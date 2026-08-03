@@ -12,6 +12,7 @@ mod check_abi_layout;
 mod check_adr_coverage;
 mod check_audit_positional;
 mod check_binary_size;
+mod check_build_egress_callers;
 mod check_builder_shell_job_sites;
 mod check_claim_catalog;
 mod check_claim_witness_freshness;
@@ -28,7 +29,9 @@ mod check_forbidden_deps;
 mod check_guest_agent_in_all_images;
 mod check_guest_agent_runtime_free;
 mod check_guest_binary_lists;
+mod check_guest_entropy_seed;
 mod check_guest_images_no_builder_tools;
+mod check_guest_init_parity;
 mod check_honesty;
 mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
@@ -90,6 +93,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_audit_positional::run(&workspace)
         }
+        Some("check-build-egress-callers") => {
+            let workspace = workspace_root();
+            check_build_egress_callers::run(&workspace)
+        }
         Some("check-no-host-nix") => {
             let workspace = workspace_root();
             check_no_host_nix::run(&workspace)
@@ -129,6 +136,10 @@ fn main() -> Result<()> {
         Some("check-builder-shell-job-sites") => {
             let workspace = workspace_root();
             check_builder_shell_job_sites::run(&workspace)
+        }
+        Some("check-guest-entropy-seed") => {
+            let workspace = workspace_root();
+            check_guest_entropy_seed::run(&workspace)
         }
         Some("check-closure-budget") => {
             let workspace = workspace_root();
@@ -211,7 +222,15 @@ fn main() -> Result<()> {
                 (false, true) => check_mutation_witnesses::Mode::Run,
                 (false, false) => check_mutation_witnesses::Mode::PinOnly,
             };
-            check_mutation_witnesses::run(&workspace, mode)
+            // `--package <name>` shards a `--run` by cargo package so each
+            // CI job finishes inside the six-hour job cap; unset means the
+            // whole surface.
+            let package = args
+                .iter()
+                .position(|a| a == "--package")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+            check_mutation_witnesses::run(&workspace, mode, package)
         }
         Some("check-conformance") => {
             let workspace = workspace_root();
@@ -225,6 +244,10 @@ fn main() -> Result<()> {
         Some("check-vsock-only-egress") => {
             let workspace = workspace_root();
             check_vsock_only_egress::run(&workspace)
+        }
+        Some("check-guest-init-parity") => {
+            let workspace = workspace_root();
+            check_guest_init_parity::run(&workspace)
         }
         Some("check-uniform-vsock-egress") => {
             let workspace = workspace_root();
@@ -282,7 +305,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-stream-redaction-seam, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -323,6 +346,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-builder-shell-job-sites           Plan 204 WS-D: freeze the set of files that construct a legacy builder shell-job request"
+            );
+            eprintln!(
+                "  check-guest-entropy-seed                Every VMM boot path must seed the guest CSPRNG via /chosen/rng-seed"
             );
             eprintln!(
                 "  check-closure-budget                    Plan 200: assert mvmctl's default linux closure stays within the crate budget"

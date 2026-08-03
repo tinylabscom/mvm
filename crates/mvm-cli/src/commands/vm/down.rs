@@ -44,12 +44,15 @@ fn stop_one(client: &LocalBackend, runtime: &tokio::runtime::Runtime, name: &str
     // is the right signal for "stop attempted, did not complete — retry or
     // investigate".
     record_vm_readiness(name, InstanceReadiness::Stopping);
-    let result = runtime.block_on(client.stop_machine(&MachineId(name.to_string())));
+    let result = runtime
+        .block_on(client.stop_machine(&MachineId(name.to_string())))
+        .map_err(|error| anyhow::anyhow!(error))
+        .and_then(|_| super::volume::release_volume_leases_for_vm(name));
     // A state-changing CLI verb emits an audit entry regardless of outcome; the
     // matching `VmStart` lives in `vm/up.rs`.
     let outcome = if result.is_ok() { "ok" } else { "stop_failed" };
     mvm_core::audit_emit!(VmStop, vm: name, "{outcome}");
-    result.map_err(|e| anyhow::anyhow!("{e}"))
+    result
 }
 
 /// Stop every running VM. Fleet/multi-VM is mvmd's job; this is the local
@@ -62,11 +65,15 @@ fn stop_all(client: &LocalBackend, runtime: &tokio::runtime::Runtime) -> Result<
     // orphaned per-VM subprocesses, and it leaves registry-only rows untouched.
     // Every listed VM is an unconditional stop target, exactly as the old
     // `AnyBackend::list_all()` scan was. Infallible, so the audit always emits.
-    let mut last_err = None;
+    let mut last_err: Option<anyhow::Error> = None;
     for m in client.list_stop_targets() {
         record_vm_readiness(&m.name, InstanceReadiness::Stopping);
-        if let Err(e) = runtime.block_on(client.stop_machine(&m.id)) {
-            last_err = Some(e);
+        let stopped = runtime
+            .block_on(client.stop_machine(&m.id))
+            .map_err(|error| anyhow::anyhow!(error))
+            .and_then(|_| super::volume::release_volume_leases_for_vm(&m.name));
+        if let Err(error) = stopped {
+            last_err = Some(error);
         }
     }
     let outcome = if last_err.is_none() {
@@ -75,5 +82,5 @@ fn stop_all(client: &LocalBackend, runtime: &tokio::runtime::Runtime) -> Result<
         "stop_all_failed"
     };
     mvm_core::audit_emit!(VmStop, "{outcome}");
-    last_err.map_or(Ok(()), |e| Err(anyhow::anyhow!("{e}")))
+    last_err.map_or(Ok(()), Err)
 }

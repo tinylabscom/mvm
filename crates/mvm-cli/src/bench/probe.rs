@@ -56,6 +56,8 @@ pub fn admit_probe_plan(
     let sha = mvm_core::crypto::image_verify::sha256_file(rootfs)
         .with_context(|| format!("hashing probe rootfs {}", rootfs.display()))?;
     let input = SynthesisInput {
+        network_mode: Default::default(),
+        l3_network: None,
         vm_name,
         tenant: Some("bench"),
         backend_name,

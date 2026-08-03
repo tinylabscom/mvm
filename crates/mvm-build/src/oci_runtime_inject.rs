@@ -105,6 +105,9 @@ pub fn inject_mvm_runtime(
         ("dev/shm", 0o1777),
         ("run", 0o755),
         ("tmp", 0o1777),
+        ("mnt", 0o755),
+        ("data", 0o755),
+        ("work", 0o755),
         ("mvm/runtime", 0o755),
         ("usr/lib/mvm/wrappers", 0o755),
     ] {
@@ -316,7 +319,9 @@ mod tests {
         assert_eq!(written_entrypoint, entrypoint);
         assert!(injected.runtime_mount_point.is_dir());
         assert!(root.join("mvm/runtime").is_dir());
-        for rel in ["proc", "sys", "dev/pts", "dev/shm", "run", "tmp"] {
+        for rel in [
+            "proc", "sys", "dev/pts", "dev/shm", "run", "tmp", "mnt", "data", "work",
+        ] {
             assert!(root.join(rel).is_dir(), "{rel} mountpoint exists");
         }
         assert_eq!(

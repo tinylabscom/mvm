@@ -413,6 +413,12 @@ fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    // The L3 tunnel and the socket-aware egress client are alternatives, not
+    // layers: the mode the plan admitted decides which one the guest starts.
+    if let Some(token) = crate::egress_shared::l3_cmdline_token(config) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     cmdline
 }
 
@@ -823,6 +829,12 @@ impl VmBackend for LibkrunBackend {
             // there is no net device in the guest's device tree to route.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
+            // libkrun attaches a virtio-net device and drains it, which
+            // satisfies `no_routable_guest_nic` (no upstream route) but
+            // not the L3 tunnel's stricter precondition: that mode
+            // requires the guest to have no network device at all, so
+            // `mvm0` is the only interface its stack can route to.
+            l3_vsock: false,
             // libkrun's C API doesn't expose virtio-balloon control
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
@@ -878,6 +890,10 @@ impl VmBackend for LibkrunBackend {
 
         let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
         let cfg = build_supervisor_config(config, &state_dir)?;
+        // The L3 gateway is orthogonal to the substitution endpoint: a
+        // launch may need one, the other, or neither. It goes first because
+        // it must be listening before the guest boots and dials it.
+        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir)?;
         let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(
             &config.name,
             &state_dir,
@@ -1046,6 +1062,7 @@ impl VmBackend for LibkrunBackend {
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        crate::netd_spawn::reap_netd(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer too (no-op when none spawned),
         // so they can't outlive the guest.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
@@ -1528,6 +1545,7 @@ mod tests {
         assert!(!caps.snapshots);
         assert!(!caps.pause_resume);
         assert!(!caps.tap_networking);
+        assert!(!caps.l3_vsock);
     }
 
     #[test]
@@ -2297,6 +2315,85 @@ mod tests {
         assert!(
             cmdline.contains("mvm.host_signer_pub="),
             "host_signer_pub trust anchor missing: {cmdline}"
+        );
+    }
+
+    /// `capabilities()` is a declaration table that callers route on, and
+    /// nothing asserted its contents: deleting any of seven fields from
+    /// the struct literal silently fell back to the `Default`, and every
+    /// one of those deletions survived.
+    ///
+    /// `tap_networking` and `no_routable_guest_nic` are the two that
+    /// matter beyond feature routing. A libkrun workload guest has no net
+    /// device at all — the supervisor accepts only `VsockDirect`, which
+    /// never calls libkrun's net attach — so the pair must read
+    /// "no TAP, no routable NIC". A caller that believed otherwise would
+    /// be reasoning about a network path that does not exist.
+    #[test]
+    fn libkrun_capabilities_declare_the_vsock_only_shape() {
+        let caps = LibkrunBackend.capabilities();
+
+        // The NIC-less posture, stated both ways.
+        assert!(!caps.tap_networking, "a libkrun workload guest has no TAP");
+        assert!(
+            caps.no_routable_guest_nic,
+            "a libkrun workload guest has no net device to route at all"
+        );
+        assert!(caps.vsock, "vsock is the only transport into the guest");
+        assert!(caps.host_vsock_proxy);
+        assert!(
+            !caps.l3_vsock,
+            "libkrun does not meet the stricter L3 tunnel precondition"
+        );
+
+        // The rest of the table, each pinned so its deletion is visible.
+        assert!(
+            !caps.pause_resume,
+            "libkrun's C API exposes no pause/resume"
+        );
+        assert!(!caps.snapshots, "libkrun has no memory snapshots");
+        assert_eq!(caps.snapshot_capability, SnapshotCapability::DiskOnly);
+        assert!(caps.standby_pool);
+        assert!(!caps.balloon, "libkrun's C API exposes no balloon control");
+        assert!(
+            !caps.fs_quick_checkpoint,
+            "the libkrun rootfs is a regular file, not an APFS clone source"
+        );
+    }
+
+    /// A backend's liveness probe decides whether a VM reports Running or
+    /// Stopped. Pinned to `true` a dead VM is Running forever, and the
+    /// reaper never collects it; pinned to `false` a live VM looks gone.
+    #[test]
+    fn pid_alive_distinguishes_a_live_process_from_a_dead_one() {
+        // This process is alive by construction.
+        assert!(pid_alive(std::process::id() as libc::pid_t));
+
+        // A child we reap ourselves is definitively gone afterwards.
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn a short-lived child");
+        let pid = child.id() as libc::pid_t;
+        child.wait().expect("reap the child");
+        assert!(!pid_alive(pid), "a reaped child must not report as alive");
+    }
+
+    /// The timestamp stamped onto libkrun VM state. A constant makes every
+    /// VM look like it started at the same moment, which defeats any
+    /// age-based reaping built on it.
+    #[test]
+    fn now_unix_secs_is_a_real_clock() {
+        let observed = now_unix_secs();
+        // 2020-01-01, comfortably in the past and comfortably after any
+        // constant a mutation would substitute.
+        assert!(
+            observed > 1_577_836_800,
+            "expected a current unix timestamp, got {observed}"
+        );
+        assert!(
+            observed < 4_102_444_800,
+            "expected a timestamp before 2100, got {observed}"
         );
     }
 }

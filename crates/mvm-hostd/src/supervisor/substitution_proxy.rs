@@ -408,7 +408,7 @@ pub(crate) fn redact_request(
     req: &mut ProxyRequest,
     redactor: &RedactingSubstitution,
     action: &mvm_core::policy::RedactionAction,
-) -> RedactionHits {
+) -> Result<RedactionHits, SensitiveDetectionError> {
     let mut hits = RedactionHits::default();
     for (_, value) in req.headers.iter_mut() {
         if find_placeholder(value).is_some() {
@@ -423,16 +423,52 @@ pub(crate) fn redact_request(
         req.body = masked;
         hits.merge(h);
     }
-    hits
+    if hits.detector_failures > 0 {
+        Err(SensitiveDetectionError)
+    } else {
+        Ok(hits)
+    }
 }
 
-/// True when `action` opts the destination into redaction (entropy or names on)
-/// — the trigger for the cleartext-scan fail-closed gate. Curated secrets always
-/// run, but a body we can't scan in cleartext (compressed / over-cap) is only a
-/// *bypass* worth refusing once a destination has opted into the deeper scan.
+/// A detector violated the validated-span contract. No matched bytes or
+/// dependency error text cross this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("sensitive-data detector failed closed")]
+pub(crate) struct SensitiveDetectionError;
+
+/// True when `action` requires body protection or observation. The default
+/// action protects curated secrets and PII, so it arms the cleartext-scan gate
+/// even when entropy and name scanning are off. Only an explicit audit-only
+/// secrets action paired with disabled PII and no optional detectors is inactive.
 pub(crate) fn redaction_active(action: &mvm_core::policy::RedactionAction) -> bool {
-    !matches!(action.entropy, mvm_core::policy::EntropyMode::Off)
+    !matches!(action.secrets, mvm_core::policy::SecretAction::Audit)
+        || action.pii.mode.as_deref() != Some("disabled")
+        || !matches!(action.entropy, mvm_core::policy::EntropyMode::Off)
         || !matches!(action.names, mvm_core::policy::NameMode::Off)
+}
+
+#[cfg(test)]
+mod redaction_gate_tests {
+    use super::redaction_active;
+    use mvm_core::policy::{PiiPolicy, RedactionAction, SecretAction};
+
+    #[test]
+    fn default_curated_protection_arms_the_fail_closed_gate() {
+        assert!(redaction_active(&RedactionAction::default()));
+    }
+
+    #[test]
+    fn audit_only_with_pii_disabled_does_not_claim_body_protection() {
+        let action = RedactionAction {
+            pii: PiiPolicy {
+                mode: Some("disabled".into()),
+                categories: Vec::new(),
+            },
+            secrets: SecretAction::Audit,
+            ..Default::default()
+        };
+        assert!(!redaction_active(&action));
+    }
 }
 
 /// The fail-closed scan-gate the cleartext cores run before substitute/forward:
@@ -1199,7 +1235,16 @@ impl SubstitutionService {
             .replacement_engine
             .start_flow(&self.tenant, &replacement_action);
         let replacement_proofs = self.replace_outbound(&mut req, &mut replacement_flow);
-        let (req, redaction_hits) = self.redact_outbound(req, &action);
+        let (req, redaction_hits) = match self.redact_outbound(req, &action) {
+            Ok(redacted) => redacted,
+            Err(_) => {
+                self.audit_fail_closed(destination.as_deref(), "fail_closed_detector")
+                    .await;
+                return WireResponse::Refused {
+                    message: "sensitive-data detector failed closed; refusing request".into(),
+                };
+            }
+        };
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
             Err(e) => {
@@ -1249,10 +1294,10 @@ impl SubstitutionService {
         &self,
         req: ProxyRequest,
         action: &mvm_core::policy::RedactionAction,
-    ) -> (ProxyRequest, RedactionHits) {
+    ) -> Result<(ProxyRequest, RedactionHits), SensitiveDetectionError> {
         let mut req = req;
-        let hits = redact_request(&mut req, &self.redactor, action);
-        (req, hits)
+        let hits = redact_request(&mut req, &self.redactor, action)?;
+        Ok((req, hits))
     }
 
     fn replace_outbound(
@@ -1301,6 +1346,9 @@ impl SubstitutionService {
         }
         if hits.names > 0 {
             categories.push("name".into());
+        }
+        if hits.detector_failures > 0 {
+            categories.push("detector_failure".into());
         }
         categories.sort_unstable();
         categories.dedup();
@@ -1973,21 +2021,6 @@ mod server_tests {
         tempfile::TempDir,
     ) {
         service_with_policies(value, hosts, None, None)
-    }
-
-    /// Like [`service_with`], but attaches `policy` (when `Some`) so a test can
-    /// exercise the destination-aware redaction / fail-closed gate.
-    fn service_with_policy(
-        value: &str,
-        hosts: &[&str],
-        policy: Option<mvm_core::policy::RedactionPolicy>,
-    ) -> (
-        Arc<SubstitutionService>,
-        String,
-        Arc<MockForwarder>,
-        tempfile::TempDir,
-    ) {
-        service_with_policies(value, hosts, policy, None)
     }
 
     fn service_with_policies(
@@ -2733,27 +2766,11 @@ mod server_tests {
         server.abort();
     }
 
-    /// Fail-closed: a `content-encoding`-bearing request to a destination opted
-    /// into entropy redaction can't be scanned in cleartext, so it's refused and
-    /// never forwarded — a body we can't read is a silent bypass.
+    /// Fail-closed: the default action protects curated secrets and PII, so a
+    /// `content-encoding`-bearing request is refused before forwarding.
     #[tokio::test]
     async fn compressed_body_to_redaction_destination_is_refused() {
-        use mvm_core::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
-        let policy = RedactionPolicy {
-            default: RedactionAction::default(),
-            profiles: vec![RedactionProfile {
-                host: "api.openai.com".into(),
-                action: RedactionAction {
-                    entropy: EntropyMode::Redact {
-                        min_bits_per_char: 4.0,
-                        min_run_len: 20,
-                    },
-                    ..Default::default()
-                },
-            }],
-        };
-        let (service, ph, forwarder, dir) =
-            service_with_policy("sk-live-zzz", &["api.openai.com"], Some(policy));
+        let (service, ph, forwarder, dir) = service_with("sk-live-zzz", &["api.openai.com"]);
         let sock = dir.path().join("subst.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let server = tokio::spawn(Arc::clone(&service).serve(listener));

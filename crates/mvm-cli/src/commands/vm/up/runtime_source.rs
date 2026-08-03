@@ -332,6 +332,23 @@ pub(crate) fn universal_initramfs_available() -> bool {
 pub(crate) fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
 ) -> Result<()> {
+    attach_universal_initramfs_with_resolver(start_config, |env, cache_root, version, arch| {
+        mvm_build::initramfs::resolve_or_build_local_initramfs(env, cache_root, version, arch)
+    })
+}
+
+fn attach_universal_initramfs_with_resolver(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    resolve: impl FnOnce(
+        &HostShellEnvironment,
+        &std::path::Path,
+        &str,
+        mvm_core::arch::GuestArch,
+    ) -> Result<
+        mvm_fs::initramfs::InitramfsArtifact,
+        mvm_build::initramfs::InitramfsBuildError,
+    >,
+) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     let arch = mvm_core::arch::GuestArch::host();
@@ -342,7 +359,7 @@ pub(crate) fn attach_universal_initramfs_if_cached(
             "guest sources changed since the cached universal initramfs was built; discarded it"
         );
     }
-    match mvm_build::initramfs::resolve_or_build_local_initramfs(&env, &cache_root, version, arch) {
+    match resolve(&env, &cache_root, version, arch) {
         Ok(artifact) => {
             if let Some(workspace_root) =
                 crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
@@ -1452,9 +1469,24 @@ mod universal_initramfs_attach_tests {
         env.isolate_mvm_home(dir.path());
 
         let mut sc = VmStartConfig::default();
-        // Must never return an error: a cold cache falls back to legacy boot
-        // (or is warmed automatically on hosts that can build/fetch it).
-        attach_universal_initramfs_if_cached(&mut sc).unwrap();
+        let resolver_called = std::cell::Cell::new(false);
+        attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| {
+            resolver_called.set(true);
+            Err(mvm_build::initramfs::InitramfsBuildError::HostUnsupported {
+                operation: "test cache miss",
+                reason: "automatic warming is disabled in this test",
+            })
+        })
+        .unwrap();
+
+        assert!(
+            resolver_called.get(),
+            "the cold-cache resolver must be called"
+        );
+        assert!(
+            sc.initrd_path.is_none(),
+            "a cold-cache resolution failure must preserve legacy boot"
+        );
     }
 
     #[test]

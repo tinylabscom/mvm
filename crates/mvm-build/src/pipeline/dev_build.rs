@@ -1,3 +1,6 @@
+#[cfg(feature = "builder-vm")]
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use tracing::instrument;
 
@@ -5,150 +8,9 @@ use mvm_core::build_env::ShellEnvironment;
 
 use super::BuildMode;
 
-/// Build the chained `--override-input` arguments that swap the user
-/// flake's `mvm` input for the dev variant at `nix/dev/`, and the dev
-/// variant's own `mvm` input for the local `nix/` parent flake.
-///
-/// Both overrides use `git+file:///<workspace>?dir=...` URIs (not `path:`)
-/// because the flakes contain `path:..` / `./..` references that need to
-/// resolve relative to the git source root, not relative to the
-/// store-copied flake directory. With `git+file:`, Nix uses git-source
-/// resolution and the relative paths land where they should. With
-/// `path:`, Nix copies the flake directory in isolation and `..` becomes
-/// `/nix/store`, which has no flake.nix or Cargo.lock.
-///
-/// This is the SOLE place in the build pipeline that wires in the dev
-/// guest agent. User flakes never reference `nix/dev/`; they always
-/// declare `mvm.url = "github:tinylabscom/mvm?dir=nix"` (or a local path
-/// equivalent), which resolves to the production library. mvmctl, by
-/// definition the dev tool, injects these overrides on every `nix build`
-/// it performs so its images get the dev agent (vsock Exec handler
-/// compiled in). mvmd, the production coordinator, never calls this code
-/// path — its pool builds stay prod-only.
-///
-/// Resolution order:
-///   1. `MVM_DEV_FLAKE_URL` env var — escape hatch. When set, used
-///      verbatim as the override target. The chained `mvm/mvm` override
-///      is suppressed because callers using this env var are pointing at
-///      a self-contained dev flake (e.g. `github:tinylabscom/mvm?dir=nix/dev`
-///      once published) that already pins its own `mvm` input correctly.
-///   2. Workspace root resolved by walking up from the compile-time
-///      manifest dir until we find `nix/flake.nix` (parent flake) and
-///      `nix/dev/flake.nix` (dev variant) as siblings. Both get
-///      `git+file:///<workspace>?dir=...` overrides.
-///   3. Fallback: emit a warning and skip. The build proceeds with the
-///      production agent, surfacing the misconfiguration explicitly
-///      rather than silently producing a non-functional `mvmctl exec`
-///      image.
-#[cfg(test)]
-fn dev_override_flags(env: &dyn ShellEnvironment, mode: BuildMode) -> String {
-    if !mode.injects_dev_override() {
-        // Prod-shape build: produce sealed images with the prod
-        // guest agent. No override, no --impure. The console gate
-        // will refuse attach against the resulting image.
-        return String::new();
-    }
-
-    if let Ok(url) = std::env::var("MVM_DEV_FLAKE_URL")
-        && !url.trim().is_empty()
-    {
-        return format!(" --override-input mvm {}", shell_quote(url.trim()));
-    }
-
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let mut candidate = std::path::PathBuf::from(manifest_dir);
-    loop {
-        let parent_flake = candidate.join("nix/flake.nix");
-        let dev_dir = candidate.join("nix/dev");
-        if parent_flake.is_file() && dev_dir.join("flake.nix").is_file() {
-            let workspace = candidate.display().to_string();
-            return format!(
-                " --override-input mvm git+file://{}?dir=nix/dev \
-                 --override-input mvm/mvm git+file://{}?dir=nix",
-                shell_quote(&workspace),
-                shell_quote(&workspace),
-            );
-        }
-        if !candidate.pop() {
-            break;
-        }
-    }
-
-    env.log_warn(
-        "Could not locate nix/dev (the dev variant flake); building with the \
-         production guest agent. `mvmctl exec` and `mvmctl console` will be \
-         unavailable against the resulting image. Set MVM_DEV_FLAKE_URL to \
-         override.",
-    );
-    String::new()
-}
-
 /// Base directory for dev build artifacts ($HOME/.mvm/dev/builds).
 fn dev_builds_dir() -> String {
     format!("{}/dev/builds", mvm_core::config::mvm_home())
-}
-
-/// Path the CLI writes when a build notices the host-backed Nix
-/// store has grown past the GC threshold. Lives under the data dir
-/// because the data dir is the only path the dev VM and the host
-/// agree on (via the `datadir` VirtioFS share mounted at the same
-/// absolute path in both).
-#[cfg(test)]
-fn gc_sentinel_path() -> String {
-    format!("{}/dev/nix-store-needs-gc", mvm_core::config::mvm_home())
-}
-
-/// Consume the GC sentinel: if it exists, run `nix-collect-garbage
-/// --delete-older-than 14d` inside the VM (the only place the in-VM
-/// nix daemon's locks are honoured), then remove the sentinel
-/// regardless of whether GC succeeded — leaving it in place would
-/// make every subsequent build re-trigger the GC, defeating the
-/// purpose of the threshold check.
-#[cfg(test)]
-fn run_gc_if_requested(env: &dyn ShellEnvironment) {
-    let sentinel = gc_sentinel_path();
-    let quoted = shell_quote(&sentinel);
-    let exists_check = format!("test -e {quoted} && echo yes || echo no");
-    let exists = env
-        .shell_exec_stdout(&exists_check)
-        .map(|s| s.trim() == "yes")
-        .unwrap_or(false);
-    if !exists {
-        return;
-    }
-    env.log_info("Host-backed Nix store passed GC threshold; running nix-collect-garbage --delete-older-than 14d");
-    if let Err(e) = env.shell_exec_visible("nix-collect-garbage --delete-older-than 14d") {
-        env.log_warn(&format!("nix-collect-garbage failed (continuing): {e}"));
-    }
-
-    // The artifact dirs at $HOME/.mvm/dev/builds/<hash>/ are
-    // host-side caches keyed on a Nix store path. Once that store
-    // path has been GC'd (no longer registered with `nix-store
-    // --query --hash`), the cache entry is stale: its files were
-    // hardlinked from store paths that have been removed, so they're
-    // either missing or about to dangle. Reaping these entries
-    // alongside the store keeps the host's data dir bounded without
-    // requiring the user to know about a separate cleanup ritual.
-    let builds_dir = dev_builds_dir();
-    let prune_script = format!(
-        "for d in {builds}/*; do \
-           [ -d \"$d\" ] || continue; \
-           rev=$(basename \"$d\"); \
-           if ! nix-store --query --hash \"/nix/store/$rev\"-* >/dev/null 2>&1; then \
-             rm -rf \"$d\"; \
-             echo \"  pruned stale build artifacts: $rev\"; \
-           fi; \
-         done",
-        builds = shell_quote(&builds_dir),
-    );
-    if let Err(e) = env.shell_exec_visible(&prune_script) {
-        env.log_warn(&format!("Could not prune stale build artifacts: {e}"));
-    }
-
-    let cleanup = format!("rm -f {quoted}");
-    if let Err(e) = env.shell_exec(&cleanup) {
-        env.log_warn(&format!("Could not remove GC sentinel {sentinel}: {e}"));
-    }
 }
 
 /// Result of a dev build via `nix build` in the builder VM.
@@ -323,151 +185,6 @@ pub fn dev_build(
     }
 }
 
-#[cfg(test)]
-fn dev_build_via_shell_env(
-    env: &dyn ShellEnvironment,
-    flake_ref: &str,
-    profile: Option<&str>,
-    mode: BuildMode,
-) -> Result<DevBuildResult> {
-    if !builder_env_has_nix(env) {
-        let _ = (env, flake_ref, profile, mode);
-        anyhow::bail!(
-            "No `nix` on PATH inside the builder environment. Rebuild or restart \
-             the project builder VM before running the dev build."
-        );
-    }
-
-    // Honour the host-side GC sentinel before any new build work
-    // touches the store. The CLI writes
-    // `~/.mvm/dev/nix-store-needs-gc` (mounted at the same path
-    // inside the VM via the datadir share) when the upper layer's
-    // allocated bytes cross threshold; we collect garbage exactly
-    // once, then remove the sentinel. Doing it here — inside the VM,
-    // before we hold any new gcroots — means the daemon owns the
-    // store locks and only unreferenced paths get reaped. Failure is
-    // a warning, not a build failure: a missing or unreachable nix
-    // binary should never block the user's work.
-    run_gc_if_requested(env);
-
-    let attr = resolve_dev_build_attribute(env, flake_ref, profile);
-
-    // Run optional pre-build hook if the flake provides one.
-    // This supports templates that install external software (e.g. via an
-    // upstream installer script) before the Nix build runs.
-    let pre_build_impure = run_pre_build_hook(env, flake_ref)?;
-
-    // mvmctl is a dev tool, so every image it builds gets the dev guest
-    // agent (vsock Exec handler compiled in) injected via --override-input
-    // against the dev sibling flake at `nix/dev/`. User flakes contain no
-    // dev/prod toggle — see `dev_override_flags()` for the contract.
-    let dev_override = dev_override_flags(env, mode);
-
-    // The override target references the workspace's `Cargo.lock` from a
-    // path outside the user flake's source closure, which pure-eval rejects.
-    // `--impure` is required whenever we apply the override.
-    let impure_flag = if !dev_override.is_empty() {
-        " --impure"
-    } else {
-        pre_build_impure
-    };
-
-    // Step 1: Run nix build with visible output so the user sees progress
-    env.log_info(&format!("Building: nix build {}", attr));
-    let build_cmd = format!(
-        "nix build {} --no-link{}{}",
-        attr, impure_flag, dev_override
-    );
-    let _build_span = tracing::info_span!("build_image", flake = %flake_ref).entered();
-    let build_start = std::time::Instant::now();
-    env.shell_exec_visible(&build_cmd)
-        .with_context(|| format!("nix build failed for {}", attr))?;
-    mvm_core::observability::metrics::global()
-        .build_image_duration_ms
-        .store(
-            build_start.elapsed().as_millis() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-    // Step 2: Capture the output path (instant, uses Nix cache)
-    let output = env
-        .shell_exec_stdout(&format!(
-            "nix build {} --no-link --print-out-paths{}{}",
-            attr, impure_flag, dev_override,
-        ))
-        .with_context(|| "Failed to get nix build output path")?;
-
-    let nix_output_path = output
-        .lines()
-        .rev()
-        .find(|l| l.starts_with("/nix/store/"))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "nix build did not produce an output path. Output:\n{}",
-                output
-            )
-        })?
-        .trim()
-        .to_string();
-
-    env.log_info(&format!("Build output: {}", nix_output_path));
-
-    // Step 3: Extract revision hash from /nix/store/<hash>-...
-    let revision_hash = extract_revision_hash(&nix_output_path);
-    let build_dir = dev_build_dir(&revision_hash);
-
-    // Step 4: Check cache — skip copy if artifacts already exist
-    if check_cache(env, &revision_hash)? {
-        env.log_success(&format!("Cache hit: {}", build_dir));
-        let initrd_path = detect_initrd(&build_dir);
-        let runner_dir = detect_runner(&build_dir);
-        let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
-        return Ok(DevBuildResult {
-            vmlinux_path: format!("{}/vmlinux", build_dir),
-            initrd_path,
-            rootfs_path: format!("{}/rootfs.ext4", build_dir),
-            build_dir,
-            revision_hash,
-            cached: true,
-            runner_dir,
-            artifact_sizes,
-        });
-    }
-
-    // Step 5: Copy artifacts from Nix store to dev build directory
-    copy_dev_artifacts(env, &nix_output_path, &build_dir)?;
-
-    // Step 5a: Emit the sidecar manifest (`mvm-meta.json`)
-    // alongside the rootfs. Best-effort: a missing sidecar is fine
-    // (consumer in `vm/runtime_meta.rs::from_sidecar` defaults to
-    // accessible-by-default), but a present sidecar lights up the
-    // console gate end-to-end. Failures here log + continue —
-    // surfacing the gap without breaking the build.
-    crate::builder_vm::emit_sidecar_via_passthru_query(
-        env,
-        &attr,
-        &build_dir,
-        &dev_override,
-        impure_flag,
-    );
-
-    env.log_success(&format!("Artifacts stored at {}", build_dir));
-
-    let initrd_path = detect_initrd(&build_dir);
-    let runner_dir = detect_runner(&build_dir);
-    let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
-    Ok(DevBuildResult {
-        vmlinux_path: format!("{}/vmlinux", build_dir),
-        initrd_path,
-        rootfs_path: format!("{}/rootfs.ext4", build_dir),
-        build_dir,
-        revision_hash,
-        cached: false,
-        runner_dir,
-        artifact_sizes,
-    })
-}
-
 /// Build path that always runs Nix inside the project builder VM.
 #[cfg(feature = "builder-vm")]
 fn dev_build_via_builder_vm(
@@ -494,13 +211,57 @@ fn dev_build_via_builder_vm(
 
     let result = dev_build_via_builder_vm_uncached(env, flake_ref, profile, mode)?;
 
-    // Record the fingerprint → revision mapping so the next identical
-    // build short-circuits. Best-effort: a read-only cache dir just means
-    // the next build re-evaluates.
-    if let Some(fp) = fingerprint.as_deref() {
-        let _ = crate::pipeline::build_cache::write_cached_revision(fp, &result.revision_hash);
+    // Record the fingerprint → typed cache record mapping so the next
+    // identical build short-circuits (and can verify what it finds rather
+    // than trusting the path). Best-effort: a read-only cache dir, or an
+    // artifact set the record can't describe, just means the next build
+    // re-evaluates.
+    if let Some(fp) = fingerprint.as_deref()
+        && let Err(e) = write_cache_record_for_result(fp, &result)
+    {
+        tracing::debug!(error = %e, "failed to write build-cache record");
     }
     Ok(result)
+}
+
+/// Build and persist an [`mvm_core::action::ActionCacheRecord`] for a
+/// freshly built `result`, keyed by the input `fingerprint`.
+///
+/// `rootfs.ext4` is the one universal artifact; every other candidate
+/// (`vmlinux`, `initrd`, `bin/microvm-run`, `image.tar.gz`) is recorded only
+/// when it actually exists in the revision dir. When `rootfs.ext4` is
+/// absent, no record is written at all: an absent record reads back as a
+/// cold miss, so we never serve a cache hit we cannot re-verify (fail
+/// closed: never trust the path over a verified digest).
+#[cfg(feature = "builder-vm")]
+fn write_cache_record_for_result(fingerprint: &str, result: &DevBuildResult) -> Result<()> {
+    let build_dir = Path::new(&result.build_dir);
+    if !build_dir.join("rootfs.ext4").is_file() {
+        return Ok(());
+    }
+    let mut rel_paths: Vec<&str> = vec!["rootfs.ext4"];
+    if build_dir.join("vmlinux").is_file() {
+        rel_paths.push("vmlinux");
+    }
+    if build_dir.join("initrd").is_file() {
+        rel_paths.push("initrd");
+    }
+    if build_dir.join("bin").join("microvm-run").is_file() {
+        rel_paths.push("bin/microvm-run");
+    }
+    if build_dir.join("image.tar.gz").is_file() {
+        rel_paths.push("image.tar.gz");
+    }
+
+    let action_digest = mvm_core::action::ActionDigest::from_fingerprint_hex(fingerprint)
+        .map_err(|e| anyhow::anyhow!("invalid build-cache fingerprint {fingerprint:?}: {e}"))?;
+    let record = mvm_core::action::build_record(
+        action_digest,
+        result.revision_hash.clone(),
+        build_dir,
+        &rel_paths,
+    )?;
+    crate::pipeline::build_cache::write_cache_record(fingerprint, &record)
 }
 
 /// Compute the host-side build fingerprint for the cache, or `None` when
@@ -531,19 +292,39 @@ fn build_cache_fingerprint(
     }
 }
 
-/// Reconstruct a cache-hit [`DevBuildResult`] from a recorded revision,
-/// or `None` when there is no record or its artifacts are incomplete.
-/// The completeness gate is `rootfs.ext4` — the one universal artifact;
-/// a kernel-less mkGuest image carries no `vmlinux` and relies on the
-/// cached-builder-kernel fallback resolved at boot.
+/// Reconstruct a cache-hit [`DevBuildResult`] from a recorded
+/// [`mvm_core::action::ActionCacheRecord`], or `None` when there is no
+/// record, it fails to parse, or verification against the artifacts
+/// actually on disk fails.
+///
+/// A missing or unparseable record is a plain miss: there is nothing to
+/// evict, since nothing was trusted. A record that parses but fails
+/// on-disk verification is a miss *and* evicts the stale entry (both the
+/// record and the build dir it named), so a tampered or partially-collected
+/// cache entry is never served twice and a fresh build runs unconditionally.
 #[cfg(feature = "builder-vm")]
 fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
-    let revision_hash = crate::pipeline::build_cache::read_cached_revision(fingerprint)?;
-    let build_dir = dev_build_dir(&revision_hash);
-    let rootfs_path = format!("{build_dir}/rootfs.ext4");
-    if !std::path::Path::new(&rootfs_path).is_file() {
+    let record = crate::pipeline::build_cache::read_cache_record(fingerprint)?;
+    let build_dir = dev_build_dir(&record.revision);
+    if let Err(e) = mvm_core::action::verify_artifacts_on_disk(Path::new(&build_dir), &record) {
+        tracing::debug!(error = %e, "build-cache entry failed verification; evicting");
+        crate::pipeline::build_cache::evict_cache_record(fingerprint);
+        // The build dir must go too, not just the record: the next build's
+        // `dev_build_with_builder_vm` promotes fresh artifacts into
+        // `dev_build_dir(revision)` only when that path is *absent* — it
+        // trusts an existing directory by revision name alone, with no hash
+        // check. Leaving the poisoned dir in place would make the next
+        // build discard its own freshly-built good output, re-adopt the
+        // poisoned bytes because the name matched, and let
+        // `write_cache_record_for_result` bless them again — one detected
+        // tamper would otherwise recur forever instead of self-healing on
+        // the very next build.
+        let _ = std::fs::remove_dir_all(&build_dir);
         return None;
     }
+
+    let revision_hash = record.revision;
+    let rootfs_path = format!("{build_dir}/rootfs.ext4");
     let initrd_path = detect_initrd(&build_dir);
     let runner_dir = detect_runner(&build_dir);
     let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
@@ -741,6 +522,11 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     };
     let staging = unique_dev_staging_dir();
     std::fs::create_dir_all(&staging).with_context(|| format!("creating staging dir {staging}"))?;
+    // Armed the moment the dir exists, so every early return below (the
+    // builder error, the install-volume bail) cleans it up on drop. Only
+    // `disarm()`ed once the artifacts have actually left `staging` behind
+    // (renamed, copied-then-removed, or discarded on a cache hit).
+    let mut staging_guard = StagingDirGuard::new(std::path::PathBuf::from(&staging));
 
     // dev_build_with_builder_vm is called for
     // user-flake builds (mvmctl build against the user's flake).
@@ -782,6 +568,9 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
         let _ = std::fs::remove_dir_all(&staging);
         tracing::debug!(error = %e, "rename failed; fell back to copy");
     }
+    // The staging dir is gone one way or another by this point (renamed
+    // away, or removed above) — disarm so Drop doesn't redundantly try.
+    staging_guard.disarm();
 
     let build_dir = final_dir;
     let vmlinux_path = format!("{build_dir}/vmlinux");
@@ -977,75 +766,6 @@ fn copy_sparse_file(src: &std::path::Path, dst: &std::path::Path) -> Result<()> 
     Ok(())
 }
 
-/// Run the flake's `pre-build.sh` hook if it exists.
-///
-/// Some templates install external software (e.g. via an upstream installer
-/// script) before the Nix build. If `<flake_ref>/pre-build.sh` exists and
-/// is executable, it is run with visible output. Returns `" --impure"` when
-/// the hook ran (so `nix build` can reference host paths), or `""` otherwise.
-#[cfg(test)]
-fn run_pre_build_hook(env: &dyn ShellEnvironment, flake_ref: &str) -> Result<&'static str> {
-    let pre_build = format!("{}/pre-build.sh", flake_ref);
-    let check = env
-        .shell_exec_stdout(&format!(
-            "test -f {} && test -x {} && echo yes || echo no",
-            shell_quote(&pre_build),
-            shell_quote(&pre_build),
-        ))
-        .unwrap_or_default();
-
-    if check.trim() != "yes" {
-        return Ok("");
-    }
-
-    env.log_info("Running pre-build hook (pre-build.sh)...");
-    env.shell_exec_visible(&format!("bash {}", shell_quote(&pre_build)))
-        .with_context(|| "pre-build.sh hook failed")?;
-
-    // The hook may install files outside the Nix store (e.g. /opt/openclaw)
-    // that the flake references via builtins.path. --impure is required for
-    // nix build to access these host paths.
-    Ok(" --impure")
-}
-
-/// Resolve the Nix attribute for a dev build.
-///
-/// - `None` → builds the flake's `default` package (convention: `default = worker`).
-/// - `Some(profile)` → builds `packages.<system>.tenant-<profile>`.
-#[cfg(test)]
-fn resolve_dev_build_attribute(
-    env: &dyn ShellEnvironment,
-    flake_ref: &str,
-    profile: Option<&str>,
-) -> String {
-    match profile {
-        Some(p) if p != "default" => {
-            let system = nix_system();
-            let attr = format!("{}#packages.{}.tenant-{}", flake_ref, system, p);
-            env.log_info(&format!("Build attribute: {}", attr));
-            attr
-        }
-        _ => {
-            // Build the flake's default package for the target Linux system
-            // (not the host, which may be macOS).
-            let system = nix_system();
-            let attr = format!("{}#packages.{}.default", flake_ref, system);
-            env.log_info(&format!("Build attribute: {} (default)", attr));
-            attr
-        }
-    }
-}
-
-/// Extract the Nix store hash from an output path like `/nix/store/<hash>-name`.
-#[cfg(test)]
-fn extract_revision_hash(nix_output_path: &str) -> String {
-    nix_output_path
-        .strip_prefix("/nix/store/")
-        .and_then(|s| s.split('-').next())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
 /// Return the dev build directory for a given revision hash.
 #[cfg(any(test, feature = "builder-vm"))]
 fn dev_build_dir(revision_hash: &str) -> String {
@@ -1066,88 +786,42 @@ fn unique_dev_staging_dir() -> String {
     )
 }
 
-#[cfg(test)]
-fn shell_quote(input: &str) -> String {
-    format!("'{}'", input.replace('\'', "'\\''"))
+/// Removes a staging directory on drop unless [`Self::disarm`] was called
+/// first.
+///
+/// `dev_build_with_builder_vm` used to leak `.staging-*` dirs under
+/// `dev_builds_dir()` on a mid-build failure: the cleanup was only reached
+/// on the success path, so a builder error or an unexpected artifact shape
+/// (`InstallVolume` for a flake build) returned early and left the staged
+/// files behind forever. Tying removal to `Drop` makes every exit path —
+/// present and future — clean up structurally instead of needing a matching
+/// `remove_dir_all` at each `return`/`?`/`bail!`.
+#[cfg(feature = "builder-vm")]
+struct StagingDirGuard {
+    path: std::path::PathBuf,
+    armed: bool,
 }
 
-/// True if `nix` is available inside the builder shell environment.
-#[cfg(test)]
-fn builder_env_has_nix(env: &dyn ShellEnvironment) -> bool {
-    env.shell_exec_stdout("nix --version 2>/dev/null | head -1")
-        .map(|s| s.trim().starts_with("nix "))
-        .unwrap_or(false)
+#[cfg(feature = "builder-vm")]
+impl StagingDirGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// Call once the staging dir has already been consumed (renamed away)
+    /// or removed, so `Drop` doesn't attempt a redundant no-op removal.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
 }
 
-/// Check whether cached artifacts exist for a revision hash.
-#[cfg(test)]
-fn check_cache(env: &dyn ShellEnvironment, revision_hash: &str) -> Result<bool> {
-    let build_dir = dev_build_dir(revision_hash);
-    let result = env.shell_exec_stdout(&format!(
-        "test -f {dir}/vmlinux && test -f {dir}/rootfs.ext4 && echo yes || echo no",
-        dir = build_dir,
-    ))?;
-    Ok(result.trim() == "yes")
-}
-
-/// Copy kernel, initrd, and rootfs from a Nix store output to the dev build directory.
-#[cfg(test)]
-fn copy_dev_artifacts(
-    env: &dyn ShellEnvironment,
-    nix_output_path: &str,
-    build_dir: &str,
-) -> Result<()> {
-    env.shell_exec(&format!(
-        r#"
-        set -euo pipefail
-        mkdir -p {dir}
-
-        # Copy kernel (try 'kernel' then 'vmlinux')
-        if [ -e {out}/kernel ]; then
-            cp -L {out}/kernel {dir}/vmlinux
-        elif [ -e {out}/vmlinux ]; then
-            cp -L {out}/vmlinux {dir}/vmlinux
-        else
-            echo 'ERROR: kernel not found in build output' >&2
-            ls -la {out}/ >&2
-            exit 1
-        fi
-
-        # Copy initrd if present (NixOS stage-1 for proper activation)
-        if [ -e {out}/initrd ]; then
-            cp -L {out}/initrd {dir}/initrd
-        fi
-
-        # Copy rootfs (try 'rootfs' then 'rootfs.ext4')
-        if [ -e {out}/rootfs ]; then
-            cp -L {out}/rootfs {dir}/rootfs.ext4
-        elif [ -e {out}/rootfs.ext4 ]; then
-            cp -L {out}/rootfs.ext4 {dir}/rootfs.ext4
-        else
-            echo 'ERROR: rootfs not found in build output' >&2
-            ls -la {out}/ >&2
-            exit 1
-        fi
-
-        # Copy microvm.nix runner scripts if present
-        if [ -d {out}/bin ] && [ -x {out}/bin/microvm-run ]; then
-            mkdir -p {dir}/bin
-            cp -rL {out}/bin/* {dir}/bin/
-            chmod +x {dir}/bin/*
-        fi
-
-        # Copy OCI image if present (for Apple Container dev mode)
-        if [ -e {out}/image.tar.gz ]; then
-            cp -L {out}/image.tar.gz {dir}/image.tar.gz
-        fi
-
-        echo "Artifacts:"
-        ls -lh {dir}/
-        "#,
-        out = nix_output_path,
-        dir = build_dir,
-    ))
-    .with_context(|| format!("Failed to copy artifacts to {}", build_dir))
+#[cfg(feature = "builder-vm")]
+impl Drop for StagingDirGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 /// Measure artifact file sizes in the build directory.
@@ -1216,9 +890,6 @@ fn nix_system() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The local `TestEnv` below is a ShellEnvironment mock; import the
-    // process-env guard under a distinct name so the two don't collide.
-    use mvm_core::util::test_env::TestEnv as EnvGuard;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1373,24 +1044,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_revision_hash_valid() {
-        let hash = extract_revision_hash("/nix/store/abc123def456-tenant-worker-minimal");
-        assert_eq!(hash, "abc123def456");
-    }
-
-    #[test]
-    fn test_extract_revision_hash_no_prefix() {
-        let hash = extract_revision_hash("/some/other/path");
-        assert_eq!(hash, "unknown");
-    }
-
-    #[test]
-    fn test_extract_revision_hash_empty() {
-        let hash = extract_revision_hash("");
-        assert_eq!(hash, "unknown");
-    }
-
-    #[test]
     fn test_dev_build_dir() {
         let dir = dev_build_dir("abc123");
         assert!(dir.ends_with("/dev/builds/abc123"), "got: {}", dir);
@@ -1466,115 +1119,6 @@ mod tests {
             !builds.join("middle").exists() && !builds.join("oldest").exists(),
             "pruned build dirs must be removed from disk"
         );
-    }
-
-    #[test]
-    fn test_resolve_attribute_with_profile() {
-        let env = TestEnv::new();
-
-        let attr = resolve_dev_build_attribute(&env, "/home/user/my-project", Some("worker"));
-
-        let system = nix_system();
-        assert_eq!(
-            attr,
-            format!("/home/user/my-project#packages.{}.tenant-worker", system)
-        );
-    }
-
-    #[test]
-    fn test_resolve_attribute_custom_profile() {
-        let env = TestEnv::new();
-
-        let attr = resolve_dev_build_attribute(&env, "/tmp/flake", Some("gateway"));
-
-        let system = nix_system();
-        assert_eq!(
-            attr,
-            format!("/tmp/flake#packages.{}.tenant-gateway", system)
-        );
-    }
-
-    #[test]
-    fn test_resolve_attribute_default() {
-        let env = TestEnv::new();
-
-        let attr = resolve_dev_build_attribute(&env, "/tmp/flake", None);
-        let system = linux_system();
-
-        assert_eq!(attr, format!("/tmp/flake#packages.{system}.default"));
-    }
-
-    #[test]
-    fn test_check_cache_hit() {
-        let env = TestEnv::new();
-        env.stub_stdout("test -f", "yes");
-
-        let cached = check_cache(&env, "abc123").unwrap();
-        assert!(cached);
-    }
-
-    #[test]
-    fn test_check_cache_miss() {
-        let env = TestEnv::new();
-        env.stub_stdout("test -f", "no");
-
-        let cached = check_cache(&env, "abc123").unwrap();
-        assert!(!cached);
-    }
-
-    #[test]
-    fn test_dev_build_cached() {
-        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
-        let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_HOME", temp.path().join("mvm-home"));
-        let env = TestEnv::new();
-        env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
-
-        // nix build --no-link (visible) succeeds
-        // nix build --print-out-paths returns the path
-        env.stub_stdout(
-            "--print-out-paths",
-            "/nix/store/abc123-tenant-worker-minimal\n",
-        );
-        // Cache check returns yes
-        env.stub_stdout("test -f", "yes");
-
-        let expected_dir = dev_build_dir("abc123");
-        let result =
-            dev_build_via_shell_env(&env, "/home/user/project", Some("minimal"), BuildMode::Dev)
-                .unwrap();
-
-        assert!(result.cached);
-        assert_eq!(result.revision_hash, "abc123");
-        assert_eq!(result.build_dir, expected_dir);
-        assert_eq!(result.vmlinux_path, format!("{expected_dir}/vmlinux"));
-        assert_eq!(result.rootfs_path, format!("{expected_dir}/rootfs.ext4"));
-    }
-
-    #[test]
-    fn test_dev_build_fresh() {
-        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
-        let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_HOME", temp.path().join("mvm-home"));
-        let env = TestEnv::new();
-        env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
-
-        env.stub_stdout("--print-out-paths", "/nix/store/xyz789-tenant-minimal\n");
-        // Cache miss
-        env.stub_stdout("test -f", "no");
-
-        let expected_dir = dev_build_dir("xyz789");
-        let result =
-            dev_build_via_shell_env(&env, "/tmp/flake", Some("minimal"), BuildMode::Dev).unwrap();
-
-        assert!(!result.cached);
-        assert_eq!(result.revision_hash, "xyz789");
-        assert_eq!(result.build_dir, expected_dir);
-
-        // Verify a copy script was executed
-        let exec_log = env.exec_log.lock().unwrap();
-        let has_copy = exec_log.iter().any(|s| s.contains("cp -L"));
-        assert!(has_copy, "Expected copy script in exec log");
     }
 
     #[cfg(all(feature = "builder-vm", unix))]
@@ -1714,6 +1258,192 @@ mod tests {
             exec_log.iter().all(|entry| !entry.contains("nix ")),
             "builder failure path must not fall back to host-side Nix: {exec_log:?}"
         );
+
+        // The regression this guards: a builder error used to return before
+        // the staging dir (created just before `run_build` is invoked) was
+        // ever cleaned up, leaking a `.staging-*` dir under the builds dir
+        // on every failed build.
+        let leaked_staging = std::fs::read_dir(dev_builds_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            })
+            .unwrap_or(false);
+        assert!(
+            !leaked_staging,
+            "a builder failure must not leave a .staging-* dir behind"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn staging_dir_guard_removes_dir_on_drop_without_disarm() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staging = tmp.path().join("staging-guard-armed");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        {
+            let _guard = StagingDirGuard::new(staging.clone());
+            assert!(staging.exists());
+        }
+        assert!(
+            !staging.exists(),
+            "an armed guard must remove the dir on drop"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn staging_dir_guard_leaves_dir_when_disarmed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staging = tmp.path().join("staging-guard-disarmed");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        {
+            let mut guard = StagingDirGuard::new(staging.clone());
+            guard.disarm();
+        }
+        assert!(
+            staging.exists(),
+            "a disarmed guard must leave the dir alone on drop"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn cache_hit_verifies_and_serves() {
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
+        let mut env_guard = mvm_core::util::test_env::TestEnv::new();
+        env_guard.isolate_mvm_home(temp.path());
+
+        let fingerprint = "a".repeat(64);
+        let revision = "rev-cache-hit";
+        let build_dir_path = std::path::PathBuf::from(dev_build_dir(revision));
+        std::fs::create_dir_all(&build_dir_path).expect("create revision dir");
+        std::fs::write(build_dir_path.join("rootfs.ext4"), b"rootfs contents")
+            .expect("write rootfs.ext4");
+
+        let action_digest = mvm_core::action::ActionDigest::from_fingerprint_hex(&fingerprint)
+            .expect("valid fingerprint");
+        let record = mvm_core::action::build_record(
+            action_digest,
+            revision.to_string(),
+            &build_dir_path,
+            &["rootfs.ext4"],
+        )
+        .expect("build_record over real artifacts");
+        crate::pipeline::build_cache::write_cache_record(&fingerprint, &record)
+            .expect("write cache record");
+
+        let result = cached_build_result(&fingerprint).expect("verified cache entry should hit");
+        assert!(result.cached);
+        assert_eq!(result.revision_hash, revision);
+        assert_eq!(result.build_dir, build_dir_path.to_str().unwrap());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn tampered_cache_entry_is_evicted() {
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
+        let mut env_guard = mvm_core::util::test_env::TestEnv::new();
+        env_guard.isolate_mvm_home(temp.path());
+
+        let fingerprint = "b".repeat(64);
+        let revision = "rev-tampered";
+        let build_dir_path = std::path::PathBuf::from(dev_build_dir(revision));
+        std::fs::create_dir_all(&build_dir_path).expect("create revision dir");
+        std::fs::write(build_dir_path.join("rootfs.ext4"), b"original bytes")
+            .expect("write rootfs.ext4");
+
+        let action_digest = mvm_core::action::ActionDigest::from_fingerprint_hex(&fingerprint)
+            .expect("valid fingerprint");
+        let record = mvm_core::action::build_record(
+            action_digest,
+            revision.to_string(),
+            &build_dir_path,
+            &["rootfs.ext4"],
+        )
+        .expect("build_record over real artifacts");
+        crate::pipeline::build_cache::write_cache_record(&fingerprint, &record)
+            .expect("write cache record");
+
+        // Flip a byte after the record was written — the recorded digest no
+        // longer matches what's on disk.
+        let mut bytes = std::fs::read(build_dir_path.join("rootfs.ext4")).expect("read rootfs");
+        bytes[0] ^= 0xFF;
+        std::fs::write(build_dir_path.join("rootfs.ext4"), bytes).expect("rewrite rootfs");
+
+        let cache_dir = crate::pipeline::build_cache::build_cache_dir();
+        assert!(
+            cache_dir.join(&fingerprint).exists(),
+            "sanity: the record file must exist before eviction"
+        );
+        assert!(
+            build_dir_path.exists(),
+            "sanity: the poisoned build dir must exist before eviction"
+        );
+
+        assert!(
+            cached_build_result(&fingerprint).is_none(),
+            "a tampered artifact must never be served"
+        );
+        assert!(
+            !cache_dir.join(&fingerprint).exists(),
+            "a failed verification must delete the stale record file, not merely refuse it"
+        );
+        assert!(
+            crate::pipeline::build_cache::read_cache_record(&fingerprint).is_none(),
+            "a failed verification must evict the stale record, not merely refuse it"
+        );
+        // The build dir must be gone too, not just the record: the next
+        // `dev_build_with_builder_vm` run promotes fresh artifacts into
+        // `dev_build_dir(revision)` only when that path doesn't already
+        // exist (it trusts an existing dir by revision name, no hash
+        // check). If eviction only deleted the record, the poisoned dir
+        // would survive and get silently re-adopted (and re-blessed with a
+        // fresh record) on the very next build.
+        assert!(
+            !build_dir_path.exists(),
+            "eviction must remove the poisoned build dir so a rebuild can't re-adopt it by name"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn missing_record_is_cold_miss() {
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
+        let mut env_guard = mvm_core::util::test_env::TestEnv::new();
+        env_guard.isolate_mvm_home(temp.path());
+
+        let fingerprint = "c".repeat(64);
+        let revision = "rev-no-record";
+        let build_dir_path = std::path::PathBuf::from(dev_build_dir(revision));
+        std::fs::create_dir_all(&build_dir_path).expect("create revision dir");
+        std::fs::write(build_dir_path.join("rootfs.ext4"), b"bytes").expect("write rootfs.ext4");
+        // Deliberately no cache record written for `fingerprint`.
+
+        assert!(cached_build_result(&fingerprint).is_none());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn legacy_plaintext_record_is_cold_miss() {
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
+        let mut env_guard = mvm_core::util::test_env::TestEnv::new();
+        env_guard.isolate_mvm_home(temp.path());
+
+        let fingerprint = "d".repeat(64);
+        let revision = "rev-legacy";
+        let build_dir_path = std::path::PathBuf::from(dev_build_dir(revision));
+        std::fs::create_dir_all(&build_dir_path).expect("create revision dir");
+        std::fs::write(build_dir_path.join("rootfs.ext4"), b"bytes").expect("write rootfs.ext4");
+
+        // Pre-typed-record cache entries were a bare `<revision>\n` marker.
+        let cache_dir = crate::pipeline::build_cache::build_cache_dir();
+        std::fs::create_dir_all(&cache_dir).expect("create build-cache dir");
+        std::fs::write(cache_dir.join(&fingerprint), format!("{revision}\n"))
+            .expect("write legacy record");
+
+        assert!(cached_build_result(&fingerprint).is_none());
     }
 
     #[test]
@@ -1757,59 +1487,6 @@ mod tests {
 
         assert!(result.runner_dir.is_some());
         assert_eq!(result.runner_dir.as_ref().unwrap(), &dir);
-    }
-
-    #[test]
-    fn test_pre_build_hook_skipped_when_absent() {
-        let env = TestEnv::new();
-        // Default: shell_exec_stdout returns "" for unknown commands,
-        // so the hook check returns "no" equivalent → skip.
-        let flag = run_pre_build_hook(&env, "/tmp/flake").unwrap();
-        assert_eq!(flag, "");
-    }
-
-    #[test]
-    fn test_pre_build_hook_runs_when_present() {
-        let env = TestEnv::new();
-        env.stub_stdout("test -f", "yes");
-
-        let flag = run_pre_build_hook(&env, "/tmp/flake").unwrap();
-        assert_eq!(flag, " --impure");
-
-        // Verify the hook script was executed.
-        let exec_log = env.exec_log.lock().unwrap();
-        assert!(
-            exec_log.iter().any(|s| s.contains("pre-build.sh")),
-            "Expected pre-build.sh in exec log"
-        );
-    }
-
-    #[test]
-    fn test_dev_build_with_pre_build_hook() {
-        let env = TestEnv::new();
-        env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
-
-        // Pre-build hook exists.
-        env.stub_stdout("test -f", "yes");
-        // nix build output.
-        env.stub_stdout("--print-out-paths", "/nix/store/abc123-tenant-minimal\n");
-
-        let result =
-            dev_build_via_shell_env(&env, "/tmp/flake", Some("minimal"), BuildMode::Dev).unwrap();
-
-        // Verify --impure was added to nix build commands.
-        let exec_log = env.exec_log.lock().unwrap();
-        let nix_build_cmds: Vec<_> = exec_log
-            .iter()
-            .filter(|s| s.contains("nix build"))
-            .collect();
-        assert!(
-            nix_build_cmds.iter().all(|s| s.contains("--impure")),
-            "Expected --impure in nix build commands: {:?}",
-            nix_build_cmds
-        );
-
-        assert_eq!(result.revision_hash, "abc123");
     }
 
     #[test]
@@ -1899,65 +1576,6 @@ mod tests {
     fn test_detect_runner_returns_none_when_absent() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(detect_runner(tmp.path().to_str().unwrap()), None);
-    }
-
-    #[test]
-    fn builder_env_has_nix_returns_true_when_probe_stubbed() {
-        // Default TestEnv stubs the builder VM `nix --version` probe to a success response.
-        let env = TestEnv::new();
-        assert!(builder_env_has_nix(&env));
-    }
-
-    #[test]
-    fn builder_env_has_nix_returns_false_when_probe_empty() {
-        // Override the default stub with an empty response, which is what a broken builder VM would return.
-        let env = TestEnv::new();
-        env.stub_stdout("nix --version", "");
-        assert!(!builder_env_has_nix(&env));
-    }
-
-    #[test]
-    fn dev_build_bails_clearly_when_nix_missing() {
-        let env = TestEnv::new();
-        env.stub_stdout("nix --version", "");
-        let result = dev_build_via_shell_env(
-            &env,
-            "/definitely/not/a/real/flake/dir",
-            Some("minimal"),
-            BuildMode::Dev,
-        );
-        let err = result.expect_err("must bail when no nix is available");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("No `nix` on PATH inside the builder environment"),
-            "bail must name missing nix: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_dev_build_includes_artifact_sizes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_HOME", tmp.path());
-
-        let env = TestEnv::new();
-        env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
-        env.stub_stdout("--print-out-paths", "/nix/store/xyz789-tenant-minimal\n");
-        env.stub_stdout("test -f", "no");
-
-        // `copy_dev_artifacts` below is shell-mocked and never touches disk,
-        // so pre-seed the real files it would have written. The build dir
-        // path is deterministic from the stubbed nix output's revision hash.
-        let build_dir = dev_build_dir("xyz789");
-        std::fs::create_dir_all(&build_dir).unwrap();
-        std::fs::write(format!("{build_dir}/vmlinux"), vec![0u8; 1234]).unwrap();
-        std::fs::write(format!("{build_dir}/rootfs.ext4"), vec![0u8; 5678]).unwrap();
-
-        let result =
-            dev_build_via_shell_env(&env, "/tmp/flake", Some("minimal"), BuildMode::Dev).unwrap();
-
-        assert_eq!(result.artifact_sizes.vmlinux_bytes, 1234);
-        assert_eq!(result.artifact_sizes.rootfs_bytes, 5678);
     }
 
     fn fixture_passthru_json(accessible: bool) -> String {
@@ -2054,38 +1672,6 @@ mod tests {
             .expect("read")
             .expect("present");
         assert!(!sidecar.accessible, "sealed fixture round-tripped");
-    }
-
-    #[test]
-    fn build_mode_prod_emits_no_dev_override() {
-        // The whole point: production-shape commands must not
-        // inject the dev sibling-flake override.
-        let env = TestEnv::new();
-        let flags = dev_override_flags(&env, BuildMode::Prod);
-        assert!(
-            flags.is_empty(),
-            "Prod must produce no override; got: {flags:?}"
-        );
-    }
-
-    #[test]
-    fn build_mode_dev_emits_override_when_workspace_layout_present() {
-        // In the workspace, dev_override_flags walks up from
-        // CARGO_MANIFEST_DIR for nix/dev/flake.nix. When found, it
-        // returns the override; when not, it logs a warning and
-        // returns "". Either outcome is valid here — we only assert
-        // that injects_dev_override is honored: if the layout is
-        // present, Dev produces an override; if absent (no warning
-        // sentinel to check for in this mock), the env var escape
-        // hatch can force one.
-        let env = TestEnv::new();
-        let mut env_guard = EnvGuard::new();
-        env_guard.set("MVM_DEV_FLAKE_URL", "git+file:///tmp/fake?dir=nix/dev");
-        let flags = dev_override_flags(&env, BuildMode::Dev);
-        assert!(
-            flags.contains("--override-input mvm"),
-            "Dev with MVM_DEV_FLAKE_URL set must produce an override; got: {flags:?}"
-        );
     }
 
     #[test]

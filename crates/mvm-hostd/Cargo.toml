@@ -25,6 +25,13 @@ substrate_server_category = "host daemon roles substrate (supervisor + broker + 
 
 # Each key subprocess is its own process — the moat. The supervisor and
 # jailer are library modules; the jailer is applied in-process by each role.
+# Per-VM L3 tunnel gateway. Its own process for the same reason the broker
+# and the substitution endpoint are: it parses bytes a hostile guest
+# controls, so it gets its own address space and its own failure domain.
+[[bin]]
+name = "mvm-netd"
+path = "src/bin/mvm-netd.rs"
+
 [[bin]]
 name = "mvm-broker"
 path = "src/bin/mvm-broker.rs"
@@ -116,6 +123,7 @@ hickory-resolver = { workspace = true, features = ["tokio"], optional = true }
 hickory-proto.workspace = true
 rand.workspace = true
 regex.workspace = true
+leakguard.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

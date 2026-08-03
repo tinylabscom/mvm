@@ -32,6 +32,16 @@ use world::CliWorld;
 
 #[tokio::main]
 async fn main() {
+    // Cargo will not rebuild another package's binary for this test target,
+    // so a stale `mvmctl` silently drives every CLI scenario. Left alone
+    // that surfaces as a pile of unrelated assertion failures, which is
+    // exactly the wrong signal — the scenarios are fine, the binary is old.
+    // Check it up front and say so.
+    if let Err(problem) = check_mvmctl_freshness() {
+        eprintln!("\nconformance: {problem}\n");
+        std::process::exit(2);
+    }
+
     // Warm-restore scenarios mutate the process `MVM_HOME` and call
     // in-process seal/verify helpers. Run all scenarios sequentially so
     // no other thread observes the environment mid-scenario.
@@ -39,6 +49,84 @@ async fn main() {
         .max_concurrent_scenarios(1)
         .filter_run_and_exit(features_dir(), should_run)
         .await;
+}
+
+/// Refuse to run against an `mvmctl` that is missing or older than the
+/// sources it is built from.
+///
+/// The freshness bar is deliberately coarse — newest source mtime versus
+/// binary mtime. It cannot prove the binary is correct, only that it
+/// predates a change, which is the failure mode that actually bites: edit
+/// the CLI, run the suite, and spend an hour reading scenario diffs.
+fn check_mvmctl_freshness() -> Result<(), String> {
+    let binary = mvmctl_path();
+    let Ok(binary_meta) = std::fs::metadata(&binary) else {
+        return Err(format!(
+            "no mvmctl binary at {}.\n\
+             The CLI scenarios drive the built binary as a subprocess, and cargo does \
+             not build it for this target.\n\
+             Run: cargo build --bin mvmctl",
+            binary.display()
+        ));
+    };
+    let Ok(binary_time) = binary_meta.modified() else {
+        return Ok(());
+    };
+
+    let repo = steps::cli::workspace_root();
+    let Some((newest, newest_at)) = newest_source(&repo.join("crates")) else {
+        return Ok(());
+    };
+    if newest_at > binary_time {
+        return Err(format!(
+            "mvmctl at {} is older than {}.\n\
+             The CLI scenarios would run against the stale binary and fail in ways \
+             that look like broken scenarios rather than a stale build.\n\
+             Run: cargo build --bin mvmctl",
+            binary.display(),
+            newest.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Where `assert_cmd`'s `cargo_bin` looks: the test binary's target
+/// directory, two levels up from `deps/`.
+fn mvmctl_path() -> PathBuf {
+    let mut dir = std::env::current_exe().unwrap_or_default();
+    dir.pop(); // the test binary's own name
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    dir.join("mvmctl")
+}
+
+/// The most recently modified `.rs` file under `root`, if any.
+fn newest_source(root: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
+    fn walk(dir: &Path, best: &mut Option<(PathBuf, std::time::SystemTime)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                // `target/` under a crate would swamp the scan and is not source.
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                walk(&path, best);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(modified) = meta.modified()
+                && best.as_ref().is_none_or(|(_, t)| modified > *t)
+            {
+                *best = Some((path, modified));
+            }
+        }
+    }
+    let mut best = None;
+    walk(root, &mut best);
+    best
 }
 
 /// Decide whether a scenario runs from its tags and the host's probed

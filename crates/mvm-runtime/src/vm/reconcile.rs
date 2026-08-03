@@ -211,19 +211,37 @@ pub fn sweep(
 }
 
 /// Supervisor pid-file names a per-VM state dir may carry. `pid` is the
-/// Apple-Container dev-VM owner file; `libkrun.pid` / `vz.pid` / `hvf.pid` are
-/// the workload-supervisor files (one per backend). The first one that exists
-/// and points at a live process marks the dir as having a live owner. HVF must
-/// be listed here or convergence reaps every running HVF machine's state dir.
-const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid", "pid"];
+/// Apple-Container dev-VM owner file; `libkrun.pid` / `vz.pid` / `hvf.pid` /
+/// `fc.pid` / `qemu.pid` are the workload-supervisor files (one per backend). The first one
+/// that exists and points at a live process marks the dir as having a live
+/// owner. Every pid-file backend must be listed here or convergence can reap a
+/// running machine's state dir before its lifecycle command attaches.
+const PID_FILE_NAMES: &[&str] = &[
+    "libkrun.pid",
+    "vz.pid",
+    "hvf.pid",
+    "fc.pid",
+    "qemu.pid",
+    "pid",
+];
 
 /// `kill(pid, 0)` existence probe — delivers no signal, just checks the
-/// process is alive. The cheap half of the live-vs-orphan discrimination
+/// process is alive. `EPERM` is a positive existence result for a supervisor
+/// owned by another uid (notably root-owned Firecracker); only `ESRCH` means
+/// the process is absent. The cheap half of the live-vs-orphan discrimination
 /// (see module docs); the heavier argv/ppid sweep stays in `cache prune`.
 fn pid_is_alive(pid: i32) -> bool {
     // SAFETY: kill with signal 0 performs only a permission/existence
     // check and never delivers a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    let result = unsafe { libc::kill(pid, 0) };
+    let error = (result != 0)
+        .then(|| std::io::Error::last_os_error().raw_os_error())
+        .flatten();
+    kill_zero_reports_alive(result, error)
+}
+
+fn kill_zero_reports_alive(result: i32, error: Option<i32>) -> bool {
+    result == 0 || error == Some(libc::EPERM)
 }
 
 fn read_pid_file(path: &Path) -> Option<i32> {
@@ -235,12 +253,27 @@ fn read_pid_file(path: &Path) -> Option<i32> {
         .filter(|&p| p > 1)
 }
 
-/// Does `dir` carry a supervisor pid file pointing at a live process?
-fn dir_has_live_process(dir: &Path) -> bool {
+/// Whether one supervisor PID file identifies a live process.
+pub fn pid_file_has_live_process(path: &Path) -> bool {
+    read_pid_file(path).is_some_and(pid_is_alive)
+}
+
+/// Resolve the first known supervisor PID file in `dir` that points at a live
+/// process.
+pub fn live_process_pid_file(dir: &Path) -> Option<PathBuf> {
     PID_FILE_NAMES
         .iter()
-        .filter_map(|f| read_pid_file(&dir.join(f)))
-        .any(pid_is_alive)
+        .map(|file| dir.join(file))
+        .find(|path| pid_file_has_live_process(path))
+}
+
+/// Whether a VM state directory carries a supervisor PID file pointing at a
+/// live process.
+///
+/// Runtime reconciliation and host-agent registration cleanup share this
+/// ownership rule so neither can reap state or services for a live backend.
+pub fn state_dir_has_live_process(dir: &Path) -> bool {
+    live_process_pid_file(dir).is_some()
 }
 
 /// Best-effort recursive removal of a state dir. The dead-process
@@ -274,7 +307,7 @@ impl RuntimeView for FsRuntimeView {
         Path::new(&reg.vm_dir).is_dir()
     }
     fn process_alive(&self, reg: &VmRegistration) -> bool {
-        dir_has_live_process(Path::new(&reg.vm_dir))
+        state_dir_has_live_process(Path::new(&reg.vm_dir))
     }
     fn orphan_dirs(&self, known: &BTreeSet<String>) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&self.vms_root) else {
@@ -292,7 +325,7 @@ impl RuntimeView for FsRuntimeView {
             // Canonical layout is `vms/<name>`, so the dir basename is the
             // registry key. A dir with a live owner is an in-flight or
             // specially-managed VM (e.g. the dev VM) — never an orphan.
-            if known.contains(name) || dir_has_live_process(&path) {
+            if known.contains(name) || state_dir_has_live_process(&path) {
                 continue;
             }
             out.push(name.to_string());
@@ -443,6 +476,14 @@ fn emit_audit(report: &ConvergeReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_zero_treats_permission_denied_as_a_live_process() {
+        assert!(kill_zero_reports_alive(0, None));
+        assert!(kill_zero_reports_alive(-1, Some(libc::EPERM)));
+        assert!(!kill_zero_reports_alive(-1, Some(libc::ESRCH)));
+        assert!(!kill_zero_reports_alive(-1, Some(libc::EINVAL)));
+    }
     use crate::vm::name_registry::RegisterParams;
     use mvm_core::util::test_env::TestEnv;
     use std::cell::RefCell;
@@ -806,6 +847,40 @@ mod tests {
         assert!(
             view.orphan_dirs(&BTreeSet::new()).is_empty(),
             "a dir owned by a live hvf supervisor must not be reaped as an orphan"
+        );
+    }
+
+    #[test]
+    fn fs_view_recognizes_live_firecracker_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("firecracker-vm");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fc.pid"), std::process::id().to_string()).unwrap();
+
+        let view = FsRuntimeView::new(root);
+        let dir_str = dir.to_string_lossy().into_owned();
+        let reg = RegisterParams::minimal("firecracker-vm", &dir_str, "default");
+        let mut registry = VmNameRegistry::default();
+        registry.register_with_metadata(reg).unwrap();
+        assert!(
+            view.process_alive(registry.lookup("firecracker-vm").unwrap()),
+            "a live fc.pid must count as a live Firecracker owner"
+        );
+        assert!(
+            view.orphan_dirs(&BTreeSet::new()).is_empty(),
+            "a dir owned by live Firecracker must not be reaped as an orphan"
+        );
+    }
+
+    #[test]
+    fn shared_liveness_rule_recognizes_qemu_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("qemu.pid"), std::process::id().to_string()).unwrap();
+
+        assert_eq!(
+            live_process_pid_file(tmp.path()),
+            Some(tmp.path().join("qemu.pid"))
         );
     }
 

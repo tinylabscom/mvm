@@ -66,7 +66,7 @@ template: doc
 - [Architecture overview](/architecture/overview/): local runtime flow.
 - [Lifecycle states](/working/lifecycle-states/): running, stopped, paused, cold, restoring, and cleaned sandbox states.
 - [Core components](/architecture/core-components/): CLI, SDKs, builder VM, supervisor, backend, and guest agent.
-- [Control surfaces](/architecture/control-surfaces/): CLI, SDK, MCP, console, guest RPC, and not-claimed management surfaces.
+- [Control surfaces](/architecture/control-surfaces/): CLI, SDK, console, guest RPC, and not-claimed management surfaces.
 - [Security and isolation](/architecture/security-isolation/): build, launch, runtime, policy, audit, and SDK boundaries.
 - [Networking and storage](/architecture/networking-storage/): egress, ports, files, volumes, and snapshots.
 - [Architecture reference](/reference/architecture/): crates, backends, builder VM, supervisor layers.

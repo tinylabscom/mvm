@@ -153,8 +153,19 @@ mod tests {
         assert_eq!(result, payload);
     }
 
+    /// Both directions. Asserting only that a fresh registry is empty
+    /// leaves a constant-`true` predicate passing, and the broker's
+    /// startup readiness gate reads this — so a fully-populated registry
+    /// would report itself as having nothing bound.
     #[test]
-    fn empty_registry_reports_empty() {
-        assert!(Registry::new().is_empty());
+    fn registry_reports_empty_only_while_no_handler_is_registered() {
+        let mut registry = Registry::new();
+        assert!(registry.is_empty());
+
+        registry.register(Arc::new(EchoHandler));
+        assert!(
+            !registry.is_empty(),
+            "a registry holding a handler is not empty"
+        );
     }
 }

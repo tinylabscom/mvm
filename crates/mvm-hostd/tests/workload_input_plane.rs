@@ -215,6 +215,9 @@ fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
         agent_verbs: None,
         services: Vec::new(),
         stream_retention: Default::default(),
+        // Closed transport: this fixture's workload reaches nothing.
+        network_mode: mvm_protocol::plan::NetworkMode::None,
+        l3_network: None,
     }
 }
 

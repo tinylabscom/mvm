@@ -9,7 +9,8 @@ olddefconfig`. Two kernels derive from one shared base:
   boots (virtio, vsock, ext4/overlay, seccomp, …), `CONFIG_MODULES=n`.
 - [`builder.nix`](./builder.nix) — base + builder-only infra
   (virtio-fs, namespaces/cgroups, iptables egress lockdown).
-- [`workload.nix`](./workload.nix) — base + dm-verity (verified boot).
+- [`workload.nix`](./workload.nix) — base + dm-verity (verified boot), with
+  compiler size optimization and workload-only namespace/cgroup removal.
 
 Two ways the same files are consumed:
 
@@ -66,10 +67,12 @@ Add a feature: drop its short Kconfig symbol (without the
 `CONFIG_` prefix) into the `enables` list. `make olddefconfig`
 will pull in transitive dependencies on the next build.
 
-Remove a feature: add it to `disables`. If `olddefconfig` later
-re-enables it because another `=y` symbol depends on it, that
-parent symbol needs to come off too — disabling a leaf doesn't
-override a hard dependency.
+Remove a feature: add best-effort experiments to `baseDisables` or a variant's
+`extraDisables`. Once the resolved config proves the cut, move it to
+`requiredDisables` (or a variant's `requiredExtraDisables`). Config generation
+then fails if `olddefconfig` silently selects the feature back on. A reverted
+cut usually means that its selecting parent must also be removed; disabling a
+leaf does not override a Kconfig `select`.
 
 To introspect what `olddefconfig` produced, build the variant-specific
 config outputs or the paired `resolved-configs` output:
@@ -91,6 +94,10 @@ nix build .#builder-metrics -o /tmp/builder-metrics
 nix build .#workload-metrics -o /tmp/workload-metrics
 cat /tmp/workload-metrics/metrics.json
 ```
+
+The default workload output is size-optimized. `workload-sizeopt-*` remains an
+identical compatibility/measurement alias so existing release automation does
+not need a flag migration.
 
 The output is a regular `.config` text file — diffable across
 `disables` edits to confirm SoC platform clusters or other

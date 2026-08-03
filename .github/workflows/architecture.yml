@@ -15,11 +15,16 @@ on:
   pull_request:
   # Required for the merge queue: the Invariant check must run on merge_group.
   merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
+# Pull-request refs are stable across updates, so a new commit cancels only the
+# superseded run for that PR. Merge-group refs identify exact queue commits and
+# must finish; manual dispatches receive a unique key so independent diagnostics
+# do not block each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

@@ -13,6 +13,24 @@
 # `suite` names the Gherkin file under `features/suites/` that carries the
 # scenario (R3). Every claim must have a scenario and at least one witness.
 #
+# `independent_verifiers` records how many independent implementations of a
+# format a claim rests on, each checked against one shared corpus rather than
+# against input it generated for itself. Two implementations that only ever see
+# their own output agree by construction and prove nothing about each other.
+#
+# `witness_kinds` names the witness kinds that are meaningful for this claim,
+# and each named kind must have at least one live witness. It exists because
+# a witness can be deleted from the list below without any gate noticing: the
+# catalog check verifies that listed witnesses exist, not that a claim still
+# has the kinds of evidence it is supposed to have. Declaring them makes
+# giving one up an explicit, reviewable edit rather than a silent deletion.
+#
+# The kinds are not uniform, deliberately. MVM-SEC-04 ("no `do_exec` in a
+# production build") is a property of a shipped binary, so its evidence is a
+# CI symbol-grep and an `fn:` witness would have to be invented. Others are
+# properties of code logic with no useful CI counterpart. Requiring both
+# everywhere would buy fabricated witnesses, not assurance.
+#
 # Witness tokens are typed:
 #   fn:NAME   -- a `fn NAME(` must exist under `crates/`
 #   ci:NAME   -- NAME must appear in some `.github/workflows/*` file
@@ -22,6 +40,7 @@ spec = "mvm/1"
 [[claim]]
 id = "MVM-SEC-01"
 level = "build"
+witness_kinds = ["fn", "ci"]
 suite = "host_shares"
 statement = "No host-fs access from a guest beyond explicit shares"
 witnesses = [
@@ -36,6 +55,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-02"
 level = "build"
+witness_kinds = ["fn", "ci"]
 suite = "guest_privilege"
 statement = "No guest binary can elevate to uid 0"
 witnesses = [
@@ -47,6 +67,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-03"
 level = "build"
+witness_kinds = ["fn", "ci"]
 suite = "verified_boot"
 statement = "A tampered rootfs ext4 fails to boot"
 witnesses = [
@@ -58,6 +79,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-04"
 level = "build"
+witness_kinds = ["ci"]
 suite = "agent_surface"
 statement = "The guest agent has no do_exec in production builds"
 witnesses = [
@@ -67,6 +89,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-05"
 level = "build"
+witness_kinds = ["ci"]
 suite = "fuzz_surface"
 statement = "Vsock framing + supervisor-config JSON are fuzzed"
 # Named per fuzz target rather than by the lane, so each witness points at
@@ -83,6 +106,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-06"
 level = "build"
+witness_kinds = ["fn", "ci"]
 suite = "runtime_overlay"
 statement = "The pre-built dev image is hash-verified"
 witnesses = [
@@ -93,6 +117,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-07"
 level = "some-true"
+witness_kinds = ["ci"]
 suite = "supply_chain"
 statement = "Cargo deps are audited on every PR"
 witnesses = [
@@ -104,17 +129,22 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-08"
 level = "build"
+witness_kinds = ["fn"]
 suite = "admission_audit"
 statement = "Every workload runs from a signed, audited ExecutionPlan"
+independent_verifiers = 2
 witnesses = [
     "fn:synthesize_plan",
     "fn:admit_for_run",
     "fn:verify_audit_chain",
+    "fn:frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts",
+    "fn:no_std_verifier_accepts_the_same_corpus_the_host_verifier_does",
 ]
 
 [[claim]]
 id = "MVM-SEC-09"
 level = "build"
+witness_kinds = ["fn"]
 suite = "bundle_boot"
 statement = "Every published bundle is content-addressed and re-verified"
 witnesses = [
@@ -125,6 +155,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-10"
 level = "build"
+witness_kinds = ["fn", "ci"]
 suite = "egress_vsock"
 statement = "No untrusted workload reaches the network unless policy-admitted"
 witnesses = [
@@ -141,6 +172,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-11"
 level = "build"
+witness_kinds = ["fn", "ci"]
 suite = "app_deps"
 statement = "Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated"
 witnesses = [
@@ -152,6 +184,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-12"
 level = "build"
+witness_kinds = ["fn"]
 suite = "host_services"
 statement = "Every host-side service binding is plan-gated and audited"
 witnesses = [
@@ -162,6 +195,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-13"
 level = "build"
+witness_kinds = ["fn"]
 suite = "secrets_pii"
 statement = "No raw secret value crosses the broker channel"
 witnesses = [
@@ -172,6 +206,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-14"
 level = "build"
+witness_kinds = ["fn"]
 suite = "oci_provenance"
 statement = "OCI image provenance is recorded in the chain-signed audit log"
 witnesses = [
@@ -182,6 +217,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-15"
 level = "build"
+witness_kinds = ["fn", "ci"]
 suite = "prod_console"
 statement = "A sealed production microVM has no shell, no do_exec, and no PTY"
 # Scoped to what the three witnesses check. The host→guest input plane's
@@ -196,6 +232,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-16"
 level = "build"
+witness_kinds = ["fn"]
 suite = "egress_substitution"
 statement = "Egress substitution keeps a raw secret off the guest, bound-only, no value in audit"
 witnesses = [
@@ -207,6 +244,7 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-17"
 level = "build"
+witness_kinds = ["fn"]
 suite = "workload_input"
 statement = "Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited"
 # Preview, not shipped: three of the four legs have no production caller yet

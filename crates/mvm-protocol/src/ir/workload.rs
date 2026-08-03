@@ -630,6 +630,18 @@ pub struct Network {
     /// "unspecified — substrate picks based on `mode`".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<NetworkDns>,
+    /// The workload needs a real in-guest IP stack: raw sockets, ICMP,
+    /// non-TCP/UDP protocols, or its own resolver.
+    ///
+    /// A statement about the *workload*, not about a transport. It is what
+    /// selects the L3 tunnel, and it is declared here rather than chosen at
+    /// run time so the same workload resolves the same way on every host.
+    ///
+    /// Leave it off unless the workload genuinely needs it: the tunnel
+    /// cannot carry host-side secret substitution or cleartext redaction,
+    /// because the guest originates its own connections.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub raw_ip_stack: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

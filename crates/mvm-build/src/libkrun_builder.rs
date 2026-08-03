@@ -5983,7 +5983,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_helper_build_command_uses_real_embed_mode() {
+    fn bootstrap_helper_build_command_uses_isolated_target_dir() {
         let cmd = builder_vm_bootstrap_helper_build_command(
             std::ffi::OsStr::new("cargo"),
             Path::new("/workspace"),
@@ -6005,8 +6005,6 @@ mod tests {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert!(!envs.contains_key("MVM_SKIP_EMBED_BINARIES"));
-        assert!(!envs.contains_key("MVM_EMBED_BINARIES"));
         assert_eq!(
             envs.get("CARGO_TARGET_DIR"),
             Some(&Some("/tmp/helper-target".to_string()))

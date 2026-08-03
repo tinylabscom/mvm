@@ -395,6 +395,55 @@ mod reap_orphans_tests {
     }
 
     #[test]
+    fn reap_spares_live_firecracker_workload_under_launchd() {
+        let mut supervisor = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stand-in Firecracker supervisor");
+        let supervisor_pid = supervisor.id() as i32;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-workload-livetest-fc-running");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        let helper_cmd = format!("sleep 30 # {}", vm.file_name().unwrap().to_string_lossy());
+        let mut helper = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&helper_cmd)
+            .spawn()
+            .expect("spawn stand-in helper");
+        let helper_pid = helper.id() as i32;
+        let snapshot = ProcSnapshot::from_parts(
+            [(supervisor_pid, 1), (helper_pid, 1)].into_iter().collect(),
+            vec![(helper_pid, helper_cmd)],
+        );
+        std::fs::write(vm.join("fc.pid"), format!("{supervisor_pid}\n")).expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            WORKLOAD_SIDECARS,
+            false,
+            true,
+            false,
+            &snapshot,
+        )
+        .expect("reap");
+
+        assert_eq!(
+            out.killed, 0,
+            "a live Firecracker supervisor must protect its helper"
+        );
+        assert!(
+            pid_is_alive(helper_pid),
+            "helper of live Firecracker was wrongly killed"
+        );
+
+        let _ = supervisor.kill();
+        let _ = supervisor.wait();
+        let _ = helper.kill();
+        let _ = helper.wait();
+    }
+
+    #[test]
     fn reap_still_kills_orphaned_ephemeral_builder_under_launchd() {
         let (mut child, pid, snapshot) = alive_child_under_launchd();
 
@@ -560,6 +609,75 @@ mod reap_orphans_tests {
             "dead ephemeral builder dir must be reclaimed"
         );
         assert!(!vm.exists(), "ephemeral builder dir should be gone");
+    }
+
+    #[test]
+    fn startup_reaps_builder_egress_supervisor_from_another_worktree() {
+        let pid = std::process::id() as i32;
+        let command = concat!(
+            "/tmp/other-worktree/target/debug/mvmctl ",
+            "__builder-egress-supervisor --endpoint ",
+            "/tmp/other-worktree/target/debug/mvm-substitution-endpoint"
+        );
+        let snapshot = ProcSnapshot::from_parts(
+            [(pid, 1)].into_iter().collect(),
+            vec![(pid, command.to_string())],
+        );
+
+        assert_eq!(
+            reap_orphaned_builder_egress_supervisors(true, &snapshot),
+            1,
+            "a launchd-parented builder egress wrapper is orphaned regardless of worktree"
+        );
+    }
+
+    #[test]
+    fn startup_spares_owned_or_unrelated_mvmctl_processes() {
+        let pid = std::process::id() as i32;
+        let wrapper = concat!(
+            "/tmp/worktree/target/debug/mvmctl ",
+            "__builder-egress-supervisor --endpoint /tmp/endpoint"
+        );
+        let owned = ProcSnapshot::from_parts(
+            [(pid, 42)].into_iter().collect(),
+            vec![(pid, wrapper.to_string())],
+        );
+        let unrelated = ProcSnapshot::from_parts(
+            [(pid, 1)].into_iter().collect(),
+            vec![(
+                pid,
+                "/tmp/worktree/target/debug/mvmctl machine ls".to_string(),
+            )],
+        );
+        let spoofed_executable = ProcSnapshot::from_parts(
+            [(pid, 1)].into_iter().collect(),
+            vec![(
+                pid,
+                "/tmp/worktree/target/debug/not-mvmctl __builder-egress-supervisor".to_string(),
+            )],
+        );
+        let later_argument = ProcSnapshot::from_parts(
+            [(pid, 1)].into_iter().collect(),
+            vec![(
+                pid,
+                "/tmp/worktree/target/debug/mvmctl machine run __builder-egress-supervisor"
+                    .to_string(),
+            )],
+        );
+
+        assert_eq!(reap_orphaned_builder_egress_supervisors(true, &owned), 0);
+        assert_eq!(
+            reap_orphaned_builder_egress_supervisors(true, &unrelated),
+            0
+        );
+        assert_eq!(
+            reap_orphaned_builder_egress_supervisors(true, &spoofed_executable),
+            0
+        );
+        assert_eq!(
+            reap_orphaned_builder_egress_supervisors(true, &later_argument),
+            0
+        );
     }
 }
 

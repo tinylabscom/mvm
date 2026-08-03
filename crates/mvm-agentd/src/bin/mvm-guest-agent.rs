@@ -55,9 +55,9 @@ use std::sync::{Arc, Mutex};
 
 use mvm_agentd::vsock::{
     AuthenticatedSession, GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, TrafficPlane,
-    TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant, is_verb_trust_baseline,
+    TrustDecision, VERB_TRUST_POLICY_PATH, current_uid, enforce_verb_grant, is_verb_trust_baseline,
     launch_requires_grant, load_host_signer_verifying_key, load_pinned_verb_grant,
-    load_verb_trust_policy, trust_decision,
+    load_verb_trust_policy, trust_decision, workload_privilege_refusal,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -288,6 +288,15 @@ fn handle_client(
     }
 
     if let Some(resp) = enforce_verb_grant(&req, verb_grant.as_ref()) {
+        send_authenticated_response(&mut file, &mut session, &resp);
+        return;
+    }
+
+    // No workload code runs as root. The privilege drop during activation is
+    // the mechanism; this is the backstop that makes a boot path which never
+    // reached that drop fail closed and name itself, rather than silently
+    // running the workload with uid 0.
+    if let Some(resp) = workload_privilege_refusal(&req, current_uid()) {
         send_authenticated_response(&mut file, &mut session, &resp);
         return;
     }

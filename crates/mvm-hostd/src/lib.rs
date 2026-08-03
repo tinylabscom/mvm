@@ -49,6 +49,11 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+/// `mvm-netd` — the host-side L3 tunnel gateway. Machine-scoped: a packet
+/// reaches host networking only after crossing vsock, binding to a
+/// host-owned session, and passing frame, IP, and signed-plan policy
+/// validation.
+pub mod netd;
 /// Child-side parent-death watchdog: each subprocess-moat bin exits the
 /// instant its supervisor dies, closing the macOS / abnormal-death gap the
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.

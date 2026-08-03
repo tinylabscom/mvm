@@ -11,24 +11,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::guest_agent_build::GuestRuntimeBinaryBytes;
 use crate::oci_runtime_inject::{MvmRuntimeBinaries, OciEntrypointConfig};
 use crate::rootfs::MaterializeExt4Input;
 use mvm_fs::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
 };
-
-/// Guest runtime binaries embedded in the host binary at build time — the
-/// end-user fallback for a shipped mvmctl with no source checkout to
-/// cross-compile from.
-pub struct PrebuiltGuestBinaries<'a> {
-    pub oci_init: &'a [u8],
-    pub agent: &'a [u8],
-    pub netinit: &'a [u8],
-    pub egress_client: &'a [u8],
-    pub entrypoint_runner: &'a [u8],
-    pub verity_init: &'a [u8],
-}
 
 pub struct InjectAndMaterializeRequest<'a> {
     cache_root: &'a Path,
@@ -37,8 +24,8 @@ pub struct InjectAndMaterializeRequest<'a> {
     label: &'a str,
     profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
     entrypoint: Option<&'a OciEntrypointConfig>,
-    prebuilt: Option<PrebuiltGuestBinaries<'a>>,
     sealed: bool,
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
 
 impl<'a> InjectAndMaterializeRequest<'a> {
@@ -55,8 +42,8 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             label,
             profile: crate::oci_runtime_inject::RuntimeInjectionProfile::RootfsOnly,
             entrypoint: None,
-            prebuilt: None,
             sealed: false,
+            deferred_nodes: Vec::new(),
         }
     }
 }
@@ -68,8 +55,8 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     label: &'a str,
     profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
     entrypoint: Option<&'a OciEntrypointConfig>,
-    prebuilt: Option<PrebuiltGuestBinaries<'a>>,
     sealed: bool,
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
 
 impl<'a> InjectAndMaterializeRequestBuilder<'a> {
@@ -83,13 +70,15 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
         self
     }
 
-    pub fn prebuilt(mut self, prebuilt: Option<PrebuiltGuestBinaries<'a>>) -> Self {
-        self.prebuilt = prebuilt;
+    pub fn sealed(mut self, sealed: bool) -> Self {
+        self.sealed = sealed;
         self
     }
 
-    pub fn sealed(mut self, sealed: bool) -> Self {
-        self.sealed = sealed;
+    /// Carry the OCI unpacker's deferred nodes — entries a case-folding
+    /// host filesystem could not hold — into the materialized image.
+    pub fn deferred_nodes(mut self, deferred_nodes: Vec<mvm_fs::ext4::Node>) -> Self {
+        self.deferred_nodes = deferred_nodes;
         self
     }
 
@@ -101,8 +90,8 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             label: self.label,
             profile: self.profile,
             entrypoint: self.entrypoint,
-            prebuilt: self.prebuilt,
             sealed: self.sealed,
+            deferred_nodes: self.deferred_nodes,
         }
     }
 }
@@ -117,10 +106,9 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
 /// (see [`seal_and_assemble_verity`]) — and the sidecar is written `sealed`, so
 /// the runtime routes the block+ext4 verity boot and refuses interactive access.
 ///
-/// Guest binaries resolve by build mode: shipped binaries with non-empty
-/// `prebuilt` bytes install those exact embedded helpers first, while source
-/// builds with embedded stubs compile the invoking checkout through the
-/// content-keyed guest cache. A caller with no embedded binaries passes `None`.
+/// Guest binaries for the remaining legacy/rootfs-only injection shapes resolve
+/// from the invoking source checkout's content-keyed cache or an existing
+/// compatibility cache. The host executable does not carry workload binaries.
 pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
     let InjectAndMaterializeRequest {
         cache_root,
@@ -129,10 +117,10 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         label,
         profile,
         entrypoint,
-        prebuilt,
         sealed,
+        deferred_nodes,
     } = request;
-    let bins = resolve_guest_binaries(cache_root, prebuilt)?;
+    let bins = resolve_guest_binaries(cache_root)?;
     crate::oci_runtime_inject::inject_mvm_runtime(
         unpacked_root,
         &bins,
@@ -141,15 +129,15 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         profile,
     )
     .context("inject mvm runtime into OCI rootfs")?;
+    ensure_volume_mount_roots(unpacked_root)?;
 
     // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
     let tree_size = unpacked_tree_size(unpacked_root)
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
-    materialize_run_rootfs(&MaterializeExt4Input::new(
-        unpacked_root.to_path_buf(),
-        output.to_path_buf(),
-        tree_size,
-    ))?;
+    materialize_run_rootfs(
+        &MaterializeExt4Input::new(unpacked_root.to_path_buf(), output.to_path_buf(), tree_size)
+            .with_deferred_nodes(deferred_nodes),
+    )?;
 
     // `--prod`: seal the rootfs and stand up its verity initramfs together,
     // before the sidecar is written. If this fails we surface it and never
@@ -170,6 +158,18 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
     )
     .write_to_dir(rootfs_dir)
     .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
+    Ok(())
+}
+
+/// Materialize the admitted top-level guest volume roots into every sealed OCI
+/// image. The root becomes dm-verity read-only before PID 1 runs, so mountpoints
+/// cannot be created lazily inside the guest.
+fn ensure_volume_mount_roots(unpacked_root: &Path) -> Result<()> {
+    for relative in ["data", "work", "mnt"] {
+        let path = unpacked_root.join(relative);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("create guest volume mount root {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -350,54 +350,42 @@ fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) 
 
 /// Resolve the guest-agent binaries.
 ///
-/// A shipped mvmctl with embedded bytes installs those exact helpers first, so
-/// stale same-version cache entries cannot override the released runtime. A
-/// source build has embedded stubs (`prebuilt = None`) and resolves the
-/// *invoking* checkout's guest sources through a content-keyed cache, so local
-/// edits rebuild instead of serving a stale version+arch entry. A no-checkout
-/// caller without embedded helpers can still use a complete version+arch cache.
-pub fn resolve_guest_binaries(
-    cache_root: &Path,
-    prebuilt: Option<PrebuiltGuestBinaries<'_>>,
-) -> Result<MvmRuntimeBinaries> {
+/// A source checkout resolves the invoking checkout's guest sources through a
+/// content-keyed cache, so local edits rebuild instead of serving a stale
+/// version+arch entry. An installed caller may reuse a complete compatibility
+/// cache, but the released workload path obtains guest code from the universal
+/// initramfs and runtime overlay.
+pub fn resolve_guest_binaries(cache_root: &Path) -> Result<MvmRuntimeBinaries> {
     let arch = mvm_core::arch::GuestArch::host();
 
-    if let Some(p) = prebuilt {
-        let version = env!("CARGO_PKG_VERSION");
-        return crate::guest_agent_build::install_prebuilt_guest_binaries(
-            GuestRuntimeBinaryBytes {
-                oci_init: p.oci_init,
-                agent: p.agent,
-                netinit: p.netinit,
-                egress_client: p.egress_client,
-                entrypoint_runner: p.entrypoint_runner,
-                verity_init: p.verity_init,
-            },
-            cache_root,
-            version,
-            arch,
-        )
-        .context("install the embedded guest agent binaries");
-    }
-
-    if let Some(ws) = crate::guest_agent_build::detect_source_workspace() {
-        let cache_key = crate::guest_agent_build::source_cache_key(&ws)
-            .context("fingerprint guest sources for the build cache")?;
-        return crate::guest_agent_build::resolve_or_build_guest_binaries(
-            cache_root, &cache_key, arch, &ws,
-        )
-        .context("build guest agent binaries from the source checkout");
-    }
-
-    let version = env!("CARGO_PKG_VERSION");
-    if let Some(cached) = crate::guest_agent_build::cached_guest_binaries(cache_root, version, arch)
+    match crate::guest_agent_build::guest_binary_source()
+        .context("resolve the guest-binary cache key for this host")?
     {
-        return Ok(cached);
+        crate::guest_agent_build::GuestBinarySource::SourceCheckout {
+            workspace_root,
+            cache_key,
+        } => {
+            return crate::guest_agent_build::resolve_or_build_guest_binaries(
+                cache_root,
+                &cache_key,
+                arch,
+                &workspace_root,
+            )
+            .context("build guest agent binaries from the source checkout");
+        }
+        crate::guest_agent_build::GuestBinarySource::EmbeddedVersion { cache_key } => {
+            if let Some(cached) =
+                crate::guest_agent_build::cached_guest_binaries(cache_root, &cache_key, arch)
+            {
+                return Ok(cached);
+            }
+        }
     }
 
     anyhow::bail!(
-        "no guest agent binaries available: this build embeds none and there is no source \
-         checkout to cross-compile from"
+        "legacy rootfs guest-runtime injection is unavailable for mvmctl {} on {arch}; \
+         run from a source checkout or use the universal initramfs/runtime-overlay path",
+        env!("CARGO_PKG_VERSION")
     )
 }
 
@@ -545,53 +533,16 @@ pub fn select_root_strategy(s: RootStrategySelection) -> RootStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::arch::GuestArch;
 
     #[test]
-    fn embedded_guest_binaries_overwrite_stale_cache() {
-        let cache = tempfile::tempdir().unwrap();
-        let arch = GuestArch::host();
-        let version = env!("CARGO_PKG_VERSION");
-        crate::guest_agent_build::install_prebuilt_guest_binaries(
-            GuestRuntimeBinaryBytes {
-                oci_init: b"stale-init",
-                agent: b"stale-agent",
-                netinit: b"stale-netinit",
-                egress_client: b"stale-egress",
-                entrypoint_runner: b"stale-entrypoint",
-                verity_init: b"stale-verity-init",
-            },
-            cache.path(),
-            version,
-            arch,
-        )
-        .unwrap();
+    fn sealed_oci_tree_contains_volume_mount_roots() {
+        let root = tempfile::tempdir().unwrap();
 
-        let bins = resolve_guest_binaries(
-            cache.path(),
-            Some(PrebuiltGuestBinaries {
-                oci_init: b"fresh-init",
-                agent: b"fresh-agent",
-                netinit: b"fresh-netinit",
-                egress_client: b"fresh-egress",
-                entrypoint_runner: b"fresh-entrypoint",
-                verity_init: b"fresh-verity-init",
-            }),
-        )
-        .unwrap();
+        ensure_volume_mount_roots(root.path()).expect("create mount roots");
 
-        assert_eq!(std::fs::read(bins.oci_init).unwrap(), b"fresh-init");
-        assert_eq!(std::fs::read(bins.agent).unwrap(), b"fresh-agent");
-        assert_eq!(std::fs::read(bins.netinit).unwrap(), b"fresh-netinit");
-        assert_eq!(std::fs::read(bins.egress_client).unwrap(), b"fresh-egress");
-        assert_eq!(
-            std::fs::read(bins.entrypoint_runner).unwrap(),
-            b"fresh-entrypoint"
-        );
-        assert_eq!(
-            std::fs::read(bins.verity_init).unwrap(),
-            b"fresh-verity-init"
-        );
+        for relative in ["data", "work", "mnt"] {
+            assert!(root.path().join(relative).is_dir());
+        }
     }
 
     #[cfg(not(target_os = "linux"))]

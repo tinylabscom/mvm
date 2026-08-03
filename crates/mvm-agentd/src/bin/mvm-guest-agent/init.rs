@@ -4,8 +4,11 @@
 //! this harness before entering the normal vsock control plane:
 //!
 //!   1. Mount `/proc`, `/sys`, and `/dev`.
-//!   2. Install a SIGCHLD handler so orphaned descendants become zombies
-//!      that PID 1 reaps immediately.
+//!   2. Start the orphan reaper so descendants re-parented to PID 1 are
+//!      collected instead of accumulating as zombies. It is a thread, not
+//!      a SIGCHLD handler, so it can publish the statuses of children the
+//!      agent owns rather than destroying them — see
+//!      [`mvm_agentd::child_wait`].
 //!   3. Hand control back to `main`; the normal vsock accept loop serves
 //!      `ActivateEnvironment` as the only allowed verb.
 //!   4. `apply_activation` mounts the rootfs, runtime overlay, and volumes,
@@ -14,18 +17,10 @@
 //! Linux-only.  On non-Linux targets the functions are no-ops so the
 //! workspace still compiles on macOS.
 
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use mvm_agentd::guest_mount;
 use mvm_agentd::vsock::ActivateEnvironment;
 
 use crate::state::{ActivationState, AgentBootState};
-
-/// Fixed workload UID/GID the agent drops to after activation.
-/// Matches the existing `agentUid` used by `nix/lib/mk-guest.nix`.
-pub(crate) const WORKLOAD_UID: u32 = 901;
-pub(crate) const WORKLOAD_GID: u32 = 901;
 
 /// True when this process is PID 1 in the initramfs.
 pub(crate) fn is_pid1() -> bool {
@@ -47,7 +42,7 @@ pub(crate) fn early_setup() {
             // /sys, and /dev for the namespace and drops CAP_SYS_ADMIN, so
             // the initramfs early mounts would fail with EPERM. The agent
             // is still PID 1 of the container's PID namespace, so the
-            // SIGCHLD reaper is still required.
+            // orphan reaper is still required.
             eprintln!(
                 "mvm-guest-agent: unix transport — container runtime provides early filesystems"
             );
@@ -55,7 +50,7 @@ pub(crate) fn early_setup() {
             fatal(&format!("early filesystem mount failed: {e}"));
         }
         provision_host_signer_anchor();
-        install_sigchld_handler();
+        mvm_agentd::child_wait::install_orphan_reaper();
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -112,7 +107,12 @@ pub(crate) fn apply_activation(
     } else {
         guest_mount::pivot_to_root(&new_root)?;
     }
-    guest_mount::drop_privilege(WORKLOAD_UID, WORKLOAD_GID)?;
+    // The same post-mount setup the legacy per-rootfs init performs: mediated
+    // tools, egress CA, verb grant, netinit, loopback + resolver, egress client.
+    // It has to land after the pivot (it writes into the workload's root) and
+    // before the privilege drop (mounts and interface changes need root).
+    bootstrap_guest_environment()?;
+    guest_mount::drop_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
     eprintln!("mvm-guest-agent: activation complete, serving operational RPCs");
@@ -132,52 +132,20 @@ fn fatal(message: &str) -> ! {
     std::process::exit(1);
 }
 
-// ============================================================================
-// SIGCHLD handling (Linux only)
-// ============================================================================
-
+/// Run the post-mount setup shared with the legacy per-rootfs init.
 #[cfg(target_os = "linux")]
-static SIGCHLD_INSTALLED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(target_os = "linux")]
-fn install_sigchld_handler() {
-    if SIGCHLD_INSTALLED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-
-    // SAFETY: `on_sigchld` is async-signal-safe: it only calls `waitpid`
-    // in a loop with `WNOHANG` and writes to `STDERR_FILENO` on failure.
-    // The handler is installed once from the main thread before any child
-    // processes exist.
-    unsafe {
-        let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = on_sigchld as *const () as usize;
-        action.sa_flags = libc::SA_NOCLDSTOP | libc::SA_RESTART;
-        let rc = libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
-        if rc != 0 {
-            fatal(&format!(
-                "sigaction(SIGCHLD) failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-    }
+fn bootstrap_guest_environment() -> Result<(), guest_mount::MountError> {
+    mvm_agentd::guest_bootstrap::provision_guest_environment().map_err(|_| {
+        guest_mount::MountError::GuestBootstrap(
+            "egress was required but no egress client resolved".to_string(),
+        )
+    })
 }
 
-/// SIGCHLD handler.  Reap any zombie children without blocking.  The
-/// loop is required because multiple children may exit while the signal
-/// is masked and Linux collapses concurrent SIGCHLD deliveries.
-#[cfg(target_os = "linux")]
-unsafe extern "C" fn on_sigchld(_sig: libc::c_int) {
-    loop {
-        let mut status = 0;
-        // SAFETY: `waitpid(-1, WNOHANG)` is async-signal-safe and does not
-        // block.  The status pointer is owned on this signal-handler stack.
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if pid <= 0 {
-            break;
-        }
-    }
+/// The agent is PID 1 only inside a Linux guest, so there is nothing to set up
+/// on a host build. Spelled out rather than left as a `cfg`-erased call site so
+/// the Linux path cannot quietly disappear.
+#[cfg(not(target_os = "linux"))]
+fn bootstrap_guest_environment() -> Result<(), guest_mount::MountError> {
+    Ok(())
 }

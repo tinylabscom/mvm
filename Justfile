@@ -138,12 +138,6 @@ test:
     mkdir -p target/nextest
     cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
 
-# Non-release builds now skip the embedded host-vm binary cross-compile by
-# default. Keep this explicit recipe as the "always stub" path when a caller
-# wants to force the fast mode even after opting into real embeds elsewhere.
-test-fast:
-    MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace
-
 # Doctests. nextest does NOT run doctests, so `just test` skips them;
 # this is the companion that keeps doc-fence coverage gated.
 test-doc:
@@ -189,9 +183,8 @@ bdd:
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
 # a targeted rebuild or CI.
 build-supervisors:
-    cargo build -p mvm-hostd --bin mvm-substitution-endpoint
-    cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
-    cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
+    cargo build -p mvm-hostd --bin mvm-substitution-endpoint --bin mvm-hvf-supervisor
+    cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 kernel-workload:
@@ -259,6 +252,12 @@ mutation-surface:
 # Mutate the claim surface and ratchet survivors against the baseline.
 # HOURS: this is the nightly lane's command, not an inner-loop check.
 # Needs `cargo install cargo-mutants cargo-nextest`.
+#
+# No isolation wrapper here on purpose. `--run` executes security code with
+# its check removed, so it must not reach a real mvm state root — and that
+# confinement lives where cargo-mutants is actually spawned, so every
+# caller gets it rather than each one carrying its own copy. This recipe
+# had no wrapper at all until that landed, which is the failure mode.
 mutation-witnesses:
     cargo run -p xtask -- check-mutation-witnesses --run
 

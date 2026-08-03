@@ -35,17 +35,18 @@ pub(crate) fn run_shell_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    let _owned = mvm_agentd::child_wait::OwnedChild::new(child.id());
 
     // Poll until the child exits or the timeout fires.
     let start = Instant::now();
     let status = loop {
-        match child.try_wait()? {
+        match mvm_agentd::child_wait::try_wait(&mut child)? {
             Some(status) => break status,
             None if start.elapsed() >= timeout => {
                 if let Err(e) = child.kill() {
                     eprintln!("failed to kill child process: {e}");
                 }
-                if let Err(e) = child.wait() {
+                if let Err(e) = mvm_agentd::child_wait::wait(&mut child) {
                     eprintln!("failed to wait child process: {e}");
                 }
                 return Ok(std::process::Output {

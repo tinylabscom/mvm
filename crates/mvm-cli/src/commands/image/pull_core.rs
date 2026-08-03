@@ -143,6 +143,7 @@ pub(super) fn resolve_or_pull_run_image_with(
                     oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?
                         .as_ref(),
                     prod,
+                    super::cache::read_deferred_nodes(cache_root, &image.resolved_digest)?,
                 )
                 .with_context(|| {
                     format!(
@@ -265,6 +266,7 @@ fn pull_image_ref(
 
     let mut cached_layers = Vec::with_capacity(layers.len());
     let mut prior_layer_paths = std::collections::HashSet::new();
+    let mut deferred_nodes = Vec::new();
     for layer in &layers {
         let compressed =
             fetch_or_read_layer(cache_root, &runtime, &layer_fetcher, &image_ref, layer)
@@ -272,6 +274,7 @@ fn pull_image_ref(
         let report = unpack_layer_bytes(layer, &compressed, &unpacked_root, &prior_layer_paths)
             .with_context(|| format!("unpack layer {}", layer.digest))?;
         prior_layer_paths.extend(report.paths_written);
+        deferred_nodes.extend(report.deferred_nodes);
         cached_layers.push(CachedOciLayer {
             digest: layer.digest.clone(),
             size_bytes: layer.size,
@@ -282,6 +285,7 @@ fn pull_image_ref(
     let runtime_tag = oci_runtime_tag();
     let rootfs_path = format!("rootfs/{manifest_hex}-{runtime_tag}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_path);
+    super::cache::write_deferred_nodes(cache_root, &manifest.digest, &deferred_nodes)?;
     inject_runtime_and_materialize(
         cache_root,
         &unpacked_root,
@@ -289,6 +293,7 @@ fn pull_image_ref(
         &image_ref.canonical(),
         None,
         false,
+        deferred_nodes,
     )?;
 
     let provenance = super::oci_types::OciProvenance {
@@ -505,11 +510,18 @@ mod tests {
     }
 
     fn seed_guest_runtime_cache(cache_root: &Path) {
-        use mvm_build::guest_agent_build::GuestAgentLayout;
+        use mvm_build::guest_agent_build::{GuestAgentLayout, guest_binary_source};
         use mvm_core::arch::GuestArch;
 
+        // Seed the key the resolver actually reads, not the one this fixture
+        // assumed. In a source checkout the resolver keys on a fingerprint of
+        // the guest sources, so a version-keyed seed misses — silently,
+        // because a miss is not an error, it is a real cross-compile of the
+        // guest agent. That is what made these tests take fifty-five seconds
+        // each while appearing to work from a seeded cache.
+        let source = guest_binary_source().expect("resolve the guest-binary cache key");
         let guest_layout =
-            GuestAgentLayout::under(cache_root, env!("CARGO_PKG_VERSION"), GuestArch::host());
+            GuestAgentLayout::under(cache_root, source.cache_key(), GuestArch::host());
         std::fs::create_dir_all(&guest_layout.dir).expect("create guest cache dir");
         for path in [
             &guest_layout.oci_init,
@@ -530,6 +542,7 @@ mod tests {
         image_label: &str,
         _entrypoint: Option<&OciEntrypointConfig>,
         _sealed: bool,
+        deferred_nodes: Vec<mvm_fs::ext4::Node>,
     ) -> Result<()> {
         assert!(unpacked_root.is_dir(), "unpacked root must exist");
         let parent = rootfs_abs.parent().expect("rootfs has parent");
@@ -537,6 +550,12 @@ mod tests {
         fs::write(rootfs_abs, format!("materialized:{image_label}"))?;
         fs::write(parent.join("rootfs.verity"), b"fake-verity")?;
         fs::write(parent.join("rootfs.roothash"), b"abc\n")?;
+        // A fn pointer can't capture, so the deferred set the materializer
+        // was handed is recorded on disk for the caller to assert on.
+        fs::write(
+            parent.join("deferred-seen.json"),
+            serde_json::to_vec(&deferred_nodes)?,
+        )?;
         Ok(())
     }
 
@@ -686,6 +705,58 @@ mod tests {
     }
 
     #[test]
+    fn self_heal_restores_the_deferred_nodes_the_pull_recorded() {
+        // The self-heal path rebuilds an ext4 from a surviving unpacked
+        // tree with no layer tarballs in hand. On a case-folding host that
+        // tree is missing every path the host could not hold, so the
+        // rebuild has to read them back from the sidecar — otherwise the
+        // repaired image is quietly less complete than the one it replaced.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some("rootfs/alpine-deferred/rootfs.ext4".to_string());
+        image.runtime_tag = Some(oci_runtime_tag());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+        seed_guest_runtime_cache(tmp.path());
+
+        let deferred = vec![mvm_fs::ext4::Node::Symlink {
+            path: "/usr/share/man/man7/pam.7.gz".to_string(),
+            target: "PAM.7.gz".to_string(),
+        }];
+        crate::commands::image::cache::write_deferred_nodes(tmp.path(), digest, &deferred)
+            .expect("record deferred nodes");
+
+        let resolved = resolve_or_pull_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+        )
+        .expect("repair from unpacked layers");
+
+        let seen: Vec<mvm_fs::ext4::Node> = serde_json::from_slice(
+            &fs::read(
+                resolved
+                    .rootfs_path
+                    .parent()
+                    .expect("rootfs has parent")
+                    .join("deferred-seen.json"),
+            )
+            .expect("materializer recorded what it was handed"),
+        )
+        .expect("parse recorded deferred nodes");
+        assert_eq!(seen, deferred);
+    }
+
+    #[test]
     fn resolve_run_image_missing_rootfs_without_unpacked_layers_asks_for_repull() {
         // The index records a materialized rootfs whose ext4 has vanished AND
         // whose unpacked layer tree is also gone — genuine cache loss. The run
@@ -784,5 +855,30 @@ mod tests {
         let descriptor = descriptor.expect("config descriptor");
         assert_eq!(descriptor.digest, digest);
         assert_eq!(descriptor.size, 17);
+    }
+
+    /// Which layers are gzip-compressed decides how each one is unpacked,
+    /// and nothing asserted it — a constant in either direction survived,
+    /// as did collapsing the three-way disjunction.
+    ///
+    /// Both directions matter: pinned to `true` every uncompressed layer
+    /// is fed through a gzip reader, pinned to `false` every compressed
+    /// one is unpacked as raw tar. Either way the rootfs the provenance
+    /// record describes is not the rootfs that boots.
+    #[test]
+    fn gzip_layers_are_recognised_by_media_type() {
+        // Each disjunct on its own, so none can be dropped unnoticed.
+        assert!(is_gzip_layer("application/vnd.oci.image.layer.v1.tar+gzip"));
+        assert!(is_gzip_layer("application/vnd.example.layer.gzip"));
+        assert!(is_gzip_layer("application/vnd.example.tar.gzip.v2"));
+
+        // Uncompressed and unrelated media types are not gzip.
+        assert!(!is_gzip_layer("application/vnd.oci.image.layer.v1.tar"));
+        assert!(!is_gzip_layer(
+            "application/vnd.docker.image.rootfs.diff.tar"
+        ));
+        assert!(!is_gzip_layer("application/vnd.oci.image.config.v1+json"));
+        assert!(!is_gzip_layer("application/vnd.example.layer+zstd"));
+        assert!(!is_gzip_layer(""));
     }
 }

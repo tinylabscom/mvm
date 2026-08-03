@@ -1,10 +1,16 @@
 #![deny(unsafe_code)]
 // mvm-core: Pure types, IDs, config, utilities
-// No internal mvm dependencies — this is the foundation crate.
+// Depends only on the smaller canonical volume-contract leaf plus the
+// no_std protocol foundation; it does not depend on a runtime or provider.
 // `deny` (not `forbid`) so `util::test_env` can carry the one narrow
 // unsafe carve-out for process-wide env mutation in tests.
 
+/// Content-addressed build-action cache records: a typed identity for one
+/// cached action's output artifacts, and a verify-on-read helper that
+/// recomputes each artifact's digest before a cache entry is trusted.
+pub mod action;
 pub mod arch;
+pub mod at_rest;
 pub mod build_env;
 pub mod catalog;
 pub mod checkpoint;

@@ -763,6 +763,13 @@ pub fn build_guest_wrapper(req: &ExecRequest, add_dir_labels: &[String]) -> Stri
     for (k, v) in &req.env {
         script.push_str(&format!("export {k}={}\n", shell_quote(v)));
     }
+    // After the caller's exports, and composed against `$PATH` in the guest, so
+    // the mediated tools win whatever the image or the caller sets. A NIC-less
+    // guest's `ping` is one of these: the image's own copy fails at `socket()`.
+    script.push_str(&format!(
+        "export PATH={}:\"$PATH\"\n",
+        shell_quote(mvm_core::guest_netd::MEDIATED_TOOLS_BIN),
+    ));
     if let ExecTarget::LaunchPlan { entrypoint } = &req.target
         && let Some(wd) = &entrypoint.working_dir
     {
@@ -857,8 +864,7 @@ pub fn snapshot_eligible(
 /// Captured stdout/stderr/exit-code from a one-shot exec.
 ///
 /// `run_captured` returns this instead of streaming guest output to the
-/// CLI's terminal. The MCP server consumes it to assemble a `tools/call`
-/// response.
+/// CLI's terminal, so a caller can inspect the run's output as data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecOutput {
     pub exit_code: i32,
@@ -874,9 +880,9 @@ pub struct ExecOutput {
 /// — captured into the returned [`ExecOutput`] instead of inherited
 /// to the parent process's terminal.
 ///
-/// Used by `mvmctl mcp` to build MCP `tools/call run` responses; the
-/// CLI's interactive `mvmctl exec` keeps using [`run`] (streaming) so
-/// human ergonomics don't regress.
+/// Used where a caller needs the output as data; the CLI's interactive
+/// `mvmctl exec` keeps using [`run`] (streaming) so human ergonomics
+/// don't regress.
 pub fn run_captured(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<ExecOutput> {
     run_inner(req, /* capture = */ true, admit, None, None)
         .map(|either| either.right().expect("capture mode returns ExecOutput"))
@@ -953,7 +959,7 @@ impl<L, R> Either<L, R> {
 /// rootfs strategy the run-path tier gate selected) back to the command layer,
 /// which records it on the chain-signed admission log (`plan.boot_posture`).
 /// The command layer reads it after the run returns. `None` means the caller
-/// does not audit posture (MCP / session boots, which never reach virtiofs).
+/// does not audit posture (session boots, which never reach virtiofs).
 pub type PostureSink = std::cell::Cell<mvm_build::run_image::RootStrategy>;
 pub type RuntimeSourcePolicySink = std::cell::Cell<mvm_core::vm_backend::RuntimeSourcePolicy>;
 
@@ -1610,9 +1616,8 @@ fn restore_via_snapshot(
 /// Send the wrapped command to the guest agent and either stream
 /// stdout/stderr (default) or capture them (when `capture=true`).
 ///
-/// `capture=true` is used by [`run_captured`] / `mvmctl mcp` to assemble
-/// MCP `tools/call` responses; the streaming path keeps the existing
-/// `mvmctl exec` ergonomics.
+/// `capture=true` is used by [`run_captured`] to return the output as
+/// data; the streaming path keeps the existing `mvmctl exec` ergonomics.
 fn run_in_guest(
     vm_name: &str,
     req: &ExecRequest,
@@ -1740,18 +1745,17 @@ fn direct_pty_inline_argv(req_argv: &[String], req: &ExecRequest, labels: &[Stri
 // Warm-VM session primitives
 // ---------------------------------------------------------------------------
 //
-// `mvmctl exec` and `mvmctl mcp tools/call run` (cold) both go through
-// `run_inner` above — boot, run, tear down. The MCP `session=ID` path
-// needs to keep the VM alive across many calls. The three primitives
-// below split that lifecycle apart so the dispatcher can:
+// `mvmctl exec` goes through `run_inner` above — boot, run, tear down.
+// The session path needs to keep the VM alive across many calls. The
+// three primitives below split that lifecycle apart so a caller can:
 //
 //   1. boot once   → SessionVm handle
 //   2. dispatch N  → ExecOutput per call
 //   3. tear down   → on idle / max / close / shutdown
 //
 // They deliberately NOT support `--add-dir` (volumes, rsync-back,
-// staging dirs) — session VMs are meant for inference workloads
-// against a clean closure, not interactive file mounts.
+// staging dirs) — session VMs are meant for repeated calls against a
+// clean closure, not interactive file mounts.
 
 /// Handle to a long-running session microVM.
 ///
@@ -1768,8 +1772,8 @@ pub struct SessionVm {
 /// state that must ride the fresh boot path.
 ///
 /// `vm_name_prefix` becomes the human-readable part of the VM name —
-/// callers typically pass `"mcp-session-<short-id>"` so `mvmctl ls`
-/// shows which MCP session a VM belongs to.
+/// callers typically pass a `"<kind>-session-<short-id>"` string so
+/// `mvmctl ls` shows which session a VM belongs to.
 /// The audit substrate an admitted plan contributes to a session VM so the
 /// backend spawns the substitution endpoint (the guest never holds a raw
 /// secret). The caller (`invoke --from-workload-ir`) admits the workload's
@@ -1828,7 +1832,7 @@ pub fn boot_session_vm(
         profile: Some(spec.profile),
         cpus,
         memory_mib,
-        // Session VMs are short-lived MCP-driven boots; balloon
+        // Session VMs are short-lived boots; balloon
         // elasticity isn't useful here, so leave commit at boot.
         mem_initial_mib: None,
         ports: vec![],
@@ -2286,7 +2290,47 @@ mod tests {
         assert!(script.starts_with("set -e\n"));
         assert!(script.contains("exec 'true'"));
         assert!(!script.contains("mount"));
-        assert!(!script.contains("export"));
+        // The mediated-tool PATH is always emitted; no caller export joins it.
+        assert_eq!(script.matches("export ").count(), 1);
+        assert!(script.contains(mvm_core::guest_netd::MEDIATED_TOOLS_BIN));
+    }
+
+    /// The image's own `ping` fails at `socket()` in a NIC-less guest, so the
+    /// mediated stand-in has to win even when the caller sets `PATH` itself.
+    #[test]
+    fn build_guest_wrapper_mediated_path_outranks_a_caller_supplied_path() {
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            add_dirs: Vec::new(),
+            env: vec![("PATH".into(), "/usr/bin".into())],
+            target: ExecTarget::Inline {
+                argv: vec!["true".into()],
+            },
+            timeout_secs: Some(30),
+            pty: false,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+            hypervisor: None,
+            sdk_sidecar: None,
+        };
+        let script = build_guest_wrapper(&req, &[]);
+        let caller = script.find("export PATH='/usr/bin'").expect("caller PATH");
+        let mediated = script
+            .find(mvm_core::guest_netd::MEDIATED_TOOLS_BIN)
+            .expect("mediated PATH");
+        assert!(
+            mediated > caller,
+            "mediated PATH must come last to win; got:\n{script}"
+        );
+        // Composed against $PATH rather than replacing it, so the caller's
+        // entry survives behind ours.
+        assert!(script.contains(":\"$PATH\""), "got:\n{script}");
     }
 
     #[test]
@@ -2756,7 +2800,8 @@ mod tests {
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));
-        assert!(!script.contains("export "));
+        assert_eq!(script.matches("export ").count(), 1);
+        assert!(script.contains(mvm_core::guest_netd::MEDIATED_TOOLS_BIN));
         assert!(script.contains("exec 'true'"));
     }
 

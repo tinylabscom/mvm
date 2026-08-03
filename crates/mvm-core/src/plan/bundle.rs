@@ -1615,6 +1615,51 @@ mod tests {
         assert!(format!("{err:#}").contains("sha256 mismatch"));
     }
 
+    /// Replay vectors: frozen inputs and the addresses they must produce.
+    ///
+    /// The neighbouring lowercase-hex test uses `sha256("abc")`, a textbook
+    /// vector that pins the output *encoding* and nothing about how a bundle
+    /// is addressed. These pin the address itself, including that it is taken
+    /// over raw archive bytes with no text conversion anywhere in the path.
+    ///
+    /// `MVM_PRINT_ADDRESS_VECTORS=1` prints instead of asserting.
+    #[test]
+    fn bundle_sha256_vectors_are_frozen() {
+        let cases: &[(&str, &[u8], &str)] = &[
+            (
+                "empty",
+                b"",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "ascii",
+                b"mvm bundle contents",
+                "05aff18ed1fc9ed295f062e6f279f166cae4dc6dc823007a928f2aa5a54a3e68",
+            ),
+            // Raw bytes, not text. A digest that went through any string
+            // conversion would differ here: 0x00 truncates a C string, 0xff
+            // and 0x80 are not valid UTF-8 on their own.
+            (
+                "binary-with-nul-and-high-bytes",
+                &[0x00, 0xff, 0x01, 0xfe, 0x80, 0x7f],
+                "609f600034067e63d4c7d4440226395296d0bd91ddcb64ae199b2bdb41224f5a",
+            ),
+        ];
+
+        for (name, input, expected) in cases {
+            let actual = bundle_sha256(input);
+            if std::env::var_os("MVM_PRINT_ADDRESS_VECTORS").is_some() {
+                println!("bundle_sha256\t{name}\t{actual}");
+                continue;
+            }
+            assert_eq!(
+                &actual, expected,
+                "bundle_sha256/{name}: address moved — every published bundle \
+                 addressed this way just changed"
+            );
+        }
+    }
+
     #[test]
     fn bundle_sha256_is_lowercase_hex() {
         let h = bundle_sha256(b"abc");
@@ -2169,5 +2214,120 @@ mod tests {
         assert_eq!(parsed.schema_version, 1);
         assert!(parsed.resources.is_none());
         assert!(parsed.verity.is_none());
+    }
+
+    /// A read failure that is not "absent" must not be reported as
+    /// absent. The two are different answers: absent means the caller
+    /// may go fetch the bundle, unreadable means the local registry is
+    /// broken. Collapsing the guard to `true` merged them and nothing
+    /// noticed.
+    ///
+    /// A directory where the archive should be gives a deterministic
+    /// non-NotFound errno on every platform and without depending on
+    /// the test process being unprivileged.
+    #[test]
+    fn fs_resolver_reports_io_rather_than_missing_when_the_path_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sha = "a".repeat(64);
+        std::fs::create_dir_all(tmp.path().join(format!("{sha}.mvmpkg"))).unwrap();
+
+        let resolver = FsBundleResolver::new(tmp.path());
+        match resolver.resolve(&sha) {
+            Err(BundleResolveError::Io { bundle_sha256, .. }) => assert_eq!(bundle_sha256, sha),
+            other => panic!("expected Io for an unreadable archive path, got {other:?}"),
+        }
+
+        // The absent case still reports absent — the point is that the
+        // two are distinguished, not that everything is now an error.
+        match resolver.resolve(&"b".repeat(64)) {
+            Err(BundleResolveError::MissingBundle { .. }) => {}
+            other => panic!("expected MissingBundle for an absent archive, got {other:?}"),
+        }
+    }
+
+    /// `remove` swallowing a real removal failure tells the operator a
+    /// bundle is gone when it is still installed. Only "already absent"
+    /// is allowed to be silent.
+    #[test]
+    fn bundle_registry_remove_surfaces_a_real_removal_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let sha = "c".repeat(64);
+
+        // A non-empty directory where the archive file should be:
+        // remove_file refuses it, and the refusal is not NotFound.
+        let archive = registry.archive_path(&sha);
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("occupant"), b"x").unwrap();
+
+        assert!(
+            registry.remove(&sha).is_err(),
+            "a removal that failed must not be reported as a completed removal"
+        );
+
+        // The install dir has its own guard, and it needs its own case:
+        // a test that only breaks the archive removal leaves the second
+        // guard free to swallow everything. A plain file where the
+        // install directory should be makes remove_dir_all refuse.
+        let dir_sha = "e".repeat(64);
+        std::fs::write(registry.install_dir(&dir_sha), b"not a directory").unwrap();
+        assert!(
+            registry.remove(&dir_sha).is_err(),
+            "a failed install-dir removal must not be reported as a completed removal"
+        );
+
+        // Nothing installed at all is still the quiet, successful case.
+        let clean = BundleRegistry::new(tmp.path().join("empty"));
+        assert!(
+            !clean
+                .remove(&"d".repeat(64))
+                .expect("absent removes cleanly")
+        );
+    }
+
+    /// An unreadable registry root must error, not read as "no bundles
+    /// installed". `gc --all` over a silently-empty list deletes nothing
+    /// and reports success.
+    #[test]
+    fn bundle_registry_list_errors_when_the_root_is_not_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root-is-a-file");
+        std::fs::write(&root, b"not a directory").unwrap();
+
+        let registry = BundleRegistry::new(&root);
+        assert!(
+            registry.list().is_err(),
+            "an unreadable registry root must not read as an empty registry"
+        );
+    }
+
+    /// The name filter is a conjunction: 64 characters *and* all hex.
+    /// Weakened to a disjunction it admits any 64-character name and any
+    /// short hex name, so staging and scratch directories surface as
+    /// installed bundles and `gc` treats them as such.
+    #[test]
+    fn bundle_registry_list_requires_both_length_and_hex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let valid = "0123456789abcdef".repeat(4);
+        assert_eq!(valid.len(), 64);
+
+        for name in [
+            valid.as_str(),
+            // 64 characters, not hex.
+            "z".repeat(64).as_str(),
+            // Hex, not 64 characters.
+            "abc",
+            // Neither.
+            "scratch",
+        ] {
+            std::fs::create_dir_all(tmp.path().join(name)).unwrap();
+        }
+
+        assert_eq!(
+            registry.list().expect("list ok"),
+            vec![valid],
+            "only a 64-char lowercase-hex directory is an installed bundle"
+        );
     }
 }

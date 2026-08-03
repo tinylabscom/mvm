@@ -16,6 +16,14 @@
 #                 the built-in driver the mount fails "No such device".
 #   FUSE_FS     — virtio-fs is FUSE-backed, so the workload needs it too (the
 #                 builder kernel already carries both — same proven recipe).
+#   TUN         — /dev/net/tun, for the opt-in L3-over-vsock network mode. The
+#                 guest agent creates `mvm0` with IFF_TUN | IFF_NO_PI and
+#                 frames raw IP packets over vsock; without the built-in
+#                 driver the device node never appears and the mode fails
+#                 closed at startup with "guest kernel needs CONFIG_TUN".
+#                 Workload-only: the builder VM has no tunnel. This is the TUN
+#                 half of the driver only — the guest still has no NIC, and
+#                 `mvm0` terminates in the agent, not in a host device.
 #
 # The flake passes `base` in so both the builder and workload kernels share
 # one `base.nix` source. base.nix is imported relatively by the builder-vm
@@ -23,12 +31,22 @@
 # importing through `workspace` forces realisation of the filtered store
 # path, which `nix flake check --no-build` refuses.
 
-{ pkgs, base, optimizeForSize ? false }:
+{
+  pkgs,
+  base,
+  optimizeForSize ? true,
+}:
 
 base.mkKernel {
-  extraEnables =
-    [ "MD" "BLK_DEV_DM" "DM_VERITY" "VIRTIO_FS" "FUSE_FS" ]
-    ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_SIZE" ];
+  extraEnables = [
+    "MD"
+    "BLK_DEV_DM"
+    "DM_VERITY"
+    "VIRTIO_FS"
+    "FUSE_FS"
+    "TUN"
+  ]
+  ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_SIZE" ];
   # Workload-only disables. Each drop lives here (not in shared base.nix)
   # because it depends on a workload-specific enable or would be unsafe for
   # the builder kernel:
@@ -62,6 +80,11 @@ base.mkKernel {
   #                 symbol in Linux 6.12, so the syscall-facing interface goes
   #                 away here but the interpreter stays built-in until the
   #                 workload networking contract changes.
+  #   NAMESPACES / CGROUPS — the sealed guest runs one admitted workload and
+  #                 never creates namespace or cgroup hierarchies. Those are
+  #                 required by the builder VM's Nix sandbox and therefore
+  #                 stay enabled only in builder.nix. They are required cuts
+  #                 here so Kconfig cannot silently select them back on.
   #
   # The next four are boot-probe eliminations: each is compiled in by the
   # defconfig base and *initialises at boot* on a single-workload OCI microVM
@@ -81,25 +104,29 @@ base.mkKernel {
   #   VLAN_8021Q  — 802.1Q VLAN tagging. Guest egress is host-mediated (egress
   #                 proxy over vsock), never in-guest VLAN interfaces, so the
   #                 "8021q: 802.1Q VLAN Support" init is dead weight.
-  #   CC_OPTIMIZE_FOR_PERFORMANCE — flipped off only for the size experiment
-  #                 output; the default workload kernel keeps the current mode
-  #                 until measured results prove the size-oriented mode is worth
-  #                 shipping.
-  extraDisables =
-    [
-      "NETFILTER"
-      "BLK_DEV_MD"
-      "BLK_DEV_LOOP"
-      "BPF_SYSCALL"
-      "PERF_EVENTS"
-      "PROFILING"
-      "IKCONFIG"
-      "IKCONFIG_PROC"
-      "CHECKPOINT_RESTORE"
-      "NET_9P"
-      "BTRFS_FS"
-      "GNSS"
-      "VLAN_8021Q"
-    ]
-    ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_PERFORMANCE" ];
+  #   CC_OPTIMIZE_FOR_PERFORMANCE — workload kernels optimize for size by
+  #                 default. The controlled x86_64 comparison saved about 0.7
+  #                 MiB while the same Firecracker boot reached PID 1 within
+  #                 normal sub-second variance. Callers can still request the
+  #                 performance-oriented build explicitly for experiments.
+  extraDisables = [
+    "NETFILTER"
+    "BLK_DEV_MD"
+    "BLK_DEV_LOOP"
+    "BPF_SYSCALL"
+    "PERF_EVENTS"
+    "PROFILING"
+    "IKCONFIG"
+    "IKCONFIG_PROC"
+    "CHECKPOINT_RESTORE"
+    "NET_9P"
+    "BTRFS_FS"
+    "GNSS"
+    "VLAN_8021Q"
+  ]
+  ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_PERFORMANCE" ];
+  requiredExtraDisables = [
+    "NAMESPACES"
+    "CGROUPS"
+  ];
 }

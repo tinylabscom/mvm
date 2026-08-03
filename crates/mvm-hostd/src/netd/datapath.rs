@@ -1,0 +1,548 @@
+//! The platform seam for forwarding admitted L3 packets.
+//!
+//! Everything above this trait is platform-neutral: framing, session
+//! identity, policy, DNS, flow state, ingress, audit. Everything below it is
+//! an implementation detail that sits **after** the vsock trust boundary — a
+//! host TUN device, a network namespace, NAT rules. None of it is ever
+//! attached to the guest or exposed as a hypervisor network device.
+//!
+//! The signature is the enforcement: [`send_to_network`] takes an
+//! [`AdmittedPacket`], a type only `mvm_net::l3`'s admitter can construct.
+//! There is no way to reach a datapath with bytes that have not been through
+//! policy, because there is no way to name one.
+//!
+//! [`send_to_network`]: DatapathHandle::send_to_network
+
+use std::net::Ipv4Addr;
+
+use mvm_net::l3::AdmittedPacket;
+
+/// What a forwarding backend can actually carry.
+///
+/// Reported rather than assumed, because the backends differ in kind: a
+/// Linux host TUN moves arbitrary IP, while a userspace socket gateway can
+/// only translate the transports it knows how to open sockets for. A plan
+/// that needs something the selected backend lacks is refused at admission
+/// — there is no degrade, and no "mostly works".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardingCapabilities {
+    pub tcp: bool,
+    pub udp: bool,
+    /// Host-terminated DNS. Required for domain rules to mean anything.
+    pub controlled_dns: bool,
+    pub icmp: bool,
+    pub arbitrary_ipv4: bool,
+    pub arbitrary_ipv6: bool,
+    /// IP protocols other than TCP/UDP/ICMP.
+    pub raw_ip_protocols: bool,
+    pub declared_ingress: bool,
+    pub multi_queue: bool,
+    /// Whether the backend forwards whole IP packets, as opposed to
+    /// translating flows into host sockets.
+    pub full_packet_forwarding: bool,
+    /// Whether it works by opening host sockets on the guest's behalf.
+    pub userspace_socket_translation: bool,
+}
+
+impl ForwardingCapabilities {
+    /// Nothing supported. The base every backend narrows from, so a new
+    /// backend that forgets to set a flag is under-capable rather than
+    /// over-claiming.
+    pub const NONE: Self = Self {
+        tcp: false,
+        udp: false,
+        controlled_dns: false,
+        icmp: false,
+        arbitrary_ipv4: false,
+        arbitrary_ipv6: false,
+        raw_ip_protocols: false,
+        declared_ingress: false,
+        multi_queue: false,
+        full_packet_forwarding: false,
+        userspace_socket_translation: false,
+    };
+
+    /// A full L3 packet path: whole IPv4 packets, every transport.
+    pub const FULL_L3_V4: Self = Self {
+        tcp: true,
+        udp: true,
+        controlled_dns: true,
+        icmp: true,
+        arbitrary_ipv4: true,
+        arbitrary_ipv6: false,
+        raw_ip_protocols: true,
+        declared_ingress: true,
+        multi_queue: false,
+        full_packet_forwarding: true,
+        userspace_socket_translation: false,
+    };
+
+    /// A userspace socket gateway: ordinary application traffic, nothing
+    /// that needs to put an arbitrary IP packet on the wire.
+    pub const USERSPACE_SOCKETS: Self = Self {
+        tcp: true,
+        udp: true,
+        controlled_dns: true,
+        icmp: false,
+        arbitrary_ipv4: false,
+        arbitrary_ipv6: false,
+        raw_ip_protocols: false,
+        declared_ingress: true,
+        multi_queue: false,
+        full_packet_forwarding: false,
+        userspace_socket_translation: true,
+    };
+
+    /// Capabilities a plan needs that this backend does not have.
+    pub fn shortfall(&self, required: &Self) -> Vec<&'static str> {
+        let checks: [(bool, bool, &'static str); 9] = [
+            (required.tcp, self.tcp, "tcp"),
+            (required.udp, self.udp, "udp"),
+            (
+                required.controlled_dns,
+                self.controlled_dns,
+                "controlled_dns",
+            ),
+            (required.icmp, self.icmp, "icmp"),
+            (
+                required.arbitrary_ipv4,
+                self.arbitrary_ipv4,
+                "arbitrary_ipv4",
+            ),
+            (
+                required.arbitrary_ipv6,
+                self.arbitrary_ipv6,
+                "arbitrary_ipv6",
+            ),
+            (
+                required.raw_ip_protocols,
+                self.raw_ip_protocols,
+                "raw_ip_protocols",
+            ),
+            (
+                required.declared_ingress,
+                self.declared_ingress,
+                "declared_ingress",
+            ),
+            (required.multi_queue, self.multi_queue, "multi_queue"),
+        ];
+        checks
+            .into_iter()
+            .filter_map(|(req, have, name)| (req && !have).then_some(name))
+            .collect()
+    }
+
+    /// Whether this backend can serve `required`.
+    pub fn satisfies(&self, required: &Self) -> bool {
+        self.shortfall(required).is_empty()
+    }
+}
+
+/// What the gateway asks a platform to set up for one machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatapathRequest {
+    /// Machine this datapath belongs to. Used to name devices, namespaces,
+    /// and rule tables so teardown is unambiguous.
+    pub machine_id: String,
+    /// The host side of the point-to-point link.
+    pub gateway: Ipv4Addr,
+    /// The guest's assigned address. Return traffic for anything else is
+    /// not this machine's.
+    pub guest: Ipv4Addr,
+    /// Prefix length of the /30.
+    pub prefix_len: u8,
+    pub mtu: u16,
+}
+
+/// Why a datapath could not be opened or used.
+#[derive(Debug, thiserror::Error)]
+pub enum DatapathError {
+    /// This platform has no datapath in this build.
+    #[error("{platform}: {detail}")]
+    Unsupported {
+        platform: &'static str,
+        detail: String,
+    },
+    /// Setup failed.
+    #[error("opening the {what} for {machine_id:?} failed: {source}")]
+    SetupFailed {
+        what: &'static str,
+        machine_id: String,
+        source: std::io::Error,
+    },
+    /// A privileged operation was refused.
+    #[error("{operation} needs privileges this process does not have: {detail}")]
+    PrivilegeRequired {
+        operation: &'static str,
+        detail: String,
+    },
+    /// The plan needs capabilities this backend does not have.
+    #[error("{backend} cannot serve this plan: missing {}", .missing.join(", "))]
+    CapabilityShortfall {
+        backend: &'static str,
+        missing: Vec<&'static str>,
+    },
+    /// I/O on an open datapath failed.
+    #[error("datapath I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// An open per-machine datapath.
+pub trait DatapathHandle: Send {
+    /// Forward one admitted guest packet to the host network.
+    ///
+    /// Takes [`AdmittedPacket`] rather than `&[u8]` so this cannot be
+    /// reached without having passed admission.
+    fn send_to_network(&mut self, packet: &AdmittedPacket<'_>) -> Result<(), DatapathError>;
+
+    /// Read one packet arriving for this machine. Returns the byte count.
+    ///
+    /// The bytes are still untrusted at this point: they go through inbound
+    /// admission before any of them reach the guest.
+    fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError>;
+
+    /// Tear down every device, namespace, route, and rule this handle
+    /// created. Idempotent: it runs on the normal stop path and on the
+    /// failed-startup path, and must not care which got there first.
+    fn close(&mut self) -> Result<(), DatapathError>;
+
+    /// Human-readable name, for audit and diagnostics.
+    fn description(&self) -> String;
+}
+
+/// Opens per-machine datapaths.
+pub trait L3Datapath: Send + Sync {
+    fn open(&self, req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError>;
+
+    /// Whether this platform can actually serve a datapath right now. The
+    /// gateway checks this before admitting a tunnel, so an unsupported
+    /// platform refuses at admission with a clear reason instead of failing
+    /// halfway through a handshake.
+    fn is_available(&self) -> Result<(), DatapathError>;
+
+    /// What this backend can carry. Admission compares it against what the
+    /// plan needs and refuses a mismatch rather than degrading.
+    fn capabilities(&self) -> ForwardingCapabilities;
+}
+
+/// A datapath that keeps everything in memory: whatever is sent is
+/// immediately readable as though the network had echoed it, optionally
+/// after a caller-supplied transform.
+///
+/// Not `cfg(test)`: the unprivileged end-to-end test lives in another crate
+/// and needs to construct one. It is what makes the whole gateway — session
+/// binding, policy, DNS, ingress, cleanup — testable without root.
+pub struct LoopbackDatapath {
+    /// Applied to each admitted packet to produce the reply, if any. Shared
+    /// with every handle it opens.
+    responder: Responder,
+}
+
+/// Produces the reply, if any, for one forwarded packet.
+type Responder = std::sync::Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
+
+impl LoopbackDatapath {
+    /// A datapath whose replies are produced by `responder`.
+    pub fn new(responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static) -> Self {
+        Self {
+            responder: std::sync::Arc::new(responder),
+        }
+    }
+
+    /// A datapath that swallows everything and never replies.
+    pub fn sink() -> Self {
+        Self::new(|_| None)
+    }
+}
+
+impl L3Datapath for LoopbackDatapath {
+    fn open(&self, req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+        Ok(Box::new(LoopbackHandle {
+            machine_id: req.machine_id.clone(),
+            pending: std::collections::VecDeque::new(),
+            sent: Vec::new(),
+            closed: false,
+            responder: std::sync::Arc::clone(&self.responder),
+        }))
+    }
+
+    fn is_available(&self) -> Result<(), DatapathError> {
+        Ok(())
+    }
+
+    fn capabilities(&self) -> ForwardingCapabilities {
+        ForwardingCapabilities::FULL_L3_V4
+    }
+}
+
+/// Handle for [`LoopbackDatapath`].
+pub struct LoopbackHandle {
+    machine_id: String,
+    pending: std::collections::VecDeque<Vec<u8>>,
+    sent: Vec<Vec<u8>>,
+    closed: bool,
+    responder: Responder,
+}
+
+impl LoopbackHandle {
+    /// Every packet this handle was asked to forward.
+    pub fn sent(&self) -> &[Vec<u8>] {
+        &self.sent
+    }
+
+    /// Queue a packet as though it arrived from the host network.
+    pub fn inject(&mut self, packet: Vec<u8>) {
+        self.pending.push_back(packet);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
+impl DatapathHandle for LoopbackHandle {
+    fn send_to_network(&mut self, packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+        if self.closed {
+            return Err(DatapathError::Io(std::io::Error::from(
+                std::io::ErrorKind::BrokenPipe,
+            )));
+        }
+        let bytes = packet.bytes().to_vec();
+        if let Some(reply) = (self.responder)(&bytes) {
+            self.pending.push_back(reply);
+        }
+        self.sent.push(bytes);
+        Ok(())
+    }
+
+    fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
+        match self.pending.pop_front() {
+            Some(packet) => {
+                let n = packet.len().min(buf.len());
+                buf[..n].copy_from_slice(&packet[..n]);
+                Ok(n)
+            }
+            None => Err(DatapathError::Io(std::io::Error::from(
+                std::io::ErrorKind::WouldBlock,
+            ))),
+        }
+    }
+
+    fn close(&mut self) -> Result<(), DatapathError> {
+        self.closed = true;
+        self.pending.clear();
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("loopback datapath for {}", self.machine_id)
+    }
+}
+
+/// The macOS datapath.
+///
+/// Not shipped: a `utun` device, its addresses, its routes, and an mvm-owned
+/// PF anchor all require root, and mvm has no privileged host helper to ask.
+/// Rather than degrade — and specifically rather than route macOS through a
+/// general-purpose proxy runtime — the mode is refused at admission with the
+/// reason stated.
+#[derive(Debug, Default)]
+pub struct UnsupportedDatapath {
+    pub platform: &'static str,
+}
+
+impl UnsupportedDatapath {
+    pub fn new(platform: &'static str) -> Self {
+        Self { platform }
+    }
+
+    fn refusal(&self) -> DatapathError {
+        DatapathError::Unsupported {
+            platform: self.platform,
+            detail: "the L3 tunnel needs a host tunnel device, its routes, and firewall rules, \
+                     all of which require privileges this process does not have on this platform"
+                .to_string(),
+        }
+    }
+}
+
+impl L3Datapath for UnsupportedDatapath {
+    fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+        Err(self.refusal())
+    }
+
+    fn is_available(&self) -> Result<(), DatapathError> {
+        Err(self.refusal())
+    }
+
+    fn capabilities(&self) -> ForwardingCapabilities {
+        ForwardingCapabilities::NONE
+    }
+}
+
+/// The staged macOS forwarding backend: a userspace socket gateway.
+///
+/// The intended first macOS implementation translates admitted guest flows
+/// into host sockets, which needs no privileges at all — no `utun`, no
+/// routes, no PF anchor. That buys ordinary application TCP, UDP, and
+/// host-terminated DNS, which is what almost every workload wants, without
+/// a privileged helper.
+///
+/// It is **not implemented in this change**. What exists here is the
+/// capability declaration and the refusal, so that:
+///
+/// - `l3-vsock` on macOS fails at admission with a stated reason rather
+///   than booting and dropping every packet;
+/// - a plan that needs ICMP, raw IP protocols, or arbitrary-IPv4 forwarding
+///   is refused by the capability check even once the gateway lands, rather
+///   than appearing to work for TCP and silently failing elsewhere;
+/// - macOS is never quietly routed through a general-purpose proxy runtime.
+///
+/// The remaining work is a userspace TCP/UDP flow translator; the full
+/// packet backend (`utun` + scoped routes + an mvm-owned PF anchor) is a
+/// later, privileged-helper-bearing step and is a separate decision.
+#[derive(Debug, Default)]
+pub struct MacosUserspaceGateway;
+
+impl MacosUserspaceGateway {
+    fn refusal(&self) -> DatapathError {
+        DatapathError::Unsupported {
+            platform: "macos",
+            detail: "the userspace socket gateway is not implemented yet; \
+                     no privileged utun/PF backend is shipped either, so l3-vsock \
+                     is refused rather than degraded"
+                .to_string(),
+        }
+    }
+}
+
+impl L3Datapath for MacosUserspaceGateway {
+    fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+        Err(self.refusal())
+    }
+
+    fn is_available(&self) -> Result<(), DatapathError> {
+        Err(self.refusal())
+    }
+
+    fn capabilities(&self) -> ForwardingCapabilities {
+        // What the backend *will* offer once implemented. Declared now so
+        // the admission check against it is already the real one, and so a
+        // plan needing packet-level forwarding is refused for the right
+        // reason rather than for "macOS".
+        ForwardingCapabilities::USERSPACE_SOCKETS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> DatapathRequest {
+        DatapathRequest {
+            machine_id: "vm-a".into(),
+            gateway: Ipv4Addr::new(10, 201, 0, 5),
+            guest: Ipv4Addr::new(10, 201, 0, 6),
+            prefix_len: 30,
+            mtu: 1500,
+        }
+    }
+
+    #[test]
+    fn an_unsupported_platform_refuses_at_availability_check_time() {
+        let dp = UnsupportedDatapath::new("macos");
+        let err = dp.is_available().unwrap_err();
+        assert!(matches!(
+            err,
+            DatapathError::Unsupported {
+                platform: "macos",
+                ..
+            }
+        ));
+        assert!(dp.open(&request()).is_err());
+    }
+
+    #[test]
+    fn the_unsupported_refusal_explains_what_is_missing() {
+        let err = UnsupportedDatapath::new("macos")
+            .is_available()
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("privileges"), "{msg}");
+        assert!(msg.contains("macos"), "{msg}");
+    }
+
+    #[test]
+    fn a_loopback_handle_reports_what_it_was_asked_to_forward() {
+        let dp = LoopbackDatapath::sink();
+        let handle = dp.open(&request()).unwrap();
+        assert!(handle.description().contains("vm-a"));
+    }
+
+    #[test]
+    fn a_closed_handle_drains_its_queue_and_refuses_further_sends() {
+        let dp = LoopbackDatapath::sink();
+        let mut handle = dp.open(&request()).unwrap();
+        handle.close().unwrap();
+        handle.close().unwrap(); // idempotent
+        let mut buf = [0u8; 64];
+        assert!(handle.recv_from_network(&mut buf).is_err());
+    }
+
+    #[test]
+    fn a_full_l3_backend_satisfies_a_userspace_workload() {
+        assert!(
+            ForwardingCapabilities::FULL_L3_V4
+                .satisfies(&ForwardingCapabilities::USERSPACE_SOCKETS)
+        );
+    }
+
+    #[test]
+    fn a_userspace_gateway_cannot_serve_a_plan_that_needs_packet_forwarding() {
+        let required = ForwardingCapabilities {
+            icmp: true,
+            arbitrary_ipv4: true,
+            raw_ip_protocols: true,
+            ..ForwardingCapabilities::USERSPACE_SOCKETS
+        };
+        let missing = ForwardingCapabilities::USERSPACE_SOCKETS.shortfall(&required);
+        assert_eq!(missing, vec!["icmp", "arbitrary_ipv4", "raw_ip_protocols"]);
+        assert!(!ForwardingCapabilities::USERSPACE_SOCKETS.satisfies(&required));
+    }
+
+    #[test]
+    fn the_empty_capability_set_serves_nothing() {
+        let required = ForwardingCapabilities {
+            tcp: true,
+            ..ForwardingCapabilities::NONE
+        };
+        assert_eq!(
+            ForwardingCapabilities::NONE.shortfall(&required),
+            vec!["tcp"]
+        );
+    }
+
+    #[test]
+    fn the_macos_gateway_declares_its_intended_capabilities_but_refuses_to_open() {
+        let dp = MacosUserspaceGateway;
+        assert_eq!(dp.capabilities(), ForwardingCapabilities::USERSPACE_SOCKETS);
+        assert!(dp.capabilities().tcp && dp.capabilities().udp && dp.capabilities().controlled_dns);
+        assert!(
+            !dp.capabilities().full_packet_forwarding,
+            "a socket gateway must not claim to forward arbitrary packets"
+        );
+        // Declaring capabilities is not claiming support.
+        assert!(dp.is_available().is_err());
+        assert!(dp.open(&request()).is_err());
+    }
+
+    #[test]
+    fn an_unimplemented_backend_states_why_rather_than_naming_the_platform_alone() {
+        let msg = MacosUserspaceGateway
+            .is_available()
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("not implemented"), "{msg}");
+        assert!(msg.contains("refused rather than degraded"), "{msg}");
+    }
+}

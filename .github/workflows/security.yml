@@ -539,13 +539,48 @@ jobs:
   # checked on every PR by ci.yml; only the mutation run itself is
   # nightly, because it costs hours.
   mutation-witnesses:
-    name: Claim witnesses — mutation-tested (ADR-001 claims ledger)
+    name: Claim witnesses — mutation-tested (${{ matrix.package }})
     runs-on: ubuntu-latest
-    # NON-BLOCKING for now: accepted_misses is seeded only for the
-    # claim-10 anchor, so the first full runs will report holes in the
-    # not-yet-triaged files. Flip this off once the baseline covers the
-    # whole surface — tracked in specs/plans/272.
-    continue-on-error: true
+    # BLOCKING, and sharded per package.
+    #
+    # Sharding is structural, not a response to a particular runtime: a
+    # GitHub-hosted job is killed at six hours, the surface only grows,
+    # and a failure should name the package that owns it rather than
+    # arrive as one opaque red job. A lane that cannot reliably finish
+    # goes red for reasons unrelated to any claim and stops being read —
+    # the failure this lane exists to prevent, reached from the other
+    # side.
+    #
+    # Deliberately no duration quoted here. The first version of this
+    # comment cited hours measured before the slowest tests in the tree
+    # were fixed, and was wrong by roughly an order of magnitude within a
+    # week. `specs/VERIFICATION.md` carries dated, measured per-shard
+    # times instead; re-measure rather than re-quote.
+    #
+    # Every survivor is either closed by a test or carried in
+    # xtask/mutation-witness-baseline.json with the mechanism that makes it
+    # uncatchable here (a live VMM, a nix build, a feature this run does not
+    # compile, or a provable equivalence). The ratchet tolerates only those
+    # exact identities, so a NEW hole still fails — including inside the
+    # files that carry accepted entries.
+    #
+    # The matrix is pinned against the baseline by check-mutation-witnesses
+    # on every PR, so a package joining the surface cannot silently go
+    # unmeasured here.
+    #
+    # See specs/VERIFICATION.md §"Mutation-tested witnesses" and plan 272 WS-2.
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - mvm-agentd
+          - mvm-build
+          - mvm-cli
+          - mvm-core
+          - mvm-hostd
+          - mvm-protocol
+          - mvm-runtime
+          - mvm-sdk
     steps:
       - uses: actions/checkout@v6
 
@@ -559,13 +594,17 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-mutation-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-mutation-
+          key: cargo-mutation-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-mutation-${{ matrix.package }}-
 
       - name: Install cargo-mutants and nextest
         run: cargo install --locked cargo-mutants cargo-nextest
 
-      - name: Mutate the claim surface and ratchet survivors
+      - name: Install mvm-cli embedded-host toolchain
+        if: matrix.package == 'mvm-cli'
+        uses: ./.github/actions/install-zigbuild
+
+      - name: Mutate this package's claim surface and ratchet survivors
         # `--run` mutates the claim-enforcement surface and runs the suite
         # against each mutant — plan verification that no longer verifies, a
         # seccomp filter that no longer filters, the host signer. That is
@@ -593,7 +632,7 @@ jobs:
             echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
             exit 1
           fi
-          cargo run -p xtask -- check-mutation-witnesses --run
+          cargo run -p xtask -- check-mutation-witnesses --run --package '${{ matrix.package }}'
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-001 §W5.1 — the unit tests that exercise the

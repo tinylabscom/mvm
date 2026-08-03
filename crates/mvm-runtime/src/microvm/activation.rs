@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{
     ActivateEnvironment, GuestRequest, GuestResponse, RootfsConfig, RuntimeOverlayConfig,
-    VolumeConfig,
+    VolumeConfig, VolumeConfigKind,
 };
 use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig, VmVolumeKind};
 
@@ -216,7 +216,7 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
         _ => None,
     };
 
-    let volumes = build_volume_configs(config);
+    let volumes = build_volume_configs(config)?;
     let verb_grant_envelope = read_verb_grant_envelope(&config.name)?;
 
     Ok(ActivateEnvironment {
@@ -255,21 +255,46 @@ fn probe_roothash_sidecar(rootfs_path: &str) -> Option<String> {
     .then(|| hash.to_string())
 }
 
-/// Translate configured volumes into virtio-fs volume configs.
-///
-/// `Disk` volumes are attached as virtio-blk devices by the runner and are not
-/// part of the activation message. `DirShare` volumes become virtio-fs tags
-/// with the index-based tag name used by the existing cmdline encoder.
-fn build_volume_configs(config: &VmStartConfig) -> Vec<VolumeConfig> {
+/// Translate configured volumes into the exact devices the runner attached.
+fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
+    let disk_count = config
+        .volumes
+        .iter()
+        .filter(|volume| matches!(volume.kind, VmVolumeKind::Disk))
+        .count();
+    let blocks = crate::workload_runner::workload_blocks(config);
+    if blocks.len() < disk_count {
+        bail!(
+            "volume activation expected {disk_count} user block devices, but the VMM spec has {}",
+            blocks.len()
+        );
+    }
+    let first_user_block = blocks.len() - disk_count;
+    let mut block_devices = blocks[first_user_block..]
+        .iter()
+        .map(crate::driver::BlockDev::device_node);
+
     config
         .volumes
         .iter()
         .enumerate()
-        .filter(|(_, v)| matches!(v.kind, VmVolumeKind::DirShare))
-        .map(|(idx, v)| VolumeConfig {
-            tag: format!("uvol{idx}"),
-            mountpoint: v.guest.clone(),
-            read_only: v.read_only,
+        .map(|(idx, volume)| {
+            let (kind, device) = match volume.kind {
+                VmVolumeKind::DirShare => (VolumeConfigKind::VirtioFs, None),
+                VmVolumeKind::Disk => (
+                    VolumeConfigKind::Block,
+                    Some(block_devices.next().with_context(|| {
+                        format!("missing VMM block device for user volume uvol{idx}")
+                    })?),
+                ),
+            };
+            Ok(VolumeConfig {
+                tag: format!("uvol{idx}"),
+                mountpoint: volume.guest.clone(),
+                read_only: volume.read_only,
+                kind,
+                device,
+            })
         })
         .collect()
 }
@@ -421,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn build_env_maps_dir_share_volumes() {
+    fn build_env_maps_directory_and_block_volumes() {
         let (_env, _dir) = test_env();
         let config = VmStartConfig {
             name: "test-vm".into(),
@@ -435,10 +460,23 @@ mod tests {
         };
 
         let env = build_activation_environment(&config).unwrap();
-        assert_eq!(env.volumes.len(), 1);
+        assert_eq!(env.volumes.len(), 2);
         assert_eq!(env.volumes[0].tag, "uvol0");
         assert_eq!(env.volumes[0].mountpoint, "/guest/share");
         assert!(!env.volumes[0].read_only);
+        assert!(matches!(
+            env.volumes[0].kind,
+            mvm_agentd::vsock::VolumeConfigKind::VirtioFs
+        ));
+        assert_eq!(env.volumes[0].device, None);
+        assert_eq!(env.volumes[1].tag, "uvol1");
+        assert_eq!(env.volumes[1].mountpoint, "/guest/disk");
+        assert!(env.volumes[1].read_only);
+        assert!(matches!(
+            env.volumes[1].kind,
+            mvm_agentd::vsock::VolumeConfigKind::Block
+        ));
+        assert_eq!(env.volumes[1].device.as_deref(), Some("/dev/vdb"));
     }
 
     #[test]

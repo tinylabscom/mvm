@@ -406,10 +406,26 @@ impl<'a> Rooted<'a> {
         rel: &Path,
         prior_layer_paths: &HashSet<PathBuf>,
     ) -> Result<bool, RefusalReason> {
+        let target = self.root.join(rel);
         if prior_layer_paths.contains(rel) {
-            remove_prior_layer_path(self.root, rel)?;
+            // Only a prior-layer *non-directory* occupying this path is
+            // removed. A prior-layer directory is coalesced with, never
+            // cleared: every OCI layer re-lists the parent chain of
+            // everything it touches, so `usr/` arrives again in layer
+            // after layer, and treating that as a replacement would
+            // recursively delete everything the earlier layers put
+            // there. Clearing a directory is what the opaque whiteout
+            // marker means, and that has its own handler. Mirrors the
+            // Linux arm, which reaches the same outcome via an
+            // `unlinkat` that tolerates EISDIR plus an EEXIST coalesce.
+            let occupant_is_dir = std::fs::symlink_metadata(&target)
+                .map(|meta| meta.file_type().is_dir())
+                .unwrap_or(false);
+            if !occupant_is_dir {
+                remove_prior_layer_path(self.root, rel)?;
+            }
         }
-        create_directory(&self.root.join(rel))
+        create_directory(&target)
     }
 
     pub(super) fn write_symlink(

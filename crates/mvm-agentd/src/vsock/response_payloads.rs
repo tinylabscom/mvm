@@ -542,7 +542,7 @@ mod tests {
         let parsed: ProcWaitEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, ev);
         // The reason discriminant ships snake_case on the wire so
-        // CLI / Studio / MCP renderers can pattern-match on string
+        // CLI / Studio renderers can pattern-match on string
         // form without taking a typed dependency on mvm-core.
         assert!(
             json.contains("\"output_consumer_slow\""),

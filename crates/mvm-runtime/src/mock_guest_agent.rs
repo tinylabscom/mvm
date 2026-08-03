@@ -424,6 +424,7 @@ mod tests {
         connect_to, query_fs_diff_on, send_fs_request, send_proc_request, send_proc_request_on,
         send_proc_wait_on, vsock_uds_path,
     };
+    use mvm_core::util::test_env::TestEnv;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
@@ -440,6 +441,7 @@ mod tests {
 
     #[test]
     fn write_file_round_trip() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;
@@ -464,6 +466,7 @@ mod tests {
 
     #[test]
     fn mkdir_and_remove_round_trip() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;
@@ -493,6 +496,7 @@ mod tests {
 
     #[test]
     fn proc_start_assigns_deterministic_tokens() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;
@@ -520,6 +524,7 @@ mod tests {
 
     #[test]
     fn proc_signal_and_kill_return_success_variants() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;
@@ -547,6 +552,7 @@ mod tests {
 
     #[test]
     fn proc_send_input_reports_accepted_bytes() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;
@@ -568,6 +574,7 @@ mod tests {
 
     #[test]
     fn stop_removes_socket() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;
@@ -583,6 +590,7 @@ mod tests {
 
     #[test]
     fn two_agents_on_separate_vm_dirs_do_not_collide() {
+        let _env = TestEnv::new();
         let dir_a = make_vm_dir();
         let dir_b = make_vm_dir();
         let Some(agent_a) = start_mock_guest_agent(dir_a.path()) else {
@@ -632,6 +640,7 @@ mod tests {
 
     #[test]
     fn send_proc_request_on_round_trips_proc_list() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;
@@ -647,6 +656,7 @@ mod tests {
 
     #[test]
     fn send_proc_wait_on_streams_to_terminal_event() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;
@@ -660,6 +670,7 @@ mod tests {
 
     #[test]
     fn query_fs_diff_on_round_trips_empty_changes() {
+        let _env = TestEnv::new();
         let dir = make_vm_dir();
         let Some(agent) = start_mock_guest_agent(dir.path()) else {
             return;

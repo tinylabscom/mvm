@@ -73,6 +73,8 @@ pub mod run_image;
 pub mod stage0;
 pub mod template_reuse;
 pub mod verity_initrd;
+/// Persistent ext4 image materialization for user-attached block volumes.
+pub mod volume_image;
 
 /// libkrun-backed builder VM (gated by `builder-vm`). See module-level
 /// docs.

@@ -276,6 +276,26 @@ pub fn admit_for_run(
 const PLAN_JSON_MAX_BYTES: usize = 1024 * 1024;
 const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 
+/// Refuse an envelope over its byte cap.
+///
+/// A one-line comparison inlined at each call site is not reachable by a
+/// test at its boundary: the only way to exercise it is to serialize a
+/// real plan of exactly the cap, which is impractical to construct. So the
+/// comparison lives here, where `cap - 1`, `cap` and `cap + 1` are three
+/// cheap assertions.
+///
+/// The direction matters. Loosening `>` to `>=` refuses at exactly the cap
+/// — stricter, and merely wrong. Tightening it to `==` refuses *only* at
+/// exactly the cap and admits everything larger, which turns the cap into
+/// no cap at all and reopens the memory-pressure vector it exists to
+/// close.
+fn enforce_size_cap(what: &str, len: usize, cap: usize) -> Result<()> {
+    if len > cap {
+        anyhow::bail!("{what} exceeds {cap} byte cap (got {len}); refusing");
+    }
+    Ok(())
+}
+
 /// Populate the three `VmStartConfig` audit-substrate fields
 /// (`tenant_id`, `plan_json`, `bundle_json`) from the admitted
 /// plan. Call after the `VmStartConfig` is built and before
@@ -317,13 +337,7 @@ pub fn populate_audit_substrate(
 
     let plan_json = serde_json::to_string(admitted.signed())
         .context("serializing SignedExecutionPlan for VmStartConfig.plan_json")?;
-    if plan_json.len() > PLAN_JSON_MAX_BYTES {
-        anyhow::bail!(
-            "plan_json exceeds {} byte cap (got {}); refusing",
-            PLAN_JSON_MAX_BYTES,
-            plan_json.len()
-        );
-    }
+    enforce_size_cap("plan_json", plan_json.len(), PLAN_JSON_MAX_BYTES)?;
     cfg.plan_json = Some(plan_json);
 
     // `bundle_json` carries the resolved tenant **PolicyBundle** (network /
@@ -337,13 +351,7 @@ pub fn populate_audit_substrate(
         Some(bundle) => {
             let bj = serde_json::to_string(bundle)
                 .context("serializing PolicyBundle for VmStartConfig.bundle_json")?;
-            if bj.len() > BUNDLE_JSON_MAX_BYTES {
-                anyhow::bail!(
-                    "bundle_json exceeds {} byte cap (got {}); refusing",
-                    BUNDLE_JSON_MAX_BYTES,
-                    bj.len()
-                );
-            }
+            enforce_size_cap("bundle_json", bj.len(), BUNDLE_JSON_MAX_BYTES)?;
             Some(bj)
         }
         None => None,
@@ -800,6 +808,8 @@ mod tests {
 
     fn fixture_input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            network_mode: Default::default(),
+            l3_network: None,
             vm_name,
             tenant: None,
             backend_name: "firecracker",
@@ -1901,5 +1911,55 @@ mod tests {
             backend.status(&VmId("vm-badvol".into())),
             Ok(mvm_core::vm_backend::VmStatus::Stopped)
         ));
+    }
+
+    /// Three points around the cap. The `>` → `==` mutant admits
+    /// everything above the cap, which is the whole vector the cap closes;
+    /// `>` → `>=` refuses a payload exactly at it. Only a boundary test
+    /// separates the two, and only an extracted comparison makes a
+    /// boundary test cheap.
+    #[test]
+    fn the_size_cap_admits_up_to_the_cap_and_refuses_above_it() {
+        assert!(enforce_size_cap("plan_json", 0, 16).is_ok());
+        assert!(enforce_size_cap("plan_json", 15, 16).is_ok());
+        assert!(
+            enforce_size_cap("plan_json", 16, 16).is_ok(),
+            "a payload exactly at the cap is within it"
+        );
+        assert!(
+            enforce_size_cap("plan_json", 17, 16).is_err(),
+            "a payload over the cap must be refused"
+        );
+        assert!(
+            enforce_size_cap("plan_json", usize::MAX, 16).is_err(),
+            "a cap that only refuses one exact size is not a cap"
+        );
+    }
+
+    /// The stale-sidecar removal exists so a reused VM name cannot inherit
+    /// the previous boot's grant. Swallowing a real removal failure leaves
+    /// that grant in place while reporting success — the one outcome the
+    /// removal is there to prevent.
+    #[test]
+    fn a_failed_stale_grant_removal_is_not_reported_as_success() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("vm-state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // A non-empty directory where the sidecar file belongs: remove_file
+        // refuses it, and the refusal is not NotFound.
+        let sidecar = state_dir.join("verb-grant.json");
+        std::fs::create_dir_all(&sidecar).unwrap();
+        std::fs::write(sidecar.join("occupant"), b"stale").unwrap();
+
+        assert!(
+            mint_verb_grant_sidecar("{}", "vm-reused", &state_dir).is_err(),
+            "a stale grant that could not be removed must not read as removed"
+        );
+
+        // Absent is still the quiet, successful case.
+        let clean = tmp.path().join("clean-state");
+        std::fs::create_dir_all(&clean).unwrap();
+        assert!(mint_verb_grant_sidecar("{}", "vm-fresh", &clean).is_ok());
     }
 }

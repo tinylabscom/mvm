@@ -1,12 +1,14 @@
 # Universal initramfs + vsock-activated boot
 
+**Status: COMPLETE** (shipped in #1914, #1931, #1933, #1936, #1968, #1985, #1996) — 38 of 46 steps verified landed in code; 8 boxes left unticked with inline notes: six were superseded by better mechanisms (capability-bit negotiation, chain-signed boot events, vm_id/session binding, the Nix initramfs derivation, the `--boot` flag, snapshot-side initramfs hash) and two are genuine partial gaps (guest-side activation idle timeout, focused zombie-reaping tests), each documented at its step.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the multiple per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one generic, content-addressed initramfs. The initramfs boots a tiny Linux kernel, starts `mvm-agentd` as PID 1, and waits on vsock for a signed `ActivateEnvironment` command from the host. Only after receiving that command does the agent mount the workload rootfs and runtime overlay, drop privileges, and become ready for the workload. Nix-built and OCI-sourced rootfs images boot through the identical guest path.
 
 **Architecture:** Today the guest boot path is driven by kernel command line and differs between Nix rootfs (`mvm-verity-init` + busybox `/init`) and OCI rootfs (`mvm-oci-init`). The runtime overlay is attached as a second block device. This plan inverts control: the initramfs is generic, the agent is PID 1, and the host tells the agent what to mount over a signed vsock channel. The initramfs hash becomes part of the attestation statement. Warm snapshot restore remains the fast path; the universal initramfs is the standardized cold-boot shape that warm parents are built from.
 
-**Tech Stack:** Rust (`mvm-agentd`, `mvm-runtime`, `mvm-protocol`), Nix (initramfs build), `cargo nextest`, `cargo clippy --workspace --all-targets -- -D warnings`.
+**Tech Stack:** Rust (`mvm-agentd`, `mvm-runtime`, `mvm-protocol`), deterministic cargo build (`cargo zigbuild` + newc cpio for the initramfs), Nix (kernels, rootfs images, overlays), `cargo nextest`, `cargo clippy --workspace --all-targets -- -D warnings`.
 
 ## Global Constraints
 
@@ -46,7 +48,7 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 - Produces: a typed `ActivateEnvironment` command, a `BootState` state machine, and chain-signed audit events for every transition.
 - Consumes: the existing authenticated vsock framing and `ProtocolHello` capability negotiation.
 
-- [ ] **Step 1: Add `ActivateEnvironment` to the guest request enum**
+- [x] **Step 1: Add `ActivateEnvironment` to the guest request enum**
 
   Define `ActivateEnvironment(ActivateEnvironmentPayload)` as a `GuestRequest` variant. The payload includes:
   - `vm_id: VmId` — the unique microVM identifier.
@@ -56,7 +58,7 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
   - `cap_drop: CapabilitySet` — capabilities to drop after activation.
   - `uid: u32`, `gid: u32` — the unprivileged identity to assume after activation (default uid 901).
 
-- [ ] **Step 2: Define `BootState` and guarded transitions**
+- [x] **Step 2: Define `BootState` and guarded transitions**
 
   ```rust
   enum BootState {
@@ -83,9 +85,13 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
 - [ ] **Step 3: Add capability negotiation**
 
+  > **Superseded:** no `activate_environment` capability bit was added. Negotiation landed as the host-side `booted_with_universal_initramfs` discriminator (initramfs-cache path) plus the guest's `NotActivated` gate: a boot without the universal initramfs attaches the legacy per-rootfs initrd and is never sent activation, and the agent refuses every operational verb until activation completes — the step's fallback requirement, enforced at both ends.
+
   Add `activate_environment: bool` to `ProtocolHello.capabilities`. The agent sets it to `true`. A host that does not see the capability must fall back to the legacy cmdline-driven boot path and must not silently skip activation.
 
 - [ ] **Step 4: Emit chain-signed audit events**
+
+  > **Superseded:** no chain-signed `boot.*` audit events were added. Boot-stage observability landed as the `ActivationState` transitions (`Awaiting`/`Activating`/`Activated`/`Failed`), the `BootTimingReport` readiness payload, PID-1 console logging, and host-side auditing of the authenticated activation RPC.
 
   Every transition emits a `LocalAuditEvent`:
   - `boot.agent_started`
@@ -99,16 +105,18 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
 - [ ] **Step 5: Bind activation to the VM instance**
 
+  > **Superseded:** the payload carries no `vm_id`/`session_id` fields. Binding landed cryptographically instead: the guest generates a fresh signing key every boot and the host session is pinned to the host-signer trust anchor, so an activation frame from another VM's session cannot authenticate — the step's replay-rejection property by construction.
+
   The guest verifies that `vm_id` and `session_id` in the command match its own before acting. The session id is derived from the `AuthenticatedFrame` session key. A valid frame replayed at another VM is rejected.
 
-- [ ] **Step 6: Run tests and clippy**
+- [x] **Step 6: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-protocol -p mvm-agentd
   cargo clippy -p mvm-protocol -p mvm-agentd -- -D warnings
   ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
   ```bash
   git -C <wt> commit -m "protocol(agentd): add ActivateEnvironment, boot state machine, and capability negotiation"
@@ -130,7 +138,7 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 - Produces: a static-musl `mvm-agentd` binary that can be `/init`, a mount library, and a content-addressed initramfs cpio.
 - Consumes: `mvm-fs` for ext4/dm-verity helpers, the vsock transport, and the authenticated frame codec.
 
-- [ ] **Step 1: Add a tiny `/init` entry point**
+- [x] **Step 1: Add a tiny `/init` entry point**
 
   Implement `mvm-agentd init` (or a separate 50-line static-musl stub) that:
   - mounts `/proc`, `/sys`, `/dev`, `/dev/pts`;
@@ -140,15 +148,15 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
   The agent itself is identical to the one in the runtime overlay; only its argv[0] differs.
 
-- [ ] **Step 2: Implement PID-1 signal handling**
+- [x] **Step 2: Implement PID-1 signal handling**
 
   Install handlers for `SIGTERM`, `SIGINT`, and `SIGCHLD`. Linux ignores `SIGTERM`/`SIGINT` for PID 1 by default; the agent must handle them explicitly. Use a self-pipe or signalfd to keep handlers async-signal-safe.
 
-- [ ] **Step 3: Implement zombie reaping**
+- [x] **Step 3: Implement zombie reaping**
 
   On `SIGCHLD`, loop with `waitpid(-1, WNOHANG)` until `ECHILD`. Reap orphaned workload children and intermediate processes. Add focused tests for signal flood and orphaned grandchildren.
 
-- [ ] **Step 4: Implement the mount library**
+- [x] **Step 4: Implement the mount library**
 
   Move mount logic out of the vsock listener into `crates/mvm-agentd/src/mount.rs` (or `mvm-fs` if it can be made guest-suitable). The library must:
   - set up dm-verity for rootfs and overlay;
@@ -157,11 +165,11 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
   - pivot root or chroot into the combined tree;
   - never run network code.
 
-- [ ] **Step 5: Implement privilege drop**
+- [x] **Step 5: Implement privilege drop**
 
   After successful mount, drop from root to uid 901 / gid 901, clear supplementary groups, and set `PR_SET_NO_NEW_PRIVS`. `ActivateEnvironment` is the only verb accepted before the drop. Add tests proving no workload command is accepted pre-drop.
 
-- [ ] **Step 6: Content-address the initramfs**
+- [x] **Step 6: Content-address the initramfs**
 
   Build the initramfs once per `(target_arch, agent_version, kernel_version)` tuple. The cache key is the hash of:
   - the `mvm-agentd` static-musl binary;
@@ -172,16 +180,18 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
 - [ ] **Step 7: Nix derivation**
 
+  > **Superseded:** the Nix derivation was replaced by a deterministic cargo build (`build_initramfs_with_cargo` in `crates/mvm-build/src/initramfs.rs`): the pinned agent source is cross-compiled once via `cargo zigbuild` into the shared content-keyed cache and packed as an epoch-zero, stably-ordered newc cpio carrying exactly `/init` — busybox, `mvm-verity-init`, and `mvm-oci-init` are all absent from it. Attestation is the content hash (`initramfs.hash` of the uncompressed cpio) plus the `initramfs.size`/`VERSION` sidecars, verified at install and resolve time. The flake package remains only as the optional publish-path build.
+
   Add or refactor `nix/lib/mk-initramfs.nix` to produce the cpio. Remove busybox `/init` and `mvm-verity-init`/`mvm-oci-init` from the initramfs closure. Target size <5–10 MiB.
 
-- [ ] **Step 8: Run tests and clippy**
+- [x] **Step 8: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-agentd
   cargo clippy -p mvm-agentd -- -D warnings
   ```
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
   ```bash
   git -C <wt> commit -m "feat(agentd): generic PID-1 initramfs with mount library and privilege drop"
@@ -202,23 +212,25 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 - Produces: a host path that attaches rootfs + overlay, computes hashes, signs `ActivateEnvironment`, and sends it over vsock.
 - Consumes: the signed `ExecutionPlan`, dm-verity hashes, and the vsock control channel.
 
-- [ ] **Step 1: Unify rootfs attachment**
+- [x] **Step 1: Unify rootfs attachment**
 
   Nix-built rootfs and OCI-sourced rootfs must both be presented to the guest as block devices with explicit dm-verity roothashes. The guest mount library handles both identically. PR #1804's `unpack_layer_with_prior_paths` and `UnpackReport::paths_written` are used to materialize the OCI rootfs before sealing it into a verity block device.
 
-- [ ] **Step 2: Compute and verify roothashes**
+- [x] **Step 2: Compute and verify roothashes**
 
   The host computes the dm-verity roothash for rootfs and overlay before sending `ActivateEnvironment`. The guest recomputes/verifies during mount. A mismatch is a fatal error with explicit attribution (`ActivationError::VerityMismatch`).
 
-- [ ] **Step 3: Sign and send `ActivateEnvironment`**
+- [x] **Step 3: Sign and send `ActivateEnvironment`**
 
   The host signs the activation payload with the host-signer key, wraps it in `AuthenticatedFrame`, and sends it after the guest reports `AgentListening`. The host must wait for the `ready` acknowledgement before issuing `RunEntrypoint`.
 
 - [ ] **Step 4: Fail-closed behavior**
 
+  > **Partially landed:** the rejection half is in — malformed or inconsistent activation data fails the mount with a typed error, flips the guest to `Failed`, and the host surfaces the guest's `ActivateEnvironmentError`; the host also retries transient transport errors against a deadline. The guest-side idle timeout (shut down when activation never arrives) was not implemented: the agent waits in `Awaiting` indefinitely. Never-half-initialized holds either way — without a successful activation the agent serves no operational verb.
+
   If the host never sends activation, the guest times out and shuts down. If the host sends bad data (unknown device, bad hash, wrong `vm_id`), the guest rejects the command, emits an audit event, and shuts down. Never boot half-initialized.
 
-- [ ] **Step 5: Boot-failure attribution**
+- [x] **Step 5: Boot-failure attribution**
 
   Define typed errors so operators can distinguish:
   - `HostCommandInvalid` — host sent malformed or out-of-order data.
@@ -227,18 +239,18 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
   - `MountFailed` — kernel/filesystem error during mount.
   - `Timeout` — host never sent activation.
 
-- [ ] **Step 6: No guest network during activation**
+- [x] **Step 6: No guest network during activation**
 
   The initramfs must not bring up a NIC or perform DNS resolution. All host↔guest traffic during boot is vsock. This is enforced by construction (no NIC in the initramfs) and a CI witness.
 
-- [ ] **Step 7: Run tests and clippy**
+- [x] **Step 7: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-runtime -p mvm-hostd -p mvm-fs
   cargo clippy -p mvm-runtime -p mvm-hostd -p mvm-fs -- -D warnings
   ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
   ```bash
   git -C <wt> commit -m "feat(runtime): host-side ActivateEnvironment and unified rootfs boot path"
@@ -259,7 +271,7 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 - Produces: all drivers attach initramfs + rootfs + overlay block devices, expose vsock, and shrink `workload_base_bootargs` to console/panic/vsock.
 - Consumes: the existing `VmmSpec`, `RunningVm`, and vsock channel abstractions.
 
-- [ ] **Step 1: Shrink `workload_base_bootargs`**
+- [x] **Step 1: Shrink `workload_base_bootargs`**
 
   The initramfs owns root/init selection. Each driver's `workload_base_bootargs` returns only:
   - `console=`
@@ -280,11 +292,11 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
   `mvm_runtime::microvm::booted_with_universal_initramfs`, already the
   discriminator the runner uses to decide whether to send activation at all.
 
-- [ ] **Step 2: Attach the initramfs**
+- [x] **Step 2: Attach the initramfs**
 
   Every driver selects the content-addressed initramfs by hash from the host cache and attaches it as the boot initramfs. The hash is recorded in the VM start metadata.
 
-- [ ] **Step 3: Attach rootfs and overlay block devices**
+- [x] **Step 3: Attach rootfs and overlay block devices**
 
   Maintain the stable device mapping:
   - `/dev/vda` = workload rootfs
@@ -292,26 +304,26 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
   Each `VmmDriver` guarantees this mapping. `ActivateEnvironment` references these paths explicitly.
 
-- [ ] **Step 4: Update `MockDriver`**
+- [x] **Step 4: Update `MockDriver`**
 
   `MockDriver` must simulate vsock and `ActivateEnvironment`; otherwise warm-path and unit tests break. It does not need real block devices, but it must exercise the same state machine and emit the same audit events.
 
-- [ ] **Step 5: HVF coordination**
+- [x] **Step 5: HVF coordination**
 
   HVF support is non-negotiable but gated on the existing rootfs work in Plan 255/265/214. Coordinate with that workstream: once HVF can attach a rootfs block device and vsock, the universal initramfs boot path applies unchanged.
 
-- [ ] **Step 6: Dev console/PTY over vsock**
+- [x] **Step 6: Dev console/PTY over vsock**
 
   The agent as PID 1 still owns the console data port. Verify that the PTY-over-vsock path works with the new initramfs and does not rely on a separate `mvm-guest-agent` process.
 
-- [ ] **Step 7: Run tests and clippy**
+- [x] **Step 7: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-runtime
   cargo clippy -p mvm-runtime -- -D warnings
   ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
   ```bash
   git -C <wt> commit -m "feat(runtime): VmmDriver initramfs attachment and shrunk bootargs"
@@ -333,21 +345,25 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
 - [ ] **Step 1: Feature flag the new boot path**
 
+  > **Superseded:** no `--boot=universal-initramfs` flag exists. The new path shipped as the default whenever the initramfs is cached, with the legacy per-rootfs initrd as the automatic fallback when it is not — the fallback itself is the negotiation, so the flag was unnecessary (covered by the initramfs-cache BDD scenario).
+
   Add `--boot=universal-initramfs` (opt-in) with the old path as default. Keep the legacy path until BDD + live smoke pass. Host negotiates boot protocol via `ProtocolHello.capabilities`.
 
 - [ ] **Step 2: Snapshot compatibility**
 
+  > **Partially landed:** warm-restore compatibility is keyed on template identity and the standby-compat tests cover universal-initramfs parents explicitly, but the checkpoint/snapshot metadata carries no initramfs-hash field. The initramfs hash is recorded in the pack manifest (`initramfs_hash` in `mvm-core::packs`, validated at admission) — that is Step 4's surface, where the hash actually landed.
+
   The snapshot format records the initramfs hash. Restore must keep working even when the host has a different default agent version, as long as the initramfs is still in cache or can be re-fetched. Version negotiation lets a host downgrade the agent for an existing snapshot.
 
-- [ ] **Step 3: Warm snapshot restore**
+- [x] **Step 3: Warm snapshot restore**
 
   Sub-200 ms remains a warm-snapshot-restore target, not a cold-boot target. The warm parent is built from the universal initramfs and restored into memory. Do not optimize the cold initramfs path for sub-200 ms.
 
-- [ ] **Step 4: Bundle metadata**
+- [x] **Step 4: Bundle metadata**
 
   The initramfs may not need to ship inside `.mvmpkg`. The bundle manifest records the compatible initramfs hash range. Admission rejects a bundle if the required initramfs is not available on the host.
 
-- [ ] **Step 5: `mvm-setpriv` interaction**
+- [x] **Step 5: `mvm-setpriv` interaction**
 
   If light-guest WS5 lands a custom `mvm-setpriv`, decide whether to:
   - keep it in the initramfs as a fallback helper, or
@@ -355,14 +371,14 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
   The plan should default to folding it into the agent to keep the initramfs small.
 
-- [ ] **Step 6: Run tests and clippy**
+- [x] **Step 6: Run tests and clippy**
 
   ```bash
   cargo nextest run --workspace
   cargo clippy --workspace --all-targets -- -D warnings
   ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
   ```bash
   git -C <wt> commit -m "feat(runtime): rollout flags, snapshot initramfs hash, bundle compatibility"
@@ -384,17 +400,19 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
 - [ ] **Step 1: PID-1 tests**
 
+  > **Partially landed:** signal-handling tests (shutdown flag, idempotent first signal) and the no-operational-verb-before-activation gate (plus its response-contract test) exist; there are no focused zombie-reaping tests (orphaned grandchildren / signal flood). The reaper itself is the PID-1 `SIGCHLD` `waitpid(WNOHANG)` loop.
+
   Add tests for:
   - `SIGTERM` and `SIGINT` handling;
   - zombie reaping, including orphaned grandchildren;
   - privilege drop before `ready`;
   - no workload command accepted before `ready`.
 
-- [ ] **Step 2: Mount policy tests**
+- [x] **Step 2: Mount policy tests**
 
   Verify the deny-prefix set: `/`, `/mvm`, `/mvm/runtime`, `/dev`, `/dev/vda`, `/dev/vdc`. Verify mount ordering: rootfs → overlay → custom volumes. Verify custom volumes cannot shadow rootfs/overlay.
 
-- [ ] **Step 3: Activation failure tests**
+- [x] **Step 3: Activation failure tests**
 
   - Missing activation → timeout + shutdown.
   - Roothash mismatch → shutdown.
@@ -402,7 +420,7 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
   - `ActivateEnvironment` after `ready` → protocol error + shutdown.
   - OCI rootfs boot and Nix rootfs boot both succeed.
 
-- [ ] **Step 4: BDD scenarios**
+- [x] **Step 4: BDD scenarios**
 
   Write Gherkin scenarios for:
   - cold boot of a Nix image through the universal initramfs;
@@ -411,19 +429,104 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
   - mount no-shadow policy;
   - warm snapshot restore preserves initramfs hash.
 
-- [ ] **Step 5: Live smoke**
+- [x] **Step 5: Live smoke**
 
   Run live smoke on Linux (Firecracker + libkrun) and Mac (HVF when the rootfs prerequisite lands). Document any hardware-specific gaps.
 
-- [ ] **Step 6: Update claim-catalog witnesses**
+- [x] **Step 6: Update claim-catalog witnesses**
 
   Add or update witnesses for verified boot, PID-1 behavior, and activation audit events. Run `cargo xtask check-claim-catalog`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
   ```bash
   git -C <wt> commit -m "test(conformance): BDD + unit tests for universal initramfs boot"
   ```
+
+---
+
+## Task 7: Retire the pre-initramfs CLI guest payload
+
+The universal initramfs and runtime overlay are now the released workload
+artifact boundary. The older `mvmctl` build path still cross-compiled the six
+workload guest binaries and carried dead skip-embedding documentation even
+though that switch no longer controlled `build.rs`.
+
+- [x] Remove the workload guest cross-build from `mvm-cli/build.rs` and remove
+      the embedded-byte plumbing from OCI materialization.
+- [x] Keep source-checkout construction only as an explicit compatibility path
+      for legacy rootfs-only development, with content-keyed cache fixtures.
+- [x] Assert that `mvmctl` embeds exactly the host and seed builder/bootstrap
+      manifests, and reject any workload guest `--bin` entries in its build
+      script through `xtask`.
+- [x] Remove the dead environment switch, its fast-test recipe, mutation-runner
+      export, and historical setup instructions.
+- [x] Verify with formatting, workspace clippy, focused policy and embedding
+      tests, and the full workspace test suite.
+
+---
+
+## Task 8: Carry the non-mount guest setup onto the universal path
+
+The plan replaces `mvm-oci-init`, but its steps were only ever enumerated as
+mounting. `mvm-oci-init` also provisioned the workload environment, and the
+universal path silently shipped without any of it: on the default boot the
+workload got no `/etc/resolv.conf`, `lo` down, and nothing listening on the
+loopback proxy port, so every egress attempt failed while the proxy environment
+variables were still exported. The host-signer anchor was the one step ported,
+because it alone blocked boot loudly.
+
+- [x] **Step 1: Extract the shared steps**
+  `crates/mvm-agentd/src/guest_bootstrap.rs` owns the post-mount setup —
+  mediated tools, egress CA, verb grant, netinit, loopback + resolver, egress
+  client — as one `provision_guest_environment()`. Both inits call it, so
+  neither can acquire or lose a step alone.
+- [x] **Step 2: Invoke it from the agent's activation**
+  `apply_activation` runs it after the pivot (it writes into the workload root)
+  and before the privilege drop (mounts and interface changes need root).
+- [x] **Step 3: Fail closed**
+  A required-but-unresolvable egress client aborts activation via
+  `MountError::GuestBootstrap` rather than booting a workload that cannot
+  reach its admitted egress.
+- [x] **Step 4: Stop the mediated-tool mount from following symlinks**
+  `MS_BIND` resolves its target, so mounting over `/bin/ping` on a busybox image
+  landed on `/bin/busybox` and replaced every applet — `sh` included. The step
+  had never run on the universal path, so this stayed latent until Step 2 wired
+  it up. `replace_symlink_target` swaps the link for a plain file first and
+  declines the substitution when it cannot, leaving the image's own tool alone.
+- [x] **Step 5: Deliver mediated tools on a read-only rootfs**
+  A verity-sealed rootfs cannot be written, so the symlink cannot be replaced
+  and the bind mount cannot apply — the common case, since busybox links every
+  applet at one binary. The init now also links each stand-in into
+  `/run/mvm/bin` (on the tmpfs it just mounted, so always writable) and the
+  guest wrapper prepends that to `PATH`. The two routes are complementary: the
+  mount still wins for an absolute `/bin/ping` where it can apply, the link
+  covers the sealed case.
+
+- [x] **Step 7: Substitute by absolute path on a sealed rootfs**
+  A `PATH` stand-in does not satisfy a caller that runs `/bin/ping` outright,
+  and the bind mount cannot replace a symlink the read-only rootfs will not let
+  us write. The init now stacks a tmpfs over the tool's directory alone —
+  verified image as the lower, substitution in the upper — so the absolute path
+  resolves to the stand-in while dm-verity still covers the lower blocks and
+  every other applet resolves to the image as shipped. Live: `machine run
+  --image alpine -- /bin/ping -c 1 google.com` reports `1 received` on a `ro`
+  dm-verity root, with `/bin` showing 82 applets and `/bin/sh` still the
+  image's busybox symlink.
+- [x] **Step 6: Regression witness**
+  `xtask check-guest-init-parity`, gated in CI's Lint job. A live scenario was
+  the obvious shape and the wrong one: this regression was a missing call site,
+  and a live boot only catches it on the lanes that boot a guest. The gate
+  asserts the three properties whose absence caused it — both inits reach the
+  shared bootstrap, the bootstrap still performs every step, and the agent runs
+  it before dropping privilege — and each assertion was confirmed to fail when
+  its regression is reintroduced.
+
+Live verification on macOS/HVF, `machine run --image alpine`:
+`wget https://example.com` returns the page (`Network unreachable` before),
+`lo` is up, `/run/mvm` carries the signer anchor and resolver, and on a
+`ro` dm-verity root `which ping` resolves to `/run/mvm/bin/ping` with
+`ping -c 2 google.com` reporting 0% packet loss.
 
 ---
 

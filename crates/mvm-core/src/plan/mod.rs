@@ -63,10 +63,11 @@ pub use synthesis::{
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
     AuditTaxonomy, DepsVolumeBinding, DepsVolumeBindingError, FsPolicyRef, HostShareGrant,
-    KeyRotationSpec, Nonce, NonceParseError, PlanId, PlanSeccompTier, PlanSeccompTierParseError,
-    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
-    SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef, StreamRetention, TenantId,
-    TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+    KeyRotationSpec, L3IcmpPolicy, L3IngressMapping, L3NetworkSpec, NetworkMode, Nonce,
+    NonceParseError, PlanId, PlanSeccompTier, PlanSeccompTierParseError, PolicyRef,
+    PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SecretReleasePolicy,
+    SecretSource, ShareKind, SignedImageRef, StreamRetention, TenantId, TimeoutSpec, Variant,
+    WorkloadId, WorkloadIntent,
 };
 pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,

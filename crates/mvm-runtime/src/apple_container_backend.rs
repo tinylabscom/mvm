@@ -18,9 +18,11 @@
 //! Honest reporting, not silent degradation: `capabilities()` and the
 //! claims array of `security_profile()` are the HVF runner's verbatim
 //! (the isolation story is identical — only the kernel image differs);
-//! the profile's notes record that the kernel is a fetched artifact whose
-//! provenance is not an mvm build. The backend is opt-in only —
-//! `AnyBackend::auto_select` never returns this kind.
+//! the profile's notes record that the kernel is a fetched artifact
+//! trusted only with a matching digest sidecar in the artifact cache,
+//! and that the sealed boot path is live-proven on this kernel. The
+//! backend is opt-in only — `AnyBackend::auto_select` never returns this
+//! kind.
 
 use std::path::Path;
 
@@ -34,6 +36,7 @@ use thiserror::Error;
 
 use crate::apple_container::artifacts;
 use crate::backend::HvfRunner;
+use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 
 /// Typed, fail-closed errors for requests this backend cannot satisfy.
 /// Every error names what was refused and why, rather than silently falling
@@ -46,6 +49,18 @@ pub enum AppleContainerError {
     ArtifactMissing {
         what: &'static str,
         path: String,
+        hint: &'static str,
+    },
+    /// The cached kernel failed its digest attestation: the
+    /// `vmlinux.blake3` sidecar is missing, malformed, or names a digest
+    /// the kernel bytes do not hash to. `reason` says which (a mismatch
+    /// names both the pinned and the actual digest); `hint` says how to
+    /// stage a trusted kernel and record its digest. An unpinned or
+    /// tampered kernel must never boot.
+    #[error("apple-container kernel untrusted: {reason} at {path} — {hint}")]
+    ArtifactUntrusted {
+        path: String,
+        reason: String,
         hint: &'static str,
     },
 }
@@ -156,9 +171,10 @@ impl VmBackend for AppleContainerBackend {
 
     fn is_available(&self) -> Result<bool> {
         // Available when the HVF runner is and the kernel artifact is in
-        // the cache; a missing kernel reports at `start` with the typed
-        // fetch hint, but a probe should not conclude a workload could
-        // start here without it.
+        // the cache AND verified against its digest sidecar; a missing,
+        // unpinned, or tampered kernel reports at `start` with the typed
+        // error, but a probe must never conclude a workload could start
+        // here on a kernel that failed attestation.
         Ok(self.runner.is_available()? && artifacts::resolve().is_ok())
     }
 
@@ -180,11 +196,27 @@ impl VmBackend for AppleContainerBackend {
                  kernel: the same universal initramfs, guest agent, activation flow, egress \
                  gate, and isolation boundary as the HVF backend — only the kernel image differs.",
                 "The kernel is a fetched binary artifact (Apple's container kernel), not an \
-                 mvm-built image: its provenance is the artifact cache, exactly like any \
-                 externally-sourced kernel a launch config names.",
+                 mvm-built image: it is trusted only with a matching vmlinux.blake3 digest \
+                 sidecar in the artifact cache — resolution fails closed when the sidecar is \
+                 absent, malformed, or disagrees with the kernel bytes, and an unverified \
+                 kernel never makes this backend available.",
+                "The sealed block+ext4 boot path is live-proven on macOS HVF with this \
+                 kernel: dm-verity-verified rootfs and runtime-overlay mounts, activation \
+                 acknowledged by the guest agent, and the uid-901 privilege drop all observed \
+                 in the gated end-to-end boot test.",
                 "Opt-in only; never selected by auto-detect.",
             ],
         }
+    }
+}
+
+impl WorkloadBackend for AppleContainerBackend {
+    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
+        // The same posture as the HVF runner this backend delegates to:
+        // proxy-aware substitution over the vsock UDS channel, no
+        // transparent :80/:443 terminator. Delegating keeps the two in
+        // lock-step if the runner's transport ever changes.
+        self.runner.egress_substitution_transport()
     }
 }
 
@@ -287,7 +319,9 @@ mod tests {
         env.isolate_mvm_home(dir.path());
         let b = AppleContainerBackend::new();
         let err = b.start(&cfg("x")).unwrap_err();
-        let AppleContainerError::ArtifactMissing { what, path, hint } = typed(&err);
+        let AppleContainerError::ArtifactMissing { what, path, hint } = typed(&err) else {
+            panic!("expected ArtifactMissing, got {:?}", typed(&err));
+        };
         assert!(what.contains("kernel"));
         assert!(path.contains("apple-container"));
         assert!(hint.contains("container kernel"));
@@ -318,6 +352,14 @@ mod tests {
                 .any(|n| n.contains("prebuilt container kernel")),
             "the notes must record the kernel provenance honestly"
         );
+        assert!(
+            profile.notes.iter().any(|n| n.contains("vmlinux.blake3")),
+            "the notes must record the digest-sidecar attestation requirement"
+        );
+        assert!(
+            profile.notes.iter().any(|n| n.contains("live-proven")),
+            "the notes must record that the sealed boot path is live-proven on this kernel"
+        );
     }
 
     #[test]
@@ -328,6 +370,120 @@ mod tests {
         let b = AppleContainerBackend::new();
         // No kernel in the isolated cache: unavailable regardless of platform.
         assert!(!b.is_available().unwrap());
+    }
+
+    /// Stage `bytes` (+ optional sidecar contents) into the isolated
+    /// cache's apple-container artifact dir. The caller must already hold
+    /// an isolated `MVM_HOME` (the tests' `TestEnv`).
+    fn stage_kernel(bytes: &[u8], sidecar: Option<&str>) {
+        let dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir())
+            .join(artifacts::ARTIFACT_DIR_NAME);
+        std::fs::create_dir_all(&dir).expect("artifact dir");
+        std::fs::write(dir.join(artifacts::KERNEL_FILE_NAME), bytes).expect("kernel");
+        if let Some(sidecar) = sidecar {
+            std::fs::write(dir.join(artifacts::KERNEL_DIGEST_FILE_NAME), sidecar).expect("sidecar");
+        }
+    }
+
+    #[test]
+    fn unpinned_or_tampered_kernel_does_not_make_the_backend_available() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let b = AppleContainerBackend::new();
+        // Unpinned: a kernel with no digest sidecar is untrusted.
+        stage_kernel(b"untrusted-kernel", None);
+        assert!(
+            !b.is_available().unwrap(),
+            "an unpinned kernel must never make the backend available"
+        );
+        // Tampered: a well-formed pin for different bytes must still fail.
+        let wrong = "0".repeat(64);
+        stage_kernel(b"tampered-kernel", Some(&wrong));
+        assert!(
+            !b.is_available().unwrap(),
+            "a kernel whose bytes fail attestation must never make the backend available"
+        );
+    }
+
+    #[test]
+    fn start_with_unpinned_or_tampered_kernel_surfaces_the_typed_untrusted_error() {
+        // The kernel-substitution path (`config_with_kernel`, called by
+        // `start`) must surface the attestation failure unchanged — never
+        // a fallback to a caller kernel, never an opaque I/O error.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let b = AppleContainerBackend::new();
+
+        stage_kernel(b"untrusted-kernel", None);
+        let err = b.start(&cfg("x")).unwrap_err();
+        let AppleContainerError::ArtifactUntrusted { path, reason, hint } = typed(&err) else {
+            panic!("expected ArtifactUntrusted, got {:?}", typed(&err));
+        };
+        assert!(path.contains("apple-container"));
+        assert!(reason.contains("no digest sidecar"));
+        assert!(hint.contains("b3sum"));
+
+        let pinned = "0".repeat(64);
+        stage_kernel(b"tampered-kernel", Some(&pinned));
+        let err = b.start(&cfg("x")).unwrap_err();
+        let AppleContainerError::ArtifactUntrusted { reason, .. } = typed(&err) else {
+            panic!("expected ArtifactUntrusted, got {:?}", typed(&err));
+        };
+        assert!(
+            reason.contains(&pinned),
+            "the error must name the pinned digest: {reason}"
+        );
+        assert!(
+            reason.contains("hashed"),
+            "the error must name the actual digest: {reason}"
+        );
+    }
+
+    #[test]
+    fn workload_transport_mirrors_the_hvf_runner() {
+        let b = AppleContainerBackend::new();
+        let transport = b.egress_substitution_transport();
+        assert_eq!(
+            transport,
+            b.runner.egress_substitution_transport(),
+            "the transport delegates to the runner's own declaration"
+        );
+        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
+        assert!(transport.supports_proxy_aware_substitution());
+        assert!(!transport.supports_transparent_terminator());
+    }
+
+    #[test]
+    fn workload_identity_and_capabilities_delegate() {
+        let b = AppleContainerBackend::new();
+        // `&dyn WorkloadBackend` still carries the full VmBackend surface:
+        // identity and capabilities are the backend's own delegations.
+        let workload: &dyn WorkloadBackend = &b;
+        assert_eq!(workload.name(), "apple-container");
+        assert_eq!(workload.kind(), BackendKind::AppleContainer);
+        let (mine, theirs) = (
+            workload.capabilities(),
+            crate::backend::hvf_runner().capabilities(),
+        );
+        assert_eq!(mine.vsock, theirs.vsock);
+        assert_eq!(mine.no_routable_guest_nic, theirs.no_routable_guest_nic);
+        assert_eq!(mine.standby_pool, theirs.standby_pool);
+        assert_eq!(mine.snapshot_capability, theirs.snapshot_capability);
+        assert_eq!(mine.pause_resume, theirs.pause_resume);
+    }
+
+    #[test]
+    fn require_workload_backend_accepts_apple_container() {
+        // The admitted-funnel boundary is pure permission — it matches the
+        // backend kind and never probes the artifact cache, so no isolated
+        // MVM_HOME is needed here (the kernel is resolved at `start`).
+        let backend = AnyBackend::from_hypervisor("apple-container");
+        let workload = crate::workload_backend::require_workload_backend(&backend)
+            .expect("apple-container boots the full admitted stack — it is a workload backend");
+        assert_eq!(workload.name(), "apple-container");
+        assert_eq!(workload.kind(), BackendKind::AppleContainer);
     }
 
     #[test]

@@ -165,6 +165,7 @@ fn do_run_detached_with(
         }
     };
     let pid = child.id() as i32;
+    let owned = mvm_agentd::child_wait::OwnedChild::new(child.id());
 
     // Reaper: wait for the detached workload, then report its exit code
     // to the host so the VM powers off (best-effort). Never touches the
@@ -172,7 +173,8 @@ fn do_run_detached_with(
     let exit_report_bin = exit_report_bin.to_path_buf();
     std::thread::spawn(move || {
         let mut child = child;
-        let code = match child.wait() {
+        let _owned = owned;
+        let code = match mvm_agentd::child_wait::wait(&mut child) {
             Ok(status) => status.code().unwrap_or(-1),
             Err(_) => -1,
         };

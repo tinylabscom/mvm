@@ -182,7 +182,7 @@ fn write_regular_file<R: Read>(
     Ok(())
 }
 
-fn classify_regular_file_mode(
+pub(super) fn classify_regular_file_mode(
     raw_mode: u32,
     options: &UnpackOptions,
 ) -> Result<u32, RefusalReason> {
@@ -198,7 +198,12 @@ fn classify_regular_file_mode(
     }
 }
 
-fn record_setid_entry(report: &mut UnpackReport, raw_path: &[u8], mode: u32, policy: SetidPolicy) {
+pub(super) fn record_setid_entry(
+    report: &mut UnpackReport,
+    raw_path: &[u8],
+    mode: u32,
+    policy: SetidPolicy,
+) {
     if mode & SETID_MODE_BITS == 0 {
         return;
     }

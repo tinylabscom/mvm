@@ -351,6 +351,8 @@ impl VmBackend for HvfBackend {
             // and always routes egress through the per-VM endpoint over vsock.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
+            // HVF presents no network device to the guest whatsoever.
+            l3_vsock: true,
             // The hvf VMM can serve the unpacked OCI tree as a read-only
             // virtiofs root (dev tier); the run-path tier gate selects it only for
             // non-prod, non-sealed workloads. This stays gated on the launchable
@@ -606,6 +608,7 @@ impl VmBackend for HvfBackend {
         // check), so a crashed VM's decrypted-secret process can't outlive the
         // guest. Idempotent + no-op when the VM spawned none (no secrets).
         crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
+        crate::netd_spawn::reap_netd(&state_dir);
         // Deregister from the per-tenant host-agent daemon (no-op if this VM
         // never registered — an unadmitted dev VM, or a failed registration
         // that was already logged). The daemon itself stays warm.
@@ -872,6 +875,8 @@ mod tests {
         use mvm_core::policy::RedactionPolicy;
 
         let input = SynthesisInput {
+            network_mode: Default::default(),
+            l3_network: None,
             vm_name: "hvf-secret-vm",
             tenant: None,
             backend_name: "hvf",

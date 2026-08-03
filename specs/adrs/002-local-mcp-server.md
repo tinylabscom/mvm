@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted.
+Withdrawn (2026-07-31). The server, its `mcp` Cargo feature, the
+`mvmctl ops mcp stdio` verb, the stdio roundtrip smoke script, and the
+`mcp-server-smoke` CI lane were all deleted. It was a surface nobody
+drove: it shipped behind an opt-in feature composed only into `user`,
+had no consumer, and duplicated authority that the CLI's JSON output
+and the SDKs already expose. The record below is kept for the numbering
+and for the reasoning, should a tool-server surface ever be revisited —
+it does not describe code that exists.
 
 ## Context
 

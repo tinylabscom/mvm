@@ -15,8 +15,7 @@ use object_store::path::Path as ObjPath;
 pub struct TemplateRegistry {
     store: AmazonS3,
     // object_store is async; this registry's API is sync, so it owns a
-    // current-thread runtime to drive the get/put calls (mirrors
-    // `crate::storage::volume::s3::S3MountProvider`).
+    // current-thread runtime to drive the get/put calls.
     rt: tokio::runtime::Runtime,
     prefix: String,
 }

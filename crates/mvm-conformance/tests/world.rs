@@ -104,6 +104,34 @@ impl Drop for ScenarioEnvGuard {
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
+    /// Result of exercising the signed-plan share gate with an attachment the
+    /// plan did not authorize.
+    pub volume_admission_result: Option<Result<(), String>>,
+    /// Result of asking a backend to accept a block-volume shape it cannot
+    /// honestly support.
+    pub volume_backend_result: Option<Result<(), String>>,
+    // --- L3 TUN-over-vsock witnesses ---
+    /// The machine a launch-guard scenario built.
+    pub l3_machine: Option<mvm_runtime::machine::Machine>,
+    /// Verdict from the no-guest-NIC launch guard.
+    pub l3_guard_result: Option<Result<(), mvm_runtime::machine::nic_guard::NicGuardError>>,
+    /// Capability shortfall from a backend check, if any.
+    pub l3_backend_check: Option<Result<(), Vec<&'static str>>>,
+    /// The per-session admission state a packet scenario drives.
+    pub l3_admitter: Option<mvm_net::l3::L3Admitter>,
+    /// Outbound verdict, reduced to its stable reason label.
+    pub l3_verdict: Option<Result<(), &'static str>>,
+    /// Inbound verdict, same shape.
+    pub l3_inbound_verdict: Option<Result<(), &'static str>>,
+    /// The packet most recently admitted or refused.
+    pub l3_last_packet: Option<Vec<u8>>,
+    pub l3_previous_session: Option<mvm_net::l3::SessionId>,
+    pub l3_current_session: Option<mvm_net::l3::SessionId>,
+    pub l3_lease: Option<mvm_net::lease::NetworkLease>,
+    pub l3_lease_instance: Option<mvm_net::channel::VmInstanceIdentity>,
+    pub l3_lease_result: Option<Result<(), String>>,
+    pub l3_backend_capabilities: Option<mvm_hostd::netd::ForwardingCapabilities>,
+    pub l3_capability_shortfall: Option<Vec<String>>,
     /// `semantic_address` per fixture name, populated on a zero-exit
     /// `build address` run.
     pub addresses: HashMap<String, String>,
@@ -123,10 +151,17 @@ pub struct CliWorld {
     /// The typed artifact-missing triple (`what`, `path`, `hint`) captured
     /// from the apple-container backend's start failure.
     pub apple_container_error: Option<(String, String, String)>,
+    /// The typed untrusted-artifact triple (`reason`, `path`, `hint`)
+    /// captured from the apple-container backend's start failure when the
+    /// cached kernel fails its digest attestation.
+    pub apple_container_untrusted: Option<(String, String, String)>,
     /// The backend kind auto-select resolved to, as its `Debug` token.
     pub auto_selected_kind: Option<String>,
     /// The kernel path after the apple-container backend's substitution.
     pub overridden_kernel_path: Option<String>,
+    /// The backend kind (`Debug` token) the admitted workload funnel
+    /// returned for the apple-container selector.
+    pub apple_container_workload_kind: Option<String>,
     /// Fixed stand-in guest-agent bytes an initramfs scenario builds from.
     pub initramfs_agent_bytes: Option<Vec<u8>>,
     /// The two deterministic cpio builds a determinism scenario compares.

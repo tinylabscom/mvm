@@ -54,6 +54,12 @@ pub struct MaterializeExt4Input {
     /// Only consulted by [`materialize_ext4_pure`] — the builder-VM path
     /// (`materialize_ext4`) doesn't stamp a label.
     pub volume_label: Option<String>,
+    /// Nodes the OCI unpacker could not place on the host tree because
+    /// the host filesystem folds case, carried here so the image still
+    /// gets them. See
+    /// [`mvm_fs::oci::unpack::UnpackReport::deferred_nodes`]. Empty on
+    /// Linux and on any case-sensitive volume.
+    pub deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
 
 impl MaterializeExt4Input {
@@ -64,7 +70,14 @@ impl MaterializeExt4Input {
             uncompressed_size_bytes,
             emit_verity: false,
             volume_label: None,
+            deferred_nodes: Vec::new(),
         }
+    }
+
+    /// Carry the unpacker's deferred nodes into the image.
+    pub fn with_deferred_nodes(mut self, deferred_nodes: Vec<mvm_fs::ext4::Node>) -> Self {
+        self.deferred_nodes = deferred_nodes;
+        self
     }
 
     /// Opt into dm-verity sidecar emission on the pure path.
@@ -139,6 +152,13 @@ pub enum RootfsError {
 
     #[error("dm-verity sidecar emission requires the `pure-mkfs` feature")]
     VerityFeatureDisabled,
+
+    #[error(
+        "the builder-VM materializer copies the host tree, so it cannot supply the {0} \
+         path(s) the host filesystem could not hold; use the in-process materializer \
+         (unset MVM_MATERIALIZE_BUILDER_VM) for this image"
+    )]
+    DeferredNodesUnsupported(usize),
 
     #[cfg(feature = "builder-vm")]
     #[error("builder VM ext4 materialization failed: {0}")]
@@ -307,6 +327,15 @@ fn materialize_ext4_in_builder_vm(
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob, LibkrunBuilderVm};
     use crate::qemu_builder::QemuBuilderVm;
 
+    // This path copies `/work` (the host tree) into the mounted ext4, so
+    // it has no way to place a node the host tree never held. Fail closed
+    // rather than emit an image that is quietly missing paths.
+    if !input.deferred_nodes.is_empty() {
+        return Err(RootfsError::DeferredNodesUnsupported(
+            input.deferred_nodes.len(),
+        ));
+    }
+
     let artifact_out = input
         .output
         .parent()
@@ -435,7 +464,8 @@ pub fn materialize_ext4_pure(
     }
     // Stage-0 /work is mounted by label; every other caller leaves
     // volume_label None and gets the unchanged default-options image.
-    let mut options = mvm_fs::rootfs::MaterializeOptions::default();
+    let mut options = mvm_fs::rootfs::MaterializeOptions::default()
+        .with_extra_nodes(input.deferred_nodes.clone());
     if let Some(label) = &input.volume_label {
         options = options.with_volume_label(label.as_bytes());
     }

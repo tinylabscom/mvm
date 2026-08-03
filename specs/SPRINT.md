@@ -10,12 +10,237 @@
 
 ## Current issue delivery
 
+- [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
+      a validated byte-span detector contract and supplements the curated
+      scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
+      Azure connection-string, Telegram-token and Discord-token detectors.
+      Arbitrary payloads are scanned as bounded UTF-8 islands without losing
+      byte offsets; invalid or overlapping detector spans fail closed and no
+      finding carries matched bytes. The same detector feeds one-way masking
+      and request-scoped reversible replacement. Default curated secret/PII
+      protection now arms compressed and over-cap refusal before forwarding.
+      The serial workspace test suite, workspace check, host workspace
+      all-target Clippy, cargo-deny and RustSec gates pass. Linux builder-VM
+      all-target Clippy remains before WS1 acceptance; streaming bodies, policy
+      lowering, admission posture and claim witnesses remain in WS2-WS4.
+
+- [x] Host-side machine logs — **plan 289**. `machine logs` now reads backend
+      console captures directly from the isolated host VM state directory, so
+      macOS no longer attempts to connect to or auto-start the retired
+      interactive dev VM. Isolated test state resolves through the canonical
+      explicit-root config helper (`vms_dir_at` / `vm_state_dir_at`), and the
+      CLI subprocess receives an isolated home. Workspace tests, check,
+      all-target clippy, formatting, and both home policy gates are green.
+      The reader itself was then replaced by plan 283's stream plane, which
+      keeps the host-side property and reads the files in-process rather than
+      spawning `tail`; see that plan doc for which of 289's constraints the
+      replacement holds.
+
+### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
+
+Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,
+`volume`, `secret`, `audit`). Each issue lands via its own PR; each PR
+updates only its own entry below.
+
+- [x] #2078 — canonical unified machine inventory through mvm-client.
+      `mvm_core::client::inventory` adds the typed `MachineInventoryRecord`
+      contract (identity/name, persistent-vs-transient kind, status +
+      detail incl. paused, fail-closed `build_mode` posture where any
+      unknown label deserializes to prod, source/backend, cpu/memory,
+      readiness, TTL, created/last-started, tags, host-path-free volume
+      attachment summaries, secret-reference count only) plus the shared
+      `InventoryQuery` visibility semantics (stopped persistent
+      definitions stay visible; stopped transients hide unless included;
+      expired hide unless included). `mvm_client::inventory` hosts the
+      spec×live join (duplicate live names collapse with the live row
+      winning), the fail-closed posture resolver the SDK envelope now
+      delegates to, and the read-only `list_local_inventory` composition
+      over any `MvmClient` — mock backend included; the `MvmClient` trait
+      and gateway are unchanged. `mvmctl machine ls` now renders the
+      shared records and its `--json` is the serialized record verbatim
+      (SDK-parsed `name`/`status`/`build_mode`/`kind` keys pinned by
+      tests). 41 new/updated unit tests across the three crates cover the
+      persistent-only/transient-only/joined/paused/failed/stopped/expired/
+      duplicate-name/unknown-posture matrix, serde round-trips,
+      unknown-field rejection, and the no-secret/no-host-path guarantees.
+
+- [ ] #2080 — reusable local encrypted-volume lifecycle service.
+
+- [ ] #2081 — reusable write-only local secret lifecycle service.
+
+- [ ] #2082 — normalized verified local audit events for UI consumers.
+
+- [ ] #2079 — persistent + transient launch lifecycle through
+      `LocalBackend` (starts after #2078/#2080/#2081 land the shared
+      inventory/volume/secret types).
+
+- [x] #2091 — no workload runs as root. `mvm-oci-init` is pid 1 and spawned
+      the agent as a root child, so `is_pid1()` was false, `apply_activation`
+      returned before `drop_privilege`, and the agent kept uid 0 — and since
+      none of its five workload-spawn sites sets a uid, every workload launched
+      through it ran as root. Firecracker boots the agent as pid 1 and so
+      already dropped to 901; the variable was the init, not the backend. The
+      OCI init now spawns the agent with the workload identity, and
+      `Verb::spawns_workload_process` plus one check on the shared request path
+      refuse any workload-spawning verb served at uid 0, so a boot path that
+      never reaches the drop fails closed instead of silently running as root.
+      Live: HVF moves from `uid=0(root)` to `uid=901`, Firecracker stays at
+      `uid=901`; reverting the mechanism makes the gate refuse with a
+      self-describing error. Evidence in
+      `specs/research/no-root-workload-live-witness.md`.
+
+- [x] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
+      6.12.100 configs and remove unsupported physical hardware, radio/input,
+      filesystem, power-management, tracing/debug, keyring, task-accounting,
+      NetLabel, swap/huge-page and legacy crypto/ABI plumbing while preserving
+      every supported virtual-device and security contract. The workload
+      configs are ratcheted from 1,189 to 902 x86_64 built-ins and from 1,314
+      to 936 aarch64 built-ins. The x86_64 workload `bzImage` falls from
+      7,656,448 to 4,072,448 bytes (46.8%) and reaches PID 1 under Firecracker
+      1.14.1; the 955-symbol builder config retains cgroups, namespaces,
+      netfilter, FUSE and virtio-fs, and its 4,977,664-byte kernel also boots to
+      PID 1. Config generation now fails if Kconfig silently restores an
+      audited cut. The checksum-verified native aarch64 PR artifact contains
+      exactly 936 built-ins in an 8,216,584-byte `Image` (3,339,345 bytes
+      gzip-compressed); the raw-HVF block-root harness reached
+      `Run /init as init process` at 36.6 ms.
+
+- [x] Continuous guest entropy — **plan 285 / issue #2060**. A portable
+      virtio-rng device now fills bounded, validated guest split-queue buffers
+      directly from the host CSPRNG, fails closed without consuming a request
+      when entropy acquisition fails, and retains no generated bytes that a
+      snapshot could replay. HVF advertises the device at a stable MMIO/SPI
+      allocation on every boot while preserving the fresh `/chosen/rng-seed`
+      for early initialization. Nine focused device tests plus FDT and entropy
+      gate tests pass. A live Alpine 3.20 HVF guest bound `virtio_rng.0`, exposed
+      `/dev/hwrng`, and returned distinct digests for successive entropy reads.
+      PR #2065 passed the complete pull-request and merge-group matrices and
+      merged through the queue at `12debbfcb`, closing #2060.
+
+- [x] Zero-open-issue reconciliation tranche: the original 19-issue queue is fully
+      classified, with completed, superseded, duplicate, and intentionally
+      unplanned items closed with evidence. Queued fixes for #2007, #2028, and
+      #2029 have merged. The remaining delivery updates Wasmtime to the patched
+      46.0.2 family, synchronizes and actually builds both Linux 6.12.100
+      kernel consumers, hardens the installer HTTP fixture, and removes the
+      Linux-only 128-second initramfs build from the cold-cache unit test.
+      Full-suite validation also made the plan-mode integration test override
+      the worktree's `MVM_HOME`, preventing it from reusing another test's
+      mutable host-signing key.
+      The remaining delivery merged in #2045, closing #1937, #1972, #1983,
+      and #2035; #2039 merged separately in #2041. The #2042 helper-lifecycle
+      repair merged in #2051. #2050 also resolved the BusyBox-mediated-tool
+      defect reported as #2052, and the exact Apple-container E2E now passes on
+      current main, closing #2054. #2048 now caches confirmed default-release
+      404s per version and architecture for 24 hours while mirrors and transient
+      failures remain retryable. The production-volume epic #2040 and the
+      subsequently filed entropy issue #2060 are also closed with merged
+      evidence. The final GitHub open-issue query returned zero results.
+      A scheduled run on an older commit subsequently filed #2067: the no-SSH
+      scanner had not classified a protected-credential-path refusal test as
+      deny-only, and the `mvm-cli` mutation shard lacked the pinned Zig
+      toolchain required by its build script. The exact rerun also exposed
+      missing mutation witnesses for the new L3 privilege-drop path and an
+      unclassified, semantically equivalent deletion of libkrun's explicit
+      `l3_vsock: false` capability (whose derived default is also `false`). The
+      follow-up audits that deny test, installs Zig only for the affected shard,
+      adds a PR-time structural regression test, proves in an isolated
+      privileged child that `NoNewPrivs` and every capability set are actually
+      cleared, and pins the libkrun L3 declaration; its merge closes #2067 and
+      restores the zero-open-issue state. A fresh full-security run on the
+      merged head then exposed one remaining bounding-set result-classification
+      mutant. The follow-up extracts a pure syscall-result classifier with a
+      fail-closed truth-table test; the exact Linux `mvm-agentd` mutation shard
+      is clean with 27 relevant privilege-drop mutants caught.
+      Tracked in plan 284.
+
+- [x] Production object-store volumes — **plan 283 / issue #2040**. Standardize
+      remote volume I/O on Apache Arrow `object_store` while preserving the
+      accepted mvm↔mvmd ownership boundary and mvmd's distinction between
+      multi-attach `StorageBucket` and exclusive block `VolumeRecord`. Completion
+      requires canonical contracts, removal of the dead S3/OpenDAL split, live
+      local/block attachment, encrypted durable checkpoints and cross-worker
+      restore, working remote CLI/API policy, MinIO integration, and Linux/KVM
+      persistence/restore proof. Registry-only, compile-only, and mocked-only
+      paths do not satisfy the issue.
+  - [x] WS1: external implementations can run the canonical trait-object
+        contract; the unregistered member-only S3 mount provider is removed;
+        template-registry S3 remains independently gated; the two-surface gate
+        enforces fleet ownership. Focused tests, workspace check/doctests,
+        optional-feature check, host all-target clippy, format, model gates,
+        audit, and deny are green. The one failure among 8,516 nextest cases was
+        an installer-script flake that passed on its focused rerun.
+    - The contract, conformance fixture, and local implementation now live in
+      the dependency-light `mvm-volume-contract` leaf and are re-exported by
+      core and runtime. This lets mvmd depend on the exact mvm-owned type without
+      linking either repository's unrelated crypto/VMM dependency graph; the
+      leaf's four contract, symlink-refusal, listing, and serde tests pass, and
+      its default closure remains async-runtime-free. The isolated full `cargo
+      test --workspace --no-fail-fast` gate passes with zero failures after the
+      audit posture and process-global test-isolation fixes.
+  - [x] WS2: live attachment is complete. Portable encrypted ext4 images,
+      launch-time typed resolution, admitted VMM/guest handoff, crash recovery,
+      durable exclusive attachment leases, and canonical immutable local
+      snapshot/restore with tamper refusal and interrupted-restore convergence
+      are covered by focused tests. The local CLI lifecycle and runtime registry
+      suites pass 19 and 21 tests respectively. Five new hermetic volume BDD
+      scenarios pass in the 88-scenario/442-step suite. Live KVM proves
+      failed-start lease cleanup, writable restart persistence (23/23 steps),
+      and guest read-only refusal (17/17 steps). The restart uses the driver's
+      authenticated stop-time filesystem flush; PID monitoring proves every
+      observed Firecracker is reaped. The run also fixed root-owned process
+      reconciliation incorrectly treating `kill(pid, 0)` `EPERM` as a dead PID.
+      On the final integrated Linux tree, 24 guest-mount tests, 9 OCI-init tests,
+      and workspace all-target clippy pass with warnings denied; the host
+      all-target commit gate is also green.
+  - [x] WS3: mvmd now consumes the canonical mvm leaf contract and implements
+        it over Apache Arrow `object_store` 0.14.1 for S3-compatible, GCS,
+        Azure, and R2 providers. Remote data and names remain mandatorily
+        encrypted with tenant-scoped, zeroizing key material; credential
+        resolution has no environment fallback, and provider errors are
+        redacted. OpenDAL and its unused closure are gone. The secure dependency
+        graph keeps cloud XML parsing on `quick-xml` 0.41 while isolating iroh's
+        prerelease digest graph through a tested compatibility re-export.
+        mvmd PR #198 carries the implementation; 1,497 gateway library tests,
+        1,632 integration tests, the remaining workspace tests/doctests, check,
+        all-target clippy, formatting, focused docs, audit, and deny pass.
+  - [x] WS5 client increment: the remote stub is gone. The authenticated,
+        HTTPS-or-loopback `GatewayBackend` now carries tenant volume create,
+        list, attach, detach, checkpoint, restore, and delete operations with
+        typed failures and percent-encoded resource IDs. `mvmctl volume
+        --remote` reads its URL, in-memory-only bearer token, and tenant from
+        dedicated environment variables while local behavior stays unchanged.
+        Twenty-one gateway client tests, including one real loopback HTTP request, nine CLI
+        lifecycle parser tests, touched-crate checks, all-target Clippy, and the
+        complete 115-scenario / 523-step BDD suite pass.
+  - [x] WS4/WS5 policy/WS6/WS7: mvmd PRs #199, #201, and #202 deliver durable
+        manifests and encrypted checkpoints, fresh-worker restore, fencing,
+        retention/GC, API policy, metrics, signed lifecycle/refusal audits, and
+        operator documentation. The real MinIO lane proves encrypted multipart
+        I/O, conditional conflict handling, pagination beyond 1,000 objects,
+        and cleanup. A live Firecracker/KVM run proves encrypted attach, restart
+        persistence, checkpoint, mutation, restore into fresh state, digest
+        recovery, and clean teardown. mvm PR #2064 supplies the authenticated
+        remote CLI. Issue #2040 records the rejected speculative clauses that
+        conflict with the shipped resource and artifact contracts.
+
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout
       of untrusted code, and structural security tests. The label counter now
       toggles on every retry so its persistent timeline count cannot stick at
       one. Workflow validation, focused tests, workspace check, clippy, and
       formatting pass. Tracked in plan 282.
+
+- [x] Merge-queue latency audit and workflow hardening: measured 50 recent
+      queued merges and 101 merge-group jobs, confirmed runner admission and
+      long required-job execution as the dominant critical path, and found
+      regenerated speculative groups adding up to 2h04m of rebuild delay. The
+      two required workflows now declare `checks_requested` explicitly, cancel
+      only superseded pull-request runs, never cancel merge-group validation,
+      and give manual runs unique concurrency keys. All five required check
+      names and exact-merge-commit validation remain intact. Plan 281 records
+      the measured 38m26s p50 / 2h14m03s p95 queue latency. The live ruleset is
+      now set to build concurrency 3, group wait 0, and timeout 90 minutes.
 
 - [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
       basename deny-list over the whole workspace root to an allow-list of the
@@ -29,13 +254,49 @@
       directions are enforced by tests that parse the specific named nix list;
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
-- [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
-      <rev>/` is served on a hit if `rootfs.ext4` merely exists as a file: no
-      digest, no signature, so content substitution is undetected, and the
-      provenance recorder then signs whatever bytes are on disk. The audit log
-      faithfully records a substituted image as legitimate. Plan 276 is written
-      and Proposed; this moves WS6 into the sprint. Prerequisite for plan 279
-      WS1 so the new cache key and the new verification do not land together.
+- [x] Two-verifier oracle bar — **plan 276 WS4**. A signed audit chain frozen
+      at `tests/vectors/audit-chain-v1.jsonl`, read by both the host verifier
+      and the `no_std` mirror. The previous parity test compared them over a
+      chain generated fresh with a random key each run, so neither ever saw
+      bytes the other could also see. Diverging the mirror's serialization of
+      an absent optional field now fails over the shared corpus. riscv32 stays
+      a compile oracle — bare metal has no test harness.
+
+- [~] Content-address replay vectors — **plan 276 WS3**. Frozen
+      input→address vectors for `ir_hash`, the RFC-6962 leaf/interior/root
+      helpers, `compute_plan_id` and `bundle_sha256`. The tests that covered
+      these were relational only: hashing the canonical form with a trailing
+      newline moved every address and all four `ir_hash` unit tests stayed
+      green. `compute_plan_id` matters most — it does not use JCS, relying on
+      serde_json's default key ordering, so the gate pinned the feature flag
+      while nothing pinned the address it protects. Remaining: the audit
+      `prev_hash` spine, which needs a fixed keypair and belongs with WS4.
+
+- [x] Claim evidence pinned — **plan 276 WS1**. Each claim in
+      `model/claims.toml` now declares the `witness_kinds` it rests on, and
+      `check-claim-catalog` fails if a declared kind has no live witness, or if
+      a present kind is undeclared. Retiring a witness is now an explicit edit
+      to that declaration rather than a deletion nothing notices. Before this,
+      delisting a witness from both the model and the ADR-001 ledger left the
+      board green — claim 1 lost its only CI evidence and the run still
+      reported `clean (16 claims, 48 witnesses verified)`.
+
+- [~] Build cache verify-on-read — **plan 276 WS6**. `~/.mvm/dev/builds/
+      <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
+      digest, no signature, so content substitution went undetected and the
+      provenance recorder then signed whatever bytes were on disk — the audit
+      log faithfully recording a substituted image as legitimate.
+  - [x] Dev-build artifact cache closed in #2053: `mvm_core::action` +
+        `verify_artifacts_on_disk`, verified on read, failing closed to a cold
+        miss, and evicting both the record and the build directory. Evicting
+        only the record would leave the poisoned tree under a name a later
+        build can re-adopt. Also closed a mid-build leak of `dev_builds_dir()`
+        on failure paths. This unblocks plan 279 WS1.
+  - [ ] Kernel cache still open: `resolve_kernel` returns `Cached` on
+        `path.exists()`, and `verify_fetched_kernel` has no production caller,
+        so neither the fetch nor the read path checks a kernel against its pin.
+        Scoped as **plan 288** (`specs/plans/288-kernel-cache-verify-on-read.md`);
+        Proposed, not yet scheduled.
 
 - [ ] Build action identity + artifact manifest — **plan 279**
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).
@@ -57,6 +318,22 @@
       tamper-refusal scenarios; 8,403 workspace tests, doctests, clippy/model
       gates, and all 76 BDD scenarios pass. Tracked in
       `specs/plans/280-transcript-root-audit-binding.md`.
+- [x] L3 TUN-over-vsock network mode (plan 285 / ADR-036): a workload that
+      declares `raw_ip_stack` gets a real in-guest IP stack with no guest
+      NIC. There is no operator-facing mode selector — the transport is
+      derived from what the workload declares and recorded in the signed
+      plan. Shared no_std wire protocol, pure policy core (anti-spoof,
+      canonical-egress admission, bounded flows, controlled DNS, declared
+      ingress), guest `mvm-net-agent`, machine-scoped host gateway, Linux
+      host-TUN/nftables datapath, `CONFIG_TUN` in the workload kernel, and
+      the amendment's backend-neutral guest channel, per-boot VM identity,
+      signed network lease, and capability-gated forwarding. Wired through
+      the launch path: synthesis derives the L3 spec from the admitted mode,
+      the workload runner starts the gateway and waits for it to bind before
+      the guest boots, and every stop path reaps it. Privileged Linux lane
+      run on a KVM host (6/6, live forwarding witness, clean teardown); 23
+      hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
+      and refuses; native Windows is not claimed.
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
       dormant**. Tracked in `specs/plans/283-workload-stream-plane.md` and
@@ -101,6 +378,16 @@
       keep the SDK publication dry-run in the manual full matrix, and remove
       speculative pre-PR and redundant post-merge `main` runs without changing
       required check names.
+
+- [x] Plan 284 CI latency: stop the lint lane from repeating the full workspace
+      under `test-support`, remove unshareable multi-gigabyte `target/` caches,
+      share `mvm-cli`'s nested build graph across feature fingerprints, move
+      man-page tests onto Test's warm compile graph, and keep the removed MCP
+      server and smoke lane out of CI. Structural, targeted feature, full
+      workspace, and Linux verification are green. The first
+      post-change run measured 19–21 minutes of runner wait; its 37m36s Lint
+      execution did not beat the 36-minute cold-run baseline because the
+      remaining `mvm-cli` and live audit tests dominate the lane.
 
 - [x] #1840 faithful flake-image revert: boot the recorded slot revision,
       reconcile signed artifact hashes, and preserve the admitted restore path.
@@ -333,6 +620,58 @@
       confines `HOME` and `MVM_HOME` to a temp root, applied where
       cargo-mutants is spawned so the nightly job and the local recipe
       share one implementation.
+
+- [ ] Plan 272 WS-2 — the full-surface mutation baseline, and what
+      establishing it found. The surface had never been measured end to
+      end, and the first complete run says 1221 mutants, 359 surviving.
+      Most of the finding is not the survivors.
+
+      **Eight of the twenty-six files could not be measured at all.** The
+      lane is package-scoped, and three packages were green under
+      `--workspace` and red alone: `mvm-sdk` never enabled
+      `mvm-core/test-support`, so its tests did not compile; `mvm-cli` has
+      42 tests driving the root package's `mvmctl`, so
+      `CARGO_BIN_EXE_mvmctl` is unset; `mvm-runtime` had a test spawning
+      an `mvm-hostd` binary. Claims 1, 3, 10, 11, 14 and 15 were affected.
+      Two of the eight reported `total=0 missed=0 caught=0` — what a
+      fully-covered file reports — because `ensure_mutants_actually_ran`
+      enumerated the one baseline verdict it had seen (`Failure`) and a
+      timed-out baseline reports `Timeout`. It now requires `Success` and
+      a nonzero count.
+
+      **Two files carry 242 of the 359 survivors**, both the same shape: a
+      witness resolving to a large multi-purpose file. `mvm-host-vm-init.rs`
+      (claim 2, 164) and `console.rs` (claim 15, 78) each have their own
+      witness fully caught while the rest of the file answers to no claim.
+      Both are scoped through the new `SurfaceScope`, which cannot be
+      produced by resolution, demands a written reason and a tracking
+      issue, and survives a re-pin — so narrowing a claim's surface costs
+      an argued diff. Filed as #2006 and #2021 with the measurements.
+
+      **The in-claim survivors were nearly all real holes**, closed with
+      tests and each verified by planting its mutant. The sharpest:
+      `validate_guest_mount` and `denied_host_roots` — claim 1's Tier-0
+      host-filesystem guard, which would have admitted any guest mount
+      path and made the host signer key, the audit chain and `~/.ssh`
+      shareable into a guest — and `set_no_new_privs`, claim 2's own named
+      `fn:` witness, which had no test at all. Also two fail-open egress
+      mutants in `stages.rs` (the L4 allow-list's DNS carve-out widened to
+      pass every UDP packet; the SSH banner detector silently ceasing to
+      detect) and two in `plan_admission.rs` (a size cap that admits
+      everything above it, and a stale verb-grant that survives into a
+      reused VM name).
+
+      Three affordability defects fixed alongside: the flat 300s
+      per-mutant timeout (too short for three packages, 5× too long for
+      another — now derived from each package's baseline);
+      `seed_guest_runtime_cache` seeding the guest-binary cache under a
+      key the resolver never reads, so three `pull_core` tests
+      cross-compiled the guest agent at 55s each (mvm-cli's suite 86s →
+      2s); and `just mutation-witnesses` running `--run` against the
+      developer's real `~/.mvm` — the isolation now lives at the single
+      cargo-mutants spawn site, which is what the entry above already
+      claimed. Detail in `specs/VERIFICATION.md` §"Mutation-tested
+      witnesses".
 
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
@@ -700,7 +1039,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
   - [x] **Tier 4 — COMPLETE** (the substantive rewire happened incrementally; each split repointed its own facade + fixed imports, so the workspace was green after every batch — no broken imports remained). Closeout was documentation: the 2 "deferred" items resolved to **permanent `mvm-core` residents**, NOT pending moves — `policy/security_profile` (a `Copy` runtime value, not a serde DTO, + `crypto::seccomp` dep) and `protocol/protocol.rs` `HostdRequest`/`HostdResponse` (host-side mvmd↔hostd IPC embedding `domain::{VolumeAttach,TenantNet}` — which stay in core per architecture — over `hostd-transport` tokio framing; nothing runs in guest/browser). This is the clean line: **mvm-protocol = DTOs a no_std/edge/guest/browser consumer needs; host-only IPC + orchestration domain stay in mvm-core.** Design doc `10-…` updated to Status:COMPLETE. (Cosmetic: 1 masked test-only `ToString` import left as-is — adding it risks a redundant-import lint under the std/schema build.)
   - [x] **INCREMENT 3 COMPLETE** — the `mvm-core`→`mvm-protocol` DTO inversion (the Phase 1a long pole) is done. Entire signed plan + all wire/policy/plan DTOs compile no_std on wasm32; the wasm-container core-goal (WS11) foundation is real.
   - [ ] **Tier 4** — logic rewire (imports→mvm_protocol) + `mod.rs` re-export shims; deferred items (`security_profile`, `protocol.rs` HostdRequest/domain).
-- [x] `mvm-storage` placement — folded into `mvm-runtime` as `crate::storage::volume` (nested under the pre-existing `crate::storage` dm-thin CoW pool module — a naming collision the original decision didn't anticipate — to avoid clashing `backend.rs`/`mod.rs` filenames and a second unrelated `StorageError`). `s3` feature renamed `storage-s3`, off by default (`cargo tree -p mvm-runtime -e no-dev` carries no `object_store` by default, present only with `--features storage-s3`); Linux `tempfile` dep was already an unconditional normal dep of `mvm-runtime`, no change needed; `SnapshotUpper` import in `libkrun.rs` repointed. Crate deleted, workspace member + `[workspace.dependencies]` entries removed. Crate count 15 → 14.
+- [x] `mvm-storage` placement — folded into `mvm-runtime` as `crate::storage::volume` (nested under the pre-existing `crate::storage` dm-thin CoW pool module — a naming collision the original decision didn't anticipate — to avoid clashing `backend.rs`/`mod.rs` filenames and a second unrelated `StorageError`). The original fold renamed its S3 prototype to `storage-s3`; plan 283 later removed that unregistered member-only provider to restore the fleet ownership boundary while retaining the independent S3 template registry. Linux `tempfile` dep was already an unconditional normal dep of `mvm-runtime`, no change needed; `SnapshotUpper` import in `libkrun.rs` repointed. Crate deleted, workspace member + `[workspace.dependencies]` entries removed. Crate count 15 → 14.
 - [x] Full `nextest --workspace` ran — **6598 passed / 0 failed** (`176adc793`) after fixing a class the ident-rewrites missed: **stale crate-name STRING literals** (dir paths, `-p` pkgs, features, allowlist paths) in the builder-VM guest-build/libkrun-supervisor paths. Excl `mvm-runtime` (macOS codesign-SIGKILL) + `mvm-conformance` (cucumber `harness=false` → `just bdd`). Also unblocked **5 xtask claim gates that were failing-open** (paths pointed at renamed `crates/mvm-guest`) + a vacuous `no_backend_dep` cycle guard. Lesson: after crate renames, grep strings, not just idents; `nextest --no-fail-fast` catches runtime-wrong-but-compiling.
 - [x] **CI/ADR stale-ref sweep** (`b0a9d2477`): the workflows + `ADR-022` were never updated through the 7 consolidations, so several jobs invoked deleted packages. Remapped every functional `cargo -p <gone>` (`mvm-guest`→`mvm-agentd`, `mvm-ext4`/`mvm-oci`→`mvm-fs`, `mvm-vm-host`→`mvm-hostd`, +3 stray `mvm-build`→`mvm-fs` test invocations) **verified by RUNNING each** (mvm-agentd 560/560, mvm-fs oci 25/25 + hermetic 4/4 + the 3 ext4 examples, mvm-hostd bins build); repointed `ci-full` OCI path-filters + `architecture` globs + `security` fuzz-cache paths; refreshed the `ADR-022` crate table (dropped `mvm-verify`). Both dead-crate-`-p` + stale-path-filter rg sweeps now EMPTY; all 5 YAMLs still parse. Config/doc only. **STILL DEFERRED (cosmetic/frozen/pre-existing, reported):** prose crate-name mentions in ADRs 001/002/009/010/014/016/020/024; the `security.yml` FROZEN fuzz-lane `working-directory: crates/mvm-{guest,oci,vm-host,ext4}` (needs care re pinned locks); two OLDER broken refs `mvm-jailer-lite`/`mvm-host-vm-init` (pre-this-session consolidation); a non-breaking `crates/mvm/src/hostd/**` glob + an `ext4-real-mount` job label. `scripts/*.sh` not yet swept.
 - [ ] **Follow-up (WS2↔WS10):** `check-guest-agent-runtime-free` now FAILS — merging the tokio addon bins (`addon-dns`/`vsock-bridge`/`egress-client`) into the single guest binary drags tokio into the guest closure, against the tokio-free/~8 MB goal. Single guest binary requires de-tokio'ing the addons (WS10) or a per-binary check scope.
@@ -720,7 +1059,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [~] **Member-feature decision matrix (audited; the below need a maintainer call, so NOT executed blindly):**
   - `manifest-verify` "always-on" is **REJECTED** — it pulls the sigstore stack (tokio) into mvm-core's default closure and would break the shipped `check-core-runtime-free` gate + the runtime-free invariant. It stays opt-in (the SPRINT "always-on" wording was over-simplified). `builder-vm`/`pure-mkfs` stay member composition units (a VM-driving consumer must be able to skip the builder pipeline); not made unconditional.
   - `attestation-tpm2`/`attestation-sev-snp`/`attestation-tdx` are **stub providers** (return `NotYetImplemented`) gating hardware-backed key attestation, which ADR-002 lists **out of scope**. Candidate for YAGNI deletion (3 features + `HwProviderKind` arms + stub impls) — but that removes documented future scaffolding, so it's a maintainer ratification call, flagged not executed.
-  - `storage-s3`/`wasm-backend`: legit heavy-dep opt-ins intentionally outside both shipped surfaces (a consumer opts in at the member level); leave as-is (optionally add to the root internal allowlist for discoverability — cosmetic).
+  - `wasm-backend` remains a legitimate heavy-dependency member opt-in. The prior `storage-s3` conclusion is superseded by plan 283: the provider had no production registrant, bypassed both shipped surfaces, and crossed the accepted fleet storage boundary, so it was removed and `check-two-surfaces` now guards that boundary.
   - `schema` is already codegen/tooling-only (in no product surface); "move to build-time" is satisfied in spirit — the schemars derives can't be build-time-only without the feature enabling the derive, so the feature stays as the codegen knob.
 - Gate: `xtask check-two-surfaces` green (2 surfaces, 7 internal). **WS5 substantially COMPLETE**; only the attestation-stub deletion awaits ratification.
 
@@ -785,7 +1124,7 @@ Then unify + retire the old paths:
 - [ ] Redesign to a small, discoverable verb set; `env` shown in `--help`.
 - [ ] Merge `setup`/`bootstrap` into one first-run `bootstrap`. Add the lifecycle verbs: **`upgrade`** (self-update `mvmctl`); **`uninstall`** (remove everything — the binary, `~/.mvm`, and installed host/guest artifacts); **`env cleanup`** (reclaim `~/.mvm` — caches + transient VM/build state, keeping config + keys); **`env reset`** (wipe `~/.mvm` back to a clean slate). These replace the fragmented `cache prune` / `pack prune` / `storage gc`. `env` becomes a visible top-level subcommand (today `hide = true`).
 - [ ] Replace the 31-arm dispatch `match` with a `Command` trait (`fn run(&self, ctx: &Cli) -> Result<()>`); one module per command; every command calls `mvm-client`.
-- [ ] `mvmctl serve` exposes the agent-facing server behind an `AgentProtocol` trait (MCP impl now; ACP added as a second impl when a consumer exists — no new crate), all backed by `mvm-client`.
+- [x] ~~`mvmctl serve` exposes the agent-facing server behind an `AgentProtocol` trait~~ — descoped. The MCP server was removed outright; no agent-protocol server surface remains.
 - [ ] Remove hidden/duplicate/dead verbs.
 - [ ] Slim the **Justfile** — collapse the recipe sprawl to a small set (`build`, `test`, `lint`, `ci`, `bdd`, `run`, `clean`).
 - Gate: `mvmctl --help` lists the real surface; `tests/cli.rs` covers it; no command reaches past `mvm-client`; `just --list` is short.
@@ -803,7 +1142,7 @@ Then unify + retire the old paths:
 - [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
 - [ ] Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "abort"` for bins.
 - [ ] Dep cut: dedupe ext4 (writer+reader), TLS (`reqwest`/`rustls`/`rcgen`), compression (`flate2`/`lzma-rs`/`tar`), net (`etherparse`/`rtnetlink`/`mio`), syscall (`nix`/`rustix`/`libc`); **reimplement trivially-used deps** where it removes an attack surface for little code.
-- [ ] **Nix build speed:** local parallel/incremental build (nix-fast-build-style), no external cache providers (hermetic).
+- [ ] **Nix build speed:** local parallel/incremental build (nix-fast-build-style), no external cache providers (hermetic). **Narrowed (2026-07-31):** the initramfs left the Nix path entirely — it is now a deterministic cargo artifact (`build_initramfs_with_cargo`), so a cold cache costs one `cargo zigbuild` cross-compile, not a Nix evaluation. This item now covers only kernels, rootfs images, and overlays.
 - Gate: guest RSS ≤ ~8 MB, host RSS ≤ ~64 MB idle; an idle guest configured at 512 MB resident-costs ~its working set (demand-fault proven); lockfile materially smaller.
 
 **WS-DX — developer experience & performance** (the story #1637 promises)
@@ -849,6 +1188,24 @@ Then unify + retire the old paths:
       the capture path does not emit `checkpoint.created` (#1962), so the
       post-restore grant delivery and the child's egress/broker/exit channels
       remain live-unproven. The flip is gated on that run.
+  - [x] Ordinary persistent-machine Firecracker teardown now fails closed
+        (#2007): non-interactive or declined confirmation exits non-zero, state
+        is retained unless process exit is verified, and a restart cannot
+        overwrite the PID marker of a still-live process. Reconcile-on-entry
+        also recognizes `fc.pid`, so it cannot delete a live Firecracker's
+        state before the stop path attaches. The 2026-07-31 KVM recheck passed:
+        refusal retained PID 4124113 and the exact process, then `--yes`
+        removed the marker and process. Eleven regressions cover confirmation,
+        marker ownership, exact-PID teardown, cleanup ordering, and
+        reconciliation. The analogous warm-pool claim-refusal cleanup remains
+        a separate open gate.
+      Factory parents now receive an authority-free admitted plan and a signed
+      `checkpoint.created` anchor before entering the pool (#1962). Live KVM
+      validation proves a production-replenished parent is anchored and the
+      next claim passes the former `ParentUnaudited` gate, restores a child, and
+      reaches post-restore signaling. It then fails closed because the child's
+      identity/grant re-pin does not complete; that handshake remains the hard
+      blocker, with egress/broker/exit channel parity still behind it.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.
@@ -905,9 +1262,9 @@ Phase 4 (docs, close-out, wasm stretch, mvmd)     ─   last
 
 WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net` (1d). WS2 depends on the guest/host crate merges (1e/1h). WS10's de-tokio depends on WS2's single-binary shape.
 
-### Active workstream: universal initramfs + vsock-activated boot (Plan 270)
+### Workstream: universal initramfs + vsock-activated boot (Plan 270) — COMPLETE
 
-Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
+Shipped in #1914 (core), #1931 (QEMU unified runner), #1933 (Docker dev-tier), #1936 (Wasm activation), #1968 (Apple Container kernel on HVF), #1985 (activation agent-readiness retry), and #1996 (deterministic cargo initramfs, which replaced the Nix initramfs build described below). Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
 
 **Prerequisites:** satisfied. `feat/vsock-control-conformance` and `feat/firecracker-vsock-only-final` are already merged to `main`; `feat/hvf-converge-vsock` cleanup is in PR #1905.
 
@@ -915,7 +1272,12 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
 1. [x] Initramfs Nix derivation + content-addressed build. Created
    `nix/packages/mvm-guest-agent-static.nix`, `nix/images/initramfs/flake.nix`,
    and exposed `packages.<system>.initramfs` producing `initramfs.cpio.gz`,
-   `initramfs.hash`, `initramfs.size`, and `VERSION`.
+   `initramfs.hash`, `initramfs.size`, and `VERSION`. **Replaced (#1996):**
+   the Linux build path is now `build_initramfs_with_cargo` in
+   `mvm-build/src/initramfs.rs` — the pinned agent source is cross-compiled
+   via the shared `guest_agent_build::resolve_or_build_guest_binaries` cache
+   and packed as an epoch-zero, stably-ordered newc cpio (same sidecar
+   contract). The flake remains only as the optional publish-path build.
 2. [x] PID-1 signal handling and zombie reaping in `mvm-agentd`. Added
    `init.rs` with PID-1 detection, early filesystem mounts, and a SIGCHLD
    reaper. Wired into `mvm-guest-agent.rs` before the vsock bind.
@@ -956,8 +1318,8 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    **Corrected — the shrink was unconditional and broke every host that
    cannot resolve the universal artifact.**
    `attach_universal_initramfs_if_cached` is non-fatal by design, and on
-   macOS it always fails (no `nix build` for a Linux initramfs, and the
-   published `initramfs-<arch>.tar.gz` 404s), so the boot falls back to the
+   macOS it always fails (no local build for a Linux initramfs on macOS, and
+   the published `initramfs-<arch>.tar.gz` 404s), so the boot falls back to the
    legacy per-rootfs `rootfs.initrd` whose PID 1 is `mvm-verity-init` — which
    reads those exact tokens off the cmdline and is never sent
    `ActivateEnvironment`. Result on every macOS `machine run --image`:
@@ -986,14 +1348,16 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    refusal) counting as ready and only a transport failure as not-yet — and
    routed both waiters through it.
 9. [x] Initramfs cache resolver/builder and CLI attachment. Added
-   `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs` Nix
+   `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs`
    builder + cache installer, and `attach_universal_initramfs_if_cached` in
    `mvm-cli/src/commands/vm/up/runtime_source.rs`, wired from `exec.rs` and
    `oci_persist.rs` and `checkpoint.rs` right after the runtime-overlay attachment. The resolver
    validates `initramfs.cpio.gz`, `initramfs.hash`, `initramfs.size`, and
    `VERSION`; the builder supports worktree-isolated caches by seeding from
    the default cache, falls back to a published-release download on non-Linux
-   hosts, produces the artifact on Linux via `nix build`, and installs
+   hosts, produces the artifact on Linux via the deterministic cargo build
+   (`build_initramfs_with_cargo` — previously `nix build`, replaced in
+   #1996), and installs
    atomically. `cargo fmt --all`, `cargo clippy --workspace --all-targets --
    -D warnings`, the spec-ref lint, targeted nextest for the modified crates
    (mvm-fs, mvm-build, mvm-runtime, mvm-agentd, mvm-cli initramfs tests),
@@ -1011,6 +1375,16 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    and updated the verified-boot cmdline feature to assert that the legacy
    `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots
    — narrowed by item 6's correction to *universal*-initramfs boots only.
+10. [x] Retired the obsolete CLI workload-guest payload. `mvm-cli/build.rs`
+    now embeds only the host and seed builder/bootstrap manifests; the six
+    workload helpers are supplied by the universal initramfs and runtime
+    overlay. Removed the dead skip-embedding environment switch and fast-test
+    recipe, deleted the embedded-byte OCI plumbing, retained a content-keyed
+    source fallback for legacy rootfs-only development, and added `xtask` plus
+    integration assertions that prevent workload binaries from returning to
+    the CLI payload. Focused tests, workspace clippy, formatting, and the full
+    workspace test suite pass; the latter was run serially because unrelated
+    tests mutate process-global environment variables under parallel execution.
 
 Live witness for items 6 and 8 on macOS 26.5.2 / arm64, HVF backend, after the
 corrections: `machine run --image alpine -- /bin/sh -c "echo TRANSIENT-OK; cat
@@ -1140,7 +1514,8 @@ produce the artifact, so what is proven is the eviction and the fallback.
 
 `initramfs::tests::resolve_returns_missing_when_cache_empty` is also fixed. Its
 `HOME` isolation had made it genuinely hermetic, which exposed what that was
-hiding: on Linux the empty-cache path falls through to a real `nix build`, and
+hiding: on Linux the empty-cache path falls through to a real build (then
+`nix build`; since #1996 the deterministic cargo build), and
 with a shell double that reports success without producing an artifact the call
 never returns. It ran for 20,000+ seconds and took a CI job to its six-hour
 limit. It had been passing on Linux only by finding an artifact it was supposed
@@ -1149,7 +1524,9 @@ contract is the one the name claims, and completes in milliseconds.
 
 That a shell double reporting success can make the nix path hang rather than
 error is worth closing separately: a build producing no artifact should fail,
-not wait.
+not wait. For the initramfs this is now moot because the Nix build path was
+removed entirely; the cargo build either produces the artifact or returns a
+typed error.
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
 ### Deferred: a dry run should not require a bootable backend

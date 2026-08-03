@@ -233,6 +233,7 @@ fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
                 "file={overlay_verity_path},if=virtio,format=raw,readonly=on"
             ));
         }
+        append_qemu_user_disks(&mut drives, config);
         return drives;
     }
     let mut drives = vec![format!("file={},if=virtio,format=raw", config.rootfs_path)];
@@ -243,7 +244,36 @@ fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
     if let Some(overlay) = crate::microvm::non_verity_overlay_ext4(config) {
         drives.push(format!("file={overlay},if=virtio,format=raw,readonly=on"));
     }
+    append_qemu_user_disks(&mut drives, config);
     drives
+}
+
+fn append_qemu_user_disks(drives: &mut Vec<String>, config: &VmStartConfig) {
+    drives.extend(
+        config
+            .volumes
+            .iter()
+            .filter(|volume| matches!(volume.kind, mvm_core::vm_backend::VmVolumeKind::Disk))
+            .map(|volume| {
+                let read_only = if volume.read_only { ",readonly=on" } else { "" };
+                format!("file={},if=virtio,format=raw{read_only}", volume.host)
+            }),
+    );
+}
+
+fn ensure_qemu_volumes_supported(config: &VmStartConfig) -> Result<()> {
+    if let Some(volume) = config
+        .volumes
+        .iter()
+        .find(|volume| matches!(volume.kind, mvm_core::vm_backend::VmVolumeKind::DirShare))
+    {
+        bail!(
+            "qemu directory-share volume '{}' -> '{}' is unsupported; use a disk-image volume",
+            volume.host,
+            volume.guest
+        );
+    }
+    Ok(())
 }
 
 impl VmBackend for QemuBackend {
@@ -274,6 +304,7 @@ impl VmBackend for QemuBackend {
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        ensure_qemu_volumes_supported(config)?;
         let qemu_bin = locate_qemu()?;
         let kernel = resolve_workload_kernel(config)?;
         ensure_qemu_runtime_source_supported(config)?;
@@ -1342,6 +1373,53 @@ mod tests {
         };
         assert_eq!(qemu_drive_args(&config).len(), 1);
         assert!(!qemu_cmdline(&config).contains("mvm.runtime_data="));
+    }
+
+    #[test]
+    fn qemu_attaches_disk_volumes_with_requested_access_mode() {
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            volumes: vec![
+                mvm_core::vm_backend::VmVolume {
+                    host: "/tmp/writable.ext4".into(),
+                    guest: "/data/writable".into(),
+                    kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+                    ..Default::default()
+                },
+                mvm_core::vm_backend::VmVolume {
+                    host: "/tmp/readonly.ext4".into(),
+                    guest: "/data/readonly".into(),
+                    read_only: true,
+                    kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let drives = qemu_drive_args(&config);
+        assert_eq!(drives.len(), 3);
+        assert!(drives[1].contains("/tmp/writable.ext4"));
+        assert!(!drives[1].contains("readonly=on"));
+        assert!(drives[2].contains("/tmp/readonly.ext4"));
+        assert!(drives[2].contains("readonly=on"));
+    }
+
+    #[test]
+    fn qemu_refuses_directory_share_before_start() {
+        let config = VmStartConfig {
+            volumes: vec![mvm_core::vm_backend::VmVolume {
+                host: "/tmp/share".into(),
+                guest: "/data/share".into(),
+                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let err = ensure_qemu_volumes_supported(&config).unwrap_err();
+        assert!(err.to_string().contains("directory-share"));
+        assert!(err.to_string().contains("/data/share"));
     }
 
     #[test]

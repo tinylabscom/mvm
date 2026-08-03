@@ -396,7 +396,10 @@ impl<'a> Pump<'a> {
     /// throughput — unbounded, in a guest with a fixed memory budget. A
     /// wrapper that traps SIGTERM and keeps printing is all it takes.
     fn poll_child_once(&self, child: &mut Child, ladder: &mut KillLadder) -> Option<PumpOutcome> {
-        match child.try_wait() {
+        // Through `child_wait`, never the inherent method: when the agent is
+        // PID 1 its orphan reaper can consume the status first, and only the
+        // shared waiter can then say what the workload actually exited with.
+        match crate::child_wait::try_wait(child) {
             // A child we signalled is reported by *why* we signalled it, not
             // by the signal that finally landed.
             Ok(Some(status)) => Some(match ladder {

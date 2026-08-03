@@ -321,11 +321,19 @@ fn volume_create_parses_default_root() {
                     volume,
                     root,
                     host_backed,
+                    size,
+                    remote,
+                    bucket,
+                    storage_class,
                 },
         })) => {
             assert_eq!(volume, "work");
             assert_eq!(root, None);
             assert!(!host_backed);
+            assert_eq!(size, "1G");
+            assert!(!remote);
+            assert!(bucket.is_none());
+            assert!(storage_class.is_none());
         }
         _ => panic!("Expected volume create command"),
     }
@@ -352,11 +360,19 @@ fn volume_create_host_backed_parses() {
                     volume,
                     root,
                     host_backed,
+                    size,
+                    remote,
+                    bucket,
+                    storage_class,
                 },
         })) => {
             assert_eq!(volume, "work");
             assert_eq!(root, None);
             assert!(host_backed);
+            assert_eq!(size, "1G");
+            assert!(!remote);
+            assert!(bucket.is_none());
+            assert!(storage_class.is_none());
         }
         _ => panic!("Expected volume create command"),
     }
@@ -398,10 +414,152 @@ fn volume_catalog_json_parses() {
     };
     match mg.action {
         machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
-            command: volume::VolumeCmd::Catalog { json },
-        })) => assert!(json),
+            command: volume::VolumeCmd::Catalog { json, remote },
+        })) => {
+            assert!(json);
+            assert!(!remote);
+        }
         _ => panic!("Expected volume catalog command"),
     }
+}
+
+#[test]
+fn volume_snapshot_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "volume",
+        "snapshot",
+        "work",
+        "before-upgrade",
+    ])
+    .unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    assert!(matches!(
+        mg.action,
+        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command: volume::VolumeCmd::Snapshot { volume, snapshot, remote },
+        })) if volume == "work" && snapshot == "before-upgrade" && !remote
+    ));
+}
+
+#[test]
+fn volume_restore_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "volume",
+        "restore",
+        "work",
+        "before-upgrade",
+    ])
+    .unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    assert!(matches!(
+        mg.action,
+        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command: volume::VolumeCmd::Restore { volume, snapshot, target, remote },
+        })) if volume == "work" && snapshot == "before-upgrade" && target.is_none() && !remote
+    ));
+}
+
+#[test]
+fn remote_volume_lifecycle_flags_parse() {
+    let create = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "volume",
+        "create",
+        "data",
+        "--size",
+        "8G",
+        "--remote",
+        "--bucket",
+        "bucket-1",
+        "--storage-class",
+        "durable",
+    ])
+    .unwrap();
+    let Commands::Machine(group) = create.command else {
+        panic!("expected machine group")
+    };
+    assert!(matches!(
+        group.action,
+        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command: volume::VolumeCmd::Create {
+                volume,
+                size,
+                remote: true,
+                bucket: Some(bucket),
+                storage_class: Some(storage_class),
+                ..
+            },
+        })) if volume == "data" && size == "8G" && bucket == "bucket-1" && storage_class == "durable"
+    ));
+
+    let checkpoint = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "volume",
+        "checkpoint",
+        "vol-1",
+        "snap-1",
+        "--remote",
+    ])
+    .unwrap();
+    let Commands::Machine(group) = checkpoint.command else {
+        panic!("expected machine group")
+    };
+    assert!(matches!(
+        group.action,
+        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command: volume::VolumeCmd::Snapshot {
+                volume,
+                snapshot,
+                remote: true,
+            },
+        })) if volume == "vol-1" && snapshot == "snap-1"
+    ));
+
+    let restore = Cli::try_parse_from([
+        "mvmctl", "machine", "volume", "restore", "vol-1", "snap-1", "--target", "restored",
+        "--remote",
+    ])
+    .unwrap();
+    let Commands::Machine(group) = restore.command else {
+        panic!("expected machine group")
+    };
+    assert!(matches!(
+        group.action,
+        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command: volume::VolumeCmd::Restore {
+                volume,
+                snapshot,
+                target: Some(target),
+                remote: true,
+            },
+        })) if volume == "vol-1" && snapshot == "snap-1" && target == "restored"
+    ));
+
+    let delete =
+        Cli::try_parse_from(["mvmctl", "machine", "volume", "delete", "vol-1", "--remote"])
+            .unwrap();
+    let Commands::Machine(group) = delete.command else {
+        panic!("expected machine group")
+    };
+    assert!(matches!(
+        group.action,
+        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command: volume::VolumeCmd::Delete {
+                volume,
+                remote: true,
+            },
+        })) if volume == "vol-1"
+    ));
 }
 
 #[test]
@@ -1565,16 +1723,6 @@ fn test_metrics_instance_flag_parses() {
         }
         _ => panic!("expected Metrics command"),
     }
-}
-
-#[cfg(not(feature = "mcp"))]
-#[test]
-fn test_ops_mcp_is_unrecognized_without_feature() {
-    let result = Cli::try_parse_from(["mvmctl", "ops", "mcp", "stdio"]);
-    assert!(
-        result.is_err(),
-        "`ops mcp` is opt-in behind the `mcp` feature"
-    );
 }
 
 #[test]

@@ -8,11 +8,17 @@
 //! the agent drops privilege, use raw syscalls rather than `mount(8)`, and
 //! must fail closed on roothash mismatch.
 
+use std::collections::BTreeSet;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
-use crate::vsock::{RootfsConfig, RuntimeOverlayConfig, VolumeConfig};
+use crate::vsock::{RootfsConfig, RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind};
+
+/// Fixed identity used by the guest agent and workload command runner.
+pub const WORKLOAD_UID: u32 = 901;
+/// Fixed group used by the guest agent and workload command runner.
+pub const WORKLOAD_GID: u32 = 901;
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.
@@ -37,6 +43,13 @@ pub enum MountError {
     /// The activation message itself is contradictory or malformed.
     #[error("invalid activation config: {0}")]
     InvalidConfig(String),
+    /// Post-mount guest setup failed, so the workload environment is incomplete.
+    ///
+    /// Fail closed: booting on would hand the workload an environment missing
+    /// the egress path its plan admitted, which the workload cannot tell apart
+    /// from a policy denial.
+    #[error("guest bootstrap failed: {0}")]
+    GuestBootstrap(String),
 }
 
 impl MountError {
@@ -219,41 +232,149 @@ pub fn mount_runtime_overlay(runtime: Option<&RuntimeOverlayConfig>, root: &Path
 }
 
 /// Reserved mountpoints that volumes are not allowed to shadow.
+#[cfg(test)]
 pub(crate) const RESERVED_MOUNTS: &[&str] =
     &["/", "/mvm", "/mvm/runtime", "/dev", "/dev/vda", "/dev/vdc"];
 
 /// Validate that a volume mountpoint does not collide with reserved paths.
 pub fn validate_volume_mountpoint(mountpoint: &str) -> Result<()> {
-    let normalized = if mountpoint.ends_with('/') && mountpoint.len() > 1 {
-        &mountpoint[..mountpoint.len() - 1]
-    } else {
-        mountpoint
-    };
-    if !normalized.starts_with('/') {
-        return Err(MountError::PathPolicyDenied(format!(
-            "volume mountpoint {mountpoint:?} must be absolute"
-        )));
-    }
-    for reserved in RESERVED_MOUNTS {
-        if normalized == *reserved || normalized.starts_with(&format!("{reserved}/")) {
-            return Err(MountError::PathPolicyDenied(format!(
-                "volume mountpoint {mountpoint:?} shadows reserved path {reserved:?}"
-            )));
-        }
-    }
-    Ok(())
+    validated_relative_mountpoint(mountpoint).map(|_| ())
 }
 
-/// Mount any custom virtio-fs volumes inside the new root tree.
-pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
-    for vol in volumes {
-        validate_volume_mountpoint(&vol.mountpoint)?;
-        let target = root.join(&vol.mountpoint);
+fn validated_relative_mountpoint(mountpoint: &str) -> Result<PathBuf> {
+    let normalized = mvm_core::crypto::policy::validate_mount_path(mountpoint)
+        .map_err(|error| MountError::PathPolicyDenied(error.to_string()))?;
+    Path::new(&normalized)
+        .strip_prefix("/")
+        .map(Path::to_path_buf)
+        .map_err(|_| {
+            MountError::PathPolicyDenied(format!(
+                "volume mountpoint {mountpoint:?} is not a normalized absolute path"
+            ))
+        })
+}
+
+fn volume_mount_target(root: &Path, mountpoint: &str) -> Result<PathBuf> {
+    Ok(root.join(validated_relative_mountpoint(mountpoint)?))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn volume_mount_scaffold(root: &Path, mountpoint: &str) -> Result<Option<PathBuf>> {
+    let relative = validated_relative_mountpoint(mountpoint)?;
+    let mut components = relative.components();
+    let Some(base) = components.next() else {
+        return Err(MountError::PathPolicyDenied(format!(
+            "volume mountpoint {mountpoint:?} has no allowed mount root"
+        )));
+    };
+    if components.next().is_none() {
+        return Ok(None);
+    }
+    Ok(Some(root.join(base.as_os_str())))
+}
+
+fn ensure_volume_mount_target(
+    root: &Path,
+    mountpoint: &str,
+    scaffolds: &mut BTreeSet<PathBuf>,
+) -> Result<PathBuf> {
+    let target = volume_mount_target(root, mountpoint)?;
+    let first_error = match ensure_dir(&target.to_string_lossy()) {
+        Ok(()) => return Ok(target),
+        Err(error) => error,
+    };
+    if !matches!(
+        &first_error,
+        MountError::Syscall { source, .. } if source.raw_os_error() == Some(libc::EROFS)
+    ) {
+        return Err(first_error);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = scaffolds;
+        Err(first_error)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Some(scaffold) = volume_mount_scaffold(root, mountpoint)? else {
+            return Err(first_error);
+        };
+        if !scaffolds.contains(&scaffold) {
+            mount(
+                "tmpfs",
+                &scaffold.to_string_lossy(),
+                "tmpfs",
+                libc::MS_NOSUID | libc::MS_NODEV,
+                "mode=0755",
+            )?;
+            scaffolds.insert(scaffold);
+        }
         ensure_dir(&target.to_string_lossy())?;
+        Ok(target)
+    }
+}
+
+fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static str)> {
+    if volume.tag.is_empty() {
+        return Err(MountError::InvalidConfig(
+            "volume tag must not be empty".to_string(),
+        ));
+    }
+    match volume.kind {
+        VolumeConfigKind::VirtioFs => {
+            if volume.device.is_some() {
+                return Err(MountError::InvalidConfig(format!(
+                    "virtio-fs volume {:?} must not carry a block device",
+                    volume.tag
+                )));
+            }
+            Ok((&volume.tag, "virtiofs"))
+        }
+        VolumeConfigKind::Block => {
+            let device = volume.device.as_deref().ok_or_else(|| {
+                MountError::InvalidConfig(format!(
+                    "block volume {:?} is missing its guest device",
+                    volume.tag
+                ))
+            })?;
+            let suffix = device.strip_prefix("/dev/vd").ok_or_else(|| {
+                MountError::PathPolicyDenied(format!(
+                    "block volume device {device:?} is outside /dev/vd[a-z]"
+                ))
+            })?;
+            if suffix.len() != 1 || !suffix.bytes().all(|byte| byte.is_ascii_lowercase()) {
+                return Err(MountError::PathPolicyDenied(format!(
+                    "block volume device {device:?} is outside /dev/vd[a-z]"
+                )));
+            }
+            Ok((device, "ext4"))
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn writable_block_volume_owner(volume: &VolumeConfig) -> Option<(u32, u32)> {
+    (!volume.read_only && volume.kind == VolumeConfigKind::Block)
+        .then_some((WORKLOAD_UID, WORKLOAD_GID))
+}
+
+/// Mount custom virtio-fs and ext4 block volumes inside the new root tree.
+pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
+    let mut scaffolds = BTreeSet::new();
+    for vol in volumes {
+        let (source, filesystem) = resolve_volume_mount_source(vol)?;
+        #[cfg(not(target_os = "linux"))]
+        let _ = (source, filesystem);
+        let target = ensure_volume_mount_target(root, &vol.mountpoint, &mut scaffolds)?;
+        #[cfg(not(target_os = "linux"))]
+        let _ = &target;
         #[cfg(target_os = "linux")]
         {
             let flags = if vol.read_only { libc::MS_RDONLY } else { 0 };
-            mount(&vol.tag, &target.to_string_lossy(), "virtiofs", flags, "")?;
+            mount(source, &target.to_string_lossy(), filesystem, flags, "")?;
+            if let Some((uid, gid)) = writable_block_volume_owner(vol) {
+                chown(&target.to_string_lossy(), uid, gid)?;
+            }
         }
     }
     Ok(())
@@ -297,27 +418,42 @@ pub fn pivot_to_root(new_root: &Path) -> Result<()> {
 pub fn drop_privilege(uid: u32, gid: u32) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // Drop any supplementary groups first while still root.
-        // SAFETY: setgroups(0, NULL) is the documented Linux way to clear all supplementary groups.
-        if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
-            return Err(MountError::syscall(
-                "setgroups",
-                std::io::Error::last_os_error(),
-            ));
-        }
-        // Order matters: setgid before setuid so the saved gid stays usable.
-        setgid(gid)?;
-        setuid(uid)?;
-        // Paranoia: confirm we cannot regain root.
-        // SAFETY: getuid() has no precondition and cannot fail.
-        if unsafe { libc::getuid() } == 0 {
-            return Err(MountError::Syscall {
-                context: "privilege drop failed: still uid 0".to_string(),
-                source: std::io::Error::from_raw_os_error(libc::EPERM),
-            });
-        }
+        drop_privilege_raw(uid, gid)
+            .map_err(|source| MountError::syscall("privilege drop", source))?;
     }
     let _ = (uid, gid);
+    Ok(())
+}
+
+/// The privilege drop as bare syscalls, allocating nothing on any path.
+///
+/// This is the single implementation; `drop_privilege` is the wrapper that
+/// adds a typed error for the pid-1 path. It exists separately because the
+/// other caller runs inside a `pre_exec` hook — that is, in a forked child
+/// before `exec` — where allocating can deadlock if another thread held the
+/// allocator lock at fork time. Bare syscalls plus `last_os_error` (which
+/// only wraps errno) keep that path allocation-free.
+#[cfg(target_os = "linux")]
+pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
+    // Drop any supplementary groups first while still root.
+    // SAFETY: setgroups(0, NULL) is the documented Linux way to clear all supplementary groups.
+    if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Order matters: setgid before setuid so the saved gid stays usable.
+    // SAFETY: both receive a plain id value; no pointer contract.
+    if unsafe { libc::setgid(gid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above.
+    if unsafe { libc::setuid(uid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Paranoia: confirm we cannot regain root.
+    // SAFETY: getuid() has no precondition and cannot fail.
+    if unsafe { libc::getuid() } == 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+    }
     Ok(())
 }
 
@@ -533,25 +669,18 @@ fn ensure_dir(path: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn setuid(uid: u32) -> Result<()> {
-    // SAFETY: setuid receives a plain uid_t value; no pointer contract.
-    let rc = unsafe { libc::setuid(uid) };
+fn chown(path: &str, uid: u32, gid: u32) -> Result<()> {
+    let path = CString::new(path).map_err(|error| {
+        MountError::syscall(
+            "chown path has NUL",
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, error),
+        )
+    })?;
+    // SAFETY: path is a live NUL-terminated C string and uid/gid are plain values.
+    let rc = unsafe { libc::chown(path.as_ptr(), uid, gid) };
     if rc != 0 {
         return Err(MountError::syscall(
-            format!("setuid({uid})"),
-            std::io::Error::last_os_error(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn setgid(gid: u32) -> Result<()> {
-    // SAFETY: setgid receives a plain gid_t value; no pointer contract.
-    let rc = unsafe { libc::setgid(gid) };
-    if rc != 0 {
-        return Err(MountError::syscall(
-            format!("setgid({gid})"),
+            format!("chown({}, {uid}, {gid})", path.to_string_lossy()),
             std::io::Error::last_os_error(),
         ));
     }
@@ -1024,8 +1153,8 @@ mod tests {
     #[test]
     fn validate_volume_mountpoint_accepts_normal_paths() {
         assert!(validate_volume_mountpoint("/data").is_ok());
-        assert!(validate_volume_mountpoint("/srv/app").is_ok());
-        assert!(validate_volume_mountpoint("/nested/mvm/other").is_ok());
+        assert!(validate_volume_mountpoint("/mnt/app").is_ok());
+        assert!(validate_volume_mountpoint("/work/nested/other").is_ok());
     }
 
     #[test]
@@ -1046,6 +1175,118 @@ mod tests {
     fn validate_volume_mountpoint_rejects_relative_and_empty() {
         assert!(validate_volume_mountpoint("data").is_err());
         assert!(validate_volume_mountpoint("").is_err());
+        assert!(validate_volume_mountpoint("/data/../proc").is_err());
+        assert!(validate_volume_mountpoint("//dev").is_err());
+    }
+
+    #[test]
+    fn volume_mount_target_stays_beneath_the_staged_root() {
+        assert_eq!(
+            volume_mount_target(Path::new("/mnt/root"), "/data/work").unwrap(),
+            PathBuf::from("/mnt/root/data/work")
+        );
+    }
+
+    #[test]
+    fn volume_mount_target_rejects_a_relative_mountpoint() {
+        assert!(volume_mount_target(Path::new("/mnt/root"), "data").is_err());
+    }
+
+    #[test]
+    fn nested_volume_mount_uses_its_allowed_root_as_a_writable_scaffold() {
+        assert_eq!(
+            volume_mount_scaffold(Path::new("/mnt/root"), "/data/work/cache").unwrap(),
+            Some(PathBuf::from("/mnt/root/data"))
+        );
+        assert_eq!(
+            volume_mount_scaffold(Path::new("/mnt/root"), "/data").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn volume_mount_source_distinguishes_virtiofs_and_block() {
+        let share = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/data/share".to_string(),
+            read_only: true,
+            kind: crate::vsock::VolumeConfigKind::VirtioFs,
+            device: None,
+        };
+        assert_eq!(
+            resolve_volume_mount_source(&share).unwrap(),
+            ("uvol0", "virtiofs")
+        );
+
+        let block = VolumeConfig {
+            tag: "uvol1".to_string(),
+            mountpoint: "/data/disk".to_string(),
+            read_only: false,
+            kind: crate::vsock::VolumeConfigKind::Block,
+            device: Some("/dev/vdb".to_string()),
+        };
+        assert_eq!(
+            resolve_volume_mount_source(&block).unwrap(),
+            ("/dev/vdb", "ext4")
+        );
+    }
+
+    #[test]
+    fn volume_mount_source_rejects_invalid_kind_device_combinations() {
+        let share_with_device = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/data/share".to_string(),
+            read_only: false,
+            kind: crate::vsock::VolumeConfigKind::VirtioFs,
+            device: Some("/dev/vdb".to_string()),
+        };
+        assert!(resolve_volume_mount_source(&share_with_device).is_err());
+
+        let invalid_block = VolumeConfig {
+            tag: "uvol1".to_string(),
+            mountpoint: "/data/disk".to_string(),
+            read_only: false,
+            kind: crate::vsock::VolumeConfigKind::Block,
+            device: Some("/dev/sda".to_string()),
+        };
+        assert!(resolve_volume_mount_source(&invalid_block).is_err());
+    }
+
+    #[test]
+    fn writable_block_volume_is_owned_by_the_workload() {
+        let volume = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/data".to_string(),
+            read_only: false,
+            kind: crate::vsock::VolumeConfigKind::Block,
+            device: Some("/dev/vdb".to_string()),
+        };
+
+        assert_eq!(
+            writable_block_volume_owner(&volume),
+            Some((WORKLOAD_UID, WORKLOAD_GID))
+        );
+    }
+
+    #[test]
+    fn read_only_and_virtiofs_volumes_keep_their_existing_owner() {
+        let read_only_block = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/data".to_string(),
+            read_only: true,
+            kind: crate::vsock::VolumeConfigKind::Block,
+            device: Some("/dev/vdb".to_string()),
+        };
+        let writable_share = VolumeConfig {
+            tag: "uvol1".to_string(),
+            mountpoint: "/work".to_string(),
+            read_only: false,
+            kind: crate::vsock::VolumeConfigKind::VirtioFs,
+            device: None,
+        };
+
+        assert_eq!(writable_block_volume_owner(&read_only_block), None);
+        assert_eq!(writable_block_volume_owner(&writable_share), None);
     }
 
     #[test]

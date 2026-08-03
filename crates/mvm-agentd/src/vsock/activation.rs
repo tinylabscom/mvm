@@ -86,18 +86,38 @@ pub struct RuntimeOverlayConfig {
     pub roothash: String,
 }
 
-/// virtio-fs volume to mount after rootfs activation.
+/// Device kind for a boot-time user volume.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum VolumeConfigKind {
+    /// Host directory exposed through a named virtio-fs tag.
+    #[default]
+    VirtioFs,
+    /// Persistent ext4 image exposed as a virtio-blk device.
+    Block,
+}
+
+/// User volume to mount after rootfs activation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VolumeConfig {
-    /// virtio-fs tag advertised by the host for this share.
+    /// Stable attachment identifier. For virtio-fs this is the advertised tag;
+    /// for block devices it preserves the host's `uvol{index}` identity.
     pub tag: String,
     /// Absolute guest mountpoint.  Must pass `MountPathPolicy`.
     pub mountpoint: String,
     /// Mount read-only when `true`.
     #[serde(default)]
     pub read_only: bool,
+    /// Attachment kind. Missing on older messages means virtio-fs.
+    #[serde(default)]
+    pub kind: VolumeConfigKind,
+    /// Guest block device for [`VolumeConfigKind::Block`]. Must be absent for
+    /// virtio-fs and is validated against the bounded `/dev/vd[a-z]` range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 #[cfg(test)]
@@ -123,6 +143,8 @@ mod tests {
                 tag: "data".to_string(),
                 mountpoint: "/mnt/data".to_string(),
                 read_only: true,
+                kind: VolumeConfigKind::VirtioFs,
+                device: None,
             }],
             verb_grant_envelope: None,
         };
@@ -175,6 +197,15 @@ mod tests {
         let json = serde_json::to_string(&env).expect("serialize");
         let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.rootfs.virtiofs_tag.as_deref(), Some("mvmroot"));
+    }
+
+    #[test]
+    fn legacy_volume_config_defaults_to_virtiofs() {
+        let volume: VolumeConfig =
+            serde_json::from_str(r#"{"tag":"data","mountpoint":"/data","read_only":true}"#)
+                .expect("deserialize legacy volume config");
+        assert!(matches!(volume.kind, VolumeConfigKind::VirtioFs));
+        assert_eq!(volume.device, None);
     }
 
     #[test]

@@ -154,29 +154,65 @@ within a day", not "within a PR".
       now exports both roots to a runner temp dir, carrying
       `CARGO_HOME`/`RUSTUP_HOME` across so an hours-long run does not
       re-download the registry and toolchain.
-      **Residual:** the isolation is in the workflow step, so it does not
-      reach `just mutation-witnesses` — the local recipe #1946 called the
-      sharper of the two, since a developer's real `~/.mvm` is not a
-      discarded VM. Moving it into the gate itself, where cargo-mutants is
-      spawned, would cover both entry points from one place.
-- [ ] Populate `accepted_misses` for the remaining 25 surface files from
-      the first full nightly runs, then drop `continue-on-error` so a new
-      hole fails the lane. **Triage rule:** a **real hole** gets the test
-      that catches it; an **equivalent mutant** gets an `accepted_misses`
-      entry with a stated reason. `check_accepted_reasons` already refuses
-      an unexplained entry, so the reason is enforced, not encouraged.
-- [ ] Triage the four seeded misses. What the first run already shows:
-  - [ ] `is_banned_ssh_port -> false` survives. Only the negative
+      **Residual closed.** The isolation now lives at the single
+      cargo-mutants spawn site (`MutationIsolation`), so it covers the
+      nightly job, `just mutation-witnesses` and a bare `cargo run -p
+      xtask` from one place. It had been the workflow step only, which
+      left the local recipe — the sharper of the two, since a developer's
+      real `~/.mvm` is not a discarded VM — running unprotected.
+- [x] Populate `accepted_misses` for the remaining 25 surface files, then
+      drop `continue-on-error` so a new hole fails the lane. **Done: 91
+      entries, every one naming the mechanism that makes its mutant
+      uncatchable, and the lane is armed.** **Triage
+      rule:** a **real hole** gets the test that catches it; an
+      **equivalent mutant** gets an `accepted_misses` entry with a stated
+      reason. `check_accepted_reasons` already refuses an unexplained
+      entry, so the reason is enforced, not encouraged.
+
+      First full run: **1221 mutants, 359 surviving.** Most of what it
+      found was not survivors.
+
+      **Eight files could not be measured at all.** The lane is
+      package-scoped and three packages were green under `--workspace` and
+      red alone — `mvm-sdk` (never enabled `mvm-core/test-support`, so its
+      tests did not compile), `mvm-cli` (42 tests drive the root package's
+      binary, so `CARGO_BIN_EXE_mvmctl` is unset), `mvm-runtime` (a test
+      spawned an `mvm-hostd` binary). Two of the eight reported
+      `total=0 missed=0 caught=0`, which is what a fully-covered file
+      reports, because `ensure_mutants_actually_ran` enumerated the one
+      baseline verdict it had seen (`Failure`) while a timed-out baseline
+      reports `Timeout`. It now requires `Success` and a nonzero count.
+
+      **Two files carry 242 of the 359**, both a witness resolving to a
+      large multi-purpose file whose own witness is fully caught:
+      `mvm-host-vm-init.rs` (claim 2, 164) and `console.rs` (claim 15,
+      78). Scoped via `SurfaceScope` — not producible by resolution,
+      mandatory `why` + tracking issue, carried across a re-pin — and
+      filed as #2006 / #2021 with the measurements.
+
+      **Two affordability defects** also fixed, without which the lane is
+      not viable nightly: the flat 300s per-mutant timeout (too short for
+      three packages, 5× too long for another; now derived from each
+      package's own baseline) and `seed_guest_runtime_cache` seeding the
+      guest-binary cache under a key the resolver never reads, which made
+      three `pull_core` tests cross-compile the guest agent at 55s each
+      (mvm-cli's package suite 86s → 2s).
+- [x] Triage the four seeded misses. **All four were real holes, not
+      equivalent mutants**, so all four are closed with tests rather than
+      recorded — each verified by planting its mutant and watching the new
+      test go red. `network_policy.rs` now measures 52 mutants, 0
+      surviving. What the first run showed:
+  - [x] `is_banned_ssh_port -> false` survives. Only the negative
         direction is asserted inside mvm-protocol, so pinning the
         predicate to false goes unnoticed while flipping its `==` is
         caught. The SSH ban has real callers in mvm-core and mvm-cli;
         the owning crate should assert port 22 *is* banned.
-  - [ ] `NetworkPreset::is_deny_all` survives being replaced by **both**
+  - [x] `NetworkPreset::is_deny_all` survives being replaced by **both**
         `true` and `false`. It has no production caller anywhere in the
         tree — its only use is an assertion in mvm-core's
         `security_profile` tests. Either it is load-bearing and wants a
         caller, or it is dead code wearing a claim-shaped name.
-  - [ ] `NetworkPolicy::trusted_build_egress -> Default::default()`
+  - [x] `NetworkPolicy::trusted_build_egress -> Default::default()`
         survives. The mutant substitutes the deny-all default, so it
         makes the policy *stricter*: a functional coverage gap, not a
         security hole. Worth recording as exactly that.

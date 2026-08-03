@@ -21,6 +21,10 @@ extern crate alloc;
 
 pub mod entrypoint;
 pub mod ir;
+/// The L3-over-vsock tunnel protocol: framing, control messages, and
+/// bounded IP validation. Shared by the in-guest agent and the host
+/// gateway.
+pub mod l3;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
 pub mod lifecycle;
 /// RFC 6962 Merkle transparency-log inclusion proofs over the audit log.

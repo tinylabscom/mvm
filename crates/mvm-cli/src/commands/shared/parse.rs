@@ -659,4 +659,164 @@ mod volume_spec_tests {
         assert!(!path_is_under(Path::new("/a/bc"), Path::new("/a/b")));
         assert!(!path_is_under(Path::new("/x"), Path::new("/a/b")));
     }
+
+    /// The Tier-0 guest-mount allow-list, in both directions.
+    ///
+    /// Replacing this whole function with `Ok(())` survived, which means
+    /// nothing established that a user volume cannot shadow or
+    /// make-writable a system mount — claim 1's "no host-fs access from a
+    /// guest beyond explicit shares" resting on an unwitnessed check.
+    #[test]
+    fn the_guest_mount_allow_list_admits_only_allowed_roots() {
+        // Every allowed root, bare and with a child.
+        for root in ALLOWED_GUEST_MOUNT_ROOTS {
+            validate_guest_mount(root).unwrap_or_else(|e| panic!("{root} must be allowed: {e}"));
+            validate_guest_mount(&format!("{root}/sub"))
+                .unwrap_or_else(|e| panic!("{root}/sub must be allowed: {e}"));
+            // Trailing slashes normalize rather than change the verdict.
+            validate_guest_mount(&format!("{root}/"))
+                .unwrap_or_else(|e| panic!("{root}/ must be allowed: {e}"));
+        }
+
+        // Anything outside them is refused — including the rootfs itself
+        // and paths that merely share a prefix with an allowed root.
+        for denied in [
+            "/",
+            "/etc",
+            "/usr",
+            "/root",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/datax",
+            "/workshop",
+            "/mnttest",
+            "relative/path",
+            "",
+        ] {
+            assert!(
+                validate_guest_mount(denied).is_err(),
+                "{denied} must not be an allowed guest mount"
+            );
+        }
+    }
+
+    /// The reserved paths sit *under* an allowed root, so the allow-list
+    /// alone would admit them; the reserved check is what refuses them.
+    /// Both its equality and its prefix arm need a case, or one of the
+    /// two can be weakened without any test noticing.
+    #[test]
+    fn reserved_runtime_mounts_are_refused_even_under_an_allowed_root() {
+        for reserved in RESERVED_UNDER_ALLOWED {
+            // Exact match.
+            assert!(
+                validate_guest_mount(reserved).is_err(),
+                "{reserved} is reserved by the runtime"
+            );
+            // A path *under* the reserved drive.
+            assert!(
+                validate_guest_mount(&format!("{reserved}/nested")).is_err(),
+                "{reserved}/nested is under a reserved drive"
+            );
+            // A sibling that merely shares the prefix is not reserved, so
+            // the check must not be a bare `starts_with`.
+            assert!(
+                validate_guest_mount(&format!("{reserved}x")).is_ok(),
+                "{reserved}x is a distinct path and stays allowed"
+            );
+        }
+    }
+
+    /// The protected host roots a share may never expose. Emptying this
+    /// list survived, and an empty list means the host signer key, the
+    /// audit chain and the user's credential stores all become shareable
+    /// into a guest.
+    #[test]
+    fn the_protected_host_roots_cover_keys_audit_and_credentials() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("HOME", tmp.path());
+        env.set("MVM_HOME", tmp.path().join("mvm"));
+
+        let roots = denied_host_roots();
+        assert!(
+            !roots.is_empty(),
+            "an empty protected-root list protects nothing"
+        );
+        assert!(
+            roots.contains(&mvm_core::config::mvm_keys_dir()),
+            "the host signer key directory must never be shareable"
+        );
+        assert!(
+            roots.contains(&mvm_core::config::mvm_audit_dir()),
+            "the audit chain must never be shareable"
+        );
+        for cred in [".ssh", ".gnupg", ".aws"] {
+            assert!(
+                roots.contains(&tmp.path().join(cred)),
+                "~/{cred} must never be shareable"
+            );
+        }
+
+        // And the list is actually consulted: a path inside one is under it.
+        assert!(path_is_under(
+            &tmp.path().join(".ssh").join("id_ed25519"),
+            &tmp.path().join(".ssh")
+        ));
+    }
+
+    /// The MiB→bytes conversion is two multiplications, and both survived
+    /// every arithmetic mutation: nothing observed the size of the image
+    /// that gets created. `*` becoming `+` or `/` turns a 10 MiB request
+    /// into a few kilobytes, so the guest gets a disk orders of magnitude
+    /// smaller than it asked for and fails on first write.
+    ///
+    /// Asserting the created file's length is what makes this
+    /// discriminate; asserting the call returns `Ok` is what the
+    /// whole-function `-> Ok(())` mutant passes.
+    #[test]
+    fn a_disk_volume_is_materialised_at_the_requested_size() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let host = tmp.path().join("data.img");
+        let volume = VmVolume {
+            host: host.to_string_lossy().into_owned(),
+            guest: "/data".to_string(),
+            size: "10M".to_string(),
+            read_only: false,
+            kind: VmVolumeKind::Disk,
+            encrypted: false,
+        };
+
+        materialize_disk_volume(&volume).expect("materialising a disk volume");
+
+        let len = std::fs::metadata(&host).expect("the image exists").len();
+        // The writer rounds down to a block boundary (observed: 64 KiB
+        // short of the request), so this asserts the band rather than an
+        // exact count — an exact count would encode the rounding as if it
+        // were the contract. The band is still far tighter than any of the
+        // arithmetic mutants: `10 + 1024 * 1024` is ~1 MiB, `10 * 1024 +
+        // 1024` is ~11 KiB, and the two `/` forms collapse to 10 and 0.
+        let requested = 10 * 1024 * 1024u64;
+        assert!(
+            len > requested - (1024 * 1024) && len <= requested,
+            "a 10M request must produce very nearly 10 MiB, got {len} bytes"
+        );
+
+        // A directory share is not a disk and must not have an image
+        // written for it — the early return is its own mutant.
+        let share_host = tmp.path().join("share");
+        let share = VmVolume {
+            host: share_host.to_string_lossy().into_owned(),
+            guest: "/share".to_string(),
+            size: "10M".to_string(),
+            read_only: false,
+            kind: VmVolumeKind::DirShare,
+            encrypted: false,
+        };
+        materialize_disk_volume(&share).expect("a dir share is a no-op");
+        assert!(
+            !share_host.exists(),
+            "a directory share must not materialise a disk image"
+        );
+    }
 }

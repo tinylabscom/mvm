@@ -109,7 +109,7 @@ Environment (all done, on this M4 Max):
 - **3b done:** a stock Firecracker-CI `vmlinux-6.1.102` boots and emits a full
   kernel console log on `console=ttyS0` → G1 confirmed a non-bug.
 - **aarch64 `mvmctl` cross-build done + validated:** `cargo zigbuild --target
-  aarch64-unknown-linux-gnu --bin mvmctl` (MVM_SKIP_EMBED_BINARIES=1) links a
+  aarch64-unknown-linux-gnu --bin mvmctl` links a
   glibc-dynamic ELF; runs in the guest (`mvmctl 0.18.0`) and carries `bundle
   export/install` + `machine run --manifest`. Packaging gate passes.
 

@@ -25,8 +25,11 @@ mod rpc;
 /// an empty module elsewhere. Public so the one-shot guest bins can reach it.
 pub mod sys;
 mod verb_grant;
+mod workload_privilege;
 
-pub use activation::{ActivateEnvironment, RootfsConfig, RuntimeOverlayConfig, VolumeConfig};
+pub use activation::{
+    ActivateEnvironment, RootfsConfig, RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
+};
 pub use api::{
     PRIMED_MARKER_PATH, PostRestoreReply, checkpoint_integrations, interpret_primed_status,
     mount_volume_on, ping, ping_at, post_restore_at, post_restore_with_grant_and_clock_at,
@@ -71,6 +74,7 @@ pub use verb_grant::{
     parse_require_grant_cmdline, pin_verb_grant, provision_host_signer_anchor_from_cmdline,
     re_pin_verb_grant, trust_decision, verifying_key_from_hex, write_host_signer_anchor,
 };
+pub use workload_privilege::{current_uid, workload_privilege_refusal};
 
 /// Default vsock guest CID (Firecracker convention).
 pub const GUEST_CID: u32 = 3;

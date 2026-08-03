@@ -62,6 +62,10 @@ pub enum InitramfsBuildError {
     #[error("download failed for {url}: {reason}")]
     DownloadFailed { url: String, reason: String },
 
+    /// The release server confirmed that the requested artifact does not exist.
+    #[error("download returned HTTP 404 for {url}")]
+    DownloadNotFound { url: String },
+
     /// Underlying I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -205,7 +209,7 @@ pub fn resolve_or_build_local_initramfs(
         // Linux initramfs here. Try to download a published release artifact
         // into the cache before giving up. This mirrors the runtime-overlay
         // download path.
-        match download_initramfs(version, arch, cache_root) {
+        match download_initramfs_with_negative_cache(version, arch, cache_root) {
             Ok(artifact) => Ok(artifact),
             Err(download_err) => {
                 tracing::debug!(
@@ -444,6 +448,14 @@ fn set_cache_perms(_p: &Path) -> Result<(), InitramfsBuildError> {
 /// pattern as the runtime overlay downloader.
 const DEFAULT_RELEASE_BASE: &str = "https://github.com/tinylabscom/mvm/releases/download";
 
+/// A confirmed release-artifact 404 is retried daily so a late release upload
+/// becomes visible without making every invocation pay the network cost.
+#[cfg(any(not(target_os = "linux"), test))]
+const RELEASE_NOT_FOUND_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+#[cfg(any(not(target_os = "linux"), test))]
+const RELEASE_NOT_FOUND_CACHE_DIR: &str = ".release-not-found";
+
 /// Documented escape hatch to bypass SHA-256 integrity checks. Mirrors the
 /// runtime-overlay and dev-image downloaders.
 pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
@@ -474,6 +486,114 @@ pub fn release_base_url(version: &str) -> String {
     let base = std::env::var("MVM_INITRAMFS_BASE_URL")
         .unwrap_or_else(|_| DEFAULT_RELEASE_BASE.to_string());
     format!("{}/v{version}", base.trim_end_matches('/'))
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn release_not_found_marker(cache_root: &Path, version: &str, arch: GuestArch) -> PathBuf {
+    cache_root
+        .join(RELEASE_NOT_FOUND_CACHE_DIR)
+        .join(version)
+        .join(arch.to_string())
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn record_release_not_found(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    observed_at: u64,
+) -> Result<(), InitramfsBuildError> {
+    let marker = release_not_found_marker(cache_root, version, arch);
+    mvm_core::util::atomic_io::atomic_write_str(&marker, &observed_at.to_string())
+        .map_err(std::io::Error::other)?;
+    Ok(())
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn release_not_found_is_fresh(cache_root: &Path, version: &str, arch: GuestArch, now: u64) -> bool {
+    let marker = release_not_found_marker(cache_root, version, arch);
+    let Some(observed_at) = std::fs::read_to_string(marker)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    now.saturating_sub(observed_at) < RELEASE_NOT_FOUND_TTL.as_secs()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn not_found_error(version: &str, arch: GuestArch) -> InitramfsBuildError {
+    let names = InitramfsArtifactNames::for_arch(&arch.to_string());
+    InitramfsBuildError::DownloadNotFound {
+        url: format!("{}/{}", release_base_url(version), names.archive_checksum),
+    }
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn with_release_negative_cache<T>(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    now: u64,
+    uses_default_release: bool,
+    attempt: impl FnOnce() -> Result<T, InitramfsBuildError>,
+) -> Result<T, InitramfsBuildError> {
+    if uses_default_release && release_not_found_is_fresh(cache_root, version, arch, now) {
+        return Err(not_found_error(version, arch));
+    }
+
+    match attempt() {
+        Ok(value) => {
+            let marker = release_not_found_marker(cache_root, version, arch);
+            if let Err(error) = std::fs::remove_file(&marker)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::debug!(
+                    path = %marker.display(),
+                    %error,
+                    "failed to clear initramfs release negative-cache marker"
+                );
+            }
+            Ok(value)
+        }
+        Err(error @ InitramfsBuildError::DownloadNotFound { .. }) => {
+            if uses_default_release
+                && let Err(marker_error) = record_release_not_found(cache_root, version, arch, now)
+            {
+                tracing::debug!(
+                    %marker_error,
+                    "failed to persist initramfs release negative-cache marker"
+                );
+            }
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn download_initramfs_with_negative_cache(
+    version: &str,
+    arch: GuestArch,
+    cache_root: &Path,
+) -> Result<InitramfsArtifact, InitramfsBuildError> {
+    let uses_default_release = std::env::var_os("MVM_INITRAMFS_BASE_URL").is_none();
+    with_release_negative_cache(
+        cache_root,
+        version,
+        arch,
+        current_unix_seconds(),
+        uses_default_release,
+        || download_initramfs(version, arch, cache_root),
+    )
 }
 
 /// Download the published initramfs tarball for `version` + `arch` from the
@@ -633,7 +753,14 @@ fn verify_file_sha256(
 
 fn curl_download(url: &str, dest: &Path) -> Result<(), InitramfsBuildError> {
     let output = std::process::Command::new("curl")
-        .args(["-fSL", "--silent", "--show-error", "-o"])
+        .args([
+            "-fSL",
+            "--silent",
+            "--show-error",
+            "--write-out",
+            "%{http_code}",
+            "-o",
+        ])
         .arg(dest)
         .arg(url)
         .output();
@@ -643,15 +770,11 @@ fn curl_download(url: &str, dest: &Path) -> Result<(), InitramfsBuildError> {
         Ok(out) => {
             let _ = std::fs::remove_file(dest);
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let code = out
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string());
-            Err(InitramfsBuildError::DownloadFailed {
-                url: url.to_string(),
-                reason: format!("curl exited {code}; stderr={stderr}"),
-            })
+            let http_status = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u16>()
+                .ok();
+            Err(curl_failure(url, http_status, out.status.code(), &stderr))
         }
         Err(e) => {
             let _ = std::fs::remove_file(dest);
@@ -663,12 +786,154 @@ fn curl_download(url: &str, dest: &Path) -> Result<(), InitramfsBuildError> {
     }
 }
 
+fn curl_failure(
+    url: &str,
+    http_status: Option<u16>,
+    exit_code: Option<i32>,
+    stderr: &str,
+) -> InitramfsBuildError {
+    if http_status == Some(404) {
+        return InitramfsBuildError::DownloadNotFound {
+            url: url.to_string(),
+        };
+    }
+    let code = exit_code
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    InitramfsBuildError::DownloadFailed {
+        url: url.to_string(),
+        reason: format!("curl exited {code}; stderr={stderr}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+    use std::cell::Cell;
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn confirmed_404_is_attempted_once_within_the_negative_cache_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attempts = Cell::new(0);
+        let version = "0.18.0";
+        let arch = GuestArch::Aarch64;
+
+        let first = with_release_negative_cache(tmp.path(), version, arch, 1_000, true, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(InitramfsBuildError::DownloadNotFound {
+                url: "https://example.invalid/missing".to_string(),
+            })
+        })
+        .unwrap_err();
+        let second = with_release_negative_cache(tmp.path(), version, arch, 1_001, true, || {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert_eq!(attempts.get(), 1);
+        assert!(matches!(
+            first,
+            InitramfsBuildError::DownloadNotFound { .. }
+        ));
+        assert!(matches!(
+            second,
+            InitramfsBuildError::DownloadNotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn expired_release_not_found_marker_retries_and_refreshes_only_a_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attempted = Cell::new(false);
+        let version = "0.18.0";
+        let arch = GuestArch::Aarch64;
+        record_release_not_found(tmp.path(), version, arch, 1_000).unwrap();
+        let retry_at = 1_000 + RELEASE_NOT_FOUND_TTL.as_secs();
+
+        let error = with_release_negative_cache(tmp.path(), version, arch, retry_at, true, || {
+            attempted.set(true);
+            Err::<(), _>(InitramfsBuildError::DownloadNotFound {
+                url: "https://example.invalid/missing".to_string(),
+            })
+        })
+        .unwrap_err();
+
+        assert!(attempted.get());
+        assert!(matches!(
+            error,
+            InitramfsBuildError::DownloadNotFound { .. }
+        ));
+        let marker = release_not_found_marker(tmp.path(), version, arch);
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            retry_at.to_string()
+        );
+    }
+
+    #[test]
+    fn transient_download_failure_is_not_negative_cached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let version = "0.18.0";
+        let arch = GuestArch::Aarch64;
+
+        let error = with_release_negative_cache(tmp.path(), version, arch, 1_000, true, || {
+            Err::<(), _>(InitramfsBuildError::DownloadFailed {
+                url: "https://example.invalid/unreachable".to_string(),
+                reason: "timeout".to_string(),
+            })
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, InitramfsBuildError::DownloadFailed { .. }));
+        assert!(!release_not_found_marker(tmp.path(), version, arch).exists());
+    }
+
+    #[test]
+    fn configured_mirror_bypasses_default_release_negative_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attempted = Cell::new(false);
+        let version = "0.18.0";
+        let arch = GuestArch::Aarch64;
+        record_release_not_found(tmp.path(), version, arch, 1_000).unwrap();
+
+        with_release_negative_cache(tmp.path(), version, arch, 1_001, false, || {
+            attempted.set(true);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(attempted.get());
+        assert!(!release_not_found_marker(tmp.path(), version, arch).exists());
+    }
+
+    #[test]
+    fn curl_404_is_distinct_from_transient_http_failure() {
+        let missing = curl_failure(
+            "https://example.invalid/missing",
+            Some(404),
+            Some(22),
+            "not found",
+        );
+        let unavailable = curl_failure(
+            "https://example.invalid/unavailable",
+            Some(503),
+            Some(22),
+            "unavailable",
+        );
+
+        assert!(matches!(
+            missing,
+            InitramfsBuildError::DownloadNotFound { .. }
+        ));
+        assert!(matches!(
+            unavailable,
+            InitramfsBuildError::DownloadFailed { .. }
+        ));
+    }
 
     /// The defect this closes: the cache key is `(version, arch)` and the
     /// version only moves on a release, so an artifact built from older guest

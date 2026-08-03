@@ -21,6 +21,21 @@ pub(super) struct PendingXattr {
     value: Vec<u8>,
 }
 
+/// Convert collected pax xattrs into the ext4 writer's representation,
+/// for an entry that is being carried into the image as a
+/// [`crate::ext4::Node`] rather than written to the host tree. Names
+/// have already passed [`classify_xattr_name`]'s allow-list, so this is
+/// a pure shape change.
+pub(super) fn into_ext4_xattrs(attrs: Vec<PendingXattr>) -> Vec<crate::ext4::Xattr> {
+    attrs
+        .into_iter()
+        .map(|attr| crate::ext4::Xattr {
+            name: String::from_utf8_lossy(&attr.name).into_owned(),
+            value: attr.value,
+        })
+        .collect()
+}
+
 /// Why an xattr was dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XattrWarningReason {

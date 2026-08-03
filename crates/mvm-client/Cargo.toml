@@ -72,3 +72,5 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 # The tracing bridge's tests install a capturing subscriber to assert the
 # emitted event carries the payload bytes back out unaltered.
 tracing-subscriber = { workspace = true }
+# Inventory-record wire assertions (round-trips, no-host-path leak checks).
+serde_json = { workspace = true }

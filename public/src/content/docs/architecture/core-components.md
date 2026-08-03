@@ -8,7 +8,7 @@ description: The moving parts that make up the secure sandbox product.
 `mvmctl` is the local operator interface. It builds, launches, inspects, pauses, resumes, snapshots, logs, forwards ports, and performs guest RPC operations.
 
 See [Control surfaces](/architecture/control-surfaces/) for how the CLI relates
-to SDKs, MCP, console access, and guest RPC.
+to SDKs, console access, and guest RPC.
 
 ## SDKs
 

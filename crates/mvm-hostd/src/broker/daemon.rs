@@ -250,6 +250,33 @@ impl HostAgentDaemon {
         self.vms.len()
     }
 
+    /// Drop registrations whose VM state no longer has a live supervisor.
+    ///
+    /// A crashed CLI can miss the signed deregistration request. Without this
+    /// backstop, the persisted registration keeps the resident daemon and its
+    /// signer helper alive forever. Registrations from older clients without
+    /// an ownership marker fail open while their state directory still exists.
+    pub fn reap_dead_registrations(&mut self) -> Result<usize> {
+        let dead: Vec<String> = self
+            .registrations
+            .iter()
+            .filter(|(_, registration)| registration_owner_is_dead(registration))
+            .map(|(vm_id, _)| vm_id.clone())
+            .collect();
+
+        for vm_id in &dead {
+            self.vms.remove(vm_id);
+            self.registrations.remove(vm_id);
+            if let Err(e) = self.deregister_helper_vm(vm_id) {
+                warn!(vm_id = %vm_id, error = %e, "dead VM signer-helper deregister failed");
+            }
+        }
+        if !dead.is_empty() {
+            self.persist_registrations()?;
+        }
+        Ok(dead.len())
+    }
+
     /// Snapshot of the currently-registered VM ids (bound + serving). The
     /// health watcher reads this each pass to decide which guests to probe.
     pub fn registered_vm_ids(&self) -> Vec<String> {
@@ -519,6 +546,27 @@ impl HostAgentDaemon {
     }
 }
 
+fn registration_owner_is_dead(registration: &RegisterVm) -> bool {
+    let Some(head_path) = registration.workload_chain_head_path.as_deref() else {
+        return false;
+    };
+    let Some(state_dir) = Path::new(head_path).parent() else {
+        return false;
+    };
+    if !state_dir.exists() {
+        return true;
+    }
+    let reference = state_dir.join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE);
+    let Ok(bytes) = std::fs::read(reference) else {
+        return false;
+    };
+    let Ok(pid_path) = serde_json::from_slice::<PathBuf>(&bytes) else {
+        return false;
+    };
+    pid_path.parent() == Some(state_dir)
+        && !mvm_runtime::vm::reconcile::pid_file_has_live_process(&pid_path)
+}
+
 /// Validate a `vm_id` is safe to embed in a filesystem path: a non-empty DNS-
 /// label-shaped token (alphanumeric plus `-`/`_`), no separators, no traversal.
 fn validate_vm_id(vm_id: &str) -> Result<()> {
@@ -712,6 +760,82 @@ mod tests {
         assert!(!d.is_registered("vm-1"));
         // Drop runs synchronously on remove → socket file gone.
         assert!(!sock.exists(), "broker socket unbound");
+    }
+
+    #[tokio::test]
+    async fn dead_registration_is_reaped_and_removed_from_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("registrations.json");
+        let mut d = daemon("local").with_registration_journal(&journal_path);
+        let reg = register(dir.path(), "dead-vm", "local", None);
+        let owner_pid_path = dir.path().join("hvf.pid");
+        std::fs::write(
+            dir.path()
+                .join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE),
+            serde_json::to_vec(&owner_pid_path).unwrap(),
+        )
+        .unwrap();
+        let sock = PathBuf::from(&reg.broker_listen_socket);
+
+        d.apply(&ControlRequest::Register(reg)).unwrap();
+
+        assert_eq!(d.reap_dead_registrations().unwrap(), 1);
+        assert_eq!(d.registration_count(), 0);
+        assert!(!sock.exists(), "dead registration must unbind its socket");
+        assert!(
+            RegistrationJournal::new(journal_path)
+                .load()
+                .unwrap()
+                .is_empty(),
+            "dead registration must be removed from the restart journal"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_supervisor_pid_spares_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hvf.pid"), std::process::id().to_string()).unwrap();
+        let mut d = daemon("local");
+        let reg = register(dir.path(), "live-vm", "local", None);
+        let owner_pid_path = dir.path().join("hvf.pid");
+        std::fs::write(
+            dir.path()
+                .join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE),
+            serde_json::to_vec(&owner_pid_path).unwrap(),
+        )
+        .unwrap();
+
+        d.apply(&ControlRequest::Register(reg)).unwrap();
+
+        assert_eq!(d.reap_dead_registrations().unwrap(), 0);
+        assert!(d.is_registered("live-vm"));
+    }
+
+    #[tokio::test]
+    async fn legacy_registration_without_owner_path_fails_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = daemon("local");
+        let reg = register(dir.path(), "legacy-vm", "local", None);
+
+        d.apply(&ControlRequest::Register(reg)).unwrap();
+
+        assert_eq!(d.reap_dead_registrations().unwrap(), 0);
+        assert!(d.is_registered("legacy-vm"));
+    }
+
+    #[test]
+    fn registration_with_missing_state_directory_is_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = register(dir.path(), "missing-vm", "local", None);
+        reg.workload_chain_head_path = Some(
+            dir.path()
+                .join("removed-state")
+                .join("audit-signer.head")
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        assert!(registration_owner_is_dead(&reg));
     }
 
     #[test]

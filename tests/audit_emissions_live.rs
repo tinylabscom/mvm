@@ -1873,6 +1873,8 @@ fn volume_create_emits_volume_create_audit_entry() {
             "managed",
             "--root",
             root.to_str().expect("utf-8 path"),
+            "--size",
+            "16M",
         ])
         .output()
         .expect("spawn mvmctl volume create");
@@ -1909,6 +1911,8 @@ fn volume_unlock_and_lock_emit_audit_entries() {
             "managed",
             "--root",
             root.to_str().expect("utf-8 path"),
+            "--size",
+            "16M",
         ])
         .output()
         .expect("spawn mvmctl volume create");
@@ -1928,12 +1932,6 @@ fn volume_unlock_and_lock_emit_audit_entries() {
         "mvmctl volume unlock failed: stderr={}",
         String::from_utf8_lossy(&unlock.stderr)
     );
-    std::fs::write(
-        root.join("unlocked").join("managed").join("proof.txt"),
-        b"ok",
-    )
-    .expect("write unlocked volume proof");
-
     let lock = sandbox
         .mvmctl()
         .args(["machine", "volume", "lock", "managed"])

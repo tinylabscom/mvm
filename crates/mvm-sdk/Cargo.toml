@@ -61,16 +61,19 @@ name = "emit_workload_schema"
 path = "src/bin/emit_schema.rs"
 
 [dev-dependencies]
+# `TestEnv` lives behind mvm-core's `test-support`, and the compile
+# pipeline's tests use it. Without this line the feature only arrives via
+# workspace-wide feature unification, so `cargo test -p mvm-sdk` on its
+# own does not compile — which is how mutation testing, always
+# package-scoped, measured nothing here and reported it as clean.
+# Matches mvm-build and mvm-runtime.
+mvm-core = { workspace = true, features = ["test-support"] }
 # IR↔guest-parser contract test (runtime_json_contract): asserts the
 # IR's emitted runtime.json shapes match mvm-agentd's runtime_config
 # parser.
 mvm-agentd = { workspace = true }
 # Async tests for the subprocess MvmClient impl.
 tokio = { workspace = true, features = ["macros", "rt"] }
-# `compile::flake`'s tests drive `TestEnv` to isolate `MVM_HOME`. Declared
-# here rather than picked up from workspace feature unification, so
-# `cargo nextest run -p mvm-sdk` on its own compiles what a workspace run does.
-mvm-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -64,7 +64,7 @@ impl fmt::Display for PackBackend {
 #[serde(transparent)]
 pub struct HostCapability(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Sha256Hex(String);
 
@@ -786,23 +786,32 @@ fn decode_signature(encoded: &str) -> Result<[u8; 64], PackVerifyError> {
     })
 }
 
-fn hash_file(path: &Path) -> Result<(Sha256Hex, u64), String> {
-    let mut file = File::open(path).map_err(|error| error.to_string())?;
+/// Stream `path` through a `Sha256` hasher in fixed-size chunks (never reads
+/// the whole file into memory) and return its lowercase-hex digest and byte
+/// length. Shared with `action::hash_file_streaming`, which needs the raw
+/// `io::Error` to tell a missing file apart from any other read failure.
+pub(crate) fn stream_sha256(path: &Path) -> std::io::Result<(String, u64)> {
+    let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut total = 0u64;
     let mut buffer = [0u8; 8192];
     loop {
-        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
         total = total.saturating_add(read as u64);
         hasher.update(&buffer[..read]);
     }
-    Ok((Sha256Hex(hex::encode(hasher.finalize())), total))
+    Ok((hex::encode(hasher.finalize()), total))
 }
 
-fn is_sha256_hex(value: &str) -> bool {
+fn hash_file(path: &Path) -> Result<(Sha256Hex, u64), String> {
+    let (hex, size) = stream_sha256(path).map_err(|error| error.to_string())?;
+    Ok((Sha256Hex(hex), size))
+}
+
+pub(crate) fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()

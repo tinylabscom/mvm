@@ -13,6 +13,9 @@ use mvm_core::policy::{
 
 use crate::supervisor::pii_redactor::{PiiMatch, PiiRedactor};
 use crate::supervisor::secrets_scanner::{SecretMatch, SecretsScanner};
+use crate::supervisor::sensitive_detector::{
+    LeakGuardCredentialDetector, SensitiveDetector, SensitiveMatch,
+};
 use crate::supervisor::substitution_proxy::ForwardResponse;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -44,6 +47,7 @@ impl ReplacementEngine {
         ReplacementFlow {
             tenant: tenant.to_string(),
             action: action.clone(),
+            supplemental: LeakGuardCredentialDetector::new(),
             secrets: SecretsScanner::with_default_rules(),
             pii: PiiRedactor::with_default_rules(),
             proof_key: self.proof_key,
@@ -86,6 +90,7 @@ struct ProofRecordInput {
 pub struct ReplacementFlow {
     tenant: String,
     action: ReversibleReplacementAction,
+    supplemental: LeakGuardCredentialDetector,
     secrets: SecretsScanner,
     pii: PiiRedactor,
     proof_key: [u8; 32],
@@ -246,6 +251,34 @@ impl ReplacementFlow {
     fn detect_spans(&self, payload: &[u8]) -> Vec<DetectedSpan> {
         let mut spans = Vec::new();
         if self.action.handles_class(SensitiveClass::Secret) {
+            match self.supplemental.detect(payload) {
+                Ok(supplemental) => {
+                    spans.extend(supplemental.into_iter().map(
+                        |SensitiveMatch {
+                             class,
+                             category,
+                             start,
+                             end,
+                         }| DetectedSpan {
+                            class,
+                            category,
+                            start,
+                            end,
+                        },
+                    ));
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "reversible detector failed closed");
+                    if !payload.is_empty() {
+                        return vec![DetectedSpan {
+                            class: SensitiveClass::Secret,
+                            category: "detector_failure",
+                            start: 0,
+                            end: payload.len(),
+                        }];
+                    }
+                }
+            }
             spans.extend(self.secrets.match_spans(payload).into_iter().map(
                 |SecretMatch { name, start, end }| DetectedSpan {
                     class: SensitiveClass::Secret,
@@ -401,6 +434,34 @@ mod tests {
         let text = String::from_utf8(response.body).unwrap();
         assert!(text.contains("+14155550123"));
         assert!(text.contains("sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn supplemental_secret_is_replaced_and_exact_echo_reinjected() {
+        let engine = ReplacementEngine::new();
+        let mut flow = engine.start_flow("tenant", &enabled_action());
+        let jwt = format!(
+            "{}.{}.{}",
+            "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "signature1234"
+        );
+        let (replaced, proofs) = flow.replace_body(format!("token={jwt}").as_bytes());
+        let replaced = String::from_utf8(replaced).expect("replacement is UTF-8");
+        assert!(!replaced.contains(&jwt));
+        assert!(replaced.contains("mvmr1_"));
+        assert_eq!(proofs.len(), 1);
+        assert_eq!(proofs[0].policy_decision, "replace:jwt");
+
+        let mut response = ForwardResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: replaced.into_bytes(),
+        };
+        let reinjected = flow.reinject_response(&mut response);
+        assert_eq!(
+            String::from_utf8(response.body).unwrap(),
+            format!("token={jwt}")
+        );
+        assert_eq!(reinjected.len(), 1);
     }
 
     #[test]

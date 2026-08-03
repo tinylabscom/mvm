@@ -24,7 +24,7 @@ SDK / CLI
 | Guest agent | In-guest process, filesystem, readiness, and telemetry RPC. |
 
 See [Control surfaces](/architecture/control-surfaces/) for the current CLI,
-SDK, MCP, console, and guest RPC entry points.
+SDK, console, and guest RPC entry points.
 
 ## Security posture
 

@@ -245,6 +245,11 @@ fn admit_standby_parent_plan(
         agent_verbs: None,
         services: Vec::new(),
         stream_retention: Default::default(),
+        // The parent reaches nothing, so it gets the closed transport and no
+        // L3 spec — the same "no workload authority" posture as the empty
+        // secrets, services, and shares above.
+        network_mode: mvm_protocol::plan::NetworkMode::None,
+        l3_network: None,
     };
     let ledger = InMemoryNonceLedger::new();
     admit_for_run(&input, &SystemClock, &ledger, None, None)
@@ -1485,7 +1490,12 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn a_parent_the_spawn_records_is_found_by_the_claim_compat_key() {
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
         let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
         let kernel = tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"warm-kernel").unwrap();
@@ -1557,7 +1567,12 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn claim_or_cold_leaves_the_parent_claimable_for_the_runner_to_reserve() {
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
         let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
         let kernel = tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"warm-kernel").unwrap();
@@ -1696,7 +1711,12 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn warm_to_target_concurrent_calls_do_not_overshoot() {
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
         let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
         let kernel = tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"k").unwrap();

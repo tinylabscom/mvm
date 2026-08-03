@@ -142,7 +142,7 @@ pub(in crate::commands) enum Commands {
     /// Print shell configuration (completions + dev aliases) to stdout
     #[command(hide = true)]
     ShellInit(env::shell_init::Args),
-    /// Operational / observability commands (metrics, config, mcp)
+    /// Operational / observability commands (metrics, config)
     #[command(hide = true)]
     Ops(ops::group::Args),
     /// Manage named dev networks
@@ -323,10 +323,7 @@ fn configure_runtime_logging(cli: &Cli) {
         }
         None => LogFormat::Human,
     };
-    let is_mcp = matches!(&cli.command, Commands::Ops(a) if a.action.is_mcp());
-    if !is_mcp {
-        logging::init(log_format, cli.verbose);
-    }
+    logging::init(log_format, cli.verbose);
 }
 
 fn install_signal_handler() {

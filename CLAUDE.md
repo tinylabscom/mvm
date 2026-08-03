@@ -95,8 +95,8 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge/native-gateway/passt impl lives in `mvm-runtime`.
 - `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
 - `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait + every backend impl (`libkrun`/`hvf_backend`+`hvf/`/`firecracker`/`qemu`/`mock`), VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
-- `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
-- `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries; folds the old `mvm-mcp` behind an `mcp` feature.
+- `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
+- `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries.
 
 **Top of graph (daemons, SDK, FFI):**
 
@@ -485,12 +485,9 @@ test gate — it's process-parallel and faster than `cargo test` on this
 folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 --workspace` still works as a fallback if nextest isn't installed.
 
-For fast inner-loop iteration or a freshly-created worktree, `just
-test-fast` (`MVM_SKIP_EMBED_BINARIES=1`) skips the embedded host-vm binary
-cross-compile in `crates/mvm-cli/build.rs` — safe for everything except a
-builder-VM boot (which fails closed with a clear message under a stub
-build). `just test-cached` wraps rustc in sccache to share compilation
-across worktrees/branches (needs `cargo install sccache`).
+For fast inner-loop iteration across worktrees, `just test-cached` wraps rustc
+in sccache to share compilation across branches (needs `cargo install
+sccache`).
 
 **Always pass `--all` to `cargo fmt`.** Without it, fmt only checks the
 manifest crate (whichever one the manifest points at), silently missing
@@ -518,40 +515,13 @@ Never write scratch, temporary, or intermediate files anywhere inside the repo w
 
 ```bash
 cargo build
-cargo run -- --help
-
-# Bootstrap the builder VM (optional; builds auto-bootstrap it on first use)
-cargo run -- bootstrap
-
-# Build from Nix flake (Plan 178: build-time verbs live under `build`)
-cargo run -- build image --flake . --profile minimal --role worker
-cargo run -- run --flake . --profile minimal --cpus 2 --memory 1024
-
-# Templates
-cargo run -- template create base --flake . --profile minimal --role worker --cpus 2 --mem 1024
-cargo run -- template build base
-cargo run -- template list
-
-# Image catalog
-cargo run -- image list              # browse bundled catalog
-cargo run -- image search http       # search by name/tag
-cargo run -- image fetch minimal     # build from catalog entry
-
-# Networks
-cargo run -- network create isolated # create named network
-cargo run -- network list            # list all networks
-cargo run -- network remove isolated # remove a network
-
-# Console (interactive PTY, dev-mode only)
-cargo run -- console myvm            # interactive shell
-cargo run -- console myvm --command "uname -a"  # one-shot exec
-
-# Setup & diagnostics
-cargo run -- init                    # first-time setup wizard
-cargo run -- security status         # security posture evaluation
-cargo run -- cache info              # cache directory info
-cargo run -- cache prune             # clean stale temp files
+cargo run -- --help   # full verb surface: build/run/template/image/network/console/init/cache/doctor/…
 ```
+
+Every subcommand is self-documenting via `--help`; the complete reference is
+`public/src/content/docs/reference/cli-commands.md`. Build-time verbs
+(`image`/`run`/`template`) live under `build`; `console` is an interactive PTY,
+dev-mode only.
 
 ## Dev Network Layout
 

@@ -8,7 +8,7 @@ use crate::base::ui;
 use crate::firecracker;
 
 use super::observe::list_vms;
-use super::{abs_vms_dir, require_linux_env};
+use super::{abs_vms_dir, read_firecracker_pid, require_linux_env};
 
 /// Pause the vCPUs of a running Firecracker VM.
 ///
@@ -170,6 +170,22 @@ fn await_graceful_exit(
     Ok(false)
 }
 
+/// Remove per-VM runtime state only after the Firecracker process is proven
+/// gone. Keeping the directory on failure preserves the pid marker, API socket,
+/// logs, and other evidence needed to retry or diagnose the stop.
+fn cleanup_stopped_vm_state(
+    name: &str,
+    is_running: impl FnOnce() -> Result<bool>,
+    cleanup: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if is_running()? {
+        anyhow::bail!(
+            "Firecracker VM '{name}' is still running; retaining its state for retry and recovery"
+        );
+    }
+    cleanup()
+}
+
 pub fn stop_vm(name: &str) -> Result<()> {
     require_linux_env()?;
 
@@ -190,10 +206,19 @@ pub fn stop_vm(name: &str) -> Result<()> {
         &mvm_core::config::vm_state_dir(name),
         name,
     );
+    // Same reasoning for the L3 gateway: a crashed guest must not leave a
+    // host TUN and an nft table behind.
+    crate::netd_spawn::reap_netd(&mvm_core::config::vm_state_dir(name));
     if !firecracker::is_vm_running(&pid_file)? {
         ui::info(&format!("VM '{}' is not running.", name));
         return Ok(());
     }
+    // Capture the process identity while the marker is known-good. From this
+    // point onward, marker presence is recovery metadata only: every liveness
+    // decision uses the captured PID so losing `fc.pid` cannot make a live
+    // Firecracker look stopped.
+    let pid = read_firecracker_pid(&abs_dir)
+        .with_context(|| format!("read Firecracker pid for VM '{name}' before stop"))?;
 
     ui::info(&format!("Stopping VM '{}'...", name));
 
@@ -214,32 +239,28 @@ pub fn stop_vm(name: &str) -> Result<()> {
     let exited_gracefully = await_graceful_exit(
         std::time::Duration::from_millis(250),
         std::time::Duration::from_millis(25),
-        || firecracker::is_vm_running(&pid_file),
+        || firecracker::is_firecracker_pid_running(pid),
         std::time::Instant::now,
         std::thread::sleep,
     )?;
 
-    // Clean up the API socket either way; only fall back to a hard kill when
-    // the guest ignored the ACPI request within the graceful window.
-    if exited_gracefully {
-        run_in_vm(&format!("sudo rm -f {socket}", socket = socket))?;
-    } else {
-        run_in_vm(&format!(
-            r#"
-            if [ -f {pid} ]; then
-                sudo kill $(cat {pid}) 2>/dev/null || true
-            fi
-            sudo rm -f {socket}
-            "#,
-            pid = pid_file,
-            socket = socket,
-        ))?;
+    // The driver owns the verified SIGTERM → SIGKILL escalation. It reports an
+    // error and retains the pid marker if the process survives both signals.
+    if !exited_gracefully {
+        crate::driver::fc::terminate_firecracker_pid(name, pid, std::path::Path::new(&pid_file))
+            .with_context(|| format!("terminate Firecracker VM '{name}'"))?;
     }
 
-    // Remove the VM directory
-    if let Err(e) = run_in_vm(&format!("rm -rf {}", abs_dir)) {
-        warn!("failed to remove VM directory: {e}");
-    }
+    let q_abs_dir = shell_quote(&abs_dir);
+    cleanup_stopped_vm_state(
+        name,
+        || firecracker::is_firecracker_pid_running(pid),
+        || {
+            run_in_vm(&format!("rm -rf {q_abs_dir}"))
+                .map(|_| ())
+                .with_context(|| format!("remove stopped VM state {abs_dir}"))
+        },
+    )?;
 
     ui::success(&format!("VM '{}' stopped.", name));
     Ok(())
@@ -357,5 +378,44 @@ mod tests {
             result.is_err(),
             "a failing liveness probe must surface, not be swallowed"
         );
+    }
+
+    #[test]
+    fn cleanup_refuses_to_remove_state_while_firecracker_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fc.pid"), "4242").unwrap();
+        let cleanup_called = Cell::new(false);
+
+        let err = cleanup_stopped_vm_state(
+            "wedged-vm",
+            || Ok(true),
+            || {
+                cleanup_called.set(true);
+                std::fs::remove_dir_all(dir.path()).map_err(Into::into)
+            },
+        )
+        .expect_err("live Firecracker state must be retained");
+
+        assert!(
+            err.to_string().contains("still running"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!cleanup_called.get());
+        assert!(dir.path().join("fc.pid").exists());
+    }
+
+    #[test]
+    fn cleanup_removes_state_after_firecracker_exit_is_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fc.pid"), "4242").unwrap();
+
+        cleanup_stopped_vm_state(
+            "stopped-vm",
+            || Ok(false),
+            || std::fs::remove_dir_all(dir.path()).map_err(Into::into),
+        )
+        .expect("verified-stopped state can be removed");
+
+        assert!(!dir.path().exists());
     }
 }

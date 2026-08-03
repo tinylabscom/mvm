@@ -1243,9 +1243,34 @@ p90 2027, max 2119, spread 353), 10/10 activated. Warm is **not** measurable
 through the claim path while #1962 stands — the ~60 ms figure is the driver-seam
 restore, not a claim latency.
 
+**Updated by the sixth live run (2026-08-01 UTC).** Issue #1962 is fixed and
+live-proven. A parent replenished through the production path carried a signed
+`checkpoint.created` anchor before it was recorded idle, and the next claim
+passed parent-lineage verification, restored a child, and reached post-restore
+signaling. It then failed closed because the child never completed the
+post-restore identity/grant re-pin. BLOCKER-3 is therefore the next hard gate;
+BLOCKER-4 remains behind it. The failed child and cold-boot fallback left no
+orphan process or state directory. `standby_pool` remains `false`, and no warm
+success latency is claimed.
+
+- [x] Parent audit sub-gate: production-replenished parents carry a signed
+      creation anchor and pass the former `ParentUnaudited` refusal.
+- [ ] Post-restore identity/grant re-pin: make the restored child complete the
+      freshness handshake before the capability can be armed.
+
 The ordered gate list — the one to work from — is "What must happen before
 `standby_pool` can flip to `true`" in
 `specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`.
+
+- [x] Close the ordinary persistent-machine stop leak found during live
+  validation (#2007). A non-interactive or declined confirmation now fails
+  non-zero, reconcile-on-entry recognizes `fc.pid`, both Firecracker stop paths
+  retain a captured process identity through teardown, and a new start refuses
+  to replace the PID marker of a process still alive. Hermetic regressions cover
+  those boundaries. The 2026-07-31 KVM recheck retained the exact process and
+  marker after non-TTY refusal, then removed both after `--yes`. The warm-pool
+  claim-refusal cleanup remains a separate open gate because it owns and
+  removes child state through `ClaimCleanup`, not this ordinary stop path.
 
 ## Done when
 

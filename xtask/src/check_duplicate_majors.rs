@@ -43,8 +43,21 @@ const ALLOWLIST: &[&str] = &[
     // pins 0.12.1; the two rust-vmm families track different vmm-sys-util
     // majors until they converge.
     "vmm-sys-util",
+    // windows-sys 0.52 and 0.60/0.61 are already an accepted split. Those
+    // versions necessarily resolve matching windows-targets and per-architecture
+    // support crates at 0.52 and 0.53; none of these crates is independently
+    // selectable until the upstream windows-sys users converge.
     "windows-core",
     "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

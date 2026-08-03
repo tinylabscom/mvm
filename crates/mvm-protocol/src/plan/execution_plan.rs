@@ -16,9 +16,9 @@ use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
-    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, NetworkMode, Nonce, PlanId,
-    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
-    SignedImageRef, StreamRetention, TenantId, WorkloadId,
+    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, L3NetworkSpec, NetworkMode,
+    Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef,
+    SecretBinding, SignedImageRef, StreamRetention, TenantId, WorkloadId,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -83,6 +83,14 @@ pub struct ExecutionPlan {
     /// closed default.
     #[serde(default)]
     pub network_mode: NetworkMode,
+
+    /// The L3-tunnel contract, when `network_mode` is
+    /// [`NetworkMode::L3Vsock`]. Admission refuses an `l3_vsock` plan with no
+    /// spec and a spec on a plan with another mode, so the two fields cannot
+    /// disagree about what was admitted. `#[serde(default)]` so a plan
+    /// without the field deserializes as the safe absent case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l3_network: Option<L3NetworkSpec>,
 
     /// Opt-in warm-snapshot timing. `None` (default) = this workload is not
     /// warm-snapshotted; `Some(at)` = the host may capture a warm snapshot when
@@ -270,6 +278,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         admission_profile: AdmissionProfile::local_default("vm:boot", PlanSeccompTier::Standard),
         network_policy: PolicyRef("local-default".to_string()),
         network_mode: Default::default(),
+        l3_network: None,
         snapshot_at: Default::default(),
         build_provenance: Default::default(),
         fs_policy: FsPolicyRef("local-default".to_string()),

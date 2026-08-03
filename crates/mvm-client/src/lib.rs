@@ -13,14 +13,18 @@
 //! surface consumers import. [`stream_tracing`] republishes that stream into
 //! a consumer's `tracing` setup, behind the `tracing-bridge` feature.
 
+pub mod audit;
 pub mod boot;
 pub mod connect;
+pub mod inventory;
 pub mod local;
 pub mod readiness;
 pub mod registration;
+pub mod secret;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
+pub mod volume;
 
 pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{

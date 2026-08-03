@@ -63,7 +63,18 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// removed the vminitd gRPC client (`prost`/`prost-types`/`h2`/`http`) and
 /// their exclusive transitive set from the default closure. Lower it freely
 /// as deps drop.
-const CLOSURE_BUDGET: usize = 270;
+///
+/// 273 (was 270): the Apple Container kernel digest-pin contract uses BLAKE3
+/// for streamed multi-hundred-megabyte kernel verification. Its `blake3`
+/// package and three small support crates are part of the default host binary.
+///
+/// 274 (was 273): the canonical `mvm-volume-contract` leaf is now the single
+/// volume contract consumed by both mvm and fleet orchestrators; the leaf
+/// itself is the only new crate in the default closure.
+///
+/// 275 (was 274): the exact-pinned, zero-dependency `leakguard` detector adds
+/// one crate to enforce default-on credential masking on protected egress.
+const CLOSURE_BUDGET: usize = 275;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

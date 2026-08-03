@@ -304,14 +304,27 @@ pub fn pack_dir(pack_hash: &str) -> std::path::PathBuf {
 /// disk images) and the host-side VMM state (pid files, console log,
 /// vsock sockets) share the same per-VM directory with disjoint file names.
 pub fn vms_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home()).join("vms")
+    vms_dir_at(mvm_home())
+}
+
+/// Root of all per-VM directories beneath an explicit mvm home.
+///
+/// This pure variant lets callers with an already-resolved or isolated root
+/// use the canonical layout without mutating process-wide environment state.
+pub fn vms_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("vms")
 }
 
 /// Per-VM state directory: `<mvm_home>/vms/<name>/`. Holds the
 /// libkrun pid file, console log, vsock listener socket(s), runtime
 /// `mode.json`, `rootfs.ref` / `kernel.ref`, and the `ports` file.
 pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
-    vms_dir().join(name)
+    vm_state_dir_at(mvm_home(), name)
+}
+
+/// Per-VM state directory beneath an explicit mvm home.
+pub fn vm_state_dir_at(mvm_home: impl AsRef<std::path::Path>, name: &str) -> std::path::PathBuf {
+    vms_dir_at(mvm_home).join(name)
 }
 
 /// Per-instance state root: `<mvm_home>/instances/<name>/`. Distinct from
@@ -359,6 +372,10 @@ pub fn machine_spec_path(name: &str) -> std::path::PathBuf {
 pub fn host_agent_root() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("host-agent")
 }
+
+/// Per-VM marker containing the supervisor PID-file path that owns a
+/// host-agent registration.
+pub const HOST_AGENT_OWNER_PID_REF_FILE: &str = "host-agent.owner-pid";
 
 /// Per-tenant host-agent daemon directory: `<mvm_home>/host-agent/<tenant>/`.
 /// Holds the resident daemon's control UDS, pid file, worker pid file, and
@@ -1243,6 +1260,18 @@ mod tests {
         }
 
         env.remove("MVM_HOME");
+    }
+
+    #[test]
+    fn vm_state_dir_at_uses_an_explicit_isolated_home() {
+        assert_eq!(
+            vms_dir_at("/isolated/mvm"),
+            std::path::PathBuf::from("/isolated/mvm/vms")
+        );
+        assert_eq!(
+            vm_state_dir_at("/isolated/mvm", "log-test"),
+            std::path::PathBuf::from("/isolated/mvm/vms/log-test")
+        );
     }
 
     #[test]

@@ -136,9 +136,6 @@ jobs:
       - name: repr(C) types carry a layout contract (check-abi-layout)
         run: cargo run -p xtask -- check-abi-layout
 
-      - name: SDK crate split guard
-        run: cargo run -p xtask -- check-sdk-split
-
       - name: Gated doc claims (plan 74 W0)
         run: cargo run -p xtask -- check-doc-claims
 
@@ -469,34 +466,6 @@ jobs:
             --test seccomp_property \
             --test landlock_property \
             -- --ignored --nocapture
-
-  mcp-server-smoke:
-    name: MCP server stdio roundtrip (plan 32 / Proposal A)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      # Plan 115 / ADR-065 — mvm-cli's build.rs needs zigbuild.
-      - uses: ./.github/actions/install-zigbuild
-
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-mcp-smoke-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-mcp-smoke-
-
-      - name: Build mvmctl + run MCP roundtrip smoke
-        run: ./scripts/test-mcp-roundtrip.sh
 
   # ── Lane: app-deps-audit (ADR-047 claim 9, Plan 73 Followup D) ────
   # Exercises the ADR-047 application-dependency audit pipeline on

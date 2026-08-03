@@ -99,6 +99,14 @@ required-features = ["addons"]
 name = "mvm-ping"
 path = "src/bin/mvm-ping.rs"
 
+# In-guest L3 TUN-over-vsock tunnel agent. Creates `mvm0`, framing raw IP
+# packets onto dedicated vsock connections to the host gateway. Linux-only
+# at runtime; compiles as an inert binary elsewhere so workspace builds stay
+# green for macOS contributors.
+[[bin]]
+name = "mvm-net-agent"
+path = "src/bin/mvm-net-agent.rs"
+
 # In-guest one-shot workload-exit-code reporter over AF_VSOCK.
 [[bin]]
 name = "mvm-exit-report"

@@ -37,10 +37,24 @@ use std::path::Path;
 /// Where the pinned surface and accepted misses live.
 const BASELINE_REL: &str = "xtask/mutation-witness-baseline.json";
 
-/// Per-mutant test timeout handed to cargo-mutants. A mutant that hangs
-/// is a caught mutant as far as this gate cares, but without a bound a
-/// single infinite loop stalls the whole lane.
-const MUTANT_TIMEOUT_SECS: u32 = 300;
+/// Per-mutant test timeout, as a multiple of the package's own measured
+/// baseline. A mutant that hangs is a caught mutant as far as this gate
+/// cares, but without a bound a single infinite loop stalls the lane.
+///
+/// Relative rather than absolute because the packages on this surface
+/// differ by two orders of magnitude in suite time, and one fixed number
+/// is wrong for all of them in both directions at once. A flat 300s was
+/// **too short** for the packages whose own suite runs longer than that —
+/// their baseline timed out, so no mutant was ever tested and the file
+/// read as covered — and **five times too long** for a package whose
+/// suite takes fourteen seconds, where every hanging mutant burned the
+/// full five minutes.
+const MUTANT_TIMEOUT_MULTIPLIER: u32 = 5;
+
+/// Floor under the derived timeout, so a package whose suite runs in
+/// milliseconds does not get a timeout measured in milliseconds and start
+/// reporting scheduler noise as caught mutants.
+const MUTANT_MINIMUM_TIMEOUT_SECS: u32 = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -68,6 +82,44 @@ pub struct SurfaceFile {
     pub package: String,
     /// Claim numbers whose witnesses resolve here.
     pub claims: Vec<u32>,
+    /// Optionally restrict which mutants in this file are in claim scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<SurfaceScope>,
+    /// Cargo features the mutation build must enable for this file.
+    ///
+    /// cargo-mutants generates mutants by parsing source, and `syn` does
+    /// not evaluate `cfg`. A function behind a feature the run does not
+    /// enable is therefore mutated, never compiled, and reported as a
+    /// survivor that no test could ever kill. Naming the feature here is
+    /// the difference between measuring the code and tolerating a mutant
+    /// nothing can reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+/// A narrowing of one file's mutation surface.
+///
+/// The surface is resolved by mapping each `fn:` witness to its declaring
+/// file, which assumes the file is the enforcement code the witness
+/// guards. That holds for a cohesive module and fails for a large
+/// multi-purpose binary, where the witness guards one function and the
+/// other few thousand lines answer to no claim at all.
+///
+/// Narrowing a claim's surface is a weakening move, and one that reads as
+/// routine in a diff — so it is deliberately expensive here. Resolution
+/// never produces a scope, so one can only arrive by hand, in the
+/// committed baseline, as a reviewable diff. It carries a mandatory `why`,
+/// enforced exactly as an accepted miss's reason is, and must name where
+/// the excluded code's coverage is tracked, so narrowing records a debt
+/// rather than discharging one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SurfaceScope {
+    /// Regex handed to `cargo mutants --re`, matched against mutant names.
+    pub examine_re: String,
+    /// Why the rest of the file is not this claim's surface.
+    pub why: String,
+    /// Where the excluded code's own coverage gap is tracked.
+    pub excluded_tracked_by: String,
 }
 
 /// A mutant that survived, with a stated reason for tolerating it.
@@ -120,7 +172,18 @@ pub struct Miss {
     pub mutant: String,
 }
 
-pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
+/// Restrict a `--run` to one cargo package.
+///
+/// The whole surface takes about six hours end to end, and a
+/// GitHub-hosted job is killed at six. Split per package the slowest is
+/// well under two and a half, so the lane is one job per package rather
+/// than one job that cannot reliably finish.
+///
+/// Only the mutation step narrows. The surface pin and the uncovered-claim
+/// diff still run over the *whole* ledger in every job, so a claim
+/// dropping out of coverage fails every shard rather than only the one
+/// that happens to own it.
+pub fn run(workspace: &Path, mode: Mode, package: Option<&str>) -> Result<()> {
     let Surface {
         files: resolved,
         uncovered,
@@ -138,15 +201,25 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
     if matches!(mode, Mode::RepinSurface | Mode::RewriteBaseline) {
         // Re-pinning keeps the stated reasons; a full rewrite discards
         // them on purpose, having just re-observed the ground truth.
+        let previous = read_baseline(&baseline_path).ok();
         let accepted_misses = if mode == Mode::RewriteBaseline {
-            seed_accepted(&run_mutants_over(workspace, &resolved)?)
+            let scoped = carry_scopes_forward(resolved.clone(), previous.as_ref());
+            seed_accepted(&run_mutants_over(
+                workspace,
+                &for_package(&scoped, package),
+            )?)
         } else {
-            read_baseline(&baseline_path)
-                .map(|b| b.accepted_misses)
+            previous
+                .as_ref()
+                .map(|b| b.accepted_misses.clone())
                 .unwrap_or_default()
         };
+        // Re-pinning must never silently widen a scope back out: that
+        // would look like routine maintenance and quietly re-admit
+        // hundreds of out-of-claim mutants.
+        let surface = carry_scopes_forward(resolved, previous.as_ref());
         let baseline = Baseline {
-            surface: resolved,
+            surface,
             uncovered_claims: uncovered,
             accepted_misses,
         };
@@ -162,6 +235,8 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
 
     let baseline = read_baseline(&baseline_path)?;
     let mut errors = check_accepted_reasons(&baseline.accepted_misses);
+    errors.extend(check_scope_reasons(&baseline.surface));
+    errors.extend(check_shard_matrix(workspace, &baseline.surface));
     errors.extend(diff_surface(&baseline.surface, &resolved));
     errors.extend(diff_uncovered(&baseline.uncovered_claims, &uncovered));
 
@@ -173,8 +248,36 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
     }
 
     if mode == Mode::Run {
-        let observed = run_mutants_over(workspace, &resolved)?;
-        let verdict = ratchet(&baseline.accepted_misses, &observed);
+        // The committed surface, not the freshly resolved one: resolution
+        // cannot know about scopes, and running the unscoped surface would
+        // report every out-of-claim mutant as a new miss.
+        let surface = for_package(&baseline.surface, package);
+        if surface.is_empty() {
+            bail!(
+                "check-mutation-witnesses: --package {} matches no surface file. A shard that \
+                 measures nothing must fail rather than pass silently.",
+                package.unwrap_or("<none>")
+            );
+        }
+        if let Some(pkg) = package {
+            eprintln!(
+                "check-mutation-witnesses: shard for package {pkg} ({} of {} surface files)",
+                surface.len(),
+                baseline.surface.len()
+            );
+        }
+        let observed = run_mutants_over(workspace, &surface)?;
+        // The accepted set narrows with the surface, or every other
+        // package's entries would be reported as "now caught" by a shard
+        // that never looked at them.
+        let paths: BTreeSet<&str> = surface.iter().map(|s| s.path.as_str()).collect();
+        let accepted: Vec<AcceptedMiss> = baseline
+            .accepted_misses
+            .iter()
+            .filter(|a| paths.contains(a.file.as_str()))
+            .cloned()
+            .collect();
+        let verdict = ratchet(&accepted, &observed);
         for m in &verdict.new_misses {
             errors.push(format!(
                 "new surviving mutant in {}: {} — a claim witness does not detect this change",
@@ -259,6 +362,11 @@ pub fn resolve_surface(workspace: &Path) -> Result<Surface> {
                 path: path.clone(),
                 package: package_for(path)?,
                 claims: claims.iter().copied().collect(),
+                // Resolution never narrows. A scope can only be added by
+                // hand to the committed baseline, which is what makes it
+                // a reviewable act rather than a silent one.
+                scope: None,
+                features: Vec::new(),
             })
         })
         .collect();
@@ -366,6 +474,161 @@ pub fn diff_uncovered(committed: &[UncoveredClaim], resolved: &[UncoveredClaim])
         errors.push(format!(
             "claim {n} gained a mutation surface — re-pin so the baseline records it"
         ));
+    }
+    errors
+}
+
+/// Where the nightly lane declares its per-package shards.
+const SECURITY_WORKFLOW_REL: &str = ".github/workflows/security.yml";
+
+/// The lane's shard matrix must name exactly the packages on the surface.
+///
+/// The shards exist because the whole surface cannot finish inside a
+/// GitHub job's six-hour cap. That makes the matrix a second place the
+/// surface is written down, and a package that joins the ledger but not
+/// the matrix is simply never mutated — while every shard stays green.
+/// That is the same silent-loss failure the committed surface pin exists
+/// to prevent, one level out, so it is checked the same way.
+pub fn check_shard_matrix(workspace: &Path, surface: &[SurfaceFile]) -> Vec<String> {
+    let path = workspace.join(SECURITY_WORKFLOW_REL);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return vec![format!(
+            "cannot read {SECURITY_WORKFLOW_REL} to verify the mutation shard matrix"
+        )];
+    };
+    let declared = shard_packages(&text);
+    if declared.is_empty() {
+        return vec![format!(
+            "{SECURITY_WORKFLOW_REL} declares no mutation shard matrix; the nightly lane would \
+             measure nothing"
+        )];
+    }
+    let wanted: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
+    let mut errors = Vec::new();
+    for pkg in &wanted {
+        if !declared.contains(*pkg) {
+            errors.push(format!(
+                "package {pkg} is on the mutation surface but has no shard in \
+                 {SECURITY_WORKFLOW_REL}, so nothing ever mutates it"
+            ));
+        }
+    }
+    for pkg in &declared {
+        if !wanted.contains(pkg.as_str()) {
+            errors.push(format!(
+                "{SECURITY_WORKFLOW_REL} declares a mutation shard for {pkg}, which owns no \
+                 surface file; the shard would fail on an empty surface"
+            ));
+        }
+    }
+    errors
+}
+
+/// The `package:` list under the mutation job's matrix.
+///
+/// Text-scanned rather than YAML-parsed, matching the sibling gates and
+/// the workspace's deliberate dependency floor.
+pub fn shard_packages(workflow: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut in_job = false;
+    let mut in_list = false;
+    for line in workflow.lines() {
+        if line.starts_with("  mutation-witnesses:") {
+            in_job = true;
+            continue;
+        }
+        if in_job && line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':') {
+            break; // next job at the same indent
+        }
+        if !in_job {
+            continue;
+        }
+        let t = line.trim();
+        if t == "package:" {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            if let Some(name) = t.strip_prefix("- ") {
+                out.insert(name.trim().to_string());
+            } else if !t.is_empty() {
+                in_list = false;
+            }
+        }
+    }
+    out
+}
+
+/// The surface files owned by `package`, or all of them when unfiltered.
+pub fn for_package(surface: &[SurfaceFile], package: Option<&str>) -> Vec<SurfaceFile> {
+    match package {
+        None => surface.to_vec(),
+        Some(pkg) => surface
+            .iter()
+            .filter(|s| s.package == pkg)
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Copy each committed file's `scope` onto the freshly resolved surface.
+///
+/// Resolution cannot derive a scope, so without this every re-pin would
+/// drop the narrowings and silently re-admit the code they exclude.
+pub fn carry_scopes_forward(
+    mut resolved: Vec<SurfaceFile>,
+    previous: Option<&Baseline>,
+) -> Vec<SurfaceFile> {
+    let Some(previous) = previous else {
+        return resolved;
+    };
+    let scopes: BTreeMap<&str, &SurfaceScope> = previous
+        .surface
+        .iter()
+        .filter_map(|s| s.scope.as_ref().map(|sc| (s.path.as_str(), sc)))
+        .collect();
+    let features: BTreeMap<&str, &Vec<String>> = previous
+        .surface
+        .iter()
+        .filter(|s| !s.features.is_empty())
+        .map(|s| (s.path.as_str(), &s.features))
+        .collect();
+    for file in &mut resolved {
+        if let Some(scope) = scopes.get(file.path.as_str()) {
+            file.scope = Some((*scope).clone());
+        }
+        if let Some(f) = features.get(file.path.as_str()) {
+            file.features = (*f).clone();
+        }
+    }
+    resolved
+}
+
+/// Every narrowed surface must say why, and where the excluded code's
+/// coverage is tracked. A scope without either is a claim quietly
+/// shrinking to fit its evidence.
+pub fn check_scope_reasons(surface: &[SurfaceFile]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for file in surface {
+        let Some(scope) = &file.scope else { continue };
+        if scope.examine_re.trim().is_empty() {
+            errors.push(format!(
+                "surface {} has an empty scope regex — remove the scope rather than                  narrowing to nothing",
+                file.path
+            ));
+        }
+        if scope.why.trim().is_empty() {
+            errors.push(format!(
+                "surface {} is scoped with no stated reason — say why the rest of the                  file is not claim {:?}'s surface",
+                file.path, file.claims
+            ));
+        }
+        if scope.excluded_tracked_by.trim().is_empty() {
+            errors.push(format!(
+                "surface {} is scoped without naming where the excluded code's coverage                  is tracked — narrowing must record the debt, not discharge it",
+                file.path
+            ));
+        }
     }
     errors
 }
@@ -490,6 +753,7 @@ fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile]) -> Result<Vec<Mis
     let out_root = std::env::temp_dir().join("mvm-mutation-witnesses");
     std::fs::create_dir_all(&out_root)
         .with_context(|| format!("creating {}", out_root.display()))?;
+    let isolation = MutationIsolation::establish(&out_root)?;
 
     let mut all = Vec::new();
     for (i, file) in surface.iter().enumerate() {
@@ -502,29 +766,120 @@ fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile]) -> Result<Vec<Mis
             file.claims
         );
         let out_dir = out_root.join(file.path.replace('/', "_"));
-        all.extend(run_mutants_for_file(workspace, file, &out_dir)?);
+        all.extend(run_mutants_for_file(workspace, file, &out_dir, &isolation)?);
     }
     all.sort();
     all.dedup();
     Ok(all)
 }
 
-fn run_mutants_for_file(workspace: &Path, file: &SurfaceFile, out_dir: &Path) -> Result<Vec<Miss>> {
-    let status = std::process::Command::new("cargo")
-        .current_dir(workspace)
+/// The state roots a mutation run is confined to.
+///
+/// `--run` executes security code with its check removed: plan verification
+/// that no longer verifies, the host signer, seccomp construction. It must
+/// not reach a real mvm state root — the mutation may be *in* the path or
+/// mode logic, so it can mint a key at the wrong path or leave firewall
+/// rules behind.
+///
+/// Applied here, at the one place cargo-mutants is spawned, rather than in
+/// each caller's shell. A caller that forgets is the whole failure mode,
+/// and there is no reason for the nightly lane, the Justfile recipe and a
+/// bare `cargo run -p xtask` to each carry their own copy of it.
+struct MutationIsolation {
+    home: std::path::PathBuf,
+    cargo_home: std::path::PathBuf,
+    rustup_home: std::path::PathBuf,
+}
+
+impl MutationIsolation {
+    fn establish(under: &Path) -> Result<Self> {
+        // Resolve the toolchain roots from the *real* home before
+        // redirecting: `~` follows `HOME`, so a subprocess whose `HOME`
+        // moved would look for cargo and rustup inside the empty temp
+        // root and find no toolchain at all.
+        let real_home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| real_home.as_ref().map(|h| h.join(".cargo")))
+            .context("resolving CARGO_HOME: neither CARGO_HOME nor HOME is set")?;
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| real_home.as_ref().map(|h| h.join(".rustup")))
+            .context("resolving RUSTUP_HOME: neither RUSTUP_HOME nor HOME is set")?;
+
+        let home = under.join("state-root");
+        std::fs::create_dir_all(&home)
+            .with_context(|| format!("creating the isolated state root {}", home.display()))?;
+
+        // A reachable keystore under the redirected root means the
+        // redirect did not take. Refuse rather than mutate against keys.
+        let keys = home.join(".mvm").join("keys");
+        if keys.exists() {
+            bail!(
+                "refusing to mutate against a reachable keystore at {} — the isolated \
+                 state root is supposed to be empty",
+                keys.display()
+            );
+        }
+        eprintln!(
+            "check-mutation-witnesses: mutating under an isolated HOME/MVM_HOME at {}",
+            home.display()
+        );
+        Ok(Self {
+            home,
+            cargo_home,
+            rustup_home,
+        })
+    }
+
+    fn apply(&self, cmd: &mut std::process::Command) {
+        // Both roots move together. `MVM_HOME` alone is not enough:
+        // `default_mvm_cache_dir` deliberately reads the home directory to
+        // seed from the shared cache, which is the one door `MVM_HOME`
+        // does not close.
+        cmd.env("MVM_HOME", &self.home)
+            .env("HOME", &self.home)
+            .env("CARGO_HOME", &self.cargo_home)
+            .env("RUSTUP_HOME", &self.rustup_home);
+    }
+}
+
+fn run_mutants_for_file(
+    workspace: &Path,
+    file: &SurfaceFile,
+    out_dir: &Path,
+    isolation: &MutationIsolation,
+) -> Result<Vec<Miss>> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.current_dir(workspace)
         .arg("mutants")
         .args(["-p", &file.package])
         .args(["--file", &file.path])
         .args(["--test-tool", "nextest"])
-        .args(["--timeout", &MUTANT_TIMEOUT_SECS.to_string()])
+        .args([
+            "--timeout-multiplier",
+            &MUTANT_TIMEOUT_MULTIPLIER.to_string(),
+        ])
+        .args([
+            "--minimum-test-timeout",
+            &MUTANT_MINIMUM_TIMEOUT_SECS.to_string(),
+        ])
         .arg("--output")
-        .arg(out_dir)
-        // The embedded host-vm binaries are cross-compiled by
-        // mvm-cli's build.rs; a mutation run rebuilds per mutant and
-        // does not boot a VM, so paying that cost every time is waste.
-        .env("MVM_SKIP_EMBED_BINARIES", "1")
-        .status()
-        .context("spawning `cargo mutants`")?;
+        .arg(out_dir);
+    if !file.features.is_empty() {
+        let joined = file.features.join(",");
+        eprintln!("      features {joined}");
+        cmd.args(["--features", &joined]);
+    }
+    if let Some(scope) = &file.scope {
+        eprintln!(
+            "      scoped to /{}/ — {}",
+            scope.examine_re, scope.excluded_tracked_by
+        );
+        cmd.args(["--re", &scope.examine_re]);
+    }
+    isolation.apply(&mut cmd);
+    let status = cmd.status().context("spawning `cargo mutants`")?;
 
     // Exit status is deliberately not the signal: cargo-mutants exits
     // nonzero merely because mutants survived, which is the case this
@@ -568,27 +923,45 @@ fn run_mutants_for_file(workspace: &Path, file: &SurfaceFile, out_dir: &Path) ->
 ///
 /// That is the failure this whole gate exists to prevent, one level up: a
 /// green result standing in for evidence that was never collected. So the
-/// counts in `outcomes.json` are the signal, not the presence of a file. A
-/// completed run carries `total_mutants`; a baseline failure carries only
-/// an `outcomes` array whose sole entry is the failed `Baseline` scenario.
+/// counts in `outcomes.json` are the signal, not the presence of a file.
+///
+/// There are two ways to arrive here having tested nothing, and both have
+/// been observed on this repo's own claim surface:
+///
+/// - The baseline fails to build or fails its tests, giving a `Baseline`
+///   outcome summarised `Failure`.
+/// - The baseline **times out**, giving one summarised `Timeout`. That is
+///   what a package whose own suite runs longer than the per-test budget
+///   produces, and it is indistinguishable from the above in every way
+///   that matters here.
+///
+/// So the check is that the summary *is* `Success`, rather than that it is
+/// one of a list of known failures. A summary this code has not seen
+/// before is not evidence that anything ran. `total_mutants` is checked
+/// for being **nonzero** for the same reason: cargo-mutants writes the key
+/// as `0` on an aborted run, so its mere presence proves nothing.
 fn ensure_mutants_actually_ran(outcomes_json: &str, path: &str) -> Result<u64> {
     let v: serde_json::Value = serde_json::from_str(outcomes_json)
         .with_context(|| format!("parsing cargo-mutants outcomes.json for {path}"))?;
 
-    let baseline_failed = v
+    let baseline_verdict = v
         .get("outcomes")
         .and_then(|o| o.as_array())
-        .is_some_and(|entries| {
-            entries.iter().any(|e| {
-                e.get("scenario").and_then(|s| s.as_str()) == Some("Baseline")
-                    && e.get("summary").and_then(|s| s.as_str()) == Some("Failure")
-            })
-        });
-    if baseline_failed {
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|e| e.get("scenario").and_then(|s| s.as_str()) == Some("Baseline"))
+        })
+        .and_then(|e| e.get("summary").and_then(|s| s.as_str()));
+    if let Some(verdict) = baseline_verdict
+        && verdict != "Success"
+    {
         bail!(
-            "{path}: the unmutated tree failed its own tests, so cargo-mutants tested \
-             no mutants. This file contributed no coverage — it is not clean, it is \
-             unmeasured. Fix the failing tests for its package and re-run."
+            "{path}: the unmutated tree did not pass its own tests (baseline \
+             {verdict}), so cargo-mutants tested no mutants. This file contributed \
+             no coverage — it is not clean, it is unmeasured. Fix its package's \
+             suite, or raise the per-test timeout if the suite is merely slow, then \
+             re-run."
         );
     }
 
@@ -599,6 +972,13 @@ fn ensure_mutants_actually_ran(outcomes_json: &str, path: &str) -> Result<u64> {
              measured."
         );
     };
+    if total == 0 {
+        bail!(
+            "{path}: cargo-mutants tested zero mutants. A claim-surface file with \
+             nothing to mutate is not covered, it is unmeasured — either the run \
+             aborted before mutating anything, or `--file` matched no code."
+        );
+    }
     Ok(total)
 }
 
@@ -804,6 +1184,8 @@ a.rs:5:1: replace x with y
             path: path.into(),
             package: package_for(path).unwrap_or_else(|| "unknown".into()),
             claims,
+            scope: None,
+            features: Vec::new(),
         }
     }
 
@@ -837,6 +1219,199 @@ a.rs:5:1: replace x with y
         let errs = diff_surface(&old, &new);
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("changed claims"));
+    }
+
+    fn scoped(path: &str, examine_re: &str, why: &str, tracked: &str) -> SurfaceFile {
+        SurfaceFile {
+            path: path.into(),
+            package: package_for(path).unwrap_or_else(|| "unknown".into()),
+            claims: vec![2],
+            features: Vec::new(),
+            scope: Some(SurfaceScope {
+                examine_re: examine_re.into(),
+                why: why.into(),
+                excluded_tracked_by: tracked.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn an_unscoped_surface_file_needs_no_justification() {
+        assert!(check_scope_reasons(&[surface("crates/a/src/l.rs", vec![1])]).is_empty());
+    }
+
+    #[test]
+    fn a_scope_must_state_why_and_where_the_rest_is_tracked() {
+        let ok = scoped(
+            "crates/a/src/l.rs",
+            "virtiofs",
+            "one witness, big file",
+            "#123",
+        );
+        assert!(check_scope_reasons(&[ok]).is_empty());
+
+        let no_why = scoped("crates/a/src/l.rs", "virtiofs", "   ", "#123");
+        let errs = check_scope_reasons(&[no_why]);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("no stated reason"), "{}", errs[0]);
+
+        let no_tracking = scoped("crates/a/src/l.rs", "virtiofs", "because", "");
+        let errs = check_scope_reasons(&[no_tracking]);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("record the debt"), "{}", errs[0]);
+
+        let empty_re = scoped("crates/a/src/l.rs", "", "because", "#123");
+        let errs = check_scope_reasons(&[empty_re]);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("narrowing to nothing"), "{}", errs[0]);
+    }
+
+    /// A re-pin resolves the surface afresh, and resolution never yields a
+    /// scope. Without carrying them forward, routine maintenance would
+    /// silently widen every narrowed file back out.
+    #[test]
+    fn repinning_carries_a_scope_forward() {
+        let previous = Baseline {
+            surface: vec![scoped("crates/a/src/l.rs", "virtiofs", "why", "#123")],
+            uncovered_claims: vec![],
+            accepted_misses: vec![],
+        };
+        let resolved = vec![surface("crates/a/src/l.rs", vec![2])];
+        assert!(resolved[0].scope.is_none());
+
+        let carried = carry_scopes_forward(resolved, Some(&previous));
+        assert_eq!(
+            carried[0].scope.as_ref().map(|s| s.examine_re.as_str()),
+            Some("virtiofs")
+        );
+    }
+
+    #[test]
+    fn carrying_forward_leaves_unscoped_files_alone() {
+        let previous = Baseline {
+            surface: vec![scoped("crates/a/src/l.rs", "virtiofs", "why", "#123")],
+            uncovered_claims: vec![],
+            accepted_misses: vec![],
+        };
+        let carried = carry_scopes_forward(
+            vec![surface("crates/b/src/other.rs", vec![9])],
+            Some(&previous),
+        );
+        assert!(carried[0].scope.is_none());
+    }
+
+    const SHARD_WORKFLOW: &str = "\
+jobs:
+  other-job:
+    name: not this one
+    strategy:
+      matrix:
+        package:
+          - not-a-real-package
+  mutation-witnesses:
+    name: Claim witnesses
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - mvm-cli
+          - mvm-hostd
+    steps:
+      - run: true
+  later-job:
+    name: after
+";
+
+    #[test]
+    fn shard_packages_reads_only_the_mutation_jobs_matrix() {
+        let got = shard_packages(SHARD_WORKFLOW);
+        assert_eq!(
+            got,
+            ["mvm-cli", "mvm-hostd"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<BTreeSet<_>>(),
+            "a sibling job's matrix must not leak into the mutation shard list"
+        );
+    }
+
+    #[test]
+    fn a_surface_package_with_no_shard_is_reported() {
+        let declared = shard_packages(SHARD_WORKFLOW);
+        // mvm-core is on the surface but absent from the matrix above.
+        let surface = [
+            surface("crates/mvm-cli/src/a.rs", vec![1]),
+            surface("crates/mvm-core/src/b.rs", vec![2]),
+        ];
+        let missing: Vec<&str> = surface
+            .iter()
+            .map(|s| s.package.as_str())
+            .filter(|p| !declared.contains(*p))
+            .collect();
+        assert_eq!(
+            missing,
+            vec!["mvm-core"],
+            "a package on the surface with no shard must be visible"
+        );
+    }
+
+    #[test]
+    fn a_shard_for_a_package_with_no_surface_file_is_reported() {
+        let declared = shard_packages(SHARD_WORKFLOW);
+        let surface = [surface("crates/mvm-cli/src/a.rs", vec![1])];
+        let wanted: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
+        let extra: Vec<&String> = declared
+            .iter()
+            .filter(|p| !wanted.contains(p.as_str()))
+            .collect();
+        assert_eq!(
+            extra.len(),
+            1,
+            "a shard whose package owns no surface file must be visible"
+        );
+    }
+
+    #[test]
+    fn a_package_shard_selects_only_that_packages_files() {
+        let surface = [
+            surface("crates/mvm-cli/src/a.rs", vec![1]),
+            surface("crates/mvm-cli/src/b.rs", vec![2]),
+            surface("crates/mvm-hostd/src/c.rs", vec![3]),
+        ];
+        let cli = for_package(&surface, Some("mvm-cli"));
+        assert_eq!(cli.len(), 2);
+        assert!(cli.iter().all(|s| s.package == "mvm-cli"));
+
+        assert_eq!(for_package(&surface, Some("mvm-hostd")).len(), 1);
+        // Unfiltered is the whole surface, so a non-sharded run is
+        // unchanged.
+        assert_eq!(for_package(&surface, None).len(), 3);
+        // A package with no surface files yields nothing, which the caller
+        // turns into a failure rather than a silent pass.
+        assert!(for_package(&surface, Some("mvm-sdk")).is_empty());
+    }
+
+    /// Every shard together must cover the surface exactly once. A package
+    /// dropped from the matrix would otherwise go unmeasured while every
+    /// job stayed green.
+    #[test]
+    fn the_shards_partition_the_surface() {
+        let surface = [
+            surface("crates/mvm-cli/src/a.rs", vec![1]),
+            surface("crates/mvm-hostd/src/c.rs", vec![3]),
+            surface("crates/mvm-core/src/d.rs", vec![4]),
+        ];
+        let packages: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
+        let mut seen: Vec<String> = Vec::new();
+        for p in &packages {
+            for f in for_package(&surface, Some(p)) {
+                seen.push(f.path);
+            }
+        }
+        seen.sort();
+        let mut all: Vec<String> = surface.iter().map(|s| s.path.clone()).collect();
+        all.sort();
+        assert_eq!(seen, all, "the shards must cover every file exactly once");
     }
 
     #[test]
@@ -1045,6 +1620,26 @@ mod baseline_guard_tests {
   "unviable": 0
 }"#;
 
+    /// Verbatim shape observed running this gate's own surface over
+    /// `crates/mvm-build/src/app_deps_gate.rs`: three of that package's
+    /// tests outran the per-test budget, so the *baseline* timed out.
+    /// cargo-mutants found 33 mutants, tested none of them, and still
+    /// wrote every count as zero.
+    const BASELINE_TIMED_OUT: &str = r#"{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Timeout",
+      "log_path": "log/baseline.log"
+    }
+  ],
+  "total_mutants": 0,
+  "missed": 0,
+  "caught": 0,
+  "timeout": 0,
+  "unviable": 0
+}"#;
+
     #[test]
     fn a_failed_baseline_is_an_error_not_a_clean_file() {
         let err = ensure_mutants_actually_ran(BASELINE_FAILED, "crates/x/src/y.rs")
@@ -1082,5 +1677,63 @@ mod baseline_guard_tests {
     fn a_clean_file_is_still_accepted() {
         assert_eq!(ensure_mutants_actually_ran(COMPLETED, "p").unwrap(), 17);
         assert!(parse_missed("").is_empty());
+    }
+
+    /// A timed-out baseline tested nothing, exactly like a failed one. It
+    /// was not caught while the check enumerated known failure summaries,
+    /// which is why the check now asks for `Success` instead.
+    #[test]
+    fn a_timed_out_baseline_is_an_error_not_a_clean_file() {
+        let err = ensure_mutants_actually_ran(BASELINE_TIMED_OUT, "crates/x/src/y.rs")
+            .expect_err("a baseline that timed out tested no mutants");
+        let msg = err.to_string();
+        assert!(msg.contains("Timeout"), "{msg}");
+        assert!(msg.contains("unmeasured"), "{msg}");
+    }
+
+    /// Any baseline verdict other than success is unmeasured, including
+    /// one this code has never seen. Enumerating known failures would let
+    /// a new cargo-mutants summary read as coverage.
+    #[test]
+    fn an_unrecognised_baseline_verdict_is_an_error() {
+        let json = r#"{
+  "outcomes": [{"scenario": "Baseline", "summary": "SomeFutureVerdict"}],
+  "total_mutants": 0
+}"#;
+        let err = ensure_mutants_actually_ran(json, "crates/x/src/y.rs")
+            .expect_err("an unknown baseline verdict is not evidence anything ran");
+        assert!(err.to_string().contains("SomeFutureVerdict"), "{err}");
+    }
+
+    /// A run that completed its baseline but mutated nothing is also
+    /// unmeasured: a claim-surface file with no mutants tells you nothing
+    /// about its witness.
+    #[test]
+    fn zero_mutants_tested_is_an_error_even_with_a_passing_baseline() {
+        let json = r#"{
+  "outcomes": [{"scenario": "Baseline", "summary": "Success"}],
+  "total_mutants": 0,
+  "missed": 0,
+  "caught": 0
+}"#;
+        let err = ensure_mutants_actually_ran(json, "crates/x/src/y.rs")
+            .expect_err("zero mutants is not coverage");
+        assert!(err.to_string().contains("zero mutants"), "{err}");
+    }
+
+    /// A successful baseline alongside a real total is still accepted —
+    /// the new checks must not reject the shape a healthy run writes.
+    #[test]
+    fn a_successful_baseline_with_mutants_is_accepted() {
+        let json = r#"{
+  "outcomes": [{"scenario": "Baseline", "summary": "Success"}],
+  "total_mutants": 33,
+  "missed": 2,
+  "caught": 31
+}"#;
+        assert_eq!(
+            ensure_mutants_actually_ran(json, "crates/x/src/y.rs").unwrap(),
+            33
+        );
     }
 }

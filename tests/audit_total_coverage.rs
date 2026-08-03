@@ -33,7 +33,7 @@
 //! - [`AuditPosture::InteractiveOrControl`] — interactive PTY surface
 //!   (`console`, `exec`, `dev`), shell/installer surfaces
 //!   (`bootstrap`, `init`, `shell-init`), or pure control-plane
-//!   commands (`mcp`) whose audit channel is the inner protocol.
+//!   commands whose audit channel is the inner protocol.
 //!
 //! When a clap subcommand has its own subcommands but its posture
 //! here is NOT `DelegatesToSub` (e.g. `audit` is `ReadOnly` even
@@ -262,6 +262,11 @@ const VOLUME_SUB: &[(&str, AuditPosture)] = &[
     ("create", AuditPosture::Emits("VolumeCreate")),
     ("unlock", AuditPosture::Emits("VolumeOpen")),
     ("lock", AuditPosture::Emits("VolumeLock")),
+    ("snapshot", AuditPosture::Emits("VolumeSnapshot")),
+    ("restore", AuditPosture::Emits("VolumeRestore")),
+    // Remote-only control-plane mutation. The authenticated gateway records
+    // the signed deletion audit after enforcing tenant authority.
+    ("delete", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),
     ("mount", AuditPosture::Emits("VmVolumeAdd")),
     ("ls", AuditPosture::ReadOnly),
@@ -464,7 +469,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Plan 200 — beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.
-    // Plan 178 — metrics/config/mcp grouped under `ops <sub>`.
+    // metrics/config grouped under `ops <sub>`.
     ("ops", AuditPosture::DelegatesToSub(OPS_SUB)),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
@@ -515,9 +520,7 @@ fn audit_walk(
 
     // Missing-in-table: clap names not present in declared.
     for name in &clap_names {
-        if !declared_map.contains_key(name.as_str())
-            && !is_declared_optional_leaf(parent_path, name.as_str())
-        {
+        if !declared_map.contains_key(name.as_str()) {
             let mut p: Path = parent_path.to_vec();
             p.push(name.as_str());
             missing.push(path_str(&p));
@@ -543,10 +546,6 @@ fn audit_walk(
             audit_walk(inner, sub_clap, &child_path, missing, stale);
         }
     }
-}
-
-fn is_declared_optional_leaf(parent_path: &[&str], name: &str) -> bool {
-    matches!((parent_path, name), (["ops"], "mcp"))
 }
 
 #[test]
@@ -665,6 +664,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "VolumeCreate",
         "VolumeLock",
         "VolumeOpen",
+        "VolumeRestore",
+        "VolumeSnapshot",
         "VmFileCopy",
         "VmFsMutate",
         "VmProcSignal",

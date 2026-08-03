@@ -3,6 +3,7 @@
 **Status:** Research / proposal. Not scheduled. No code changes accompany this document.
 **Grounded on:** worktree `/Users/auser/work/tinylabs/mvmco/mvm`, branch `main`, commit `4414ddc195785f23039e09d02d61b0194f28ab57`, working tree clean at the time of investigation.
 **Method:** source read of the current checkout + safe local measurements on this host (macOS 26, Apple Silicon). Every claim is tagged **[fact]** (observed in code/on disk), **[measured]** (timed here), **[inference]** (derived from architecture, not measured), or **[recommendation]**.
+**Revised 2026-08-01:** three framing corrections from an adversarial audit — Milestone A's local T9 ceiling (the signer key is co-located with the cache; §10/§12), the builder-tier egress posture (a deliberate ADR-001 Tier-2 choice, not a violation; §2.3/§5.3), and a measurement caveat on the unmeasured latency ranking (§1).
 
 ---
 
@@ -30,14 +31,16 @@ Nix stays as the **default `BuildBackend`** — the thing that turns a flake int
 2. **Nix stops being the only producer of an attestable artifact.** OCI-derived rootfs (`mvm_fs::oci_to_rootfs`) and future backends emit the same `ArtifactManifest` + attestation. The artifact layer becomes backend-independent.
 3. **The nix source filter gets narrowed** (`nix/lib/workspace-filter.nix`). It is currently a basename blacklist over the entire workspace root, so editing a Markdown file under `specs/` changes `mvmSrc`'s store path and forces a guest-agent rebuild. This is the single cheapest latency win available and it requires no architecture change at all (§3.4).
 
+**Measurement caveat.** No successful end-to-end build, warm cache-hit, or no-op was timed on this host — the warm cache never engaged and builds appear to have failed before completion (§3.1). Every latency figure here is **[inference]**, and the §3.3 bottleneck ranking (H2 > H1 > H3 > H4) is provisional pending the §3.5 benchmark.
+
 ### 1.4 Answers to the six closing questions
 
 1. **Retain, wrap, reduce, or replace Nix?** *Retain and wrap.* Reduce its blast radius by narrowing its source filter and keeping it off the warm path. Do not replace.
 2. **What owns action identity, content identity, the CAS, attestations?** Action identity → a new `mvm-core::action` module (sibling to `plan/content_id.rs`). Content identity → `mvm-fs` (an extended `hash.rs` tree manifest) rendered as the existing `mvm_core::packs::Sha256Hex`. CAS → a generalized `mvm_core::pack_cache`. Attestation → an extended `mvm_core::packs::PackManifest`, signed by the existing host signer, audit-chained by the existing `AuditEmitter`.
 3. **Adopt REAPI or another protocol?** Not now, and never internally. Later, at the `mvmd` boundary only, as an export format.
-4. **Where should build execution occur?** Unchanged — inside the builder VM (libkrun / HVF / QEMU), driven over the existing typed vsock control plane. Add an explicit **network-off build phase** distinct from a **network-on fetch phase** (§5.3), which is the one place today's architecture materially violates the stated constraints.
+4. **Where should build execution occur?** Unchanged — inside the builder VM (libkrun / HVF / QEMU), driven over the existing typed vsock control plane. Add an explicit **network-off build phase** distinct from a **network-on fetch phase** (§5.3). This is not a fix for a violated invariant: the builder tier *deliberately* runs unrestricted egress (ADR-001 Tier-2 dev/test — it carries no untrusted workload, so claim-10 egress enforcement is not wired there). It is a **stricter posture proposed for reproducible release builds**, tightening beyond what the tier matrix requires.
 5. **What should Lean 4 verify?** The *verifier*, not the build. First target: output-manifest construction — path normalization cannot escape the declared root, and every accepted path appears exactly once. Second: `verify plan result = true → PolicyCompliant plan result` for a deliberately small `PolicyCompliant`. Lean sits in a later assurance phase and produces a golden-vector corpus that the Rust verifier is differentially tested against (§8).
-6. **Smallest first implementation with immediate value?** Milestone A (§10): make `~/.mvm/dev/builds/<rev>/` a verify-on-read content-addressed entry with a typed `ActionDigest` key. It closes a live cache-substitution hole, makes cache hits self-checking, and is a prerequisite for everything else. It is roughly one PR against `mvm-build` + `mvm-core`.
+6. **Smallest first implementation with immediate value?** Milestone A (§10): make `~/.mvm/dev/builds/<rev>/` a verify-on-read content-addressed entry with a typed `ActionDigest` key. It makes cache hits self-checking (recompute-on-read, fail closed) — closing a corruption/skew class outright — and is a prerequisite for everything else. Its value *against a hostile local build script* (T9) is bounded: on a single-user host the host signer key sits in the same account as the cache, so signing raises the bar to corruption/skew detection, not supply-chain proof, until key custody is separated (§10). It is roughly one PR against `mvm-build` + `mvm-core`.
 
 ---
 
@@ -98,7 +101,7 @@ This is the most important finding in the report: **mvm has already done most of
 
    `canonicalizer_equivalence.rs:1-23` locks the first two together and documents the known astral-plane divergence in `serde_jcs` 0.1.0 (UTF-8 byte order vs RFC 8785's UTF-16 code-unit order). The third and fourth are unlocked. The fourth is the one that signs bundles and packs — reordering a struct field silently changes the signature payload. This is not currently a bug (Rust field order is stable per build), but it is a canonicalization hazard with no gate, and it is precisely what a Lean spec would eliminate.
 
-5. **Build actions cannot run with networking off.** `trusted_build_egress()` is literally `unrestricted()` (`crates/mvm-protocol/src/policy/network_policy.rs:262-272`), and that is the policy the builder VM runs under. The tight allowlist (`crates/mvm-build/src/egress_proxy/allowlist.rs:59-72` — pypi, npm, crates.io, cache.nixos.org, github, cdn.kernel.org, port 443 only) applies to the **app-deps install** path, not to `nix build`. The constraint "normal build actions should be able to run with networking disabled" is **not** met today. **[fact]**
+5. **Build actions cannot run with networking off.** `trusted_build_egress()` is literally `unrestricted()` (`crates/mvm-protocol/src/policy/network_policy.rs:262-272`), and that is the policy the builder VM runs under. The tight allowlist (`crates/mvm-build/src/egress_proxy/allowlist.rs:59-72` — pypi, npm, crates.io, cache.nixos.org, github, cdn.kernel.org, port 443 only) applies to the **app-deps install** path, not to `nix build`. There is no network-off build mode today — but the framing matters: this is an *external* goal, not an mvm invariant. ADR-001 makes the builder a Tier-2 dev/test tier where claim-10 egress enforcement is deliberately unwired, so unrestricted builder egress is a **tier decision, not a violation**. A network-off build is therefore a *proposed stricter posture* for reproducible release builds (§5.3), not a today-broken requirement. **[fact/inference]**
 
 ### 2.4 Gaps in the existing tree hasher
 
@@ -707,7 +710,7 @@ Everything below is **assumed**, not proved:
 | T6 | Nondeterminism (clock, RNG, locale, readdir order, uid) | `SOURCE_DATE_EPOCH`, `TZ=UTC`, `LC_ALL=C`, sorted walk, uid/gid→0, timestamps zeroed | Independent rebuild mismatch | Both manifests | Unenumerated sources exist | Diff manifests; fix the source |
 | T7 | Unauthorized network access | `NetworkPolicy::deny_all()` during `BuildAction`; vsock-only data plane | Evidence records any connect attempt | Evidence digest | Monitor sees all egress paths | Fail the build; investigate |
 | T8 | Dependency substitution | `flake.lock` + `PackInputs.nar_hashes` + allowlisted fetch | Hash mismatch | Fetch attestation | Upstream pin integrity | Re-pin; rebuild |
-| T9 | **Cache poisoning (today's live hole)** | *Currently: 0700 dir permissions only.* Proposed: signed action-cache entry + verify-on-read | **Currently: none.** Proposed: digest recompute on hit | Proposed: eviction audit entry | Local-account compromise = game over regardless | **Milestone A closes this** |
+| T9 | **Cache poisoning (today's live hole)** | *Currently: 0700 dir permissions only.* Proposed: signed action-cache entry + verify-on-read | **Currently: none.** Proposed: digest recompute on hit | Proposed: eviction audit entry | Local-account compromise = game over regardless (the signer key is co-located with the cache) | **Milestone A: corruption/skew detection locally; T9 supply-chain closure only once key custody is separated (mvmd shared-store or hardware key)** |
 | T10 | Malicious action-cache mapping | Signature over `(action, artifact)`; exact action-digest equality | Signature/equality check | Attestation | Signer honesty (→ T15) | Evict; distrust signer |
 | T11 | Corrupted / truncated CAS data | Verify-on-read | Digest mismatch | Eviction entry | — | Evict + refetch |
 | T12 | TOCTOU between hash and use | Immutable CAS (content-addressed, never rewritten); atomic rename publish; verify at point of use | Digest mismatch at use | — | Filesystem honours rename atomicity | Evict |
@@ -721,7 +724,7 @@ Everything below is **assumed**, not proved:
 | T20 | Concurrency race / partial publish | Quarantine + atomic rename | Never observable | — | Rename atomicity | — |
 | T21 | Compromised remote `mvmd` worker | Host recomputes the artifact digest from returned bytes; worker identity distinct | Digest mismatch; reproduction mismatch | Both attestations | — | Distrust worker; rebuild |
 
-**T9 deserves emphasis.** Today, anything that can write `~/.mvm/dev/builds/<rev>/rootfs.ext4` can cause a subsequent `mvmctl up` to boot substituted bytes. The 0700 permission on `~/.mvm` means this requires the user's own account — so it is not a privilege-escalation vector — but it *is* a persistence and supply-chain vector (a compromised dev tool, a malicious `cargo` build script, a bad `npx`), and the audit log will faithfully record the substituted digest as if it were legitimate. This is the strongest argument for prioritizing Milestone A.
+**T9 deserves emphasis.** Today, anything that can write `~/.mvm/dev/builds/<rev>/rootfs.ext4` can cause a subsequent `mvmctl up` to boot substituted bytes. The 0700 permission on `~/.mvm` means this requires the user's own account — so it is not a privilege-escalation vector — but it *is* a persistence and supply-chain vector (a compromised dev tool, a malicious `cargo` build script, a bad `npx`), and the audit log will faithfully record the substituted digest as if it were legitimate. Milestone A makes this **detectable** (recompute-on-read, fail closed) and cache hits self-consistent — the strongest *local* argument for prioritizing it. But note the ceiling: on a single-user host the host signer key (`~/.mvm/keys/host-signer.ed25519`, 0600) lives in the same account that can write the cache, so a local attacker can read the key, forge a valid signature over substituted bytes, and pass verify-on-read. Signing therefore *closes* T9-as-supply-chain only once the signer sits outside the workload's account — the `mvmd` shared-store trust topology, or hardware-backed key custody (ADR-001 lists hardware attestation as out of scope). **[inference]**
 
 ---
 
@@ -760,7 +763,7 @@ The profile is part of `ExecutionPolicy` and therefore inside the action digest 
 No flag day. Each milestone is independently useful and independently revertible.
 
 ### Milestone A — Verified, typed build cache *(the smallest thing worth doing)*
-**Delivers:** closes T9; makes cache hits self-checking.
+**Delivers:** cache hits self-checking (recompute-on-read, fail closed) — closes the corruption/skew class outright; closes T9 supply-chain substitution *only where the signer key is not co-located with the cache* (mvmd shared-store or hardware-backed custody). On a single-user local host it raises the bar but the key stays forgeable by a local-account attacker (§10).
 - Introduce `ActionDigest` newtype in `mvm-core::action`; `workload_build_fingerprint` returns it (add the domain separator; this is a **cache-key break** — accept the one-time miss, do not migrate).
 - Replace `read/write_cached_revision` with an `ActionCache` recording `{action_digest → {revision, artifact digests, signature}}`.
 - Verify-on-read on every hit: recompute each artifact's SHA-256, fail closed, evict on mismatch, emit an audit entry.
@@ -876,7 +879,7 @@ Only questions that genuinely cannot be settled from the repository or a safe lo
 |---|---|
 | Security / isolation / auditability over convenience | **Met.** Every proposed mechanism fails closed. |
 | No SSH in production | **Met.** Nothing here touches interactive access. |
-| Guest networking not required for compilation | **Violated today** (`trusted_build_egress()` == `unrestricted()`), addressed by Milestone E. **This is the one substantive mismatch found.** |
+| Guest networking not required for compilation | **Not a violation — a deliberate tier choice:** the builder is ADR-001 Tier-2 (claim-10 egress enforcement is not wired there), so `trusted_build_egress() == unrestricted()` is by design. Milestone E proposes a **stricter release-build posture** (an offline build phase) on top — a tightening, not a fix. |
 | Existing trusted transport (vsock/UDS) | **Met.** Uses the existing typed vsock control plane unchanged. |
 | No signing keys in an untrusted guest | **Met.** Host-side signer only; explicitly stated as non-negotiable. |
 | Inputs/toolchains digest-pinned, read-only | **Met** by design; partially true today (Stage-0 seed and kernel are pinned; the workspace mount is not read-only). |

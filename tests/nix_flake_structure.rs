@@ -240,14 +240,18 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         );
     }
 
-    const KERNEL_VERSION: &str = "6.12.98";
-    const KERNEL_HASH: &str = "sha256-pitqLSB/9yUQ5fRxVrcHjh5xeXNXQSQRuOT/+X/I9Mc=";
+    const KERNEL_VERSION: &str = "6.12.100";
+    const KERNEL_HASH: &str = "sha256-Z/lzUzQGSS6Gd0usvO+uUNUNXDTL9wPEfsUmpe/c7pA=";
     assert!(
         libkrunfw.contains(&format!("linux-{KERNEL_VERSION}.tar.xz"))
             && libkrunfw.contains(&format!("hash = \"{KERNEL_HASH}\""))
             && libkrunfw.contains("KERNEL_REMOTE")
-            && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)"),
-        "libkrunfw must pin and substitute the kernel source instead of downloading it during build"
+            && libkrunfw.contains(&format!(
+                "'KERNEL_VERSION = linux-6.12.91' 'KERNEL_VERSION = linux-{KERNEL_VERSION}'"
+            ))
+            && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)")
+            && libkrunfw.contains("'virtio_transport_alloc_skb(&info, dgram_len, false, NULL,'"),
+        "libkrunfw must pin the kernel version, substitute the source, and keep its datagram patch compatible with that kernel"
     );
     assert!(
         kernel_base.contains(&format!("kernelVersion = \"{KERNEL_VERSION}\""))
@@ -777,6 +781,80 @@ fn shared_kernel_base_forces_hvc0_console_support() {
 }
 
 #[test]
+fn shared_kernel_base_enforces_audited_subsystem_removals() {
+    let path = nix_dir().join("images").join("kernel").join("base.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/kernel/base.nix must be present: {e}"));
+    let required_start = content
+        .find("requiredDisables =")
+        .expect("required kernel-disable set starts");
+    let base_start = content[required_start..]
+        .find("baseDisables =")
+        .map(|offset| required_start + offset)
+        .expect("base kernel-disable set follows required cuts");
+    let required = &content[required_start..base_start];
+
+    for symbol in [
+        "SOUNDWIRE",
+        "NFC",
+        "RFKILL",
+        "VIRTIO_INPUT",
+        "VT",
+        "SQUASHFS",
+        "KEXEC",
+        "DEBUG_FS",
+        "KALLSYMS",
+        "NLS_UTF8",
+        "NETLABEL",
+        "NET_SCHED",
+        "IOSCHED_BFQ",
+        "MQ_IOSCHED_KYBER",
+        "NUMA",
+        "CMA",
+        "QRTR",
+        "BLK_DEV_BSG_COMMON",
+        "BLK_DEV_BSGLIB",
+        "PACKET",
+        "TASKSTATS",
+        "HUGETLB_PAGE",
+        "ACPI_PROCESSOR",
+        "X86_PLATFORM_DEVICES",
+        "ARM_SCMI_PROTOCOL",
+        "SERIAL_8250",
+    ] {
+        assert!(
+            required.contains(&format!("\"{symbol}\"")),
+            "the audited kernel cut must retain CONFIG_{symbol} in requiredDisables"
+        );
+    }
+    assert!(
+        content.contains("requiredDisableList =")
+            && content.contains("required kernel disables were reverted by olddefconfig"),
+        "the resolved config must fail if Kconfig selectors silently restore an audited cut"
+    );
+}
+
+#[test]
+fn workload_kernel_optimizes_for_size_by_default() {
+    let path = nix_dir().join("images").join("kernel").join("workload.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/kernel/workload.nix must be present: {e}"));
+    let required_extra = content
+        .split_once("requiredExtraDisables =")
+        .map(|(_, tail)| tail)
+        .expect("workload-specific required kernel cuts are present");
+
+    assert!(
+        content.contains("optimizeForSize ? true")
+            && content.contains("\"CC_OPTIMIZE_FOR_SIZE\"")
+            && content.contains("\"CC_OPTIMIZE_FOR_PERFORMANCE\"")
+            && required_extra.contains("\"NAMESPACES\"")
+            && required_extra.contains("\"CGROUPS\""),
+        "the default workload kernel must select size optimization and enforce workload-only namespace and cgroup cuts"
+    );
+}
+
+#[test]
 fn mk_guest_deindents_pid1_script_before_writing_init() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
@@ -863,6 +941,13 @@ fn runtime_overlay_flake_stages_egress_client_binary() {
          `/egress-client` inside the overlay ext4 so runtime-lean \
          sealed boots can source the egress shim from the mounted \
          runtime filesystem."
+    );
+    assert!(
+        content.contains("cp ${netAgent}/bin/mvm-net-agent \"$staging/net-agent\""),
+        "runtime-overlay flake must stage `mvm-net-agent` at `/net-agent` \
+         inside the overlay ext4. A guest booted for the l3-vsock mode that \
+         cannot resolve the agent refuses to start its workload, so a missing \
+         stage here is a failed boot rather than a degraded one."
     );
 }
 

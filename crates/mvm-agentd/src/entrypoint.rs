@@ -684,6 +684,11 @@ pub fn execute_streaming(
         }
     };
 
+    // Claim the child before it can exit, so PID 1's orphan reaper records
+    // its status for us rather than discarding it. Held until this call
+    // returns, by which point the child has been waited on.
+    let _owned = crate::child_wait::OwnedChild::new(child.id());
+
     // Drop the parent's copy of the write end so the child is the
     // only writer. Without this, reading the read end blocks
     // forever because the kernel sees a writer (us) still has it
@@ -903,13 +908,13 @@ pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
     signal_process_group(child, libc::SIGTERM);
     let escalate_at = Instant::now() + grace;
     while Instant::now() < escalate_at {
-        if let Ok(Some(_)) = child.try_wait() {
+        if let Ok(Some(_)) = crate::child_wait::try_wait(child) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     signal_process_group(child, libc::SIGKILL);
-    let _ = child.wait();
+    let _ = crate::child_wait::wait(child);
 }
 
 #[cfg(unix)]

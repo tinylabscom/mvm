@@ -14,7 +14,7 @@
 //!    `list_machines` / `stop_machine` / ….
 //!
 //! Legitimately-direct callers — the store surfaces (checkpoint/snapshot), the
-//! streaming/interactive verbs (exec/invoke/session/mcp), and the build /
+//! streaming/interactive verbs (exec/invoke/session), and the build /
 //! diagnostics substrate that only *selects* a backend — earn a rule-scoped
 //! `EXEMPTIONS` entry with a reason. Test code (`#[cfg(test)]` ranges, `tests/`
 //! files, `*_test.rs`) and comments are never flagged.
@@ -74,11 +74,6 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "commands/vm/session.rs",
         &[Rule::AnyBackend],
         "streaming session: backend selection for resume",
-    ),
-    (
-        "commands/ops/mcp.rs",
-        &[Rule::AnyBackend],
-        "MCP code-runner: backend selection for the untrusted transient VM",
     ),
     (
         "commands/pool.rs",

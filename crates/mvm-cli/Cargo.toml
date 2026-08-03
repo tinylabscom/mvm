@@ -9,13 +9,17 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-mvm-core.workspace = true
+mvm-core = { workspace = true, features = ["client-remote"] }
 mvm-agentd.workspace = true
 mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-fs.workspace = true
 mvm-hostd.workspace = true
+# The networking-mode compatibility gate: a plan that needs host-side
+# substitution must not be able to select the L3 tunnel, where the host
+# sees only ciphertext.
+mvm-net.workspace = true
 # The `MvmClient` facade: read-only listing/inspect commands route through
 # `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
 mvm-client.workspace = true
@@ -43,6 +47,7 @@ rustls.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_jcs = "0.1"
 sha2.workspace = true
 tar = "0.4"
 flate2.workspace = true
@@ -89,10 +94,6 @@ contributor-bootstrap = [
     "mvm-runtime/contributor-bootstrap",
     "mvm-build/contributor-bootstrap",
 ]
-# The MCP server (crate::mcp — dispatcher/protocol/server/session/tools)
-# needs no deps beyond what mvm-cli already carries unconditionally
-# (serde, serde_json, anyhow, tracing, tracing-subscriber).
-mcp = []
 builder-vm = ["mvm-build/builder-vm"]
 # In-process, pure-Rust rootfs materialization (no builder VM / mkfs) for the
 # `run --image` path. Default: the run path builds the ext4 image with the

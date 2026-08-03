@@ -554,22 +554,23 @@ Contributions are welcome. The short version:
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
 just install-hooks        # pre-commit hook: auto-runs cargo fmt --all
 
-# Source-checkout builds cross-compile embedded guest binaries; you need:
+# Source-checkout builds cross-compile builder/bootstrap helpers; you need:
 brew install zig          # or your distro's zig
 cargo install cargo-zigbuild cargo-nextest
 ```
 
-End users of released binaries need none of that — the guest binaries ship
-embedded. You do **not** need host Nix: every Nix evaluation runs inside the
-builder VM. After building, run `mvmctl doctor` — it reports the resolved builder
-backend and emits install hints for anything missing.
+End users of released binaries need none of that — workload guest code comes
+from the universal initramfs and read-only runtime overlay, while
+builder/bootstrap helpers ship with `mvmctl`. You do **not** need host Nix:
+every Nix evaluation runs inside the builder VM. After building, run `mvmctl
+doctor` — it reports the resolved builder backend and emits install hints for
+anything missing.
 
 ### Build, test, lint
 
 ```bash
 just build           # cargo build
 just test            # cargo nextest run --workspace   (the named test gate)
-just test-fast       # skips the embedded-binary cross-compile (fast inner loop)
 just lint            # cargo fmt --all -- --check  +  clippy -D warnings
 just ci              # lint + tests + doctests — run this before every PR
 ```

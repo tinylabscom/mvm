@@ -34,17 +34,14 @@ use std::path::Path;
 /// native aarch64 config build — ratchet it to the count CI reports if it
 /// differs.
 ///
-/// Batch 9 (follow-up subtraction pass): after the shared `AUDIT` cut, the
-/// base now also drops the optional BPF JIT path. `CONFIG_NET` still keeps the
-/// core interpreter via `CONFIG_BPF=y`, but neither the sealed workload nor
-/// the builder path needs native-code BPF compilation. The current native
-/// aarch64 workload-kernel CI build resolves to 1333 built-ins, so the budget
-/// is ratcheted to that exact count until the next subtraction pass lands.
-/// x86_64 was not re-measured in this host session, so its ceiling stays
-/// intentionally slack until the Linux/x86_64 CI config build reports the new
-/// count.
-const BUDGET_AARCH64: usize = 1333;
-const BUDGET_X86_64: usize = 1203;
+/// The current subtraction pass removes selector-pinned input/VT, radio,
+/// physical-network, SoC, filesystem, tracing/debug, kexec/hibernate, legacy
+/// crypto, power-management, task-accounting, NetLabel and unprovisioned
+/// swap/huge-page families. Resolved Linux 6.12.100 configs contain exactly
+/// 936 aarch64 and 902 x86_64 built-ins. PCI, virtio-net, virtio-balloon, KVM
+/// time, and x86 ACPI core remain because supported backends exercise them.
+const BUDGET_AARCH64: usize = 936;
+const BUDGET_X86_64: usize = 902;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
 /// the larger budget (fail-open on the ceiling, never a false pass on a real

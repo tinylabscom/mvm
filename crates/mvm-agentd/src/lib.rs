@@ -19,6 +19,10 @@ pub mod builder_build;
 pub mod builder_session;
 /// Builder-VM file transfer over vsock (the hvf VMM has no virtio-fs).
 pub mod builder_transfer;
+/// The single waiter for child processes: an orphan reaper that publishes
+/// what it collects, so PID-1 reaping cannot destroy an owned child's exit
+/// status.
+pub mod child_wait;
 /// PTY-over-vsock interactive console — the single dev-only interactive path
 /// into a guest. Gated behind `interactive` so the relay symbols are absent from
 /// a sealed production agent (claim 15: no interactive access to a sealed prod
@@ -43,6 +47,10 @@ pub mod fs_rpc;
 /// normal wake) the guest reseeds its CSPRNG so two clones don't generate
 /// identical key material.
 pub mod genid;
+/// Post-mount guest environment setup shared by the two guest inits, so the
+/// legacy per-rootfs initrd and the universal-initramfs agent cannot drift.
+#[cfg(target_os = "linux")]
+pub mod guest_bootstrap;
 pub mod guest_mount;
 /// Shared in-guest network bring-up (eth0 up + DHCP + static fallback), used by
 /// both the builder VM init and the workload guest netinit.
@@ -61,6 +69,10 @@ pub mod host_cost;
 pub mod host_time;
 pub mod icmp_client;
 pub mod integrations;
+/// The in-guest half of the L3 TUN-over-vsock tunnel: the `mvm0` device,
+/// its host-assigned configuration, the privilege drop, and the packet
+/// pump. `mvm0` terminates only in this agent.
+pub mod l3;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole

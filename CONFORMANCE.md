@@ -17,7 +17,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-08` | `build` | Every workload runs from a signed, audited ExecutionPlan | `fn:synthesize_plan`, `fn:admit_for_run`, `fn:verify_audit_chain` |
+| `MVM-SEC-08` | `build` | Every workload runs from a signed, audited ExecutionPlan | `fn:synthesize_plan`, `fn:admit_for_run`, `fn:verify_audit_chain`, `fn:frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts`, `fn:no_std_verifier_accepts_the_same_corpus_the_host_verifier_does` |
 
 ## agent_surface
 

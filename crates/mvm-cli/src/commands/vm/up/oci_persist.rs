@@ -34,16 +34,21 @@ use super::runtime_source::{
 /// off disk to decide whether to stand up its egress endpoint needs the pre-start
 /// persist:
 ///
-/// - **Firecracker / libkrun / hvf**: the runner-backed endpoint reads
-///   `<state_dir>/plan.json` during endpoint setup.
+/// - **Firecracker / libkrun / hvf / apple-container**: the runner-backed
+///   endpoint reads `<state_dir>/plan.json` during endpoint setup. The
+///   apple-container backend holds the same HVF runner, so its `start()` reads
+///   the same file.
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
 pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
-    matches!(hypervisor, "firecracker" | "libkrun" | "hvf")
+    matches!(
+        hypervisor,
+        "firecracker" | "libkrun" | "hvf" | "apple-container"
+    )
 }
 
-pub(in crate::commands::vm) fn load_workload_ir(
+pub(in crate::commands) fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_protocol::ir::Workload>> {
     let Some(ir_path) = workload_ir_path else {
@@ -181,6 +186,10 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         has_ad_hoc_argv,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+    let mut prepared_volumes =
+        super::super::volume::merge_registered_volumes_for_launch(name, volumes)
+            .context("resolving registered local volumes before admission")?;
+    let volumes = &prepared_volumes.volumes;
     register_vm_name(name, "default");
     let image_sealed = crate::commands::vm::agent_verbs::image_is_sealed(rootfs_path);
     let overlay_required_oci = persistent_oci_rootfs_requires_overlay_policy(rootfs_path);
@@ -300,6 +309,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         emit_failed_if(&admission, "backend-start", &err);
         return Err(err);
     }
+    prepared_volumes.commit();
     emit_launched_if(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);
@@ -669,9 +679,10 @@ mod persists_plan_before_start_tests {
     fn persists_plan_before_start_covers_the_substitution_backends() {
         // The substitution endpoint reads <state_dir>/plan.json inside start() to
         // decide whether to spawn, so every backend that spawns it must persist the
-        // plan first — including the hvf backend. QEMU must not (it would
+        // plan first — including the hvf backend and the apple-container backend,
+        // which holds the same HVF runner. QEMU must not (it would
         // overwrite the in-memory config).
-        for hv in ["firecracker", "libkrun", "hvf"] {
+        for hv in ["firecracker", "libkrun", "hvf", "apple-container"] {
             assert!(
                 persists_plan_before_start(hv),
                 "{hv} spawns the substitution endpoint and must persist plan.json"

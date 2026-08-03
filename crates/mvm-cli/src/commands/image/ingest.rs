@@ -98,6 +98,7 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
     fs::create_dir_all(&unpacked_root)
         .with_context(|| format!("create {}", unpacked_root.display()))?;
     let mut prior_layer_paths = std::collections::HashSet::new();
+    let mut deferred_nodes = Vec::new();
     for layer in &image.layers {
         let report = unpack_layer_bytes(
             &layer.descriptor,
@@ -107,17 +108,20 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
         )
         .with_context(|| format!("unpack layer {}", layer.descriptor.digest))?;
         prior_layer_paths.extend(report.paths_written);
+        deferred_nodes.extend(report.deferred_nodes);
     }
 
     let rootfs_rel = format!("rootfs/{manifest_hex}-{}/rootfs.ext4", oci_runtime_tag());
     let rootfs_abs = cache_root.join(&rootfs_rel);
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &image.manifest_digest)?;
+    super::cache::write_deferred_nodes(cache_root, &image.manifest_digest, &deferred_nodes)?;
     materialize_overlay_lean_rootfs(
         cache_root,
         &unpacked_root,
         &rootfs_abs,
         &image.manifest_digest,
+        deferred_nodes,
     )?;
 
     let provenance = OciProvenance {

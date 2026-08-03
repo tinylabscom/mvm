@@ -231,11 +231,19 @@ export function resources(opts: {
 export function network(opts: {
   mode?: "none" | "bridge" | "host";
   ports?: PortForward[];
+  /**
+   * The workload needs a real in-guest IP stack — raw sockets, ICMP,
+   * non-TCP/UDP protocols, or its own resolver. Selects the transport, so
+   * it is a declaration about the workload rather than a choice about the
+   * host. Omitting it keeps the socket-aware default.
+   */
+  rawIpStack?: boolean;
 }): Network {
   return {
     mode: opts.mode ?? "none",
     ports: opts.ports ?? [],
     peers: [],
+    ...(opts.rawIpStack ? { raw_ip_stack: true } : {}),
   };
 }
 

@@ -34,6 +34,19 @@ pub enum RpcError {
         /// `kind_name()` (kebab-case) of the rejected request.
         verb: String,
     },
+    /// The agent refused to spawn workload code because it is still uid 0.
+    /// Indicates a boot path that never reached the privilege drop, not a
+    /// policy decision about this particular caller.
+    #[error(
+        "guest agent refused {verb}: it is still running as uid {uid}, so the workload \
+         would have run as root. The agent never reached its privilege drop."
+    )]
+    WorkloadPrivilegeRefused {
+        /// `kind_name()` (kebab-case) of the refused request.
+        verb: String,
+        /// The uid the agent was serving under.
+        uid: u32,
+    },
     /// The agent returned a response variant not in the verb's
     /// `response_contract()` — a protocol violation.
     #[error("guest agent returned {got:?} for {verb}, not in its contract {expected:?}")]
@@ -147,6 +160,9 @@ pub fn check_response(req: &GuestRequest, resp: GuestResponse) -> Result<GuestRe
             Err(RpcError::UnsupportedInProfile { profile, verb })
         }
         GuestResponse::VerbNotAuthorized { verb } => Err(RpcError::VerbNotAuthorized { verb }),
+        GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
+            Err(RpcError::WorkloadPrivilegeRefused { verb, uid })
+        }
         other => {
             let got = other.variant();
             let contract = req.response_contract();
@@ -411,6 +427,9 @@ where
         let event = match resp {
             GuestResponse::EntrypointEvent(e) => e,
             GuestResponse::Error { message } => bail!("guest agent error: {message}"),
+            GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
+                return Err(RpcError::WorkloadPrivilegeRefused { verb, uid }.into());
+            }
             other => bail!("expected EntrypointEvent during RunEntrypoint stream, got {other:?}"),
         };
         if event.is_terminal() {
@@ -491,6 +510,9 @@ pub fn send_run_detached(
         GuestResponse::VerbNotAuthorized { verb } => {
             Err(RpcError::VerbNotAuthorized { verb }.into())
         }
+        GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
+            Err(RpcError::WorkloadPrivilegeRefused { verb, uid }.into())
+        }
         other => bail!("expected DetachedStarted for RunDetached, got {other:?}"),
     }
 }
@@ -524,6 +546,9 @@ where
             // "unexpected variant") so the host can audit it as `verb_denied`.
             GuestResponse::VerbNotAuthorized { verb } => {
                 return Err(RpcError::VerbNotAuthorized { verb }.into());
+            }
+            GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
+                return Err(RpcError::WorkloadPrivilegeRefused { verb, uid }.into());
             }
             other => bail!("expected ExecEvent during exec stream, got {other:?}"),
         };
@@ -1058,6 +1083,35 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], ExecEvent::Stderr { ref chunk } if chunk == b"e"));
         assert!(matches!(term, ExecEvent::Exit { code: 2 }));
+    }
+
+    #[test]
+    fn read_exec_stream_surfaces_root_refusal_as_typed_rpc_error() {
+        // The no-root gate's refusal must reach the host as a typed, downcastable
+        // error naming the uid — the operator's whole diagnosis is "the agent
+        // never reached its privilege drop", which a stringified "unexpected
+        // variant" would bury.
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let guest_handle = std::thread::spawn(move || {
+            write_frame(
+                &mut guest,
+                &GuestResponse::WorkloadPrivilegeRefused {
+                    verb: "exec".to_string(),
+                    uid: 0,
+                },
+            )
+            .unwrap();
+        });
+        let err = read_exec_stream(&mut host, |_| {}).unwrap_err();
+        guest_handle.join().unwrap();
+        match err.downcast_ref::<RpcError>() {
+            Some(RpcError::WorkloadPrivilegeRefused { verb, uid }) => {
+                assert_eq!(verb, "exec");
+                assert_eq!(*uid, 0);
+            }
+            other => panic!("expected typed RpcError::WorkloadPrivilegeRefused, got {other:?}"),
+        }
     }
 
     #[test]

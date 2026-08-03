@@ -25,7 +25,7 @@ verification under `trust`. Domains that already own their own subcommands
 | Daily drivers (top-level) | `machine` (`run`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `build`, `doctor`, `init`, `bootstrap` |
 | `vm <sub>` | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay` |
-| `ops <sub>` | `metrics`, `bench`, `config`, `mcp` |
+| `ops <sub>` | `metrics`, `bench`, `config` |
 | `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
 | `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
 | Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact` |
@@ -903,10 +903,6 @@ All commands accept these global options:
 | `MVM_BUILDER_AGENT_BIN` | Override the path to the builder-agent binary baked into the builder VM image | Auto-detected from build closure |
 | `MVM_BUILDER_AGENT_PORT` | Vsock port the builder agent listens on | `54_321` |
 | `MVM_BUILDER_VM_TIMEOUT_SECS` | Wall-clock cap for one-shot libkrun builder VM runs before the supervisor is killed | `1800` |
-| `MVM_MCP_SESSION_IDLE` | MCP session idle timeout in seconds | `300` |
-| `MVM_MCP_SESSION_MAX` | MCP session maximum lifetime in seconds | `1800` |
-| `MVM_MCP_MAX_INFLIGHT` | Max concurrent in-flight `tools/call run` invocations | `8` |
-| `MVM_MCP_MEM_CEILING_MIB` | Per-call memory ceiling enforced before dispatching to a microVM | `8192` |
 | `MVM_TENANT_KEY_<ID>` | Compatibility hook for tenant-scoped key material consumed by shared policy/keystore primitives. Fleet operators should configure tenant keys through `mvmd`. | None |
 | `MVM_SKIP_COSIGN_VERIFY` | Set to `1` to bypass cosign signature verification on prebuilt-image downloads and on the runtime-overlay / SDK-sidecar release archives. Documented emergency-rotation escape only; never set in CI or production. | Unset |
 | `MVM_SKIP_HASH_VERIFY` | Set to `1` to bypass SHA-256 verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production. | Unset |

@@ -241,4 +241,78 @@ mod tests {
         );
         assert_eq!(metrics.snapshot().audit_dns_total, 1);
     }
+
+    /// The blocking emitters are the vsock transport's only route into the
+    /// chain-signed log, and nothing exercised them: replacing any of the
+    /// three with a no-op survived, which is a DNS query leaving no trace
+    /// at all.
+    ///
+    /// `block_in_place` requires a multi-thread runtime, hence the
+    /// flavor here rather than the plain `#[tokio::test]` the async
+    /// emitters use.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_blocking_emitters_reach_the_audit_chain() {
+        let (recorder, signer, _metrics) = fixture();
+
+        tokio::task::spawn_blocking({
+            let recorder = recorder.clone();
+            move || {
+                emit_dns_query_blocking(
+                    &recorder,
+                    "blocking.test",
+                    DnsRecordType::A,
+                    &DnsVerdict::Refused,
+                );
+                emit_dns_rate_limited_blocking(&recorder, "limited.test", DnsRecordType::Aaaa);
+                emit_dns_malformed_blocking(&recorder);
+            }
+        })
+        .await
+        .expect("blocking emitters run to completion");
+
+        let entries = signer.entries();
+        assert_eq!(
+            entries.len(),
+            3,
+            "each blocking emitter must land one entry in the chain"
+        );
+
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e.labels.get("qname").map(String::as_str).unwrap_or(""))
+            .collect();
+        assert!(names.contains(&"blocking.test"));
+        assert!(names.contains(&"limited.test"));
+        // The malformed arm recovers no qname, and still leaves a trace.
+        assert!(names.contains(&""));
+
+        let verdicts: Vec<&str> = entries
+            .iter()
+            .map(|e| e.labels.get("verdict").map(String::as_str).unwrap_or(""))
+            .collect();
+        assert!(verdicts.contains(&"refused"));
+        assert!(verdicts.contains(&"rate_limited"));
+        assert!(verdicts.contains(&"malformed"));
+    }
+
+    /// Off a multi-thread runtime the emitter must decline rather than
+    /// panic — `block_in_place` aborts on a current-thread runtime. This
+    /// is the half that the runtime-flavor guard's negation gets wrong: a
+    /// flipped `!` proceeds here and bails on the multi-thread case above.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_blocking_emitters_decline_off_a_multi_thread_runtime() {
+        let (recorder, signer, _metrics) = fixture();
+        emit_dns_query_blocking(
+            &recorder,
+            "single.test",
+            DnsRecordType::A,
+            &DnsVerdict::Refused,
+        );
+        assert!(
+            signer.entries().is_empty(),
+            "a current-thread runtime cannot block_in_place; the emitter declines"
+        );
+    }
 }

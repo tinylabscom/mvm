@@ -2379,6 +2379,34 @@
           "additionalProperties": false
         },
         {
+          "description": "The agent refused to spawn workload code because it is still running as uid 0. Carries the offending verb and the live uid so the refusal is self-diagnosing rather than needing a console-log hunt.",
+          "type": "object",
+          "required": [
+            "WorkloadPrivilegeRefused"
+          ],
+          "properties": {
+            "WorkloadPrivilegeRefused": {
+              "type": "object",
+              "required": [
+                "uid",
+                "verb"
+              ],
+              "properties": {
+                "uid": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "verb": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "description": "Per-integration status report.",
           "type": "object",
           "required": [
@@ -3780,13 +3808,29 @@
       "type": "string"
     },
     "VolumeConfig": {
-      "description": "virtio-fs volume to mount after rootfs activation.",
+      "description": "User volume to mount after rootfs activation.",
       "type": "object",
       "required": [
         "mountpoint",
         "tag"
       ],
       "properties": {
+        "device": {
+          "description": "Guest block device for [`VolumeConfigKind::Block`]. Must be absent for virtio-fs and is validated against the bounded `/dev/vd[a-z]` range.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "Attachment kind. Missing on older messages means virtio-fs.",
+          "default": "virtio_fs",
+          "allOf": [
+            {
+              "$ref": "#/definitions/VolumeConfigKind"
+            }
+          ]
+        },
         "mountpoint": {
           "description": "Absolute guest mountpoint.  Must pass `MountPathPolicy`.",
           "type": "string"
@@ -3797,11 +3841,30 @@
           "type": "boolean"
         },
         "tag": {
-          "description": "virtio-fs tag advertised by the host for this share.",
+          "description": "Stable attachment identifier. For virtio-fs this is the advertised tag; for block devices it preserves the host's `uvol{index}` identity.",
           "type": "string"
         }
       },
       "additionalProperties": false
+    },
+    "VolumeConfigKind": {
+      "description": "Device kind for a boot-time user volume.",
+      "oneOf": [
+        {
+          "description": "Host directory exposed through a named virtio-fs tag.",
+          "type": "string",
+          "enum": [
+            "virtio_fs"
+          ]
+        },
+        {
+          "description": "Persistent ext4 image exposed as a virtio-blk device.",
+          "type": "string",
+          "enum": [
+            "block"
+          ]
+        }
+      ]
     },
     "VolumeMountErrorKind": {
       "description": "Class of error returned in `VolumeMountResult::Error`. Closed enum so the host can branch on `kind` without parsing message text. (Renamed from `ShareErrorKind`.)",

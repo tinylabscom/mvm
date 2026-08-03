@@ -471,6 +471,13 @@ pub struct VmCapabilities {
     /// Backend supports host/vsock-mediated networking (egress/ingress brokers
     /// over vsock) instead of a guest NIC.
     pub host_vsock_proxy: bool,
+    /// Backend can carry the L3 TUN-over-vsock tunnel: dedicated vsock
+    /// ports for the guest agent's control and packet connections, with no
+    /// guest NIC of any kind. Strictly stronger than
+    /// [`host_vsock_proxy`](Self::host_vsock_proxy) — that mode brokers
+    /// sockets, this one carries raw IP packets — so a backend must
+    /// advertise it separately rather than inheriting it.
+    pub l3_vsock: bool,
     /// Backend can carry an interactive PTY exec/console session.
     pub pty_exec: bool,
     /// Backend permits an in-guest SSH server (production SSH). Always `false`
@@ -500,6 +507,7 @@ pub struct RequiredCapabilities {
     pub vsock: bool,
     pub no_routable_guest_nic: bool,
     pub host_vsock_proxy: bool,
+    pub l3_vsock: bool,
     pub pty_exec: bool,
 }
 
@@ -507,7 +515,7 @@ impl VmCapabilities {
     /// Names of the capabilities `required` asks for that this backend does
     /// not advertise. Empty means the backend can serve the request.
     pub fn shortfall(&self, required: &RequiredCapabilities) -> Vec<&'static str> {
-        let checks: [(bool, bool, &'static str); 9] = [
+        let checks: [(bool, bool, &'static str); 10] = [
             (
                 required.eager_cow_restore,
                 self.eager_cow_restore,
@@ -544,6 +552,7 @@ impl VmCapabilities {
                 self.host_vsock_proxy,
                 "host_vsock_proxy",
             ),
+            (required.l3_vsock, self.l3_vsock, "l3_vsock"),
             (required.pty_exec, self.pty_exec, "pty_exec"),
         ];
         checks
@@ -1753,5 +1762,101 @@ mod tests {
         };
         assert!(profile.dropped_claims().is_empty());
         assert!(profile.na_claims().is_empty());
+    }
+
+    /// The audit label is what the chain-signed log records for the boot's
+    /// runtime source. A blank or wrong label is a corrupt audit record,
+    /// and every variant must be distinguishable from every other.
+    #[test]
+    fn runtime_source_audit_labels_are_exact_and_distinct() {
+        assert_eq!(
+            RuntimeSourcePolicy::RequiredOverlay.audit_label(),
+            "required-overlay"
+        );
+        assert_eq!(
+            RuntimeSourcePolicy::PreferOverlay.audit_label(),
+            "prefer-overlay"
+        );
+        assert_eq!(RuntimeSourcePolicy::RootfsOnly.audit_label(), "rootfs-only");
+
+        let labels = [
+            RuntimeSourcePolicy::RequiredOverlay.audit_label(),
+            RuntimeSourcePolicy::PreferOverlay.audit_label(),
+            RuntimeSourcePolicy::RootfsOnly.audit_label(),
+        ];
+        for label in labels {
+            assert!(!label.is_empty());
+        }
+        assert_ne!(labels[0], labels[1]);
+        assert_ne!(labels[1], labels[2]);
+        assert_ne!(labels[0], labels[2]);
+    }
+
+    /// Every cmdline spelling round-trips to its own variant. Dropping an
+    /// arm makes that value unparseable, so the boot silently falls back to
+    /// a runtime source the cmdline did not ask for.
+    #[test]
+    fn every_runtime_source_cmdline_value_round_trips() {
+        for policy in [
+            RuntimeSourcePolicy::RequiredOverlay,
+            RuntimeSourcePolicy::PreferOverlay,
+            RuntimeSourcePolicy::RootfsOnly,
+        ] {
+            assert_eq!(
+                RuntimeSourcePolicy::from_cmdline_value(policy.cmdline_value()),
+                Some(policy),
+                "{} must parse back to itself",
+                policy.cmdline_value()
+            );
+        }
+        assert_eq!(RuntimeSourcePolicy::from_cmdline_value("nonsense"), None);
+        assert_eq!(RuntimeSourcePolicy::from_cmdline_value(""), None);
+        // The audit spelling is not the cmdline spelling; neither is accepted
+        // in the other's place.
+        assert_eq!(
+            RuntimeSourcePolicy::from_cmdline_value("prefer-overlay"),
+            None
+        );
+    }
+
+    /// `is_microvm` gates the Tier 3 shared-kernel banner, so it must be a
+    /// conjunction: any missing isolation layer means not a microVM. With
+    /// a disjunction, a container that only clears the host-hypervisor
+    /// layer reports as hardware-isolated and the banner never fires.
+    #[test]
+    fn is_microvm_requires_every_isolation_layer() {
+        assert!(LayerCoverage::all_layers().is_microvm());
+
+        let base = LayerCoverage::all_layers();
+        for drop_one in [
+            LayerCoverage {
+                l1_host_hypervisor: false,
+                ..base
+            },
+            LayerCoverage {
+                l2_vmm: false,
+                ..base
+            },
+            LayerCoverage {
+                l3_guest_kernel: false,
+                ..base
+            },
+        ] {
+            assert!(
+                !drop_one.is_microvm(),
+                "a backend missing an isolation layer must not report as a microVM: {drop_one:?}"
+            );
+        }
+
+        // The Tier 3 shape: only the host hypervisor, no VMM, no guest
+        // kernel of its own.
+        let shared_kernel = LayerCoverage {
+            l1_host_hypervisor: true,
+            l2_vmm: false,
+            l3_guest_kernel: false,
+            l4_guest_agent: true,
+            l5_workload: true,
+        };
+        assert!(!shared_kernel.is_microvm());
     }
 }

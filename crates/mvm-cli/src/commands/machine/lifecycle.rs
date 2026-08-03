@@ -245,8 +245,9 @@ pub(super) fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) 
 }
 
 pub(super) fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()> {
-    if !args.yes {
-        use std::io::IsTerminal as _;
+    use std::io::IsTerminal as _;
+
+    confirm_stop(args.yes, std::io::stdin().is_terminal(), || {
         let prompt = if args.all {
             "Stop all running machines?".to_string()
         } else if args.names.len() == 1 {
@@ -258,12 +259,8 @@ pub(super) fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) ->
                 args.names.join(", ")
             )
         };
-        let confirmed = std::io::stdin().is_terminal() && crate::ui::confirm(&prompt);
-        if !confirmed {
-            println!("aborted");
-            return Ok(());
-        }
-    }
+        crate::ui::confirm(&prompt)
+    })?;
     if args.all {
         return down::run(cli, down::Args { name: None }, cfg);
     }
@@ -286,13 +283,37 @@ pub(super) fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) ->
     Ok(())
 }
 
+pub(super) fn confirm_stop(
+    yes: bool,
+    stdin_is_terminal: bool,
+    prompt: impl FnOnce() -> bool,
+) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !stdin_is_terminal {
+        anyhow::bail!("refusing to stop without confirmation; pass --yes");
+    }
+    if !prompt() {
+        anyhow::bail!("stop aborted");
+    }
+    Ok(())
+}
+
 pub(super) fn machine_is_running(name: &str) -> bool {
     mvm_client::backend_is_running(&shared::resolve_effective_hypervisor("firecracker"), name)
 }
 
 pub(super) fn stop_running_machine(name: &str) {
     let hypervisor = shared::resolve_effective_hypervisor("firecracker");
-    if let Err(err) = mvm_client::backend_stop_by_name(&hypervisor, name) {
-        tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
+    match mvm_client::backend_stop_by_name(&hypervisor, name) {
+        Ok(()) => {
+            if let Err(err) = crate::commands::vm::volume::release_volume_leases_for_vm(name) {
+                tracing::warn!(error = %err, machine = name, "releasing volume leases after stop failed");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
+        }
     }
 }
