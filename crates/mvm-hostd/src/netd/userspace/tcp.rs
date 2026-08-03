@@ -436,7 +436,7 @@ impl EstablishedFlow {
     ) -> Result<Self, DatapathError> {
         let key = entry.key();
         let syn = entry.syn().to_vec();
-        let mut flow = Self::open(entry.into_socket(), key, guest, mtu)?;
+        let mut flow = Self::open(entry.into_socket(), key, guest, mtu, now_millis)?;
         flow.deliver_from_guest(&syn);
         flow.poll(now_millis);
         Ok(flow)
@@ -447,6 +447,7 @@ impl EstablishedFlow {
         key: FlowKey,
         guest: IpAddr,
         mtu: usize,
+        now_millis: u64,
     ) -> Result<Self, DatapathError> {
         // Re-asserted rather than assumed: a blocking write in the pump
         // would park the whole drive loop on one slow destination.
@@ -457,7 +458,10 @@ impl EstablishedFlow {
         // A predictable seed makes this flow's ISNs predictable to the
         // guest, which is the one party we do not trust.
         config.random_seed = rand::random();
-        let mut interface = Interface::new(config, &mut device, SmolInstant::from_millis(0i64));
+        // Seeded with the caller's clock, not zero: an interface born at
+        // zero and then polled at the real time jumps its whole timer base
+        // forward on the first pass.
+        let mut interface = Interface::new(config, &mut device, smol_now(now_millis));
         interface.update_ip_addrs(|addrs| {
             addrs
                 .push(host_cidr(key.remote))
@@ -592,9 +596,8 @@ impl EstablishedFlow {
     }
 
     fn poll(&mut self, now_millis: u64) {
-        let now = SmolInstant::from_millis(now_millis as i64);
         self.interface
-            .poll(now, &mut self.device, &mut self.sockets);
+            .poll(smol_now(now_millis), &mut self.device, &mut self.sockets);
     }
 
     /// Move guest bytes out of the stack and onto the host socket, and
@@ -816,6 +819,13 @@ fn host_cidr(ip: IpAddr) -> IpCidr {
         IpAddr::V4(a) => IpCidr::new(IpAddress::Ipv4(a), 32),
         IpAddr::V6(a) => IpCidr::new(IpAddress::Ipv6(a), 128),
     }
+}
+
+/// The caller's clock in the stack's own units. Saturating, so a caller
+/// whose clock is past the i64 millisecond range cannot wrap the stack's
+/// timers into the past.
+fn smol_now(now_millis: u64) -> SmolInstant {
+    SmolInstant::from_millis(i64::try_from(now_millis).unwrap_or(i64::MAX))
 }
 
 fn smol_addr(ip: IpAddr) -> IpAddress {

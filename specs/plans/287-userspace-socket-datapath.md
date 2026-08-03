@@ -828,13 +828,14 @@ git commit -m "feat(netd): assert the connected peer is the admitted destination
 
 **Files:**
 - Modify: `crates/mvm-hostd/src/netd/userspace/tcp.rs`
+- Also modified: `crates/mvm-hostd/Cargo.toml` (smoltcp `alloc`), `crates/mvm-hostd/src/netd/userspace/mod.rs` (the shared `SocketSet`'s storage, and the comment about `alloc` that ceased to be true), `xtask/src/check_duplicate_majors.rs` (`defmt` — see Step 3)
 
 **Interfaces:**
 - Consumes: `HalfOpen` and `HalfOpenTable` (Task 9), `assert_peer_matches` and `synthesize_rst` (Task 10).
-- Produces: `struct EstablishedFlow` with `pump(&mut self, now_millis: u64) -> PumpStats`, `on_guest_fin(&mut self)`, `on_host_error(&mut self, kind: std::io::ErrorKind)` (Task 12), `take_guest_packets(&mut self) -> Vec<Vec<u8>>`; `struct PumpStats { to_host: usize, to_guest: usize, stalled: usize }`.
-- Produces (test-facing accessors, `pub(crate)`): `EstablishedFlow::bytes_buffered(&self) -> usize`, `host_write_shutdown(&self) -> bool`, `host_socket_closed(&self) -> bool`.
+- Produces: `struct EstablishedFlow` with `from_half_open(entry, guest, mtu, now_millis)`, `pump(&mut self, now_millis: u64) -> PumpStats`, `on_guest_fin(&mut self)`, `take_guest_packets(&mut self) -> Vec<Vec<u8>>`, `deliver_from_guest(&mut self, &[u8]) -> PushOutcome`, `close_host(&mut self)`, `key()`, `guest()`, `is_active()`, `host_error()`; `struct PumpStats { to_host: usize, to_guest: usize, stalled: usize }`; `const fn max_bytes_per_pass() -> usize`. `on_host_error` stays Task 12's.
+- Produces (test-facing accessors): `EstablishedFlow::bytes_buffered(&self) -> usize`, `host_write_shutdown(&self) -> bool`, `host_socket_closed(&self) -> bool`. Landed as `pub`, not `pub(crate)`: `netd::userspace::tcp` is public API of the crate, so `pub` is reachable and warning-free while a `pub(crate)` accessor used only from `#[cfg(test)]` code trips `dead_code` in the plain lib build, which `-D warnings` rejects.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 /// Backpressure is what makes the stated memory ceiling real. Without
@@ -861,24 +862,53 @@ fn a_guest_fin_half_closes_the_host_socket() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+Landed as ten tests, driven by a hand-built guest TCP endpoint (`FakeGuest`) over a real loopback host socket. Beyond the four sketched: `backpressure_holds_while_the_guest_keeps_pushing` (the bound under sustained demand), `a_guest_fin_arriving_as_a_packet_half_closes_the_host_socket` (the production path, where the FIN is a packet rather than a call), `a_guest_fin_does_not_truncate_data_the_host_has_not_seen`, `a_pump_pass_on_an_idle_flow_moves_nothing`, and `closing_the_host_socket_is_observable` — which exists so that `assert!(!flow.host_socket_closed())` is not vacuously true.
+
+Two of the sketched assertions were strengthened because the sketch would have passed under a real bug:
+
+- `bytes_buffered() <= SOCKET_TX_BUFFER` is satisfied by a mutant that *discards* the guest's bytes on `WouldBlock`. The landed test asserts `bytes_buffered() == buffered_before` and `to_host == 0` as well, so a drop is caught.
+- `!to_guest.is_empty()` after a guest FIN is satisfied by `Shutdown::Both`, which still puts a packet on the guest queue. The landed test asserts the packet carries the peer's payload.
+
+Every fixture is bounded (`FILL_ATTEMPTS`, `SETTLED_BLOCKS`, `PUMP_ATTEMPTS`, an explicit peer read timeout), so no negative in this suite can hang instead of failing.
+
+- [x] **Step 2: Run and confirm failure**
 
 Run: `cargo nextest run -p mvm-hostd a_guest_fin_half_closes`
-Expected: FAIL — not defined.
+Observed: FAIL, 13 errors — `E0433/E0425: cannot find type 'EstablishedFlow'` (×9), `cannot find type 'PumpStats'`, `cannot find function 'max_bytes_per_pass'` (×2), `cannot find function 'emit_v4_segment'`.
 
-- [ ] **Step 3: Implement**
+- [~] **Step 3 (implemented; three deviations): Implement**
 
-`pump` moves bytes both directions. When the host socket returns `WouldBlock`, stop reading from the smoltcp socket so its receive window closes naturally. A guest FIN calls `shutdown(Shutdown::Write)` on the host socket and leaves the read half open.
+`pump` moves bytes both directions in one bounded pass. When the host socket returns `WouldBlock`, nothing is consumed from the smoltcp socket, so its receive window closes and the guest's own TCP stops sending; the host→guest direction mirrors it, refusing to read the host socket once the stack's send buffer is full. A guest FIN calls `shutdown(Shutdown::Write)` and leaves the read half open.
 
-- [ ] **Step 4: Run tests and confirm they pass**
+Deviations:
 
-Run: `cargo nextest run -p mvm-hostd -E 'test(slow_host_socket) or test(guest_fin)'`
-Expected: PASS.
+1. **Each flow carries its own smoltcp stack** — `Interface` + `GuestDevice` + a one-socket `SocketSet` — rather than being one socket in a set shared across flows. The guest addresses each flow at *its own* destination, and a shared interface can hold four addresses; the alternative is `set_any_ip`, which makes one interface answer for every address that exists. Per-flow also makes the buffer ceiling per-flow arithmetic instead of a shared pool one flow can monopolise, and it is what lets `pump(&mut self, ..)` and `take_guest_packets(&mut self)` have the shapes this task specifies. Consequence: `UserspaceHandle`'s own `SocketSet` stays empty; wiring the handle to own a flow table is Task 12's.
 
-- [ ] **Step 5: Commit**
+2. **Order of operations on a FIN.** `shutdown(Write)` cannot fire the moment the FIN is seen: the guest's last segment can still be in the stack's receive buffer, and shutting down first truncates the request into a short body with a clean close — indistinguishable, to the peer, from the guest having sent exactly that. The FIN is latched, the guest→host direction drained, and the shutdown forwarded only once `recv_queue()` is empty. `on_guest_fin` does that drain itself, so it still shuts down synchronously when nothing is buffered.
+
+3. **smoltcp's `alloc` feature is now on**, because per-flow socket storage and ring buffers must be owned and smoltcp can otherwise only borrow them for the socket set's own lifetime. It compiles no new crate — it enables the owned arm of `managed`, already in the tree — but smoltcp's `alloc` names `defmt?/alloc`, and that weak reference alone resolves `defmt` 0.3 into `Cargo.lock` beside the 1.1 `jiff` declares. `cargo tree -e normal -i defmt@0.3.100` and `@1.1.0` both print nothing, so neither is built; `check-duplicate-majors` reads the resolved graph regardless, so `defmt` joins its ALLOWLIST with that evidence, alongside the existing `nom` entry made on the same grounds. `cargo deny check`: advisories/bans/licenses/sources all ok.
+
+`max_bytes_per_pass()` is `SOCKET_RX_BUFFER.min(SOCKET_TX_BUFFER)` — no new number. Worth recording that within a single pass this bound is also *structural*: nothing frees buffer space mid-pass (the guest's ACKs only arrive on the next poll), so a pass cannot exceed it whether or not the budget is checked. The explicit budget keeps the bound stated if that ever stops being true.
+
+Host-side errors are stored on the flow and exposed through `host_error()` rather than swallowed; turning one into a guest-facing RST is Task 12's.
+
+- [x] **Step 4: Run tests and confirm they pass**
+
+Run: `cargo nextest run -p mvm-hostd -E 'test(/netd::userspace::tcp/)'` → 38 passed.
+Also: `-p mvm-hostd` 1357 passed / 2 skipped; clippy `-D warnings` clean; nightly fmt clean; `check-file-size`, `check-no-spec-refs-in-comments`, `check-no-network-literals`, `check-vsock-only-egress`, `check-duplicate-majors` clean; `cargo deny check` ok; `just check-linux` and `cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-hostd --all-targets` clean.
+
+Mutation-checked, each red in under 0.05 s (never a hang):
+
+| Mutation | Result |
+|---|---|
+| host `WouldBlock` consumes the bytes anyway | `a_slow_host_socket_stops_us_accepting_from_the_stack` fails — "a host socket that will not take a byte must register as a stall"; `backpressure_holds_while_the_guest_keeps_pushing` fails on `to_host` 16384 ≠ 0 |
+| host→guest drains into a side buffer instead of stopping at the stack | `a_pump_pass_terminates_under_a_saturating_peer` fails — "one pass must be bounded so the drive loop keeps servicing other work" |
+| `Shutdown::Write` → `Shutdown::Both` | `the_peer_can_still_send_after_a_guest_fin` fails — "and what reaches the guest must be the peer's bytes" |
+
+- [x] **Step 5: Commit**
 
 ```sh
-git add crates/mvm-hostd/src/netd/userspace/tcp.rs
+git add crates/mvm-hostd/src/netd/userspace/ crates/mvm-hostd/Cargo.toml Cargo.lock xtask/src/check_duplicate_majors.rs
 git commit -m "feat(netd): pump established flows with backpressure and half-close"
 ```
 
