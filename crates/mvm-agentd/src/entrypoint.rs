@@ -458,6 +458,14 @@ pub struct EntrypointCall<'a> {
     pub caps: CallCaps,
     /// Environment injected after `env_clear()`.
     pub env: Vec<(String, String)>,
+    /// Keep the child's stdin open after `stdin` is written, handing it to
+    /// [`crate::stream_input::InputDesk`] so admitted host frames can keep
+    /// feeding it until the host closes the stream.
+    ///
+    /// `false` closes stdin immediately, which is what makes a read-to-EOF
+    /// workload terminate. Opting in is therefore also opting into "this call
+    /// ends when the host says so, or when the deadline does".
+    pub stream_input: bool,
 }
 
 /// How one run of the wrapper ended, carrying nothing it produced.
@@ -533,6 +541,7 @@ pub fn execute(
         timeout,
         caps,
         env,
+        stream_input: false,
     };
     let mut retained = RetainingSink::new(&caps);
     let outcome = execute_streaming(&call, &mut |event| retained.accept(event));
@@ -573,6 +582,7 @@ pub fn execute_streaming(
         timeout,
         caps,
         env,
+        stream_input,
     } = call;
     if stdin_data.len() > caps.stdin_max {
         return RunOutcome::StdinCap;
@@ -680,22 +690,34 @@ pub fn execute_streaming(
     // open.
     drop(fd3_write_for_child);
 
-    // Pipe stdin and close. A write error here means the wrapper
-    // already died or closed its stdin; treat as soft failure and
-    // continue to wait/drain for whatever it did emit.
+    // Pipe the one-shot payload. A write error here means the wrapper already
+    // died or closed its stdin; treat as soft failure and continue to
+    // wait/drain for whatever it did emit.
     if let Some(mut pipe) = child.stdin.take() {
         let _ = pipe.write_all(stdin_data);
-        // Dropping `pipe` closes stdin; without that the wrapper may
+        if *stream_input {
+            // The host intends to keep writing, so the fd survives this scope
+            // and the EOF is the host's to send. `Pump::run` finds no stdin
+            // left on the `Child` and has nothing to close.
+            crate::stream_input::InputDesk::open(pipe);
+        }
+        // Otherwise dropping `pipe` closes stdin; without that the wrapper may
         // block forever on read.
     }
 
     // Nothing here waits for the child to die before output moves: the pump
     // hands each read straight to `sink`.
-    Pump::new(caps)
+    let outcome = Pump::new(caps)
         .control_channel(fd3_read)
         .deadline(Instant::now() + *timeout)
-        .run(&mut child, sink)
-        .into()
+        .run(&mut child, sink);
+
+    if *stream_input {
+        // The child is reaped. A desk left open would answer the next host
+        // frame as if a workload were still reading it.
+        crate::stream_input::InputDesk::abandon();
+    }
+    outcome.into()
 }
 
 /// Create an `O_CLOEXEC` pipe and return `(read_end, write_end)` as

@@ -309,6 +309,9 @@ pub enum GuestResponse {
         previous_secs: u64,
         applied_secs: u64,
     },
+
+    /// Outcome of one `StreamInput` frame or one `CloseStreamInput`.
+    StreamInputResult(StreamInputResult),
 }
 /// Declares a unit enum that is the name-only projection of a wire enum,
 /// with a `ALL` slice (every variant, declaration order) and a `name()`
@@ -346,7 +349,7 @@ name_enum! {
         ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
         FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
         ProcList, ProcSignal, ProcSendInput, ProcWait, ProcKill, MountVolume,
-        UnmountVolume, UpdateIdleTimeout, RunCode,
+        UnmountVolume, UpdateIdleTimeout, RunCode, StreamInput, CloseStreamInput,
     }
 }
 
@@ -364,7 +367,7 @@ name_enum! {
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
         EntrypointStatusReport,
         ReadinessStatusReport, FsResult, ProcResult, ProcWaitEvent,
-        VolumeMountResult, UpdateIdleTimeoutAck,
+        VolumeMountResult, UpdateIdleTimeoutAck, StreamInputResult,
     }
 }
 
@@ -428,7 +431,9 @@ impl Verb {
             | Self::FsList
             | Self::ProcSendInput
             | Self::ProcWait
-            | Self::RunCode => Data,
+            | Self::RunCode
+            | Self::StreamInput
+            | Self::CloseStreamInput => Data,
             Self::ActivateEnvironment
             | Self::ProtocolHello
             | Self::WorkerStatus
@@ -521,6 +526,7 @@ impl Verb {
             Verb::MountVolume | Verb::UnmountVolume => unary(&[R::VolumeMountResult]),
             Verb::UpdateIdleTimeout => unary(&[R::UpdateIdleTimeoutAck]),
             Verb::RunCode => stream(&[R::ExecEvent]),
+            Verb::StreamInput | Verb::CloseStreamInput => unary(&[R::StreamInputResult]),
         }
     }
 }
@@ -569,6 +575,7 @@ impl GuestResponse {
             GuestResponse::ReadinessStatusReport(_) => ResponseVariant::ReadinessStatusReport,
             GuestResponse::FsResult(_) => ResponseVariant::FsResult,
             GuestResponse::ProcResult(_) => ResponseVariant::ProcResult,
+            GuestResponse::StreamInputResult(_) => ResponseVariant::StreamInputResult,
             GuestResponse::ProcWaitEvent(_) => ResponseVariant::ProcWaitEvent,
             GuestResponse::VolumeMountResult(_) => ResponseVariant::VolumeMountResult,
             GuestResponse::UpdateIdleTimeoutAck { .. } => ResponseVariant::UpdateIdleTimeoutAck,

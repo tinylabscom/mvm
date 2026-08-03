@@ -397,6 +397,7 @@ mod tests {
             stdin: vec![],
             timeout_secs: 1,
             env: vec![],
+            stream_input: false,
         };
         assert!(enforce_verb_grant(&run, Some(&grant)).is_none());
         // baseline => allowed even though not listed

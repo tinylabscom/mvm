@@ -32,6 +32,7 @@ pub const INPUT_GRANT_SERVICE: &str = "host.stream.v1";
 /// piece) owns replay/lease bookkeeping.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputFrame {
     /// 0-based position of this frame in the writer's session.
     pub seq: u64,
@@ -39,16 +40,38 @@ pub struct InputFrame {
     pub payload: Vec<u8>,
 }
 
-/// Explicit end-of-input marker.
+/// Explicit end-of-input marker, and the last bytes that go with it.
 ///
 /// Continuous input has no natural end the way one-shot `stdin_data` does
 /// (`entrypoint.rs` writes it once and closes the pipe immediately). Without
 /// this frame, a read-to-EOF program — `cat`-shaped workloads chief among
-/// them — hangs forever waiting on a stdin that never closes. Carries no
-/// fields of its own: it is a pure signal, not a payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// them — hangs forever waiting on a stdin that never closes.
+///
+/// It is not a pure signal, because the admitting gate withholds the tail of
+/// the stream that is still a live prefix of a known secret rather than
+/// shipping it and refusing afterwards. Closing is what proves that tail was
+/// only ever a prefix, so the tail rides on the close: [`trailing`] is
+/// delivered *before* EOF, and dropping it would silently swallow the
+/// writer's last bytes. [`after_seq`] fixes where EOF sits in the sequence,
+/// so a receiver can refuse a close that overtook a frame still in flight.
+///
+/// One type, not two: this is both what the gate returns when a session ends
+/// and what travels the wire, so the host's idea of "where the stream ended"
+/// cannot drift from the guest's.
+///
+/// [`trailing`]: Self::trailing
+/// [`after_seq`]: Self::after_seq
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CloseInput {}
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CloseInput {
+    /// Highest [`InputFrame::seq`] the writer's session admitted, or `None`
+    /// when it admitted nothing. EOF is ordered immediately after it.
+    pub after_seq: Option<u64>,
+    /// Bytes the gate cleared but held back, released here because closing
+    /// proves they were a proper prefix of a secret and not a secret.
+    pub trailing: Vec<u8>,
+}
 
 /// Whether `services` authorizes the input plane, i.e. carries the
 /// [`INPUT_GRANT_SERVICE`] token. A `services` list that says nothing about
@@ -104,16 +127,36 @@ mod tests {
 
     #[test]
     fn close_input_serde_round_trip() {
-        let c = CloseInput::default();
+        let c = CloseInput {
+            after_seq: Some(7),
+            trailing: vec![b'A', b'K'],
+        };
         let json = serde_json::to_string(&c).unwrap();
         let back: CloseInput = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);
     }
 
     #[test]
+    fn a_session_that_admitted_nothing_closes_after_no_seq() {
+        let c = CloseInput::default();
+        assert_eq!(c.after_seq, None);
+        assert!(c.trailing.is_empty());
+    }
+
+    #[test]
     fn close_input_rejects_unknown_field() {
-        let json = r#"{"surprise":true}"#;
+        let json = r#"{"after_seq":null,"trailing":[],"surprise":true}"#;
         assert!(serde_json::from_str::<CloseInput>(json).is_err());
+    }
+
+    #[test]
+    fn close_input_carries_the_withheld_tail_verbatim() {
+        // The tail is the writer's last bytes. A close that dropped or
+        // truncated it would lose them with no error anywhere.
+        let json = r#"{"after_seq":3,"trailing":[104,105]}"#;
+        let c: CloseInput = serde_json::from_str(json).unwrap();
+        assert_eq!(c.after_seq, Some(3));
+        assert_eq!(c.trailing, b"hi");
     }
 
     #[test]

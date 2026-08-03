@@ -2087,22 +2087,22 @@ cost in earlier tasks; neither is enforced by a type across this boundary.
    `deliver_tail` takes `&mut self`, `close` takes `self` — but nothing forces
    the host side to hand the tail over at all.
 
-- [ ] **Step 1: Write the failing test** — a plan-granted consumer writes to a
+- [x] **Step 1: Write the failing test** — a plan-granted consumer writes to a
   running workload's stdin and the workload sees it; an ungranted one is refused
   and the refusal is in the chain. Must fail today for want of a route.
 
-- [ ] **Step 2: Run to verify it fails.**
+- [x] **Step 2: Run to verify it fails.**
 
-- [ ] **Step 3: Implement the route.** Input travels the same vsock transport as
+- [x] **Step 3: Implement the route.** Input travels the same vsock transport as
   everything else; the guest has no NIC and gains none here.
 
-- [ ] **Step 4: Preserve both guarantees above**, with a test for each that fails
+- [x] **Step 4: Preserve both guarantees above**, with a test for each that fails
   if the order or the tail is dropped.
 
-- [ ] **Step 5: Never stall.** A child not reading stdin must not block the host,
+- [x] **Step 5: Never stall.** A child not reading stdin must not block the host,
   and a slow host must not stall the child's output.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git commit -am "feat(stream): route granted input frames to the workload's stdin"

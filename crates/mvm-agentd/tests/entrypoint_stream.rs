@@ -83,6 +83,7 @@ fn serve_with_caps(mut guest: UnixStream, script: &str, timeout: Duration, caps:
         timeout,
         caps,
         env: vec![("PATH".to_string(), SCRIPT_PATH.to_string())],
+        stream_input: false,
     };
     let terminal = stream_call(call, &mut |event| {
         write_frame(&mut guest, &GuestResponse::EntrypointEvent(event)).expect("frame an event");
@@ -489,6 +490,7 @@ fn a_blocked_consumer_does_not_defer_the_child_deadline() {
         timeout: Duration::from_millis(300),
         caps: caps(),
         env: vec![("PATH".to_string(), SCRIPT_PATH.to_string())],
+        stream_input: false,
     };
 
     let started = Instant::now();

@@ -26,15 +26,22 @@
 //!   bound in a guest with a fixed memory budget, so a queue past
 //!   [`MAX_PENDING_INPUT_BYTES`] is refused rather than accepted: backpressure
 //!   the writer can see, instead of memory it cannot.
+//!
+//! [`InputDesk`] is where the two halves meet. The entrypoint runner spawns
+//! the child and opens the desk; the host's frames arrive later, each on its
+//! own control connection, and find the sink by name. One desk per guest,
+//! because one guest is one workload.
 
 use std::io::{self, Write};
 use std::process::ChildStdin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use mvm_protocol::stream::input::InputFrame;
+use mvm_protocol::stream::input::{CloseInput, InputFrame};
 use zeroize::Zeroize;
+
+use crate::vsock::{StreamInputRefusal, StreamInputResult};
 
 /// Bytes that may sit queued for a workload that is not reading its stdin.
 ///
@@ -163,6 +170,156 @@ fn write_until_closed(mut stdin: ChildStdin, rx: &Receiver<Vec<u8>>, pending: &A
     }
     // Dropping `stdin` closes the write end, and that close is the EOF a
     // read-to-EOF workload has been waiting for.
+}
+
+/// The workload whose stdin this guest is currently accepting input for, and
+/// how far through its stream the agent has got.
+///
+/// One per guest, because one guest is one workload. Frames arrive on their
+/// own control connections — the production listener answers one operational
+/// request per connection — so the running entrypoint call and the frames
+/// destined for it never share a stack. This is the join.
+struct OpenInput {
+    sink: InputSink,
+    /// Highest `seq` handed to the sink, or `None` before the first frame.
+    ///
+    /// The host's gate already refuses a frame whose `seq` does not advance,
+    /// so this is the same rule checked at the other end of the wire. That is
+    /// the point: the gate scans for secret material over the concatenation of
+    /// what it accepted, in acceptance order, so a transport that delivered
+    /// two frames out of order could reassemble inside the guest a secret the
+    /// gate saw as two harmless halves. Refusing here means such a transport
+    /// is caught by the end that would suffer from it, not only promised
+    /// against by the end that would cause it.
+    delivered_seq: Option<u64>,
+}
+
+/// Where a host-admitted input frame lands. Reached by name rather than by
+/// handle so there is exactly one of it per guest.
+pub struct InputDesk;
+
+impl InputDesk {
+    /// Accept streamed input for the workload owning `stdin`.
+    ///
+    /// Called by the entrypoint runner for a call that asked to keep its stdin
+    /// open. Replaces whatever was there: the previous call's child has been
+    /// reaped by the time a new one spawns, and a stale sink kept around would
+    /// answer frames for a workload that no longer exists.
+    pub fn open(stdin: ChildStdin) {
+        *desk() = Some(OpenInput {
+            sink: InputSink::new(stdin),
+            delivered_seq: None,
+        });
+    }
+
+    /// Stop accepting input because the workload is gone.
+    ///
+    /// Not a close: nothing is delivered and no EOF is synthesized, because
+    /// the child that would have read it is already reaped. Dropping the sink
+    /// discards whatever was still queued, which is the honest outcome —
+    /// there is nowhere left to put it.
+    pub fn abandon() {
+        *desk() = None;
+    }
+
+    /// Queue one admitted frame for the workload.
+    pub fn write_frame(frame: InputFrame) -> StreamInputResult {
+        let mut slot = desk();
+        let Some(open) = slot.as_mut() else {
+            return no_workload();
+        };
+        if let Some(last) = open.delivered_seq
+            && frame.seq <= last
+        {
+            return refused(
+                StreamInputRefusal::OutOfOrder,
+                format!(
+                    "input frame seq {} does not advance past the delivered {last}",
+                    frame.seq
+                ),
+            );
+        }
+        let seq = frame.seq;
+        match open.sink.write_frame(frame) {
+            Ok(()) => {
+                open.delivered_seq = Some(seq);
+                StreamInputResult::Accepted {
+                    queued_bytes: open.sink.queued_bytes() as u64,
+                }
+            }
+            Err(err) => refused(refusal_for(&err), err.to_string()),
+        }
+    }
+
+    /// Deliver the tail the host's gate withheld, then close the workload's
+    /// stdin.
+    ///
+    /// The order is the whole point and the types enforce half of it:
+    /// `deliver_tail` takes `&mut self` and `close` takes `self`, so the tail
+    /// cannot be shipped after EOF. What no type enforces is that the tail is
+    /// handed over at all — those bytes are the writer's last ones, cleared by
+    /// the gate and held back only until closing proved they were a prefix of
+    /// a secret rather than one.
+    pub fn close(close: CloseInput) -> StreamInputResult {
+        let mut slot = desk();
+        let Some(delivered) = slot.as_ref().map(|open| open.delivered_seq) else {
+            return no_workload();
+        };
+        if close.after_seq < delivered {
+            // The close claims to sit before a frame already delivered, so it
+            // overtook one in flight. Ending the stream here would cut off
+            // bytes the writer sent before it.
+            return refused(
+                StreamInputRefusal::OutOfOrder,
+                format!(
+                    "close after_seq {:?} precedes the delivered {delivered:?}",
+                    close.after_seq
+                ),
+            );
+        }
+        let mut open = slot
+            .take()
+            .expect("the desk observed under this same lock is still there");
+        let tail = open.sink.deliver_tail(&close.trailing);
+        // The fd closes either way: the stream is over, and a workload left
+        // waiting on a stdin that never EOFs would hang until its deadline.
+        open.sink.close();
+        match tail {
+            Ok(()) => StreamInputResult::Closed,
+            Err(err) => refused(refusal_for(&err), err.to_string()),
+        }
+    }
+}
+
+/// The guest's single input desk, recovered rather than propagated on poison:
+/// a panicking writer must not make the workload's stdin permanently
+/// unreachable, and the slot is one `Option` that a partial update cannot
+/// leave inconsistent.
+fn desk() -> MutexGuard<'static, Option<OpenInput>> {
+    static DESK: OnceLock<Mutex<Option<OpenInput>>> = OnceLock::new();
+    DESK.get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn no_workload() -> StreamInputResult {
+    refused(
+        StreamInputRefusal::NoWorkload,
+        "no workload in this guest is accepting streamed input".to_string(),
+    )
+}
+
+fn refused(kind: StreamInputRefusal, message: String) -> StreamInputResult {
+    StreamInputResult::Refused { kind, message }
+}
+
+/// Which refusal a sink error is. The two the sink distinguishes mean
+/// different things to a writer: one is worth retrying and one never is.
+fn refusal_for(err: &io::Error) -> StreamInputRefusal {
+    match err.kind() {
+        io::ErrorKind::WouldBlock => StreamInputRefusal::QueueFull,
+        _ => StreamInputRefusal::WorkloadGone,
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +469,212 @@ mod tests {
         }
         let err = last.expect_err("a sink with no workload behind it must say so");
         assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    // --- the desk: where a host frame finds the running workload ----------
+
+    /// The desk is one per guest, so two tests driving it at once would be
+    /// driving each other's workload. Serialized rather than made per-test:
+    /// "there is exactly one" is the property, and a desk a test could have
+    /// its own copy of would not be it.
+    fn desk_test() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Open the desk over a fresh `/bin/cat`, returning the child so the test
+    /// can read back exactly what reached its stdin.
+    fn desk_over_cat() -> std::process::Child {
+        let mut child = spawn("/bin/cat", &[]);
+        InputDesk::open(child.stdin.take().expect("piped stdin"));
+        child
+    }
+
+    fn queued(result: &StreamInputResult) -> u64 {
+        match result {
+            StreamInputResult::Accepted { queued_bytes } => *queued_bytes,
+            other => panic!("expected an accepted frame, got {other:?}"),
+        }
+    }
+
+    fn refusal_kind(result: &StreamInputResult) -> StreamInputRefusal {
+        match result {
+            StreamInputResult::Refused { kind, .. } => *kind,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frames_reach_the_workloads_stdin_in_the_order_they_were_offered() {
+        // The host gate scans for secret material over the concatenation of
+        // what it accepted, in acceptance order. A desk that delivered two
+        // frames in any other order would reassemble in the guest what the
+        // gate saw as two harmless halves.
+        let _guard = desk_test();
+        let child = desk_over_cat();
+
+        let _ = queued(&InputDesk::write_frame(frame(0, b"AKIAIOSFODNN")));
+        let _ = queued(&InputDesk::write_frame(frame(1, b"7EXAMPLE")));
+        assert_eq!(
+            InputDesk::close(CloseInput {
+                after_seq: Some(1),
+                trailing: Vec::new(),
+            }),
+            StreamInputResult::Closed
+        );
+
+        let out = child.wait_with_output().expect("cat exits after EOF");
+        assert_eq!(out.stdout, b"AKIAIOSFODNN7EXAMPLE");
+    }
+
+    #[test]
+    fn a_frame_that_does_not_advance_the_sequence_is_refused_and_delivers_nothing() {
+        // The receiving end of the ordering contract. A transport that
+        // reordered two frames is caught here, at the end that would suffer
+        // from it, rather than only promised against by the end that would
+        // cause it.
+        let _guard = desk_test();
+        let child = desk_over_cat();
+
+        let _ = queued(&InputDesk::write_frame(frame(4, b"first")));
+        let refused = InputDesk::write_frame(frame(4, b"replayed"));
+        assert_eq!(refusal_kind(&refused), StreamInputRefusal::OutOfOrder);
+        let earlier = InputDesk::write_frame(frame(1, b"overtaking"));
+        assert_eq!(refusal_kind(&earlier), StreamInputRefusal::OutOfOrder);
+        let _ = queued(&InputDesk::write_frame(frame(5, b"second")));
+        InputDesk::close(CloseInput {
+            after_seq: Some(5),
+            trailing: Vec::new(),
+        });
+
+        let out = child.wait_with_output().expect("cat exits after EOF");
+        assert_eq!(
+            out.stdout, b"firstsecond",
+            "a refused frame must contribute no bytes at all"
+        );
+    }
+
+    #[test]
+    fn the_withheld_tail_is_delivered_before_the_eof() {
+        // The gate holds back the tail of the stream that is still a live
+        // prefix of a known secret. Those are the writer's last bytes; a close
+        // that dropped them would swallow them with no error anywhere.
+        let _guard = desk_test();
+        let child = desk_over_cat();
+
+        let _ = queued(&InputDesk::write_frame(frame(0, b"hi ")));
+        assert_eq!(
+            InputDesk::close(CloseInput {
+                after_seq: Some(0),
+                trailing: b"SEK".to_vec(),
+            }),
+            StreamInputResult::Closed
+        );
+
+        let out = child.wait_with_output().expect("cat exits after EOF");
+        assert_eq!(out.stdout, b"hi SEK");
+    }
+
+    #[test]
+    fn a_close_that_overtook_a_delivered_frame_is_refused() {
+        let _guard = desk_test();
+        let child = desk_over_cat();
+
+        let _ = queued(&InputDesk::write_frame(frame(7, b"delivered")));
+        let refused = InputDesk::close(CloseInput {
+            after_seq: Some(2),
+            trailing: b"lost".to_vec(),
+        });
+        assert_eq!(refusal_kind(&refused), StreamInputRefusal::OutOfOrder);
+
+        // And the stream is still open, so the writer can close it properly.
+        assert_eq!(
+            InputDesk::close(CloseInput {
+                after_seq: Some(7),
+                trailing: b"!".to_vec(),
+            }),
+            StreamInputResult::Closed
+        );
+        let out = child.wait_with_output().expect("cat exits after EOF");
+        assert_eq!(out.stdout, b"delivered!");
+    }
+
+    #[test]
+    fn a_guest_with_no_open_workload_refuses_input_rather_than_buffering_it() {
+        // Default-deny's shape on this side: with no call holding a stdin
+        // open there is nowhere for bytes to go, and inventing a buffer for
+        // them would be inventing a workload.
+        let _guard = desk_test();
+        InputDesk::abandon();
+        assert_eq!(
+            refusal_kind(&InputDesk::write_frame(frame(0, b"nobody home"))),
+            StreamInputRefusal::NoWorkload
+        );
+        assert_eq!(
+            refusal_kind(&InputDesk::close(CloseInput::default())),
+            StreamInputRefusal::NoWorkload
+        );
+    }
+
+    #[test]
+    fn a_closed_stream_takes_no_further_frames() {
+        let _guard = desk_test();
+        let child = desk_over_cat();
+        InputDesk::close(CloseInput::default());
+        assert_eq!(
+            refusal_kind(&InputDesk::write_frame(frame(0, b"after the end"))),
+            StreamInputRefusal::NoWorkload
+        );
+        let out = child.wait_with_output().expect("cat exits after EOF");
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn a_workload_that_never_reads_answers_with_back_pressure_not_a_stall() {
+        // The desk answers on the control connection, so a frame it cannot
+        // queue has to come back as a refusal the writer can act on. Blocking
+        // instead would hold the connection for as long as the workload runs.
+        let _guard = desk_test();
+        let mut child = spawn("/bin/sh", &["-c", "sleep 5"]);
+        InputDesk::open(child.stdin.take().expect("piped stdin"));
+
+        let mut refusal = None;
+        for seq in 0..64 {
+            let result = InputDesk::write_frame(frame(seq, &vec![b'x'; 64 * 1024]));
+            if let StreamInputResult::Refused { kind, .. } = result {
+                refusal = Some(kind);
+                break;
+            }
+        }
+        assert_eq!(
+            refusal,
+            Some(StreamInputRefusal::QueueFull),
+            "an unread queue must stop growing at its budget"
+        );
+
+        InputDesk::abandon();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn an_accepted_frame_reports_what_is_still_undelivered() {
+        let _guard = desk_test();
+        let mut child = spawn("/bin/sh", &["-c", "sleep 5"]);
+        InputDesk::open(child.stdin.take().expect("piped stdin"));
+
+        // Far more than a pipe holds, into a child that reads none of it, so
+        // the figure is a real backlog rather than a rounding artefact.
+        let mut last = 0;
+        for seq in 0..4 {
+            last = queued(&InputDesk::write_frame(frame(seq, &vec![b'y'; 128 * 1024])));
+        }
+        assert!(last > 0, "a wedged workload must report a backlog");
+
+        InputDesk::abandon();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

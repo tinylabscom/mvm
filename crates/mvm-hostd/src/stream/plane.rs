@@ -56,6 +56,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use mvm_protocol::stream::input::InputFrame;
+
 use mvm_core::config;
 use mvm_core::crypto::aead;
 use mvm_core::plan::DEFAULT_TENANT;
@@ -70,6 +72,8 @@ use mvm_runtime::workload_runner::{ConsoleCapture, ConsoleStreamer};
 use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
 use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
 use crate::stream::entrypoint_source::EntrypointSink;
+use crate::stream::input_gate::InputRefusal;
+use crate::stream::input_route::{InputRoute, InputRouteError, InputTransport};
 use crate::stream::journal;
 use crate::stream::redact::StreamRedaction;
 use crate::stream::serve::{self, StreamServerHandle, serve_stream};
@@ -90,10 +94,34 @@ struct VmStream {
     transcript_dir: Option<PathBuf>,
 }
 
-/// The per-process registry of live per-VM stream captures.
+/// The per-process registry of live per-VM stream captures, and of the input
+/// routes pointing the other way.
+///
+/// Two maps, one lock each, because they answer to different lifetimes: a
+/// capture lives for the whole VM, an input route only for as long as a writer
+/// holds the lease. What they share is that both are per-VM registrations in
+/// whichever host process owns the VM, and that [`release`](StreamPlane::release)
+/// ends both.
+///
+/// Ordering is arbitrated per route, not per map. Every write holds *that
+/// VM's* route lock across accept-drain-deliver, so two concurrent writers
+/// cannot interleave the bytes of one stream and the gate's secret scan —
+/// defined over the order it accepted bytes in — describes what the guest
+/// actually receives. The map's own lock is released before any of that
+/// happens: delivering crosses a vsock round trip, and holding one lock across
+/// it would make a slow guest on one VM stall writes to every other.
 pub struct StreamPlane {
     vms: Mutex<HashMap<String, VmStream>>,
+    inputs: Mutex<HashMap<String, SharedRoute>>,
 }
+
+/// One VM's input route, shared between the map and whoever is mid-write.
+///
+/// `Option` because ending the stream consumes the route — [`InputRoute::close`]
+/// takes `self` — and the taking has to happen under the same lock a concurrent
+/// writer would be holding, so a write and a close cannot both think they own
+/// the stream.
+type SharedRoute = Arc<Mutex<Option<InputRoute>>>;
 
 impl Default for StreamPlane {
     fn default() -> Self {
@@ -105,6 +133,7 @@ impl StreamPlane {
     pub fn new() -> Self {
         Self {
             vms: Mutex::new(HashMap::new()),
+            inputs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -201,7 +230,81 @@ impl StreamPlane {
     /// departed writer left beside the segments and sealed from that instead.
     /// Doing nothing in the second case is what left every non-foreground
     /// workload with a directory of ciphertext and no manifest.
+    /// Open the host→guest input route for `vm` under `admitted`.
+    ///
+    /// Everything that decides whether a writer may do this lives in
+    /// [`InputRoute::open`] and, below it, the gate: the signed grant, the
+    /// single-writer lease, and the chain-signed record of the decision. The
+    /// plane's part is to own the route for as long as the VM does, so a
+    /// [`release`](Self::release) ends the input stream along with the
+    /// capture.
+    ///
+    /// A route already open for `vm` is not replaced — the gate's lease has
+    /// already refused this caller by then, so reaching here twice would mean
+    /// the same writer opening twice.
+    pub fn open_input(
+        &self,
+        vm: &str,
+        admitted: &crate::plan_admission::AdmittedPlan,
+        transport: Box<dyn InputTransport>,
+    ) -> Result<(), InputRefusal> {
+        let route = InputRoute::open(vm, admitted, transport)?;
+        self.inputs()
+            .insert(vm.to_string(), Arc::new(Mutex::new(Some(route))));
+        Ok(())
+    }
+
+    /// Whether a writer currently holds `vm`'s input route.
+    pub fn input_is_open(&self, vm: &str) -> bool {
+        self.inputs().contains_key(vm)
+    }
+
+    /// Offer one frame to `vm`'s workload.
+    ///
+    /// This VM's route lock is held across the whole of accept-drain-deliver
+    /// inside [`InputRoute::write`], which is what makes delivery order
+    /// acceptance order under concurrent callers. Splitting it into "accept
+    /// now, deliver later" would reintroduce exactly the reordering the gate's
+    /// scan cannot see through. The registry lock is not held across it: the
+    /// delivery is a round trip to a guest, and one shared lock over that would
+    /// let a wedged VM stall every other VM's writer.
+    pub fn write_input(&self, vm: &str, frame: InputFrame) -> Result<(), InputRouteError> {
+        let shared = self.route(vm)?;
+        let mut held = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        held.as_mut()
+            .ok_or(InputRouteError::NoSession)?
+            .write(frame)
+    }
+
+    /// End `vm`'s input stream: the withheld tail, then EOF.
+    pub fn close_input(&self, vm: &str) -> Result<(), InputRouteError> {
+        let shared = self.inputs().remove(vm).ok_or(InputRouteError::NoSession)?;
+        close_shared(&shared)
+    }
+
+    /// This VM's route, or the absence of one. Cloned out from under the
+    /// registry lock so the caller can take its time with it.
+    fn route(&self, vm: &str) -> Result<SharedRoute, InputRouteError> {
+        self.inputs()
+            .get(vm)
+            .map(Arc::clone)
+            .ok_or(InputRouteError::NoSession)
+    }
+
     pub fn release(&self, vm: &str) {
+        // The input stream goes first, and it goes properly: a route dropped
+        // rather than closed would leave a workload waiting on a stdin that
+        // never EOFs, and would lose the tail the gate withheld.
+        let held = self.inputs().remove(vm);
+        if let Some(shared) = held
+            && let Err(error) = close_shared(&shared)
+        {
+            tracing::debug!(
+                vm = %vm,
+                error = %error,
+                "the workload's input stream could not be closed cleanly at teardown"
+            );
+        }
         // Bound to a `let` so the registry lock is released before either
         // seal runs: both touch the disk, and neither needs the map.
         let held = self.registry().remove(vm);
@@ -213,6 +316,13 @@ impl StreamPlane {
             // does nothing.
             None => adopt_capture(vm),
         }
+    }
+
+    /// The input registry, recovered rather than propagated on poison for the
+    /// same reason as the capture registry: a panicking writer must not take
+    /// every other VM's input path down with it.
+    fn inputs(&self) -> MutexGuard<'_, HashMap<String, SharedRoute>> {
+        self.inputs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn registry(&self) -> MutexGuard<'_, HashMap<String, VmStream>> {
@@ -242,6 +352,13 @@ impl ConsoleStreamer for StreamPlane {
     fn stop(&self, vm_name: &str) {
         self.release(vm_name);
     }
+}
+
+/// End the stream a shared route holds, taking it out under the route's own
+/// lock so a concurrent writer cannot be mid-frame while it goes.
+fn close_shared(shared: &SharedRoute) -> Result<(), InputRouteError> {
+    let taken = shared.lock().unwrap_or_else(PoisonError::into_inner).take();
+    taken.map_or(Err(InputRouteError::NoSession), InputRoute::close)
 }
 
 /// Build the VM's broker over a fresh encrypted transcript, under the same

@@ -61,14 +61,16 @@
 //!
 //! ## Ordering: close against an in-flight frame
 //!
-//! `CloseInput` carries no `seq`, so the wire alone cannot say whether a close
-//! overtook a frame still in flight. Rather than assume the transport is
+//! A close carries no `seq` of its own, so the wire alone cannot say whether
+//! one overtook a frame still in flight. Rather than assume the transport is
 //! ordered, the gate makes the question unaskable: a close is *defined* to sit
 //! after the highest `seq` this session accepted, and [`InputSession::close`]
 //! takes `self` by value, so no frame can be written through a session that has
 //! closed. One leaseholder owns the session, and the lease is what makes "the
-//! writer cannot race itself" true. [`InputClose::after_seq`] hands the
-//! boundary to the delivery side, which needs to know which frame EOF follows.
+//! writer cannot race itself" true. [`CloseInput::after_seq`] hands the
+//! boundary to the delivery side, which needs to know which frame EOF follows —
+//! and it is the same type that travels the wire, so the two ends cannot hold
+//! different opinions about where the stream ended.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -76,7 +78,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use mvm_core::plan::ExecutionPlan;
-use mvm_protocol::stream::input::{InputFrame, grants_input};
+use mvm_protocol::stream::input::{CloseInput, InputFrame, grants_input};
 use zeroize::Zeroize;
 
 use crate::audit::emitter::AuditEmitter;
@@ -623,12 +625,12 @@ impl InputSession {
     /// using. Taking `self` by value keeps a closed session from being written
     /// to, but that is a compile-time guard and expiry is a runtime condition.
     /// A lost lease yields nothing at all, EOF included.
-    pub fn close(mut self) -> Result<InputClose, InputRefusal> {
+    pub fn close(mut self) -> Result<CloseInput, InputRefusal> {
         self.check_live()?;
         let mut trailing = std::mem::take(&mut self.outbox);
         trailing.extend_from_slice(&self.scanner.flush());
         release_lease(&self.vm, &self.holder);
-        Ok(InputClose {
+        Ok(CloseInput {
             after_seq: self.highest_accepted_seq,
             trailing,
         })
@@ -692,17 +694,6 @@ impl Drop for InputSession {
         self.outbox.zeroize();
         release_lease(&self.vm, &self.holder);
     }
-}
-
-/// Where a closed session left the stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputClose {
-    /// The highest `seq` this session accepted, or `None` if it accepted
-    /// nothing. EOF is ordered immediately after it.
-    pub after_seq: Option<u64>,
-    /// Bytes cleared for the guest that the owner had not yet drained, plus
-    /// the tail the scanner was holding.
-    pub trailing: Vec<u8>,
 }
 
 /// Look up what `vm`'s binding supplies, falling back to the process defaults.

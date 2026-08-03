@@ -83,6 +83,8 @@ impl GuestRequest {
             GuestRequest::UnmountVolume { .. } => Verb::UnmountVolume,
             GuestRequest::UpdateIdleTimeout { .. } => Verb::UpdateIdleTimeout,
             GuestRequest::RunCode { .. } => Verb::RunCode,
+            GuestRequest::StreamInput(_) => Verb::StreamInput,
+            GuestRequest::CloseStreamInput(_) => Verb::CloseStreamInput,
         }
     }
 
@@ -121,7 +123,14 @@ impl GuestRequest {
             | GuestRequest::ReadinessStatus
             | GuestRequest::MountVolume { .. }
             | GuestRequest::UnmountVolume { .. }
-            | GuestRequest::UpdateIdleTimeout { .. } => RequestClass::ProdSafe,
+            | GuestRequest::UpdateIdleTimeout { .. }
+            // The input plane is production surface by design: a sealed
+            // workload's stdin is what the host's signed grant, single-writer
+            // lease and secret scan exist to police. Refusing the verb in
+            // SealedProd would make the whole gate unreachable exactly where
+            // it matters, leaving the dev tier as the only place input works.
+            | GuestRequest::StreamInput(_)
+            | GuestRequest::CloseStreamInput(_) => RequestClass::ProdSafe,
 
             // DevOnly: shell exec, process RPC, filesystem RPC,
             // console, port forwarding, code eval, filesystem diff.
@@ -194,6 +203,8 @@ impl GuestRequest {
             "post-restore",
             "entrypoint-status",
             "run-entrypoint",
+            "stream-input",
+            "close-stream-input",
             "mount-volume",
             "unmount-volume",
             "update-idle-timeout",
@@ -204,6 +215,7 @@ impl GuestRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_protocol::stream::input::{CloseInput, InputFrame};
 
     #[test]
     fn run_detached_classifies_dev_only() {
@@ -253,7 +265,13 @@ mod tests {
                 stdin: vec![],
                 timeout_secs: 1,
                 env: vec![],
+                stream_input: false,
             },
+            GuestRequest::StreamInput(InputFrame {
+                seq: 0,
+                payload: vec![b'x'],
+            }),
+            GuestRequest::CloseStreamInput(CloseInput::default()),
             GuestRequest::RunDetached {
                 argv: vec!["/bin/sh".into(), "-lc".into(), "true".into()],
                 env: vec![],
@@ -387,6 +405,8 @@ mod tests {
             "ProbeStatus",
             "PrimedStatus",
             "RunEntrypoint",
+            "StreamInput",
+            "CloseStreamInput",
             "PostRestore",
             "EntrypointStatus",
             "ReadinessStatus",
@@ -531,7 +551,15 @@ mod tests {
                 stdin: vec![],
                 timeout_secs: 60,
                 env: vec![],
+                stream_input: false,
             },
+            // A sealed workload's stdin is exactly what the host gate polices;
+            // refusing the verb here would put the gate out of reach.
+            GuestRequest::StreamInput(InputFrame {
+                seq: 0,
+                payload: vec![b'x'],
+            }),
+            GuestRequest::CloseStreamInput(CloseInput::default()),
             GuestRequest::SleepPrep {
                 drain_timeout_secs: 5,
             },

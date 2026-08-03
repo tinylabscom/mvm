@@ -618,11 +618,16 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
     let mut out = CallOutput::inherited();
     let terminal = mvm_agentd::vsock::send_run_entrypoint(
         &mut stream,
-        stdin,
-        timeout_secs,
-        // Secret-bearing workloads route through the in-guest forward proxy;
-        // plain vsock-egress workloads route through the loopback SOCKS5 client.
-        workload_egress_env(vm_name),
+        mvm_agentd::vsock::RunEntrypointCall {
+            stdin,
+            timeout_secs,
+            // Secret-bearing workloads route through the in-guest forward proxy;
+            // plain vsock-egress workloads route through the loopback SOCKS5 client.
+            env: workload_egress_env(vm_name),
+            // This dispatch writes its payload once and has no writer behind
+            // it, so the guest closes stdin and a read-to-EOF workload exits.
+            stream_input: false,
+        },
         |event| write_entrypoint_event(event, &mut capture, &mut out),
     )
     .context("Streaming RunEntrypoint response")?;

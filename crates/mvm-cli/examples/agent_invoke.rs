@@ -25,18 +25,23 @@ fn main() -> anyhow::Result<()> {
 
     let stdout = RefCell::new(Vec::<u8>::new());
     let stderr = RefCell::new(Vec::<u8>::new());
-    let terminal =
-        mvm_agentd::vsock::send_run_entrypoint(&mut stream, payload, 30, Vec::new(), |event| {
-            match event {
-                mvm_agentd::vsock::EntrypointEvent::Stdout { chunk } => {
-                    stdout.borrow_mut().extend_from_slice(chunk)
-                }
-                mvm_agentd::vsock::EntrypointEvent::Stderr { chunk } => {
-                    stderr.borrow_mut().extend_from_slice(chunk)
-                }
-                _ => {}
+    let terminal = mvm_agentd::vsock::send_run_entrypoint(
+        &mut stream,
+        mvm_agentd::vsock::RunEntrypointCall {
+            stdin: payload,
+            timeout_secs: 30,
+            ..Default::default()
+        },
+        |event| match event {
+            mvm_agentd::vsock::EntrypointEvent::Stdout { chunk } => {
+                stdout.borrow_mut().extend_from_slice(chunk)
             }
-        })?;
+            mvm_agentd::vsock::EntrypointEvent::Stderr { chunk } => {
+                stderr.borrow_mut().extend_from_slice(chunk)
+            }
+            _ => {}
+        },
+    )?;
 
     println!("STDOUT: {}", String::from_utf8_lossy(&stdout.borrow()));
     let err = stderr.borrow();

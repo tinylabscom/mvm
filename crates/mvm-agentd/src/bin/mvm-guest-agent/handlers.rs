@@ -11,12 +11,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mvm_agentd::entrypoint::{CallCaps, EntrypointCall};
 use mvm_agentd::entrypoint_stream::stream_call;
+use mvm_agentd::stream_input::InputDesk;
 use mvm_agentd::stream_pump::{CapturedOutput, StreamGap};
 use mvm_agentd::vsock::{
     ComponentState, EntrypointEvent, FsChange, FsChangeKind, GuestResponse, RunEntrypointError,
 };
 use mvm_agentd::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_agentd::worker_protocol::WorkerOutcome;
+use mvm_protocol::stream::input::{CloseInput, InputFrame};
 
 use crate::HandlerCtx;
 use crate::globals::{
@@ -143,6 +145,7 @@ fn handle_run_entrypoint(
     stdin: Vec<u8>,
     timeout_secs: u64,
     env: Vec<(String, String)>,
+    stream_input: bool,
 ) -> GuestResponse {
     // When a warm-process pool is active, route through it instead
     // of the cold-respawn path. The host wire is identical;
@@ -195,6 +198,7 @@ fn handle_run_entrypoint(
         timeout: Duration::from_secs(timeout_secs),
         caps: CallCaps::v1(),
         env,
+        stream_input,
     };
 
     // Each event is framed the moment it arrives, so the host sees a
@@ -575,6 +579,7 @@ pub(crate) fn handle_run_entrypoint_request(
     stdin: Vec<u8>,
     timeout_secs: u64,
     env: Vec<(String, String)>,
+    stream_input: bool,
 ) -> GuestResponse {
     if matches!(
         ctx.boot_state.snapshot().entrypoint,
@@ -586,8 +591,24 @@ pub(crate) fn handle_run_entrypoint_request(
                 .to_string(),
         })
     } else {
-        handle_run_entrypoint(ctx.file, stdin, timeout_secs, env)
+        handle_run_entrypoint(ctx.file, stdin, timeout_secs, env, stream_input)
     }
+}
+
+/// Deliver one host-admitted input frame to the running workload's stdin.
+///
+/// Nothing here re-decides whether the writer was allowed to send it: that is
+/// the host gate's job, and it is the only place with the signed plan, the
+/// lease and the secret set to decide it with. The desk's own refusals are
+/// about *delivery* — no workload, a frame out of order, a queue at its
+/// budget — and none of them wait on the workload to read.
+pub(crate) fn handle_stream_input(frame: InputFrame) -> GuestResponse {
+    GuestResponse::StreamInputResult(InputDesk::write_frame(frame))
+}
+
+/// Deliver the withheld tail, then close the workload's stdin.
+pub(crate) fn handle_close_stream_input(close: CloseInput) -> GuestResponse {
+    GuestResponse::StreamInputResult(InputDesk::close(close))
 }
 
 #[cfg(not(feature = "interactive"))]

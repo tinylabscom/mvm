@@ -316,6 +316,7 @@ fn run_entrypoint(
                 stdin,
                 timeout_secs: timeout.map_or(0, |d| d.as_secs()),
                 env: Vec::new(),
+                stream_input: false,
             },
             |ev| {
                 if let GuestResponse::EntrypointEvent(e) = ev {

@@ -33,6 +33,53 @@ pub enum ProcResult {
     },
 }
 
+/// Outcome of one `StreamInput` frame or one `CloseStreamInput`.
+///
+/// Every arm is a fact about *queuing*, never about the workload having read
+/// the bytes: the agent hands input to a writer thread and answers straight
+/// away, because waiting on a child that stopped reading its stdin would hold
+/// the control connection open for as long as the workload runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum StreamInputResult {
+    /// Queued for the workload. `queued_bytes` is what has not reached its
+    /// stdin yet — back-pressure a writer can pace itself against before it
+    /// hits [`StreamInputRefusal::QueueFull`].
+    Accepted { queued_bytes: u64 },
+    /// The trailing bytes were queued and the stdin fd is closed. The stream
+    /// is over; a later frame answers [`StreamInputRefusal::NoWorkload`].
+    Closed,
+    /// Nothing was delivered, and why.
+    Refused {
+        kind: StreamInputRefusal,
+        message: String,
+    },
+}
+
+/// Why the agent would not deliver an input frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum StreamInputRefusal {
+    /// No workload in this guest is accepting streamed input: none is
+    /// running, the call did not ask for an open stdin, or the stream is
+    /// already closed.
+    NoWorkload,
+    /// `seq` did not advance past the last frame delivered, or a close
+    /// claimed to sit before one. The host's gate refuses the same shape;
+    /// checking it again here means a transport that reordered is caught at
+    /// the end that would suffer from it, not only at the end that promised
+    /// not to cause it.
+    OutOfOrder,
+    /// The undelivered queue is at its budget. Retryable: offer the frame
+    /// again once the workload has read some of what is already queued.
+    QueueFull,
+    /// The workload's stdin is gone — it exited or closed the fd. Retrying
+    /// will not help.
+    WorkloadGone,
+}
+
 /// Per-process metadata returned by `ProcList`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

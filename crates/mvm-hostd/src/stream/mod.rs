@@ -35,7 +35,11 @@
 //! The other direction is [`input_gate`], and it is the mirror image of all
 //! of the above: capture is always on and authorizes nobody, while a workload's
 //! stdin is default-deny behind a signed plan grant, leased to one writer, and
-//! scanned for the host's own secrets before a byte moves.
+//! scanned for the host's own secrets before a byte moves. [`input_route`] is
+//! what carries the bytes it cleared to the guest, and [`plane`] owns one
+//! route per VM beside that VM's broker — the same lock that arbitrates
+//! concurrent writers is what keeps delivery order equal to the order the gate
+//! accepted, which is the order its secret scan describes.
 //!
 //! Two sources feed one broker. [`console_source`] republishes the write-only
 //! console capture, which covers boot and the window after the agent dies but
@@ -50,6 +54,7 @@ pub mod durable;
 pub mod entrypoint_source;
 pub mod fanout;
 pub mod input_gate;
+pub mod input_route;
 mod journal;
 pub mod plane;
 pub mod redact;
@@ -65,9 +70,10 @@ pub use fanout::{
     ReaderHandle, ReaderStart,
 };
 pub use input_gate::{
-    CATEGORY_HOST_SECRET, DEFAULT_LEASE_TTL, InputAudit, InputAuditSink, InputBinding, InputClose,
-    InputGate, InputRefusal, InputSession, KnownSecret,
+    CATEGORY_HOST_SECRET, DEFAULT_LEASE_TTL, InputAudit, InputAuditSink, InputBinding, InputGate,
+    InputRefusal, InputSession, KnownSecret,
 };
+pub use input_route::{InputRoute, InputRouteError, InputTransport, VsockInput};
 pub use plane::StreamPlane;
 pub use redact::{
     ClearOutcome, REDACTION_FAILED_EVENT, Redacted, RedactionFailed, StreamRedaction,
