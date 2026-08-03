@@ -78,6 +78,19 @@ impl GuestDevice {
         self.from_guest.len()
     }
 
+    /// Bytes held across both queues.
+    ///
+    /// The queues bound themselves by packet *count*, but the footprint a
+    /// memory ceiling has to model is bytes, and the two differ by up to
+    /// an MTU per packet. Summed on demand rather than tracked
+    /// incrementally: it is a sum over at most `queue_depth` entries, and
+    /// a running total is one more thing that can drift out of step with
+    /// the queues it claims to describe.
+    pub fn bytes_queued(&self) -> usize {
+        let sum = |q: &VecDeque<Vec<u8>>| q.iter().map(Vec::len).sum::<usize>();
+        sum(&self.from_guest) + sum(&self.to_guest)
+    }
+
     /// Look at the oldest guest-sent packet without dequeuing it. Test-only:
     /// production callers drain through the smoltcp stack, which consumes
     /// via `Device::receive`, never by peeking.
@@ -193,6 +206,24 @@ mod tests {
                 == 8,
             "every packet past the bound must report a drop, so the caller can count it"
         );
+    }
+
+    /// The queues bound packets; the ceiling is denominated in bytes. A
+    /// count that did not translate to bytes would let the footprint be
+    /// measured against the wrong quantity.
+    #[test]
+    fn the_queues_report_the_bytes_they_hold_not_just_the_packets() {
+        let mut dev = GuestDevice::new(1500, 4);
+        assert_eq!(dev.bytes_queued(), 0);
+        dev.push_from_guest(&ipv4_stub());
+        dev.push_from_guest(&ipv4_stub());
+        assert_eq!(dev.bytes_queued(), 2 * ipv4_stub().len());
+        // Past the bound nothing is added, so nothing is counted either.
+        let mut dev = GuestDevice::new(1500, 1);
+        for _ in 0..10 {
+            dev.push_from_guest(&ipv4_stub());
+        }
+        assert_eq!(dev.bytes_queued(), ipv4_stub().len());
     }
 
     #[test]

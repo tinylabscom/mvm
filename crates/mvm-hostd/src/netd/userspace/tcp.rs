@@ -45,7 +45,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 
 use mvm_net::l3::admit::DenyCode;
-use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
 use mvm_net::l3::flow::FlowKey;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::ChecksumCapabilities;
@@ -61,7 +60,9 @@ use crate::netd::datapath::DatapathError;
 use crate::netd::metrics::GatewayMetrics;
 
 use super::device::{GuestDevice, PushOutcome};
-use super::limits::{HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER};
+use super::limits::{
+    FLOW_QUEUE_DEPTH, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
+};
 
 /// A guest SYN held back from the stack while its host connect runs.
 pub struct HalfOpen {
@@ -381,6 +382,19 @@ pub struct PumpStats {
 /// this states the bound rather than inventing one, and keeps it stated if
 /// a later change ever does let a buffer drain inside a pass.
 pub const fn max_bytes_per_pass() -> usize {
+    const {
+        // A budget at or past a buffer is no bound at all — it is a no-op
+        // the moment anything frees buffer space mid-pass. Asserted at
+        // compile time because no behavioural test can separate the two
+        // limits while they coincide.
+        assert!(pass_budget() <= SOCKET_RX_BUFFER);
+        assert!(pass_budget() <= SOCKET_TX_BUFFER);
+        assert!(pass_budget() > 0);
+    }
+    pass_budget()
+}
+
+const fn pass_budget() -> usize {
     if SOCKET_RX_BUFFER < SOCKET_TX_BUFFER {
         SOCKET_RX_BUFFER
     } else {
@@ -453,10 +467,15 @@ impl EstablishedFlow {
         // would park the whole drive loop on one slow destination.
         host.set_nonblocking(true)?;
 
-        let mut device = GuestDevice::new(mtu, DEFAULT_QUEUE_DEPTH);
+        // `FLOW_QUEUE_DEPTH`, never the machine-wide default: this device
+        // is per flow, so its depth multiplies by the socket cap and is
+        // part of the per-machine ceiling.
+        let mut device = GuestDevice::new(mtu, FLOW_QUEUE_DEPTH);
         let mut config = Config::new(HardwareAddress::Ip);
-        // A predictable seed makes this flow's ISNs predictable to the
-        // guest, which is the one party we do not trust.
+        // Recommended by smoltcp's own doc on `Config::random_seed`: a
+        // predictable seed would make the ISNs and IPv4 identification
+        // field this flow generates predictable too — to the guest, which
+        // is the one party here we do not trust.
         config.random_seed = rand::random();
         // Seeded with the caller's clock, not zero: an interface born at
         // zero and then polled at the real time jumps its whole timer base
@@ -544,16 +563,30 @@ impl EstablishedFlow {
         stats
     }
 
-    /// The guest has closed its sending half.
+    /// Reconcile the host socket's write half with the stack's view of the
+    /// guest's sending half.
     ///
     /// `shutdown(Write)`, never `close`: the peer may have a whole response
     /// still to write, and closing would discard it and break every
     /// half-duplex protocol. Guest bytes the host has not seen yet are
     /// written first — see [`Self::forward_guest_fin`].
+    ///
+    /// A caller reaches for this because it believes it saw a FIN. That
+    /// belief is a **hint to look**, never the authority: the FIN flag is
+    /// guest-written, and a caller reading it off the packet reads it
+    /// before the stack has judged whether the segment was even in window.
+    /// Taking the caller's word lets a guest half-close a conversation it
+    /// never legitimately closed — truncating the in-flight request, and
+    /// wedging the flow, since nothing may be written after a forwarded
+    /// FIN. So the only thing that latches it here is
+    /// [`RecvError::Finished`] from the stack itself, exactly as in
+    /// [`Self::pump`]. An out-of-window FIN the stack discarded leaves
+    /// this a no-op.
     pub fn on_guest_fin(&mut self) {
-        self.guest_fin_seen = true;
         let mut stats = PumpStats::default();
-        let _ = self.guest_to_host(&mut stats);
+        if self.guest_to_host(&mut stats) {
+            self.guest_fin_seen = true;
+        }
         self.forward_guest_fin();
     }
 
@@ -563,11 +596,17 @@ impl EstablishedFlow {
     }
 
     /// Bytes this flow is holding on the guest's behalf, in either
-    /// direction. Bounded by the two per-socket buffers, which is what
-    /// makes the per-machine ceiling a real number.
+    /// direction, across **every** place it holds them.
+    ///
+    /// The device queues are counted alongside the socket's ring buffers
+    /// rather than left out. They are the larger of the two terms, and a
+    /// measure that omitted them would report a flow as inside its bound
+    /// while its packet queues grew — which is exactly the growth
+    /// [`FLOW_BUFFER_BYTES`](super::limits::FLOW_BUFFER_BYTES) exists to
+    /// bound, and the only growth a test can observe.
     pub fn bytes_buffered(&self) -> usize {
         let socket = self.socket();
-        socket.recv_queue() + socket.send_queue()
+        socket.recv_queue() + socket.send_queue() + self.device.bytes_queued()
     }
 
     /// Whether the host socket's write half has been shut down.
@@ -1075,7 +1114,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::limits::{
-        DEFAULT_MAX_HALF_OPEN, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
+        DEFAULT_MAX_HALF_OPEN, FLOW_BUFFER_BYTES, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER,
+        SOCKET_TX_BUFFER,
     };
 
     /// The address the session leased this guest. Deliberately not the
@@ -1850,13 +1890,9 @@ mod tests {
             self.seq = self.seq.wrapping_add(payload.len() as u32);
         }
 
-        /// Offer `bytes` of guest data in segments that fit the MTU, and
-        /// let the stack take in as much of it as its window allows.
-        ///
-        /// The poll matters: without it the segments sit in the device
-        /// queue and the socket's receive buffer stays empty, which would
-        /// make every assertion about buffered bytes vacuous.
-        fn offer(&mut self, flow: &mut EstablishedFlow, bytes: usize) {
+        /// Push `bytes` of guest data at the flow's device in segments
+        /// that fit the MTU, without letting the stack drain them.
+        fn queue(&mut self, flow: &mut EstablishedFlow, bytes: usize) {
             let chunk = [0xABu8; 1_024];
             let mut sent = 0;
             while sent < bytes {
@@ -1864,6 +1900,16 @@ mod tests {
                 self.send(flow, &chunk[..n]);
                 sent += n;
             }
+        }
+
+        /// The same, then let the stack take in as much as its window
+        /// allows.
+        ///
+        /// The poll matters: without it the segments sit in the device
+        /// queue and the socket's receive buffer stays empty, which would
+        /// make every assertion about the socket's own buffering vacuous.
+        fn offer(&mut self, flow: &mut EstablishedFlow, bytes: usize) {
+            self.queue(flow, bytes);
             flow.poll(0);
             let _ = flow.take_guest_packets();
         }
@@ -1871,6 +1917,19 @@ mod tests {
         fn fin(&mut self, flow: &mut EstablishedFlow) {
             flow.deliver_from_guest(&self.segment(TcpControl::Fin, Some(self.ack), &[]));
             self.seq = self.seq.wrapping_add(1);
+        }
+
+        /// A FIN far outside the stack's receive window — a hostile
+        /// guest's cheapest attempt to half-close a conversation it has
+        /// not finished. The stack discards it; nothing else may act on
+        /// it. The real sequence is left untouched so the guest can carry
+        /// on sending legitimately afterwards.
+        fn out_of_window_fin(&mut self, flow: &mut EstablishedFlow) {
+            let real_seq = self.seq;
+            self.seq = self.seq.wrapping_add(1_000_000);
+            let forged = self.segment(TcpControl::Fin, Some(self.ack), &[]);
+            self.seq = real_seq;
+            flow.deliver_from_guest(&forged);
         }
     }
 
@@ -1991,16 +2050,26 @@ mod tests {
         (flow, peer, g)
     }
 
-    fn pump_until_guest_packets(flow: &mut EstablishedFlow) -> Vec<Vec<u8>> {
+    /// Pump until `wanted` reaches the guest, accumulating everything the
+    /// stack emits on the way.
+    ///
+    /// Waiting for merely *a* packet is not enough: the stack has its own
+    /// traffic to send — the ACK answering the guest's FIN, for one — and
+    /// a wait that stopped at the first packet would hand back that ACK
+    /// before the peer's bytes had crossed loopback, then blame the pump
+    /// for their absence. Bounded: on exhaustion it returns what it saw,
+    /// so the caller's assertion fails rather than the test hanging.
+    fn pump_until_payload(flow: &mut EstablishedFlow, wanted: &[u8]) -> Vec<Vec<u8>> {
+        let mut seen = Vec::new();
         for pass in 0..PUMP_ATTEMPTS {
             flow.pump(pass as u64);
-            let out = flow.take_guest_packets();
-            if !out.is_empty() {
-                return out;
+            seen.extend(flow.take_guest_packets());
+            if carries_payload(&seen, wanted) {
+                return seen;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        Vec::new()
+        seen
     }
 
     /// Backpressure is what makes the stated memory ceiling real. Without
@@ -2024,8 +2093,8 @@ mod tests {
             "a stall must leave the guest's bytes in the stack, not discard them"
         );
         assert!(
-            flow.bytes_buffered() <= SOCKET_RX_BUFFER + SOCKET_TX_BUFFER,
-            "buffering must stop at the per-socket bound, not grow to meet demand"
+            flow.bytes_buffered() <= FLOW_BUFFER_BYTES,
+            "buffering must stop at the per-flow bound, not grow to meet demand"
         );
     }
 
@@ -2041,8 +2110,8 @@ mod tests {
             let stats = flow.pump(pass);
             assert_eq!(stats.to_host, 0, "the host socket is still full");
             assert!(
-                flow.bytes_buffered() <= SOCKET_RX_BUFFER + SOCKET_TX_BUFFER,
-                "pass {pass} grew the flow past the per-socket bound"
+                flow.bytes_buffered() <= FLOW_BUFFER_BYTES,
+                "pass {pass} grew the flow past the per-flow bound"
             );
         }
     }
@@ -2051,8 +2120,15 @@ mod tests {
     /// break every half-duplex protocol.
     #[test]
     fn a_guest_fin_half_closes_the_host_socket() {
-        let (mut flow, _peer, _g) = established_flow_with_peer();
+        let (mut flow, _peer, mut g) = established_flow_with_peer();
+        // A real, in-window FIN, taken in by the stack. `on_guest_fin` acts
+        // on the stack's verdict, never the caller's say-so — see
+        // `an_out_of_window_fin_cannot_half_close_the_host_socket`.
+        g.fin(&mut flow);
+        flow.poll(0);
+
         flow.on_guest_fin();
+
         assert!(flow.host_write_shutdown());
         assert!(
             !flow.host_socket_closed(),
@@ -2098,10 +2174,16 @@ mod tests {
     /// The peer's response after our FIN must still reach the guest.
     #[test]
     fn the_peer_can_still_send_after_a_guest_fin() {
-        let (mut flow, mut peer, _g) = established_flow_with_peer();
+        let (mut flow, mut peer, mut g) = established_flow_with_peer();
+        g.fin(&mut flow);
+        flow.poll(0);
         flow.on_guest_fin();
+        assert!(
+            flow.host_write_shutdown(),
+            "the fixture must have shut down"
+        );
         peer.write_all(b"trailing response").expect("peer write");
-        let to_guest = pump_until_guest_packets(&mut flow);
+        let to_guest = pump_until_payload(&mut flow, b"trailing response");
         assert!(
             !to_guest.is_empty(),
             "a half-close must not discard what the peer had left to send"
@@ -2143,6 +2225,104 @@ mod tests {
             next.stalled > 0,
             "and refusing to read is a stall, reported as one"
         );
+    }
+
+    /// A guest must not be able to half-close a conversation it never
+    /// legitimately closed.
+    ///
+    /// The FIN flag is guest-written, and a caller that parses it off the
+    /// packet reads it *before* the stack has judged whether the segment
+    /// was in window. If that caller's word were enough, one bare
+    /// out-of-window FIN would shut the host write half down — truncating
+    /// whatever request was in flight and wedging the flow, since nothing
+    /// may be written after a forwarded FIN. So the stack's own verdict is
+    /// the only thing that latches it.
+    #[test]
+    fn an_out_of_window_fin_cannot_half_close_the_host_socket() {
+        let (mut flow, mut peer, mut g) = established_flow_with_peer();
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("a bounded read");
+
+        g.out_of_window_fin(&mut flow);
+        flow.pump(0);
+        // Both entry points: the pump, and a caller convinced it saw one.
+        flow.on_guest_fin();
+
+        assert!(
+            !flow.host_write_shutdown(),
+            "a FIN the stack discarded must not reach the host socket"
+        );
+
+        // And the flow is not wedged: the guest can still send, and its
+        // bytes still arrive.
+        let request = b"still talking";
+        g.send(&mut flow, request);
+        g.fin(&mut flow);
+        flow.pump(1);
+        assert!(
+            flow.host_write_shutdown(),
+            "the guest's own in-window FIN must still close the write half"
+        );
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got).expect("the peer reads to EOF");
+        assert_eq!(
+            got.as_slice(),
+            request,
+            "the forged FIN must not have cost the guest its own bytes"
+        );
+    }
+
+    /// The device queues are per-flow state whose filling a guest drives,
+    /// and they are the *larger* term in a flow's footprint. A guest that
+    /// floods them must hit the flow's bound, not the host's memory:
+    /// multiplied by the socket cap, a queue depth chosen for one queue
+    /// per machine is the difference between a 68 MiB ceiling and an
+    /// 800 MiB one.
+    #[test]
+    fn a_guest_that_floods_the_device_queue_stays_inside_the_flow_bound() {
+        let (mut flow, _peer, mut g) = established_flow_with_full_host_buffer();
+        let before = flow.bytes_buffered();
+
+        // Far more than any window, and never given a chance to drain.
+        g.queue(&mut flow, FLOW_BUFFER_BYTES * 4);
+
+        assert!(
+            flow.bytes_buffered() > before,
+            "the fixture must actually load the device queue"
+        );
+        assert!(
+            flow.bytes_buffered() <= FLOW_BUFFER_BYTES,
+            "a flow held {} bytes against a {FLOW_BUFFER_BYTES} byte bound",
+            flow.bytes_buffered()
+        );
+    }
+
+    /// The per-flow buffers are budgeted; the per-flow *structs* are not,
+    /// so they must stay small enough never to become a second, unmodelled
+    /// ceiling. `EstablishedFlow` holds smoltcp's `Interface` by value, so
+    /// this covers it.
+    #[test]
+    fn a_flows_fixed_overhead_stays_small_beside_its_buffers() {
+        let fixed = std::mem::size_of::<EstablishedFlow>();
+        assert!(
+            fixed * 16 < FLOW_BUFFER_BYTES,
+            "{fixed} bytes of fixed per-flow state is no longer negligible against a \
+             {FLOW_BUFFER_BYTES} byte buffer budget; fold it into the ceiling"
+        );
+    }
+
+    /// The pass budget has to stay a real bound.
+    ///
+    /// Nothing frees buffer space inside a pass today, so the buffers
+    /// happen to bind at the same value and no behavioural test can
+    /// separate the two. That is exactly why this asserts the relation
+    /// directly: a budget raised past a buffer is a silently unbounded
+    /// pass the moment anything does drain mid-pass.
+    #[test]
+    fn the_pass_budget_can_never_exceed_a_socket_buffer() {
+        assert!(max_bytes_per_pass() <= SOCKET_RX_BUFFER);
+        assert!(max_bytes_per_pass() <= SOCKET_TX_BUFFER);
+        assert!(max_bytes_per_pass() > 0, "a zero budget moves nothing");
     }
 
     /// Neither side ready must be a cheap no-op, not a spin.
