@@ -440,9 +440,13 @@ impl StreamBroker {
         write(
             root.path(),
             REDACT_RS,
+            // The fixture names the constructor as a function value, without
+            // a call — matching on the call shape silently mutated nothing
+            // and the test asserted a gate that had not been given anything
+            // to catch.
             &GOOD_REDACT.replace(
-                "PiiRedactor::with_default_rules()",
-                "PiiRedactor::new(&[], Mode::Detect).expect(\"empty\")",
+                "PiiRedactor::with_default_rules",
+                "|| PiiRedactor::new(&[], Mode::Detect).expect(\"empty\")",
             ),
         );
         let err = check_seam_is_unforgeable(root.path())
