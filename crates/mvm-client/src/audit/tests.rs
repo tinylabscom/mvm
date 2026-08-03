@@ -615,6 +615,106 @@ fn verify_sources_reports_summaries_and_refusals() {
 }
 
 #[test]
+fn unsigned_secrets_operator_log_is_neither_a_source_nor_a_refusal() {
+    // `mvmctl secret …` writes an UNSIGNED plain-JSON operator log at
+    // `<audit_dir>/secrets.jsonl`. It is not a chain: it must never
+    // surface as events, and its presence must not poison reads or
+    // verifies with a permanent refusal.
+    let fx = Fixture::new();
+    std::fs::write(
+        fx.audit_dir.join("secrets.jsonl"),
+        r#"{"ts":"2026-08-01T09:00:00Z","action":"put","name":"db"}"#,
+    )
+    .unwrap();
+    write_lifecycle_chain(
+        &fx.audit_dir,
+        &fx.key,
+        &[lifecycle_entry("local", "plan.admitted", ts(9, 0))],
+    );
+
+    let response = read_all(&fx.reader());
+    assert!(response.refusals.is_empty(), "{:?}", response.refusals);
+    assert_eq!(response.sources.len(), 1);
+    assert_eq!(response.events.len(), 1);
+
+    // Even a tenant literally named "secrets" cannot claim the operator
+    // log as its lifecycle chain.
+    let outcome = fx.reader().verify_sources(Some("secrets")).unwrap();
+    assert!(outcome.sources.is_empty());
+    assert!(outcome.refusals.is_empty());
+}
+
+#[test]
+fn dotted_tenant_round_trips_scoped_and_unscoped() {
+    // A tenant name may contain dots. Tenant-scoped classification must
+    // anchor on the tenant (like the chain writers do) instead of
+    // splitting at the first dot, and the unscoped path must recover the
+    // same split via the tenant's lifecycle chain.
+    let fx = Fixture::new();
+    write_lifecycle_chain(
+        &fx.audit_dir,
+        &fx.key,
+        &[lifecycle_entry("a.b", "plan.admitted", ts(9, 0))],
+    );
+    write_workload_chain(
+        &fx.audit_dir,
+        &fx.scratch,
+        &fx.key,
+        "a.b",
+        "vm1",
+        &[("plan", "2026-08-01T09:01:00Z", "a.b")],
+    );
+
+    // Scoped verify sees BOTH chains (the old tenant-anchored semantics).
+    let outcome = fx.reader().verify_sources(Some("a.b")).unwrap();
+    assert!(outcome.refusals.is_empty(), "{:?}", outcome.refusals);
+    assert_eq!(outcome.sources.len(), 2, "{:?}", outcome.sources);
+    let workload = &outcome.sources[1];
+    assert_eq!(workload.source.kind, AuditSourceKind::Workload);
+    assert_eq!(workload.source.tenant, "a.b");
+    assert_eq!(workload.source.machine.as_deref(), Some("vm1"));
+
+    // Scoped read returns both events under the right identities.
+    let scoped = fx
+        .reader()
+        .read(&AuditReadRequest::builder().tenant("a.b").build())
+        .unwrap();
+    assert_eq!(scoped.events.len(), 2);
+    assert!(scoped.events.iter().all(|e| e.tenant == "a.b"));
+
+    // Unscoped read parses the workload stem via the known tenant, so
+    // the scope check passes instead of mis-splitting into tenant "a".
+    let unscoped = read_all(&fx.reader());
+    assert!(unscoped.refusals.is_empty(), "{:?}", unscoped.refusals);
+    assert_eq!(unscoped.events.len(), 2);
+    assert!(unscoped.events.iter().all(|e| e.tenant == "a.b"));
+}
+
+#[test]
+fn discover_source_ids_lists_without_a_key_and_skips_non_chains() {
+    let fx = Fixture::new();
+    assert!(
+        discover_source_ids(&fx.audit_dir, Some("local"))
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::write(fx.audit_dir.join("secrets.jsonl"), "{}\n").unwrap();
+    assert!(
+        discover_source_ids(&fx.audit_dir, None).unwrap().is_empty(),
+        "the unsigned operator log must never count as a source"
+    );
+    write_lifecycle_chain(
+        &fx.audit_dir,
+        &fx.key,
+        &[lifecycle_entry("local", "plan.admitted", ts(9, 0))],
+    );
+    let ids = discover_source_ids(&fx.audit_dir, Some("local")).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0].kind, AuditSourceKind::Lifecycle);
+    assert_eq!(ids[0].tenant, "local");
+}
+
+#[test]
 fn unreadable_audit_dir_is_an_io_error_not_a_refusal() {
     let fx = Fixture::new();
     // A file where the directory should be.

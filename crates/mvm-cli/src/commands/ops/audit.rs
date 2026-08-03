@@ -774,6 +774,19 @@ fn print_chain_line(line: &str) {
 
 fn audit_verify(tenant: &str) -> Result<()> {
     let dir = default_audit_dir()?;
+
+    // Nothing to verify ⇒ return before touching the host signer, so a
+    // read-only verify on a pristine host never mints a signing keypair.
+    let discovered = mvm_client::audit::discover_source_ids(&dir, Some(tenant))
+        .context("enumerating audit sources")?;
+    if discovered.is_empty() {
+        ui::info(&format!(
+            "No audit chain found for tenant '{tenant}' under {}. Nothing to verify.",
+            dir.display()
+        ));
+        return Ok(());
+    }
+
     // Both chain kinds are signed under the host key; load it once.
     let signer =
         host_signer::load_or_init().context("loading host signer to verify audit chain")?;
@@ -784,15 +797,7 @@ fn audit_verify(tenant: &str) -> Result<()> {
     let reader = LocalAuditReader::new(&dir, signer.verifying);
     let outcome = reader
         .verify_sources(Some(tenant))
-        .context("enumerating audit sources")?;
-
-    if outcome.sources.is_empty() && outcome.refusals.is_empty() {
-        ui::info(&format!(
-            "No audit chain found for tenant '{tenant}' under {}. Nothing to verify.",
-            dir.display()
-        ));
-        return Ok(());
-    }
+        .context("verifying audit sources")?;
 
     for summary in &outcome.sources {
         ui::success(&format!(

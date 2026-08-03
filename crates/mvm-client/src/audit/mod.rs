@@ -19,9 +19,11 @@
 //! capped at this boundary; secret material, environment values, raw
 //! payloads, host paths, and terminal control sequences never leave it.
 //!
-//! The unsigned legacy operator log (`<state_dir>/log/audit.jsonl`) is
-//! deliberately not a source: it carries no authenticity and can never be
-//! presented as trusted activity.
+//! The unsigned operator logs — the legacy `<state_dir>/log/audit.jsonl`
+//! and the `<audit_dir>/secrets.jsonl` the secret CLI writes — are
+//! deliberately not sources: they carry no authenticity and can never be
+//! presented as trusted activity, so they yield neither events nor
+//! refusals.
 
 mod event;
 mod normalize;
@@ -241,11 +243,69 @@ struct SourceFile {
     path: PathBuf,
 }
 
+/// The unsigned plain-JSON operator log `mvmctl secret …` writes into the
+/// audit directory. It is not a chain and carries no authenticity, so it
+/// is never a source — neither events nor a refusal.
+const SECRETS_OPERATOR_LOG: &str = "secrets.jsonl";
+
+/// Enumerate the source identities under `dir` without verifying anything
+/// (and without needing a verifying key). Same discovery rules as a read:
+/// lifecycle chains first, then workload chains, sorted by scope; the
+/// unsigned operator log and non-chain sidecars are never included. A
+/// missing directory is an empty host, not an error.
+pub fn discover_source_ids(
+    dir: &Path,
+    tenant: Option<&str>,
+) -> Result<Vec<AuditSourceId>, AuditReadError> {
+    Ok(discover_sources(dir, tenant)?
+        .into_iter()
+        .map(|s| s.id)
+        .collect())
+}
+
 /// Enumerate the audit sources under `dir`, optionally scoped to one
 /// tenant, in deterministic order: lifecycle chains first, then workload
-/// chains, each sorted by (tenant, machine). A missing directory is an
-/// empty host, not an error.
+/// chains, each sorted by (tenant, machine).
 fn discover_sources(dir: &Path, tenant: Option<&str>) -> Result<Vec<SourceFile>, AuditReadError> {
+    let names = list_dir_names(dir)?;
+    let mut sources: Vec<SourceFile> = match tenant {
+        // Tenant-scoped: anchor parsing on the requested tenant, exactly
+        // like the chain writers name their files — a tenant name may
+        // itself contain dots.
+        Some(tenant) => names
+            .iter()
+            .filter_map(|(name, path)| {
+                classify_for_tenant(name, tenant).map(|id| SourceFile {
+                    id,
+                    path: path.clone(),
+                })
+            })
+            .collect(),
+        // Unscoped: lifecycle stems name the tenants; workload files are
+        // matched against those known tenants first so dotted tenant
+        // names split correctly, falling back to the first dot.
+        None => {
+            let known_tenants: Vec<String> = names
+                .iter()
+                .filter_map(|(name, _)| lifecycle_tenant(name))
+                .collect();
+            names
+                .iter()
+                .filter_map(|(name, path)| {
+                    classify_unscoped(name, &known_tenants).map(|id| SourceFile {
+                        id,
+                        path: path.clone(),
+                    })
+                })
+                .collect()
+        }
+    };
+    sources.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(sources)
+}
+
+/// File names (with paths) in the audit directory. Missing dir ⇒ empty.
+fn list_dir_names(dir: &Path) -> Result<Vec<(String, PathBuf)>, AuditReadError> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -256,56 +316,99 @@ fn discover_sources(dir: &Path, tenant: Option<&str>) -> Result<Vec<SourceFile>,
             });
         }
     };
-    let mut sources = Vec::new();
+    let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| AuditReadError::Io {
             dir: dir.to_path_buf(),
             reason: e.to_string(),
         })?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(id) = classify_file_name(name) else {
-            continue;
-        };
-        if let Some(want) = tenant
-            && id.tenant != want
-        {
-            continue;
+        if let Some(name) = entry.file_name().to_str() {
+            names.push((name.to_string(), entry.path()));
         }
-        sources.push(SourceFile {
-            id,
-            path: entry.path(),
-        });
     }
-    sources.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(sources)
+    Ok(names)
 }
 
-/// Map a file name in the audit directory onto a source identity.
-/// `<tenant>.<vm>.workload.jsonl` is a workload chain, any other
-/// `*.jsonl` is a per-tenant lifecycle chain; sidecars (`*.root.json`,
-/// transcripts, heads) are not sources.
-fn classify_file_name(name: &str) -> Option<AuditSourceId> {
-    if let Some(stem) = name.strip_suffix(mvm_core::config::WORKLOAD_AUDIT_SUFFIX) {
-        let (tenant, vm) = stem.split_once('.')?;
-        if tenant.is_empty() || vm.is_empty() {
-            return None;
-        }
+/// Tenant named by a lifecycle chain file (`<tenant>.jsonl`), excluding
+/// the unsigned operator log and workload chains.
+fn lifecycle_tenant(name: &str) -> Option<String> {
+    if name == SECRETS_OPERATOR_LOG || name.ends_with(mvm_core::config::WORKLOAD_AUDIT_SUFFIX) {
+        return None;
+    }
+    let tenant = name.strip_suffix(".jsonl")?;
+    if tenant.is_empty() {
+        return None;
+    }
+    Some(tenant.to_string())
+}
+
+/// Tenant-anchored classification: is `name` one of `tenant`'s chains?
+/// Uses the same naming helper the chain writers use, so a tenant name
+/// containing dots parses identically on both sides.
+fn classify_for_tenant(name: &str, tenant: &str) -> Option<AuditSourceId> {
+    if name == SECRETS_OPERATOR_LOG {
+        return None;
+    }
+    if let Some(vm) = mvm_core::config::workload_audit_vm_name(name, tenant) {
         return Some(AuditSourceId {
             kind: AuditSourceKind::Workload,
             tenant: tenant.to_string(),
             machine: Some(vm.to_string()),
         });
     }
-    let tenant = name.strip_suffix(".jsonl")?;
-    if tenant.is_empty() {
+    if lifecycle_tenant(name).is_some_and(|t| t == tenant) {
+        return Some(AuditSourceId {
+            kind: AuditSourceKind::Lifecycle,
+            tenant: tenant.to_string(),
+            machine: None,
+        });
+    }
+    None
+}
+
+/// Unscoped classification of one file name. Workload stems are matched
+/// against the known lifecycle tenants (longest match wins) before the
+/// first-dot fallback, so `<a.b>.<vm>.workload.jsonl` splits correctly
+/// whenever tenant `a.b` has a lifecycle chain alongside.
+fn classify_unscoped(name: &str, known_tenants: &[String]) -> Option<AuditSourceId> {
+    if name == SECRETS_OPERATOR_LOG {
         return None;
     }
-    Some(AuditSourceId {
+    if let Some(stem) = name.strip_suffix(mvm_core::config::WORKLOAD_AUDIT_SUFFIX) {
+        let (tenant, vm) = split_workload_stem(stem, known_tenants)?;
+        return Some(AuditSourceId {
+            kind: AuditSourceKind::Workload,
+            tenant,
+            machine: Some(vm),
+        });
+    }
+    lifecycle_tenant(name).map(|tenant| AuditSourceId {
         kind: AuditSourceKind::Lifecycle,
-        tenant: tenant.to_string(),
+        tenant,
         machine: None,
     })
+}
+
+/// Split a workload-chain stem (`<tenant>.<vm>`) into its parts: longest
+/// known-tenant prefix first, then the first-dot fallback.
+fn split_workload_stem(stem: &str, known_tenants: &[String]) -> Option<(String, String)> {
+    let known = known_tenants
+        .iter()
+        .filter_map(|t| {
+            stem.strip_prefix(t.as_str())
+                .and_then(|rest| rest.strip_prefix('.'))
+                .filter(|vm| !vm.is_empty())
+                .map(|vm| (t.clone(), vm.to_string()))
+        })
+        .max_by_key(|(t, _)| t.len());
+    if known.is_some() {
+        return known;
+    }
+    let (tenant, vm) = stem.split_once('.')?;
+    if tenant.is_empty() || vm.is_empty() {
+        return None;
+    }
+    Some((tenant.to_string(), vm.to_string()))
 }
 
 /// Apply the request's machine, kind, and time-window filters.
