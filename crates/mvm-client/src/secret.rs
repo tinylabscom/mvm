@@ -230,18 +230,32 @@ impl SecretService {
     }
 
     /// Non-secret metadata for one secret, or `None` when it doesn't exist.
+    ///
+    /// Audit fidelity: a present secret records outcome `ok`, an absent one
+    /// records `miss`, and a store/row failure records `err` — so probes for
+    /// absent secrets are distinguishable from hits and from storage faults.
     pub fn metadata(
         &self,
         tenant: &str,
         name: &str,
     ) -> Result<Option<SecretMetadata>, SecretServiceError> {
-        let exists = self.secret_exists(tenant, name);
-        self.audit
-            .record("get", tenant, name, &Ok::<(), anyhow::Error>(()))?;
-        if !exists {
-            return Ok(None);
+        let result = (|| -> Result<Option<SecretMetadata>, SecretServiceError> {
+            if !self.secret_exists(tenant, name)? {
+                return Ok(None);
+            }
+            self.metadata_row(tenant, name).map(Some)
+        })();
+        match &result {
+            Ok(Some(_)) => self.audit.record_outcome("get", tenant, name, "ok", None)?,
+            Ok(None) => self
+                .audit
+                .record_outcome("get", tenant, name, "miss", None)?,
+            Err(e) => {
+                self.audit
+                    .record_outcome("get", tenant, name, "err", Some(&e.to_string()))?
+            }
         }
-        self.metadata_row(tenant, name).map(Some)
+        result
     }
 
     fn metadata_row(&self, tenant: &str, name: &str) -> Result<SecretMetadata, SecretServiceError> {
@@ -266,7 +280,17 @@ impl SecretService {
         name: &str,
         value: SecretValueInput,
     ) -> Result<PutOutcome, SecretServiceError> {
-        let existed = self.secret_exists(tenant, name);
+        // A store failure here must surface, not silently mislabel a replace
+        // as a create; the failed attempt is still audited (labeled `create`,
+        // since the prior state is unknowable when the store can't be read).
+        let existed = match self.secret_exists(tenant, name) {
+            Ok(existed) => existed,
+            Err(e) => {
+                self.audit
+                    .record("create", tenant, name, &Err::<(), _>(&e))?;
+                return Err(e);
+            }
+        };
         let action = if existed { "replace" } else { "create" };
         let result = self.store.put(tenant, name, value.storage_value());
         // Consume the input now: the plaintext is zeroized here, immediately
@@ -318,7 +342,7 @@ impl SecretService {
         meta: SecretBindingMeta,
     ) -> Result<(), SecretServiceError> {
         let result = (|| -> Result<(), SecretServiceError> {
-            if !self.secret_exists(tenant, name) {
+            if !self.secret_exists(tenant, name)? {
                 return Err(SecretServiceError::MissingSecret {
                     tenant: tenant.to_string(),
                     name: name.to_string(),
@@ -386,7 +410,7 @@ impl SecretService {
                     name: r.name.clone(),
                 });
             }
-            if !self.secret_exists(&r.tenant, &r.name) {
+            if !self.secret_exists(&r.tenant, &r.name)? {
                 return Err(SecretServiceError::MissingSecret {
                     tenant: r.tenant.clone(),
                     name: r.name.clone(),
@@ -419,11 +443,12 @@ impl SecretService {
     // ── Internals ─────────────────────────────────────────────────────
 
     /// Presence check via enumeration — never decrypts or touches a value.
-    fn secret_exists(&self, tenant: &str, name: &str) -> bool {
-        self.store
-            .list(tenant)
-            .map(|names| names.iter().any(|n| n == name))
-            .unwrap_or(false)
+    /// A store failure propagates rather than reading as "absent": treating
+    /// an IO error as `false` would let `get` claim a stored secret is not
+    /// set and let `put` mislabel a replace as a create.
+    fn secret_exists(&self, tenant: &str, name: &str) -> Result<bool, SecretServiceError> {
+        let names = self.store.list(tenant)?;
+        Ok(names.iter().any(|n| n == name))
     }
 }
 
@@ -753,9 +778,119 @@ mod tests {
     }
 
     #[test]
-    fn metadata_for_missing_secret_is_none() {
+    fn metadata_for_missing_secret_is_none_and_audited_as_miss() {
         let f = fixture();
         assert!(f.service.metadata("local", "absent").unwrap().is_none());
+        // A probe for an absent secret is distinguishable in the audit
+        // stream: outcome `miss`, not `ok`.
+        let log = audit_text(&f);
+        assert!(log.contains("\"action\":\"get\""), "got: {log}");
+        assert!(log.contains("\"outcome\":\"miss\""), "got: {log}");
+        assert!(!log.contains("\"outcome\":\"ok\""), "got: {log}");
+    }
+
+    #[test]
+    fn metadata_hit_is_audited_as_ok() {
+        let f = fixture();
+        f.service
+            .put("local", "openai", SecretValueInput::new("sk".into()))
+            .unwrap();
+        f.service.metadata("local", "openai").unwrap().unwrap();
+        let last = audit_text(&f).lines().last().unwrap().to_string();
+        assert!(last.contains("\"action\":\"get\""), "got: {last}");
+        assert!(last.contains("\"outcome\":\"ok\""), "got: {last}");
+    }
+
+    // ── Store-failure propagation ─────────────────────────────────────
+
+    /// A value store whose every operation fails, standing in for an
+    /// unreachable keyring or unreadable secrets dir.
+    struct FailingStore;
+
+    impl SecretStore for FailingStore {
+        fn put(
+            &self,
+            _tenant: &str,
+            _name: &str,
+            _value: &secrecy::SecretBox<String>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("store offline")
+        }
+        fn get(&self, _tenant: &str, _name: &str) -> anyhow::Result<secrecy::SecretBox<String>> {
+            anyhow::bail!("store offline")
+        }
+        fn delete(&self, _tenant: &str, _name: &str) -> anyhow::Result<()> {
+            anyhow::bail!("store offline")
+        }
+        fn list(&self, _tenant: &str) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("store offline")
+        }
+    }
+
+    fn failing_fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let bindings_dir = tmp.path().join("bindings");
+        let machines_root = tmp.path().join("machines");
+        let audit_path = tmp.path().join("secrets.jsonl");
+        let service = SecretService::builder()
+            .store(Arc::new(FailingStore))
+            .bindings(Arc::new(FileBindingStore::with_dir(&bindings_dir)))
+            .machines_root(machines_root.clone())
+            .audit(SecretAudit::with_path(audit_path.clone()))
+            .build()
+            .unwrap();
+        Fixture {
+            _tmp: tmp,
+            service,
+            audit_path,
+            bindings_dir,
+            machines_root,
+        }
+    }
+
+    #[test]
+    fn metadata_store_error_propagates_instead_of_reading_as_absent() {
+        // An IO failure must not make a probe claim "not set".
+        let f = failing_fixture();
+        let err = f.service.metadata("local", "openai").unwrap_err();
+        assert!(err.to_string().contains("store offline"), "got: {err}");
+        let log = audit_text(&f);
+        assert!(log.contains("\"action\":\"get\""), "got: {log}");
+        assert!(log.contains("\"outcome\":\"err\""), "got: {log}");
+        assert!(!log.contains("\"outcome\":\"miss\""), "got: {log}");
+    }
+
+    #[test]
+    fn put_store_error_on_existence_check_propagates_and_is_audited() {
+        // The prior state is unknowable when the store can't be read, so the
+        // attempt fails (never a silently mislabeled create/replace) and the
+        // failure lands in the audit stream.
+        let f = failing_fixture();
+        let err = f
+            .service
+            .put("local", "openai", SecretValueInput::new("sk".into()))
+            .unwrap_err();
+        assert!(err.to_string().contains("store offline"), "got: {err}");
+        let log = audit_text(&f);
+        assert!(log.contains("\"action\":\"create\""), "got: {log}");
+        assert!(log.contains("\"outcome\":\"err\""), "got: {log}");
+        assert!(!log.contains("\"sk\""), "no value in audit: {log}");
+    }
+
+    #[test]
+    fn bind_store_error_fails_closed() {
+        // A store failure during the existence check refuses the binding
+        // rather than admitting or misreporting a missing secret.
+        let f = failing_fixture();
+        let err = f
+            .service
+            .bind("local", "openai", bearer_binding(&["api.openai.com"]))
+            .unwrap_err();
+        assert!(matches!(err, SecretServiceError::Storage(_)), "got: {err}");
+        assert!(
+            !f.bindings_dir.join("local").join("openai.json").exists(),
+            "no binding may land when the store is unreadable"
+        );
     }
 
     // ── Admission validation ──────────────────────────────────────────

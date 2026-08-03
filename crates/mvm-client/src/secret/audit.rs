@@ -121,10 +121,24 @@ impl SecretAudit {
     where
         E: std::fmt::Display,
     {
-        let (outcome_str, error) = match outcome {
-            Ok(_) => ("ok", None),
-            Err(e) => ("err", Some(e.to_string())),
-        };
+        match outcome {
+            Ok(_) => self.record_outcome(action, tenant, name, "ok", None),
+            Err(e) => self.record_outcome(action, tenant, name, "err", Some(&e.to_string())),
+        }
+    }
+
+    /// Record with an explicit outcome label. The `ok`/`err` pair covers most
+    /// actions; probe-shaped reads additionally use `miss` so an absent
+    /// secret is distinguishable from a present one — and from a storage
+    /// failure — in the audit stream.
+    pub fn record_outcome(
+        &self,
+        action: &str,
+        tenant: &str,
+        name: &str,
+        outcome_str: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
         if let Some(ref path) = self.path {
             let entry = serde_json::json!({
                 "timestamp": Utc::now().to_rfc3339(),
@@ -151,7 +165,7 @@ impl SecretAudit {
         // operator secret CRUD must not fail because the chain-signed stream
         // is unreachable.
         if let Some(ref rec) = self.recorder {
-            emit_through_recorder(rec, action, tenant, name, outcome_str, error.as_deref());
+            emit_through_recorder(rec, action, tenant, name, outcome_str, error);
         }
         Ok(())
     }
