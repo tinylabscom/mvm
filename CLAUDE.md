@@ -405,8 +405,8 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
     `workflow_dispatch`-only, so none of the six gate a PR; they run
     on manual dispatch.
-15. **A sealed production microVM has no shell, no `do_exec`, no PTY,
-    and no input that can change what runs.** The sole
+15. **A sealed production microVM has no shell, no `do_exec`, and no
+    PTY.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
     console (`crates/mvm-agentd/src/console.rs`), which is gated behind
     the `interactive` Cargo feature — so a sealed prod agent (built
@@ -427,12 +427,14 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     sibling to `prod-agent-runentry-contract`. Serial-console passthrough
     was considered and rejected (fatal on an input-less console); there
     is exactly one interactive transport and it is dev-only.
-    This claim used to hold by **absence** — a sealed VM had no host→guest
-    byte path at all. The workload input plane built one, so it now holds
-    by policy for the input half: bytes reach the already-running
-    entrypoint's stdin and nothing else, cannot select a program or alter
-    argv or env (the entrypoint is fixed at admission), and are refused
-    without a grant in the signed plan. See `Preview` claim 17.
+    This claim used to read "no interactive access", holding by
+    **absence** — a sealed VM had no host→guest byte path at all. The
+    workload input plane built one, so the claim shrank to the part that
+    still holds by absence, which is what its three witnesses check. The
+    input plane's own properties (stdin only, no program selection, no
+    argv or env change, refused without a plan grant) are policy enforced
+    by host code with no production caller, and are claimed separately as
+    `Preview` claim 17 with their limits.
 
 `Preview` claim 17 — **workload stdin is grant-gated, single-writer,
 secret-scanned across frames, and every refusal audited**

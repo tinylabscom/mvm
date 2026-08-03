@@ -135,21 +135,25 @@ per the threat model above.
 | 12 | Every host-side broker service is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited | cross-cutting | Binding-gated dispatch with a rejection ladder for unbound and out-of-profile calls; the handler registry is linted for policy-schema and composition coverage |
 | 13 | No raw secret value crosses the broker channel | data containment | `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space; secret-bearing buffers are zeroized on drop |
 | 14 | Every OCI image admission records provenance in the chain-signed audit log | supply chain | A `plan.oci_provenance` entry carries the registry host, repo, supplied reference, resolved manifest digest, layer digest list, trust policy, and cosign verdict; a production pull or run refuses a mutable reference before any network fetch |
-| 15 | A sealed production microVM has no shell, no `do_exec`, no PTY, and no input that can change what runs | L4 | Only the dev `/init` variant serves a console; the sealed rootfs is dm-verity protected; the backend captures the guest console write-only, with no host input; the host accessible-gate refuses `console` on a sealed image; the agent's console and `do_exec` are both `interactive`-gated. The host→guest input plane carries bytes to the already-running entrypoint's stdin and nothing else: it cannot select a program, alter argv or env, or spawn anything, because the entrypoint is fixed at admission, and it is refused outright without a grant in the signed plan |
+| 15 | A sealed production microVM has no shell, no `do_exec`, and no PTY | L4 | Only the dev `/init` variant serves a console; the sealed rootfs is dm-verity protected; the backend captures the guest console write-only, with no host input; the host accessible-gate refuses `console` on a sealed image; the agent's console and `do_exec` are both `interactive`-gated |
 
-**Claim 15 changed shape.** It used to hold by *absence*: a sealed
-production microVM had no host→guest byte path at all, so "nobody can
-drive it" needed no policy. The workload input plane built one. What
-survives is narrower and worth stating plainly: no shell, no `do_exec`
-and no PTY on a sealed image, unchanged; and input bytes that reach a
-running workload's stdin cannot select a program, alter its argv or
+**Claim 15 changed shape, and shrank.** It used to read "no interactive
+access to a sealed production microVM", and it held by *absence*: a
+sealed VM had no host→guest byte path at all, so "nobody can drive it"
+needed no policy. The workload input plane built one. What survives is
+the part that still holds by absence — no shell, no `do_exec`, no PTY —
+and that is all this row now claims, because that is all its three
+witnesses check.
+
+The input plane's own properties are *not* folded in here. Bytes that
+reach a running workload's stdin cannot select a program, alter argv or
 environment, or spawn anything, because the entrypoint is fixed at
-admission and the plane writes to a pipe, not to a launcher. Refusing
-input without a plan grant is now a *policy* decision made by host code,
-not a consequence of there being nothing to refuse — a strictly weaker
-guarantee than the one this claim used to make. Preview 17 states what
-that policy enforces and, more importantly, what it does not enforce
-yet.
+admission and the plane writes to a pipe rather than to a launcher; and
+input is refused outright without a grant in the signed plan. Every one
+of those is a *policy* decision made by host code, not a consequence of
+there being nothing to refuse, and the code that makes it has no
+production caller yet. It is stated and witnessed as Preview 17, with
+its limits, rather than asserted as part of a shipped claim.
 
 **Preview 17 — workload stdin is grant-gated, single-writer, secret-scanned
 and audited.** The host→guest input plane refuses every write unless the
@@ -516,7 +520,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 12 | Every host-side service binding is plan-gated and audited | fn:unbound_service_returns_not_bound, fn:service_call_rejects_unknown_envelope_fields | ExecutionPlan.services binding (ADR-020) | Shipped |
 | 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-023) | Shipped |
 | 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md) | Shipped |
-| 15 | A sealed production microVM has no shell, no do_exec, no PTY, and no input that can change what runs | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + interactive-gated agent (Plan 165 WS-C, ADR-001 §W4.3 extension); the input plane writes to a fixed entrypoint's stdin and selects nothing — see row 17 | Shipped |
+| 15 | A sealed production microVM has no shell, no do_exec, and no PTY | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + interactive-gated agent (Plan 165 WS-C, ADR-001 §W4.3 extension). The host→guest input plane is deliberately *not* claimed here: its properties are policy, not absence, and are witnessed at row 17 | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
 | 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
 

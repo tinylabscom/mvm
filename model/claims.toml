@@ -183,7 +183,10 @@ witnesses = [
 id = "MVM-SEC-15"
 level = "build"
 suite = "prod_console"
-statement = "A sealed production microVM has no shell, no do_exec, no PTY, and no input that can change what runs"
+statement = "A sealed production microVM has no shell, no do_exec, and no PTY"
+# Scoped to what the three witnesses check. The host→guest input plane's
+# properties are policy rather than absence and have no production caller;
+# they are claimed separately, as Preview MVM-SEC-17, with their limits.
 witnesses = [
     "fn:console_refused_on_sealed_image",
     "fn:prod_console_attachment_has_no_input",

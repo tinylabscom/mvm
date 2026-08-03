@@ -389,8 +389,9 @@ fn describe_console_merge(args: &Args) -> Option<String> {
     ))
 }
 
-/// The console fallback cannot do three things the broker can, and a user who
-/// is not told will read its output as if it could.
+/// The console fallback cannot do four things the broker can, and a user who
+/// is not told will read its output as if it could. Redaction leads: the other
+/// three cost the reader accuracy, that one shows them raw guest bytes.
 ///
 /// A channel selection is not among them: the resolver refuses that outright
 /// rather than leaving this note to carry a warning about a filter nothing
@@ -399,9 +400,9 @@ fn announce_console_only(args: &Args, sinks: &mut Sinks<'_>) {
     notice(
         sinks,
         &format!(
-            "note: microVM {:?} has no output capture; showing its console log, which merges \
-             stdout and stderr, is not hash-chained, and has no record boundaries — so -n is \
-             approximated in bytes",
+            "note: microVM {:?} has no output capture; showing its console log, which is not \
+             redacted, merges stdout and stderr, is not hash-chained, and has no record \
+             boundaries — so -n is approximated in bytes",
             args.name
         ),
     );
@@ -413,15 +414,16 @@ fn announce_console_only(args: &Args, sinks: &mut Sinks<'_>) {
 /// The recorded half was sealed by a process that did not capture it, so it
 /// stops where *that* process exited — for a detached start, seconds into the
 /// run. Everything after it comes off the console log: same bytes the guest
-/// wrote, none of the guarantees. Saying so is what stops the unchained
+/// wrote, none of the guarantees — including redaction, which the recorded
+/// half applied and this half does not. Saying so is what stops the unchained
 /// remainder being read as if the chain covered it, and what explains the
 /// repeated lines where the two halves overlap.
 fn describe_history_and_console(args: &Args) -> String {
     format!(
         "note: microVM {:?} was recorded by a process that exited before the run did; what the \
-         recording covers is shown first, then the console log covering the rest — which merges \
-         stdout and stderr, is not hash-chained, and repeats the part the recording already \
-         showed",
+         recording covers is shown first, then the console log covering the rest — which is not \
+         redacted, merges stdout and stderr, is not hash-chained, and repeats the part the \
+         recording already showed",
         args.name
     )
 }
@@ -772,6 +774,10 @@ mod tests {
         assert!(described.contains("console log"), "{described}");
         assert!(described.contains("not hash-chained"), "{described}");
         assert!(described.contains("repeats"), "{described}");
+        // The spliced-in half is raw guest bytes. Losing the chain costs
+        // accuracy; losing redaction is the one with a safety consequence, so
+        // it is named rather than left to the guide.
+        assert!(described.contains("not redacted"), "{described}");
     }
 
     #[test]
@@ -1335,6 +1341,10 @@ mod tests {
             let rendered = notices(captured);
             assert!(rendered.contains("merges stdout and stderr"), "{rendered}");
             assert!(rendered.contains("not hash-chained"), "{rendered}");
+            // The console log is the unredacted source. An operator reading it
+            // as if the broker's redaction applied is the one misreading here
+            // that has a safety consequence, so the notice names it.
+            assert!(rendered.contains("not redacted"), "{rendered}");
             assert!(
                 rendered.contains("-n is approximated in bytes"),
                 "{rendered}"

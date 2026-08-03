@@ -83,7 +83,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-15` | `build` | A sealed production microVM has no shell, no do_exec, no PTY, and no input that can change what runs | `fn:console_refused_on_sealed_image`, `fn:prod_console_attachment_has_no_input`, `ci:prod-agent-no-console` |
+| `MVM-SEC-15` | `build` | A sealed production microVM has no shell, no do_exec, and no PTY | `fn:console_refused_on_sealed_image`, `fn:prod_console_attachment_has_no_input`, `ci:prod-agent-no-console` |
 
 ## runtime_overlay
 

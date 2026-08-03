@@ -29,10 +29,10 @@ mvmctl machine logs my-machine -f | grep ERROR      # searches stdout only
 mvmctl machine logs my-machine -f 2>/dev/null       # drops the workload's stderr
 ```
 
-A **persistent** machine — one you keep alive with `-d`, `--ttl`, or
-`--healthcheck` — attaches to the output itself once it boots, unless you
-pass `--detach` or ask for JSON, so you usually do not have to follow up
-with `logs` at all:
+A **persistent** machine — one you keep alive with `--ttl` or `--healthcheck` —
+attaches to the output itself once it boots, so you usually do not have to
+follow up with `logs` at all. Starting one with `-d` (`--detach`) or asking for
+JSON prints and returns instead of attaching:
 
 ```sh
 mvmctl machine run --healthcheck 'curl -fsS localhost/health' \
@@ -67,15 +67,15 @@ mvmctl machine logs my-machine
 | --- | --- | --- |
 | Live broker | The machine is running and this host is capturing it. | Channel-separated, hash-chained, live. |
 | Recorded transcript | The machine has ended, or you asked for history first. | Channel-separated, hash-chained, encrypted at rest, verified on read. |
-| Console log | Neither of the above. | One merged byte stream. No channels, no chain, no record boundaries. |
+| Console log | Neither of the above. | One merged byte stream. Not redacted. No channels, no chain, no record boundaries. |
 
-A console-only read says so on stderr, because it cannot do three things the
+A console-only read says so on stderr, because it cannot do four things the
 other two can:
 
 ```
 note: microVM "my-machine" has no output capture; showing its console log,
-which merges stdout and stderr, is not hash-chained, and has no record
-boundaries — so -n is approximated in bytes
+which is not redacted, merges stdout and stderr, is not hash-chained, and has
+no record boundaries — so -n is approximated in bytes
 ```
 
 ## The `--stream` filter
@@ -173,12 +173,19 @@ signed execution plan, as `stream_retention`:
 - `ephemeral` — fan out live and keep no chained, verifiable transcript.
   `mvmctl machine logs -f` works exactly as before while the workload runs.
 
-`ephemeral` does not mean no bytes land on disk. The backend still writes its
-own `console.log` — outside this plane, unredacted, unaffected by the
-retention mode — and once the run ends, `mvmctl machine logs` falls back to
-reading that file, printing the run's output in full. Choose `ephemeral` to
-skip the audited, hash-chained copy; it does not stop the output from being
-readable afterward.
+**Nothing selects `ephemeral` today.** Every production caller builds the plan
+with the default, so every real run is `persist`. The mode is admitted and
+signed, and the field is read on the boot path, but there is no operator-facing
+way to set it — the same shape as the [input
+channel](/guides/workload-input/), which is built and dormant. Read this
+section as the contract the mode is bound by, not as a switch you can throw.
+
+Were it selected, `ephemeral` would still not mean no bytes land on disk. The
+backend writes its own `console.log` regardless — outside this plane,
+unredacted, unaffected by the retention mode — and once the run ends, `mvmctl
+machine logs` falls back to reading that file, printing the run's output in
+full. What `ephemeral` drops is the audited, hash-chained copy, not the output's
+readability afterward.
 
 There is deliberately **no CLI flag** for this. A flag would make a missing
 transcript ambiguous: nobody reading the evidence later could tell a run that
@@ -240,8 +247,8 @@ so:
 ```
 note: microVM "…" was recorded by a process that exited before the run did;
 what the recording covers is shown first, then the console log covering the
-rest — which merges stdout and stderr, is not hash-chained, and repeats the
-part the recording already showed
+rest — which is not redacted, merges stdout and stderr, is not hash-chained,
+and repeats the part the recording already showed
 ```
 
 ## Reading output from code

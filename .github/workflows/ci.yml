@@ -266,6 +266,14 @@ jobs:
       # queue's critical path (this job has headroom; `Test` is the long pole).
       # Clippy above already compiled the workspace `--all-targets`, so the
       # crate graph is warm for these feature-specific recompiles.
+      - name: Clippy (mvm-client tracing-bridge)
+        # `--all-targets` selects targets, not features: the workspace clippy
+        # above never enables `tracing-bridge`, and nothing else in the tree
+        # does either, so `stream_tracing.rs` and its tests compile in no lane.
+        # A rename in `mvm-core::stream_client` would break it with the merge
+        # queue green.
+        run: cargo clippy -p mvm-client --all-targets --features tracing-bridge -- -D warnings
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
