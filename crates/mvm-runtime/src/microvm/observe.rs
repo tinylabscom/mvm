@@ -2,10 +2,13 @@
 //! slot allocation/reservation bookkeeping.
 
 use anyhow::{Context, Result};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use tracing::{instrument, warn};
 
 use crate::base::config::{RunInfo, VmSlot};
-use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible, shell_quote};
+use crate::base::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
 use crate::base::ui;
 use crate::firecracker;
 
@@ -16,46 +19,76 @@ use super::{abs_vms_dir, firecracker_vsock_uds_path, require_linux_env};
 /// By default shows the guest serial console (`console.log`).
 /// With `hypervisor=true`, shows Firecracker hypervisor logs (`firecracker.log`).
 pub fn logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()> {
-    require_linux_env()?;
+    let state_dir = mvm_core::config::vm_state_dir(name);
+    let log_file = resolve_log_path(&state_dir, hypervisor)
+        .with_context(|| format!("No logs found for VM '{name}' (is the name correct?)"))?;
+    show_log_file(&log_file, follow, lines)
+}
 
-    let abs_vms = abs_vms_dir();
+/// Resolve the backend-captured host log without crossing a guest execution
+/// boundary. Every supported VMM writes its serial console into the VM state
+/// directory, including macOS HVF and libkrun workloads.
+fn resolve_log_path(state_dir: &Path, hypervisor: bool) -> Result<PathBuf> {
     let filename = if hypervisor {
         "firecracker.log"
     } else {
         "console.log"
     };
-    let log_file = format!("{}/{}/{}", abs_vms, name, filename);
-
-    // Check the log file exists; fall back to firecracker.log for VMs started before
-    // the console.log split.
-    let exists = run_in_vm_stdout(&format!("[ -f {} ] && echo yes || echo no", log_file))?;
-    if exists.trim() != "yes" {
-        if !hypervisor {
-            // Try legacy location (pre-split VMs wrote everything to firecracker.log)
-            let fallback = format!("{}/{}/firecracker.log", abs_vms, name);
-            let fb_exists =
-                run_in_vm_stdout(&format!("[ -f {} ] && echo yes || echo no", fallback))?;
-            if fb_exists.trim() == "yes" {
-                ui::warn(
-                    "console.log not found; showing firecracker.log (VM started before log split)",
-                );
-                return show_log_file(&fallback, follow, lines);
-            }
-        }
-        anyhow::bail!("No logs found for VM '{}' (is the name correct?)", name);
+    let requested = state_dir.join(filename);
+    if requested.is_file() {
+        return Ok(requested);
     }
 
-    show_log_file(&log_file, follow, lines)
+    if !hypervisor {
+        let legacy = state_dir.join("firecracker.log");
+        if legacy.is_file() {
+            ui::warn(
+                "console.log not found; showing firecracker.log (VM started before log split)",
+            );
+            return Ok(legacy);
+        }
+    }
+
+    anyhow::bail!("neither the requested log nor a legacy fallback exists")
 }
 
-fn show_log_file(log_file: &str, follow: bool, lines: u32) -> Result<()> {
+fn show_log_file(log_file: &Path, follow: bool, lines: u32) -> Result<()> {
+    let mut command = Command::new("tail");
+    command.args(tail_arguments(log_file, follow, lines));
     if follow {
-        run_in_vm_visible(&format!("tail -f {}", log_file))?;
+        let status = command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .with_context(|| format!("following {}", log_file.display()))?;
+        if !status.success() {
+            anyhow::bail!("tail failed for {} with {status}", log_file.display());
+        }
     } else {
-        let output = run_in_vm_stdout(&format!("tail -n {} {}", lines, log_file))?;
-        print!("{}", output);
+        let output = command
+            .output()
+            .with_context(|| format!("reading {}", log_file.display()))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tail failed for {} with {}: {}",
+                log_file.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        print!("{}", String::from_utf8_lossy(&output.stdout));
     }
     Ok(())
+}
+
+fn tail_arguments(log_file: &Path, follow: bool, lines: u32) -> Vec<OsString> {
+    let mut arguments = vec![OsString::from("-n"), OsString::from(lines.to_string())];
+    if follow {
+        arguments.push(OsString::from("-f"));
+    }
+    arguments.push(log_file.as_os_str().to_owned());
+    arguments
 }
 
 // ============================================================================
@@ -397,6 +430,35 @@ pub(super) fn release_slot_reservation(slot: &VmSlot) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_path_resolves_host_console_and_legacy_fallback() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let console = state_dir.path().join("console.log");
+        std::fs::write(&console, "console").unwrap();
+        assert_eq!(resolve_log_path(state_dir.path(), false).unwrap(), console);
+
+        std::fs::remove_file(&console).unwrap();
+        let legacy = state_dir.path().join("firecracker.log");
+        std::fs::write(&legacy, "legacy").unwrap();
+        assert_eq!(resolve_log_path(state_dir.path(), false).unwrap(), legacy);
+    }
+
+    #[test]
+    fn log_path_refuses_missing_or_wrong_stream() {
+        let state_dir = tempfile::tempdir().unwrap();
+        assert!(resolve_log_path(state_dir.path(), false).is_err());
+
+        std::fs::write(state_dir.path().join("console.log"), "console").unwrap();
+        assert!(resolve_log_path(state_dir.path(), true).is_err());
+    }
+
+    #[test]
+    fn follow_tail_arguments_include_requested_line_count() {
+        let path = Path::new("/tmp/console log");
+        let expected = ["-n", "200", "-f", "/tmp/console log"].map(OsString::from);
+        assert_eq!(tail_arguments(path, true, 200), expected);
+    }
 
     #[test]
     fn console_warning_patterns_detect_kernel_panic() {

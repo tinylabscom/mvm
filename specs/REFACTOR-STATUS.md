@@ -6,6 +6,14 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [x] Plan 289 — Host-side machine logs
+      (`specs/plans/289-host-side-machine-logs.md`)
+  - [x] Read backend-captured logs from the isolated host VM state directory
+  - [x] Preserve log flags and legacy fallback without shell interpolation;
+        follow mode honors the requested line count
+  - [x] Cover host-only CLI behavior and log resolution with regression tests
+  - [x] Complete workspace tests, check, formatting, and all-target clippy
+
 - [x] Plan 286 — Guest-kernel hardware floor
       (`specs/plans/286-kernel-floor.md`)
   - [x] Audit resolved x86_64/aarch64 configs and enforce required cuts

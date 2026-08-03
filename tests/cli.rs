@@ -176,6 +176,43 @@ fn machine_reconfigure_help_lists_patch_flags() {
     }
 }
 
+/// Reading a machine's captured console is a host-side operation. It must not
+/// depend on the Linux builder/dev VM being available on macOS.
+#[test]
+fn machine_logs_reads_host_state_without_dev_vm() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let state_dir = mvm_home.path().join("vms").join("log-test");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(
+        state_dir.join("console.log"),
+        "old line\nrecent line one\nrecent line two\n",
+    )
+    .unwrap();
+    // Reconcile-on-entry preserves only state owned by a live supervisor.
+    std::fs::write(state_dir.join("hvf.pid"), std::process::id().to_string()).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args(["machine", "logs", "log-test", "--lines", "2"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "machine logs must read host state; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "recent line one\nrecent line two"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("dev VM"),
+        "machine logs must not try to start or connect to a dev VM"
+    );
+}
+
 /// Regression guard: the `ops bench` verb was removed — benchmarking is a
 /// dev/CI concern, not a shipped end-user command.
 #[test]

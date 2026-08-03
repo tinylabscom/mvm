@@ -10,6 +10,16 @@
 
 ## Current issue delivery
 
+- [x] Host-side machine logs — **plan 289**. `machine logs` now reads backend
+      console captures directly from the isolated host VM state directory, so
+      macOS no longer attempts to connect to or auto-start the retired
+      interactive dev VM. Host `tail` receives paths as process arguments,
+      `-f` honors the requested `--lines`/`-n` count through
+      `tail -n <lines> -f`, hypervisor and legacy fallback behavior is retained,
+      and unit plus real-CLI regression coverage proves the command works with
+      dev-VM auto-start disabled. Workspace tests, check, all-target clippy, and
+      formatting are green.
+
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
 Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,
