@@ -55,3 +55,5 @@ tracing = { workspace = true }
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+# Inventory-record wire assertions (round-trips, no-host-path leak checks).
+serde_json = { workspace = true }

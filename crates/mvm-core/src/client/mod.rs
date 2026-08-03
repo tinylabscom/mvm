@@ -16,6 +16,7 @@ pub mod dto;
 pub mod error;
 #[cfg(feature = "client-remote")]
 pub mod gateway;
+pub mod inventory;
 pub mod mock;
 
 pub use error::{MvmError, Result};

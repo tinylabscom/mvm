@@ -16,7 +16,27 @@ Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,
 `volume`, `secret`, `audit`). Each issue lands via its own PR; each PR
 updates only its own entry below.
 
-- [ ] #2078 — canonical unified machine inventory through mvm-client.
+- [x] #2078 — canonical unified machine inventory through mvm-client.
+      `mvm_core::client::inventory` adds the typed `MachineInventoryRecord`
+      contract (identity/name, persistent-vs-transient kind, status +
+      detail incl. paused, fail-closed `build_mode` posture where any
+      unknown label deserializes to prod, source/backend, cpu/memory,
+      readiness, TTL, created/last-started, tags, host-path-free volume
+      attachment summaries, secret-reference count only) plus the shared
+      `InventoryQuery` visibility semantics (stopped persistent
+      definitions stay visible; stopped transients hide unless included;
+      expired hide unless included). `mvm_client::inventory` hosts the
+      spec×live join (duplicate live names collapse with the live row
+      winning), the fail-closed posture resolver the SDK envelope now
+      delegates to, and the read-only `list_local_inventory` composition
+      over any `MvmClient` — mock backend included; the `MvmClient` trait
+      and gateway are unchanged. `mvmctl machine ls` now renders the
+      shared records and its `--json` is the serialized record verbatim
+      (SDK-parsed `name`/`status`/`build_mode`/`kind` keys pinned by
+      tests). 41 new/updated unit tests across the three crates cover the
+      persistent-only/transient-only/joined/paused/failed/stopped/expired/
+      duplicate-name/unknown-posture matrix, serde round-trips,
+      unknown-field rejection, and the no-secret/no-host-path guarantees.
 
 - [ ] #2080 — reusable local encrypted-volume lifecycle service.
 

@@ -2802,6 +2802,7 @@ dependencies = [
  "mvm-fs",
  "mvm-hostd",
  "mvm-runtime",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
