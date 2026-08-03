@@ -669,6 +669,33 @@ mod tests {
     }
 
     #[test]
+    fn ad_hoc_host_attachment_refuses_names_unfit_for_virtiofs_tags() {
+        let home = TestVolumeHome::new();
+        let host_dir = home.path().join("adhoc");
+        fs::create_dir(&host_dir).unwrap();
+        let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
+
+        // Accepted by the general name type but too loose for the virtio-fs
+        // tag the guest kernel sees: underscores and >32-char names must be
+        // refused with the same rule managed creation enforces.
+        for name in ["input_data", &"a".repeat(33)] {
+            let request = AttachmentRequest::builder("vm-1", name)
+                .unwrap()
+                .guest_path("/work/input")
+                .profile(AdmittedProfile::Dev)
+                .build()
+                .unwrap();
+            let err = svc
+                .prepare_ad_hoc_host_attachment(&request, &host_dir)
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("volume name"),
+                "expected a volume-name refusal for {name:?}, got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
     fn launch_reprobes_host_backed_attachments() {
         let home = TestVolumeHome::new();
         let host_dir = home.path().join("adhoc");

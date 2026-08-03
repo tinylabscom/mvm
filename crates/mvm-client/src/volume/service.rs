@@ -199,6 +199,7 @@ impl LocalVolumeService {
     ) -> Result<AttachmentRecord> {
         let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
         lifecycle::recover_local_volume_catalog()?;
+        lifecycle::validate_volume_name(request.volume.as_str())?;
         if !host_dir.is_absolute() {
             bail!("host path must be absolute, got {}", host_dir.display());
         }
