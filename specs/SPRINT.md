@@ -17,8 +17,9 @@
       `-f` honors the requested `--lines`/`-n` count through
       `tail -n <lines> -f`, hypervisor and legacy fallback behavior is retained,
       and unit plus real-CLI regression coverage proves the command works with
-      dev-VM auto-start disabled. Workspace tests, check, all-target clippy, and
-      formatting are green.
+      dev-VM auto-start disabled. Isolated test state also resolves through the
+      canonical explicit-root config helper. Workspace tests, check, all-target
+      clippy, formatting, and the single-home policy gate are green.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 

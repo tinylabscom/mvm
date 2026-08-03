@@ -181,7 +181,7 @@ fn machine_reconfigure_help_lists_patch_flags() {
 #[test]
 fn machine_logs_reads_host_state_without_dev_vm() {
     let mvm_home = tempfile::tempdir().unwrap();
-    let state_dir = mvm_home.path().join("vms").join("log-test");
+    let state_dir = mvm_core::config::vm_state_dir_at(mvm_home.path(), "log-test");
     std::fs::create_dir_all(&state_dir).unwrap();
     std::fs::write(
         state_dir.join("console.log"),

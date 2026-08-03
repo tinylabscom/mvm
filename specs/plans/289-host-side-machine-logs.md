@@ -33,3 +33,5 @@ the headless Linux builder VM.
       validated result.
 - [x] Make follow mode honor `--lines`/`-n` via `tail -n <lines> -f` and cover
       the exact host-process arguments.
+- [x] Route isolated test state through an explicit-root `mvm_core::config`
+      helper and pass the single-home policy gate.
