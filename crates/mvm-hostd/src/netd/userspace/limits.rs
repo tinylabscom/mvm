@@ -53,6 +53,22 @@ pub const HALF_OPEN_TIMEOUT_MILLIS: u64 = 10_000;
 /// default would take.
 pub const KEEPALIVE_IDLE_SECS: u64 = 60;
 
+/// How long a flow whose host socket has failed waits for the guest to
+/// take the bytes it is still owed, before resetting anyway.
+///
+/// The deferral in `deliver_then_reset` has to end somewhere. This is an
+/// **absolute** deadline, taken once when the failure is latched and never
+/// refreshed, which is the whole point: smoltcp's own
+/// `TcpSocket::set_timeout` measures the gap between packets *the remote
+/// sends*, so a guest that acknowledges without ever draining refreshes it
+/// for free and holds the flow for as long as it likes. A deadline nothing
+/// the guest does can move cannot be starved that way.
+///
+/// Ten seconds, the same scale as [`HALF_OPEN_TIMEOUT_MILLIS`], for the
+/// same reason: the guest is one in-memory hop away, so a guest that has
+/// not taken its last bytes in that long is not going to.
+pub const RESET_DELIVERY_TIMEOUT_MILLIS: u64 = 10_000;
+
 /// Gap between probes once the peer has stopped answering.
 pub const KEEPALIVE_PROBE_INTERVAL_SECS: u64 = 10;
 

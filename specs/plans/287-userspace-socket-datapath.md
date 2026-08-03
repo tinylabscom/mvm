@@ -1079,8 +1079,8 @@ still holds.
 
 - [x] **Step 4: Run tests and confirm they pass**
 
-`cargo nextest run -p mvm-hostd` → 1403 passed / 2 skipped (after review round 1).
-`-E 'test(userspace)'` → 104 passed. clippy `-D warnings` clean (`metrics()`
+`cargo nextest run -p mvm-hostd` → 1405 passed / 2 skipped (after review round 2).
+`-E 'test(userspace)'` → 106 passed. clippy `-D warnings` clean (`metrics()`
 is `pub`, not `pub(crate)`, for the `dead_code` reason recorded under Task
 11); nightly fmt clean; `check-file-size` clean; `cargo zigbuild --target
 x86_64-unknown-linux-gnu -p mvm-hostd --all-targets` clean.
@@ -1185,6 +1185,65 @@ The ceiling did not move: the one field added is an inline `bool`, and
 keepalive is a socket option, not memory. 1403 tests pass, and the full
 crate suite was run five times to confirm the flake that came in with the
 withdrawn idle measure left with it.
+
+**Review round 2 landed on top** (`fix(netd): bound the deferred reset with
+a deadline a guest cannot move`).
+
+Round 1 introduced a coupling neither side saw: the deferred reset was
+relying on the idleness reaper as its backstop, and round 1 removed that
+reaper. The deferral was left with **no terminator**. A guest that stops
+acknowledging — a crash, a zero window, or a hostile guest simply choosing
+not to — kept `send_queue() > 0` forever, so `deliver_then_reset` returned
+early on every pass, the socket was never aborted, it stayed `is_active()`,
+and the retain kept it. The descriptor was released (that part was right),
+but the flow entry, ~176 KB of buffers, and a slot in `open_socket_count`
+were held for the machine's lifetime; 256 of those and no connect for that
+machine can ever succeed again.
+
+**The terminator: an absolute deadline on the flow, not smoltcp's
+`set_timeout`.** `RESET_DELIVERY_TIMEOUT_MILLIS` (10 s, the same scale as
+the half-open timeout and for the same reason — the guest is one in-memory
+hop away) is taken once when the failure is latched and never refreshed.
+
+`set_timeout` was examined first, since using the stack's own mechanism
+would have been preferable, and rejected on two counts read out of
+smoltcp 0.13.1's source rather than assumed:
+
+- It measures the gap between packets **the remote sends**
+  (`timed_out()` is `now >= remote_last_ts + timeout`, and `remote_last_ts`
+  is refreshed on every ingress packet at `socket/tcp.rs:2001`). A guest
+  that acknowledges without ever draining refreshes it for free — precisely
+  the starvation the review asked about. A terminator a guest can postpone
+  is not a terminator.
+- `timed_out()` is evaluated **unconditionally** at the top of `dispatch`
+  (`socket/tcp.rs:2389`), and `poll_at` schedules a wake for it, so a socket
+  left carrying a timeout aborts a healthy quiet connection whose remote
+  has simply had nothing to say. That is round 1's streaming case again,
+  reached through a different door.
+
+Two tests: `a_guest_that_stops_acknowledging_cannot_hold_the_flow_forever`
+(the flow becomes reapable rather than staying `is_active()` forever) and
+`a_guest_that_stops_acknowledging_does_not_pin_its_budget_slot` (the handle
+gets its `open_socket_count` slot back). Both stay red under a deferral with
+the deadline removed **and** under a deadline that is refreshed each pass —
+the second mutation is the starvable shape, so the suite discriminates
+between the two designs rather than merely covering the code.
+
+Also in this round: the `pump_flows` doc line still said "or gone idle",
+contradicting its own body — corrected. And `socket2`'s `all` feature, which
+the keepalive knobs need, is now declared in `crates/mvm-hostd/Cargo.toml`
+instead of being inherited by luck from `mvm-build → reqwest → hyper-util`;
+`cargo metadata --no-deps` reports `mvm-hostd -> socket2 features = ['all']`.
+
+Round-2 mutations, both observed:
+
+| Mutation | Result |
+| --- | --- |
+| the deadline check removed (the bug as found) | both stops-acknowledging tests red, 0.12 s |
+| the deadline refreshed on every pass (the starvable shape) | both stops-acknowledging tests red, 0.11 s |
+
+The ceiling did not move: `reset_pending: bool` became
+`reset_deadline: Option<u64>`, still inline. 1405 tests pass.
 
 **Known gap, not this task's:** nothing in production calls
 `UserspaceHandle::service`. `DatapathHandle` has no `service` method and the

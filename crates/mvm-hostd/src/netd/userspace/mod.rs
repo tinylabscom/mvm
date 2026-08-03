@@ -369,7 +369,11 @@ impl UserspaceHandle {
     }
 
     /// Move both directions of every established flow, and reap the ones
-    /// that have finished or gone idle.
+    /// that have finished.
+    ///
+    /// Finished means the connection ended, never that it was quiet: see
+    /// the body, and [`limits::KEEPALIVE_IDLE_SECS`] for what reclaims a
+    /// flow whose peer is gone.
     fn pump_flows(&mut self, now_millis: u64) {
         let Self { flows, metrics, .. } = self;
         flows.retain(|_, flow| {
@@ -611,6 +615,7 @@ fn fold_throughput(metrics: &mut GatewayMetrics, stats: &tcp::PumpStats) {
 
 #[cfg(test)]
 mod tests {
+    use super::limits::RESET_DELIVERY_TIMEOUT_MILLIS;
     use super::*;
     use crate::netd::test_packets::v4_packet;
     use mvm_net::l3::flow::DEFAULT_TCP_IDLE_MILLIS;
@@ -1133,6 +1138,86 @@ mod tests {
         assert_eq!(handle.open_socket_count(), 1);
     }
 
+    /// The budget slot, not just the descriptor. A flow holding an
+    /// undelivered reset keeps roughly 176 KB of buffers and a place in
+    /// `open_socket_count`; a guest that simply stops acknowledging must
+    /// not be able to hold those for the machine's lifetime, which is what
+    /// an unbounded deferral would allow — 256 times over, after which no
+    /// connect for this machine could ever succeed again.
+    #[test]
+    fn a_guest_that_stops_acknowledging_does_not_pin_its_budget_slot() {
+        let (mut handle, _dst, mut peer, _ack) = handle_with_an_established_conversation();
+        let body = b"an-answer-the-guest-never-acknowledges";
+        peer.write_all(body).expect("peer write");
+        peer.flush().expect("flush");
+        assert!(
+            drive_until(&mut handle, |h| h.metrics().bytes_ingress > 0),
+            "the peer's answer must reach the stack before its socket dies"
+        );
+
+        // The peer dies abortively; the fixture guest acknowledges nothing
+        // from here on, which is the state under test.
+        socket2::SockRef::from(&peer)
+            .set_linger(Some(Duration::ZERO))
+            .expect("an abortive close");
+        drop(peer);
+        assert!(
+            drive_until(&mut handle, |h| h
+                .flows
+                .values()
+                .all(EstablishedFlow::host_socket_closed)),
+            "the dead peer's descriptor must come back straight away"
+        );
+
+        let mut buf = [0u8; MTU_V1 as usize];
+        assert!(
+            !drain_carries_a_reset(&mut handle, &mut buf),
+            "while the deadline holds, the guest still gets its chance at the data"
+        );
+        assert_eq!(
+            handle.open_socket_count(),
+            1,
+            "and the flow is held open for it"
+        );
+
+        handle
+            .service(RESET_DELIVERY_TIMEOUT_MILLIS + 1)
+            .expect("past the reset deadline");
+
+        assert!(
+            drain_carries_a_reset(&mut handle, &mut buf),
+            "past the deadline the guest is reset rather than waited on"
+        );
+        handle
+            .service(RESET_DELIVERY_TIMEOUT_MILLIS + 2)
+            .expect("service");
+        assert_eq!(
+            handle.open_socket_count(),
+            0,
+            "and the budget slot comes back with it"
+        );
+        assert!(handle.flows.is_empty());
+    }
+
+    /// Drain everything waiting for the guest, reporting whether a reset
+    /// was among it. Bounded: a read path that never reports `WouldBlock`
+    /// fails its caller's assertion rather than spinning here.
+    fn drain_carries_a_reset(handle: &mut UserspaceHandle, buf: &mut [u8]) -> bool {
+        let mut saw_reset = false;
+        for _ in 0..SERVICE_ATTEMPTS {
+            let Ok(n) = handle.recv_from_network(buf) else {
+                break;
+            };
+            let Ok(ip) = smoltcp::wire::Ipv4Packet::new_checked(&buf[..n]) else {
+                continue;
+            };
+            if let Ok(seg) = smoltcp::wire::TcpPacket::new_checked(ip.payload()) {
+                saw_reset |= seg.rst();
+            }
+        }
+        saw_reset
+    }
+
     /// And the resource hole that closes: a peer that goes away takes its
     /// descriptor with it, without the guest having to do anything.
     #[test]
@@ -1160,19 +1245,10 @@ mod tests {
         // The guest is told, and only once it has been told is the flow
         // reaped — the reset is the last thing this flow owes anyone.
         let mut buf = [0u8; MTU_V1 as usize];
-        let mut saw_reset = false;
-        for _ in 0..SERVICE_ATTEMPTS {
-            let Ok(n) = handle.recv_from_network(&mut buf) else {
-                break;
-            };
-            let Ok(ip) = smoltcp::wire::Ipv4Packet::new_checked(&buf[..n]) else {
-                continue;
-            };
-            if let Ok(seg) = smoltcp::wire::TcpPacket::new_checked(ip.payload()) {
-                saw_reset |= seg.rst();
-            }
-        }
-        assert!(saw_reset, "the guest must learn that its peer is gone");
+        assert!(
+            drain_carries_a_reset(&mut handle, &mut buf),
+            "the guest must learn that its peer is gone"
+        );
 
         handle.service(1).expect("service");
         assert!(handle.flows.is_empty());

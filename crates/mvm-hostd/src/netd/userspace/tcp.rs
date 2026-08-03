@@ -63,7 +63,8 @@ use super::accept_mtu;
 use super::device::{GuestDevice, PushOutcome, QueueDepths};
 use super::limits::{
     FLOW_RX_QUEUE_DEPTH, FLOW_TX_QUEUE_DEPTH, HALF_OPEN_TIMEOUT_MILLIS, KEEPALIVE_IDLE_SECS,
-    KEEPALIVE_PROBE_INTERVAL_SECS, KEEPALIVE_PROBE_RETRIES, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
+    KEEPALIVE_PROBE_INTERVAL_SECS, KEEPALIVE_PROBE_RETRIES, RESET_DELIVERY_TIMEOUT_MILLIS,
+    SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
 };
 
 /// A guest SYN held back from the stack while its host connect runs.
@@ -454,10 +455,10 @@ pub struct EstablishedFlow {
     /// that has already run, and every retransmit and timeout on this flow
     /// would be judged against the wrong instant.
     last_polled_millis: u64,
-    /// A reset is owed to the guest but has not been sent, because the
-    /// stack is still holding bytes the host already received for it.
+    /// A reset is owed to the guest but has not been sent yet, and the
+    /// clock at which it goes out regardless. `Some` means owed.
     /// See [`Self::deliver_then_reset`].
-    reset_pending: bool,
+    reset_deadline: Option<u64>,
 }
 
 impl EstablishedFlow {
@@ -567,7 +568,7 @@ impl EstablishedFlow {
             host_read_eof: false,
             host_error: None,
             last_polled_millis: now_millis,
-            reset_pending: false,
+            reset_deadline: None,
         })
     }
 
@@ -711,9 +712,14 @@ impl EstablishedFlow {
             // The descriptor is dead whatever happens next; release it now
             // rather than holding it for however long the reset takes.
             self.close_host();
-            self.reset_pending = true;
+            // Taken once, from the failure, and never moved afterwards —
+            // see [`RESET_DELIVERY_TIMEOUT_MILLIS`].
+            self.reset_deadline = Some(
+                self.last_polled_millis
+                    .saturating_add(RESET_DELIVERY_TIMEOUT_MILLIS),
+            );
         }
-        if self.reset_pending {
+        if self.reset_deadline.is_some() {
             self.deliver_then_reset();
         }
     }
@@ -737,20 +743,35 @@ impl EstablishedFlow {
     /// its pending receive queue — so "emitted" is not the same as
     /// "delivered", and only the acknowledgement proves the second.
     ///
-    /// Bounded by the caller: a guest that never acknowledges stops moving
-    /// bytes, and the handle's idle reaper takes the flow. Nothing here
-    /// waits forever.
+    /// **Bounded by its own deadline**, not by anything outside: a guest
+    /// that stops acknowledging — a crash, a zero window, or simply a
+    /// hostile guest choosing not to — would otherwise hold this flow's
+    /// buffers and its slot in the host's socket budget for the machine's
+    /// whole life, since nothing else ages an established flow and the
+    /// descriptor this one would have blocked on is already gone.
+    ///
+    /// The deadline is absolute and set once at the failure. It is
+    /// deliberately not smoltcp's `set_timeout`, which measures the gap
+    /// between packets the *remote* sends: a guest can refresh that by
+    /// acknowledging without ever draining, and a terminator a guest can
+    /// postpone is not a terminator. `set_timeout` is also evaluated
+    /// unconditionally in smoltcp's dispatch, so a socket left carrying one
+    /// would abort a perfectly healthy quiet connection — the streaming
+    /// case this datapath must not break.
     fn deliver_then_reset(&mut self) {
         // Emit whatever the guest's window allows before anything else.
         self.poll(self.last_polled_millis);
-        if self.socket().send_queue() > 0 {
+        let overdue = self
+            .reset_deadline
+            .is_some_and(|deadline| self.last_polled_millis >= deadline);
+        if self.socket().send_queue() > 0 && !overdue {
             return;
         }
         self.sockets.get_mut::<TcpSocket>(self.handle).abort();
         // Aborting only moves the socket's state; the reset itself leaves
         // on the next poll.
         self.poll(self.last_polled_millis);
-        self.reset_pending = false;
+        self.reset_deadline = None;
     }
 
     /// Release the host descriptor now rather than at drop.
@@ -3062,6 +3083,45 @@ mod tests {
             "a fixture where the two coincide could not tell a live number from a stale one"
         );
         assert_eq!(ack, g.seq, "and acknowledge everything the guest sent");
+    }
+
+    /// The deferral has to end somewhere. A guest that stops acknowledging
+    /// — a crash, a zero window, or a hostile guest choosing not to — would
+    /// otherwise hold this flow's buffers and its slot in the host's socket
+    /// budget for the machine's whole life: the descriptor is already gone,
+    /// so nothing else about this flow can ever fail again, and nothing
+    /// ages an established flow.
+    #[test]
+    fn a_guest_that_stops_acknowledging_cannot_hold_the_flow_forever() {
+        let (mut flow, mut peer, _g) = established_flow_with_peer();
+        buffer_a_peer_response(&mut flow, &mut peer, b"never-acknowledged");
+
+        flow.on_host_error(io::ErrorKind::ConnectionReset);
+        assert!(
+            rst_in(&flow.take_guest_packets()).is_none(),
+            "the reset is owed but must wait on the data first"
+        );
+
+        // Passes go by and the guest acknowledges nothing.
+        for pass in 0..5 {
+            flow.pump_ignoring_metrics(pass * 1_000);
+            assert!(
+                rst_in(&flow.take_guest_packets()).is_none(),
+                "inside the deadline the guest still gets its chance"
+            );
+        }
+        assert!(flow.is_active(), "and the flow is still held for it");
+
+        flow.pump_ignoring_metrics(RESET_DELIVERY_TIMEOUT_MILLIS + 1);
+
+        assert!(
+            rst_in(&flow.take_guest_packets()).is_some(),
+            "past the deadline the flow gives up rather than waiting forever"
+        );
+        assert!(
+            !flow.is_active(),
+            "and it becomes reapable, so its buffers and budget slot come back"
+        );
     }
 
     /// An established flow is reclaimed when its peer stops answering, not

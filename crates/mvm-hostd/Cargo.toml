@@ -121,7 +121,13 @@ ipnet.workspace = true
 # channel and the datapath are independent sources of work.
 mio = { workspace = true }
 # Non-blocking host `connect()` for the userspace datapath's deferred handshake.
-socket2 = { workspace = true }
+# `all` for the TCP keepalive tuning knobs (`with_interval`, `with_retries`)
+# the userspace datapath sets on every flow's host socket. Declared here
+# rather than relied on: without it the crate builds only while some
+# unrelated transitive dependency happens to enable the feature, and the
+# failure when that changes names a missing method with no hint where the
+# feature went.
+socket2 = { workspace = true, features = ["all"] }
 # custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
 # carries no hickory and stays on the workspace 1.85 floor.
 hickory-resolver = { workspace = true, features = ["tokio"], optional = true }
