@@ -157,7 +157,7 @@ updates only its own entry below.
       is clean with 27 relevant privilege-drop mutants caught.
       Tracked in plan 284.
 
-- [ ] Production object-store volumes — **plan 283 / issue #2040**. Standardize
+- [x] Production object-store volumes — **plan 283 / issue #2040**. Standardize
       remote volume I/O on Apache Arrow `object_store` while preserving the
       accepted mvm↔mvmd ownership boundary and mvmd's distinction between
       multi-attach `StorageBucket` and exclusive block `VolumeRecord`. Completion
@@ -165,9 +165,9 @@ updates only its own entry below.
       local/block attachment, encrypted durable checkpoints and cross-worker
       restore, working remote CLI/API policy, MinIO integration, and Linux/KVM
       persistence/restore proof. Registry-only, compile-only, and mocked-only
-      paths do not satisfy the issue. Follow-up verification is open because
-      the original cross-worker claim covered gateway-local directories rather
-      than the gateway→agent→hostd worker data plane.
+      paths do not satisfy the issue. Follow-up verification closed the original
+      gateway-local proof gap with the canonical gateway→agent→hostd worker data
+      plane; mvm PR #2100 and mvmd PR #203 are merged with green final matrices.
   - [x] WS1: external implementations can run the canonical trait-object
         contract; the unregistered member-only S3 mount provider is removed;
         template-registry S3 remains independently gated; the two-surface gate
@@ -218,7 +218,7 @@ updates only its own entry below.
         Twenty-one gateway client tests, including one real loopback HTTP request, nine CLI
         lifecycle parser tests, touched-crate checks, all-target Clippy, and the
         complete 115-scenario / 523-step BDD suite pass.
-  - [ ] WS4/WS5 policy/WS6/WS7: mvmd PRs #199, #201, and #202 deliver durable
+  - [x] WS4/WS5 policy/WS6/WS7: mvmd PRs #199, #201, and #202 deliver durable
         manifests and encrypted checkpoints, gateway-local restore, fencing,
         retention/GC, API policy, metrics, signed lifecycle/refusal audits, and
         operator documentation. The real MinIO lane proves encrypted multipart
@@ -232,8 +232,10 @@ updates only its own entry below.
         The composed Linux/KVM proof is now green: two isolated production
         workers preserve boot counts 1→2 across a source restart, transfer the
         encrypted image through gateway→agent→hostd, and observe boot count 3
-        after destination restore. Both follow-up PR matrices are green; this
-        item and issue #2040 remain open until both changes land.
+        after destination restore. Both follow-up PR matrices are green, mvm
+        PR #2100 passed its full merge-group matrix including the Nix 50 MB
+        guest-artifact footprint gate, and mvmd PR #203 passed all 11 final-head
+        checks before both changes landed.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout
