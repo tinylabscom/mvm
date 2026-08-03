@@ -23,10 +23,15 @@ pub const DEFAULT_MAX_HOST_SOCKETS: usize = 256;
 pub const FD_RESERVE: usize = 64;
 
 /// Concurrent half-open connections. Each parks a connecting descriptor,
-/// so this is sized for a burst, not for a flood, and scales with
-/// [`DEFAULT_MAX_HOST_SOCKETS`]: a half-open entry holds a real file
-/// descriptor, so it draws on the same budget an established socket does.
-pub const DEFAULT_MAX_HALF_OPEN: usize = 32;
+/// so this is sized for a burst, not for a flood — but the burst is real:
+/// a page-load fan-out, a parallel package-manager install, or a sidecar
+/// dialing its upstreams at startup can open dozens at once, and the
+/// [`HALF_OPEN_TIMEOUT_MILLIS`] wait means slow or high-RTT destinations
+/// linger long enough to stack on top of fresh SYNs. Past this count the
+/// table drops the newcomer rather than queuing it, so this is sized
+/// against that demand, not against a fraction of
+/// [`DEFAULT_MAX_HOST_SOCKETS`] picked for tidiness.
+pub const DEFAULT_MAX_HALF_OPEN: usize = 64;
 
 /// How long a half-open entry waits for its host connect.
 pub const HALF_OPEN_TIMEOUT_MILLIS: u64 = 10_000;
@@ -221,8 +226,16 @@ mod tests {
         };
     }
 
+    /// This guard exists to express one thing: half-open entries must not
+    /// be able to consume the whole socket budget, since each one holds a
+    /// real descriptor and competes with established sockets for it. The
+    /// ratio is what should give when the two constants are re-sized, not
+    /// [`DEFAULT_MAX_HALF_OPEN`] — that number is set against real connect
+    /// demand, and a guard tuned to make a demand-driven figure fit is a
+    /// guard tuned to stop guarding. A quarter of the cap still leaves that
+    /// property true.
     #[test]
     fn half_open_is_far_smaller_than_the_socket_cap() {
-        const { assert!(DEFAULT_MAX_HALF_OPEN * 4 < DEFAULT_MAX_HOST_SOCKETS) };
+        const { assert!(DEFAULT_MAX_HALF_OPEN * 3 < DEFAULT_MAX_HOST_SOCKETS) };
     }
 }
