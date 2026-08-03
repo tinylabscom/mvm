@@ -113,7 +113,26 @@ updates only its own entry below.
       responses, serialization, Debug, errors, audit records, and
       persisted sidecars.
 
-- [ ] #2082 — normalized verified local audit events for UI consumers.
+- [x] #2082 — normalized verified local audit events for UI consumers.
+      Delivered `mvm_client::audit::LocalAuditReader`: discovers the
+      per-tenant lifecycle chains and per-VM workload chains under
+      `<mvm_home>/audit/`, verifies each through the canonical seams
+      (`mvm_hostd::supervisor::verify_audit_chain_entries` and the new
+      `mvm_hostd::audit_signer::verify::verify_workload_chain_entries`,
+      extracted from the existing count-only verifier), enforces a
+      per-source tenant-scope check, and returns normalized
+      `VerifiedAuditEvent`s (stable `(source, seq)` identity; newest-first
+      ordering by signed timestamp → source rank → chain position) with
+      typed per-source `AuditSourceRefusal`s — a failed source yields zero
+      events, never a partial prefix. Bounded reads with typed cursor plus
+      machine/tenant/kind/time filters; all free text sanitized (ANSI/OSC
+      strip, control-char drop, length caps, sensitive-label exclusion,
+      host-path redaction) at the service boundary; workload `fields`
+      payloads are never rendered. `mvmctl audit verify` now runs through
+      the same `verify_sources` seam. 53 new tests including the
+      refusal matrix (tamper, reorder, truncation, wrong key, cross-scope),
+      pagination walk, serde/unknown-field pins, and seeded property loops
+      over untrusted audit input.
 
 - [ ] #2079 — persistent + transient launch lifecycle through
       `LocalBackend` (starts after #2078/#2080/#2081 land the shared

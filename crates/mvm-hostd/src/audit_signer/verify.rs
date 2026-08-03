@@ -52,10 +52,22 @@ pub fn verify_workload_chain(
     path: &Path,
     verifying_key: &VerifyingKey,
 ) -> Result<usize, WorkloadVerifyError> {
+    verify_workload_chain_entries(path, verifying_key).map(|entries| entries.len())
+}
+
+/// Verify the workload audit chain at `path` and return its authenticated
+/// entries in chain order. Consumers use this when a decision or a display
+/// depends on the entry contents, rather than re-parsing an
+/// already-verified file a second time. Same rejection ladder as
+/// [`verify_workload_chain`].
+pub fn verify_workload_chain_entries(
+    path: &Path,
+    verifying_key: &VerifyingKey,
+) -> Result<Vec<CanonicalEntry>, WorkloadVerifyError> {
     let content =
         std::fs::read_to_string(path).map_err(|e| WorkloadVerifyError::Io(e.to_string()))?;
     let mut prev_hash = CanonicalEntry::genesis_prev_hash();
-    let mut count = 0usize;
+    let mut entries = Vec::new();
     for (idx, line) in content.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -134,9 +146,9 @@ pub fn verify_workload_chain(
             .map_err(|_| WorkloadVerifyError::SignatureInvalid { line: idx })?;
 
         prev_hash = on_disk.entry_hash;
-        count += 1;
+        entries.push(entry);
     }
-    Ok(count)
+    Ok(entries)
 }
 
 // ============================================================================
@@ -218,6 +230,21 @@ mod tests {
         let (path, sk) = build(&dir, 3);
         let count = verify_workload_chain(&path, &vk(&sk)).expect("clean chain must verify");
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn entries_variant_returns_authenticated_entries_in_chain_order() {
+        let dir = tempdir().unwrap();
+        let (path, sk) = build(&dir, 3);
+        let entries = verify_workload_chain_entries(&path, &vk(&sk))
+            .expect("clean chain must yield its entries");
+        assert_eq!(entries.len(), 3);
+        for e in &entries {
+            assert_eq!(e.category, "workload_audit");
+            assert_eq!(e.tenant_id, "t-1");
+        }
+        // Chain order: each entry's prev_hash links to the previous head.
+        assert_eq!(entries[0].prev_hash, CanonicalEntry::genesis_prev_hash());
     }
 
     #[test]

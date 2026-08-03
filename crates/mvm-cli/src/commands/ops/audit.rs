@@ -6,9 +6,9 @@ use clap::{Args as ClapArgs, Subcommand};
 use crate::ui;
 
 use ed25519_dalek::VerifyingKey;
+use mvm_client::audit::{AuditSourceId, AuditSourceKind, LocalAuditReader};
 use mvm_core::user_config::MvmConfig;
-use mvm_hostd::audit_signer::verify::verify_workload_chain;
-use mvm_hostd::supervisor::{SignedEnvelope, verify_audit_chain};
+use mvm_hostd::supervisor::SignedEnvelope;
 use mvm_protocol::merkle::{InclusionProof, SignedAuditRoot, verify_inclusion, verify_signed_root};
 
 use super::super::vm::audit_chain::{AuditEmitter, audit_path_for_tenant, default_audit_dir};
@@ -774,10 +774,19 @@ fn print_chain_line(line: &str) {
 
 fn audit_verify(tenant: &str) -> Result<()> {
     let dir = default_audit_dir()?;
-    let lifecycle_path = audit_path_for_tenant(&dir, tenant);
-    let workload_paths = workload_chain_paths(&dir, tenant)?;
+    // Both chain kinds are signed under the host key; load it once.
+    let signer =
+        host_signer::load_or_init().context("loading host signer to verify audit chain")?;
 
-    if !lifecycle_path.exists() && workload_paths.is_empty() {
+    // The canonical verification seam: the same source discovery +
+    // verification the verified-audit UI reader uses, so the CLI and UI
+    // consumers can never disagree on what verifies.
+    let reader = LocalAuditReader::new(&dir, signer.verifying);
+    let outcome = reader
+        .verify_sources(Some(tenant))
+        .context("enumerating audit sources")?;
+
+    if outcome.sources.is_empty() && outcome.refusals.is_empty() {
         ui::info(&format!(
             "No audit chain found for tenant '{tenant}' under {}. Nothing to verify.",
             dir.display()
@@ -785,65 +794,46 @@ fn audit_verify(tenant: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Both chain kinds are signed under the host key; load it once.
-    let signer =
-        host_signer::load_or_init().context("loading host signer to verify audit chain")?;
-    let vk = signer.verifying;
-
-    // The host-lifecycle chain (`<tenant>.jsonl`, SignedEnvelope format).
-    if lifecycle_path.exists() {
-        match verify_audit_chain(&lifecycle_path, &vk) {
-            Ok(count) => ui::success(&format!(
-                "audit chain '{}' verifies clean: {count} entries",
-                lifecycle_path.display()
-            )),
-            // Print a clear error AND propagate so the process exits
-            // nonzero. `mvmctl audit verify` is meant for scripting.
-            Err(e) => anyhow::bail!("audit chain verify failed: {e}"),
-        }
+    for summary in &outcome.sources {
+        ui::success(&format!(
+            "{} '{}' verifies clean: {} entries",
+            source_kind_label(summary.source.kind),
+            source_path(&dir, &summary.source).display(),
+            summary.entries
+        ));
     }
 
-    // The per-VM workload-emitted chains (`<tenant>.<vm>.workload.jsonl`,
-    // OnDiskEntry/JCS). Each per-VM signer owns its own file (single-writer),
-    // so a tenant can have several; verify every one.
-    for workload_path in &workload_paths {
-        match verify_workload_chain(workload_path, &vk) {
-            Ok(count) => ui::success(&format!(
-                "workload audit chain '{}' verifies clean: {count} entries",
-                workload_path.display()
-            )),
-            Err(e) => anyhow::bail!(
-                "workload audit chain verify failed ({}): {e}",
-                workload_path.display()
-            ),
-        }
+    // Print a clear error AND propagate so the process exits nonzero.
+    // `mvmctl audit verify` is meant for scripting.
+    if let Some(refusal) = outcome.refusals.first() {
+        anyhow::bail!(
+            "{} verify failed ({}): {}",
+            source_kind_label(refusal.source.kind),
+            source_path(&dir, &refusal.source).display(),
+            refusal.detail
+        );
     }
-
     Ok(())
 }
 
-/// Enumerate a tenant's per-VM workload audit chains
-/// (`<tenant>.<vm>.workload.jsonl`) in the audit dir, sorted for stable
-/// output. The naming convention lives in `mvm-core::config` so the writer
-/// (the backend spawn) and this reader can't drift.
-fn workload_chain_paths(dir: &std::path::Path, tenant: &str) -> Result<Vec<std::path::PathBuf>> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        // No audit dir yet ⇒ no workload chains.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading audit dir {}", dir.display())),
-    };
-    let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading audit dir {}", dir.display()))?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if mvm_core::config::workload_audit_vm_name(name, tenant).is_some() {
-            paths.push(entry.path());
-        }
+/// Human label for a chain kind in `audit verify` output.
+fn source_kind_label(kind: AuditSourceKind) -> &'static str {
+    match kind {
+        AuditSourceKind::Lifecycle => "audit chain",
+        AuditSourceKind::Workload => "workload audit chain",
     }
-    paths.sort();
-    Ok(paths)
+}
+
+/// On-disk path of a source, for operator-facing display.
+fn source_path(dir: &std::path::Path, source: &AuditSourceId) -> std::path::PathBuf {
+    match (&source.kind, &source.machine) {
+        (AuditSourceKind::Workload, Some(vm)) => dir.join(format!(
+            "{}.{vm}{}",
+            source.tenant,
+            mvm_core::config::WORKLOAD_AUDIT_SUFFIX
+        )),
+        _ => audit_path_for_tenant(dir, &source.tenant),
+    }
 }
 
 fn audit_show(tenant: &str, plan_id: &str, json: bool) -> Result<()> {

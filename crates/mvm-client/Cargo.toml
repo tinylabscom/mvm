@@ -48,6 +48,15 @@ flate2 = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
+# Verified audit reader surface: chrono for time filters/ordering,
+# ed25519 for the trusted verifying key in the reader's constructor,
+# serde for the UI-facing event/cursor DTOs. All already in the mvmctl
+# closure via mvm-core/mvm-hostd, so no new crates enter the build.
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 # Non-fatal diagnostics on the pause path (fc.paused marker best-effort write).
 # Already in the mvmctl closure via mvm-runtime, so this adds no crates.
 tracing = { workspace = true }
@@ -78,3 +87,6 @@ mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 # Inventory-record wire assertions (round-trips, no-host-path leak checks).
 serde_json = { workspace = true }
+# Seeded property-style loops + fresh Ed25519 test keys for the verified
+# audit reader's fixture chains.
+rand = { workspace = true }
