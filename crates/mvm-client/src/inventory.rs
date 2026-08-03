@@ -115,8 +115,8 @@ pub fn join_inventory(
 
 /// Collapse duplicate live rows onto one entry per name. A non-stopped row
 /// wins over a stopped duplicate (a stale stopped registry row must never
-/// mask the actually-running VM); among rows of equal liveness the
-/// later-listed one wins, so the fold is deterministic.
+/// mask the actually-running VM); otherwise the later-listed row wins, so
+/// the fold is deterministic.
 fn dedup_live_by_name(live: Vec<MachineState>) -> BTreeMap<String, MachineState> {
     let mut by_name: BTreeMap<String, MachineState> = BTreeMap::new();
     for state in live {
