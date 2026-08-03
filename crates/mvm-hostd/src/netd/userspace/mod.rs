@@ -63,6 +63,34 @@ fn accept_packet_size(len: usize) -> Result<(), DatapathError> {
     Ok(())
 }
 
+/// Refuse a configured MTU above [`MTU_V1`], rather than accommodating it.
+///
+/// The per-machine memory ceiling is computed from `MTU_V1`, because a
+/// device queue entry is bounded by the link's MTU. Take the configured
+/// value instead and the ceiling becomes a runtime number that no
+/// compile-time assertion can pin — at an MTU of 9000 the true figure is
+/// some multiple of the asserted one, and the constant silently stops
+/// describing reality. That has already happened once here by a different
+/// route, which is the argument for closing the route rather than widening
+/// the formula.
+///
+/// Failing closed is the right direction because `MTU_V1` is *fixed and
+/// not negotiated* — deliberately, so that nothing outside this process
+/// gets to choose the host's buffer sizes. Nothing on this datapath needs
+/// jumbo frames, and a ceiling a configuration can raise is not a ceiling.
+fn accept_mtu(mtu: usize) -> Result<usize, DatapathError> {
+    if mtu > MTU_V1 as usize {
+        return Err(DatapathError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "configured MTU {mtu} exceeds the fixed {MTU_V1} byte MTU this datapath \
+                 sizes its buffers for"
+            ),
+        )));
+    }
+    Ok(mtu)
+}
+
 /// Read `RLIMIT_NOFILE` and raise the soft limit toward the hard limit.
 ///
 /// An unprivileged process may always raise its own soft limit up to the
@@ -127,7 +155,7 @@ impl UserspaceSocketDatapath {
             source,
         })?;
 
-        let mut device = GuestDevice::new(req.mtu as usize, DEFAULT_QUEUE_DEPTH);
+        let mut device = GuestDevice::new(accept_mtu(req.mtu as usize)?, DEFAULT_QUEUE_DEPTH);
         let mut config = Config::new(HardwareAddress::Ip);
         // Recommended by smoltcp's own doc on `Config::random_seed`: a
         // predictable seed makes the ISNs and IPv4 identification field
@@ -245,6 +273,14 @@ impl DatapathHandle for UserspaceHandle {
             // way a caller already knows how to interpret.
             PushOutcome::DroppedQueueFull => Err(DatapathError::Io(std::io::Error::from(
                 std::io::ErrorKind::WouldBlock,
+            ))),
+            // Unreachable through this method — `accept_packet_size` above
+            // has already refused anything oversized — but the device is
+            // the backstop for every other way in, and a silent arm here
+            // would hide a real drop if one ever arrived by another path.
+            PushOutcome::DroppedOversized => Err(DatapathError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "packet exceeds the link MTU",
             ))),
         }
     }
@@ -372,6 +408,30 @@ mod tests {
     #[test]
     fn a_packet_at_exactly_the_mtu_is_accepted() {
         assert!(accept_packet_size(MTU_V1 as usize).is_ok());
+    }
+
+    /// The memory ceiling is computed from `MTU_V1`. A configured MTU above
+    /// it would make that constant describe something other than reality —
+    /// the same class of silent drift that the per-flow device queues
+    /// caused, reached by configuration instead of by code.
+    #[test]
+    fn an_mtu_above_the_fixed_one_is_refused_rather_than_accommodated() {
+        assert!(accept_mtu(MTU_V1 as usize).is_ok());
+        assert!(accept_mtu(MTU_V1 as usize - 1).is_ok());
+        assert!(
+            accept_mtu(9000).is_err(),
+            "a jumbo MTU would silently multiply the per-machine ceiling"
+        );
+    }
+
+    #[test]
+    fn opening_a_handle_refuses_an_mtu_above_the_fixed_one() {
+        let mut req = request();
+        req.mtu = 9000;
+        assert!(
+            UserspaceSocketDatapath::new().open_handle(&req).is_err(),
+            "the datapath must not open with buffers it has not budgeted for"
+        );
     }
 
     #[test]

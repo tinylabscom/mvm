@@ -59,6 +59,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::netd::datapath::DatapathError;
 use crate::netd::metrics::GatewayMetrics;
 
+use super::accept_mtu;
 use super::device::{GuestDevice, PushOutcome};
 use super::limits::{
     FLOW_QUEUE_DEPTH, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
@@ -469,8 +470,10 @@ impl EstablishedFlow {
 
         // `FLOW_QUEUE_DEPTH`, never the machine-wide default: this device
         // is per flow, so its depth multiplies by the socket cap and is
-        // part of the per-machine ceiling.
-        let mut device = GuestDevice::new(mtu, FLOW_QUEUE_DEPTH);
+        // part of the per-machine ceiling. That ceiling is also computed
+        // from the fixed MTU, so an MTU above it is refused rather than
+        // sized for.
+        let mut device = GuestDevice::new(accept_mtu(mtu)?, FLOW_QUEUE_DEPTH);
         let mut config = Config::new(HardwareAddress::Ip);
         // Recommended by smoltcp's own doc on `Config::random_seed`: a
         // predictable seed would make the ISNs and IPv4 identification
@@ -617,6 +620,13 @@ impl EstablishedFlow {
     /// Whether the host descriptor has been released.
     pub fn host_socket_closed(&self) -> bool {
         self.host.is_none()
+    }
+
+    /// Stack-produced packets this flow discarded because the guest-bound
+    /// queue was full. Each one costs the guest a retransmission timeout,
+    /// so a non-zero value here is a real symptom, not noise.
+    pub fn dropped_to_guest(&self) -> u64 {
+        self.device.dropped_to_guest()
     }
 
     /// Whether the guest's connection is still exchanging packets.
@@ -1830,6 +1840,11 @@ mod tests {
         /// What to acknowledge — the stack's ISN plus one. Zero until the
         /// SYN-ACK has been read.
         ack: u32,
+        /// The MSS this guest's SYN advertises. `None` omits the option
+        /// entirely, which an ordinary guest may well do and which drops
+        /// the stack to its 536 byte default — the case that decides how
+        /// deep the guest-bound queue has to be.
+        mss: Option<u16>,
     }
 
     impl FakeGuest {
@@ -1839,6 +1854,24 @@ mod tests {
                 guest: guest_v4(),
                 seq: GUEST_ISN,
                 ack: 0,
+                mss: Some(1_400),
+            }
+        }
+
+        /// A guest whose SYN carries no MSS option at all.
+        fn without_mss_option(key: FlowKey) -> Self {
+            Self {
+                mss: None,
+                ..Self::new(key)
+            }
+        }
+
+        /// A guest that asks for segments so small that no queue depth can
+        /// hold a pass's worth of them.
+        fn with_tiny_mss(key: FlowKey) -> Self {
+            Self {
+                mss: Some(64),
+                ..Self::new(key)
             }
         }
 
@@ -1858,7 +1891,9 @@ mod tests {
                 ack_number: ack.map(|a| TcpSeqNumber(a as i32)),
                 window_len: u16::MAX,
                 window_scale: None,
-                max_seg_size: matches!(control, TcpControl::Syn).then_some(1_400),
+                max_seg_size: matches!(control, TcpControl::Syn)
+                    .then_some(self.mss)
+                    .flatten(),
                 sack_permitted: false,
                 sack_ranges: [None; 3],
                 timestamp: None,
@@ -2018,7 +2053,10 @@ mod tests {
     }
 
     fn flow_over(host: std::net::TcpStream) -> (EstablishedFlow, FakeGuest) {
-        let mut g = FakeGuest::new(flow_key());
+        flow_over_with(host, FakeGuest::new(flow_key()))
+    }
+
+    fn flow_over_with(host: std::net::TcpStream, mut g: FakeGuest) -> (EstablishedFlow, FakeGuest) {
         let entry = half_open_over(host, flow_key(), g.syn());
         let mut flow = EstablishedFlow::from_half_open(entry, guest(), MTU_V1 as usize, 0)
             .expect("a completed connect becomes a flow");
@@ -2297,17 +2335,128 @@ mod tests {
         );
     }
 
-    /// The per-flow buffers are budgeted; the per-flow *structs* are not,
-    /// so they must stay small enough never to become a second, unmodelled
-    /// ceiling. `EstablishedFlow` holds smoltcp's `Interface` by value, so
-    /// this covers it.
+    /// A full-throughput pass must fit in the guest-bound queue.
+    ///
+    /// A segment the queue cannot take is discarded *silently* as far as
+    /// smoltcp is concerned — it has already treated it as sent — so the
+    /// guest waits out a retransmission timeout, seconds, for something
+    /// the host threw away. Sizing the queue by byte budget alone put it
+    /// at 12 slots, below the segments plus ACKs one pass emits, and made
+    /// that reachable on an ordinary transfer.
     #[test]
-    fn a_flows_fixed_overhead_stays_small_beside_its_buffers() {
-        let fixed = std::mem::size_of::<EstablishedFlow>();
+    fn a_full_throughput_pass_does_not_overflow_the_guest_bound_queue() {
+        let (mut flow, peer, _g) = established_flow_with_peer();
+        let (_blocked, stuffed) = fill_until_would_block(&peer);
+        assert!(stuffed > max_bytes_per_pass(), "the fixture must saturate");
+
+        let stats = flow.pump(0);
+
+        assert_eq!(stats.to_guest, max_bytes_per_pass());
+        assert_eq!(
+            flow.dropped_to_guest(),
+            0,
+            "a pass emitting its full budget must not discard segments the guest \
+             will then wait an RTO for"
+        );
+    }
+
+    /// The same, for the guest that actually decides the depth: one whose
+    /// SYN carries no MSS option, so the stack falls back to 536 byte
+    /// segments and a full pass becomes ~31 of them rather than ~12.
+    #[test]
+    fn a_full_throughput_pass_fits_even_at_the_default_segment_size() {
+        let (host, peer) = host_pair();
+        let (mut flow, _g) = flow_over_with(host, FakeGuest::without_mss_option(flow_key()));
+        let (_blocked, stuffed) = fill_until_would_block(&peer);
+        assert!(stuffed > max_bytes_per_pass(), "the fixture must saturate");
+
+        let stats = flow.pump(0);
+        let packets = flow.take_guest_packets();
+
+        assert_eq!(stats.to_guest, max_bytes_per_pass());
         assert!(
-            fixed * 16 < FLOW_BUFFER_BYTES,
-            "{fixed} bytes of fixed per-flow state is no longer negligible against a \
-             {FLOW_BUFFER_BYTES} byte buffer budget; fold it into the ceiling"
+            packets.len() > max_bytes_per_pass() / MTU_V1 as usize,
+            "the fixture must actually produce small segments, not full-size ones"
+        );
+        assert_eq!(
+            flow.dropped_to_guest(),
+            0,
+            "{} segments at the default MSS overflowed the guest-bound queue",
+            packets.len()
+        );
+    }
+
+    /// A guest can drive the segment count past any depth by advertising a
+    /// tiny MSS, so the queue cannot promise never to drop. What it must
+    /// do is say so: an unreported drop is an RTO nobody can explain.
+    #[test]
+    fn a_guest_bound_queue_overflow_is_counted_rather_than_silent() {
+        let (host, peer) = host_pair();
+        let (mut flow, _g) = flow_over_with(host, FakeGuest::with_tiny_mss(flow_key()));
+        let (_blocked, _stuffed) = fill_until_would_block(&peer);
+
+        flow.pump(0);
+
+        assert!(
+            flow.dropped_to_guest() > 0,
+            "a 64 byte MSS turns one buffer into far more segments than any depth \
+             holds; the drops must be visible"
+        );
+    }
+
+    /// Every way into the device queues is size-checked, not only the
+    /// datapath handle's own entry point.
+    #[test]
+    fn an_oversized_packet_is_refused_at_the_flow_as_well() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        assert_eq!(
+            flow.deliver_from_guest(&vec![0u8; MTU_V1 as usize + 1]),
+            PushOutcome::DroppedOversized
+        );
+        assert_eq!(
+            flow.deliver_from_guest(&vec![0u8; MTU_V1 as usize]),
+            PushOutcome::Queued,
+            "and a packet at exactly the MTU still goes through"
+        );
+    }
+
+    /// The ceiling is computed from the fixed MTU, so a flow must not be
+    /// built with buffers sized for anything larger.
+    #[test]
+    fn a_flow_refuses_an_mtu_above_the_fixed_one() {
+        let (host, _peer) = host_pair();
+        let g = FakeGuest::new(flow_key());
+        let entry = half_open_over(host, flow_key(), g.syn());
+        assert!(
+            EstablishedFlow::from_half_open(entry, guest(), 9000, 0).is_err(),
+            "a jumbo MTU would silently multiply this flow's share of the ceiling"
+        );
+    }
+
+    /// Pins the flow's **inline** size — the bytes in the struct itself,
+    /// which include smoltcp's `Interface` because it is held by value
+    /// under this workspace's feature set.
+    ///
+    /// What this does *not* cover, stated plainly so nobody reads it as a
+    /// guarantee it cannot make: it is blind to the heap. Everything
+    /// behind `SocketSet`'s `Vec`, the two socket ring buffers, and the
+    /// device queues is one pointer here regardless of how much it
+    /// allocates — adding a `Vec` field moves this figure by 24 bytes
+    /// whether it holds nothing or a megabyte. Heap growth is covered
+    /// per-term instead: the ring buffers by their constants, the device
+    /// queues by `a_guest_that_floods_the_device_queue_stays_inside_the_flow_bound`.
+    /// A new heap-allocating field is covered by neither, and must be added
+    /// to `FLOW_BUFFER_BYTES` by hand.
+    ///
+    /// Pinned close to the real figure rather than loosely, so that a new
+    /// inline field is a failing test and not a rounding error.
+    #[test]
+    fn a_flows_inline_size_stays_pinned() {
+        let inline = std::mem::size_of::<EstablishedFlow>();
+        assert!(
+            inline <= 1_024,
+            "{inline} bytes of inline per-flow state; if this grew on purpose, \
+             re-pin it, and check whether the growth was heap rather than inline"
         );
     }
 

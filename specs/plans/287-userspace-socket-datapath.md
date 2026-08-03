@@ -490,6 +490,9 @@ mod tests {
     #[test]
     fn the_per_machine_memory_ceiling_is_what_we_claim() {
         assert_eq!(SOCKET_RX_BUFFER + SOCKET_TX_BUFFER, 32 * 1024);
+        // Superseded — see the note under Step 4. The landed figure is
+        // 135_698_432, because the ceiling has to count the per-flow
+        // device queues as well as the socket ring buffers.
         assert_eq!(MEMORY_CEILING_BYTES, 32 * 1024 * 1024);
         assert!(
             DEFAULT_MAX_HOST_SOCKETS < mvm_net::l3::DEFAULT_MAX_FLOWS,
@@ -540,6 +543,24 @@ pub const SOCKET_TX_BUFFER: usize = 16 * 1024;
 pub const MEMORY_CEILING_BYTES: usize =
     DEFAULT_MAX_HOST_SOCKETS * (SOCKET_RX_BUFFER + SOCKET_TX_BUFFER);
 ```
+
+**Superseded during Task 11 (two rounds). The 32 MiB figure above was never the whole cost.**
+
+Task 11 gave every flow its own `GuestDevice`, so the device queues multiply by `DEFAULT_MAX_HOST_SOCKETS` and belong in the ceiling; the constant above counts only the socket ring buffers. The landed form adds a derived per-flow queue depth and the handle's own machine-wide device:
+
+```rust
+pub const FLOW_QUEUE_DEPTH: usize = /* window.div_ceil(DEFAULT_SEGMENT_PAYLOAD) + POLLS_PER_PASS */;  // 33
+
+pub const FLOW_BUFFER_BYTES: usize =
+    SOCKET_RX_BUFFER + SOCKET_TX_BUFFER + 2 * FLOW_QUEUE_DEPTH * MTU_V1 as usize;                     // 131_768
+
+pub const MEMORY_CEILING_BYTES: usize =
+    DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize;         // 135_698_432
+```
+
+The depth went 256 (inherited machine-wide default) → 12 (a byte budget at full-size segments) → 33. Twelve was too small in two ways at once: a segment need not be full-size — a guest whose SYN carries no MSS option gets smoltcp's 536 byte default, turning a 16 KiB window into 31 segments — and a pass emits an ACK per poll beside its data. A depth below what one pass emits overflows on ordinary full-throughput traffic, and that overflow costs the guest a retransmission timeout, so the guest-bound queue now counts what it discards (`GuestDevice::dropped_to_guest`) instead of dropping silently. A hostile MSS can still outrun any depth; that becomes a visible number rather than a stall nobody can explain.
+
+`MTU_V1` in the formula is the configured MTU too, because `accept_mtu` refuses anything above it at both entry points (`open_handle` and `EstablishedFlow::from_half_open`). Failing closed rather than computing from the configured value keeps the ceiling a compile-time constant: `MTU_V1` is fixed and not negotiated by design, and a ceiling a configuration can raise is not a ceiling.
 
 - [ ] **Step 5: Run tests and confirm they pass**
 
@@ -904,6 +925,14 @@ Mutation-checked, each red in under 0.05 s (never a hang):
 | host `WouldBlock` consumes the bytes anyway | `a_slow_host_socket_stops_us_accepting_from_the_stack` fails — "a host socket that will not take a byte must register as a stall"; `backpressure_holds_while_the_guest_keeps_pushing` fails on `to_host` 16384 ≠ 0 |
 | host→guest drains into a side buffer instead of stopping at the stack | `a_pump_pass_terminates_under_a_saturating_peer` fails — "one pass must be bounded so the drive loop keeps servicing other work" |
 | `Shutdown::Write` → `Shutdown::Both` | `the_peer_can_still_send_after_a_guest_fin` fails — "and what reaches the guest must be the peer's bytes" |
+
+**Two review rounds landed on top.**
+
+Round 1 (`fix(netd): make the per-flow memory ceiling true again, and the FIN the stack's call`): the per-flow device queue was still inheriting `DEFAULT_QUEUE_DEPTH`, so the real footprint was ~800 MiB against an asserted 32 MiB — see the note under Task 6 Step 4. `bytes_buffered()` also grew its device term, and `on_guest_fin` stopped latching on the caller's word: it runs the same drain `pump` does and latches only on `RecvError::Finished`, so a forged out-of-window FIN cannot half-close the host socket.
+
+Round 2 (`fix(netd): size the guest queue for what a pass emits, and stop dropping silently`): the round-1 depth of 12 was below what one pass emits, the guest-bound overflow was silent, and the ceiling read `MTU_V1` where the configured MTU was unvalidated. Depth is now 33, overflow is counted, and `accept_mtu` fails closed above `MTU_V1` at both entry points. The oversize check moved into `GuestDevice::push_from_guest`, so `EstablishedFlow::deliver_from_guest` is covered by the same guard as the handle's `send_to_network` rather than being a second unguarded way in. `a_flows_fixed_overhead_stays_small_beside_its_buffers` became `a_flows_inline_size_stays_pinned`, whose doc states what a `size_of` pin cannot see: everything behind `SocketSet`'s `Vec` is one pointer here, so a new heap-allocating field must be added to `FLOW_BUFFER_BYTES` by hand.
+
+Worth recording about the device term's witnesses: `a_guest_that_floods_the_device_queue_stays_inside_the_flow_bound` is the only runtime test that reddens if `bytes_buffered()` stops counting the device queues. The two backpressure tests assert `bytes_buffered() <= FLOW_BUFFER_BYTES`, an upper bound that a smaller measure satisfies trivially. The constant-level term is separately pinned by `the_per_machine_memory_ceiling_is_what_we_claim`.
 
 - [x] **Step 5: Commit**
 

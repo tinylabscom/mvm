@@ -31,6 +31,14 @@ pub enum PushOutcome {
     /// already queued was evicted to make room, so an established
     /// conversation never loses a packet to a newcomer.
     DroppedQueueFull,
+    /// The packet was larger than the link's MTU.
+    ///
+    /// Refused here rather than only at the datapath's own entry point, so
+    /// that every way into these queues is covered by one check. The queues
+    /// bound packet *count*; an oversized packet would sit in one at its
+    /// full size and put the per-flow byte bound out by however much the
+    /// sender chose.
+    DroppedOversized,
 }
 
 /// The virtual NIC smoltcp drives, backed by two bounded packet queues.
@@ -43,6 +51,8 @@ pub struct GuestDevice {
     /// Packets the stack produced, awaiting delivery to the guest. This is
     /// smoltcp's transmit side.
     to_guest: VecDeque<Vec<u8>>,
+    /// See [`GuestDevice::dropped_to_guest`].
+    dropped_to_guest: u64,
 }
 
 impl GuestDevice {
@@ -52,14 +62,18 @@ impl GuestDevice {
             queue_depth,
             from_guest: VecDeque::new(),
             to_guest: VecDeque::new(),
+            dropped_to_guest: 0,
         }
     }
 
     /// Admit a packet that arrived from the guest.
     ///
-    /// The caller counts `DroppedQueueFull` as a metric, so it must be
-    /// reported rather than swallowed.
+    /// The caller counts every non-`Queued` outcome as a metric, so each
+    /// must be reported rather than swallowed.
     pub fn push_from_guest(&mut self, bytes: &[u8]) -> PushOutcome {
+        if bytes.len() > self.mtu {
+            return PushOutcome::DroppedOversized;
+        }
         if self.from_guest.len() >= self.queue_depth {
             return PushOutcome::DroppedQueueFull;
         }
@@ -76,6 +90,19 @@ impl GuestDevice {
     /// them.
     pub fn pending_from_guest(&self) -> usize {
         self.from_guest.len()
+    }
+
+    /// Stack-produced packets dropped because the guest-bound queue was
+    /// full.
+    ///
+    /// Counted, because unlike the guest-facing side this drop has no
+    /// caller to return an outcome to. smoltcp hands a segment to the
+    /// transmit token and considers it sent; discarding it silently costs
+    /// the guest a retransmission timeout — seconds — with nothing
+    /// anywhere to say why. A drop the host cannot see is a drop nobody
+    /// will ever debug.
+    pub fn dropped_to_guest(&self) -> u64 {
+        self.dropped_to_guest
     }
 
     /// Bytes held across both queues.
@@ -106,19 +133,33 @@ impl Device for GuestDevice {
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let buffer = self.from_guest.pop_front()?;
+        let queue_depth = self.queue_depth;
+        let Self {
+            to_guest,
+            dropped_to_guest,
+            ..
+        } = self;
         Some((
             GuestRxToken { buffer },
             GuestTxToken {
-                queue: &mut self.to_guest,
-                queue_depth: self.queue_depth,
+                queue: to_guest,
+                queue_depth,
+                dropped: dropped_to_guest,
             },
         ))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        let queue_depth = self.queue_depth;
+        let Self {
+            to_guest,
+            dropped_to_guest,
+            ..
+        } = self;
         Some(GuestTxToken {
-            queue: &mut self.to_guest,
-            queue_depth: self.queue_depth,
+            queue: to_guest,
+            queue_depth,
+            dropped: dropped_to_guest,
         })
     }
 
@@ -151,6 +192,9 @@ impl phy::RxToken for GuestRxToken {
 pub struct GuestTxToken<'a> {
     queue: &'a mut VecDeque<Vec<u8>>,
     queue_depth: usize,
+    /// Where a discarded segment is recorded. See
+    /// [`GuestDevice::dropped_to_guest`].
+    dropped: &'a mut u64,
 }
 
 impl<'a> phy::TxToken for GuestTxToken<'a> {
@@ -162,9 +206,12 @@ impl<'a> phy::TxToken for GuestTxToken<'a> {
         let result = f(&mut buffer);
         // The same drop-the-newcomer rule as the guest→stack side: if the
         // guest stalls its drain, the stack must not be able to grow this
-        // queue without bound.
+        // queue without bound. Counted on the way out, because smoltcp has
+        // already treated this segment as sent.
         if self.queue.len() < self.queue_depth {
             self.queue.push_back(buffer);
+        } else {
+            *self.dropped = self.dropped.saturating_add(1);
         }
         result
     }
@@ -224,6 +271,19 @@ mod tests {
             dev.push_from_guest(&ipv4_stub());
         }
         assert_eq!(dev.bytes_queued(), ipv4_stub().len());
+    }
+
+    /// The device is the backstop for every entry point, not just the one
+    /// the datapath handle guards.
+    #[test]
+    fn a_packet_larger_than_the_mtu_is_refused_by_the_device_itself() {
+        let mut dev = GuestDevice::new(1500, 4);
+        assert_eq!(
+            dev.push_from_guest(&vec![0u8; 1501]),
+            PushOutcome::DroppedOversized
+        );
+        assert_eq!(dev.push_from_guest(&vec![0u8; 1500]), PushOutcome::Queued);
+        assert_eq!(dev.pending_from_guest(), 1);
     }
 
     #[test]
