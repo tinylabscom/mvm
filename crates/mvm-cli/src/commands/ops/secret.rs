@@ -1,56 +1,50 @@
 //! `mvmctl secret put/set/get/ls/rm` CLI surface.
 //!
-//! Local CRUD for secret namespaces. Values never appear in
-//! logs, error chains, or process listings — `put`/`set` accept the
-//! value via an interactive hidden prompt, stdin, flag, or file;
-//! `get` verifies that a secret exists but never prints the stored
-//! value.
+//! Thin flag layer over the canonical write-only secret lifecycle service
+//! ([`mvm_client::secret::SecretService`]) — the same orchestration local UI
+//! surfaces consume. Values never appear in logs, error chains, or process
+//! listings — `put`/`set` accept the value via an interactive hidden prompt,
+//! stdin, flag, or file; `get` verifies that a secret exists but never
+//! prints the stored value; the service has no reveal path at all.
 //!
-//! `set` is `put` plus an egress binding: it
-//! records, in a parallel [`mvm_hostd::keyholder::FileBindingStore`], the
-//! auth-type and destination allow-list for a secret whose value the host
-//! egress proxy substitutes toward bound destinations only (never the
-//! guest). `ls` surfaces that binding (type + hosts) but never the value.
+//! `set` is `put` plus an egress binding: it records the auth-type and
+//! destination allow-list for a secret whose value the host egress proxy
+//! substitutes toward bound destinations only (never the guest). `ls`
+//! surfaces that binding (type + hosts) but never the value. `rm` refuses
+//! while a persistent machine still references the secret.
 //!
 //! ## Audit
 //!
-//! Every put/get/delete/list emits one JSON line to
-//! `~/.mvm/audit/secrets.jsonl` carrying
-//! `(timestamp, action, namespace, name, outcome, pid,
-//! secret_visibility, storage_security, error?)`. Values are never
-//! logged. When the chain recorder is available, the same posture
-//! labels are emitted on the chain-signed `secret.*` event.
+//! The service emits one JSON line per action to
+//! `~/.mvm/audit/secrets.jsonl` (`create`/`replace`/`bind`/`unbind`/
+//! `remove`/`remove_refused`/`get`/`list`) carrying
+//! `(timestamp, action, tenant, name, outcome, pid, secret_visibility,
+//! storage_security, error?)`. Values are never logged. When the chain
+//! recorder is available, the same posture labels ride the chain-signed
+//! `secret.*` event.
 //!
 //! ## Backend choice
 //!
-//! Goes through [`secret_store::default_secret_store`]:
+//! [`SecretService::local`] goes through the default store selection:
 //! - Auto store when the OS keystore is reachable: writes prefer
-//!   `KeyringSecretStore`, while reads/lists/deletes keep
-//!   file-backed secrets visible.
+//!   `KeyringSecretStore`, while reads/lists/deletes keep file-backed
+//!   secrets visible.
 //! - `FileSecretStore` everywhere else (CI Linux, headless hosts).
 //!
-//! Tests inject `FileSecretStore::with_dir` + `FileBindingStore::with_dir`
-//! via [`run_with_stores`].
+//! Tests inject temp-dir stores via [`SecretService::builder`] and
+//! [`run_with_service`].
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-use mvm_core::crypto::secret_store::{self, SecretStore};
-use mvm_core::plan::TenantId;
-use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
-use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
+use mvm_client::secret::{PutOutcome, SecretBindingMeta, SecretService, SecretValueInput};
 use mvm_protocol::ir::{AuthType, Sigv4Params};
-use secrecy::SecretBox;
 
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use crate::commands::vm::audit_chain::default_audit_dir;
-use crate::commands::vm::host_signer;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -101,7 +95,7 @@ pub(in crate::commands) enum SecretAction {
         /// Local namespace. Fleet tenant secrets are managed by mvmd.
         #[arg(long, default_value = "local")]
         tenant: String,
-        /// Destination the credential may reach (claim 12). Repeatable;
+        /// Destination the credential may reach. Repeatable;
         /// at least one required. `*.` subdomain wildcards supported.
         #[arg(long = "host", required = true)]
         hosts: Vec<String>,
@@ -138,7 +132,8 @@ pub(in crate::commands) enum SecretAction {
         tenant: String,
     },
 
-    /// Remove a tenant secret.
+    /// Remove a tenant secret. Refused while a persistent machine still
+    /// references it.
     Rm {
         name: String,
         #[arg(long, default_value = "local")]
@@ -168,26 +163,20 @@ impl From<AuthTypeArg> for AuthType {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let store = secret_store::default_secret_store();
-    let bindings = FileBindingStore::default_location()?;
-    run_with_stores(store.as_ref(), &bindings, args)
+    let service = SecretService::local()?;
+    run_with_service(&service, args)
 }
 
-/// Same dispatch as [`run`] but takes injected stores. Test seam for
-/// `FileSecretStore::with_dir(<tempdir>)` + `FileBindingStore::with_dir`.
-pub(in crate::commands) fn run_with_stores(
-    store: &dyn SecretStore,
-    bindings: &dyn BindingStore,
-    args: Args,
-) -> Result<()> {
-    let audit = AuditLog::default()?.with_optional_recorder();
+/// Same dispatch as [`run`] but takes an injected service. Test seam for a
+/// `SecretService` built over temp-dir stores.
+pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args) -> Result<()> {
     match args.action {
         SecretAction::Put {
             name,
             tenant,
             value,
             value_file,
-        } => cmd_put(store, &audit, tenant, name, value, value_file),
+        } => cmd_put(service, tenant, name, value, value_file),
         SecretAction::Set {
             name,
             tenant,
@@ -195,13 +184,11 @@ pub(in crate::commands) fn run_with_stores(
             auth_type,
             aws_access_key_id,
             region,
-            service,
+            service: aws_service,
             value,
             value_file,
         } => cmd_set(
-            store,
-            bindings,
-            &audit,
+            service,
             SetArgs {
                 tenant,
                 name,
@@ -209,14 +196,14 @@ pub(in crate::commands) fn run_with_stores(
                 auth_type: auth_type.into(),
                 aws_access_key_id,
                 region,
-                service,
+                service: aws_service,
                 value,
                 value_file,
             },
         ),
-        SecretAction::Get { name, tenant } => cmd_get(store, &audit, tenant, name),
-        SecretAction::Ls { tenant } => cmd_ls(store, bindings, &audit, tenant),
-        SecretAction::Rm { name, tenant } => cmd_rm(store, bindings, &audit, tenant, name),
+        SecretAction::Get { name, tenant } => cmd_get(service, tenant, name),
+        SecretAction::Ls { tenant } => cmd_ls(service, tenant),
+        SecretAction::Rm { name, tenant } => cmd_rm(service, tenant, name),
     }
 }
 
@@ -225,21 +212,18 @@ pub(in crate::commands) fn run_with_stores(
 // ============================================================================
 
 fn cmd_put(
-    store: &dyn SecretStore,
-    audit: &AuditLog,
+    service: &SecretService,
     tenant: String,
     name: String,
     value: Option<String>,
     value_file: Option<PathBuf>,
 ) -> Result<()> {
-    let result = (|| {
-        let raw = resolve_value(value, value_file, &name)?;
-        let secret = SecretBox::new(Box::new(raw));
-        store.put(&tenant, &name, &secret)
-    })();
-    audit.record("put", &tenant, &name, &result)?;
-    result?;
-    eprintln!("Stored secret '{name}' for tenant '{tenant}'.");
+    let raw = resolve_value(value, value_file, &name)?;
+    let outcome = service.put(&tenant, &name, SecretValueInput::new(raw))?;
+    match outcome {
+        PutOutcome::Created => eprintln!("Stored secret '{name}' for tenant '{tenant}'."),
+        PutOutcome::Replaced => eprintln!("Replaced secret '{name}' for tenant '{tenant}'."),
+    }
     Ok(())
 }
 
@@ -257,12 +241,7 @@ struct SetArgs {
     value_file: Option<PathBuf>,
 }
 
-fn cmd_set(
-    store: &dyn SecretStore,
-    bindings: &dyn BindingStore,
-    audit: &AuditLog,
-    set: SetArgs,
-) -> Result<()> {
+fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
     let SetArgs {
         tenant,
         name,
@@ -270,32 +249,27 @@ fn cmd_set(
         auth_type,
         aws_access_key_id,
         region,
-        service,
+        service: aws_service,
         value,
         value_file,
     } = set;
-    let result = (|| -> Result<()> {
-        // Validate the SigV4 scope params against the auth-type BEFORE touching
-        // the store: `--type sigv4` requires all three; any of them is rejected
-        // for a non-sigv4 type (they'd be silently dropped otherwise).
-        let sigv4 = resolve_sigv4_params(auth_type, aws_access_key_id, region, service)?;
-        let raw = resolve_value(value, value_file, &name)?;
-        let secret = SecretBox::new(Box::new(raw));
-        store.put(&tenant, &name, &secret)?;
-        // Binding after value: if the value write fails we never record a
-        // binding for a secret that isn't there.
-        bindings.put(
-            &tenant,
-            &name,
-            &SecretBindingMeta {
-                auth_type,
-                allowed_hosts: hosts,
-                sigv4,
-            },
-        )
-    })();
-    audit.record("set", &tenant, &name, &result)?;
-    result?;
+    // Validate the SigV4 scope params against the auth-type BEFORE touching
+    // the store: `--type sigv4` requires all three; any of them is rejected
+    // for a non-sigv4 type (they'd be silently dropped otherwise).
+    let sigv4 = resolve_sigv4_params(auth_type, aws_access_key_id, region, aws_service)?;
+    let raw = resolve_value(value, value_file, &name)?;
+    service.put(&tenant, &name, SecretValueInput::new(raw))?;
+    // Binding after value: the service refuses to bind a secret with no
+    // stored value, so a failed value write never leaves a dangling binding.
+    service.bind(
+        &tenant,
+        &name,
+        SecretBindingMeta {
+            auth_type,
+            allowed_hosts: hosts,
+            sigv4,
+        },
+    )?;
     eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
     Ok(())
 }
@@ -339,33 +313,29 @@ fn resolve_sigv4_params(
     }
 }
 
-fn cmd_get(store: &dyn SecretStore, audit: &AuditLog, tenant: String, name: String) -> Result<()> {
-    let result = store.get(&tenant, &name);
-    audit.record("get", &tenant, &name, &result.as_ref().map(|_| ()))?;
-    result?;
-    println!("Secret '{name}' is set for tenant '{tenant}'.");
-    Ok(())
+fn cmd_get(service: &SecretService, tenant: String, name: String) -> Result<()> {
+    // Presence check only — the service has no reveal path, so the value is
+    // never decrypted, let alone printed.
+    match service.metadata(&tenant, &name)? {
+        Some(_) => {
+            println!("Secret '{name}' is set for tenant '{tenant}'.");
+            Ok(())
+        }
+        None => anyhow::bail!("secret '{name}' is not set for tenant '{tenant}'"),
+    }
 }
 
-fn cmd_ls(
-    store: &dyn SecretStore,
-    bindings: &dyn BindingStore,
-    audit: &AuditLog,
-    tenant: String,
-) -> Result<()> {
-    let result = store.list(&tenant);
-    audit.record("list", &tenant, "*", &result.as_ref().map(|_| ()))?;
-    let names = result?;
-    if names.is_empty() {
+fn cmd_ls(service: &SecretService, tenant: String) -> Result<()> {
+    let rows = service.list(&tenant)?;
+    if rows.is_empty() {
         eprintln!("No secrets stored for tenant '{tenant}'.");
         return Ok(());
     }
-    for name in &names {
+    for row in &rows {
         // Name + (for bound secrets) auth-type and destination
         // allow-list. Never the value, and never anything value-derived:
         // the binding is operator-declared metadata.
-        let binding = bindings.get(&tenant, name)?;
-        println!("{}", ls_line(name, binding.as_ref()));
+        println!("{}", ls_line(&row.name, row.binding.as_ref()));
     }
     Ok(())
 }
@@ -405,19 +375,11 @@ fn auth_type_label(t: AuthType) -> &'static str {
     }
 }
 
-fn cmd_rm(
-    store: &dyn SecretStore,
-    bindings: &dyn BindingStore,
-    audit: &AuditLog,
-    tenant: String,
-    name: String,
-) -> Result<()> {
-    let result = store.delete(&tenant, &name);
-    audit.record("delete", &tenant, &name, &result)?;
-    result?;
-    // Drop the binding too so a re-`put` of the same name can't inherit a
-    // stale allow-list. Idempotent — absent binding is fine.
-    bindings.delete(&tenant, &name)?;
+fn cmd_rm(service: &SecretService, tenant: String, name: String) -> Result<()> {
+    // The service refuses while a persistent machine references the secret
+    // (fail closed; no force path) and drops the binding alongside the value
+    // so a re-`put` of the same name can't inherit a stale allow-list.
+    service.remove(&tenant, &name)?;
     eprintln!("Removed secret '{name}' for tenant '{tenant}'.");
     Ok(())
 }
@@ -470,268 +432,71 @@ fn read_secret_from_stdin() -> Result<String> {
     Ok(buf)
 }
 
-// ============================================================================
-// Audit log — minimal per-action JSONL stream
-// ============================================================================
-
-const AUDIT_FILENAME: &str = "secrets.jsonl";
-const SECRET_VISIBILITY_AUDIT_VALUE: &str = "write_only";
-const STORAGE_SECURITY_AUDIT_VALUE: &str = "encrypted_at_rest";
-
-/// Resolve `~/.mvm/audit/secrets.jsonl`. Falls back to a no-op log
-/// when `$HOME` is unset (CI sandboxes, daemons without a home dir)
-/// rather than failing the whole command — secret CRUD should keep
-/// working even when the audit destination is unreachable.
-///
-/// Dual-emit: when a [`Recorder`] is wired (via
-/// [`AuditLog::with_optional_recorder`]), every successful action
-/// also emits a chain-signed `secret.<verb>` entry through the
-/// chain-signed audit stream. The original JSONL stream stays — operators
-/// reading `~/.mvm/audit/secrets.jsonl` see the same shape; the Recorder
-/// is purely additive.
-pub(crate) struct AuditLog {
-    path: Option<PathBuf>,
-    recorder: Option<Recorder>,
-}
-
-impl AuditLog {
-    pub(crate) fn default() -> Result<Self> {
-        // No resolvable home root → no-op log (CI sandboxes, daemons
-        // without a home dir).
-        if mvm_core::config::mvm_home_strict().is_err() {
-            return Ok(Self {
-                path: None,
-                recorder: None,
-            });
-        }
-        let dir = mvm_core::config::mvm_audit_dir();
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating audit dir {}", dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok();
-        }
-        Ok(Self {
-            path: Some(dir.join(AUDIT_FILENAME)),
-            recorder: None,
-        })
-    }
-
-    /// Best-effort: attach a Recorder backed by the host signer's
-    /// chain-signed audit stream. Failures (no `$HOME`, host signer
-    /// not initialized, loose perms) leave the recorder unset and
-    /// log a `tracing::warn` — secret CRUD continues to work; the
-    /// extra chain-signed entry just doesn't land.
-    pub(crate) fn with_optional_recorder(mut self) -> Self {
-        match build_secret_recorder() {
-            Ok(rec) => self.recorder = Some(rec),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "plan 60 Phase 4 secret recorder not wired; \
-                     falling back to JSONL-only audit"
-                );
-            }
-        }
-        self
-    }
-
-    /// Test seam — write to an injected path.
-    #[cfg(test)]
-    pub(crate) fn with_path(path: PathBuf) -> Self {
-        Self {
-            path: Some(path),
-            recorder: None,
-        }
-    }
-
-    /// Test seam — inject both a path and a pre-built Recorder for
-    /// dual-emit testing.
-    #[cfg(test)]
-    pub(crate) fn with_path_and_recorder(path: PathBuf, recorder: Recorder) -> Self {
-        Self {
-            path: Some(path),
-            recorder: Some(recorder),
-        }
-    }
-
-    pub(crate) fn record<T, E>(
-        &self,
-        action: &str,
-        tenant: &str,
-        name: &str,
-        outcome: &std::result::Result<T, E>,
-    ) -> Result<()>
-    where
-        E: std::fmt::Display,
-    {
-        let (outcome_str, error) = match outcome {
-            Ok(_) => ("ok", None),
-            Err(e) => ("err", Some(e.to_string())),
-        };
-        if let Some(ref path) = self.path {
-            let entry = serde_json::json!({
-                "timestamp": Utc::now().to_rfc3339(),
-                "action": action,
-                "tenant": tenant,
-                "name": name,
-                "outcome": outcome_str,
-                "pid": std::process::id(),
-                "secret_visibility": SECRET_VISIBILITY_AUDIT_VALUE,
-                "storage_security": STORAGE_SECURITY_AUDIT_VALUE,
-                "error": error,
-            });
-            let mut line = serde_json::to_vec(&entry).context("serialize audit entry")?;
-            line.push(b'\n');
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(path)
-                .with_context(|| format!("opening audit log {}", path.display()))?;
-            f.write_all(&line)
-                .with_context(|| format!("writing audit entry to {}", path.display()))?;
-        }
-        // Dual-emit through Recorder. Audit-side failures are
-        // surfaced as warnings, not propagated — operator-secret CRUD
-        // must not fail because the chain-signed stream is unreachable
-        // (matches `audit_chain::AuditEmitter`'s posture).
-        if let Some(ref rec) = self.recorder {
-            emit_through_recorder(rec, action, tenant, name, outcome_str, error.as_deref());
-        }
-        Ok(())
-    }
-}
-
-/// Build a Recorder backed by `FileAuditSigner` rooted at
-/// `~/.mvm/audit/`. The host signing key is read via
-/// `host_signer::load_or_init`; the default tenant the recorder uses
-/// for the unbound entry's required `tenant` field is `"local"` (matches
-/// the secret command's default tenant). The per-action tenant is
-/// captured in the entry's labels.
-fn build_secret_recorder() -> Result<Recorder> {
-    let signer = host_signer::load_or_init().context("loading host signer for secret recorder")?;
-    let audit_dir = default_audit_dir()?;
-    let file_signer = FileAuditSigner::open(signer.signing, &audit_dir)
-        .with_context(|| format!("opening FileAuditSigner at {}", audit_dir.display()))?;
-    Ok(Recorder::new(
-        Arc::new(file_signer),
-        TenantId("local".to_string()),
-    ))
-}
-
-fn emit_through_recorder(
-    recorder: &Recorder,
-    action: &str,
-    tenant: &str,
-    name: &str,
-    outcome: &str,
-    error: Option<&str>,
-) {
-    let event = format!("secret.{action}");
-    let mut extras: Vec<(String, String)> = vec![
-        ("tenant".to_string(), tenant.to_string()),
-        ("name".to_string(), name.to_string()),
-        ("outcome".to_string(), outcome.to_string()),
-        ("pid".to_string(), std::process::id().to_string()),
-        (
-            "secret_visibility".to_string(),
-            SECRET_VISIBILITY_AUDIT_VALUE.to_string(),
-        ),
-        (
-            "storage_security".to_string(),
-            STORAGE_SECURITY_AUDIT_VALUE.to_string(),
-        ),
-    ];
-    if let Some(err) = error {
-        extras.push(("error".to_string(), err.to_string()));
-    }
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::warn!(error = %e, "building tokio runtime for secret audit emit");
-            return;
-        }
-    };
-    if let Err(e) = rt.block_on(recorder.record_unbound(EventCategory::Secret, event, extras)) {
-        tracing::warn!(
-            error = %e,
-            action = action,
-            "Recorder dual-emit failed for secret event"
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_client::secret::{MachineSecretRef, SecretAudit};
     use mvm_core::crypto::secret_store::FileSecretStore;
+    use mvm_hostd::keyholder::FileBindingStore;
+    use std::sync::Arc;
+    use tempfile::TempDir;
 
-    fn temp_audit() -> (tempfile::TempDir, AuditLog) {
+    struct Fixture {
+        _tmp: TempDir,
+        service: SecretService,
+        audit_path: PathBuf,
+        bindings_dir: PathBuf,
+        machines_root: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("secrets.jsonl");
-        (tmp, AuditLog::with_path(path))
+        let bindings_dir = tmp.path().join("bindings");
+        let machines_root = tmp.path().join("machines");
+        let audit_path = tmp.path().join("secrets.jsonl");
+        let service = SecretService::builder()
+            .store(Arc::new(FileSecretStore::with_dir(
+                tmp.path().join("secrets"),
+            )))
+            .bindings(Arc::new(FileBindingStore::with_dir(&bindings_dir)))
+            .machines_root(machines_root.clone())
+            .audit(SecretAudit::with_path(audit_path.clone()))
+            .build()
+            .unwrap();
+        Fixture {
+            _tmp: tmp,
+            service,
+            audit_path,
+            bindings_dir,
+            machines_root,
+        }
     }
 
-    fn temp_bindings() -> (tempfile::TempDir, FileBindingStore) {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = FileBindingStore::with_dir(tmp.path());
-        (tmp, store)
+    fn audit_text(f: &Fixture) -> String {
+        std::fs::read_to_string(&f.audit_path).unwrap_or_default()
     }
 
-    fn read_audit(audit: &AuditLog) -> String {
-        let path = audit.path.as_ref().expect("audit has path");
-        std::fs::read_to_string(path).unwrap_or_default()
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // Audit invariants
-    // ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn audit_log_records_put_action_with_tenant_and_name() {
-        let (_dir, audit) = temp_audit();
-        let res: Result<()> = Ok(());
-        audit.record("put", "acme", "api_token", &res).unwrap();
-        let log = read_audit(&audit);
-        assert!(log.contains("\"action\":\"put\""), "got: {log}");
-        assert!(log.contains("\"tenant\":\"acme\""));
-        assert!(log.contains("\"name\":\"api_token\""));
-        assert!(log.contains("\"outcome\":\"ok\""));
-        assert!(log.contains("\"secret_visibility\":\"write_only\""));
-        assert!(log.contains("\"storage_security\":\"encrypted_at_rest\""));
-    }
-
-    #[test]
-    fn audit_log_never_carries_value_field() {
-        // The audit entry shape must not include any field named
-        // `value` or similar — even on failure. If a future
-        // refactor accidentally adds the value to the entry, this
-        // test catches it.
-        let (_dir, audit) = temp_audit();
-        let res: Result<()> = Err(anyhow::anyhow!("boom"));
-        audit.record("put", "acme", "tok", &res).unwrap();
-        let log = read_audit(&audit);
-        assert!(!log.contains("\"value\""));
-        assert!(!log.contains("\"plaintext\""));
-        assert!(log.contains("\"outcome\":\"err\""));
-        assert!(log.contains("\"error\":\"boom\""));
-        assert!(log.contains("\"secret_visibility\":\"write_only\""));
-        assert!(log.contains("\"storage_security\":\"encrypted_at_rest\""));
-    }
-
-    #[test]
-    fn audit_log_includes_pid() {
-        let (_dir, audit) = temp_audit();
-        let res: Result<()> = Ok(());
-        audit.record("get", "acme", "tok", &res).unwrap();
-        let log = read_audit(&audit);
-        // pid is process id at time of record; just assert the
-        // field exists with a numeric value.
-        assert!(log.contains("\"pid\":"));
+    fn set(
+        f: &Fixture,
+        name: &str,
+        hosts: &[&str],
+        auth_type: AuthType,
+        value: &str,
+    ) -> Result<()> {
+        cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: name.into(),
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+                auth_type,
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                value: Some(value.into()),
+                value_file: None,
+            },
+        )
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -769,125 +534,49 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Subcommand handlers — happy paths
+    // Subcommand handlers over the service
     //
     // `cmd_get` is intentionally a presence check only: it verifies
-    // the entry exists but never exposes the raw value.
+    // the entry exists but never exposes the raw value (the service
+    // has no reveal path to call).
     // ──────────────────────────────────────────────────────────────
 
     #[test]
     fn cmd_put_then_ls_shows_name() {
-        let tmp_store = tempfile::tempdir().unwrap();
-        let store = FileSecretStore::with_dir(tmp_store.path());
-        let (_audit_dir, audit) = temp_audit();
+        let f = fixture();
         cmd_put(
-            &store,
-            &audit,
+            &f.service,
             "acme".into(),
             "api_token".into(),
             Some("secret-xyz".into()),
             None,
         )
         .unwrap();
-        let names = store.list("acme").unwrap();
-        assert_eq!(names, vec!["api_token"]);
+        let rows = f.service.list("acme").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "api_token");
     }
 
     #[test]
     fn cmd_rm_after_put_clears_name() {
-        let tmp_store = tempfile::tempdir().unwrap();
-        let store = FileSecretStore::with_dir(tmp_store.path());
-        let (_bind_dir, bindings) = temp_bindings();
-        let (_audit_dir, audit) = temp_audit();
+        let f = fixture();
         cmd_put(
-            &store,
-            &audit,
+            &f.service,
             "acme".into(),
             "k".into(),
             Some("v".into()),
             None,
         )
         .unwrap();
-        cmd_rm(&store, &bindings, &audit, "acme".into(), "k".into()).unwrap();
-        assert!(store.list("acme").unwrap().is_empty());
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // `secret set` (value + egress binding) and `ls`
-    // ──────────────────────────────────────────────────────────────
-
-    fn set(
-        store: &dyn SecretStore,
-        bindings: &dyn BindingStore,
-        audit: &AuditLog,
-        name: &str,
-        hosts: &[&str],
-        auth_type: AuthType,
-        value: &str,
-    ) -> Result<()> {
-        cmd_set(
-            store,
-            bindings,
-            audit,
-            SetArgs {
-                tenant: "local".into(),
-                name: name.into(),
-                hosts: hosts.iter().map(|h| h.to_string()).collect(),
-                auth_type,
-                aws_access_key_id: None,
-                region: None,
-                service: None,
-                value: Some(value.into()),
-                value_file: None,
-            },
-        )
-    }
-
-    /// The injected stores + audit log a `set` test threads through — grouped
-    /// so the SigV4 helper stays under the argument-count lint.
-    struct SetCtx<'a> {
-        store: &'a dyn SecretStore,
-        bindings: &'a dyn BindingStore,
-        audit: &'a AuditLog,
-    }
-
-    /// Like [`set`] but for a SigV4 secret: passes the scope params through.
-    fn set_sigv4(
-        ctx: SetCtx<'_>,
-        name: &str,
-        hosts: &[&str],
-        params: Sigv4Params,
-        value: &str,
-    ) -> Result<()> {
-        cmd_set(
-            ctx.store,
-            ctx.bindings,
-            ctx.audit,
-            SetArgs {
-                tenant: "local".into(),
-                name: name.into(),
-                hosts: hosts.iter().map(|h| h.to_string()).collect(),
-                auth_type: AuthType::Sigv4,
-                aws_access_key_id: Some(params.access_key_id),
-                region: Some(params.region),
-                service: Some(params.service),
-                value: Some(value.into()),
-                value_file: None,
-            },
-        )
+        cmd_rm(&f.service, "acme".into(), "k".into()).unwrap();
+        assert!(f.service.list("acme").unwrap().is_empty());
     }
 
     #[test]
     fn cmd_set_stores_value_and_binding_without_leaking_value() {
-        let tmp_store = tempfile::tempdir().unwrap();
-        let store = FileSecretStore::with_dir(tmp_store.path());
-        let (bind_dir, bindings) = temp_bindings();
-        let (_audit_dir, audit) = temp_audit();
-
+        let f = fixture();
         set(
-            &store,
-            &bindings,
-            &audit,
+            &f,
             "openai",
             &["api.openai.com"],
             AuthType::Bearer,
@@ -895,57 +584,53 @@ mod tests {
         )
         .unwrap();
 
-        // Value landed in the value store.
-        assert_eq!(store.list("local").unwrap(), vec!["openai"]);
-        // Binding landed with type + hosts.
-        let b = bindings.get("local", "openai").unwrap().unwrap();
-        assert_eq!(b.auth_type, AuthType::Bearer);
-        assert_eq!(b.allowed_hosts, vec!["api.openai.com"]);
+        // Value + binding both landed.
+        let rows = f.service.list("local").unwrap();
+        assert_eq!(rows.len(), 1);
+        let binding = rows[0].binding.as_ref().expect("binding recorded");
+        assert_eq!(binding.auth_type, AuthType::Bearer);
+        assert_eq!(binding.allowed_hosts, vec!["api.openai.com"]);
         // The binding sidecar carries metadata only — never the value.
         let sidecar =
-            std::fs::read_to_string(bind_dir.path().join("local").join("openai.json")).unwrap();
+            std::fs::read_to_string(f.bindings_dir.join("local").join("openai.json")).unwrap();
         assert!(
             !sidecar.contains("sk-live-zzz"),
             "binding sidecar must not contain the secret value: {sidecar}"
         );
+        // Neither does the audit stream.
+        assert!(!audit_text(&f).contains("sk-live-zzz"));
     }
 
     #[test]
     fn cmd_set_sigv4_stores_params_in_binding_not_value_in_sidecar() {
-        let tmp_store = tempfile::tempdir().unwrap();
-        let store = FileSecretStore::with_dir(tmp_store.path());
-        let (bind_dir, bindings) = temp_bindings();
-        let (_audit_dir, audit) = temp_audit();
-
-        set_sigv4(
-            SetCtx {
-                store: &store,
-                bindings: &bindings,
-                audit: &audit,
+        let f = fixture();
+        cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: "aws".into(),
+                hosts: vec!["s3.us-east-1.amazonaws.com".into()],
+                auth_type: AuthType::Sigv4,
+                aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".into()),
+                region: Some("us-east-1".into()),
+                service: Some("s3".into()),
+                // The secret-access-key is the stored value.
+                value: Some("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into()),
+                value_file: None,
             },
-            "aws",
-            &["s3.us-east-1.amazonaws.com"],
-            Sigv4Params {
-                access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
-                region: "us-east-1".into(),
-                service: "s3".into(),
-            },
-            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", // the secret-access-key
         )
         .unwrap();
 
-        // The value (secret-access-key) landed in the value store.
-        assert_eq!(store.list("local").unwrap(), vec!["aws"]);
-        // The binding carries the non-secret scope params.
-        let b = bindings.get("local", "aws").unwrap().unwrap();
-        assert_eq!(b.auth_type, AuthType::Sigv4);
-        let params = b.sigv4.expect("sigv4 params stored");
+        let rows = f.service.list("local").unwrap();
+        let binding = rows[0].binding.as_ref().expect("binding recorded");
+        assert_eq!(binding.auth_type, AuthType::Sigv4);
+        let params = binding.sigv4.as_ref().expect("sigv4 params stored");
         assert_eq!(params.access_key_id, "AKIAIOSFODNN7EXAMPLE");
         assert_eq!(params.region, "us-east-1");
         assert_eq!(params.service, "s3");
         // The secret-access-key (the signing key) never lands in the sidecar.
         let sidecar =
-            std::fs::read_to_string(bind_dir.path().join("local").join("aws.json")).unwrap();
+            std::fs::read_to_string(f.bindings_dir.join("local").join("aws.json")).unwrap();
         assert!(
             !sidecar.contains("wJalrXUtnFEMI"),
             "binding sidecar must not carry the secret-access-key: {sidecar}"
@@ -1039,40 +724,68 @@ mod tests {
 
     #[test]
     fn cmd_rm_removes_binding_too() {
-        let tmp_store = tempfile::tempdir().unwrap();
-        let store = FileSecretStore::with_dir(tmp_store.path());
-        let (_bind_dir, bindings) = temp_bindings();
-        let (_audit_dir, audit) = temp_audit();
+        let f = fixture();
         set(
-            &store,
-            &bindings,
-            &audit,
+            &f,
             "openai",
             &["api.openai.com"],
             AuthType::Bearer,
             "sk-live-zzz",
         )
         .unwrap();
-        cmd_rm(&store, &bindings, &audit, "local".into(), "openai".into()).unwrap();
-        assert!(bindings.get("local", "openai").unwrap().is_none());
+        cmd_rm(&f.service, "local".into(), "openai".into()).unwrap();
+        assert!(f.service.metadata("local", "openai").unwrap().is_none());
+    }
+
+    #[test]
+    fn cmd_rm_refused_while_a_machine_references_the_secret() {
+        let f = fixture();
+        cmd_put(
+            &f.service,
+            "local".into(),
+            "openai".into(),
+            Some("sk-live-zzz".into()),
+            None,
+        )
+        .unwrap();
+        // A persistent machine (spec on disk) declares a reference.
+        let machine_dir = f.machines_root.join("web");
+        std::fs::create_dir_all(&machine_dir).unwrap();
+        std::fs::write(machine_dir.join("machine.json"), b"{}").unwrap();
+        f.service
+            .record_machine_references(
+                "web",
+                &[MachineSecretRef {
+                    tenant: "local".into(),
+                    name: "openai".into(),
+                    placeholder_var: Some("OPENAI_API_KEY".into()),
+                    destinations: vec!["api.openai.com".into()],
+                }],
+            )
+            .unwrap();
+
+        let err = cmd_rm(&f.service, "local".into(), "openai".into()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("web"), "refusal names the machine: {msg}");
+        assert!(!msg.contains("sk-live-zzz"), "refusal must not leak: {msg}");
+        // Value survives; refusal is audited.
+        assert_eq!(f.service.list("local").unwrap().len(), 1);
+        assert!(audit_text(&f).contains("\"action\":\"remove_refused\""));
     }
 
     #[test]
     fn cmd_get_checks_presence_without_returning_secret() {
-        let tmp_store = tempfile::tempdir().unwrap();
-        let store = FileSecretStore::with_dir(tmp_store.path());
-        let (_audit_dir, audit) = temp_audit();
+        let f = fixture();
         cmd_put(
-            &store,
-            &audit,
+            &f.service,
             "acme".into(),
             "api_token".into(),
             Some("secret-xyz".into()),
             None,
         )
         .unwrap();
-        cmd_get(&store, &audit, "acme".into(), "api_token".into()).unwrap();
-        let log = read_audit(&audit);
+        cmd_get(&f.service, "acme".into(), "api_token".into()).unwrap();
+        let log = audit_text(&f);
         assert!(log.contains("\"action\":\"get\""), "got: {log}");
         assert!(
             !log.contains("secret-xyz"),
@@ -1081,16 +794,20 @@ mod tests {
     }
 
     #[test]
+    fn cmd_get_missing_secret_is_an_error() {
+        let f = fixture();
+        let err = cmd_get(&f.service, "acme".into(), "absent".into()).unwrap_err();
+        assert!(err.to_string().contains("not set"), "got: {err}");
+    }
+
+    #[test]
     fn cmd_put_with_unsafe_tenant_id_records_audit_failure() {
         // `mvmctl secret put --tenant ../etc` must be rejected by
         // validate_shell_id before the secret hits disk, AND the
         // audit log must capture the rejection.
-        let tmp_store = tempfile::tempdir().unwrap();
-        let store = FileSecretStore::with_dir(tmp_store.path());
-        let (_audit_dir, audit) = temp_audit();
+        let f = fixture();
         let err = cmd_put(
-            &store,
-            &audit,
+            &f.service,
             "../etc".into(),
             "k".into(),
             Some("v".into()),
@@ -1101,133 +818,8 @@ mod tests {
             err.to_string().contains("Invalid tenant_id")
                 || err.to_string().contains("alphanumeric")
         );
-        let log = read_audit(&audit);
+        let log = audit_text(&f);
         assert!(log.contains("\"outcome\":\"err\""));
         assert!(log.contains("\"tenant\":\"../etc\""));
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // Recorder dual-emit
-    //
-    // When a Recorder is wired, AuditLog::record additionally emits
-    // a chain-signed `secret.<verb>` entry through the unified
-    // EventCategory::Secret stream. Existing JSONL contract is
-    // unchanged.
-    // ──────────────────────────────────────────────────────────────
-
-    use mvm_hostd::supervisor::CapturingAuditSigner;
-
-    fn temp_audit_with_recorder() -> (
-        tempfile::TempDir,
-        AuditLog,
-        std::sync::Arc<CapturingAuditSigner>,
-    ) {
-        let tmp = tempfile::tempdir().unwrap();
-        let jsonl_path = tmp.path().join("secrets.jsonl");
-        let signer = std::sync::Arc::new(CapturingAuditSigner::new());
-        let recorder = Recorder::new(signer.clone(), TenantId("local".to_string()));
-        (
-            tmp,
-            AuditLog::with_path_and_recorder(jsonl_path, recorder),
-            signer,
-        )
-    }
-
-    #[test]
-    fn record_with_recorder_dual_emits_to_jsonl_and_chain() {
-        // Both sinks fire on a single record() call: the original
-        // JSONL stream keeps its shape, and the Recorder's
-        // chain-signed envelope carries the secret.<verb> event.
-        let (_dir, audit, signer) = temp_audit_with_recorder();
-        let res: Result<()> = Ok(());
-        audit.record("put", "acme", "api_token", &res).unwrap();
-
-        // JSONL stream — preserved verbatim.
-        let log = read_audit(&audit);
-        assert!(log.contains("\"action\":\"put\""), "got: {log}");
-        assert!(log.contains("\"tenant\":\"acme\""));
-        assert!(log.contains("\"secret_visibility\":\"write_only\""));
-        assert!(log.contains("\"storage_security\":\"encrypted_at_rest\""));
-
-        // Recorder stream — entry carries the
-        // canonical `secret.put` event name and per-action tenant
-        // in labels (the entry's `tenant` field is the recorder's
-        // default).
-        let entries = signer.entries();
-        assert_eq!(entries.len(), 1, "expected one Recorder entry");
-        assert_eq!(entries[0].event, "secret.put");
-        assert_eq!(entries[0].labels.get("tenant"), Some(&"acme".to_string()));
-        assert_eq!(
-            entries[0].labels.get("name"),
-            Some(&"api_token".to_string())
-        );
-        assert_eq!(entries[0].labels.get("outcome"), Some(&"ok".to_string()));
-        assert_eq!(
-            entries[0].labels.get("secret_visibility"),
-            Some(&"write_only".to_string())
-        );
-        assert_eq!(
-            entries[0].labels.get("storage_security"),
-            Some(&"encrypted_at_rest".to_string())
-        );
-        // category label is injected by the Recorder substrate.
-        assert_eq!(
-            entries[0].labels.get("category"),
-            Some(&"secret".to_string())
-        );
-        // No value leaks into the chain entry — same posture as
-        // the JSONL stream.
-        assert!(!entries[0].labels.values().any(|v| v.contains("plaintext")));
-    }
-
-    #[test]
-    fn record_with_recorder_carries_error_label_on_failure() {
-        let (_dir, audit, signer) = temp_audit_with_recorder();
-        let res: Result<()> = Err(anyhow::anyhow!("boom"));
-        audit.record("get", "acme", "tok", &res).unwrap();
-
-        let entries = signer.entries();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].event, "secret.get");
-        assert_eq!(entries[0].labels.get("outcome"), Some(&"err".to_string()));
-        assert_eq!(entries[0].labels.get("error"), Some(&"boom".to_string()));
-        assert_eq!(
-            entries[0].labels.get("secret_visibility"),
-            Some(&"write_only".to_string())
-        );
-        assert_eq!(
-            entries[0].labels.get("storage_security"),
-            Some(&"encrypted_at_rest".to_string())
-        );
-    }
-
-    #[test]
-    fn record_without_recorder_only_writes_jsonl() {
-        // Default `temp_audit()` path leaves recorder=None. The
-        // chain stream must NOT be touched.
-        let (_dir, audit) = temp_audit();
-        let res: Result<()> = Ok(());
-        audit.record("put", "acme", "k", &res).unwrap();
-        // Sanity: the JSONL still has the entry.
-        assert!(read_audit(&audit).contains("\"action\":\"put\""));
-        // No way to inspect a chain we never wired — the absence is
-        // the contract. The signer field on AuditLog is None.
-        assert!(audit.recorder.is_none());
-    }
-
-    #[test]
-    fn record_with_recorder_emits_all_four_verbs() {
-        let (_dir, audit, signer) = temp_audit_with_recorder();
-        let ok: Result<()> = Ok(());
-        audit.record("put", "acme", "k", &ok).unwrap();
-        audit.record("get", "acme", "k", &ok).unwrap();
-        audit.record("list", "acme", "*", &ok).unwrap();
-        audit.record("delete", "acme", "k", &ok).unwrap();
-
-        let events: Vec<String> = signer.entries().iter().map(|e| e.event.clone()).collect();
-        assert_eq!(
-            events,
-            vec!["secret.put", "secret.get", "secret.list", "secret.delete"]
-        );
     }
 }

@@ -83,7 +83,24 @@ updates only its own entry below.
       prove relock after the final release; guest write/read + restart remain
       covered by the existing `s26_volumes` firecracker scenarios.
 
-- [ ] #2081 — reusable write-only local secret lifecycle service.
+- [x] #2081 — reusable write-only local secret lifecycle service.
+      Delivered `mvm_client::secret::SecretService`: one canonical service
+      composing `SecretStore` (unchanged keyring/file selection),
+      `BindingStore` egress bindings, a new per-machine secret-reference
+      sidecar (`secret-refs.json`, metadata only), and JSONL +
+      chain-signed audit (`secret.create/replace/bind/unbind/remove/
+      remove_refused`). Inputs are `SecretValueInput` (zeroize-on-drop,
+      redacted Debug, crate-private accessor); no reveal method or
+      value-carrying response type exists. `remove` refuses while an
+      existing persistent machine references the secret (no force path);
+      `validate_for_admission` fails closed on missing secrets,
+      missing/malformed bindings, unauthorized destinations (via
+      `host_matches`), and cross-scope references. `mvmctl secret
+      put/set/get/ls/rm` now consumes the service (`get` is a pure
+      presence check — no decryption). 53 new/ported tests (36 in
+      mvm-client, 17 in mvm-cli) including no-leak assertions across
+      responses, serialization, Debug, errors, audit records, and
+      persisted sidecars.
 
 - [ ] #2082 — normalized verified local audit events for UI consumers.
 

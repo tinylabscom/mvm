@@ -67,6 +67,11 @@ hex = { workspace = true }
 tar = { workspace = true }
 chrono = { workspace = true }
 ext4-view = { workspace = true }
+# The write-only secret lifecycle service (`secret` module): typed refusals
+# (thiserror) and the `host_matches` destination check (mvm-protocol); the
+# shared serde/secrecy/chrono entries above serve it too.
+mvm-protocol = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
