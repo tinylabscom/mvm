@@ -10,6 +10,20 @@
 
 ## Current issue delivery
 
+- [~] Sensitive egress redaction — **plan 289**. The first delivery establishes
+      a validated byte-span detector contract and supplements the curated
+      scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
+      Azure connection-string, Telegram-token and Discord-token detectors.
+      Arbitrary payloads are scanned as bounded UTF-8 islands without losing
+      byte offsets; invalid or overlapping detector spans fail closed and no
+      finding carries matched bytes. The same detector feeds one-way masking
+      and request-scoped reversible replacement. Default curated secret/PII
+      protection now arms compressed and over-cap refusal before forwarding.
+      The serial workspace test suite, workspace check, host workspace
+      all-target Clippy, cargo-deny and RustSec gates pass. Linux builder-VM
+      all-target Clippy remains before WS1 acceptance; streaming bodies, policy
+      lowering, admission posture and claim witnesses remain in WS2-WS4.
+
 - [x] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
       6.12.100 configs and remove unsupported physical hardware, radio/input,
       filesystem, power-management, tracing/debug, keyring, task-accounting,

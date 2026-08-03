@@ -6,6 +6,17 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] Plan 289 — Sensitive egress redaction
+      (`specs/plans/289-sensitive-egress-redaction.md`)
+  - [x] Validated byte detector and pinned, no-default-feature LeakGuard adapter
+  - [x] Shared supplemental coverage for masking and reversible replacement
+  - [x] Default secret/PII policy arms compressed and over-cap fail-closed gates
+  - [~] Host workspace tests/check, workspace all-target Clippy and supply-chain
+        gates pass; Linux builder-VM workspace all-target Clippy remains
+  - [ ] Structured/streaming body coverage and split-boundary witnesses
+  - [ ] Signed CLI policy lowering and admission posture reporting
+  - [ ] Build-level claim promotion and adversarial backend witnesses
+
 - [x] Plan 286 — Guest-kernel hardware floor
       (`specs/plans/286-kernel-floor.md`)
   - [x] Audit resolved x86_64/aarch64 configs and enforce required cuts

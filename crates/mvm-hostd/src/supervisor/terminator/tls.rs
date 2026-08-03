@@ -226,7 +226,8 @@ where
     }
     // Mask undeclared secret/PII before substitution (declared placeholders, not
     // secret-shaped, survive to be substituted).
-    let redaction_hits = redact_request(&mut req, redactor, action);
+    let redaction_hits = redact_request(&mut req, redactor, action)
+        .map_err(|_| TerminatorError::FailClosed("fail_closed_detector"))?;
 
     let prepared =
         prepare_request(endpoint, req).map_err(|e| TerminatorError::Refused(e.to_string()))?;
@@ -896,17 +897,14 @@ mod tests {
 
     #[test]
     fn tls_compressed_body_to_redaction_destination_fails_closed() {
-        use mvm_core::policy::EntropyMode;
-        let action = RedactionAction {
-            entropy: EntropyMode::Redact {
-                min_bits_per_char: 4.0,
-                min_run_len: 20,
-            },
-            ..Default::default()
-        };
         let req = "POST /v1/x HTTP/1.1\r\nhost: api.openai.com\r\n\
                    content-encoding: gzip\r\ncontent-length: 5\r\n\r\nBYTES";
-        let d = drive_terminate(&["api.openai.com"], "api.openai.com", action, req);
+        let d = drive_terminate(
+            &["api.openai.com"],
+            "api.openai.com",
+            RedactionAction::default(),
+            req,
+        );
         assert!(
             d.result
                 .as_ref()
