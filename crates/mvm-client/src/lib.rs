@@ -8,11 +8,15 @@
 //! crate and `mvm-sdk` share one trait without a dependency cycle — but callers
 //! depend only on `mvm-client` and never name `mvm-core` directly.
 
+pub mod audit;
 pub mod boot;
 pub mod connect;
+pub mod inventory;
 pub mod local;
 pub mod readiness;
 pub mod registration;
+pub mod secret;
+pub mod volume;
 
 pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{
