@@ -345,6 +345,14 @@ impl<'a> Pump<'a> {
     }
 
     pub fn run(mut self, child: &mut Child, sink: &mut dyn FnMut(EntrypointEvent)) -> PumpOutcome {
+        // Close any stdin still attached to the `Child`. The pump waits for the
+        // child to exit, and a workload that reads to EOF never gets there
+        // while the agent holds the write end open — the wait would outlast the
+        // call. Whoever intends to keep writing takes the handle out first
+        // (`stream_input::InputSink`), which makes owning stdin a decision
+        // rather than something a caller forgets to undo.
+        drop(child.stdin.take());
+
         let (tx, rx) = mpsc::channel();
         if let Some(stdout) = child.stdout.take() {
             spawn_stream_reader(stdout, CapturedStream::Stdout, tx.clone());
@@ -1343,6 +1351,21 @@ mod tests {
         // would end the test process while the pump thread still owns a live
         // child, leaving `sleep 3` orphaned onto init — measured, not assumed.
         assert_eq!(pump.join().expect("pump thread"), PumpOutcome::Exited(0));
+    }
+
+    #[test]
+    fn the_pump_closes_a_stdin_its_caller_left_attached() {
+        // A `Child` still holding the write end keeps the workload's stdin
+        // open, so a read-to-EOF child never exits and this call never
+        // returns. The hang is the assertion; the outcome is the receipt.
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn cat");
+        let outcome = pump_child(&mut child, &mut |_| {}, &caps_with_stdout_max(1024));
+        assert_eq!(outcome, PumpOutcome::Exited(0));
     }
 
     #[test]

@@ -77,6 +77,9 @@ pub mod restore_clock;
 /// these testable units. Folded in from the former `mvm-runner` crate.
 pub mod runner;
 pub mod runtime_config;
+/// Delivery of admitted input bytes into a running workload's stdin, plus the
+/// explicit EOF a read-to-EOF workload needs to ever terminate.
+pub mod stream_input;
 /// Streaming pump for a spawned workload's stdout / stderr / fd-3 control
 /// channel. Emits an `EntrypointEvent` per read while the child is still
 /// running, so a long-lived workload is observable long before it exits.
