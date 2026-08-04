@@ -124,8 +124,27 @@ for detailed scope and acceptance criteria.
         shrink guest kernels to the virtual hardware floor and adding it
         blind would silently reverse part of that. Until that measurement
         is taken and the guest is configured, no guest can originate v6
-  - [ ] WS4 (#2117) — benchmark the datapath, then decide whether
-        multi-queue is warranted. The measurement is the deliverable
+  - [x] WS4 (#2117) — benchmarked 2026-08-04; **multi-queue rejected, no
+        implementation code**, which is the intended outcome when the
+        numbers do not support the work. Six `#[ignore]`d benchmarks extend
+        the existing `userspace_datapath.rs` suite, reusing its `Translator`
+        rather than standing up a second harness. Aggregate host→guest
+        throughput **rises 3.2×** from 1 to 16 flows (6.6 → 20.9 Gb/s
+        median, 8 runs), so a single serial service pass is not the ceiling
+        multi-queue presumes. What limits *one* flow is a fixed ~12.8 µs
+        per-pass cost that is almost entirely one syscall: on macOS a
+        zero-timeout `kevent` returning **no** events costs ~12,600 ns
+        against 171–430 ns when it returns one, reproduced in pure C with
+        none of this code in the picture, and `drain_for` only terminates on
+        a zero return. Fixing that is worth ~2.8× on single-flow — more than
+        multi-queue would have bought — and is recorded as an open defect
+        rather than fixed here, since WS4's remit was to measure and decide.
+        Per-byte capacity is ≈26 Gb/s on one core; latency p50 68–73 µs
+        round trip, 78–130 µs connect→established. The guest→host figure
+        (2.0 Gb/s) is a floor bounded by the benchmark's own send window,
+        and says so. Also fixed in passing: `l3_linux_privileged.rs` had not
+        compiled for Linux since the IPv6 field addition, because
+        `just check-linux` is `--lib` and never builds Linux-gated test files
   - [ ] WS5 (#2118) — zero-copy / batched transfer, gated on the same
         measurement; must keep the memory ceiling assertable
   - [ ] WS7 (#2119) — node-to-node transport for cross-host VM traffic,

@@ -1708,6 +1708,121 @@ git commit -m "docs(plan-287): record the userspace socket datapath as shipped"
 
 ---
 
+# Phase E — WS4: what the datapath costs, and whether it needs multi-queue
+
+**Status: COMPLETE — measured 2026-08-04. Multi-queue is NOT warranted; no
+implementation code was written, which is the intended outcome when the
+measurement does not support the work.**
+
+The deliverable here is the measurement. Multi-queue was always contingent on
+it, and the numbers do not support it.
+
+### The benchmark
+
+`crates/mvm-hostd/tests/userspace_datapath.rs`, six `#[ignore]`d tests at the
+end of the file. They extend the suite that was already there rather than
+standing up a second harness: `Translator` — the direct-handle driver the
+flow-lifetime tests use — already establishes flows through the real
+admission seam, so the benchmarks reuse it and add only the guest-side
+sequence bookkeeping a sustained flow needs (`GuestFlow`) and one host peer
+that plays source, sink or echo (`HostPeer`).
+
+Driving the handle directly rather than the `mvm-netd` process is deliberate:
+the process path folds the guest channel's framing and a UDS round trip into
+every figure, which measures the tunnel rather than the datapath this
+decides about.
+
+`#[ignore]`d because they run for seconds and are timing-sensitive; a
+benchmark that can go red under a loaded CI box trains people to ignore red.
+
+```sh
+cargo test --release -p mvm-hostd --test userspace_datapath \
+    -- --ignored --nocapture --test-threads 1
+```
+
+### Conditions
+
+Apple MacBook Pro, Darwin 25.5.0 arm64 (T6041), 16 cores, 128 GiB. Release
+build, `--test-threads 1`. Host otherwise near-idle — load average 5–9, all
+non-benchmark processes together under 160% of 1600% CPU. Eight runs of the
+concurrency sweep, three of everything else. Ranges below are the observed
+spread across those runs, not error bars.
+
+One caveat stated up front: **the guest→host figure is bounded by the
+benchmark's own 8 KiB send window**, half the datapath's 16 KiB receive
+buffer, chosen because this fake guest has no retransmit and an overrun
+would wedge the flow rather than cost it a round trip. That number is a
+floor, not the datapath's capacity.
+
+### Throughput, one flow
+
+| Direction | Median | Runs |
+|---|---|---|
+| host→guest | **7.1 Gb/s** | 7042, 7272, 7134 Mb/s |
+| guest→host | **2.0 Gb/s** (floor, see caveat) | 2025, 2107, 1988 Mb/s |
+
+### Aggregate throughput against flow count
+
+Fixed 16 MiB **aggregate** budget at every point, so each does identical
+total work and the only variable is how many flows carry it.
+
+| Flows | Median Gb/s | Range | B/pass | ns/pass |
+|---|---|---|---|---|
+| 1 | 6.6 | 5.1–7.3 | 15,828 | ~19,500 |
+| 2 | 10.3 | 8.8–11.4 | 31,536 | ~24,500 |
+| 4 | 14.5 | 13.5–16.4 | 62,602 | ~35,700 |
+| 8 | 19.0 | 18.1–19.8 | 123,362 | ~52,000 |
+| 16 | 20.9 | 18.4–22.0 | 239,675 | ~91,000 |
+
+Aggregate throughput **rises 3.2×** from one flow to sixteen and flattens
+around eight. It does not flatten at one, which is what a serial pass being
+the ceiling would have looked like.
+
+### Latency
+
+| Measurement | p50 | p99 |
+|---|---|---|
+| connect→established | 78–130 µs | 92–200 µs |
+| guest→host→guest round trip | 68–73 µs | 87–102 µs |
+
+### Where the time goes
+
+| Measurement | ns |
+|---|---|
+| bare readiness drain, nothing registered | 12,377–13,013 |
+| idle service pass, 0 flows | 12,968–13,549 |
+| idle service pass, 1 flow | 12,814–13,141 |
+| idle service pass, 4 flows | 14,037–14,314 |
+| idle service pass, 16 flows | 16,518–16,623 |
+
+Which fits `pass_ns ≈ 14.6 µs + 4.9 µs × flows`. The marginal 4.9 µs moves
+15.8 KB, so the datapath's real per-byte capacity is **≈26 Gb/s on one
+core** — and the 14.6 µs intercept is **almost entirely one syscall**, the
+readiness drain, at ~12.8 µs. On a single-flow pass that intercept is 74% of
+the pass. Per established-but-quiet flow a pass costs only ~230 ns.
+
+So the flow count does not buy parallelism. It amortizes a fixed per-pass
+tax over more bytes, which is why the curve rises and then flattens onto the
+per-byte asymptote.
+
+### Decision: multi-queue is not warranted
+
+1. **A single queue already scales.** 3.2× from 1 to 16 flows. The serial
+   service pass is not preventing concurrent flows from getting throughput,
+   which is the premise multi-queue rests on.
+2. **What limits one flow is a syscall, not serialization.** Removing the
+   drain tax would put a single flow near 18–19 Gb/s — roughly today's
+   eight-flow figure — with no concurrency work at all.
+3. **Multi-queue would multiply the tax rather than remove it.** Each queue
+   is its own drive loop paying its own ~12.8 µs zero-return wait per pass.
+4. **The asymptote is ~26 Gb/s on one core**, against a guest reachable only
+   over vsock. No workload is near this, and none has asked.
+
+Reopening this needs a workload demonstrating a per-VM demand a single queue
+cannot meet — not a flow count, a measured shortfall.
+
+---
+
 ## Deferred (explicitly not in this plan)
 
 - [ ] **`utun` + PF full-packet datapath**, and the privileged helper it needs. Separate ADR, separate decision, gated on explicit sign-off of the helper API. **Resolved as a rejection:** ADR-039 is Rejected — mvm adds no root-capable component — so this is closed, not queued, and reopening it needs a workload with a demonstrated need.
@@ -1810,6 +1925,34 @@ three with the mechanism.
       level by `the_loop_alternates_rather_than_draining_one_side_to_exhaustion`,
       which records both sides' turns in one log and asserts no run of
       inbound turns exceeds the budget.
+
+- [ ] **Every service pass pays one ~12.8 us zero-return `kevent` on macOS.**
+      Found by WS4's measurement, and it dominates single-flow throughput:
+      74% of a one-flow pass. `ReadinessSet::drain_for` only stops when a
+      poll returns zero events, so the drain's *last* call is always a
+      zero-return one -- and on this platform that is the pathological case.
+      Measured in pure C, with no Rust and none of this code in the picture:
+      a zero-timeout `kevent` that returns an event costs 171-430 ns, one
+      that returns nothing costs ~12,600 ns, and a trivial syscall
+      (`close(-1)`) costs 70 ns. So the cost is not the syscall, it is
+      specifically the empty return. Two independent halves to a fix, either
+      useful alone: stop making the terminating call at all when the previous
+      poll returned fewer events than `Events` capacity, since a short return
+      already proves the queue is drained; and let the drive loop skip the
+      drain on a pass it was not woken by readiness for. Worth roughly 2.8x
+      on single-flow throughput -- more than multi-queue was ever going to
+      buy, for a fraction of the risk. Not fixed here: WS4's remit was to
+      measure and decide, and this changes the shipped drive loop.
+      **Unmeasured on Linux**; `epoll_wait` is not known to share the
+      behaviour, so this may be macOS-only.
+- [x] **`l3_linux_privileged.rs` did not compile for Linux.** Fixed here. The
+      IPv6 work gave `DatapathRequest` its `gateway_v6`/`guest_v6` fields and
+      did not update this file, which is `#![cfg(target_os = "linux")]` and
+      therefore never built by anything a macOS contributor runs. The gap is
+      the gate, not the omission: `just check-linux` is `--lib`, so no
+      routine command compiles Linux-gated *test* files. Catching the next
+      one needs `cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-hostd
+      --all-targets` in the lane.
 
 > **Numbering note.** `285` is used twice on main — `285-l3-tun-over-vsock.md`
 > and `285-hvf-virtio-rng.md` — and so is `284`. Always reference these by

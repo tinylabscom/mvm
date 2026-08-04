@@ -27,6 +27,11 @@ fn request(machine_id: &str, third_octet: u8) -> DatapathRequest {
         gateway: Ipv4Addr::new(10, 201, third_octet, 1),
         guest: Ipv4Addr::new(10, 201, third_octet, 2),
         prefix_len: 30,
+        // v4-only: this lane asserts that a real TUN device appears and
+        // carries packets, and the v6 half of an address pair adds nothing
+        // to that.
+        gateway_v6: None,
+        guest_v6: None,
         mtu: 1500,
         ingress: Vec::new(),
     }

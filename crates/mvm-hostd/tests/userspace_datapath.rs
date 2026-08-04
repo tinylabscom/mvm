@@ -52,9 +52,11 @@
 //! than on elapsed time, and it lives in the datapath's own module tree.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use mvm_agentd::l3::{
@@ -64,6 +66,7 @@ use mvm_hostd::netd::config::{NETD_READY_MARKER, NetdConfig, NetdEgress, NetdRul
 use mvm_hostd::netd::userspace::limits::{
     HALF_CLOSED_TIMEOUT_MILLIS, HANDSHAKE_COMPLETION_TIMEOUT_MILLIS,
 };
+use mvm_hostd::netd::userspace::readiness::ReadinessSet;
 use mvm_hostd::netd::userspace::{UserspaceHandle, UserspaceSocketDatapath};
 use mvm_hostd::netd::{DatapathHandle, DatapathRequest, select_host_datapath};
 use mvm_net::channel::GuestService;
@@ -1044,13 +1047,28 @@ impl Translator {
         for _ in 0..SETTLE_PASSES {
             self.service(now_millis);
             let _ = self.drain();
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(SETTLE_PAUSE);
         }
     }
 
     /// Send a SYN, drive until the host connect resolves, and return the
     /// stack's initial sequence number from the SYN-ACK.
     fn open_flow(&mut self, cfg: &NetdConfig, dst: SocketAddr, guest_port: u16) -> u32 {
+        self.open_flow_paced(cfg, dst, guest_port, SETTLE_PAUSE)
+    }
+
+    /// [`Self::open_flow`], with the wait between passes named by the caller.
+    ///
+    /// A correctness fixture pauses, because it is not timing anything and a
+    /// spin would burn a core for the whole suite. A measurement of how long
+    /// this takes cannot pause: the pause would be most of what it reported.
+    fn open_flow_paced(
+        &mut self,
+        cfg: &NetdConfig,
+        dst: SocketAddr,
+        guest_port: u16,
+        pause: Duration,
+    ) -> u32 {
         self.send(
             &Segment {
                 guest: cfg.guest_ipv4,
@@ -1064,7 +1082,11 @@ impl Translator {
             .emit(),
             0,
         );
-        for _ in 0..SERVICE_ATTEMPTS {
+        // Bounded by wall clock rather than by a pass count, so the budget
+        // means the same thing whether or not the caller pauses between
+        // passes.
+        let start = Instant::now();
+        while start.elapsed() < OPEN_FLOW_BUDGET {
             self.service(0);
             for packet in self.drain() {
                 if let Some(seg) = tcp_of(&packet)
@@ -1075,7 +1097,9 @@ impl Translator {
                     return seg.seq;
                 }
             }
-            std::thread::sleep(Duration::from_millis(2));
+            if !pause.is_zero() {
+                std::thread::sleep(pause);
+            }
         }
         panic!("a connect to a live destination must earn the guest a SYN-ACK");
     }
@@ -1102,9 +1126,15 @@ impl Translator {
     }
 }
 
-/// Service passes a fixture will wait through for a host connect on this
-/// machine to resolve.
-const SERVICE_ATTEMPTS: usize = 200;
+/// How long a fixture will wait for a host connect on this machine to
+/// resolve. Only ever reached on the way to a failure, so it is sized to
+/// outlast a loaded host rather than to keep a passing run short.
+const OPEN_FLOW_BUDGET: Duration = Duration::from_secs(5);
+
+/// The wait a correctness fixture takes between service passes. A spin would
+/// burn a core for the length of the suite to save milliseconds nothing is
+/// measuring.
+const SETTLE_PAUSE: Duration = Duration::from_millis(2);
 
 /// Passes [`Translator::settle`] makes. Comfortably more than a loopback
 /// socket needs to report a peer's close, and cheap: each is one poll.
@@ -1213,6 +1243,10 @@ struct Tcp {
     ack: bool,
     rst: bool,
     seq: u32,
+    /// What the sender has acknowledged; meaningful only when `ack` is set.
+    /// Anything holding a send window open needs it: without it a sender
+    /// cannot tell how much of what it sent is still outstanding.
+    ack_number: u32,
     payload: Vec<u8>,
 }
 
@@ -1228,6 +1262,7 @@ fn tcp_of(packet: &[u8]) -> Option<Tcp> {
         ack: seg.ack(),
         rst: seg.rst(),
         seq: seg.seq_number().0 as u32,
+        ack_number: seg.ack_number().0 as u32,
         payload: seg.payload().to_vec(),
     })
 }
@@ -1249,4 +1284,580 @@ fn udp_of(packet: &[u8]) -> Option<Udp> {
         dst_port: datagram.dst_port(),
         payload: datagram.payload().to_vec(),
     })
+}
+
+// =====================================================================
+// what the datapath costs
+// =====================================================================
+//
+// These measure the userspace datapath itself: the `Translator` above drives
+// a `UserspaceHandle` directly, through the same admission seam production
+// uses, so what is timed is admission plus the stack plus the host sockets
+// and nothing else. Driving the `mvm-netd` process instead would fold the
+// guest channel's framing and a UDS round trip into every number, which
+// measures the tunnel rather than the thing this decides about.
+//
+// Every one is `#[ignore]`d. They run for seconds, they are timing-sensitive
+// by construction, and a benchmark that can go red on a loaded CI box trains
+// people to ignore red. Run them deliberately, on a quiet host:
+//
+//   cargo test --release -p mvm-hostd --test userspace_datapath \
+//       -- --ignored --nocapture --test-threads 1
+//
+// `--release` because a timing figure from an unoptimized build measures the
+// optimizer's absence, and `--test-threads 1` because two benchmarks sharing
+// the host's cores measure each other.
+
+/// Payload on a bulk guest segment. A full MTU-sized segment, so a
+/// throughput figure is dominated by bytes moved rather than by per-packet
+/// framing.
+const BENCH_SEGMENT: usize = 1_400;
+
+/// Bytes moved per measurement, summed across every flow in it. Fixed
+/// **aggregate** rather than fixed per-flow, so each point of the
+/// concurrency sweep does the same total work and the comparison between
+/// them is about scheduling rather than about volume.
+const BENCH_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+
+/// Wall-clock ceiling on one bulk measurement. Reached only when something
+/// has stalled, in which case the run says so rather than reporting the
+/// throughput of a stall.
+const BENCH_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How much this fake guest leaves outstanding before waiting for an
+/// acknowledgement. Half the datapath's 16 KiB receive buffer: enough to
+/// keep the window open, far enough inside it that a sender with no
+/// retransmit of its own never has a segment dropped for overrunning it.
+const BENCH_WINDOW: u32 = 8 * 1024;
+
+/// Flow counts the concurrency sweep visits. The question these answer is
+/// whether one serial service pass is the ceiling, so they span a range
+/// wide enough for a flat line to be distinguishable from a rising one.
+const BENCH_FLOW_COUNTS: [usize; 5] = [1, 2, 4, 8, 16];
+
+/// One flow's guest-side sequence bookkeeping.
+///
+/// The datapath terminates the guest's TCP, so something has to hold up the
+/// guest's half of the conversation: acknowledge what arrives, and keep a
+/// send window open. That is all this is — enough TCP to keep a flow moving,
+/// deliberately not a stack.
+struct GuestFlow {
+    port: u16,
+    dst: SocketAddr,
+    /// Next sequence number this guest sends from.
+    tx_seq: u32,
+    /// Highest sequence number the datapath has acknowledged.
+    tx_acked: u32,
+    /// Next sequence number this guest expects to receive.
+    rx_next: u32,
+}
+
+impl GuestFlow {
+    /// Bytes sent but not yet acknowledged.
+    fn outstanding(&self) -> u32 {
+        self.tx_seq.wrapping_sub(self.tx_acked)
+    }
+}
+
+impl Translator {
+    /// Open a flow and finish its handshake, returning the bookkeeping that
+    /// keeps it moving.
+    fn establish_flow(&mut self, cfg: &NetdConfig, dst: SocketAddr, port: u16) -> GuestFlow {
+        let isn = self.open_flow(cfg, dst, port);
+        self.finish_handshake(cfg, dst, port, isn);
+        GuestFlow {
+            port,
+            dst,
+            tx_seq: GUEST_ISN.wrapping_add(1),
+            tx_acked: GUEST_ISN.wrapping_add(1),
+            rx_next: isn.wrapping_add(1),
+        }
+    }
+
+    /// Send one guest segment on `flow`, carrying `payload`, and advance the
+    /// flow's send sequence past it.
+    fn send_on(&mut self, cfg: &NetdConfig, flow: &mut GuestFlow, payload: &[u8], now: u64) {
+        self.send(
+            &Segment {
+                guest: cfg.guest_ipv4,
+                guest_port: flow.port,
+                dst: flow.dst,
+                control: TcpControl::None,
+                seq: flow.tx_seq,
+                ack: Some(flow.rx_next),
+                payload,
+            }
+            .emit(),
+            now,
+        );
+        flow.tx_seq = flow.tx_seq.wrapping_add(payload.len() as u32);
+    }
+
+    /// Take everything the handle is holding, fold it into the flows it
+    /// belongs to, and report how many payload bytes arrived.
+    ///
+    /// A reset here is fatal to the measurement rather than ignorable: a
+    /// benchmark that quietly kept timing after its flow died would report
+    /// the throughput of an empty loop.
+    fn absorb(&mut self, flows: &mut [GuestFlow]) -> usize {
+        let mut delivered = 0;
+        for packet in self.drain() {
+            let Some(seg) = tcp_of(&packet) else { continue };
+            let Some(flow) = flows.iter_mut().find(|f| f.port == seg.dst_port) else {
+                continue;
+            };
+            assert!(
+                !seg.rst,
+                "the datapath reset a flow mid-measurement; the figure that \
+                 followed would be the throughput of a dead flow"
+            );
+            if seg.ack {
+                // Sequence arithmetic wraps, so "further along" is a signed
+                // difference, never a `>`.
+                if (seg.ack_number.wrapping_sub(flow.tx_acked) as i32) > 0 {
+                    flow.tx_acked = seg.ack_number;
+                }
+            }
+            if !seg.payload.is_empty() && seg.seq == flow.rx_next {
+                flow.rx_next = flow.rx_next.wrapping_add(seg.payload.len() as u32);
+                delivered += seg.payload.len();
+            }
+        }
+        delivered
+    }
+
+    /// Acknowledge, on every flow, everything received so far.
+    fn ack_all(&mut self, cfg: &NetdConfig, flows: &[GuestFlow], now: u64) {
+        for flow in flows {
+            self.send(
+                &Segment {
+                    guest: cfg.guest_ipv4,
+                    guest_port: flow.port,
+                    dst: flow.dst,
+                    control: TcpControl::None,
+                    seq: flow.tx_seq,
+                    ack: Some(flow.rx_next),
+                    payload: &[],
+                }
+                .emit(),
+                now,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// the host side of a measurement
+// ---------------------------------------------------------------------
+
+/// What a host peer does with a connection the datapath re-originates.
+#[derive(Clone)]
+enum PeerRole {
+    /// Write this many bytes, then hold the connection open. Held open on
+    /// purpose: a peer that closed would send a FIN, the flow would finish,
+    /// and the measurement would be racing the datapath reaping it.
+    Source(usize),
+    /// Read and count, into a counter the measurement can watch.
+    Sink(Arc<AtomicUsize>),
+    /// Send every byte straight back, so a round trip has something to
+    /// turn around.
+    Echo,
+}
+
+/// A listener on this host playing one role for every flow that reaches it.
+///
+/// One helper rather than three: the three roles differ only in what they do
+/// with an accepted socket, and a separate listener apiece would be the same
+/// accept loop written three times.
+struct HostPeer {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+}
+
+impl HostPeer {
+    fn start(host: Ipv4Addr, role: PeerRole) -> Self {
+        let listener = TcpListener::bind((host, 0)).expect("bind the admitted destination");
+        let addr = listener.local_addr().expect("local addr");
+        listener
+            .set_nonblocking(true)
+            .expect("a stoppable accept loop needs a non-blocking listener");
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((peer, _)) => {
+                        peer.set_nonblocking(false).ok();
+                        let role = role.clone();
+                        let flag = Arc::clone(&flag);
+                        // Detached: a connection's thread ends when its
+                        // socket does, and every socket here dies when the
+                        // datapath under measurement is dropped.
+                        std::thread::spawn(move || serve_peer(peer, role, &flag));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self { addr, stop }
+    }
+}
+
+impl Drop for HostPeer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// One accepted connection, played out to its role's end.
+fn serve_peer(mut peer: TcpStream, role: PeerRole, stop: &AtomicBool) {
+    match role {
+        PeerRole::Source(total) => {
+            let chunk = vec![0x5Au8; 64 * 1024];
+            let mut left = total;
+            while left > 0 {
+                let n = left.min(chunk.len());
+                if peer.write_all(&chunk[..n]).is_err() {
+                    return;
+                }
+                left -= n;
+            }
+            peer.flush().ok();
+            // Park rather than return: returning drops the socket, and the
+            // FIN that follows would end a flow the measurement is still
+            // timing.
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        PeerRole::Sink(count) => {
+            let mut buf = vec![0u8; 64 * 1024];
+            while let Ok(n) = peer.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                count.fetch_add(n, Ordering::Relaxed);
+            }
+        }
+        PeerRole::Echo => {
+            let mut buf = vec![0u8; 8 * 1024];
+            while let Ok(n) = peer.read(&mut buf) {
+                if n == 0 || peer.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// reporting
+// ---------------------------------------------------------------------
+
+/// Report one throughput measurement in a shape that can be compared across
+/// runs and across hosts.
+fn report_throughput(label: &str, bytes: usize, elapsed: Duration, flows: usize, passes: u64) {
+    let mbps = (bytes as f64 * 8.0) / elapsed.as_secs_f64() / 1e6;
+    let per_pass = bytes as f64 / passes.max(1) as f64;
+    let pass_ns = elapsed.as_nanos() as f64 / passes.max(1) as f64;
+    println!(
+        "{label}: {flows:>2} flow(s)  {mbps:>8.0} Mb/s  \
+         {:.1} MiB in {:.3}s  {passes} passes  {per_pass:.0} B/pass  {pass_ns:.0} ns/pass",
+        bytes as f64 / (1024.0 * 1024.0),
+        elapsed.as_secs_f64()
+    );
+}
+
+/// Report a latency distribution. Percentiles rather than a mean: the mean
+/// of a distribution with a scheduler tail in it describes nothing.
+fn report_latency(label: &str, mut samples: Vec<Duration>) {
+    assert!(!samples.is_empty(), "{label} produced no samples");
+    samples.sort_unstable();
+    let at = |q: f64| -> Duration {
+        let i = ((samples.len() - 1) as f64 * q).round() as usize;
+        samples[i]
+    };
+    let total: Duration = samples.iter().sum();
+    println!(
+        "{label}: n={}  mean {:>8.1}us  p50 {:>8.1}us  p90 {:>8.1}us  \
+         p99 {:>8.1}us  max {:>8.1}us",
+        samples.len(),
+        total.as_secs_f64() * 1e6 / samples.len() as f64,
+        at(0.50).as_secs_f64() * 1e6,
+        at(0.90).as_secs_f64() * 1e6,
+        at(0.99).as_secs_f64() * 1e6,
+        samples[samples.len() - 1].as_secs_f64() * 1e6,
+    );
+}
+
+/// Milliseconds since a measurement began, for the datapath's caller-supplied
+/// clock.
+fn clock(start: Instant) -> u64 {
+    start.elapsed().as_millis() as u64
+}
+
+// ---------------------------------------------------------------------
+// throughput
+// ---------------------------------------------------------------------
+
+/// Bulk host→guest on one flow: the direction where the datapath does the
+/// reading, and the one a workload pulling an image or a dataset lives on.
+#[test]
+#[ignore = "a benchmark: run deliberately on a quiet host, see this section's header"]
+fn measure_throughput_host_to_guest() {
+    let Some(host) = host_target() else { return };
+    let (bytes, elapsed, passes) = host_to_guest_run(host, 1);
+    report_throughput("host→guest", bytes, elapsed, 1, passes);
+}
+
+/// Bulk guest→host on one flow: the direction where the guest's segments
+/// are the input, so admission runs on every one of them.
+#[test]
+#[ignore = "a benchmark: run deliberately on a quiet host, see this section's header"]
+fn measure_throughput_guest_to_host() {
+    let Some(host) = host_target() else { return };
+    let counted = Arc::new(AtomicUsize::new(0));
+    let peer = HostPeer::start(host, PeerRole::Sink(Arc::clone(&counted)));
+    let cfg = config("netd-bench-g2h", &[tcp_rule(host, peer.addr.port())], &[]);
+    let mut tr = Translator::open(&cfg);
+    let mut flow = tr.establish_flow(&cfg, peer.addr, GUEST_PORT);
+
+    let payload = vec![0xA5u8; BENCH_SEGMENT];
+    let start = Instant::now();
+    let mut passes = 0u64;
+    let mut sent = 0usize;
+    // Measured at the receiving socket, not at the send call: bytes handed
+    // to the stack that never left it are not throughput.
+    while counted.load(Ordering::Relaxed) < BENCH_TOTAL_BYTES {
+        assert!(
+            start.elapsed() < BENCH_DEADLINE,
+            "guest→host stalled at {} of {BENCH_TOTAL_BYTES} bytes",
+            counted.load(Ordering::Relaxed)
+        );
+        let now = clock(start);
+        // Keep the window open, never overrun it: this guest has no
+        // retransmit, so a dropped segment would wedge the flow rather than
+        // cost it a round trip.
+        while flow.outstanding() < BENCH_WINDOW && sent < BENCH_TOTAL_BYTES {
+            tr.send_on(&cfg, &mut flow, &payload, now);
+            sent += payload.len();
+        }
+        tr.service(now);
+        passes += 1;
+        tr.absorb(std::slice::from_mut(&mut flow));
+    }
+    let elapsed = start.elapsed();
+    let moved = counted.load(Ordering::Relaxed);
+    drop(tr);
+    drop(peer);
+    report_throughput("guest→host", moved, elapsed, 1, passes);
+}
+
+// ---------------------------------------------------------------------
+// the measurement multi-queue turns on
+// ---------------------------------------------------------------------
+
+/// Aggregate throughput against flow count, at a fixed total byte budget.
+///
+/// This is the one that speaks to multi-queue. `service()` pumps every flow
+/// on a machine in one serial pass, so if that pass is the ceiling the
+/// aggregate is flat across this sweep and splitting the flows across queues
+/// is the thing that would move it. If the aggregate rises with flow count,
+/// the serial pass is not what is limiting and a second queue would buy
+/// nothing.
+///
+/// Fixed *aggregate* budget, so every point does identical total work and
+/// the only variable is how many flows it is spread over.
+#[test]
+#[ignore = "a benchmark: run deliberately on a quiet host, see this section's header"]
+fn measure_concurrency_scaling() {
+    let Some(host) = host_target() else { return };
+    println!("aggregate host→guest throughput against flow count:");
+    for flows in BENCH_FLOW_COUNTS {
+        let (bytes, elapsed, passes) = host_to_guest_run(host, flows);
+        report_throughput("  scaling", bytes, elapsed, flows, passes);
+    }
+}
+
+/// Move `BENCH_TOTAL_BYTES` host→guest, split evenly across `flows` flows.
+///
+/// Returns what actually arrived, how long it took, and how many service
+/// passes carried it — the last because bytes-per-pass is what separates a
+/// datapath limited by its per-pass bound from one limited by anything else.
+fn host_to_guest_run(host: Ipv4Addr, flows: usize) -> (usize, Duration, u64) {
+    let per_flow = BENCH_TOTAL_BYTES / flows;
+    let peer = HostPeer::start(host, PeerRole::Source(per_flow));
+    let cfg = config(
+        &format!("netd-bench-h2g-{flows}"),
+        &[tcp_rule(host, peer.addr.port())],
+        &[],
+    );
+    let mut tr = Translator::open(&cfg);
+    let mut open: Vec<GuestFlow> = (0..flows)
+        .map(|i| tr.establish_flow(&cfg, peer.addr, GUEST_PORT + i as u16))
+        .collect();
+
+    let want = per_flow * flows;
+    let start = Instant::now();
+    let mut got = 0usize;
+    let mut passes = 0u64;
+    while got < want {
+        assert!(
+            start.elapsed() < BENCH_DEADLINE,
+            "host→guest stalled at {got} of {want} bytes across {flows} flow(s)"
+        );
+        let now = clock(start);
+        tr.service(now);
+        passes += 1;
+        got += tr.absorb(&mut open);
+        // The datapath's window only reopens when the guest acknowledges, so
+        // this is part of the path being measured rather than bookkeeping
+        // beside it.
+        tr.ack_all(&cfg, &open, now);
+    }
+    let elapsed = start.elapsed();
+    drop(tr);
+    drop(peer);
+    (got, elapsed, passes)
+}
+
+// ---------------------------------------------------------------------
+// latency
+// ---------------------------------------------------------------------
+
+/// Connect-to-established: a guest's SYN to the SYN-ACK the datapath only
+/// sends once a real host socket has connected.
+///
+/// This is the cost the deferred handshake buys its correctness with, so it
+/// is the one worth knowing.
+#[test]
+#[ignore = "a benchmark: run deliberately on a quiet host, see this section's header"]
+fn measure_connect_latency() {
+    let Some(host) = host_target() else { return };
+    const SAMPLES: usize = 30;
+    let peer = HostPeer::start(host, PeerRole::Echo);
+    let cfg = config(
+        "netd-bench-connect",
+        &[tcp_rule(host, peer.addr.port())],
+        &[],
+    );
+    let mut tr = Translator::open(&cfg);
+
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for i in 0..SAMPLES {
+        let began = Instant::now();
+        // Spins rather than pausing: a 2ms sleep between passes would be
+        // most of what this reported.
+        tr.open_flow_paced(&cfg, peer.addr, GUEST_PORT + i as u16, Duration::ZERO);
+        samples.push(began.elapsed());
+    }
+    drop(tr);
+    drop(peer);
+    report_latency("connect→established", samples);
+}
+
+/// Round trip on an established flow: a guest segment out, the echoed bytes
+/// back. Everything the datapath does per exchange, with no bulk buffering
+/// to hide behind.
+#[test]
+#[ignore = "a benchmark: run deliberately on a quiet host, see this section's header"]
+fn measure_round_trip_latency() {
+    let Some(host) = host_target() else { return };
+    const SAMPLES: usize = 300;
+    const PROBE: usize = 64;
+    let peer = HostPeer::start(host, PeerRole::Echo);
+    let cfg = config("netd-bench-rtt", &[tcp_rule(host, peer.addr.port())], &[]);
+    let mut tr = Translator::open(&cfg);
+    let mut flow = tr.establish_flow(&cfg, peer.addr, GUEST_PORT);
+    let probe = vec![0x3Cu8; PROBE];
+
+    let start = Instant::now();
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let began = Instant::now();
+        tr.send_on(&cfg, &mut flow, &probe, clock(start));
+        let mut back = 0usize;
+        while back < PROBE {
+            assert!(
+                began.elapsed() < Duration::from_secs(10),
+                "an echoed probe never came back; the flow is not moving"
+            );
+            tr.service(clock(start));
+            back += tr.absorb(std::slice::from_mut(&mut flow));
+        }
+        samples.push(began.elapsed());
+    }
+    drop(tr);
+    drop(peer);
+    report_latency("guest→host→guest round trip", samples);
+}
+
+// ---------------------------------------------------------------------
+// where the time goes
+// ---------------------------------------------------------------------
+
+/// The cost of a service pass that has nothing to carry, against the number
+/// of established-but-quiet flows it walks.
+///
+/// This is the coarse decomposition: the value at zero flows is what one
+/// pass costs the machine no matter what — readiness drain, the expiry
+/// sweeps, the interface poll — and the slope is what each additional flow
+/// adds to every pass whether or not it has bytes. Together they say how
+/// much of a loaded pass is fixed overhead and how much is per-flow work,
+/// which is what decides whether splitting flows across queues could help.
+#[test]
+#[ignore = "a benchmark: run deliberately on a quiet host, see this section's header"]
+fn measure_idle_service_pass_cost() {
+    let Some(host) = host_target() else { return };
+    const PASSES: usize = 20_000;
+
+    // Isolated first, so the fixed cost below is attributed rather than
+    // guessed at. Every pass drains the readiness set exactly once, and on a
+    // pass whose tables are empty that non-blocking wait is the only syscall
+    // the pass is obliged to make.
+    let mut bare = ReadinessSet::new().expect("a poll set needs no privileges");
+    let start = Instant::now();
+    for _ in 0..PASSES {
+        std::hint::black_box(bare.drain());
+    }
+    println!(
+        "bare readiness drain, nothing registered: {:>7.0} ns/call",
+        start.elapsed().as_nanos() as f64 / PASSES as f64
+    );
+
+    println!("cost of one service pass carrying nothing:");
+    for flows in [0usize, 1, 4, 16] {
+        let peer = HostPeer::start(host, PeerRole::Echo);
+        let cfg = config(
+            &format!("netd-bench-idle-{flows}"),
+            &[tcp_rule(host, peer.addr.port())],
+            &[],
+        );
+        let mut tr = Translator::open(&cfg);
+        let mut open: Vec<GuestFlow> = (0..flows)
+            .map(|i| tr.establish_flow(&cfg, peer.addr, GUEST_PORT + i as u16))
+            .collect();
+        // Settle first, so nothing left over from the handshakes is counted
+        // against the idle pass.
+        for _ in 0..50 {
+            tr.service(0);
+            tr.absorb(&mut open);
+        }
+
+        let start = Instant::now();
+        for _ in 0..PASSES {
+            tr.service(clock(start));
+        }
+        let elapsed = start.elapsed();
+        drop(tr);
+        drop(peer);
+        println!(
+            "  idle pass: {flows:>2} flow(s)  {:>7.0} ns/pass  ({PASSES} passes in {:.3}s)",
+            elapsed.as_nanos() as f64 / PASSES as f64,
+            elapsed.as_secs_f64()
+        );
+    }
 }
