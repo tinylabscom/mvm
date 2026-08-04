@@ -3,7 +3,7 @@
 //! the guest boot-config attachments (host-signer pubkey, security policy)
 //! that ride along with an admitted plan.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use mvm_core::plan::SynthesisInput;
 use mvm_core::policy::PolicyBundle;
@@ -167,20 +167,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     if p.no_supervisor {
         return Ok(None);
     }
-    let sha = match p.precomputed_image_sha256 {
-        Some(sha) => sha,
-        // Cached on a `<rootfs>.sha256cache` sidecar keyed on size+mtime: the
-        // rootfs is immutable across boots of the same image, so re-hashing
-        // ~100MB every `up` is the single biggest cost left on the boot path.
-        None => mvm_core::crypto::image_verify::sha256_file_cached(p.rootfs_path).with_context(
-            || {
-                format!(
-                    "hashing rootfs at {} for plan admission",
-                    p.rootfs_path.display()
-                )
-            },
-        )?,
-    };
+    let sha = resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256)?;
 
     // Claim 9 — bundle pin (when supplied).
     //
@@ -393,6 +380,47 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         policy_bundle,
         host_signer_public_path: signer.public_path,
     }))
+}
+
+/// Resolve the image digest used by the signed plan, verifying any caller-
+/// supplied digest against the exact rootfs bytes first.
+///
+/// The ordinary boot path uses the size/mtime cache because the rootfs is
+/// immutable across repeated launches. A precomputed digest is different: it
+/// is an external attestation claim, so it must be checked with an uncached
+/// read before it can influence admission. A mismatch fails closed.
+fn resolve_image_sha256(
+    rootfs_path: &std::path::Path,
+    precomputed: Option<String>,
+) -> Result<String> {
+    match precomputed {
+        Some(expected) => {
+            let actual =
+                mvm_core::crypto::image_verify::sha256_file(rootfs_path).with_context(|| {
+                    format!(
+                        "verifying precomputed rootfs digest for {}",
+                        rootfs_path.display()
+                    )
+                })?;
+            if actual != expected {
+                bail!(
+                    "precomputed rootfs sha256 mismatch for {}: expected {}, got {}",
+                    rootfs_path.display(),
+                    expected,
+                    actual
+                );
+            }
+            Ok(actual)
+        }
+        None => {
+            mvm_core::crypto::image_verify::sha256_file_cached(rootfs_path).with_context(|| {
+                format!(
+                    "hashing rootfs at {} for plan admission",
+                    rootfs_path.display()
+                )
+            })
+        }
+    }
 }
 
 pub(in crate::commands::vm) fn guest_profile_for_boot(
@@ -731,6 +759,23 @@ mod admit_plan_tests {
         let mut f = std::fs::File::create(&path).expect("create rootfs");
         f.write_all(bytes).expect("write rootfs");
         path
+    }
+
+    #[test]
+    fn precomputed_rootfs_digest_must_match_exact_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(dir.path(), b"attested rootfs");
+        let expected = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
+
+        assert_eq!(
+            resolve_image_sha256(&rootfs, Some(expected.clone())).unwrap(),
+            expected
+        );
+        let err = resolve_image_sha256(&rootfs, Some("0".repeat(64))).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("precomputed rootfs sha256 mismatch")
+        );
     }
 
     #[test]
