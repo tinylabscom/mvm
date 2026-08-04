@@ -36,6 +36,33 @@ use super::shared::{
 };
 
 #[test]
+fn deploy_flags_parse_and_keep_local_output_controls() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "deploy",
+        "--from-ir",
+        "workload.json",
+        "--out",
+        "./sealed",
+        "--dep-volume",
+        "./deps/sha256-volume",
+        "--kernel-sha256",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--mvmd-url",
+        "https://mvmd.example",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Deploy(args)
+            if args.from_ir == Some("workload.json".into())
+                && args.out == Some("./sealed".into())
+                && args.dependency_volume == Some("./deps/sha256-volume".into())
+                && args.mvmd_url == Some("https://mvmd.example".into())
+    ));
+}
+
+#[test]
 fn top_level_command_summaries_stay_short() {
     let longest_allowed = 72;
     let long_summaries = cli_command()

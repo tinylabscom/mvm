@@ -1,12 +1,9 @@
 //! Deploy-bundle assembly for mvmd-owned control-plane flows.
 //!
-//! v1 ships the stub end of the contract: build the archive, embed
-//! the mvmd-side `mvmd-spec.json`, and call `MvmdClient::ship(bundle)`
-//! which currently logs the bundle and exits 0. The real HTTP transport
-//! (with Ed25519 signature scope over the whole archive bytes,
-//! idempotency by `sha256(body)`, tenant scoping, and the rejection
-//! taxonomy) lands once mvmd's `POST /v1/workloads` endpoint is
-//! implemented.
+//! The local side builds the archive, embeds the mvmd-side `mvmd-spec.json`,
+//! and records the resulting attestation. Remote shipping remains a separate
+//! authenticated transport contract; until that transport is available,
+//! requesting it fails closed after the local record has been written.
 //!
 //! ## Archive layout
 //!
@@ -26,12 +23,69 @@
 //! is the additional sidecar the receiver reads to make scheduling
 //! decisions without unpacking the rest.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::ir::{EnvValue, Workload};
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 
 use crate::compile::{CompileError, archive_dir, compile};
+
+/// Schema version of the local deploy record.
+pub const DEPLOY_RECORD_SCHEMA_VERSION: u32 = 1;
+
+/// Exact-byte identities of the sealed deploy archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactDigests {
+    /// BLAKE3 identity used by the local content-addressed store.
+    pub blake3: String,
+    /// SHA-256 identity retained for external tooling and interop.
+    pub sha256: String,
+    /// Number of bytes hashed in the archive.
+    pub size_bytes: u64,
+}
+
+/// The pinned runtime environment used when the workload is admitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentPin {
+    /// Lowercase hexadecimal SHA-256 of the workload kernel.
+    pub kernel_sha256: String,
+}
+
+/// The verified dependency-volume evidence carried by a deploy record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyVolumeRecord {
+    /// Hash returned by `verify_sealed_volume`.
+    pub volume_hash: String,
+    /// SHA-256 of the sealed SBOM bytes.
+    pub sbom_sha256: String,
+    /// SHA-256 of the sealed CVE result bytes.
+    pub cve_sha256: String,
+}
+
+/// Local attestation record for a sealed workload artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployRecord {
+    /// Record schema version. Readers must reject versions they do not know.
+    pub schema_version: u32,
+    /// Workload identifier from the IR.
+    pub workload_id: String,
+    /// Internal canonical IR fingerprint used by launch plans.
+    pub ir_hash: String,
+    /// Exact-byte identities of the sealed image archive.
+    pub image: ArtifactDigests,
+    /// Runtime environment pin, when one was resolved before deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<EnvironmentPin>,
+    /// Dependency-volume evidence, when the workload uses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_volume: Option<DependencyVolumeRecord>,
+}
 
 /// The mvmd-bound payload embedded into the deploy archive as
 /// `mvmd-spec.json`. Mirrors the schema fixed mvmd-side.
@@ -134,6 +188,8 @@ pub enum DeployError {
     Compile(CompileError),
     Io(std::io::Error),
     Serialize(serde_json::Error),
+    DependencyVolume { path: PathBuf, reason: String },
+    RemoteTransportUnavailable { base_url: String },
 }
 
 impl std::fmt::Display for DeployError {
@@ -142,6 +198,17 @@ impl std::fmt::Display for DeployError {
             Self::Compile(e) => write!(f, "compile failed: {e}"),
             Self::Io(e) => write!(f, "deploy io: {e}"),
             Self::Serialize(e) => write!(f, "serializing mvmd-spec.json: {e}"),
+            Self::DependencyVolume { path, reason } => {
+                write!(
+                    f,
+                    "dependency volume {} is not sealed: {reason}",
+                    path.display()
+                )
+            }
+            Self::RemoteTransportUnavailable { base_url } => write!(
+                f,
+                "remote artifact transport is unavailable for {base_url}; local deployment was preserved"
+            ),
         }
     }
 }
@@ -188,6 +255,84 @@ pub fn build_deploy_bundle(
         archive_path: out.to_path_buf(),
         workload_id: workload.id.clone(),
         schema_version: workload.schema_version.clone(),
+    })
+}
+
+/// Compute both identity digests of a sealed archive using one streaming read.
+pub fn digest_artifact(path: &Path) -> Result<ArtifactDigests, DeployError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut blake3 = blake3::Hasher::new();
+    let mut sha256 = sha2::Sha256::new();
+    let mut size_bytes = 0_u64;
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        blake3.update(&buffer[..read]);
+        sha256.update(&buffer[..read]);
+        size_bytes = size_bytes
+            .checked_add(u64::try_from(read).expect("buffer length fits in u64"))
+            .expect("artifact size must fit in u64");
+    }
+    Ok(ArtifactDigests {
+        blake3: blake3.finalize().to_hex().to_string(),
+        sha256: hex::encode(sha256.finalize()),
+        size_bytes,
+    })
+}
+
+/// Build the local attestation record for a previously-created bundle.
+///
+/// When `dependency_volume` is provided, its complete sealed layout is
+/// verified before any record is returned. This prevents a deploy from
+/// recording a volume whose content, SBOM, fetch log, or CVE result changed.
+pub fn build_deploy_record(
+    workload: &Workload,
+    bundle: &DeployBundle,
+    environment: Option<EnvironmentPin>,
+    dependency_volume: Option<&Path>,
+) -> Result<DeployRecord, DeployError> {
+    let dependency_volume = dependency_volume.map(read_dependency_volume).transpose()?;
+    let ir_hash = crate::ir::ir_hash(workload)?;
+    Ok(DeployRecord {
+        schema_version: DEPLOY_RECORD_SCHEMA_VERSION,
+        workload_id: workload.id.clone(),
+        ir_hash,
+        image: digest_artifact(&bundle.archive_path)?,
+        environment,
+        dependency_volume,
+    })
+}
+
+/// Write a deploy record as private, human-readable JSON.
+pub fn write_deploy_record(record: &DeployRecord, path: &Path) -> Result<(), DeployError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(record)?;
+    bytes.push(b'\n');
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn read_dependency_volume(path: &Path) -> Result<DependencyVolumeRecord, DeployError> {
+    let volume_hash = crate::compile::deps_audit::verify_sealed_volume(path).map_err(|error| {
+        DeployError::DependencyVolume {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        }
+    })?;
+    let manifest_path = path.join(crate::compile::deps_audit::FILE_MANIFEST);
+    let manifest: crate::compile::deps_audit::VolumeManifest =
+        serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    Ok(DependencyVolumeRecord {
+        volume_hash,
+        sbom_sha256: manifest.sbom_sha256,
+        cve_sha256: manifest.cve_sha256,
     })
 }
 
@@ -283,41 +428,26 @@ fn hook_phase_hash(cmds: &[crate::ir::HookCmd]) -> String {
     hex::encode(digest)
 }
 
-/// Stub shipping transport. Today it logs the bundle path and the
-/// mvmd-side fields and returns Ok. The real client lands once
-/// mvmd's `POST /v1/workloads` endpoint is implemented.
+/// Remote artifact client seam.
 pub struct MvmdClient {
-    /// Reserved for the real client — `tinylabscom://mvmd` URL or a
-    /// per-tenant override. Stub ignores the value.
+    /// The configured mvmd endpoint.
     pub base_url: String,
 }
 
 impl MvmdClient {
-    /// Construct a new client for `base_url`. v1 stub ignores the
-    /// argument; the real client uses it as the HTTP target.
+    /// Construct a new client for `base_url`.
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
         }
     }
 
-    /// Ship the bundle. v1 stub: log the archive path + the embedded
-    /// mvmd-spec to stderr; exits Ok. The real client will sign the
-    /// archive bytes with the host signer, `POST /v1/workloads`, and
-    /// surface mvmd's rejection codes.
-    pub fn ship(&self, bundle: &DeployBundle) -> Result<(), DeployError> {
-        let archive_size = std::fs::metadata(&bundle.archive_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        eprintln!(
-            "would ship: {} ({} bytes, workload {}, schema_version {}) → {}",
-            bundle.archive_path.display(),
-            archive_size,
-            bundle.workload_id,
-            bundle.schema_version,
-            self.base_url
-        );
-        Ok(())
+    /// Refuse to claim a remote deployment until the authenticated transport
+    /// is available. The local record is intentionally unaffected.
+    pub fn ship(&self, _bundle: &DeployBundle) -> Result<(), DeployError> {
+        Err(DeployError::RemoteTransportUnavailable {
+            base_url: self.base_url.clone(),
+        })
     }
 }
 
@@ -484,7 +614,87 @@ mod tests {
     }
 
     #[test]
-    fn stub_client_logs_without_failing() {
+    fn deploy_record_contains_both_archive_digests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(manifest_dir.join("hello.py"), b"x = 1\n").unwrap();
+        let archive = tmp.path().join("hello.tar.gz");
+        let workload = sample_workload();
+        let bundle = build_deploy_bundle(&workload, &archive, &manifest_dir).unwrap();
+        let record = build_deploy_record(
+            &workload,
+            &bundle,
+            Some(EnvironmentPin {
+                kernel_sha256: "a".repeat(64),
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(record.schema_version, DEPLOY_RECORD_SCHEMA_VERSION);
+        assert_eq!(record.workload_id, "hello");
+        assert_eq!(
+            record.image.size_bytes,
+            std::fs::metadata(&archive).unwrap().len()
+        );
+        assert_eq!(record.image.blake3.len(), 64);
+        assert_eq!(record.image.sha256.len(), 64);
+        assert!(record.environment.is_some());
+
+        let record_path = tmp.path().join("deploy.json");
+        write_deploy_record(&record, &record_path).unwrap();
+        let round_trip: DeployRecord =
+            serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+        assert_eq!(round_trip, record);
+
+        let mut unknown = serde_json::to_value(record).unwrap();
+        unknown["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<DeployRecord>(unknown).is_err());
+    }
+
+    #[test]
+    fn deploy_record_refuses_tampered_dependency_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let volume = tmp.path().join("volume");
+        let content = volume.join(crate::compile::deps_audit::FILE_CONTENT_DIR);
+        std::fs::create_dir_all(&content).unwrap();
+        let sbom = volume.join(crate::compile::deps_audit::FILE_SBOM);
+        let fetch_log = volume.join(crate::compile::deps_audit::FILE_FETCH_LOG);
+        let cve = volume.join(crate::compile::deps_audit::FILE_CVE);
+        std::fs::write(content.join("site.py"), b"print('ok')").unwrap();
+        std::fs::write(&sbom, br#"{"bomFormat":"CycloneDX"}"#).unwrap();
+        std::fs::write(&fetch_log, b"https://example.test\n").unwrap();
+        std::fs::write(&cve, br#"{"vulnerabilities":[]}"#).unwrap();
+        let seal = crate::compile::deps_audit::seal_volume(
+            &content,
+            &sbom,
+            &fetch_log,
+            &cve,
+            "2026-01-01T00:00:00Z",
+            Default::default(),
+        )
+        .unwrap();
+        std::fs::write(
+            volume.join(crate::compile::deps_audit::FILE_MANIFEST),
+            seal.manifest_bytes,
+        )
+        .unwrap();
+        std::fs::write(&cve, br#"{"vulnerabilities":["tampered"]}"#).unwrap();
+
+        let archive = tmp.path().join("image.tar.gz");
+        std::fs::write(&archive, b"image").unwrap();
+        let bundle = DeployBundle {
+            archive_path: archive,
+            workload_id: "hello".into(),
+            schema_version: "0.1".into(),
+        };
+        let err =
+            build_deploy_record(&sample_workload(), &bundle, None, Some(&volume)).unwrap_err();
+        assert!(matches!(err, DeployError::DependencyVolume { .. }));
+    }
+
+    #[test]
+    fn remote_client_fails_closed_until_transport_exists() {
         let client = MvmdClient::new("https://mvmd.test/v1");
         let tmp = tempfile::tempdir().unwrap();
         let archive = tmp.path().join("hello.tar.gz");
@@ -494,6 +704,13 @@ mod tests {
             workload_id: "hello".into(),
             schema_version: "0.1".into(),
         };
-        client.ship(&bundle).expect("stub never errors");
+        let error = client
+            .ship(&bundle)
+            .expect_err("remote shipping must not report a false success");
+        assert!(matches!(
+            error,
+            DeployError::RemoteTransportUnavailable { base_url }
+                if base_url == "https://mvmd.test/v1"
+        ));
     }
 }

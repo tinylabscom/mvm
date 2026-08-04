@@ -29,6 +29,7 @@ thiserror.workspace = true
 # as base64 in the recording JSON so the lowering can re-emit them
 # as a `before_start` shell hook.
 base64 = { workspace = true }
+blake3 = { workspace = true }
 
 # Addon module deps.
 flate2 = { workspace = true }
