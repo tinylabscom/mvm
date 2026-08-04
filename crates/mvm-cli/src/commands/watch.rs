@@ -10,11 +10,11 @@ use anyhow::{Context, Result, bail};
 use blake3::Hasher;
 use clap::Args as ClapArgs;
 use mvm_core::user_config::MvmConfig;
-use mvm_protocol::ir::{App, Entrypoint, Image, Resources, Source, Workload, ir_hash};
+use mvm_protocol::ir::{Source, Workload, ir_hash};
 use mvm_sdk::compile::compile;
 
 use super::Cli;
-use super::ir_input::load_ir_json_workload;
+use super::load_ir_json_workload;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -174,7 +174,7 @@ fn hash_inputs(roots: &[PathBuf], excluded: &Path) -> Result<String> {
     for path in files {
         let relative = path.to_string_lossy();
         hasher.update(relative.as_bytes());
-        hasher.update([0]);
+        hasher.update(&[0]);
         let mut file = fs::File::open(&path)
             .with_context(|| format!("opening watched input {}", path.display()))?;
         let mut buffer = [0_u8; 64 * 1024];
@@ -185,7 +185,7 @@ fn hash_inputs(roots: &[PathBuf], excluded: &Path) -> Result<String> {
             }
             hasher.update(&buffer[..read]);
         }
-        hasher.update([0]);
+        hasher.update(&[0]);
     }
     Ok(hasher.finalize().to_hex().to_string())
 }
@@ -230,6 +230,7 @@ mod tests {
     use super::*;
     use crate::commands::Commands;
     use clap::Parser;
+    use mvm_protocol::ir::{App, Entrypoint, Image, Resources};
 
     fn sample_workload() -> Workload {
         Workload {

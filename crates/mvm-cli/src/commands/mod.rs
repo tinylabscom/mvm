@@ -25,6 +25,8 @@ mod trust;
 pub(crate) mod vm;
 mod watch;
 
+pub(in crate::commands) use build::ir_input::load_ir_json_workload;
+
 #[cfg(test)]
 mod tests;
 
