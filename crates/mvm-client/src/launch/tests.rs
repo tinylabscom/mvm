@@ -580,6 +580,89 @@ async fn launch_refuses_cross_scope_secret_reference() {
     assert!(err.to_string().contains("cross-scope"), "got: {err}");
 }
 
+#[tokio::test]
+async fn persistent_relaunch_revalidates_sidecar_refs_recorded_earlier() {
+    let home = Isolated::new();
+    let service = fixture_secret_service(&home);
+    let secret_ref = seeded_secret_ref(&service);
+    let client = mock_client().with_secret_service(service.clone());
+    let rootfs = home.rootfs();
+
+    // Create the definition WITH a secret reference, then stop the machine.
+    let with_refs = persistent_request(&rootfs, "p-refs")
+        .secret_ref(secret_ref)
+        .build()
+        .unwrap();
+    let outcome = client.launch(with_refs).await.expect("first launch");
+    client
+        .stop_machine(&outcome.machine.id)
+        .await
+        .expect("stop");
+
+    // Revoke the binding out from under the recorded sidecar.
+    service.unbind("local", "openai").expect("revoke binding");
+
+    // An identical-config launch carrying NO refs hits the Reuse arm — the
+    // sidecar's recorded references must still be re-validated fail-closed.
+    let without_refs = persistent_request(&rootfs, "p-refs").build().unwrap();
+    let err = client.launch(without_refs).await.unwrap_err();
+    assert!(
+        matches!(err, mvm_core::client::MvmError::Rejected { .. }),
+        "got: {err}"
+    );
+    assert!(err.to_string().contains("no egress binding"), "got: {err}");
+    assert!(
+        !listed_names(&client).await.contains(&"p-refs".to_string()),
+        "nothing boots on a refused relaunch"
+    );
+}
+
+#[tokio::test]
+async fn launch_over_a_deployment_backed_spec_refuses_a_silent_image_boot() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let rootfs = home.rootfs();
+
+    // A definition carrying an attested-deployment source (created by the
+    // CLI's deployment flow, which this backend cannot honor).
+    let spec = mvm_runtime::machine::persist::MachineSpec {
+        deployment: Some("/deployments/web".into()),
+        ..super::persisted_spec_from_request(
+            &persistent_request(&rootfs, "p-deploy").build().unwrap(),
+            "p-deploy",
+        )
+    };
+    mvm_runtime::machine::persist::save_machine_spec(&spec, false).unwrap();
+
+    // The bootability gate refuses the source outright …
+    let err = super::ensure_spec_bootable_in_process(&spec).unwrap_err();
+    assert!(
+        err.to_string().contains("attested-deployment"),
+        "got: {err}"
+    );
+
+    // … and a same-image launch never silently boots it as a plain image:
+    // the deployment field is part of the launch config, so the reconcile
+    // refuses without the explicit force flow.
+    let request = persistent_request(&rootfs, "p-deploy").build().unwrap();
+    let err = client.launch(request).await.unwrap_err();
+    assert!(
+        matches!(err, mvm_core::client::MvmError::Conflict { .. }),
+        "got: {err}"
+    );
+    assert!(err.to_string().contains("different config"), "got: {err}");
+
+    // `start` refuses the same source fail-closed.
+    let err = client
+        .start_machine(&mvm_core::client::dto::MachineId("p-deploy".into()))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("attested-deployment"),
+        "got: {err}"
+    );
+}
+
 // ── Typed volume attachments ────────────────────────────────────────
 
 #[tokio::test]

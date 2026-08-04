@@ -357,6 +357,76 @@ mod tests {
         assert!(chain.contains("plan.launched"), "got: {chain}");
     }
 
+    /// A refusal in a post-admission gate (here the SDK-sidecar gate: a
+    /// volume at the sidecar mount point with no SDK service binding) still
+    /// terminates the chain — `plan.admitted` is followed by a `plan.failed`
+    /// naming the refusing stage, never left dangling.
+    #[test]
+    fn gate_refusal_after_admission_emits_plan_failed() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let data = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", data.path());
+        let keys = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable\n").unwrap();
+        let sidecar = data.path().join("sdk.ext4");
+        std::fs::write(&sidecar, b"sidecar-bytes\n").unwrap();
+
+        let signer = crate::audit::host_keypair::load_or_init_at(keys.path()).unwrap();
+        let emitter =
+            crate::audit::emitter::AuditEmitter::with_dir(signer.signing, audit.path()).unwrap();
+
+        let backend = AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let clock = SystemClock;
+        let req = LocalRunRequest {
+            name: "local-run-gate-refusal".into(),
+            rootfs_path: rootfs,
+            kernel_path: None,
+            verity_path: None,
+            roothash: None,
+            cpus: 1,
+            mem_mib: 128,
+            backend_name: "mock".into(),
+            volumes: vec![VmVolume {
+                host: sidecar.to_string_lossy().into_owned(),
+                guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
+                size: String::new(),
+                read_only: true,
+                kind: VmVolumeKind::Disk,
+                encrypted: false,
+            }],
+            destroy_on_exit: true,
+        };
+        let err = admit_and_boot_local(
+            &backend,
+            &req,
+            LocalRunContext {
+                clock: &clock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(keys.path()),
+                emitter: Some(&emitter),
+            },
+        )
+        .expect_err("the SDK-sidecar gate must refuse");
+        assert!(
+            format!("{err:#}").contains("binds no SDK host service"),
+            "got: {err:#}"
+        );
+
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert!(chain.contains("plan.admitted"), "got: {chain}");
+        assert!(chain.contains("plan.failed"), "got: {chain}");
+        assert!(chain.contains("sdk-sidecar"), "got: {chain}");
+        assert!(
+            !chain.contains("plan.launched"),
+            "a refused launch must not read as launched: {chain}"
+        );
+    }
+
     /// A missing rootfs fails at the hash step, before any admission or boot.
     #[test]
     fn admit_and_boot_local_missing_rootfs_fails_before_boot() {

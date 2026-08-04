@@ -189,9 +189,11 @@ updates only its own entry below.
       `validate_for_admission` on every admission with references +
       `clear_machine_references` at remove, and inventory
       `secret_ref_count` now reads the real `secret-refs.json` sidecar.
-      36 new tests (23 mock-backed lifecycle + 10 request-validation in
-      mvm-client, 2 seam tests in mvm-hostd, plus inventory count
-      coverage); the Linux/KVM Firecracker E2E for both modes ships
+      43 new tests (26 mock-backed lifecycle + 10 request-validation in
+      mvm-client, 4 seam/emitter tests in mvm-hostd — incl. sidecar-ref
+      re-validation on relaunch, deployment-source refusal, post-admission
+      gate refusals emitting terminal plan.failed, and plan.exited capture
+      fidelity — plus inventory count coverage); the Linux/KVM Firecracker E2E for both modes ships
       `#[ignore]`-gated in `crates/mvm-client/tests/launch_lifecycle_live.rs`
       (jailer-lite lane pattern; CI wiring deferred).
 

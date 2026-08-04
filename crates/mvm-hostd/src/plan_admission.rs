@@ -724,6 +724,30 @@ pub struct StartedMachine {
 /// The caller resolves the image to a `config.rootfs_path` beforehand; this
 /// function is backend-agnostic (it drives whatever `AnyBackend` it is handed,
 /// including the in-memory mock in tests).
+/// The four post-admission gates between `plan.admitted` and the backend
+/// start, run in order. On refusal the failing stage's wire label is
+/// returned alongside the error so the caller can emit a terminal
+/// `plan.failed` entry naming the gate.
+fn run_post_admission_gates(
+    mut config: VmStartConfig,
+    admitted: &AdmittedPlan,
+    policy_bundle: Option<&PolicyBundle>,
+) -> std::result::Result<VmStartConfig, (&'static str, anyhow::Error)> {
+    if let Err(e) = populate_audit_substrate(&mut config, admitted, policy_bundle) {
+        return Err(("audit-substrate", e));
+    }
+    if let Err(e) = enforce_admitted_shares(&config.volumes, admitted.plan()) {
+        return Err(("admitted-shares", e));
+    }
+    if let Err(e) = enforce_admitted_environment(&config, admitted.plan()) {
+        return Err(("admitted-environment", e));
+    }
+    if let Err(e) = enforce_sdk_sidecar_attachment(&config.volumes, admitted.plan()) {
+        return Err(("sdk-sidecar", e));
+    }
+    Ok(config)
+}
+
 pub fn admit_and_start(
     backend: &AnyBackend,
     params: AdmitAndStartParams<'_>,
@@ -736,16 +760,25 @@ pub fn admit_and_start(
         params.bundle_ctx,
     )?;
     if let Some(emitter) = params.emitter
-        && let Err(e) = emitter.emit_admitted(&admitted.plan, &admitted.signer_id)
+        && let Err(e) = emitter.emit_admitted(admitted.plan(), admitted.signer_id())
     {
         tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal)");
     }
 
-    let mut config = params.config;
-    populate_audit_substrate(&mut config, &admitted, params.policy_bundle)?;
-    enforce_admitted_shares(&config.volumes, admitted.plan())?;
-    enforce_admitted_environment(&config, admitted.plan())?;
-    enforce_sdk_sidecar_attachment(&config.volumes, admitted.plan())?;
+    // A refusal in any post-admission gate must still terminate the chain:
+    // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
+    // carrying the refusing stage rather than leaving a dangling admission.
+    let config = match run_post_admission_gates(params.config, &admitted, params.policy_bundle) {
+        Ok(config) => config,
+        Err((stage, err)) => {
+            if let Some(emitter) = params.emitter
+                && let Err(e) = emitter.emit_failed(admitted.plan(), stage, &format!("{err:#}"))
+            {
+                tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+            }
+            return Err(err.context(format!("admission gate refused ({stage})")));
+        }
+    };
 
     let backend_name = backend.name().to_string();
     match backend
@@ -754,7 +787,7 @@ pub fn admit_and_start(
     {
         Ok(vm_id) => {
             if let Some(emitter) = params.emitter
-                && let Err(e) = emitter.emit_launched(&admitted.plan, &backend_name)
+                && let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name)
             {
                 tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
             }
@@ -763,7 +796,7 @@ pub fn admit_and_start(
         Err(err) => {
             if let Some(emitter) = params.emitter
                 && let Err(e) =
-                    emitter.emit_failed(&admitted.plan, "backend-start", &format!("{err:#}"))
+                    emitter.emit_failed(admitted.plan(), "backend-start", &format!("{err:#}"))
             {
                 tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
             }

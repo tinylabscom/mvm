@@ -519,13 +519,40 @@ impl LocalBackend {
 
     /// Boot a persistent definition that was just created/reconciled from
     /// `request` (TTL and backend override honored from the request).
+    ///
+    /// The reconciled on-disk definition — not the request — is the boot
+    /// authority: the `Reuse` arm keeps an earlier definition, so the spec
+    /// is re-checked for in-process bootability and the sidecar's recorded
+    /// secret references are re-validated fail-closed even when this
+    /// request carries none.
     async fn boot_persistent(&self, name: &str, request: &LaunchRequest) -> Result<LaunchOutcome> {
         if self.machine_running(name) {
             return Err(MvmError::Conflict {
                 reason: format!("machine {name:?} is already running"),
             });
         }
+        let spec = mp::load_machine_spec(name).map_err(crate::local::backend_err)?;
+        ensure_spec_bootable_in_process(&spec)?;
+        self.validate_sidecar_refs(name)?;
         self.attach_lease_and_boot(name, request, false).await
+    }
+
+    /// Re-validate the secret references recorded in `name`'s sidecar —
+    /// the fail-closed gate every persistent admission passes, whether the
+    /// references arrived with this request or with an earlier create.
+    fn validate_sidecar_refs(&self, name: &str) -> Result<()> {
+        let refs = crate::secret::refs::load_refs(&machine_state_root(), name)
+            .map_err(|e| crate::local::backend_err(format!("loading secret refs: {e:#}")))?
+            .map(|record| record.references)
+            .unwrap_or_default();
+        if refs.is_empty() {
+            return Ok(());
+        }
+        self.secrets()?
+            .validate_for_admission(LOCAL_TENANT, &refs)
+            .map_err(|e| MvmError::Rejected {
+                reason: format!("secret reference admission refused: {e}"),
+            })
     }
 
     /// Shared tail of both launch paths: acquire volume leases, boot through
@@ -664,17 +691,7 @@ impl LocalBackend {
             });
         }
         let image = ensure_spec_bootable_in_process(&spec)?;
-        let refs = crate::secret::refs::load_refs(&machine_state_root(), name)
-            .map_err(|e| crate::local::backend_err(format!("loading secret refs: {e:#}")))?
-            .map(|record| record.references)
-            .unwrap_or_default();
-        if !refs.is_empty() {
-            self.secrets()?
-                .validate_for_admission(LOCAL_TENANT, &refs)
-                .map_err(|e| MvmError::Rejected {
-                    reason: format!("secret reference admission refused: {e}"),
-                })?;
-        }
+        self.validate_sidecar_refs(name)?;
         let memory_mib =
             mvm_core::util::parse_human_size(&spec.memory).map_err(crate::local::backend_err)?;
         let request = LaunchRequest::builder(LifecycleMode::Persistent, image)
@@ -808,12 +825,11 @@ impl LocalBackend {
     pub fn report_exit(&self, outcome: &LaunchOutcome) -> Result<ExitReport> {
         let name = outcome.machine.name.as_str();
         let exit_code = mvm_core::exit_capture::read_captured(&vm_state_dir(name));
+        // Capture fidelity: a missing capture is recorded as uncaptured,
+        // never attested as exit 0.
         if let Some(emitter) = build_audit_emitter()
-            && let Err(e) = emitter.emit_exited(
-                &outcome.plan,
-                exit_code.unwrap_or(0),
-                &outcome.machine.backend,
-            )
+            && let Err(e) =
+                emitter.emit_exited_with_capture(&outcome.plan, exit_code, &outcome.machine.backend)
         {
             tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
         }
