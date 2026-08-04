@@ -51,6 +51,22 @@ async-trait = { workspace = true }
 # Non-fatal diagnostics on the pause path (fc.paused marker best-effort write).
 # Already in the mvmctl closure via mvm-runtime, so this adds no crates.
 tracing = { workspace = true }
+# The local encrypted-volume lifecycle service (`volume` module). Every entry
+# below is already in the mvmctl closure via mvm-core / mvm-runtime / mvm-cli,
+# so none adds new crates to the default build.
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Canonical JSON for the immutable volume-snapshot manifest (byte-stable at
+# rest so a manifest re-serialization cannot drift its hash).
+serde_jcs = "0.1"
+rand = { workspace = true }
+secrecy = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tar = { workspace = true }
+chrono = { workspace = true }
+ext4-view = { workspace = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
