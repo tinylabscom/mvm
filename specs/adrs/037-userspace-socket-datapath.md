@@ -405,6 +405,17 @@ The third is open.
   to the same kernel object that goes to every socket. mio's registry is
   borrowed from its poll set, and a borrow cannot outlive it into a
   socket's `Drop`.
+
+  Registration alone left one case on the tick, and that is closed too. The
+  service pass spends the set's readiness before it reads a socket — an
+  edge cleared afterwards would be one for bytes nothing goes back for — so
+  a flow whose host-to-guest pump stopped at `max_bytes_per_pass` had a
+  remainder no further edge would ever announce. That pass now reports
+  `InboundDrain::Backlogged` out through `DatapathHandle::service`, and the
+  drive loop treats it exactly as it treats a bounded drain's: it comes
+  straight back instead of waiting. A stall is not a backlog and is not
+  reported as one — what frees the stack's send buffer is the guest's ACK,
+  and that arrives on the guest channel, which wakes the loop by itself.
 - **`declared_ingress: true` is advertised with no listening socket behind
   it.** `ForwardingCapabilities::USERSPACE_SOCKETS` sets the flag, so a
   plan declaring an ingress mapping is admitted, but this datapath opens

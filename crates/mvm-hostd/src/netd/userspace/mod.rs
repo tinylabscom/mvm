@@ -39,7 +39,8 @@ use self::readiness::ReadinessSet;
 use self::tcp::{EstablishedFlow, HalfOpenTable, SynOutcome};
 use self::udp::UdpAssociations;
 use super::datapath::{
-    DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
+    DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, InboundDrain,
+    L3Datapath,
 };
 use super::metrics::GatewayMetrics;
 
@@ -332,7 +333,14 @@ impl UserspaceHandle {
     /// Drive the datapath: resolve completed connects, promote them into
     /// flows, expire what has timed out, pump every established flow, and
     /// poll the machine-wide interface.
-    pub fn service(&mut self, now_millis: u64) -> Result<(), DatapathError> {
+    ///
+    /// Reports [`InboundDrain::Backlogged`] when any flow's host-to-guest
+    /// half stopped at its per-pass bound. The readiness this pass was woken
+    /// by is spent at the top, before a socket is read, so a peer's
+    /// remainder sitting in a host socket has no edge left to announce it —
+    /// the driver has to be told, or it waits out the tick with the bytes
+    /// already in hand.
+    pub fn service(&mut self, now_millis: u64) -> Result<InboundDrain, DatapathError> {
         if self.closed {
             return Err(DatapathError::Io(std::io::Error::from(
                 std::io::ErrorKind::BrokenPipe,
@@ -353,11 +361,11 @@ impl UserspaceHandle {
         // ends it.
         self.poll_associations(now_millis);
         self.expire_associations(now_millis);
-        self.pump_flows(now_millis);
+        let drain = self.pump_flows(now_millis);
         let now = SmolInstant::from_millis(now_millis as i64);
         self.interface
             .poll(now, &mut self.device, &mut self.sockets);
-        Ok(())
+        Ok(drain)
     }
 
     /// Take out every connect the kernel has decided: successes become
@@ -428,11 +436,18 @@ impl UserspaceHandle {
     /// Finished means the connection ended, never that it was quiet: see
     /// the body, and [`limits::KEEPALIVE_IDLE_SECS`] for what reclaims a
     /// flow whose peer is gone.
-    fn pump_flows(&mut self, now_millis: u64) {
+    ///
+    /// Reports whether *any* flow's host-to-guest half stopped at its bound.
+    /// One flag for the machine rather than a set of flow keys: the driver's
+    /// only decision is whether to come straight back, and it comes back to
+    /// all of them at once.
+    fn pump_flows(&mut self, now_millis: u64) -> InboundDrain {
         let Self { flows, metrics, .. } = self;
+        let mut backlogged = false;
         flows.retain(|_, flow| {
             let stats = flow.pump(now_millis, metrics);
             fold_throughput(metrics, &stats);
+            backlogged |= stats.backlogged;
             // Nothing here ages a flow for being quiet. An established flow
             // is reclaimed when its *peer* is gone — the host socket's
             // keepalive surfaces that as an error, and the error path
@@ -446,6 +461,11 @@ impl UserspaceHandle {
             // the silent hang the reset exists to prevent.
             flow.is_active() || flow.pending_to_guest() > 0
         });
+        if backlogged {
+            InboundDrain::Backlogged
+        } else {
+            InboundDrain::Idle
+        }
     }
 
     /// Put a host-originated packet on the machine-wide guest-bound queue.
@@ -639,7 +659,7 @@ impl DatapathHandle for UserspaceHandle {
 
     /// The driver holds a trait object, so this is the only `service` it can
     /// reach. Everything a pending connect needs is behind it.
-    fn service(&mut self, now_millis: u64) -> Result<(), DatapathError> {
+    fn service(&mut self, now_millis: u64) -> Result<InboundDrain, DatapathError> {
         UserspaceHandle::service(self, now_millis)
     }
 
@@ -747,12 +767,18 @@ mod tests {
     use std::net::{Ipv4Addr, TcpListener};
     use std::time::Duration;
 
-    use super::tcp::emit_v4_segment;
+    use super::tcp::{emit_v4_segment, max_bytes_per_pass};
 
     /// Service passes a fixture will wait through for a loopback connect to
     /// resolve. Bounded, so a fixture that never resolves fails an
     /// assertion instead of hanging the suite.
     const SERVICE_ATTEMPTS: usize = 200;
+
+    /// How long a fixture gives a completed loopback write to reach the
+    /// far socket's receive queue. `write` returning means the kernel took
+    /// the bytes, not that the reader can see them yet — loopback delivery
+    /// finishes in a softirq. Only ever a precondition, never an assertion.
+    const LOOPBACK_SETTLE: Duration = Duration::from_millis(50);
 
     fn request() -> DatapathRequest {
         DatapathRequest {
@@ -1428,6 +1454,41 @@ mod tests {
             );
         }
         assert_eq!(handle.open_socket_count(), 1);
+    }
+
+    /// The fold that carries a flow's own report out to the driver. The
+    /// pass spends its readiness before it reads a socket, so a flow that
+    /// stopped at its bound has nothing left to announce the remainder —
+    /// and the driver's only way to learn of it is this return value.
+    #[test]
+    fn a_flow_that_stopped_at_its_budget_makes_the_service_pass_say_so() {
+        let (mut handle, _dst, mut peer, _ack) = handle_with_an_established_conversation();
+        let body = vec![0x5Au8; max_bytes_per_pass() * 2];
+        let writer = std::thread::spawn(move || {
+            peer.write_all(&body).expect("the peer's whole answer");
+            peer.flush().expect("flush");
+            peer
+        });
+        let _peer = writer.join().expect("the peer's writer thread");
+        // The fixture's precondition, asserted below rather than assumed: a
+        // pass can only stop at the bound with more than the bound already
+        // waiting. This guest acknowledges nothing, so the stack's send
+        // buffer fills on the first pass and no later one could reach it.
+        std::thread::sleep(LOOPBACK_SETTLE);
+
+        let drain = handle.service(0).expect("service");
+
+        assert!(
+            handle.metrics().bytes_ingress >= max_bytes_per_pass() as u64,
+            "the fixture must really have had a pass's worth waiting, or this \
+             asserts nothing"
+        );
+        assert_eq!(
+            drain,
+            InboundDrain::Backlogged,
+            "a flow whose pump stopped at its bound must reach the driver as a \
+             backlog, or its tail waits out the tick"
+        );
     }
 
     /// The budget slot, not just the descriptor. A flow holding an

@@ -51,7 +51,14 @@ for detailed scope and acceptance criteria.
         of the places one is dropped out of a table. `poll_inbound` is
         bounded by `MAX_INBOUND_PACKETS_PER_PASS` and reports
         `InboundDrain::Backlogged`, mirroring the guest-facing drain rather
-        than inventing a second mechanism. Still open: `declared_ingress:
+        than inventing a second mechanism. The two further defects found
+        while closing those are **also closed**: a flow's host-to-guest
+        pump now reports that same backlog when its per-pass byte budget is
+        what stopped it, so a peer's tail no longer waits out the tick, and
+        the association fixture that aimed at a closed loopback port — where
+        the ICMP unreachable surfaced on the next `send` as `ECONNREFUSED`,
+        deterministically on Linux — now aims at a destination that exists
+        and discards. Still open: `declared_ingress:
         true` is advertised with no listening socket serving it, and cannot
         simply be cleared because `GatewayConfig::new` requires it
   - [x] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's

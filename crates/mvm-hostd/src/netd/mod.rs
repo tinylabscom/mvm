@@ -48,12 +48,12 @@ pub mod userspace;
 pub mod linux;
 
 pub use datapath::{
-    DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
-    LoopbackDatapath, LoopbackHandle, UnsupportedDatapath,
+    DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, InboundDrain,
+    L3Datapath, LoopbackDatapath, LoopbackHandle, UnsupportedDatapath,
 };
 pub use gateway::{
     Direction, Gateway, GatewayConfig, GatewayError, GatewayEvent, GatewayState, HostResolver,
-    InboundDrain, InboundPass, MAX_INBOUND_PACKETS_PER_PASS, ResolveError, StaticResolver,
+    InboundPass, MAX_INBOUND_PACKETS_PER_PASS, ResolveError, StaticResolver,
 };
 pub use metrics::GatewayMetrics;
 pub use uds_channel::{UdsGuestChannelProvider, UdsLayout};

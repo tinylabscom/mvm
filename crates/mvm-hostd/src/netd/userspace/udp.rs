@@ -478,6 +478,12 @@ mod tests {
     /// than hanging the suite.
     const ROUND_TRIP_BUDGET: Duration = Duration::from_secs(2);
 
+    /// How long an ICMP unreachable is given to reach a connected socket's
+    /// error queue. Loopback, so this is generous: measured on this path,
+    /// a refusal is reported on every attempt past a few milliseconds and
+    /// on only a few percent of attempts with no wait at all.
+    const ICMP_SETTLE: Duration = Duration::from_millis(25);
+
     /// The address the session leased this guest. Deliberately not an
     /// address any fixture packet carries: a reply must be addressed from
     /// the lease, and a fixture where the two agree could not tell which
@@ -506,6 +512,17 @@ mod tests {
             remote: dst.ip(),
             remote_port: dst.port(),
         }
+    }
+
+    /// A loopback destination that discards whatever it is sent.
+    ///
+    /// The socket is returned so the caller holds the port for the test's
+    /// lifetime. Nothing reads it: a fixture that wants a quiet peer wants
+    /// datagrams to go nowhere, not to come back.
+    fn bind_udp_sink() -> (UdpSocket, SocketAddr) {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind a loopback sink");
+        let addr = socket.local_addr().expect("local addr");
+        (socket, addr)
     }
 
     /// A loopback UDP echo server, bounded in both time and datagram count
@@ -603,11 +620,19 @@ mod tests {
     /// sending a byte a minute — 64 descriptors at a time, none of them
     /// ever reclaimed. The same argument that made the TCP path's bounds
     /// absolute rather than refreshable.
+    ///
+    /// The destination is a bound sink rather than a closed port, for the
+    /// reason
+    /// [`a_bound_destination_absorbs_a_second_datagram_rather_than_refusing_it`]
+    /// states: this is the only fixture here that sends twice on one
+    /// association, so it is the only one a refusal reaches.
     #[test]
     fn traffic_does_not_push_out_an_associations_deadline() {
+        let (_sink, dst) = bind_udp_sink();
         let mut a = UdpAssociations::new(64, guest(), watch());
-        a.send(key(), b"first", 0).expect("send");
-        a.send(key(), b"second", ASSOCIATION_LIFETIME_MILLIS - 1)
+        let flow = key_to(dst);
+        a.send(flow, b"first", 0).expect("send");
+        a.send(flow, b"second", ASSOCIATION_LIFETIME_MILLIS - 1)
             .expect("a later datagram on the same association");
         assert_eq!(a.len(), 1, "and it is still one association, not two");
         assert_eq!(
@@ -615,6 +640,28 @@ mod tests {
             1,
             "the deadline is taken from the datagram that opened the association"
         );
+    }
+
+    /// **A quiet destination has to exist.** A closed port is the opposite
+    /// of quiet: the kernel answers it with an ICMP port-unreachable, the
+    /// association's socket is connected, and the next `send` on it
+    /// reports that back as `ECONNREFUSED`. Any fixture here that sends
+    /// twice on one association is then testing the refusal rather than
+    /// whatever it meant to test — and refusal is a real signal this path
+    /// is meant to surface, so the fixture is what has to change.
+    ///
+    /// The wait is the subject, not a timing tolerance: the refusal is an
+    /// ICMP round trip, so without it a destination that refuses passes
+    /// this most of the time and fails under load.
+    #[test]
+    fn a_bound_destination_absorbs_a_second_datagram_rather_than_refusing_it() {
+        let (_sink, dst) = bind_udp_sink();
+        let mut a = UdpAssociations::new(64, guest(), watch());
+        let flow = key_to(dst);
+        a.send(flow, b"first", 0).expect("send");
+        std::thread::sleep(ICMP_SETTLE);
+        a.send(flow, b"second", 1)
+            .expect("a destination that discards must never refuse");
     }
 
     #[test]

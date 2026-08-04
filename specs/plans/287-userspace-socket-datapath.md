@@ -1711,9 +1711,10 @@ git commit -m "docs(plan-287): record the userspace socket datapath as shipped"
 ### Open defects in what this plan shipped
 
 Not scope reductions — things that are wrong, recorded so the close-out is
-not read as "finished". Three were listed at close-out; two of those are now
-closed and two more were found while closing them. ADR-037 §"Known defects in
-what shipped" carries the original three with the mechanism.
+not read as "finished". Three were listed at close-out; two of those closed,
+two more were found while closing them, and those two are now closed as well.
+One remains. ADR-037 §"Known defects in what shipped" carries the original
+three with the mechanism.
 
 - [x] **Register host sockets on the datapath's poll set.** Done. Every
       host socket the datapath opens — half-open connect, established flow,
@@ -1727,28 +1728,51 @@ what shipped" carries the original three with the mechanism.
       `a_dropped_registration_stops_reporting`, which drops the registration
       while the descriptor stays open — the only arrangement in which
       "it stopped reporting" means deregistration.
-- [ ] **`traffic_does_not_push_out_an_associations_deadline` aims at a dead
-      port.** The fixture opens an association toward `127.0.0.1:443` with
-      nothing listening, so the first datagram draws an ICMP port
-      unreachable and the connected socket reports `ECONNREFUSED` on the
+- [x] **`traffic_does_not_push_out_an_associations_deadline` aims at a dead
+      port.** Done. The fixture opened an association toward `127.0.0.1:443`
+      with nothing listening, so the first datagram drew an ICMP port
+      unreachable and the connected socket reported `ECONNREFUSED` on the
       second `send` — which the table treats as terminal, correctly, and
-      the fixture's `expect` panics. It **fails deterministically on Linux**
+      the fixture's `expect` panicked. It failed deterministically on Linux
       and intermittently on macOS (about one full-suite run in ten), which
-      is why it reads as a flake there. The behaviour under test — a
-      deadline taken once and never pushed out — needs a destination that
-      answers, the way the sibling fixtures use `bind_udp_echo_server`.
-      Pre-existing; found while closing the two defects above.
-- [ ] **Report a datapath backlog the way both drains now do.** A flow's
-      host-to-guest pump is bounded per pass (`max_bytes_per_pass`), and the
-      service pass consumes the readiness edge before pumping — which is the
-      right order, since an edge cleared afterwards is one for bytes nothing
-      would go back for. The consequence is that a peer which sends more than
-      one pass's budget and then goes quiet leaves its tail waiting for the
-      50 ms tick rather than for an edge. Bounded, and strictly better than
-      the pre-registration behaviour where everything waited for the tick,
-      but it is the same shape as the two defects above and wants the same
-      answer: `service` should say it stopped on its budget, and the drive
-      loop should treat that as a backlog. Found while closing those two.
+      is why it read as a flake there. Fixed by giving it a destination that
+      exists and discards (`bind_udp_sink`), never by tolerating the refusal:
+      a refusal is a real signal this path is meant to surface, and no
+      production error handling was touched. The subject is unchanged — the
+      deadline is still taken once from the datagram that opened the
+      association, and only the destination moved.
+      `a_bound_destination_absorbs_a_second_datagram_rather_than_refusing_it`
+      now pins the fixture property itself, waiting out the ICMP round trip
+      so it is deterministic rather than a race; aimed back at a closed port
+      it fails with `ConnectionRefused` on macOS (`code: 61`) as it did on
+      Linux (`code: 111`). Pre-existing; found while closing the two defects
+      above.
+- [x] **Report a datapath backlog the way both drains now do.** Done. A
+      flow's host-to-guest pump is bounded per pass (`max_bytes_per_pass`),
+      and the service pass consumes the readiness edge before pumping —
+      which is the right order, since an edge cleared afterwards is one for
+      bytes nothing would go back for. The consequence was that a peer which
+      sent more than one pass's budget and then went quiet left its tail
+      waiting for the 50 ms tick rather than for an edge. `host_to_guest` now
+      raises `PumpStats::backlogged` when the bound rather than the peer
+      ended the pass, `pump_flows` folds every flow's report into one
+      `InboundDrain` for the machine, `DatapathHandle::service` returns it,
+      and `drive`'s existing `Backlog` carries it as a third flag — the
+      mechanism the two drains already use, extended, not a second one.
+      `InboundDrain` moved from `gateway` to `datapath` so the trait can name
+      it; its public path is unchanged. A stall is deliberately *not* a
+      backlog: what frees the stack's send buffer is the guest's ACK, and
+      that arrives on the guest channel, which wakes the loop by itself.
+      Witnessed at four levels, each mutation-proven:
+      `a_pump_stopped_by_its_budget_says_so_and_the_tail_still_arrives` (red
+      when the report is gutted),
+      `a_flow_that_stopped_at_its_budget_makes_the_service_pass_say_so` (red
+      when either the report or the fold is gutted),
+      `a_backlogged_service_pass_reaches_the_caller_that_decides_to_wait`
+      (red when the gateway swallows it), and
+      `every_bounded_step_can_hold_the_pass_off_the_wait` (red when the flag
+      is dropped from `Backlog::any`). Every one asserts on backlog state,
+      none on elapsed time. Found while closing the two defects above.
 - [ ] **Serve declared ingress, or stop advertising it.**
       `ForwardingCapabilities::USERSPACE_SOCKETS` sets
       `declared_ingress: true` and this datapath opens no listener for it,

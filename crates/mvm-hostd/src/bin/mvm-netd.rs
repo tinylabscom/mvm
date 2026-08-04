@@ -216,20 +216,25 @@ enum Delivery {
     GuestGone,
 }
 
-/// Which side still has work its last pass could not finish.
+/// Which of the pass's bounded steps still has work it could not finish.
 ///
-/// Both drains are bounded and both report what the bound cut off. Waiting
-/// on readiness with either flag set would be waiting on an edge already
-/// spent, so a pass that ends backlogged comes straight back.
+/// Every one of them is bounded and every one reports what the bound cut
+/// off. Waiting on readiness with any flag set would be waiting on an edge
+/// already spent, so a pass that ends backlogged anywhere comes straight
+/// back.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Backlog {
     guest: bool,
+    /// A flow's host-to-guest pump stopped at its per-pass byte budget, so
+    /// the peer's remainder is sitting in a host socket the readiness set
+    /// has already reported once and will not report again.
+    datapath: bool,
     inbound: bool,
 }
 
 impl Backlog {
     fn any(&self) -> bool {
-        self.guest || self.inbound
+        self.guest || self.datapath || self.inbound
     }
 }
 
@@ -386,9 +391,10 @@ fn drive(
         // Fatal rather than counted. A datapath that cannot be serviced
         // cannot carry traffic, and carrying on would put the tunnel back
         // in the silent-hang state this call exists to remove.
-        gateway
+        backlog.datapath = gateway
             .service_datapath(now)
-            .context("servicing the datapath")?;
+            .context("servicing the datapath")?
+            == InboundDrain::Backlogged;
 
         // Unconditional, and deliberately not gated on a DATAPATH event: a
         // datapath that reports no descriptor makes progress only here, and
@@ -747,13 +753,13 @@ mod tests {
             Ok(())
         }
 
-        fn service(&mut self, now_millis: u64) -> Result<(), DatapathError> {
+        fn service(&mut self, now_millis: u64) -> Result<InboundDrain, DatapathError> {
             let mut state = self.state.lock().expect("datapath state");
             state.serviced_at.push(now_millis);
             while let Some(packet) = state.staged.pop_front() {
                 state.readable.push_back(packet);
             }
-            Ok(())
+            Ok(InboundDrain::Idle)
         }
 
         fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
@@ -954,6 +960,38 @@ mod tests {
             GuestChannel::Backlogged,
             "the drain must yield on its read budget rather than keep reading \
              until the guest happens to pause"
+        );
+    }
+
+    /// Each bounded step reaches the wait through this one predicate, so a
+    /// step whose flag it does not read is a step whose backlog waits out
+    /// the tick — with the report correctly produced and correctly stored,
+    /// and no other test the poorer.
+    #[test]
+    fn every_bounded_step_can_hold_the_pass_off_the_wait() {
+        for backlog in [
+            Backlog {
+                guest: true,
+                ..Backlog::default()
+            },
+            Backlog {
+                datapath: true,
+                ..Backlog::default()
+            },
+            Backlog {
+                inbound: true,
+                ..Backlog::default()
+            },
+        ] {
+            assert!(
+                backlog.any(),
+                "{backlog:?} left work behind and must not wait on an edge \
+                 already spent"
+            );
+        }
+        assert!(
+            !Backlog::default().any(),
+            "and a pass that finished everything waits, or an idle machine spins"
         );
     }
 

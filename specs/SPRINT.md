@@ -837,7 +837,13 @@ updates only its own entry below.
       its readiness descriptor, so a resolved connect and an arriving byte
       wake the drive loop rather than waiting out its 50 ms tick, and
       `poll_inbound` is bounded per pass and reports its backlog the way
-      the guest-facing drain already did. Still open: `declared_ingress:
+      the guest-facing drain already did. The two defects found while
+      closing those are closed too: a flow's host-to-guest pump reports the
+      same backlog when its per-pass byte budget stopped it, so a peer's
+      tail no longer waits out the tick, and the association fixture that
+      aimed at a closed loopback port — an ICMP unreachable the next `send`
+      surfaced as `ECONNREFUSED`, deterministic on Linux — now aims at a
+      destination that exists and discards. Still open: `declared_ingress:
       true` is advertised with no listening socket behind it, and cannot be
       cleared today because `GatewayConfig::new` requires it.
       Remaining plan-287 workstreams (UDP ingress, IPv6, benchmarking,

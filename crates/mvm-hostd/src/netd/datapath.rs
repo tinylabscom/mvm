@@ -187,6 +187,26 @@ pub enum DatapathError {
     Io(#[from] std::io::Error),
 }
 
+/// What one bounded pass of host-to-guest work concluded.
+///
+/// Every such pass here takes a budget and stops at it, so each one has to
+/// say which of the two things stopped it. A caller that waits on readiness
+/// has already spent the edge that woke it, and a bound is not an edge:
+/// nothing will report the remainder, so a pass cut off by its budget must
+/// say so or what it left sits until the next tick.
+///
+/// One type for every such pass rather than one per site — the drain of the
+/// host network in [`crate::netd::Gateway::poll_inbound`] and the pump of
+/// each established flow in [`DatapathHandle::service`] ask the same
+/// question and their answers are folded together by the same driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundDrain {
+    /// Nothing more was waiting.
+    Idle,
+    /// The budget ran out with more still there.
+    Backlogged,
+}
+
 /// An open per-machine datapath.
 pub trait DatapathHandle: Send {
     /// Forward one admitted guest packet to the host network.
@@ -211,8 +231,13 @@ pub trait DatapathHandle: Send {
     /// one is finishing. That is the difference between "not yet" and a
     /// hang, so the driver calls this on the same tick it ages everything
     /// else, with the same clock.
-    fn service(&mut self, _now_millis: u64) -> Result<(), DatapathError> {
-        Ok(())
+    ///
+    /// Reports [`InboundDrain::Backlogged`] when a bound inside this pass —
+    /// not the far side going quiet — is what ended it, so the driver comes
+    /// straight back rather than waiting on an edge already spent. A backend
+    /// with nothing to advance has no bound to hit and says `Idle`.
+    fn service(&mut self, _now_millis: u64) -> Result<InboundDrain, DatapathError> {
+        Ok(InboundDrain::Idle)
     }
 
     /// Tear down every device, namespace, route, and rule this handle

@@ -399,6 +399,16 @@ pub struct PumpStats {
     /// them. This is the visible half of backpressure: the bytes stay
     /// where they were and the window closes behind them.
     pub stalled: usize,
+    /// Set when [`max_bytes_per_pass`] — rather than the peer having
+    /// nothing more — is what ended the host-to-guest half of this pass.
+    ///
+    /// The distinction is the whole point. A peer that has gone quiet
+    /// announces its next byte with a readiness edge; a peer cut off by
+    /// this bound does not, because the bytes it left are already in the
+    /// host socket and the edge that reported them was spent before this
+    /// pass read anything. Nothing would go back for the remainder until
+    /// the driver's tick, so the pass has to say it left some.
+    pub backlogged: bool,
 }
 
 /// The most either direction may move in one pass.
@@ -1018,6 +1028,11 @@ impl EstablishedFlow {
     /// The mirror of the rule above: when the stack's send buffer is full
     /// we stop reading the host socket, its own receive window closes, and
     /// the peer stalls.
+    ///
+    /// A stall is not a backlog and is deliberately not reported as one:
+    /// what frees the send buffer is the guest's ACK, and that arrives on
+    /// the guest channel, which wakes the driver on its own. Only the
+    /// budget leaves bytes behind that nothing will announce.
     fn host_to_guest(&mut self, stats: &mut PumpStats) {
         let Self {
             host,
@@ -1035,7 +1050,16 @@ impl EstablishedFlow {
         };
         let socket = sockets.get_mut::<TcpSocket>(*handle);
         let mut budget = max_bytes_per_pass();
-        while budget > 0 {
+        loop {
+            if budget == 0 {
+                // The bound ended the pass, not the peer. Said here rather
+                // than inferred from the counter by a caller: a peer that
+                // sent exactly this much is indistinguishable from one that
+                // sent more, and guessing wrong the other way is a stalled
+                // transfer.
+                stats.backlogged = true;
+                break;
+            }
             if !socket.may_send() {
                 break;
             }
@@ -2371,6 +2395,22 @@ mod tests {
         panic!("the stack must answer a replayed SYN with a SYN-ACK");
     }
 
+    /// The data bytes of `packets`, concatenated in the order the stack
+    /// emitted them.
+    fn payload_bytes(packets: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for p in packets {
+            let Ok(ip) = smoltcp::wire::Ipv4Packet::new_checked(p.as_slice()) else {
+                continue;
+            };
+            let Ok(tcp) = smoltcp::wire::TcpPacket::new_checked(ip.payload()) else {
+                continue;
+            };
+            out.extend_from_slice(tcp.payload());
+        }
+        out
+    }
+
     fn carries_payload(packets: &[Vec<u8>], wanted: &[u8]) -> bool {
         packets.iter().any(|p| {
             let Ok(ip) = smoltcp::wire::Ipv4Packet::new_checked(p.as_slice()) else {
@@ -2544,6 +2584,56 @@ mod tests {
                 "pass {pass} grew the flow past the per-flow bound"
             );
         }
+    }
+
+    /// **A bound is not an edge.** A peer that goes quiet announces its
+    /// next byte with a readiness edge. A peer cut off by
+    /// [`max_bytes_per_pass`] announces nothing: the bytes it left are
+    /// already in the host socket, and the edge that reported them was
+    /// spent before this pass read anything. So the pass itself is the
+    /// only thing that can say there is more, and without it the driver
+    /// sits out its tick with the tail in hand.
+    #[test]
+    fn a_pump_stopped_by_its_budget_says_so_and_the_tail_still_arrives() {
+        let (mut flow, peer, mut g) = established_flow_with_peer();
+        let body: Vec<u8> = (0..max_bytes_per_pass() * 2)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        // Written from its own thread: this is more than one pass will
+        // take, so a synchronous write could sit on a full socket waiting
+        // for the reader that only runs below.
+        let sent = body.clone();
+        let writer = std::thread::spawn(move || {
+            let mut peer = peer;
+            peer.write_all(&sent).expect("the peer's whole answer");
+            peer.flush().expect("flush");
+            peer
+        });
+
+        let mut delivered = Vec::new();
+        let mut stopped_at_the_budget = false;
+        for pass in 0..PUMP_ATTEMPTS {
+            let stats = flow.pump_ignoring_metrics(pass as u64);
+            stopped_at_the_budget |= stats.backlogged;
+            let packets = flow.take_guest_packets();
+            delivered.extend(payload_bytes(&packets));
+            // The guest's acknowledgement is what frees the stack's send
+            // buffer. Without it the flow stalls one buffer in and the tail
+            // could not move however many passes it were given.
+            g.acknowledge(&mut flow, &packets);
+            if delivered.len() >= body.len() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _peer = writer.join().expect("the peer's writer thread");
+
+        assert!(
+            stopped_at_the_budget,
+            "a peer with more than one pass's worth must make some pass report \
+             that the bound stopped it; nothing else reports the remainder"
+        );
+        assert_eq!(delivered, body, "and every byte still reaches the guest");
     }
 
     /// Closing outright would discard the peer's remaining response and

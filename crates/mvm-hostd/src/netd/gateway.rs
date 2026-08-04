@@ -30,7 +30,8 @@ use mvm_protocol::l3::{
 use mvm_protocol::protocol::dns::{DnsRcode, DnsRecordType, decode_query, encode_response};
 
 use super::datapath::{
-    DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
+    DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, InboundDrain,
+    L3Datapath,
 };
 use super::metrics::GatewayMetrics;
 use super::packet::{build_udp_v4, udp_v4_payload};
@@ -176,19 +177,6 @@ pub enum GatewayEvent {
     RateLimited,
     /// The session ended and its resources were released.
     CleanedUp { session: SessionId },
-}
-
-/// What one [`Gateway::poll_inbound`] pass concluded.
-///
-/// The ingress mirror of the guest-facing drain's own report: a caller that
-/// waits on readiness has already spent the edge that woke it, so a pass cut
-/// off by its budget has to say so or the rest sits until the next tick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InboundDrain {
-    /// The datapath had nothing more to give.
-    Idle,
-    /// The budget ran out with packets still waiting.
-    Backlogged,
 }
 
 /// One pass of [`Gateway::poll_inbound`].
@@ -394,7 +382,11 @@ impl Gateway {
     /// holding `&mut dyn DatapathHandle` is one standing beside the
     /// admitter, and nothing outside this gateway needs that in order to
     /// make time pass.
-    pub fn service_datapath(&mut self, now_millis: u64) -> Result<(), DatapathError> {
+    ///
+    /// Passes the datapath's own [`InboundDrain`] through: whether a pass
+    /// left work behind is the caller's business, since the caller is what
+    /// decides whether to wait.
+    pub fn service_datapath(&mut self, now_millis: u64) -> Result<InboundDrain, DatapathError> {
         self.datapath.service(now_millis)
     }
 
@@ -1271,6 +1263,66 @@ mod tests {
             "the burst is exhausted, so the pass after it takes nothing"
         );
         assert_eq!(after.drain, InboundDrain::Idle);
+    }
+
+    /// A datapath that always says its own bound cut the pass short.
+    ///
+    /// The report belongs to the datapath — a userspace one raises it when a
+    /// flow's host-to-guest pump stops at its byte budget — and the driver
+    /// that decides whether to wait sits above the gateway, so the gateway
+    /// has to carry it rather than swallow it.
+    #[derive(Clone, Default)]
+    struct BackloggedNetwork;
+
+    impl L3Datapath for BackloggedNetwork {
+        fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+            Ok(Box::new(self.clone()))
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities::FULL_L3_V4
+        }
+    }
+
+    impl DatapathHandle for BackloggedNetwork {
+        fn send_to_network(&mut self, _packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn recv_from_network(&mut self, _buf: &mut [u8]) -> Result<usize, DatapathError> {
+            Err(DatapathError::Io(std::io::Error::from(
+                std::io::ErrorKind::WouldBlock,
+            )))
+        }
+
+        fn service(&mut self, _now_millis: u64) -> Result<InboundDrain, DatapathError> {
+            Ok(InboundDrain::Backlogged)
+        }
+
+        fn close(&mut self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn description(&self) -> String {
+            "a host network whose every service pass ends backlogged".to_string()
+        }
+    }
+
+    #[test]
+    fn a_backlogged_service_pass_reaches_the_caller_that_decides_to_wait() {
+        let dp = BackloggedNetwork;
+        let mut gw = open_443(&dp);
+        handshake(&mut gw);
+        assert_eq!(
+            gw.service_datapath(3).expect("service"),
+            InboundDrain::Backlogged,
+            "the gateway may not swallow a datapath's backlog: it is the \
+             driver above that decides whether to wait, not this"
+        );
     }
 
     #[test]
