@@ -34,7 +34,7 @@ use sha2::Digest as _;
 use crate::compile::{CompileError, archive_dir, compile};
 
 /// Schema version of the local deploy record.
-pub const DEPLOY_RECORD_SCHEMA_VERSION: u32 = 1;
+pub const DEPLOY_RECORD_SCHEMA_VERSION: u32 = 2;
 
 /// Exact-byte identities of the sealed deploy archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +45,25 @@ pub struct ArtifactDigests {
     /// SHA-256 identity retained for external tooling and interop.
     pub sha256: String,
     /// Number of bytes hashed in the archive.
+    pub size_bytes: u64,
+}
+
+/// Exact-byte identity of the filesystem image that the boot path mounts.
+///
+/// This is deliberately separate from [`ArtifactDigests`]: the deploy archive
+/// is a transport envelope, while this identity names the boot subject. A
+/// caller must never use the archive digest as a rootfs digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootArtifactIdentity {
+    /// Stable artifact kind understood by the boot path.
+    pub kind: String,
+    /// BLAKE3 identity used by the local content-addressed store.
+    pub blake3: String,
+    /// SHA-256 identity used by the signed execution plan and dm-verity
+    /// interoperability boundaries.
+    pub sha256: String,
+    /// Number of bytes in the exact boot artifact.
     pub size_bytes: u64,
 }
 
@@ -80,6 +99,8 @@ pub struct DeployRecord {
     pub ir_hash: String,
     /// Exact-byte identities of the sealed image archive.
     pub image: ArtifactDigests,
+    /// Exact-byte identity of the filesystem image selected for boot.
+    pub boot_artifact: BootArtifactIdentity,
     /// Runtime environment pin, when one was resolved before deployment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<EnvironmentPin>,
@@ -178,6 +199,8 @@ pub struct DeployBundle {
     pub archive_path: PathBuf,
     pub workload_id: String,
     pub schema_version: String,
+    /// Identity of the exact bytes copied into the archive.
+    pub boot_artifact: BootArtifactIdentity,
 }
 
 /// All deploy failure modes the caller might want to handle.
@@ -186,11 +209,33 @@ pub enum DeployError {
     Compile(CompileError),
     Io(std::io::Error),
     Serialize(serde_json::Error),
-    DependencyVolume { path: PathBuf, reason: String },
-    RemoteTransportUnavailable { base_url: String },
-    RemoteCredentialMissing { base_url: String },
-    RemoteHttp { base_url: String, status: u16 },
-    RemoteProtocol { base_url: String, reason: String },
+    SchemaVersion {
+        path: PathBuf,
+        found: u32,
+        expected: u32,
+    },
+    BootArtifact {
+        path: PathBuf,
+        reason: String,
+    },
+    DependencyVolume {
+        path: PathBuf,
+        reason: String,
+    },
+    RemoteTransportUnavailable {
+        base_url: String,
+    },
+    RemoteCredentialMissing {
+        base_url: String,
+    },
+    RemoteHttp {
+        base_url: String,
+        status: u16,
+    },
+    RemoteProtocol {
+        base_url: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for DeployError {
@@ -199,10 +244,26 @@ impl std::fmt::Display for DeployError {
             Self::Compile(e) => write!(f, "compile failed: {e}"),
             Self::Io(e) => write!(f, "deploy io: {e}"),
             Self::Serialize(e) => write!(f, "serializing mvmd-spec.json: {e}"),
+            Self::SchemaVersion {
+                path,
+                found,
+                expected,
+            } => write!(
+                f,
+                "deploy record {} has schema version {found}, expected {expected}",
+                path.display()
+            ),
             Self::DependencyVolume { path, reason } => {
                 write!(
                     f,
                     "dependency volume {} is not sealed: {reason}",
+                    path.display()
+                )
+            }
+            Self::BootArtifact { path, reason } => {
+                write!(
+                    f,
+                    "boot artifact {} is not attested: {reason}",
                     path.display()
                 )
             }
@@ -252,6 +313,7 @@ pub fn build_deploy_bundle(
     workload: &Workload,
     out: &Path,
     manifest_dir: &Path,
+    boot_artifact: &Path,
 ) -> Result<DeployBundle, DeployError> {
     let temp = tempfile::Builder::new()
         .prefix(".mvm-deploy-staging-")
@@ -261,12 +323,22 @@ pub fn build_deploy_bundle(
     let spec = build_mvmd_spec(workload);
     let spec_json = serde_json::to_vec_pretty(&spec)?;
     std::fs::write(staging.join("mvmd-spec.json"), spec_json)?;
+    let boot_dir = staging.join("boot");
+    std::fs::create_dir_all(&boot_dir)?;
+    std::fs::copy(boot_artifact, boot_dir.join("rootfs.ext4")).map_err(|error| {
+        DeployError::Io(std::io::Error::new(
+            error.kind(),
+            format!("copying boot artifact {}: {error}", boot_artifact.display()),
+        ))
+    })?;
+    let boot_artifact_identity = digest_boot_artifact(&boot_dir.join("rootfs.ext4"))?;
     archive_dir(&staging, out)
         .map_err(|e| DeployError::Io(std::io::Error::other(format!("archive: {e}"))))?;
     Ok(DeployBundle {
         archive_path: out.to_path_buf(),
         workload_id: workload.id.clone(),
         schema_version: workload.schema_version.clone(),
+        boot_artifact: boot_artifact_identity,
     })
 }
 
@@ -313,9 +385,46 @@ pub fn build_deploy_record(
         workload_id: workload.id.clone(),
         ir_hash,
         image: digest_artifact(&bundle.archive_path)?,
+        boot_artifact: bundle.boot_artifact.clone(),
         environment,
         dependency_volume,
     })
+}
+
+/// Hash the exact filesystem image selected for the boot path.
+pub fn digest_boot_artifact(path: &Path) -> Result<BootArtifactIdentity, DeployError> {
+    let digest = digest_artifact(path)?;
+    Ok(BootArtifactIdentity {
+        kind: "rootfs.ext4".to_string(),
+        blake3: digest.blake3,
+        sha256: digest.sha256,
+        size_bytes: digest.size_bytes,
+    })
+}
+
+/// Verify that a selected boot path still contains the bytes named by a
+/// deploy record. This is intentionally a full rehash: path names and cached
+/// metadata are not artifact identity.
+pub fn verify_boot_artifact(
+    path: &Path,
+    expected: &BootArtifactIdentity,
+) -> Result<(), DeployError> {
+    validate_boot_artifact_identity(path, expected)?;
+    let actual = digest_boot_artifact(path)?;
+    if actual != *expected {
+        return Err(DeployError::BootArtifact {
+            path: path.to_path_buf(),
+            reason: format!(
+                "boot artifact identity mismatch for {}: expected {} / {}, got {} / {}",
+                path.display(),
+                expected.blake3,
+                expected.sha256,
+                actual.blake3,
+                actual.sha256
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Write a deploy record as private, human-readable JSON.
@@ -328,6 +437,46 @@ pub fn write_deploy_record(record: &DeployRecord, path: &Path) -> Result<(), Dep
     let mut bytes = serde_json::to_vec_pretty(record)?;
     bytes.push(b'\n');
     std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Read a deploy record and reject stale or future schemas before any of its
+/// fields can influence admission.
+pub fn read_deploy_record(path: &Path) -> Result<DeployRecord, DeployError> {
+    let record: DeployRecord = serde_json::from_slice(&std::fs::read(path)?)?;
+    if record.schema_version != DEPLOY_RECORD_SCHEMA_VERSION {
+        return Err(DeployError::SchemaVersion {
+            path: path.to_path_buf(),
+            found: record.schema_version,
+            expected: DEPLOY_RECORD_SCHEMA_VERSION,
+        });
+    }
+    validate_boot_artifact_identity(path, &record.boot_artifact)?;
+    Ok(record)
+}
+
+fn validate_boot_artifact_identity(
+    path: &Path,
+    identity: &BootArtifactIdentity,
+) -> Result<(), DeployError> {
+    if identity.kind != "rootfs.ext4" {
+        return Err(DeployError::BootArtifact {
+            path: path.to_path_buf(),
+            reason: format!("unsupported boot artifact kind {:?}", identity.kind),
+        });
+    }
+    for (label, value) in [("BLAKE3", &identity.blake3), ("SHA-256", &identity.sha256)] {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(DeployError::BootArtifact {
+                path: path.to_path_buf(),
+                reason: format!("{label} must be 64 hexadecimal characters"),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -718,7 +867,10 @@ mod tests {
         };
 
         let archive = tmp.path().join("hello.tar.gz");
-        let bundle = build_deploy_bundle(&workload, &archive, &manifest_dir).expect("build");
+        let boot_artifact = tmp.path().join("rootfs.ext4");
+        std::fs::write(&boot_artifact, b"rootfs bytes").unwrap();
+        let bundle =
+            build_deploy_bundle(&workload, &archive, &manifest_dir, &boot_artifact).expect("build");
         assert_eq!(bundle.archive_path, archive);
         assert_eq!(bundle.workload_id, "hello");
         assert!(archive.is_file());
@@ -740,6 +892,10 @@ mod tests {
             entries.iter().any(|p| p == "flake.nix"),
             "archive missing flake.nix; entries: {entries:?}"
         );
+        assert!(
+            entries.iter().any(|p| p == "boot/rootfs.ext4"),
+            "archive missing exact boot artifact; entries: {entries:?}"
+        );
     }
 
     #[test]
@@ -749,8 +905,11 @@ mod tests {
         std::fs::create_dir_all(&manifest_dir).unwrap();
         std::fs::write(manifest_dir.join("hello.py"), b"x = 1\n").unwrap();
         let archive = tmp.path().join("hello.tar.gz");
+        let boot_artifact = tmp.path().join("rootfs.ext4");
+        std::fs::write(&boot_artifact, b"rootfs bytes").unwrap();
         let workload = sample_workload();
-        let bundle = build_deploy_bundle(&workload, &archive, &manifest_dir).unwrap();
+        let bundle =
+            build_deploy_bundle(&workload, &archive, &manifest_dir, &boot_artifact).unwrap();
         let record = build_deploy_record(
             &workload,
             &bundle,
@@ -768,17 +927,47 @@ mod tests {
         );
         assert_eq!(record.image.blake3.len(), 64);
         assert_eq!(record.image.sha256.len(), 64);
+        assert_eq!(record.boot_artifact.kind, "rootfs.ext4");
+        assert_eq!(record.boot_artifact.size_bytes, 12);
         assert!(record.environment.is_some());
 
         let record_path = tmp.path().join("deploy.json");
         write_deploy_record(&record, &record_path).unwrap();
         let round_trip: DeployRecord =
-            serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
         assert_eq!(round_trip, record);
+        assert_eq!(read_deploy_record(&record_path).unwrap(), record);
+
+        let stale_path = tmp.path().join("stale-deploy.json");
+        let mut stale = serde_json::to_value(&record).unwrap();
+        stale["schema_version"] = serde_json::json!(1);
+        std::fs::write(&stale_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(matches!(
+            read_deploy_record(&stale_path),
+            Err(DeployError::SchemaVersion { .. })
+        ));
 
         let mut unknown = serde_json::to_value(record).unwrap();
         unknown["unexpected"] = serde_json::json!(true);
         assert!(serde_json::from_value::<DeployRecord>(unknown).is_err());
+    }
+
+    #[test]
+    fn boot_artifact_verification_refuses_tamper_and_wrong_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"attested rootfs").unwrap();
+        let identity = digest_boot_artifact(&rootfs).unwrap();
+        verify_boot_artifact(&rootfs, &identity).unwrap();
+
+        std::fs::write(&rootfs, b"tampered rootfs").unwrap();
+        let error = verify_boot_artifact(&rootfs, &identity).unwrap_err();
+        assert!(matches!(error, DeployError::BootArtifact { .. }));
+
+        let mut wrong_kind = identity;
+        wrong_kind.kind = "image.tar.gz".to_string();
+        let error = verify_boot_artifact(&rootfs, &wrong_kind).unwrap_err();
+        assert!(matches!(error, DeployError::BootArtifact { .. }));
     }
 
     #[test]
@@ -812,10 +1001,13 @@ mod tests {
 
         let archive = tmp.path().join("image.tar.gz");
         std::fs::write(&archive, b"image").unwrap();
+        let boot_artifact = tmp.path().join("rootfs.ext4");
+        std::fs::write(&boot_artifact, b"rootfs").unwrap();
         let bundle = DeployBundle {
             archive_path: archive,
             workload_id: "hello".into(),
             schema_version: "0.1".into(),
+            boot_artifact: digest_boot_artifact(&boot_artifact).unwrap(),
         };
         let err =
             build_deploy_record(&sample_workload(), &bundle, None, Some(&volume)).unwrap_err();
@@ -828,10 +1020,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let archive = tmp.path().join("hello.tar.gz");
         std::fs::write(&archive, b"fake-bytes").unwrap();
+        let boot_artifact = tmp.path().join("rootfs.ext4");
+        std::fs::write(&boot_artifact, b"rootfs").unwrap();
         let bundle = DeployBundle {
             archive_path: archive,
             workload_id: "hello".into(),
             schema_version: "0.1".into(),
+            boot_artifact: digest_boot_artifact(&boot_artifact).unwrap(),
         };
         let record = DeployRecord {
             schema_version: DEPLOY_RECORD_SCHEMA_VERSION,
@@ -841,6 +1036,12 @@ mod tests {
                 blake3: "b".repeat(64),
                 sha256: "a".repeat(64),
                 size_bytes: 10,
+            },
+            boot_artifact: BootArtifactIdentity {
+                kind: "rootfs.ext4".into(),
+                blake3: "b".repeat(64),
+                sha256: "a".repeat(64),
+                size_bytes: 6,
             },
             environment: None,
             dependency_volume: None,
