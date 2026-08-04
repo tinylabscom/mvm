@@ -499,23 +499,15 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     // copy of the token, so the authority for every byte written here is the
     // plan this very boot was admitted under.
     let admitted = admit_ctx.borrow();
-    let dispatch_stdin = match (stream_stdin, admitted.as_ref()) {
-        (true, Some(ctx)) => DispatchStdin::Streaming(&ctx.admitted),
-        (true, None) => {
-            // `--no-supervisor` short-circuits admission, and an unsigned boot
-            // has no plan to grant anything. Refusing beats streaming into a
-            // workload nothing authorized.
+    let dispatch_stdin = match authorize_stdin(stream_stdin, admitted.as_ref(), stdin_prologue) {
+        Ok(stdin) => stdin,
+        Err(refusal) => {
             crate::exec::tear_down_session_vm(crate::exec::SessionVm {
                 vm_name: vm.vm_name.clone(),
             });
             deregister_invoke_session(session_id.as_ref());
-            anyhow::bail!(
-                "streamed stdin needs an admitted plan, and this boot was not admitted \
-                 (--no-supervisor): the input grant is what authorizes a write, so there \
-                 is nothing here to write under"
-            );
+            return Err(refusal);
         }
-        (false, _) => DispatchStdin::OneShot(stdin_prologue),
     };
     let dispatch_result = dispatch(EntrypointDispatch {
         vm_name: &vm.vm_name,
@@ -560,6 +552,30 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Decide what this call's stdin may be, now that the boot's admission is
+/// known.
+///
+/// A streamed stdin is the only shape that needs anything from the boot: the
+/// grant on the admitted plan is what authorizes a write, so a boot that
+/// produced no plan — `--no-supervisor` short-circuits admission — has nothing
+/// to write under. Refusing here beats streaming into a workload nothing
+/// authorized. A one-shot payload asks for no authority and is unaffected.
+fn authorize_stdin<'a>(
+    stream_stdin: bool,
+    admitted: Option<&'a super::up::AdmissionContext>,
+    prologue: Vec<u8>,
+) -> Result<DispatchStdin<'a>> {
+    match (stream_stdin, admitted) {
+        (true, Some(ctx)) => Ok(DispatchStdin::Streaming(&ctx.admitted)),
+        (true, None) => anyhow::bail!(
+            "streamed stdin needs an admitted plan, and this boot was not admitted \
+             (--no-supervisor): the input grant is what authorizes a write, so there \
+             is nothing here to write under"
+        ),
+        (false, _) => Ok(DispatchStdin::OneShot(prologue)),
     }
 }
 
@@ -791,12 +807,15 @@ fn dispatch_inner(call: EntrypointDispatch<'_>) -> Result<i32> {
             stream_input: streaming,
         },
         |event| write_entrypoint_event(event, &mut capture, &mut out),
-    )
-    .context("Streaming RunEntrypoint response")?;
+    );
     drop(capture);
+    // Before the `?`, not after: a call that failed truncated the caller's
+    // stdin just as surely as one that succeeded, and propagating first would
+    // swallow the only notice saying so.
     if let Some(streamed) = streamed {
         report_streamed_stdin(vm_name, &mut out, streamed.finish());
     }
+    let terminal = terminal.context("Streaming RunEntrypoint response")?;
 
     // After the output, before the exit: the caller has just been handed the
     // workload's own bytes, and this is where it learns whether the copy an
@@ -2261,5 +2280,134 @@ mod tests {
         let ca_at = env.iter().position(|(k, _)| k == "SSL_CERT_FILE").unwrap();
         let key_at = env.iter().position(|(k, _)| k == "OPENAI_API_KEY").unwrap();
         assert!(ca_at < key_at, "CA vars must precede the placeholder vars");
+    }
+}
+
+/// The two ways a call that asked to stream its stdin is turned down, and what
+/// the caller is told when the bytes it typed did not all land.
+#[cfg(test)]
+mod streamed_stdin_tests {
+    use super::*;
+    use crate::commands::vm::stdin_stream::StreamedInputReport;
+
+    fn streaming_attach_call() -> EntrypointCall {
+        EntrypointCall {
+            source: "already-running".to_string(),
+            stdin: EntrypointStdin::Streaming,
+            timeout: 30,
+            cpus: 1,
+            memory_mib: 256,
+            from_workload_ir: None,
+            agent_verb_override: Vec::new(),
+            reset: false,
+            keep_alive: false,
+            keep_alive_dev: false,
+            session: None,
+            r#fn: None,
+            attach: true,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        }
+    }
+
+    #[test]
+    fn attaching_to_a_machine_someone_else_admitted_refuses_a_streamed_stdin() {
+        // The grant rides on the plan the *boot* was admitted under, and this
+        // process holds no such plan. Without the refusal the write is turned
+        // down three layers down, where the message cannot say why.
+        let error = run_entrypoint(streaming_attach_call())
+            .expect_err("no plan here can authorize a write into that machine");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("--attach"), "{rendered}");
+        assert!(rendered.contains("input grant"), "{rendered}");
+    }
+
+    #[test]
+    fn a_one_shot_payload_needs_nothing_from_the_boot() {
+        // The refusal must be about the grant, not about streaming being
+        // involved anywhere: an unadmitted boot still delivers a payload.
+        match authorize_stdin(false, None, b"[[], {}]".to_vec()) {
+            Ok(DispatchStdin::OneShot(bytes)) => assert_eq!(bytes, b"[[], {}]"),
+            Ok(DispatchStdin::Streaming(_)) => panic!("a one-shot call must not stream"),
+            Err(e) => panic!("a one-shot payload asks for no authority: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn an_unadmitted_boot_refuses_a_streamed_stdin() {
+        // `--no-supervisor` short-circuits admission, so there is no grant and
+        // nothing to write under. Streaming anyway would put the caller's
+        // bytes into a workload nothing authorized.
+        let error = authorize_stdin(true, None, Vec::new())
+            .err()
+            .expect("an unadmitted boot has no grant to write under");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("--no-supervisor"), "{rendered}");
+        assert!(rendered.contains("admitted plan"), "{rendered}");
+    }
+
+    fn rendered_report(report: StreamedInputReport) -> (String, String) {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        {
+            let mut sinks = CallOutput {
+                sinks: EventSinks {
+                    out: Box::new(&mut out),
+                    err: Box::new(&mut err),
+                },
+                divergence: RecordedDivergence::default(),
+            };
+            report_streamed_stdin("call-vm", &mut sinks, report);
+        }
+        (
+            String::from_utf8(out).expect("utf8"),
+            String::from_utf8(err).expect("utf8"),
+        )
+    }
+
+    #[test]
+    fn a_writer_that_stopped_early_says_so_with_the_reason() {
+        let (out, err) = rendered_report(StreamedInputReport {
+            frames: 3,
+            bytes: 42,
+            reached_eof: false,
+            stopped_because: Some("the workload did not take streamed input".to_string()),
+        });
+        assert!(err.starts_with("[mvmctl-stream] "), "{err}");
+        assert!(err.contains("stopped early"), "{err}");
+        assert!(err.contains("42 byte(s) in 3 frame(s)"), "{err}");
+        assert!(
+            err.contains("the workload did not take streamed input"),
+            "{err}"
+        );
+        assert!(out.is_empty(), "a diagnostic never lands on stdout");
+    }
+
+    #[test]
+    fn a_call_that_ended_before_the_callers_stdin_did_says_so() {
+        // The truncation is invisible otherwise: the workload simply saw less
+        // than the caller sent.
+        let (out, err) = rendered_report(StreamedInputReport {
+            frames: 2,
+            bytes: 9,
+            reached_eof: false,
+            stopped_because: None,
+        });
+        assert!(err.starts_with("[mvmctl-stream] "), "{err}");
+        assert!(err.contains("ended before your stdin did"), "{err}");
+        assert!(err.contains("9 byte(s) in 2 frame(s)"), "{err}");
+        assert!(err.contains("call-vm"), "{err}");
+        assert!(out.is_empty(), "a diagnostic never lands on stdout");
+    }
+
+    #[test]
+    fn a_stream_that_ran_to_the_end_says_nothing() {
+        // A notice that fires every time stops being read.
+        let (out, err) = rendered_report(StreamedInputReport {
+            frames: 5,
+            bytes: 100,
+            reached_eof: true,
+            stopped_because: None,
+        });
+        assert!(err.is_empty(), "{err}");
+        assert!(out.is_empty(), "{out}");
     }
 }

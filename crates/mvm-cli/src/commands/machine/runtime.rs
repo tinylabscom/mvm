@@ -302,18 +302,26 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
 /// - a path — read that file and send it as one payload; a file has an end the
 ///   host already knows, so there is nothing to stream.
 fn resolve_entrypoint_stdin(spec: Option<&str>) -> Result<invoke::EntrypointStdin> {
+    resolve_entrypoint_stdin_with(spec, || {
+        use std::io::IsTerminal as _;
+        invoke::read_auto_stdin(std::io::stdin().is_terminal())
+    })
+}
+
+/// The mapping itself, with the one arm that reads this process's own stdin
+/// supplied rather than reached for — so every shape of the flag is decidable
+/// without a real fd behind it.
+fn resolve_entrypoint_stdin_with(
+    spec: Option<&str>,
+    piped: impl FnOnce() -> Result<Vec<u8>>,
+) -> Result<invoke::EntrypointStdin> {
     match spec {
         Some("-") => Ok(invoke::EntrypointStdin::Streaming),
         Some(path) => Ok(invoke::EntrypointStdin::OneShot(
             std::fs::read(path)
                 .with_context(|| format!("reading the entrypoint's stdin payload from {path}"))?,
         )),
-        None => {
-            use std::io::IsTerminal as _;
-            Ok(invoke::EntrypointStdin::OneShot(invoke::read_auto_stdin(
-                std::io::stdin().is_terminal(),
-            )?))
-        }
+        None => Ok(invoke::EntrypointStdin::OneShot(piped()?)),
     }
 }
 
@@ -448,6 +456,108 @@ pub(in crate::commands) fn boot_persistent_by_name(
         },
         cfg,
     )
+}
+
+#[cfg(test)]
+mod entrypoint_stdin_tests {
+    use super::*;
+
+    /// Name the variant the flag resolved to. A payload and a stream are
+    /// different contracts with the guest, and only one of them puts the input
+    /// grant on the signed plan — so "it parsed" is not the property.
+    fn described(resolved: &invoke::EntrypointStdin) -> String {
+        match resolved {
+            invoke::EntrypointStdin::Streaming => "streaming".to_string(),
+            invoke::EntrypointStdin::OneShot(bytes) => {
+                format!("one-shot {:?}", String::from_utf8_lossy(bytes))
+            }
+        }
+    }
+
+    fn nothing_piped() -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    /// `expect_err` needs `Debug` on the success type, and the success type
+    /// here carries the caller's own stdin — which has no business in a panic
+    /// message. Name the variant instead.
+    fn refusal(resolved: Result<invoke::EntrypointStdin>, why: &str) -> anyhow::Error {
+        match resolved {
+            Err(error) => error,
+            Ok(resolved) => panic!("{why}, got {}", described(&resolved)),
+        }
+    }
+
+    #[test]
+    fn a_dash_asks_for_a_live_stream_rather_than_a_payload() {
+        // Resolving this to a payload would disable the feature outright: no
+        // grant requested, nothing streamed, and a green suite — the caller's
+        // only symptom is a workload that never sees what they typed.
+        let resolved =
+            resolve_entrypoint_stdin_with(Some("-"), nothing_piped).expect("`-` needs no fd");
+        assert!(
+            matches!(resolved, invoke::EntrypointStdin::Streaming),
+            "`--stdin -` must stream, got {}",
+            described(&resolved)
+        );
+    }
+
+    #[test]
+    fn a_path_is_read_once_and_sent_as_a_payload() {
+        // A file has an end the host already knows, so there is nothing to
+        // stream and nothing to ask a grant for.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("payload.json");
+        std::fs::write(&path, b"[[1], {}]").expect("write");
+        let resolved = resolve_entrypoint_stdin_with(Some(&path.to_string_lossy()), nothing_piped)
+            .expect("the file exists");
+        match resolved {
+            invoke::EntrypointStdin::OneShot(bytes) => assert_eq!(bytes, b"[[1], {}]"),
+            other => panic!("a path must send a payload, got {}", described(&other)),
+        }
+    }
+
+    #[test]
+    fn an_absent_flag_keeps_the_piped_payload_it_always_had() {
+        // Inferring a stream from a piped stdin would move every existing
+        // piped call onto the granted path without anybody asking for it.
+        let resolved = resolve_entrypoint_stdin_with(None, || Ok(b"piped in".to_vec()))
+            .expect("the piped read succeeded");
+        match resolved {
+            invoke::EntrypointStdin::OneShot(bytes) => assert_eq!(bytes, b"piped in"),
+            other => panic!("an absent flag must not stream, got {}", described(&other)),
+        }
+    }
+
+    #[test]
+    fn a_stdin_path_that_does_not_exist_fails_rather_than_sending_nothing() {
+        // Silently sending an empty payload would call the entrypoint with the
+        // wrong input and report success.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("absent.json");
+        let error = refusal(
+            resolve_entrypoint_stdin_with(Some(&missing.to_string_lossy()), nothing_piped),
+            "a missing payload file must not resolve",
+        );
+        assert!(
+            format!("{error:#}").contains("absent.json"),
+            "the refusal must name the file it could not read: {error:#}"
+        );
+    }
+
+    #[test]
+    fn a_failed_piped_read_fails_the_call() {
+        let error = refusal(
+            resolve_entrypoint_stdin_with(None, || {
+                Err(anyhow::anyhow!("stdin payload exceeds the limit"))
+            }),
+            "an unreadable stdin must not resolve to an empty payload",
+        );
+        assert!(
+            format!("{error:#}").contains("exceeds the limit"),
+            "{error:#}"
+        );
+    }
 }
 
 #[cfg(test)]
