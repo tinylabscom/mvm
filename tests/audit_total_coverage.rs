@@ -442,6 +442,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("prepare", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),
     ("init", AuditPosture::InteractiveOrControl),
+    ("watch", AuditPosture::InteractiveOrControl),
     // VM lifecycle. `up` and `invoke` are retired (folded into `machine run`'s
     // argv lifecycle + `--entrypoint` action). `run` survives hidden as the SDK
     // Sandbox transport (`run --mode live/plan`); its posture is unchanged.

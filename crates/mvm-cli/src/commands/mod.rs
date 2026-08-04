@@ -23,6 +23,9 @@ mod shared;
 mod storage;
 mod trust;
 pub(crate) mod vm;
+mod watch;
+
+pub(in crate::commands) use build::ir_input::load_ir_json_workload;
 
 #[cfg(test)]
 mod tests;
@@ -103,8 +106,11 @@ pub(in crate::commands) enum Commands {
     /// Explain a run after the fact from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
-    /// Manage the versioned pack cache (list/rollback/prune/download/update)
+    /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
+    Watch(watch::Args),
+    /// Manage the versioned pack cache (list/rollback/prune/download/update)
+    #[command(display_order = 9)]
     Pack(pack::Args),
     /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing
     /// transient-run role folded into `machine run`; `run` survives only as the

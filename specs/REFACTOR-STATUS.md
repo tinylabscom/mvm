@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-03
+Last updated: 2026-08-04
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -11,7 +11,9 @@ for detailed scope and acceptance criteria.
   - [ ] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
         record; ship to mvmd when a remote is configured, else stop at the
         local sealed artifact
-  - [ ] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address
+  - [~] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address;
+        long-running mode recovers from transient input/compile errors while
+        `--once` remains fail-fast
   - [~] WS3 capture-from-sandbox via `reseal_volume`, converging on the
         declared-dependency path and keeping the lockfile hash pin
   - [~] WS4 tier follows the attestation

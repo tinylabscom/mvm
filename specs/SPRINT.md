@@ -13,6 +13,12 @@
 - [~] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
       and refuses tampered or unpinned source volumes.
+
+- [~] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
+      polls local source inputs, recompiles only when the semantic IR address
+      or source fingerprint changes, and reports rebuild/no-op iterations.
+      Long-running mode now waits for the next change after transient input or
+      compile errors, while `--once` remains fail-fast for automation.
 - [~] Develop → build → deploy an attested workload image — **plan 291**.
       The agent-verb grant now derives from the admitted run shape: baked
       entrypoints on non-dev profiles receive the attenuated ProdSafe grant,
@@ -20,6 +26,9 @@
       longer keys interactive reachability on an image sidecar bit. Deploy
       attestation, the remaining tier binding, and conformance witnesses stay
       open in WS1–WS4.
+- [~] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
+      polls local source inputs, recompiles only when the semantic IR address
+      or source fingerprint changes, and reports rebuild/no-op iterations.
 
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated

@@ -92,11 +92,18 @@ before WS1 starts.
 
 ### WS2 — `mvmctl watch`
 
-- [ ] Watch the workload source and rebuild the image on change.
-- [ ] Reuse the existing content addresses to skip no-op rebuilds: if the
+- [~] Watch the workload source and rebuild the image on change.
+      The file-backed IR watcher polls local source inputs and invokes the
+      existing deterministic compiler when the input fingerprint changes.
+- [~] Reuse the existing content addresses to skip no-op rebuilds: if the
       `ir_hash` and inputs are unchanged, do nothing.
-- [ ] Surface what changed and what it cost, so the loop teaches the developer
+- [~] Surface what changed and what it cost, so the loop teaches the developer
       what their workload actually depends on.
+      Each iteration reports whether it rebuilt or found an unchanged state;
+      rebuilds identify whether IR or source inputs changed and report compile
+      duration in milliseconds. Long-running watches keep polling after a
+      transient input or compile error and retry when the fingerprint changes;
+      `--once` remains fail-fast for automation.
 
 ### WS3 — capture dependencies from the sandbox
 
