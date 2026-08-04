@@ -401,7 +401,40 @@ remote recovery appear to be a local warm claim.
 
 ## Phase 5 — Security hardening and adversarial validation
 
-### 5.1 Confidentiality and key management
+### 5.1 Zeroization and sensitive-memory handling
+
+- [ ] Classify every value handled by the tiering path as public metadata,
+      integrity metadata, tenant data, credential material, key material, or
+      decrypted plaintext before choosing its storage and logging behavior.
+- [ ] Use the existing `zeroize`/`secrecy` primitives for data-encryption keys,
+      key-encryption keys, provider credentials, signed-request material,
+      plaintext chunk buffers, decrypted snapshot buffers, and temporary secret
+      substitutions.
+- [ ] Make sensitive types non-`Debug`, non-`Serialize`, and non-`Clone` unless
+      a deliberate, tested ownership transfer requires one of those operations.
+- [ ] Avoid unnecessary plaintext copies by passing borrowed slices where
+      possible and consuming sensitive buffers when ownership must move.
+- [ ] Zero plaintext, key, nonce, and authentication scratch buffers on normal
+      completion, error, cancellation, timeout, and task shutdown paths.
+- [ ] Use RAII cleanup guards for sensitive staging and buffer ownership so
+      cancellation cannot skip cleanup.
+- [ ] Lock key material in memory where the platform supports it and apply the
+      existing core-dump and fork-inheritance protections to key pages.
+- [ ] Define the fail-closed behavior when a platform cannot provide the
+      required key-memory protection; do not imply that file permissions alone
+      protect a remote-tier key.
+- [ ] Prevent plaintext snapshot and volume data from entering logs, tracing
+      fields, metrics labels, panic messages, crash reports, or provider errors.
+- [ ] Wipe decrypted temporary state before buffer reuse and before releasing
+      a staging allocation; do not rely on `Vec::clear()` as a zeroization
+      mechanism.
+- [ ] Treat secure deletion of local SSD/NVMe blocks as unavailable; use
+      authenticated encryption and cryptographic erasure for data that must be
+      rendered unrecoverable.
+- [ ] Add tests and review checklists proving that key and plaintext lifetimes
+      end at the intended boundary, including restore refusal and cancellation.
+
+### 5.2 Confidentiality and key management
 
 - [ ] Use client-side authenticated encryption before remote upload.
 - [ ] Domain-separate keys by organization, workspace, tenant, resource kind,
@@ -412,7 +445,7 @@ remote recovery appear to be a local warm claim.
 - [ ] Define deletion behavior for remote ciphertext when the key is destroyed.
 - [ ] Do not claim online key rotation until a complete tested transition exists.
 
-### 5.2 Deduplication privacy
+### 5.3 Deduplication privacy
 
 - [ ] Decide whether sensitive data uses tenant-scoped digests, keyed digests,
       or encryption-derived identities.
@@ -421,7 +454,7 @@ remote recovery appear to be a local warm claim.
 - [ ] Keep public immutable artifact deduplication separate from tenant-private
       artifact deduplication.
 
-### 5.3 Integrity, rollback, and substitution
+### 5.4 Integrity, rollback, and substitution
 
 - [ ] Verify manifest signature or audit binding before trusting chunk metadata.
 - [ ] Verify every ciphertext and plaintext digest.
@@ -432,7 +465,7 @@ remote recovery appear to be a local warm claim.
 - [ ] Refuse a restore when the parent checkpoint is missing, unaudited,
       tampered, or incompatible.
 
-### 5.4 Isolation and side channels
+### 5.5 Isolation and side channels
 
 - [ ] Include tenant/resource scope in cache keys and authorization checks.
 - [ ] Keep same-page merging confined to an approved same-image fork family.
@@ -441,7 +474,7 @@ remote recovery appear to be a local warm claim.
 - [ ] Never include raw resource names, credentials, or secret-bearing object
       metadata in cache filenames or provider keys.
 
-### 5.5 Resource exhaustion
+### 5.6 Resource exhaustion
 
 - [ ] Bound manifest size, chunk count, chunk size, decompressed size, and
       temporary storage.
@@ -453,7 +486,7 @@ remote recovery appear to be a local warm claim.
 - [ ] Test decompression bombs, range-read amplification, cache thrashing, and
       provider retry storms.
 
-### 5.6 Audit and observability
+### 5.7 Audit and observability
 
 - [ ] Emit non-sensitive signed records for upload, publication, cache
       admission, eviction, rehydration, restore, integrity refusal,
@@ -487,6 +520,109 @@ secret or credential leakage in files, logs, manifests, or audit records.
 - [ ] Document exactly which claims are measured, which are targets, and which
       are unavailable on each backend.
 
+## Extensibility requirements
+
+Extensibility must preserve the security and performance invariants. The goal
+is a small number of stable seams, not a general plugin framework.
+
+### Provider- and backend-neutral interfaces
+
+- [ ] Keep artifact identity, manifest semantics, chunk addressing, and
+      durability policy independent of S3/GCS/Azure/R2 names and SDK types.
+- [ ] Define narrow seams only where there are real implementations: local
+      storage, remote object storage, hot-cache policy, tiering policy, key
+      provider, clock, randomness, and fault-injection test stores.
+- [ ] Represent provider capabilities explicitly, including range reads,
+      multipart upload, conditional publication, versioning, and listing
+      guarantees; do not infer them from provider names.
+- [ ] Fail closed when a requested durability or consistency mode is not
+      supported by the selected provider.
+- [ ] Keep backend compatibility as a typed artifact property, not as a
+      stringly-typed branch scattered through restore call sites.
+- [ ] Keep the `mvm-volume-contract` and `mvm-protocol` surfaces free of
+      provider-specific credentials, clients, and async runtime dependencies.
+- [ ] Ensure a local-only build can compile and operate without any remote
+      provider configuration.
+
+### Manifest and cryptographic evolution
+
+- [ ] Version manifests explicitly and reject unknown security-critical fields
+      and algorithms rather than guessing their meaning.
+- [ ] Define supported algorithm identifiers for digest, authenticated
+      encryption, compression, and key wrapping; unsupported combinations must
+      produce typed refusals.
+- [ ] Keep encryption and compression as typed pipeline stages so future
+      compression or key-provider changes do not alter the restore contract
+      implicitly.
+- [ ] Bind chunk policy, encryption key version, nonce rules, and compression
+      parameters to the manifest digest.
+- [ ] Preserve a read-old/write-new migration path and prohibit downgrading a
+      newly written artifact to an older, weaker format.
+- [ ] Define how future HSM/KMS-backed key providers implement the existing
+      key-provider seam without placing provider-specific handles in manifests.
+- [ ] Test algorithm-agility refusal, key-version transitions, and mixed-version
+      workers before enabling a new format in production.
+
+### Tiering and placement policy
+
+- [ ] Represent hot, warm, cold, retained, and evictable state as an explicit
+      policy rather than a collection of boolean flags.
+- [ ] Make age thresholds, capacity pressure, access frequency, retention, and
+      pinning configurable through validated policy types.
+- [ ] Allow a future replicated block tier or erasure-coded cold tier without
+      changing guest-visible volume semantics.
+- [ ] Separate placement policy from storage mechanics so a policy change does
+      not bypass encryption, lineage, fencing, or audit checks.
+- [ ] Ensure a future scheduler can prefetch artifacts for a worker without
+      granting that worker additional tenant authority.
+
+### Concurrency, cancellation, and resource control
+
+- [ ] Bound every upload, download, decrypt, decompress, materialize, and
+      garbage-collection operation with explicit byte, memory, time, and
+      concurrency limits.
+- [ ] Make all remote operations cancellation-safe and clean up sensitive
+      buffers and private staging when cancelled.
+- [ ] Do not hold a synchronous lock across an async provider call; use bounded
+      queues, ownership transfer, or async synchronization as appropriate.
+- [ ] Make publication, retry, and garbage collection idempotent so workers can
+      restart without duplicate committed versions or lost references.
+- [ ] Use injected clocks and randomness in policy and tests rather than making
+      production behavior depend on wall-clock races or ambient randomness.
+
+### Migration, rollout, and operations
+
+- [ ] Support old whole-blob readers while new chunked writers roll out.
+- [ ] Define the minimum worker version for each manifest and encryption format.
+- [ ] Add a staged rollout that can pause new writes, drain in-flight work, and
+      roll back without deleting still-referenced artifacts.
+- [ ] Keep cache indexes reconstructible from authoritative manifests and
+      lineage; never make an in-memory index the only source of truth.
+- [ ] Version metrics and audit event fields while keeping labels bounded and
+      free of tenant secrets or unbounded resource identifiers.
+- [ ] Expose capability and refusal reasons to operators without exposing
+      provider credentials, signed URLs, or sensitive object metadata.
+
+### Testability and implementation discipline
+
+- [ ] Provide deterministic local and remote test stores with controllable
+      corruption, delay, partial-write, stale-read, retry, and cancellation
+      behavior.
+- [ ] Keep the core artifact and manifest logic testable without a live provider
+      or VMM; reserve provider and KVM tests for integration boundaries.
+- [ ] Add property tests for manifest evolution, chunk ordering, idempotent
+      publication, and reference reachability.
+- [ ] Require every new backend or provider implementation to run the same
+      contract suite before it can be admitted to the capability catalog.
+- [ ] Prefer extending an existing seam over adding a parallel abstraction;
+      every new trait must have a concrete second implementation or a clear
+      test-isolation boundary.
+
+**Extensibility acceptance:** a new local/remote provider, key provider, chunk
+policy, or backend can be added through the narrow contract seams without
+changing signed workload types, guest-visible storage semantics, or security
+decision points.
+
 ## Required test matrix
 
 ### Unit and property tests
@@ -494,12 +630,18 @@ secret or credential leakage in files, logs, manifests, or audit records.
 - [ ] Manifest serde roundtrip and unknown-field refusal.
 - [ ] Chunk offset/length arithmetic and overflow refusal.
 - [ ] Digest, encryption, and key-version binding.
+- [ ] Zeroization of key, plaintext, nonce, and scratch buffers on success,
+      error, cancellation, and timeout paths.
+- [ ] Sensitive types do not implement accidental debug, serialization, or
+      cloning paths.
 - [ ] Deduplication and scope isolation.
 - [ ] Atomic publication and crash recovery.
 - [ ] Reference counting and lineage-aware garbage collection.
 - [ ] Retry, cancellation, and backoff state machines.
 - [ ] Compatibility matching across backend, kernel, initramfs, and agent
       versions.
+- [ ] Manifest version, algorithm, provider-capability, and key-provider
+      negotiation refusal.
 
 ### Integration tests
 
@@ -522,6 +664,10 @@ secret or credential leakage in files, logs, manifests, or audit records.
 - [ ] Guest cannot write through a read-only attachment.
 - [ ] No cross-fork residue or cross-tenant page reuse is observable.
 - [ ] Worker restart and drain preserve retained checkpoints.
+- [ ] Remote-provider replacement preserves the canonical contract and does not
+      grant a provider additional tenant authority.
+- [ ] Key-memory protection and sensitive staging cleanup are exercised on the
+      supported host platforms.
 
 ### Fuzz and mutation coverage
 
@@ -547,8 +693,13 @@ The plan is complete only when all of the following are true:
 - [ ] `StorageBucket` and `VolumeRecord` retain their distinct semantics.
 - [ ] No raw object-store credential, secret, token, or plaintext sensitive
       value appears in an artifact, manifest, cache path, error, or log.
+- [ ] Key material, plaintext buffers, nonces, and decrypted staging state are
+      zeroized or cryptographically erased at their defined lifetime boundary.
 - [ ] Provider outage, corruption, rollback, replay, key failure, staging
       interruption, and worker loss all fail closed or converge safely.
+- [ ] A new provider, key backend, chunk policy, or VMM backend can run the
+      canonical contract and security tests without changing signed workload
+      types or guest-visible storage semantics.
 - [ ] Workspace tests, all-target Clippy, formatting, security gates, fuzz
       targets, BDD scenarios, and the required Linux/KVM live matrix pass.
 - [ ] The benchmark report distinguishes measured results from design targets
@@ -559,15 +710,16 @@ The plan is complete only when all of the following are true:
 
 1. Finish the local running-VMM warm path and restore security witnesses.
 2. Add the versioned chunk/manifest abstraction and local implementation.
-3. Add local cache metrics, eviction, reference tracking, and GC.
-4. Add `mvmd` remote manifest/chunk publication over the existing
+3. Add zeroization, sensitive-memory handling, and key-provider boundaries.
+4. Add local cache metrics, eviction, reference tracking, and GC.
+5. Add `mvmd` remote manifest/chunk publication over the existing
    `object_store` backend.
-5. Add bounded remote rehydration and cross-worker recovery.
-6. Integrate immutable templates and checkpoints.
-7. Add writable-volume tiering while preserving existing attach semantics.
-8. Revisit remote memory snapshots only after encryption and compatibility
+6. Add bounded remote rehydration and cross-worker recovery.
+7. Integrate immutable templates and checkpoints.
+8. Add writable-volume tiering while preserving existing attach semantics.
+9. Revisit remote memory snapshots only after encryption and compatibility
    gates are complete.
-9. Publish the measured performance, durability, cost, and security results.
+10. Publish the measured performance, durability, cost, and security results.
 
 The performance headline should remain the local warm claim. The remote tier’s
 headline should be elasticity, recovery, and storage economics—not pretending
