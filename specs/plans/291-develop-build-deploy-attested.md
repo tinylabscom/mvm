@@ -133,11 +133,13 @@ same sealed, hash-pinned, CVE-scanned volume.
 - [ ] Retire the `interactive` Cargo feature fork so one agent binary serves
       both tiers; the existing `RequestClass::{ProdSafe, DevOnly}` gate and the
       signed `VerbGrant` already do the enforcement.
-- [ ] Replace the symbol-absence CI witnesses with conformance scenarios
+- [~] Replace the symbol-absence CI witnesses with conformance scenarios
       asserting an attested run refuses DevOnly verbs. Note that those
       symbol-grep jobs live in `security.yml`, which does not run on pull
       requests, so a conformance scenario in the PR-gating suite is stronger
-      than what it replaces, not weaker.
+      than what it replaces, not weaker. The grant-enforcement unit now proves
+      a complete ProdSafe grant refuses both `Exec` and `ConsoleOpen`; the
+      feature-fork replacement and full guest-image validation remain open.
 
 ## Non-goals
 

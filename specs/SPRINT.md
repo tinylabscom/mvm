@@ -25,10 +25,9 @@
       while PTY and ad-hoc argv runs remain DevOnly. This prerequisite no
       longer keys interactive reachability on an image sidecar bit. Deploy
       attestation, the remaining tier binding, and conformance witnesses stay
-      open in WS1–WS4.
-- [~] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
-      polls local source inputs, recompiles only when the semantic IR address
-      or source fingerprint changes, and reports rebuild/no-op iterations.
+      open in WS1–WS4. A ProdSafe-grant conformance test now proves both
+      Exec and ConsoleOpen are refused; the interactive feature fork and
+      guest-image validation remain open.
 
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
