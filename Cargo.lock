@@ -2510,6 +2510,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "leakguard"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0eeb52dda0c35b04742d9ce5f600550dfb397190f21bd22b86113aa721cbc5d9"
+
+[[package]]
 name = "leb128"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2829,13 +2835,24 @@ dependencies = [
 name = "mvm-client"
 version = "0.18.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "chrono",
+ "ext4-view",
  "flate2",
+ "hex",
  "mvm-build",
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
  "mvm-runtime",
+ "rand 0.8.6",
+ "secrecy",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
  "tempfile",
  "tokio",
  "tracing",
@@ -2967,6 +2984,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "landlock",
+ "leakguard",
  "libc",
  "libkrun-sys",
  "mio",

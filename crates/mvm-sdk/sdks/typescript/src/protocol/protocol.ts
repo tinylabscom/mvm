@@ -318,6 +318,11 @@ VerbNotAuthorized: {
 verb: string
 }
 } | {
+WorkloadPrivilegeRefused: {
+uid: number
+verb: string
+}
+} | {
 IntegrationStatusReport: {
 integrations: IntegrationStateReport[]
 }

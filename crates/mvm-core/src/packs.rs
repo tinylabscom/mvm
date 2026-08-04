@@ -64,7 +64,7 @@ impl fmt::Display for PackBackend {
 #[serde(transparent)]
 pub struct HostCapability(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Sha256Hex(String);
 

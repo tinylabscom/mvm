@@ -17,11 +17,10 @@ pub(crate) fn ensure_default_microvm_image(
     }
 }
 
-pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
+pub(crate) fn ensure_workload_kernel() -> Result<String> {
     let cache = mvm_core::config::mvm_cache_dir();
     let arch = builder_vm_host_arch();
-    let resolved =
-        resolve_workload_kernel_bootstrap(&cache, arch, prod, find_builder_vm_flake().is_ok());
+    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, find_builder_vm_flake().is_ok());
     // Name which kernel variant a run resolved and where it came from. Without
     // this breadcrumb a wrong-kernel boot (e.g. a non-verity kernel under a
     // verity-sealed rootfs) is invisible host-side until the guest panics.
@@ -160,10 +159,9 @@ pub(super) enum WorkloadKernelBootstrap {
 pub(super) fn resolve_workload_kernel_bootstrap(
     cache_dir: &str,
     arch: &str,
-    prod: bool,
     source_checkout: bool,
 ) -> WorkloadKernelBootstrap {
-    if let Some(cached) = find_cached_workload_kernel(cache_dir, arch, prod) {
+    if let Some(cached) = find_cached_workload_kernel(cache_dir, arch) {
         return WorkloadKernelBootstrap::Cached(cached);
     }
     // The workload always boots through the verity initrd (mvm-verity-init opens
@@ -211,21 +209,26 @@ fn download_workload_kernel(arch: &str, dest: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn find_cached_workload_kernel(
-    cache_dir: &str,
-    arch: &str,
-    prod: bool,
-) -> Option<String> {
-    let mut candidates = vec![
-        format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"),
-        format!("{cache_dir}/default-microvm/prod/vmlinux"),
-    ];
-    if !prod {
-        candidates.push(format!("{cache_dir}/default-microvm/dev/vmlinux"));
-    }
-    candidates
-        .into_iter()
-        .find(|p| std::path::Path::new(p).is_file())
+/// The dedicated workload kernel, or `None` when it has not been built or
+/// downloaded yet.
+///
+/// Only the dedicated kernel qualifies. The default-microvm images ship a
+/// general-purpose NixOS kernel, and borrowing it used to be allowed here —
+/// which meant that on a host with no workload kernel cached, a workload
+/// silently booted a kernel built for a different job. Those kernels enable
+/// `CONFIG_USER_NS`, which the workload kernel deliberately leaves unset, so
+/// the borrow handed the guest a user-namespace escape hatch the workload
+/// kernel exists to remove. It was invisible: same command, same image, and a
+/// posture that depended on which kernels happened to be in the local cache.
+///
+/// A cold cache is now resolved by building or downloading the real workload
+/// kernel — which is what the caller already does, and what its own comment
+/// already claimed it did.
+pub(super) fn find_cached_workload_kernel(cache_dir: &str, arch: &str) -> Option<String> {
+    let dedicated = format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux");
+    std::path::Path::new(&dedicated)
+        .is_file()
+        .then_some(dedicated)
 }
 
 fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)> {

@@ -2379,6 +2379,34 @@
           "additionalProperties": false
         },
         {
+          "description": "The agent refused to spawn workload code because it is still running as uid 0. Carries the offending verb and the live uid so the refusal is self-diagnosing rather than needing a console-log hunt.",
+          "type": "object",
+          "required": [
+            "WorkloadPrivilegeRefused"
+          ],
+          "properties": {
+            "WorkloadPrivilegeRefused": {
+              "type": "object",
+              "required": [
+                "uid",
+                "verb"
+              ],
+              "properties": {
+                "uid": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                },
+                "verb": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "description": "Per-integration status report.",
           "type": "object",
           "required": [

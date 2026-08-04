@@ -16,9 +16,9 @@ use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
-    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, L3NetworkSpec, NetworkMode,
-    Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef,
-    SecretBinding, SignedImageRef, TenantId, WorkloadId,
+    DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant, KeyRotationSpec, L3NetworkSpec,
+    NetworkMode, Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
+    RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, WorkloadId,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -63,6 +63,16 @@ pub struct ExecutionPlan {
     /// Signed image to boot. SHA-256 + cosign bundle reference;
     /// resolved by `mvm-core::crypto::image_verify`.
     pub image: SignedImageRef,
+
+    /// The environment the image is admitted to boot in — currently the kernel
+    /// digest. `None` (default) = this plan pins no environment, which is every
+    /// plan written before the field existed.
+    ///
+    /// Skip-serialized when absent so those plans stay byte-identical: the field
+    /// is inside the signed payload, so emitting it as `null` would invalidate
+    /// every existing signature and frozen vector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<EnvironmentRef>,
 
     pub resources: Resources,
 
@@ -243,6 +253,7 @@ mod tests {
     fn minimal_plan() -> ExecutionPlan {
         let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
         ExecutionPlan {
+            environment: None,
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("fixture-plan".to_string()),
             plan_version: 1,

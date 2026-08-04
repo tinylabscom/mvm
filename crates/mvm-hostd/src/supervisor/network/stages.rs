@@ -17,6 +17,9 @@ use crate::supervisor::network::packet::{L4Proto, ParsedPacket};
 use crate::supervisor::network::{FlowDirection, PacketCtx};
 use crate::supervisor::pii_redactor::{PiiRedactor, REDACTION_MASK};
 use crate::supervisor::secrets_scanner::SecretsScanner;
+use crate::supervisor::sensitive_detector::{
+    LeakGuardCredentialDetector, SensitiveDetector, mask_matches,
+};
 use mvm_core::policy::projection::{CanonicalEgress, Proto as CanonProto};
 
 /// Outcome of the scan stage. `Pass` forwards the packet; `Drop` kills the
@@ -76,6 +79,7 @@ impl SubstitutionStage for NoopSubstitution {
 /// that's a host/transport bug, fail-closed; a raw secret-shaped blob is a
 /// workload mistake, mask-and-continue.)
 pub struct RedactingSubstitution {
+    supplemental: LeakGuardCredentialDetector,
     secrets: SecretsScanner,
     pii: PiiRedactor,
 }
@@ -93,11 +97,18 @@ pub struct RedactionHits {
     pub entropy: usize,
     /// Count of name spans that fired.
     pub names: usize,
+    /// Count of detector invariant failures. Request-level callers refuse when
+    /// this is non-zero; packet-level callers suppress the full payload.
+    pub detector_failures: usize,
 }
 
 impl RedactionHits {
     pub fn is_empty(&self) -> bool {
-        self.secrets.is_empty() && self.pii.is_empty() && self.entropy == 0 && self.names == 0
+        self.secrets.is_empty()
+            && self.pii.is_empty()
+            && self.entropy == 0
+            && self.names == 0
+            && self.detector_failures == 0
     }
 
     /// Fold another pass's categories in (used when redacting several fields —
@@ -107,6 +118,7 @@ impl RedactionHits {
         self.pii.extend(other.pii);
         self.entropy += other.entropy;
         self.names += other.names;
+        self.detector_failures += other.detector_failures;
     }
 }
 
@@ -114,6 +126,7 @@ impl RedactingSubstitution {
     /// The curated secret-pattern + PII rulesets (`DEFAULT_RULES`).
     pub fn with_default_rules() -> Self {
         Self {
+            supplemental: LeakGuardCredentialDetector::new(),
             secrets: SecretsScanner::with_default_rules(),
             pii: PiiRedactor::with_default_rules(),
         }
@@ -130,17 +143,52 @@ impl RedactingSubstitution {
     /// QEMU + any backend that routes egress through the per-VM endpoint) — so
     /// the two scrub identically with no drift.
     pub fn redact_bytes(&self, payload: &[u8]) -> Option<(Vec<u8>, RedactionHits)> {
-        let (after_secrets, secrets) = self.secrets.redact(payload, REDACTION_MASK);
+        let (after_supplemental, mut secrets, detector_failures) =
+            self.supplemental_pass(payload, true);
+        let (after_secrets, curated_secrets) =
+            self.secrets.redact(&after_supplemental, REDACTION_MASK);
+        secrets.extend(curated_secrets);
         let (after_pii, pii) = self.pii.redact(&after_secrets);
         let hits = RedactionHits {
             secrets,
             pii,
+            detector_failures,
             ..Default::default()
         };
         if hits.is_empty() {
             return None; // clean payload — pass through unchanged.
         }
         Some((after_pii, hits))
+    }
+
+    fn supplemental_pass(
+        &self,
+        payload: &[u8],
+        redact: bool,
+    ) -> (Vec<u8>, Vec<&'static str>, usize) {
+        let matches = match self.supplemental.detect(payload) {
+            Ok(matches) => matches,
+            Err(error) => {
+                tracing::error!(error = %error, "supplemental detector failed closed");
+                let output = if redact {
+                    REDACTION_MASK.to_vec()
+                } else {
+                    payload.to_vec()
+                };
+                return (output, Vec::new(), 1);
+            }
+        };
+        let categories = matches.iter().map(|matched| matched.category).collect();
+        if !redact {
+            return (payload.to_vec(), categories, 0);
+        }
+        match mask_matches(payload, &matches, REDACTION_MASK) {
+            Ok(output) => (output, categories, 0),
+            Err(error) => {
+                tracing::error!(error = %error, "supplemental detector rewrite failed closed");
+                (REDACTION_MASK.to_vec(), Vec::new(), 1)
+            }
+        }
     }
 
     /// Per-destination redaction. Curated secrets always run; entropy and names
@@ -159,11 +207,20 @@ impl RedactingSubstitution {
 
         // Curated secrets: default Block masks (today's behavior); a per-destination
         // Audit downgrade observes a trusted sink without masking.
-        let (mut buf, secrets) = match action.secrets {
+        let (mut buf, secrets, detector_failures) = match action.secrets {
             SecretAction::Block | SecretAction::Redact => {
-                self.secrets.redact(payload, REDACTION_MASK)
+                let (supplemented, supplemental_hits, failures) =
+                    self.supplemental_pass(payload, true);
+                let (curated, curated_hits) = self.secrets.redact(&supplemented, REDACTION_MASK);
+                let mut combined = supplemental_hits;
+                combined.extend(curated_hits);
+                (curated, combined, failures)
             }
-            SecretAction::Audit => (payload.to_vec(), self.secrets.scan(payload)),
+            SecretAction::Audit => {
+                let (_, mut supplemental_hits, failures) = self.supplemental_pass(payload, false);
+                supplemental_hits.extend(self.secrets.scan(payload));
+                (payload.to_vec(), supplemental_hits, failures)
+            }
         };
 
         // The name detector's co-occurrence signal needs the positions of other
@@ -183,6 +240,7 @@ impl RedactingSubstitution {
             pii: Vec::new(),
             entropy: 0,
             names: 0,
+            detector_failures,
         };
 
         // Names first, on the pre-PII-mask buffer with real PII spans. Names and
@@ -268,6 +326,7 @@ impl SubstitutionStage for RedactingSubstitution {
             dst_port = pkt.five_tuple.dst_port,
             secrets = ?hits.secrets,
             pii = ?hits.pii,
+            detector_failures = hits.detector_failures,
             "egress redactor masked undeclared secret/PII content"
         );
         Some(redacted)
@@ -773,6 +832,55 @@ mod tests {
             "secret survived redaction: {masked}"
         );
         assert!(masked.contains("XXX"), "no mask present: {masked}");
+    }
+
+    #[test]
+    fn redacting_substitution_masks_supplemental_credentials_in_binary_payload() {
+        let redactor = RedactingSubstitution::with_default_rules();
+        let jwt = format!(
+            "{}.{}.{}",
+            "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "signature1234"
+        );
+        let azure = format!(
+            "DefaultEndpointsProtocol=https;AccountName=storage;AccountKey={};EndpointSuffix=core.windows.net",
+            "A".repeat(88)
+        );
+        let mut payload = vec![0xff, 0xfe];
+        payload.extend_from_slice(format!("jwt={jwt}\nazure={azure}").as_bytes());
+
+        let (masked, hits) = redactor
+            .redact_bytes(&payload)
+            .expect("supplemental credentials must be detected");
+        assert!(
+            !masked
+                .windows(jwt.len())
+                .any(|window| window == jwt.as_bytes())
+        );
+        assert!(
+            !masked
+                .windows(azure.len())
+                .any(|window| window == azure.as_bytes())
+        );
+        assert!(hits.secrets.contains(&"jwt"), "hits={hits:?}");
+        assert!(
+            hits.secrets.contains(&"azure_connection_string"),
+            "hits={hits:?}"
+        );
+        assert_eq!(&masked[..2], &[0xff, 0xfe]);
+    }
+
+    #[test]
+    fn redacting_substitution_masks_the_entire_private_key_block() {
+        let redactor = RedactingSubstitution::with_default_rules();
+        let payload = b"before -----BEGIN PRIVATE KEY-----\nSUPERSECRETPAYLOAD\n-----END PRIVATE KEY----- after";
+
+        let (masked, hits) = redactor
+            .redact_bytes(payload)
+            .expect("private key block must be detected");
+        let masked = String::from_utf8(masked).expect("fixture is UTF-8");
+        assert!(!masked.contains("SUPERSECRETPAYLOAD"), "masked={masked}");
+        assert!(masked.contains("before XXX after"), "masked={masked}");
+        assert!(hits.secrets.contains(&"pem_private_key"), "hits={hits:?}");
     }
 
     #[test]
@@ -1725,7 +1833,7 @@ mod tests {
     }
 
     /// `merge` folds two passes' counts together, and the counters are what
-    /// the audit record reports. Every arithmetic mutation of the four
+    /// the audit record reports. Every arithmetic mutation of the five
     /// folds survived, because nothing merged two non-trivial hit sets.
     #[test]
     fn merging_redaction_hits_sums_every_category() {
@@ -1734,12 +1842,14 @@ mod tests {
             pii: vec!["p1"],
             entropy: 2,
             names: 3,
+            detector_failures: 11,
         };
         a.merge(RedactionHits {
             secrets: vec!["b"],
             pii: vec!["p2"],
             entropy: 5,
             names: 7,
+            detector_failures: 13,
         });
 
         assert_eq!(a.secrets, vec!["a", "b"]);
@@ -1748,12 +1858,25 @@ mod tests {
         // from 2-5, 2*5, 3-7 and 3*7.
         assert_eq!(a.entropy, 7);
         assert_eq!(a.names, 10);
+        assert_eq!(a.detector_failures, 24);
 
         // Merging an empty set is the identity.
-        let before = (a.entropy, a.names, a.secrets.len(), a.pii.len());
+        let before = (
+            a.entropy,
+            a.names,
+            a.detector_failures,
+            a.secrets.len(),
+            a.pii.len(),
+        );
         a.merge(RedactionHits::default());
         assert_eq!(
-            (a.entropy, a.names, a.secrets.len(), a.pii.len()),
+            (
+                a.entropy,
+                a.names,
+                a.detector_failures,
+                a.secrets.len(),
+                a.pii.len(),
+            ),
             before,
             "folding in an empty set must change nothing"
         );

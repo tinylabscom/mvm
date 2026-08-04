@@ -213,13 +213,31 @@ except claim 3, which is scoped to the block+ext4 backends. There is no
 Tier 3: a shared-kernel container runtime holds none of the L1–L3
 isolation claims, so mvm ships no container-based backend at any tier.
 
-**Claim-10 coverage.** Claim 10's default-deny egress is enforced at the
-host-side network chokepoint of the two backends that run untrusted
-workloads: Firecracker via nftables default-deny on the TAP, and libkrun
-via the gateway-bridge `PlanFlowPolicy` composed with an always-on
-mandatory deny-egress scan and per-tenant policy/DNS-sinkhole scans. Both
-derive the same posture from the same `NetworkPolicy`. QEMU is
-intentionally excluded, for the reason given in the tier matrix above.
+**Claim-10 coverage.** Claim 10's default-deny egress is enforced at **one**
+seam for every backend that runs an untrusted workload: the per-VM
+substitution endpoint reached over vsock, whose shared `EgressGate` is the
+sole decision point. There is no host-side network chokepoint to enforce at,
+because a workload guest has no network interface at all — Firecracker omits
+`/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect`, and the
+HVF device model has no net device. Egress leaves a guest only over vsock, to
+a host-side endpoint the host itself originates the outbound connection from,
+which is what makes admission, substitution and the audit record possible.
+
+Two gates keep that true rather than aspirational. `xtask
+check-uniform-vsock-egress` pins Firecracker, libkrun and HVF to a single
+spawn site (`RealEndpointSpawner::spawn`), so a driver cannot grow a second
+gate or revert to a raw backend. `xtask check-vsock-only-egress` fails closed
+if `virtio_net`, a tap, or a userspace-gateway token appears on a workload
+path. QEMU is intentionally excluded, for the reason given in the tier matrix
+above.
+
+*Corrected 2026-08-02.* This section previously described enforcement as
+"Firecracker via nftables default-deny on the TAP, and libkrun via the
+gateway-bridge `PlanFlowPolicy`". That predates the vsock-egress convergence
+and had stopped being true: a workload has no TAP to put nftables on. The
+mechanism was sound throughout — the description of it was not, which matters
+because this document is what a reviewer reads to decide whether to trust the
+posture.
 
 **Deny-all control-plane posture (DHCP/ARP).** A networked guest brings
 up its network interface at boot — link-up, then DHCP, then a static

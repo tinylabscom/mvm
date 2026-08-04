@@ -3,13 +3,11 @@ use super::*;
 use std::io::Write;
 
 #[test]
-fn find_cached_workload_kernel_prefers_dedicated_then_default_images() {
+fn only_the_dedicated_workload_kernel_qualifies() {
     let tmp = tempfile::tempdir().unwrap();
     let cache = tmp.path().to_str().unwrap();
     let arch = "x86_64";
-    // Nothing on disk → None (caller will build/download).
-    assert_eq!(find_cached_workload_kernel(cache, arch, false), None);
-    assert_eq!(find_cached_workload_kernel(cache, arch, true), None);
+    assert_eq!(find_cached_workload_kernel(cache, arch), None);
 
     let mk = |rel: &str| {
         let p = tmp.path().join(rel);
@@ -17,31 +15,24 @@ fn find_cached_workload_kernel_prefers_dedicated_then_default_images() {
         std::fs::write(&p, b"vmlinux").unwrap();
         p.to_str().unwrap().to_string()
     };
-    // The dev default image's kernel is a valid reuse source.
-    let dev = mk("default-microvm/dev/vmlinux");
+
+    // The default-microvm images ship a general-purpose NixOS kernel. It used to
+    // be accepted here as a stand-in, which silently gave workloads a kernel with
+    // CONFIG_USER_NS enabled whenever the real workload kernel was not cached.
+    // Neither variant qualifies now, however convenient the reuse was.
+    mk("default-microvm/prod/vmlinux");
+    mk("default-microvm/dev/vmlinux");
     assert_eq!(
-        find_cached_workload_kernel(cache, arch, false).as_deref(),
-        Some(dev.as_str())
+        find_cached_workload_kernel(cache, arch),
+        None,
+        "a default-microvm kernel must never stand in for the workload kernel"
     );
-    assert_eq!(find_cached_workload_kernel(cache, arch, true), None);
-    // Prod wins over dev (checked first).
-    let prod = mk("default-microvm/prod/vmlinux");
-    assert_eq!(
-        find_cached_workload_kernel(cache, arch, false).as_deref(),
-        Some(prod.as_str())
-    );
-    assert_eq!(
-        find_cached_workload_kernel(cache, arch, true).as_deref(),
-        Some(prod.as_str())
-    );
-    // The dedicated kernel cache wins over everything.
+
+    // Only the dedicated kernel resolves, so a cold cache reaches the
+    // build-or-download path instead of booting on whatever is lying around.
     let dedicated = mk(&format!("builder-vm/{arch}/kernels/workload/vmlinux"));
     assert_eq!(
-        find_cached_workload_kernel(cache, arch, false).as_deref(),
-        Some(dedicated.as_str())
-    );
-    assert_eq!(
-        find_cached_workload_kernel(cache, arch, true).as_deref(),
+        find_cached_workload_kernel(cache, arch).as_deref(),
         Some(dedicated.as_str())
     );
 }
@@ -52,7 +43,7 @@ fn cold_cache_downloads_instead_of_building_locally() {
     let cache = tmp.path().to_str().unwrap();
     let arch = "x86_64";
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, true, false),
+        resolve_workload_kernel_bootstrap(cache, arch, false),
         WorkloadKernelBootstrap::Download(format!(
             "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
         ))
@@ -65,7 +56,7 @@ fn source_checkout_cold_cache_downloads_by_default() {
     let cache = tmp.path().to_str().unwrap();
     let arch = "aarch64";
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false, false),
+        resolve_workload_kernel_bootstrap(cache, arch, false),
         WorkloadKernelBootstrap::Download(format!(
             "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
         ))
@@ -78,7 +69,7 @@ fn explicit_source_build_request_builds_workload_kernel_locally() {
     let cache = tmp.path().to_str().unwrap();
     let arch = "aarch64";
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false, true),
+        resolve_workload_kernel_bootstrap(cache, arch, true),
         WorkloadKernelBootstrap::BuildLocal(format!(
             "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
         ))
@@ -98,23 +89,23 @@ fn workload_kernel_never_reuses_the_non_verity_builder_kernel() {
     let dir = tmp.path().join(format!("builder-vm/{arch}"));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("vmlinux"), b"vmlinux").unwrap();
-    assert!(find_cached_workload_kernel(cache, arch, false).is_none());
-    assert!(find_cached_workload_kernel(cache, arch, true).is_none());
+    assert!(find_cached_workload_kernel(cache, arch).is_none());
+    assert!(find_cached_workload_kernel(cache, arch).is_none());
 
     // With no workload/default kernel cached, resolution builds it (source
     // checkout) or downloads it (installed) — never the builder kernel, in
     // either dev or prod.
     let dest = format!("{cache}/builder-vm/{arch}/kernels/workload/vmlinux");
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false, true),
+        resolve_workload_kernel_bootstrap(cache, arch, true),
         WorkloadKernelBootstrap::BuildLocal(dest.clone())
     );
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false, false),
+        resolve_workload_kernel_bootstrap(cache, arch, false),
         WorkloadKernelBootstrap::Download(dest.clone())
     );
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, true, false),
+        resolve_workload_kernel_bootstrap(cache, arch, false),
         WorkloadKernelBootstrap::Download(dest)
     );
 }

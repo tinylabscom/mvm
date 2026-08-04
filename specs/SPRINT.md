@@ -10,6 +10,126 @@
 
 ## Current issue delivery
 
+- [~] Develop → build → deploy an attested workload image — **plan 291**.
+      The agent-verb grant now derives from the admitted run shape: baked
+      entrypoints on non-dev profiles receive the attenuated ProdSafe grant,
+      while PTY and ad-hoc argv runs remain DevOnly. This prerequisite no
+      longer keys interactive reachability on an image sidecar bit. Deploy
+      attestation, the remaining tier binding, and conformance witnesses stay
+      open in WS1–WS4.
+
+- [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
+      a validated byte-span detector contract and supplements the curated
+      scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
+      Azure connection-string, Telegram-token and Discord-token detectors.
+      Arbitrary payloads are scanned as bounded UTF-8 islands without losing
+      byte offsets; invalid or overlapping detector spans fail closed and no
+      finding carries matched bytes. The same detector feeds one-way masking
+      and request-scoped reversible replacement. Default curated secret/PII
+      protection now arms compressed and over-cap refusal before forwarding.
+      The serial workspace test suite, workspace check, host workspace
+      all-target Clippy, cargo-deny and RustSec gates pass. Linux builder-VM
+      all-target Clippy remains before WS1 acceptance; streaming bodies, policy
+      lowering, admission posture and claim witnesses remain in WS2-WS4.
+
+- [x] Host-side machine logs — **plan 289**. `machine logs` now reads backend
+      console captures directly from the isolated host VM state directory, so
+      macOS no longer attempts to connect to or auto-start the retired
+      interactive dev VM. Host `tail` receives paths as process arguments,
+      `-f` honors the requested `--lines`/`-n` count through
+      `tail -n <lines> -f`, hypervisor and legacy fallback behavior is retained,
+      and unit plus real-CLI regression coverage proves the command works with
+      dev-VM auto-start disabled. Isolated test state also resolves through the
+      canonical explicit-root config helper, and the CLI subprocess receives an
+      isolated home. Workspace tests, check, all-target clippy, formatting, and
+      both home policy gates are green.
+
+### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
+
+Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,
+`volume`, `secret`, `audit`). Each issue lands via its own PR; each PR
+updates only its own entry below.
+
+- [x] #2078 — canonical unified machine inventory through mvm-client.
+      `mvm_core::client::inventory` adds the typed `MachineInventoryRecord`
+      contract (identity/name, persistent-vs-transient kind, status +
+      detail incl. paused, fail-closed `build_mode` posture where any
+      unknown label deserializes to prod, source/backend, cpu/memory,
+      readiness, TTL, created/last-started, tags, host-path-free volume
+      attachment summaries, secret-reference count only) plus the shared
+      `InventoryQuery` visibility semantics (stopped persistent
+      definitions stay visible; stopped transients hide unless included;
+      expired hide unless included). `mvm_client::inventory` hosts the
+      spec×live join (duplicate live names collapse with the live row
+      winning), the fail-closed posture resolver the SDK envelope now
+      delegates to, and the read-only `list_local_inventory` composition
+      over any `MvmClient` — mock backend included; the `MvmClient` trait
+      and gateway are unchanged. `mvmctl machine ls` now renders the
+      shared records and its `--json` is the serialized record verbatim
+      (SDK-parsed `name`/`status`/`build_mode`/`kind` keys pinned by
+      tests). 41 new/updated unit tests across the three crates cover the
+      persistent-only/transient-only/joined/paused/failed/stopped/expired/
+      duplicate-name/unknown-posture matrix, serde round-trips,
+      unknown-field rejection, and the no-secret/no-host-path guarantees.
+
+- [x] #2080 — reusable local encrypted-volume lifecycle service.
+      `mvm_client::volume` now owns the canonical lifecycle behind the
+      object-safe `VolumeService` contract with strict secret-free DTOs:
+      encrypted block-volume create, unlock/lock with DEK-binding tamper
+      refusal, typed attachments (mount allow-roots, read-only default,
+      dev-profile gate for read-write), exclusive persistent launch leases
+      with RAII rollback, just-in-time unlock with re-seal on final release,
+      idempotent crash/orphan recovery, and immutable snapshot/restore. The
+      CLI volume commands, launch merge, and stop-path release are thin shims
+      over the service (host-encryption probe injected from doctor); the
+      former CLI-private lifecycle is deleted, not duplicated. 41 service
+      tests plus 8 CLI shim tests cover create/list, RO + permitted RW
+      attach, duplicate guest paths, exclusive-lease refusal, profile
+      refusal, detach/relock, failed-launch cleanup, orphan recovery,
+      persistent restart, tampered-ciphertext refusal, and key-material
+      absence from DTOs/debug output. The live KVM BDD scenario extends to
+      prove relock after the final release; guest write/read + restart remain
+      covered by the existing `s26_volumes` firecracker scenarios.
+
+- [ ] #2081 — reusable write-only local secret lifecycle service.
+
+- [ ] #2082 — normalized verified local audit events for UI consumers.
+
+- [ ] #2079 — persistent + transient launch lifecycle through
+      `LocalBackend` (starts after #2078/#2080/#2081 land the shared
+      inventory/volume/secret types).
+
+- [x] #2091 — no workload runs as root. `mvm-oci-init` is pid 1 and spawned
+      the agent as a root child, so `is_pid1()` was false, `apply_activation`
+      returned before `drop_privilege`, and the agent kept uid 0 — and since
+      none of its five workload-spawn sites sets a uid, every workload launched
+      through it ran as root. Firecracker boots the agent as pid 1 and so
+      already dropped to 901; the variable was the init, not the backend. The
+      OCI init now spawns the agent with the workload identity, and
+      `Verb::spawns_workload_process` plus one check on the shared request path
+      refuse any workload-spawning verb served at uid 0, so a boot path that
+      never reaches the drop fails closed instead of silently running as root.
+      Live: HVF moves from `uid=0(root)` to `uid=901`, Firecracker stays at
+      `uid=901`; reverting the mechanism makes the gate refuse with a
+      self-describing error. Evidence in
+      `specs/research/no-root-workload-live-witness.md`.
+
+- [x] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
+      6.12.100 configs and remove unsupported physical hardware, radio/input,
+      filesystem, power-management, tracing/debug, keyring, task-accounting,
+      NetLabel, swap/huge-page and legacy crypto/ABI plumbing while preserving
+      every supported virtual-device and security contract. The workload
+      configs are ratcheted from 1,189 to 902 x86_64 built-ins and from 1,314
+      to 936 aarch64 built-ins. The x86_64 workload `bzImage` falls from
+      7,656,448 to 4,072,448 bytes (46.8%) and reaches PID 1 under Firecracker
+      1.14.1; the 955-symbol builder config retains cgroups, namespaces,
+      netfilter, FUSE and virtio-fs, and its 4,977,664-byte kernel also boots to
+      PID 1. Config generation now fails if Kconfig silently restores an
+      audited cut. The checksum-verified native aarch64 PR artifact contains
+      exactly 936 built-ins in an 8,216,584-byte `Image` (3,339,345 bytes
+      gzip-compressed); the raw-HVF block-root harness reached
+      `Run /init as init process` at 36.6 ms.
+
 - [x] Continuous guest entropy — **plan 285 / issue #2060**. A portable
       virtio-rng device now fills bounded, validated guest split-queue buffers
       directly from the host CSPRNG, fails closed without consuming a request
@@ -38,9 +158,12 @@
       defect reported as #2052, and the exact Apple-container E2E now passes on
       current main, closing #2054. #2048 now caches confirmed default-release
       404s per version and architecture for 24 hours while mirrors and transient
-      failures remain retryable. The production-volume epic #2040 and the
-      subsequently filed entropy issue #2060 are also closed with merged
-      evidence. The final GitHub open-issue query returned zero results.
+      failures remain retryable. The production-volume epic #2040 was closed
+      with the then-available evidence, but was subsequently reopened after the
+      claimed cross-worker proof was found to cover gateway-local directories
+      rather than the gateway→agent→hostd data plane. The subsequently filed
+      entropy issue #2060 is closed with merged evidence. The historical
+      open-issue query at that point returned zero results.
       A scheduled run on an older commit subsequently filed #2067: the no-SSH
       scanner had not classified a protected-credential-path refusal test as
       deny-only, and the `mvm-cli` mutation shard lacked the pinned Zig
@@ -67,7 +190,9 @@
       local/block attachment, encrypted durable checkpoints and cross-worker
       restore, working remote CLI/API policy, MinIO integration, and Linux/KVM
       persistence/restore proof. Registry-only, compile-only, and mocked-only
-      paths do not satisfy the issue.
+      paths do not satisfy the issue. Follow-up verification closed the original
+      gateway-local proof gap with the canonical gateway→agent→hostd worker data
+      plane; mvm PR #2100 and mvmd PR #203 are merged with green final matrices.
   - [x] WS1: external implementations can run the canonical trait-object
         contract; the unregistered member-only S3 mount provider is removed;
         template-registry S3 remains independently gated; the two-surface gate
@@ -119,15 +244,23 @@
         lifecycle parser tests, touched-crate checks, all-target Clippy, and the
         complete 115-scenario / 523-step BDD suite pass.
   - [x] WS4/WS5 policy/WS6/WS7: mvmd PRs #199, #201, and #202 deliver durable
-        manifests and encrypted checkpoints, fresh-worker restore, fencing,
+        manifests and encrypted checkpoints, gateway-local restore, fencing,
         retention/GC, API policy, metrics, signed lifecycle/refusal audits, and
         operator documentation. The real MinIO lane proves encrypted multipart
         I/O, conditional conflict handling, pagination beyond 1,000 objects,
         and cleanup. A live Firecracker/KVM run proves encrypted attach, restart
         persistence, checkpoint, mutation, restore into fresh state, digest
         recovery, and clean teardown. mvm PR #2064 supplies the authenticated
-        remote CLI. Issue #2040 records the rejected speculative clauses that
-        conflict with the shipped resource and artifact contracts.
+        remote CLI. The follow-up now supplies the missing canonical
+        `VolumeRecord` gateway→agent→hostd transfer, exact-node placement,
+        worker-local LUKS derivation, lease renewal/watchdog, and protocol v3.
+        The composed Linux/KVM proof is now green: two isolated production
+        workers preserve boot counts 1→2 across a source restart, transfer the
+        encrypted image through gateway→agent→hostd, and observe boot count 3
+        after destination restore. Both follow-up PR matrices are green, mvm
+        PR #2100 passed its full merge-group matrix including the Nix 50 MB
+        guest-artifact footprint gate, and mvmd PR #203 passed all 11 final-head
+        checks before both changes landed.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout
@@ -159,7 +292,34 @@
       directions are enforced by tests that parse the specific named nix list;
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
-- [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
+- [x] Two-verifier oracle bar — **plan 276 WS4**. A signed audit chain frozen
+      at `tests/vectors/audit-chain-v1.jsonl`, read by both the host verifier
+      and the `no_std` mirror. The previous parity test compared them over a
+      chain generated fresh with a random key each run, so neither ever saw
+      bytes the other could also see. Diverging the mirror's serialization of
+      an absent optional field now fails over the shared corpus. riscv32 stays
+      a compile oracle — bare metal has no test harness.
+
+- [~] Content-address replay vectors — **plan 276 WS3**. Frozen
+      input→address vectors for `ir_hash`, the RFC-6962 leaf/interior/root
+      helpers, `compute_plan_id` and `bundle_sha256`. The tests that covered
+      these were relational only: hashing the canonical form with a trailing
+      newline moved every address and all four `ir_hash` unit tests stayed
+      green. `compute_plan_id` matters most — it does not use JCS, relying on
+      serde_json's default key ordering, so the gate pinned the feature flag
+      while nothing pinned the address it protects. Remaining: the audit
+      `prev_hash` spine, which needs a fixed keypair and belongs with WS4.
+
+- [x] Claim evidence pinned — **plan 276 WS1**. Each claim in
+      `model/claims.toml` now declares the `witness_kinds` it rests on, and
+      `check-claim-catalog` fails if a declared kind has no live witness, or if
+      a present kind is undeclared. Retiring a witness is now an explicit edit
+      to that declaration rather than a deletion nothing notices. Before this,
+      delisting a witness from both the model and the ADR-001 ledger left the
+      board green — claim 1 lost its only CI evidence and the run still
+      reported `clean (16 claims, 48 witnesses verified)`.
+
+- [~] Build cache verify-on-read — **plan 276 WS6**. `~/.mvm/dev/builds/
       <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
       digest, no signature, so content substitution went undetected and the
       provenance recorder then signed whatever bytes were on disk — the audit
@@ -173,6 +333,8 @@
   - [ ] Kernel cache still open: `resolve_kernel` returns `Cached` on
         `path.exists()`, and `verify_fetched_kernel` has no production caller,
         so neither the fetch nor the read path checks a kernel against its pin.
+        Scoped as **plan 288** (`specs/plans/288-kernel-cache-verify-on-read.md`);
+        Proposed, not yet scheduled.
 
 - [ ] Build action identity + artifact manifest — **plan 279**
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).

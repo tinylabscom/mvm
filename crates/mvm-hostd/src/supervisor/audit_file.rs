@@ -377,6 +377,138 @@ mod tests {
     // drifts from `mvm_protocol::verify::MirrorEntry`, a genuine line
     // stops verifying and this fails here (loudly, in CI) rather than
     // only in the browser tool.
+    /// A signed audit chain frozen on disk, so both verifiers can be checked
+    /// against the *same bytes* rather than each against a chain generated for
+    /// it.
+    ///
+    /// The parity test below is real but keyed randomly per run, so its bytes
+    /// exist only inside that process. That cannot be shared with a verifier
+    /// which does not link the host signer — the `no_std` mirror under wasm,
+    /// or the bare-metal build — and an oracle bar means little if each
+    /// implementation only ever sees input it produced itself.
+    ///
+    /// Determinism comes from a fixed signing seed and fixed timestamps;
+    /// Ed25519 signing is deterministic per RFC 8032, so the bytes are stable.
+    /// `MVM_REGEN_AUDIT_CORPUS=1` rewrites the committed files.
+    mod frozen_corpus {
+        use super::*;
+
+        /// Fixed seed. Test-only: it signs nothing outside this corpus.
+        const SEED: [u8; 32] = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ];
+
+        fn vectors_dir() -> PathBuf {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|p| p.parent())
+                .expect("workspace root above crates/mvm-hostd")
+                .join("tests")
+                .join("vectors")
+        }
+
+        fn fixed_entry(tenant: &str, event: &str, ts: &str) -> AuditEntry {
+            AuditEntry {
+                timestamp: ts.parse().expect("valid RFC 3339"),
+                tenant: TenantId(tenant.to_string()),
+                plan_id: PlanId("plan-frozen".to_string()),
+                plan_version: 1,
+                bundle_id: None,
+                bundle_version: None,
+                image_name: "img".to_string(),
+                image_sha256: "d".repeat(64),
+                event: event.to_string(),
+                labels: BTreeMap::new(),
+            }
+        }
+
+        /// Build the chain the corpus pins: a plain entry, one exercising the
+        /// optional bundle fields and a label, and a `checkpoint.forked`
+        /// carrying content-address labels — the shapes whose serialization
+        /// the two implementations must agree on.
+        async fn build_chain(dir: &Path) -> (String, String) {
+            let key = SigningKey::from_bytes(&SEED);
+            let vk_hex = hex::encode(key.verifying_key().to_bytes());
+            let signer = FileAuditSigner::open(key, dir).unwrap();
+
+            signer
+                .sign_and_emit(&fixed_entry(
+                    "tenant-frozen",
+                    "plan.launched",
+                    "2020-01-01T00:00:00Z",
+                ))
+                .await
+                .unwrap();
+
+            let mut bundled = fixed_entry("tenant-frozen", "plan.admitted", "2020-01-01T00:00:01Z");
+            bundled.bundle_id = Some(mvm_core::policy::PolicyId("bundle-frozen".to_string()));
+            bundled.bundle_version = Some(3);
+            bundled
+                .labels
+                .insert("workflow".to_string(), "wf-1".to_string());
+            signer.sign_and_emit(&bundled).await.unwrap();
+
+            let mut forked =
+                fixed_entry("tenant-frozen", "checkpoint.forked", "2020-01-01T00:00:02Z");
+            forked.labels.insert(
+                "parent_digest".to_string(),
+                format!("sha256:{}", "b".repeat(64)),
+            );
+            forked.labels.insert(
+                "child_digest".to_string(),
+                format!("sha256:{}", "c".repeat(64)),
+            );
+            signer.sign_and_emit(&forked).await.unwrap();
+
+            let content = std::fs::read_to_string(signer.tenant_path("tenant-frozen")).unwrap();
+            (content, vk_hex)
+        }
+
+        #[tokio::test]
+        async fn frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts() {
+            let dir = tempfile::tempdir().unwrap();
+            let (content, vk_hex) = build_chain(dir.path()).await;
+
+            let chain_path = vectors_dir().join("audit-chain-v1.jsonl");
+            let key_path = vectors_dir().join("audit-chain-v1.pubkey");
+
+            if std::env::var_os("MVM_REGEN_AUDIT_CORPUS").is_some() {
+                std::fs::create_dir_all(vectors_dir()).unwrap();
+                std::fs::write(&chain_path, &content).unwrap();
+                std::fs::write(&key_path, format!("{vk_hex}\n")).unwrap();
+                return;
+            }
+
+            let committed = std::fs::read_to_string(&chain_path)
+                .expect("frozen audit chain corpus is committed");
+            assert_eq!(
+                committed, content,
+                "the committed corpus no longer matches what the signer emits — either the \
+                 signed serialization changed (every existing chain just became unverifiable) \
+                 or the corpus needs a deliberate regen"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&key_path).unwrap().trim(),
+                vk_hex,
+                "corpus verifying key drifted from the fixed seed"
+            );
+
+            // The host implementation, over the committed bytes.
+            let vk = VerifyingKey::from_bytes(
+                &<[u8; 32]>::try_from(hex::decode(&vk_hex).unwrap().as_slice()).unwrap(),
+            )
+            .unwrap();
+            let written = dir.path().join("committed.jsonl");
+            std::fs::write(&written, &committed).unwrap();
+            assert_eq!(
+                verify_audit_chain(&written, &vk).expect("host verifier accepts the corpus"),
+                3
+            );
+        }
+    }
+
     #[tokio::test]
     async fn mvm_verify_matches_supervisor_chain() {
         let dir = tempfile::tempdir().unwrap();

@@ -424,6 +424,45 @@ pub fn spawn_one(path: &Path, label: &str) {
     }
 }
 
+/// Spawn a helper the way `spawn_one` does, but as an unprivileged user.
+///
+/// The guest agent is started this way because it serves the verbs that run
+/// workload code, and every one of those spawn sites inherits the agent's
+/// identity rather than setting its own. On the pid-1 boot path the agent
+/// drops privilege itself once its mounts are done; on this path the init
+/// owns the mounts, so the agent never needs root and is handed the workload
+/// identity from the start. Both paths converge on the same posture: nothing
+/// that executes workload code runs as uid 0.
+#[cfg(target_os = "linux")]
+pub fn spawn_one_as(path: &Path, label: &str, uid: u32, gid: u32) {
+    use std::os::unix::process::CommandExt;
+
+    if !is_executable(path) {
+        eprintln!(
+            "mvm-guest-init: no executable {label} at {}",
+            path.display()
+        );
+        return;
+    }
+    let mut cmd = Command::new(path);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    // SAFETY: the hook runs in the forked child before exec. It calls only
+    // async-signal-safe syscalls and allocates nothing, which is what
+    // `drop_privilege_raw` exists to guarantee.
+    unsafe {
+        cmd.pre_exec(move || crate::guest_mount::drop_privilege_raw(uid, gid));
+    }
+    match cmd.spawn() {
+        Ok(child) => eprintln!(
+            "mvm-guest-init: spawned {label} pid={} uid={uid} gid={gid}",
+            child.id()
+        ),
+        Err(e) => eprintln!("mvm-guest-init: spawn {label} at {}: {e}", path.display()),
+    }
+}
+
 pub fn cmdline() -> String {
     fs::read_to_string("/proc/cmdline").unwrap_or_default()
 }

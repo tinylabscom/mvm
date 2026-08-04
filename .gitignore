@@ -67,3 +67,6 @@ specs/scratch.md
 # elsewhere. `xtask check-mutation-witnesses` always redirects it to a temp
 # dir; this guards a hand-run from leaving a report in the tree.
 mutants.out/
+
+# Python bytecode caches (SDK test runs)
+__pycache__/

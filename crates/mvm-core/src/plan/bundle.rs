@@ -1615,6 +1615,51 @@ mod tests {
         assert!(format!("{err:#}").contains("sha256 mismatch"));
     }
 
+    /// Replay vectors: frozen inputs and the addresses they must produce.
+    ///
+    /// The neighbouring lowercase-hex test uses `sha256("abc")`, a textbook
+    /// vector that pins the output *encoding* and nothing about how a bundle
+    /// is addressed. These pin the address itself, including that it is taken
+    /// over raw archive bytes with no text conversion anywhere in the path.
+    ///
+    /// `MVM_PRINT_ADDRESS_VECTORS=1` prints instead of asserting.
+    #[test]
+    fn bundle_sha256_vectors_are_frozen() {
+        let cases: &[(&str, &[u8], &str)] = &[
+            (
+                "empty",
+                b"",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "ascii",
+                b"mvm bundle contents",
+                "05aff18ed1fc9ed295f062e6f279f166cae4dc6dc823007a928f2aa5a54a3e68",
+            ),
+            // Raw bytes, not text. A digest that went through any string
+            // conversion would differ here: 0x00 truncates a C string, 0xff
+            // and 0x80 are not valid UTF-8 on their own.
+            (
+                "binary-with-nul-and-high-bytes",
+                &[0x00, 0xff, 0x01, 0xfe, 0x80, 0x7f],
+                "609f600034067e63d4c7d4440226395296d0bd91ddcb64ae199b2bdb41224f5a",
+            ),
+        ];
+
+        for (name, input, expected) in cases {
+            let actual = bundle_sha256(input);
+            if std::env::var_os("MVM_PRINT_ADDRESS_VECTORS").is_some() {
+                println!("bundle_sha256\t{name}\t{actual}");
+                continue;
+            }
+            assert_eq!(
+                &actual, expected,
+                "bundle_sha256/{name}: address moved — every published bundle \
+                 addressed this way just changed"
+            );
+        }
+    }
+
     #[test]
     fn bundle_sha256_is_lowercase_hex() {
         let h = bundle_sha256(b"abc");

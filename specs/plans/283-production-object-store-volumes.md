@@ -1,6 +1,6 @@
 # Production object-store volumes
 
-**Status:** Complete after relevance reconciliation (2026-08-02).
+**Status:** Complete — canonical cross-worker handoff, live KVM proof, required PR and merge-queue matrices, and cross-repository landing are complete (2026-08-03).
 
 **Issue:** [#2040](https://github.com/tinylabscom/mvm/issues/2040)
 
@@ -246,12 +246,22 @@ repository's documented transitive exceptions, and cargo-deny.
       manifest/ciphertext, wrong-key, bounded-resource refusal, retry, retention,
       and cross-worker restore tests.
 
-WS4 evidence (2026-08-02): mvmd PR
+WS4 evidence correction (2026-08-02): mvmd PR
 [`#199`](https://github.com/tinylabscom/mvmd/pull/199) supplies the immutable
 manifest/checkpoint state machine, bounded encrypted chunks, retry convergence,
-fresh-worker restore, fencing, retention/GC, API reconciliation, metrics, and
-positive and negative integrity coverage. Its required CI matrix passed before
-merge.
+gateway-local restore, fencing metadata, retention/GC, API reconciliation,
+metrics, and positive and negative integrity coverage. Its two-directory test
+did not transport ciphertext through the gateway/agent/hostd seam to a worker,
+so it was not evidence of cross-worker restore. The follow-up branches add the
+missing hostd v3 protocol, exact-node bounded pull/push, LUKS materialization,
+lease renewal/watchdog enforcement, and crash-safe canonical `VolumeRecord`
+placement. A dedicated Linux/KVM run now boots the encrypted volume on worker
+one, observes guest boot counters 1 and 2 across a real Firecracker restart,
+pulls the detached ciphertext through gateway → agent → hostd, restores it
+through a distinct authenticated worker, and observes counter 3 in that guest.
+The exact ignored test passes in 103.33 seconds with 1,532 other gateway tests
+filtered. Both cross-repository PR matrices are green, satisfying this
+cross-worker restore requirement.
 
 ## WS5 — Remote CLI, API, policy, and observability
 
@@ -310,13 +320,19 @@ final required matrices passed.
       test GCS/Azure builders without requiring external tenant credentials in
       normal CI.
 
-WS6 evidence (2026-08-02): the required MinIO job passed with explicit
+WS6 evidence correction (2026-08-02): the required MinIO job passed with explicit
 credentials and wrong-credential redaction, encrypted raw provider bytes, an
 8 MiB multipart round trip, conditional rename/conflict behavior, pagination
 across 1,005 objects, and cleanup. A live Firecracker/KVM run mounted a 128 MiB
 encrypted ext4 volume, preserved a guest-written digest across restart,
 checkpointed it, mutated it, restored the checkpoint into fresh local state,
-recovered the original digest, and tore down cleanly.
+recovered the original digest, and tore down cleanly. That KVM run proved the
+mvm-local block lifecycle but did not include the mvmd gateway→agent→hostd
+worker handoff. The follow-up composed run now supplies that missing proof with
+two mount/PID-isolated production workers, distinct hostd and agent processes,
+exact node identities, worker-derived LUKS2 keys, real Firecracker/jailer
+launches, restart persistence, bounded ciphertext transfer, destination
+restore, and clean detach. The follow-up PR matrix required by WS7 is green.
 
 ## WS7 — Composition, documentation, and closeout
 
@@ -349,6 +365,10 @@ recovered the original digest, and tore down cleanly.
 - Provider ETags are preserved as metadata where available, but the canonical
   manifest digest is the portable integrity identity because ETags are not
   uniformly content digests.
+- Remote object I/O remains in the host and worker userspace planes. Guests see
+  only the admitted block device; no object-store, S3, network-filesystem, or
+  FUSE support was added to the guest kernel. The mvm merge-group Nix lane
+  passed its static-musl, glibc-free, and 50 MB guest-artifact footprint gates.
 - Online master/data-key rotation is not implemented or advertised. The
   operator documentation describes safe export/import recovery under fresh
   keys and warns against swapping the master secret, so no nonexistent rotation
@@ -356,15 +376,22 @@ recovered the original digest, and tore down cleanly.
 - The platform fsyncs checkpoint source images. Freezing an arbitrary guest
   database safely requires an application-specific operator/workload contract.
 
-Implementation PRs: mvm
+Merged implementation PRs: mvm
 [`#2044`](https://github.com/tinylabscom/mvm/pull/2044) and
-[`#2064`](https://github.com/tinylabscom/mvm/pull/2064); mvmd
+[`#2064`](https://github.com/tinylabscom/mvm/pull/2064), followed by the
+canonical hostd v3 worker-transfer protocol in
+[`#2100`](https://github.com/tinylabscom/mvm/pull/2100); mvmd
 [`#198`](https://github.com/tinylabscom/mvmd/pull/198),
 [`#199`](https://github.com/tinylabscom/mvmd/pull/199),
 [`#200`](https://github.com/tinylabscom/mvmd/pull/200),
 [`#201`](https://github.com/tinylabscom/mvmd/pull/201), and
-[`#202`](https://github.com/tinylabscom/mvmd/pull/202). Issue #2040 was closed
-on 2026-08-02 after the final dependency merged.
+[`#202`](https://github.com/tinylabscom/mvmd/pull/202), followed by the exact
+gateway→agent→hostd worker data plane in
+[`#203`](https://github.com/tinylabscom/mvmd/pull/203). The final PR matrices
+and mvm merge-group matrix are green. The composed KVM witness preserves boot
+counts 1→2 across source restart, transfers only detached ciphertext, and
+observes boot count 3 after verified destination restore. The closeout corrects
+the premature 2026-08-02 issue closure with the now-landed canonical proof.
 
 ## Out of scope
 

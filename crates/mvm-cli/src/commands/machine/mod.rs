@@ -1178,15 +1178,6 @@ fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
     })
 }
 
-/// Live status label for a persisted machine, resolved through the backend.
-fn machine_status_label(name: &str) -> &'static str {
-    if lifecycle::machine_is_running(name) {
-        "running"
-    } else {
-        "stopped"
-    }
-}
-
 /// Health label for a machine's readiness, as shown in `machine ls`'s HEALTH
 /// column and `machine inspect`'s `health:` line. `None` covers both a
 /// registry entry with no readiness signal yet and a machine absent from the

@@ -448,7 +448,6 @@ pub(in crate::commands) fn run_secure_with_source(
                 admit_pty,
                 admit_has_argv,
                 admit_is_dev,
-                crate::commands::vm::agent_verbs::image_is_sealed(rootfs),
             ),
             services: admit_host_services.clone(),
         })?;
@@ -797,7 +796,7 @@ fn build_exec_request(
                 // surfacing only after a full pull + rootfs materialization. The
                 // rootfs boots verity-sealed, so the kernel must carry dm-verity;
                 // the builder kernel (which drops it) is never a stand-in.
-                let kernel_path = ensure_workload_kernel(prod)?;
+                let kernel_path = ensure_workload_kernel()?;
                 // Enforce that invariant host-side: a kernel with no dm-verity
                 // support would panic the guest in early init opening
                 // /dev/mapper/control, with no host signal. Fail fast instead.
@@ -937,6 +936,7 @@ fn emit_oci_run_admission(
         })?;
     let exec_timeout_secs = u32::try_from(timeout_secs).unwrap_or(u32::MAX);
     let input = SynthesisInput {
+        kernel_sha256: None,
         network_mode,
         l3_network: None,
         vm_name: "run-oci",
@@ -1925,13 +1925,13 @@ mod tests {
     #[test]
     fn transient_grant_eligibility_matches_run_mode() {
         use crate::commands::vm::agent_verbs::grant_eligible;
-        // Interactive transient (pty) → not eligible even when sealed.
-        assert!(!grant_eligible(true, false, false, true));
-        // Ad-hoc transient (argv) → not eligible even when sealed.
-        assert!(!grant_eligible(false, true, false, true));
-        // Transient baked-entrypoint (no pty, no argv, prod, sealed) → eligible.
-        assert!(grant_eligible(false, false, false, true));
-        // Same run but image not sealed (interactive / OCI) → NOT eligible.
-        assert!(!grant_eligible(false, false, false, false));
+        // Interactive transient (pty) issues ConsoleOpen → not eligible.
+        assert!(!grant_eligible(true, false, false));
+        // Ad-hoc transient (argv) issues Exec → not eligible.
+        assert!(!grant_eligible(false, true, false));
+        // Transient baked-entrypoint (no pty, no argv, prod profile) → eligible.
+        assert!(grant_eligible(false, false, false));
+        // Dev profile stays permissive by contract.
+        assert!(!grant_eligible(false, false, true));
     }
 }

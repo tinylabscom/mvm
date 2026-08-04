@@ -10,6 +10,7 @@ mod linux {
     use mvm_agentd::guest_bootstrap::{
         cmdline, cmdline_has_flag, cmdline_value, cstring_str, ensure_runtime_dirs, hex_decode,
         is_executable, provision_guest_environment, resolve_exec, runtime_source_policy, spawn_one,
+        spawn_one_as,
     };
     use std::ffi::{CString, OsStr};
     use std::fs;
@@ -50,7 +51,14 @@ mod linux {
             );
             std::process::exit(1);
         };
-        spawn_one(&agent, "guest-agent");
+        // Unprivileged from the start: this init has already done every root-only
+        // step above, and the agent serves the verbs that run workload code.
+        spawn_one_as(
+            &agent,
+            "guest-agent",
+            mvm_agentd::guest_mount::WORKLOAD_UID,
+            mvm_agentd::guest_mount::WORKLOAD_GID,
+        );
         idle_forever();
     }
 

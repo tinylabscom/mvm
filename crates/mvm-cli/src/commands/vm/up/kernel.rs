@@ -88,7 +88,7 @@ where
 {
     use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
     match resolve_kernel(cache_dir, arch, "workload", source_checkout) {
-        KernelResolution::Cached(p) => Ok(p.display().to_string()),
+        KernelResolution::Cached(v) => Ok(v.path().display().to_string()),
         KernelResolution::NeedsBuild(p) => {
             anyhow::bail!(
                 "kernel-pin: workload kernel not built yet (expected at {}); \
@@ -129,14 +129,6 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
         arch,
         source_checkout,
     )?))
-}
-
-pub(super) fn persistent_oci_uses_prod_kernel(
-    profile: &str,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-) -> bool {
-    profile != "dev"
-        || runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
 }
 
 #[cfg(test)]
@@ -234,14 +226,37 @@ mod resolve_pinned_kernel_tests {
     use super::*;
 
     #[test]
-    fn cached_kernel_returns_its_path() {
+    fn cached_kernel_returns_its_path_when_pinned() {
+        // Staged with a recorded digest: a cache hit is now evidence about the
+        // bytes, not about the filename. Without the pin this resolves to
+        // "needs build" — see `an_unpinned_cached_kernel_is_not_served`.
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let kernel_path =
             mvm_build::kernel_fetch::cached_kernel_path(tmp.path(), "aarch64", "workload");
         std::fs::create_dir_all(kernel_path.parent().unwrap()).unwrap();
         std::fs::write(&kernel_path, b"vmlinux").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&kernel_path).unwrap();
         let result = resolve_pinned_kernel(tmp.path(), "aarch64", true).unwrap();
         assert_eq!(result, kernel_path.display().to_string());
+    }
+
+    #[test]
+    fn an_unpinned_cached_kernel_is_not_served() {
+        // The behaviour this replaces: a kernel was booted because a file sat
+        // at the expected path. It now falls through to the build hint.
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel_path =
+            mvm_build::kernel_fetch::cached_kernel_path(tmp.path(), "aarch64", "workload");
+        std::fs::create_dir_all(kernel_path.parent().unwrap()).unwrap();
+        std::fs::write(&kernel_path, b"vmlinux").unwrap();
+
+        let err = resolve_pinned_kernel(tmp.path(), "aarch64", true).unwrap_err();
+        assert!(
+            err.to_string().contains("mvmctl kernel build"),
+            "expected the build hint, got: {err}"
+        );
     }
 
     #[test]

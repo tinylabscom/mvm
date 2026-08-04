@@ -12,6 +12,7 @@ mod check_abi_layout;
 mod check_adr_coverage;
 mod check_audit_positional;
 mod check_binary_size;
+mod check_build_egress_callers;
 mod check_builder_shell_job_sites;
 mod check_claim_catalog;
 mod check_claim_witness_freshness;
@@ -90,6 +91,10 @@ fn main() -> Result<()> {
         Some("check-audit-positional") => {
             let workspace = workspace_root();
             check_audit_positional::run(&workspace)
+        }
+        Some("check-build-egress-callers") => {
+            let workspace = workspace_root();
+            check_build_egress_callers::run(&workspace)
         }
         Some("check-no-host-nix") => {
             let workspace = workspace_root();

@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-02
+Last updated: 2026-08-03
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -16,8 +16,55 @@ for detailed scope and acceptance criteria.
         mean 300,000 guest frames, and a `mio` poll loop that drains the
         guest channel and the datapath independently so host-to-guest
         traffic no longer stalls while the guest is quiet
-  - [ ] Phase B (WS1) — the smoltcp-backed `UserspaceSocketDatapath` itself,
-        making `l3-vsock` work on hosts with no privileges
+  - [~] Phase B (WS1) — the smoltcp-backed `UserspaceSocketDatapath` itself,
+        making `l3-vsock` work on hosts with no privileges. Tasks 1–12 of 16
+        landed: the TCP path, deferred handshake, destination-integrity
+        assertion, bounded queues and flow lifetimes. UDP associations,
+        backend selection, the unprivileged end-to-end suite and close-out
+        remain, as do the ingress fuzz gate and the bounds audit
+
+- [~] Plan 291 — Develop → build → deploy an attested workload image
+      (`specs/plans/291-develop-build-deploy-attested.md`)
+  - [ ] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
+        record; ship to mvmd when a remote is configured, else stop at the
+        local sealed artifact
+  - [ ] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address
+  - [ ] WS3 capture-from-sandbox via `reseal_volume`, converging on the
+        declared-dependency path and keeping the lockfile hash pin
+  - [~] WS4 tier follows the attestation
+    - [x] Agent-verb grant derives from admitted run shape, not image sidecar
+    - [ ] Bind the tier to an attested artifact and replace the interactive
+          feature/symbol witnesses with conformance scenarios
+
+- [~] Plan 290 — Sensitive egress redaction
+      (`specs/plans/290-sensitive-egress-redaction.md`)
+  - [x] Validated byte detector and pinned, no-default-feature LeakGuard adapter
+  - [x] Shared supplemental coverage for masking and reversible replacement
+  - [x] Default secret/PII policy arms compressed and over-cap fail-closed gates
+  - [~] Host workspace tests/check, workspace all-target Clippy and supply-chain
+        gates pass; Linux builder-VM workspace all-target Clippy remains
+  - [ ] Structured/streaming body coverage and split-boundary witnesses
+  - [ ] Signed CLI policy lowering and admission posture reporting
+  - [ ] Build-level claim promotion and adversarial backend witnesses
+
+- [x] Plan 289 — Host-side machine logs
+      (`specs/plans/289-host-side-machine-logs.md`)
+  - [x] Read backend-captured logs from the isolated host VM state directory
+  - [x] Preserve log flags and legacy fallback without shell interpolation;
+        follow mode honors the requested line count
+  - [x] Cover host-only CLI behavior and log resolution with regression tests
+  - [x] Keep isolated test state behind the canonical config resolver and home
+        isolation gates
+  - [x] Complete workspace tests, check, formatting, and all-target clippy
+
+- [x] Plan 286 — Guest-kernel hardware floor
+      (`specs/plans/286-kernel-floor.md`)
+  - [x] Audit resolved x86_64/aarch64 configs and enforce required cuts
+  - [x] Ratchet workload configs to 902 x86_64 / 936 aarch64 built-ins
+  - [x] Shrink the x86_64 workload image by 46.8% and boot it on Firecracker
+  - [x] Preserve, build and boot the 955-symbol builder-kernel contract
+  - [x] Native 936-symbol aarch64 artifact built and booted to PID 1 on HVF
+  - [x] Full validation, merge-queue readiness and rollup closeout
 
 - [x] Plan 285 — HVF virtio-rng
       (`specs/plans/285-hvf-virtio-rng.md`, issue #2060)
@@ -54,7 +101,8 @@ for detailed scope and acceptance criteria.
   - [x] Live local/block attachment through the admitted VM launch path
   - [x] mvmd OpenDAL → `object_store` migration with mandatory encryption
   - [x] Authenticated remote volume CLI/client lifecycle with typed failures
-  - [x] Durable encrypted checkpoint/API policy and cross-worker restore closeout
+  - [x] Canonical worker handoff, Linux/KVM composition proof, and follow-up PR
+        matrices are green
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
   - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 
@@ -64,7 +112,7 @@ for detailed scope and acceptance criteria.
   - [x] Keep privileged execution on the trusted base ref with no checkout
   - [x] Complete repository validation and queue the PR
 
- - [x] Plan 270 — Universal initramfs + vsock-activated boot
+- [~] Plan 270 — Universal initramfs + vsock-activated boot
       (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
   - [x] Core boot contract: `ActivateEnvironment` over the authenticated
         vsock session, `ActivationState` gate, PID-1 agent with mount
@@ -75,11 +123,18 @@ for detailed scope and acceptance criteria.
   - [x] Activation agent-readiness retry on the wire (#1985)
   - [x] Deterministic cargo initramfs replaces the Nix initramfs build
         (#1996); attestation stays the content hash + sidecar contract
+  - [x] Retire the obsolete CLI workload-guest payload and dead
+        skip-embedding switch; the universal initramfs/runtime overlay owns
+        workload binaries (#2013)
+  - [x] Pin `mvmctl` embedding to the builder/bootstrap host and seed
+        manifests
   - [~] Deviations recorded at the unticked steps in the plan: capability-bit
         negotiation, chain-signed boot events, and vm_id/session binding were
         superseded by the path discriminator + session-key pinning; the
         guest-side activation idle timeout and focused zombie-reaping tests
         remain open
+  - [~] Remaining rollout, snapshot, BDD, and live-smoke work stays in the
+        plan
 
 - [~] Plan 271 — Apple Container backend: Apple's container kernel on HVF
       (`specs/plans/271-apple-container-backend.md`)
@@ -116,12 +171,6 @@ for detailed scope and acceptance criteria.
         allow-list so a docs-only edit stops invalidating every guest binary
         (416 of 1872 files, 22%, stop being cache keys)
 
- - [~] Plan 270 — universal initramfs + vsock-activated boot
- (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
-  - [x] Retire the obsolete CLI workload-guest payload and dead skip-embedding
-        switch; the universal initramfs/runtime overlay owns workload binaries
-  - [x] Pin `mvmctl` embedding to the builder/bootstrap host and seed manifests
-  - [~] Remaining rollout, snapshot, BDD, and live-smoke work stays in the plan
 - [x] Plan 284 — CI lint and merge-queue latency
   (`specs/plans/284-ci-lint-latency.md`)
   - [x] Target only the packages that own `test-support` code
@@ -131,18 +180,26 @@ for detailed scope and acceptance criteria.
   - [x] Keep the removed MCP server and smoke lane out of CI
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
- - [~] Plan 276 — Content-addressing conformance and defense
+- [~] Plan 276 — Content-addressing conformance and defense
       (`specs/plans/276-content-addressing-conformance-and-defense.md`)
   - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
-  - [ ] WS1 — reconcile the two claim tier vocabularies (`model/claims.toml`
-        `level` vs ADR claim-frontmatter `status`) so a mistier cannot
-        silently disengage `check-no-overclaim`
+  - [x] WS1 — pin the evidence each claim rests on: `witness_kinds` per claim
+        in `model/claims.toml`, gated by `check-claim-catalog`. The original
+        premise (two tier vocabularies over the same claims) was wrong — the
+        registers share no key; the real gap was that a claim could be
+        delisted from a whole kind of witness with every gate green
   - [x] WS2 — prose over-claim meta-gate, shipped as `xtask check-no-overclaim`
-  - [ ] WS3 — replay golden-vector corpus across every content-address surface,
-        recording σ and κ where a transform is in play (no corpus in tree;
-        `check-content-address-determinism` pins the `serde_json preserve_order`
-        drift mechanism, not an address)
-  - [ ] WS4 — ≥2 independent verifiers over the WS3 corpus
+  - [~] WS3 — replay golden-vector corpus. `ir_hash`, `leaf_hash`,
+        `interior_hash`, `merkle_root`, `compute_plan_id` and `bundle_sha256`
+        now carry frozen addresses. The existing `ir_hash` tests were all
+        *relational*, so a canonicalization change moving every address
+        consistently passed all four — planted and confirmed. The audit `prev_hash`
+        spine is closed by WS4's frozen signed corpus
+  - [x] WS4 — one frozen signed audit chain both verifiers read. The existing
+        parity test compared them over a randomly-keyed chain generated per
+        run, which no verifier outside that process could ever see. riscv32 is
+        a compile oracle, not an executing one — the executing pair is the host
+        verifier and the no_std mirror, with wasm executing the mirror
   - [ ] WS5 — bind each witness to its recorded red-proof
   - [~] WS6 — **lead item**: content-address the caches, verify on read. The
         2026-08-01 recon revision reverses finding 2 — integrity-on-read is the
@@ -155,18 +212,22 @@ for detailed scope and acceptance criteria.
           later build re-adopts. Unblocks plan 279 WS1
     - [ ] Workload/builder kernel cache: still path-trusting.
           `verify_fetched_kernel` exists with **no production caller** —
-          neither the fetch nor the read path checks a kernel against its pin
+          neither the fetch nor the read path checks a kernel against its pin.
+          Scoped as plan 288
+          (`specs/plans/288-kernel-cache-verify-on-read.md`)
     - [ ] Cold-tier background scrub (recon §7.9)
-  - [ ] WS7 — σ/κ separation and the transform descriptor: the protocol digest
+  - [~] WS7 — σ/κ separation: `mvm_core::at_rest` gives the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint
-        types, σ as a set, descriptor as an open enumeration. Free while every
-        surface is `Identity`; a format migration per transform family later
+        types, σ as a set, and the transform descriptor as an open enumeration.
+        The plan's "everything is Identity today" premise was wrong — OCI
+        layers are tar+gzip and transcripts store ciphertext — which
+        strengthens the case. Remaining: adopt the types at those two sites
   - [x] Discharged elsewhere: sealed transcript root anchored into the audit
         chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
         (recon §7.7 → #2019)
 
-- [~] Plan 279 — L3 TUN-over-vsock network mode
-  (`specs/plans/279-l3-tun-over-vsock.md`, ADR-035)
+- [~] Plan 285 — L3 TUN-over-vsock network mode
+  (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)
   - [x] W1–W8 — canonical `NetworkMode::L3Vsock`, the shared fuzzable wire
         protocol, the pure policy core, the guest `mvm-net-agent`, the
         machine-scoped host gateway, audit kinds, docs, and the unprivileged

@@ -97,7 +97,7 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// (the common case) means the workload calls no host service.
     pub services: Vec<mvm_protocol::protocol::broker::ServiceId>,
     /// True iff this run should receive an attenuated (ProdSafe-only) agent-verb
-    /// grant. Set this with `grant_eligible(pty, has_ad_hoc_argv, is_dev_profile, image_sealed)`.
+    /// grant. Set this with `grant_eligible(pty, has_ad_hoc_argv, is_dev_profile)`.
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs
     /// (ConsoleOpen, Exec) that a ProdSafe grant would refuse.
     pub restrict_agent_verbs: bool,
@@ -219,6 +219,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         .map(|(policy_ref, _)| policy_ref.as_str());
 
     let input = SynthesisInput {
+        kernel_sha256: None,
         network_mode: Default::default(),
         l3_network: None,
         vm_name: p.vm_name,

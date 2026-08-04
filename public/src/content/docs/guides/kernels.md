@@ -32,9 +32,9 @@ Flags:
 - `--boot-check` — after building the default workload kernel, boot a throwaway
   VM on it and confirm the in-guest agent answers over vsock.
 
-Use `--which workload-sizeopt` to build the measured comparison variant with
-`CONFIG_CC_OPTIMIZE_FOR_SIZE=y` without changing the shipped default workload
-kernel cache entry.
+Workload kernels ship with `CONFIG_CC_OPTIMIZE_FOR_SIZE=y`. The
+`workload-sizeopt` selector remains as a compatibility alias for the measured
+size-oriented variant; it resolves to the same config as `workload`.
 
 The compiled or downloaded kernel is cached at
 `~/.mvm/cache/builder-vm/<arch>/kernels/<variant>/vmlinux` and reused by every
@@ -61,7 +61,7 @@ nix build ./nix/images/kernel#builder-metrics -o /tmp/builder-metrics
 nix build ./nix/images/kernel#workload-metrics -o /tmp/workload-metrics
 cat /tmp/workload-metrics/metrics.json
 
-# Size-mode experiment output (does not change the shipped default by itself)
+# Compatibility alias for the size-oriented workload metrics
 nix build ./nix/images/kernel#workload-sizeopt-metrics -o /tmp/workload-sizeopt-metrics
 cat /tmp/workload-sizeopt-metrics/metrics.json
 ```

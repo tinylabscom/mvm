@@ -239,6 +239,28 @@ pub struct WorkloadId(pub String);
 #[serde(transparent)]
 pub struct RuntimeProfileRef(pub String);
 
+/// The execution environment a workload is admitted to boot *in*, as opposed to
+/// the image it boots. Content-addressed like [`SignedImageRef`].
+///
+/// This exists because the image digest alone does not determine how the
+/// workload is confined. The same signed image, booted on a kernel built for a
+/// different job, gets a different security posture — a kernel with
+/// `CONFIG_USER_NS` enabled lets the guest enter a user namespace as uid 0,
+/// which the workload kernel deliberately prevents. Without the kernel in the
+/// plan, that difference is invisible: identical plan, identical image,
+/// identical digests, and a posture decided by whatever the host had cached.
+///
+/// Pinning it makes the mismatch refusable at admission instead of silent at
+/// boot. The struct (rather than a bare digest) is so the rest of the
+/// environment — initrd, runtime overlay, seccomp tier — can be added without
+/// another plan field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentRef {
+    /// Lowercase hex SHA-256 of the kernel image this workload boots.
+    pub kernel_sha256: String,
+}
+
 /// Reference to a signed image. SHA-256 of the rootfs + name. The
 /// `cosign_bundle` field
 /// is the path or URL to the cosign keyless bundle that

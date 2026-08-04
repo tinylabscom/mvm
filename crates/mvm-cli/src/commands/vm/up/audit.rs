@@ -143,6 +143,7 @@ chain_signing = true
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                kernel_sha256: None,
                 network_mode: Default::default(),
                 l3_network: None,
                 vm_name: "vm-live",
@@ -249,6 +250,7 @@ stream_destinations = ["file://{}"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                kernel_sha256: None,
                 network_mode: Default::default(),
                 l3_network: None,
                 vm_name: "vm-stream",
@@ -354,6 +356,7 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                kernel_sha256: None,
                 network_mode: Default::default(),
                 l3_network: None,
                 vm_name: "vm-unsigned-audit",
@@ -434,6 +437,7 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                kernel_sha256: None,
                 network_mode: Default::default(),
                 l3_network: None,
                 vm_name: "vm-nope",
@@ -534,6 +538,7 @@ disabled_inspectors = ["ssrf_guarrd"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                kernel_sha256: None,
                 network_mode: Default::default(),
                 l3_network: None,
                 vm_name: "vm-typo",
@@ -640,6 +645,7 @@ port_hi  = 443
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                kernel_sha256: None,
                 network_mode: Default::default(),
                 l3_network: None,
                 vm_name: "vm-bad",

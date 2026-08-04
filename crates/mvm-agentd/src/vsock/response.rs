@@ -197,6 +197,10 @@ pub enum GuestResponse {
     /// The pinned verb grant does not authorize this verb for the
     /// workload. Wire-stable. Universal — may answer any request.
     VerbNotAuthorized { verb: String },
+    /// The agent refused to spawn workload code because it is still running as
+    /// uid 0. Carries the offending verb and the live uid so the refusal is
+    /// self-diagnosing rather than needing a console-log hunt.
+    WorkloadPrivilegeRefused { verb: String, uid: u32 },
     /// Per-integration status report.
     IntegrationStatusReport {
         integrations: Vec<crate::integrations::IntegrationStateReport>,
@@ -357,7 +361,7 @@ name_enum! {
     pub enum ResponseVariant {
         ActivateEnvironmentAck, ActivateEnvironmentError, NotActivated,
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
-        Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, IntegrationStatusReport,
+        Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, WorkloadPrivilegeRefused, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
         ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
@@ -379,6 +383,7 @@ impl ResponseVariant {
             ResponseVariant::Error
                 | ResponseVariant::UnsupportedInProfile
                 | ResponseVariant::VerbNotAuthorized
+                | ResponseVariant::WorkloadPrivilegeRefused
         )
     }
 }
@@ -460,6 +465,71 @@ impl Verb {
             | Self::MountVolume
             | Self::UnmountVolume
             | Self::UpdateIdleTimeout => Control,
+        }
+    }
+
+    /// Whether serving this verb creates a process running workload code.
+    ///
+    /// Exhaustive on purpose: a new verb cannot be added without someone
+    /// deciding which side of this line it falls on, the same discipline
+    /// `traffic_plane` and `RequestClass::class` already impose.
+    ///
+    /// This exists because the agent has five distinct workload-spawn sites
+    /// (`entrypoint.rs`, `exec_stream.rs`, `console.rs`, `lifecycle_hooks.rs`,
+    /// `worker_pool.rs`) and **none of them sets a uid** — every one inherits
+    /// the agent's identity. Guarding each site would therefore be guarding the
+    /// symptom. The property that matters is that the agent is not root when it
+    /// serves one of these, which is a single check over this classification.
+    pub fn spawns_workload_process(self) -> bool {
+        match self {
+            // Each of these ends in a process executing image or user code.
+            Self::Exec
+            | Self::ExecBatch
+            | Self::RunEntrypoint
+            | Self::RunDetached
+            | Self::RunCode
+            | Self::ProcStart
+            | Self::ConsoleOpen => true,
+
+            // Agent-internal: these answer from agent state, mutate mounts or
+            // forwarding, or manage a process the verbs above already created.
+            // `ActivateEnvironment` is the important one — it runs the mounts
+            // and the pivot, so it legitimately executes while still root and
+            // must never be caught by this gate.
+            Self::ActivateEnvironment
+            | Self::ProtocolHello
+            | Self::WorkerStatus
+            | Self::SleepPrep
+            | Self::Wake
+            | Self::Ping
+            | Self::ResourceUsage
+            | Self::IntegrationStatus
+            | Self::CheckpointIntegrations
+            | Self::ProbeStatus
+            | Self::PrimedStatus
+            | Self::PostRestore
+            | Self::FsDiff
+            | Self::StartPortForward
+            | Self::StartUnixSocketForward
+            | Self::ConsoleClose
+            | Self::ConsoleResize
+            | Self::EntrypointStatus
+            | Self::ReadinessStatus
+            | Self::FsRead
+            | Self::FsWrite
+            | Self::FsList
+            | Self::FsStat
+            | Self::FsMkdir
+            | Self::FsRemove
+            | Self::FsMove
+            | Self::ProcList
+            | Self::ProcSignal
+            | Self::ProcSendInput
+            | Self::ProcWait
+            | Self::ProcKill
+            | Self::MountVolume
+            | Self::UnmountVolume
+            | Self::UpdateIdleTimeout => false,
         }
     }
 
@@ -546,6 +616,9 @@ impl GuestResponse {
             GuestResponse::Error { .. } => ResponseVariant::Error,
             GuestResponse::UnsupportedInProfile { .. } => ResponseVariant::UnsupportedInProfile,
             GuestResponse::VerbNotAuthorized { .. } => ResponseVariant::VerbNotAuthorized,
+            GuestResponse::WorkloadPrivilegeRefused { .. } => {
+                ResponseVariant::WorkloadPrivilegeRefused
+            }
             GuestResponse::IntegrationStatusReport { .. } => {
                 ResponseVariant::IntegrationStatusReport
             }
