@@ -2811,6 +2811,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
+ "mvm-protocol",
  "mvm-runtime",
  "rand 0.8.6",
  "secrecy",
@@ -2820,6 +2821,7 @@ dependencies = [
  "sha2 0.11.0",
  "tar",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
