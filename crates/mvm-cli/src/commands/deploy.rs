@@ -4,6 +4,7 @@
 //! endpoint requires `MVM_MVMD_API_KEY`; the local record remains available if
 //! remote transport or admission fails.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -28,7 +29,8 @@ pub(in crate::commands) struct Args {
     #[arg(long = "from-ir", value_name = "PATH")]
     pub from_ir: Option<PathBuf>,
 
-    /// Local deployment directory. It contains image.tar.gz and deploy.json.
+    /// Local deployment directory. It contains image.tar.gz, rootfs.ext4,
+    /// and deploy.json.
     /// Defaults to ~/.mvm/deployments/<ir-hash>.
     #[arg(short = 'o', long = "out", value_name = "DIR")]
     pub out: Option<PathBuf>,
@@ -38,6 +40,11 @@ pub(in crate::commands) struct Args {
     /// for stdin.
     #[arg(long = "manifest-dir", value_name = "DIR")]
     pub manifest_dir: Option<PathBuf>,
+
+    /// Exact rootfs.ext4 that the selected boot path will mount. The file is
+    /// copied into the deployment directory and shipped inside the archive.
+    #[arg(long = "boot-artifact", value_name = "PATH")]
+    pub boot_artifact: PathBuf,
 
     /// Verify this sealed dependency volume and include its audit hashes.
     #[arg(long = "dep-volume", value_name = "DIR")]
@@ -59,6 +66,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         from_ir,
         out,
         manifest_dir,
+        boot_artifact,
         dependency_volume,
         kernel_sha256,
         mvmd_url,
@@ -70,15 +78,22 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         .with_context(|| format!("creating deployment directory {}", deployment_dir.display()))?;
 
     let artifact_path = deployment_dir.join("image.tar.gz");
+    let local_boot_artifact = deployment_dir.join("rootfs.ext4");
     let record_path = deployment_dir.join("deploy.json");
     let manifest_dir = manifest_dir.unwrap_or(resolve_default_manifest_dir(
         from_ir.as_deref(),
         entry.as_deref(),
     )?);
 
-    let bundle = build_deploy_bundle(&workload, &artifact_path, &manifest_dir)
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("building sealed artifact {}", artifact_path.display()))?;
+    install_boot_artifact(&boot_artifact, &local_boot_artifact)?;
+    let bundle = build_deploy_bundle(
+        &workload,
+        &artifact_path,
+        &manifest_dir,
+        &local_boot_artifact,
+    )
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("building sealed artifact {}", artifact_path.display()))?;
     let environment = kernel_sha256
         .map(|kernel_sha256| {
             validate_sha256(&kernel_sha256).map(|_| EnvironmentPin { kernel_sha256 })
@@ -98,6 +113,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
 
     println!("local deployment: {}", deployment_dir.display());
     println!("  artifact: {}", artifact_path.display());
+    println!("  boot artifact: {}", local_boot_artifact.display());
     println!("  record: {}", record_path.display());
     println!("  image blake3: {}", record.image.blake3);
     println!("  image sha256: {}", record.image.sha256);
@@ -116,6 +132,29 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             .with_context(|| format!("shipping deployment to {base_url}"))?;
         println!("remote deployment requested: {base_url}");
     }
+    Ok(())
+}
+
+fn install_boot_artifact(source: &Path, destination: &Path) -> Result<()> {
+    if !source.is_file() {
+        bail!(
+            "--boot-artifact is not a regular file: {}",
+            source.display()
+        );
+    }
+    if source == destination {
+        return Ok(());
+    }
+    let temporary = destination.with_extension("ext4.tmp");
+    fs::copy(source, &temporary).with_context(|| {
+        format!(
+            "copying boot artifact {} into {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    fs::rename(&temporary, destination)
+        .with_context(|| format!("publishing local boot artifact {}", destination.display()))?;
     Ok(())
 }
 

@@ -11,6 +11,7 @@ use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
 };
+use mvm_sdk::deploy::{BootArtifactIdentity, verify_boot_artifact};
 
 use crate::commands::vm::audit_chain::AuditEmitter;
 use crate::commands::vm::host_signer::{PUBLIC_FILENAME, load_or_init_at};
@@ -40,6 +41,10 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// refuses a tampered blob before any supervisor spawns) — a
     /// mismatch then aborts the launch, never boots a mis-admitted image.
     pub precomputed_image_sha256: Option<String>,
+    /// Optional deploy-record identity for the exact rootfs selected by this
+    /// boot. When present, both labeled digests and the byte count are
+    /// reverified before plan synthesis.
+    pub boot_artifact_identity: Option<&'a BootArtifactIdentity>,
     pub cpus: u32,
     pub mem_mib: u64,
     pub seccomp_tier: mvm_core::plan::PlanSeccompTier,
@@ -167,7 +172,19 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     if p.no_supervisor {
         return Ok(None);
     }
-    let sha = resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256)?;
+    let attested_sha = p
+        .boot_artifact_identity
+        .map(|identity| {
+            verify_boot_artifact(p.rootfs_path, identity).map_err(|error| {
+                anyhow::anyhow!(
+                    "verifying deploy-record boot artifact for {}: {error}",
+                    p.rootfs_path.display()
+                )
+            })?;
+            Ok::<String, anyhow::Error>(identity.sha256.clone())
+        })
+        .transpose()?;
+    let sha = resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256.or(attested_sha))?;
 
     // Claim 9 — bundle pin (when supplied).
     //
@@ -791,6 +808,7 @@ mod admit_plan_tests {
             backend_name: "firecracker",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -820,6 +838,7 @@ mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"hello rootfs");
+        let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
             tenant: "local",
@@ -827,6 +846,7 @@ mod admit_plan_tests {
             backend_name: "firecracker",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: Some(&boot_artifact),
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Network,
@@ -853,6 +873,7 @@ mod admit_plan_tests {
         assert_eq!(ctx.admitted.plan.tenant.0, "local");
         assert_eq!(ctx.admitted.plan.resources.cpus, 2);
         assert_eq!(ctx.admitted.plan.resources.mem_mib, 512);
+        assert_eq!(ctx.admitted.plan.image.sha256, boot_artifact.sha256);
         assert_eq!(
             ctx.admitted.plan.admission_profile.seccomp_tier,
             mvm_core::plan::PlanSeccompTier::Network
@@ -884,6 +905,7 @@ mod admit_plan_tests {
             backend_name: "firecracker",
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -927,6 +949,7 @@ mod admit_plan_tests {
             backend_name: "firecracker",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -954,6 +977,7 @@ mod admit_plan_tests {
             backend_name: "firecracker",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -1006,6 +1030,7 @@ mod admit_plan_tests {
             backend_name: "firecracker",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -1080,6 +1105,7 @@ mod admit_plan_tests {
             backend_name: "firecracker",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -1132,6 +1158,7 @@ mod admit_plan_tests {
             backend_name: "libkrun",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -1191,6 +1218,7 @@ mod admit_plan_tests {
             backend_name: "hvf",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

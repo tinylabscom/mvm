@@ -427,6 +427,7 @@ pub(in crate::commands) fn run_secure_with_source(
             backend_name: &admit_backend,
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus: admit_cpus,
             mem_mib: admit_mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
