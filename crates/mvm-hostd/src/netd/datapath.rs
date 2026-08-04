@@ -24,7 +24,8 @@ use mvm_net::l3::{AdmittedPacket, IngressMapping};
 /// only translate the transports it knows how to open sockets for. A plan
 /// that needs something the selected backend lacks is refused at admission
 /// — there is no degrade, and no "mostly works".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForwardingCapabilities {
     pub tcp: bool,
     pub udp: bool,

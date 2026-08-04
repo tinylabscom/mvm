@@ -90,7 +90,10 @@ impl fmt::Display for GuestService {
 /// Every field is assigned by the host. A guest cannot select, assert, or
 /// influence any of them, which is why this — and not a CID, a socket path,
 /// or a header field — is what authorization binds to.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct VmInstanceIdentity {
     /// The node this VM is running on.
     pub node_id: String,

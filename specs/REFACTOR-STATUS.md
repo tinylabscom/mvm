@@ -172,8 +172,20 @@ for detailed scope and acceptance criteria.
         `AuditEmitter` reaches `netd` at all, so there is no local audit
         record for the hop to preserve. The ADR records the design, the
         rejected alternatives, and the four unblocking conditions
-  - [ ] WS8 (#2120) — mvmd-facing node-control API, mvm side only; the
-        fleet-orchestration half stays in the mvmd repository
+  - [~] WS8 (#2120) — mvmd-facing node-control API, mvm side only.
+        **The mvm half is implemented** (`mvm_hostd::nodectl`, ADR-041,
+        sequenced in `specs/plans/292-node-control-api.md`): ownership is
+        a uid comparison against the connection's peer credential and
+        never a field in the message, so a caller is refused a machine it
+        does not own and a listing carries only its own. Forcing
+        `CallerIdentity::owns` to `true` reddens five tests. Wire types
+        are `deny_unknown_fields`, tables are bounded and drop rather
+        than evict, and nothing here binds a listener. **The cross-node
+        issuer is deliberately not built**: ADR-041 answers ADR-040's
+        open question by placing the issuer with the control plane and
+        the verification seam here, so this *half*-unblocks #2119 rather
+        than unblocking it — a key scoped to a node pair would still be a
+        second trust root. The fleet-orchestration half stays in mvmd
   - [ ] WS9 (#2121) — WSL2 validation on a real runner; documented and
         scheduled rather than claimed, since no live Windows host is
         available

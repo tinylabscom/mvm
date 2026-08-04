@@ -73,9 +73,21 @@ it would be the component that decides which workloads can reach each
 other — the most security-relevant key in the system, established by the
 least authenticated mechanism in it. Rejected.
 
-**Unblocked by:** the node-control API (#2120), specifically an issuer
-whose key is not node-scoped, and a way for a node to obtain a peer's
-verifying key from that issuer rather than from the peer.
+**Unblocked by:** an issuer whose key is not node-scoped, and a way for a
+node to obtain a peer's verifying key from that issuer rather than from
+the peer.
+
+**Where that comes from — settled by ADR-041, and not here.** This ADR
+named the node-control API (#2120) as the likely source. It is not: an
+issuer is an authority over a set of nodes, and a single host has no
+vantage point from which to mint one. ADR-041 splits the question — the
+issuer is the control plane's, the *verification* is the node's — and
+builds the node half. So P1 stays open, but its remaining half now sits
+in a named place outside this repository rather than in an unwritten
+workstream inside it. The verification seam a node needs
+(`LeaseVerifier` selecting on `key_id`, holding verifying material only,
+with `WrongNode` unrelaxed) is designed in ADR-041 §"The verification
+seam the node needs".
 
 ### P2 — Addresses are not unique across nodes, so a destination IP does not name a VM
 

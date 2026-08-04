@@ -63,7 +63,32 @@ where
     W: Write + ?Sized,
     T: serde::Serialize,
 {
+    write_json_frame_sync_capped(stream, value, usize::MAX)
+}
+
+/// The same write, refusing a body over `max_frame_bytes` before any of it
+/// reaches the stream.
+///
+/// For a writer whose output size is a bound it has claimed elsewhere: a
+/// body that exceeded it would be a broken promise shipped rather than
+/// caught, and half of it would already be on the wire by the time the
+/// reader's own cap rejected it.
+pub fn write_json_frame_sync_capped<W, T>(
+    stream: &mut W,
+    value: &T,
+    max_frame_bytes: usize,
+) -> Result<(), FrameError>
+where
+    W: Write + ?Sized,
+    T: serde::Serialize,
+{
     let body = serde_json::to_vec(value).map_err(FrameError::Json)?;
+    if body.len() > max_frame_bytes {
+        return Err(FrameError::TooLarge {
+            size: body.len(),
+            cap: max_frame_bytes,
+        });
+    }
     let len: u32 = body
         .len()
         .try_into()
