@@ -101,7 +101,9 @@ before WS1 starts.
       what their workload actually depends on.
       Each iteration reports whether it rebuilt or found an unchanged state;
       rebuilds identify whether IR or source inputs changed and report compile
-      duration in milliseconds.
+      duration in milliseconds. Long-running watches keep polling after a
+      transient input or compile error and retry when the fingerprint changes;
+      `--once` remains fail-fast for automation.
 
 ### WS3 — capture dependencies from the sandbox
 

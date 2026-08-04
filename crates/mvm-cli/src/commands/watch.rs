@@ -50,8 +50,22 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let mut previous = None;
 
     loop {
-        let workload = load_workload(&input)?;
-        let state = input_state(&workload, &manifest_dir, &args.out)?;
+        let workload = match load_workload(&input) {
+            Ok(workload) => workload,
+            Err(error) => {
+                handle_watch_error(error, args.once, "watch input unavailable")?;
+                std::thread::sleep(Duration::from_millis(args.interval_ms));
+                continue;
+            }
+        };
+        let state = match input_state(&workload, &manifest_dir, &args.out) {
+            Ok(state) => state,
+            Err(error) => {
+                handle_watch_error(error, args.once, "watched input unavailable")?;
+                std::thread::sleep(Duration::from_millis(args.interval_ms));
+                continue;
+            }
+        };
         if previous.as_ref() != Some(&state) {
             let change = previous.as_ref().map_or("initial", |old| {
                 match (
@@ -65,14 +79,18 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             });
             let started = Instant::now();
-            compile(&workload, &args.out, &manifest_dir)
+            let compile_result = compile(&workload, &args.out, &manifest_dir)
                 .map_err(anyhow::Error::from)
-                .with_context(|| format!("compiling watched workload to {}", args.out.display()))?;
-            let compile_ms = started.elapsed().as_millis();
-            eprintln!(
-                "rebuilt workload {} (change={change}, ir_hash {}, compile_ms={compile_ms})",
-                workload.id, state.ir_hash,
-            );
+                .with_context(|| format!("compiling watched workload to {}", args.out.display()));
+            if let Err(error) = compile_result {
+                handle_watch_error(error, args.once, "rebuild failed")?;
+            } else {
+                let compile_ms = started.elapsed().as_millis();
+                eprintln!(
+                    "rebuilt workload {} (change={change}, ir_hash {}, compile_ms={compile_ms})",
+                    workload.id, state.ir_hash,
+                );
+            }
             previous = Some(state);
         } else {
             eprintln!(
@@ -86,6 +104,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
         std::thread::sleep(Duration::from_millis(args.interval_ms));
     }
+}
+
+fn handle_watch_error(error: anyhow::Error, once: bool, context: &str) -> Result<()> {
+    if once {
+        return Err(error);
+    }
+    eprintln!("{context}: {error}; waiting for the next change");
+    Ok(())
 }
 
 fn validate_interval(interval_ms: u64) -> Result<()> {
@@ -367,5 +393,11 @@ mod tests {
     fn zero_poll_interval_is_rejected() {
         assert!(validate_interval(0).is_err());
         assert!(validate_interval(1).is_ok());
+    }
+
+    #[test]
+    fn long_running_watch_recovers_from_transient_errors() {
+        assert!(handle_watch_error(anyhow::anyhow!("broken input"), false, "watch").is_ok());
+        assert!(handle_watch_error(anyhow::anyhow!("broken input"), true, "watch").is_err());
     }
 }
