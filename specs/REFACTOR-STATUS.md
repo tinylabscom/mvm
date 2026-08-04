@@ -159,8 +159,19 @@ for detailed scope and acceptance criteria.
         `just check-linux` is `--lib` and never builds Linux-gated test files
   - [ ] WS5 (#2118) — zero-copy / batched transfer, gated on the same
         measurement; must keep the memory ceiling assertable
-  - [ ] WS7 (#2119) — node-to-node transport for cross-host VM traffic,
-        preserving policy, audit and identity binding across the hop
+  - [~] WS7 (#2119) — node-to-node transport for cross-host VM traffic.
+        **Designed, deliberately not implemented: ADR-040.** Three of the
+        four properties the hop must preserve cannot be preserved today,
+        each for a reason outside the transport. No cross-node trust root
+        exists and building one here would be a second one beside the
+        plan-signing root (needs WS8); addresses are not unique across
+        nodes, so a destination IP does not name a VM and a peer's address
+        collides with a local machine's; the policy language cannot name a
+        peer workload and `IngressTable::admits` takes no source, so
+        admitting a peer means admitting the host network; and no
+        `AuditEmitter` reaches `netd` at all, so there is no local audit
+        record for the hop to preserve. The ADR records the design, the
+        rejected alternatives, and the four unblocking conditions
   - [ ] WS8 (#2120) — mvmd-facing node-control API, mvm side only; the
         fleet-orchestration half stays in the mvmd repository
   - [ ] WS9 (#2121) — WSL2 validation on a real runner; documented and

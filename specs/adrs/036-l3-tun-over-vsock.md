@@ -490,6 +490,18 @@ authorization, hop identity, and flow audit correlation all survive the
 hop. The node-to-node transport is a separate abstraction and is **not
 implemented**; the local implementation does not depend on it.
 
+[ADR-040](040-node-to-node-transport.md) designs that transport and
+records why it stays unimplemented. Three of the paragraph above's
+promises are not currently keepable, and none of the three is fixable
+inside a transport: "the guest cannot tell whether a destination is local
+or remote" is unachievable while `PoolAllocator` gives two nodes the same
+addresses, since the two cases are then indistinguishable from the packet;
+destination-side authorization needs a policy language that can name a
+peer workload, which `CanonicalRule` cannot and `IngressTable` has no
+source for; and "flow audit correlation" presumes a local audit record
+that `netd` does not yet produce. ADR-040 carries the design, the
+alternatives it rejects, and the four conditions that unblock it.
+
 ## Launch-path convergence
 
 Audited paths and their status:

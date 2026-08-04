@@ -208,9 +208,18 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       see the deferred set below.)
 - [x] platform matrix (Linux / macOS / WSL2 / native Windows) documented
       without overclaiming
-- [ ] node-to-node transport for cross-host VM traffic — interface
-      described in the ADR, not implemented; the local path does not
-      depend on it
+- [~] node-to-node transport for cross-host VM traffic — **designed in
+      ADR-040 and deliberately not implemented**; the local path does not
+      depend on it. Three of the hop's four invariants are unpreservable
+      today and none of the three is fixable inside a transport: there is
+      no cross-node trust root and adding one here would be a second root
+      beside plan signing; `PoolAllocator` has no node discriminator, so a
+      peer's address collides with a local machine's and the two are not
+      distinguishable from the packet; `CanonicalRule` cannot name a peer
+      workload and `IngressTable::admits` takes only a protocol and a
+      guest port, so admitting a peer admits the host network too; and the
+      chain-signed audit log does not reach `netd`, so the hop has no
+      local record to preserve. ADR-040 carries the unblock checklist
 - [ ] `mvmd`-facing node-control API — the responsibility split is
       documented and the lease is the contract, but no RPC surface exists
 
