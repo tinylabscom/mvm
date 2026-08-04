@@ -24,6 +24,8 @@ pub struct MvmConfig {
     pub metrics_port: Option<u16>,
     /// URL for remote image catalog. None means use bundled catalog only.
     pub catalog_url: Option<String>,
+    /// Optional mvmd endpoint used by `mvmctl deploy` after local recording.
+    pub mvmd_url: Option<String>,
     /// Maximum wall-clock seconds `mvmctl up` waits for every guest
     /// integration's readiness probe to flip to `Active` before giving
     /// up and leaving `InstanceReadiness` at `ServicesStarting {
@@ -61,6 +63,7 @@ impl Default for MvmConfig {
             log_format: None,
             metrics_port: None,
             catalog_url: None,
+            mvmd_url: None,
             services_health_timeout_secs: 30,
         }
     }
@@ -175,10 +178,17 @@ pub fn set_key(cfg: &mut MvmConfig, key: &str, value: &str) -> Result<()> {
                 Some(value.to_string())
             };
         }
+        "mvmd_url" => {
+            cfg.mvmd_url = if value == "none" || value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            };
+        }
         other => {
             anyhow::bail!(
                 "Unknown config key {:?}. Valid keys: dev_vm_cpus, dev_vm_mem_gib, \
-                 default_cpus, default_memory_mib, log_format, metrics_port, catalog_url",
+                 default_cpus, default_memory_mib, log_format, metrics_port, catalog_url, mvmd_url",
                 other
             );
         }
@@ -315,6 +325,15 @@ mod tests {
         };
         set_key(&mut cfg, "catalog_url", "none").unwrap();
         assert!(cfg.catalog_url.is_none());
+    }
+
+    #[test]
+    fn test_set_key_mvmd_url() {
+        let mut cfg = MvmConfig::default();
+        set_key(&mut cfg, "mvmd_url", "https://mvmd.example").unwrap();
+        assert_eq!(cfg.mvmd_url.as_deref(), Some("https://mvmd.example"));
+        set_key(&mut cfg, "mvmd_url", "none").unwrap();
+        assert!(cfg.mvmd_url.is_none());
     }
 
     #[test]

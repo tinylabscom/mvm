@@ -224,6 +224,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         backend_name,
         rootfs_path,
         precomputed_image_sha256: None,
+        boot_artifact_identity: None,
         cpus,
         mem_mib: u64::from(memory_mib),
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

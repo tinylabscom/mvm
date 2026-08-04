@@ -21,8 +21,8 @@
 //! Each subcommand is classified as one of:
 //!
 //! - [`AuditPosture::Emits`] — the command MUST emit ≥1 audit entry on
-//!   success. The entry kind is named (`LocalAuditKind::*` or a
-//!   `plan.*` chain event).
+//!   success. The entry kind is named (`LocalAuditKind::*`, a
+//!   `cmd.*` envelope, or a `plan.*` chain event).
 //! - [`AuditPosture::ReadOnly`] — the command only reads host state.
 //!   No audit entry expected.
 //! - [`AuditPosture::DelegatesToSub`] — the verb is a subcommand
@@ -421,6 +421,9 @@ const TRUST_SUB: &[(&str, AuditPosture)] = &[
 const DEPS_SUB: &[(&str, AuditPosture)] = &[
     ("inspect", AuditPosture::ReadOnly),
     ("audit", AuditPosture::Emits("DepsAudit")),
+    ("capture", AuditPosture::Emits("DepsAudit")),
+    ("install", AuditPosture::Emits("DepsAudit")),
+    ("capture-live", AuditPosture::Emits("DepsAudit")),
 ];
 
 /// Every top-level `mvmctl` subcommand keyed by its clap name.
@@ -436,11 +439,15 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // VM image prefetch). Same posture as `env bootstrap` and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
+    // Deploy mutates the local sealed-artifact store and is wrapped by the
+    // top-level cmd.* audit envelope even when no remote is configured.
+    ("deploy", AuditPosture::Emits("cmd.deploy")),
     // Runtime-pack readiness report — reads the local pack cache only, no
     // mutation and no audit-chain emission.
     ("prepare", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),
     ("init", AuditPosture::InteractiveOrControl),
+    ("watch", AuditPosture::InteractiveOrControl),
     // VM lifecycle. `up` and `invoke` are retired (folded into `machine run`'s
     // argv lifecycle + `--entrypoint` action). `run` survives hidden as the SDK
     // Sandbox transport (`run --mode live/plan`); its posture is unchanged.
@@ -689,6 +696,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",
+        // Top-level command audit envelopes.
+        "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",
     ];

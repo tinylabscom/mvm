@@ -2108,10 +2108,11 @@ fn put_a_secret(sandbox: &AuditSandbox, tenant: &str, name: &str, value: &str) {
 }
 
 #[test]
-fn secret_put_emits_put_action_in_secret_audit_log() {
+fn secret_put_emits_create_action_in_secret_audit_log() {
     // The `mvmctl secret` command writes per-action JSONL to a
     // separate audit file (`~/.mvm/audit/secrets.jsonl`); the
-    // shape is `{"action":"put","tenant":...,"name":...,"outcome":"ok",...}`.
+    // shape is `{"action":"create","tenant":...,"name":...,"outcome":"ok",...}`
+    // (a `put` over an existing name records `"replace"` instead).
     // This pins the entry shape so a regression that flips
     // "action" → "verb" or relocates the file gets caught.
     let sandbox = AuditSandbox::new();
@@ -2137,8 +2138,8 @@ fn secret_put_emits_put_action_in_secret_audit_log() {
 
     let log = std::fs::read_to_string(sandbox.secret_audit_log_path()).unwrap_or_default();
     assert!(
-        log.contains("\"action\":\"put\""),
-        "expected an 'action':'put' entry in secrets audit log. Full log:\n{log}"
+        log.contains("\"action\":\"create\""),
+        "expected an 'action':'create' entry in secrets audit log. Full log:\n{log}"
     );
     assert!(
         log.contains("\"tenant\":\"test-tenant\""),
@@ -2213,9 +2214,9 @@ fn secret_ls_emits_list_action_in_secret_audit_log() {
 }
 
 #[test]
-fn secret_rm_emits_delete_action_in_secret_audit_log() {
+fn secret_rm_emits_remove_action_in_secret_audit_log() {
     // Same op-name vs CLI-verb decoupling as `ls` above: clap
-    // surface is `rm`, audit action is `"delete"`.
+    // surface is `rm`, audit action is `"remove"`.
     let sandbox = AuditSandbox::new();
     put_a_secret(&sandbox, "test-tenant", "api-key", "deadbeef");
 
@@ -2232,8 +2233,8 @@ fn secret_rm_emits_delete_action_in_secret_audit_log() {
 
     let log = std::fs::read_to_string(sandbox.secret_audit_log_path()).unwrap_or_default();
     assert!(
-        log.contains("\"action\":\"delete\""),
-        "expected an 'action':'delete' entry in secrets audit log. Full log:\n{log}"
+        log.contains("\"action\":\"remove\""),
+        "expected an 'action':'remove' entry in secrets audit log. Full log:\n{log}"
     );
 }
 

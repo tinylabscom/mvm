@@ -1014,6 +1014,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             backend_name: &admit_backend,
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus,
             mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

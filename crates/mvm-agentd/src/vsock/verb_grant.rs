@@ -419,6 +419,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prod_safe_grant_refuses_interactive_requests() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+
+        let grant = VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: Nonce::from_bytes([0u8; 16]),
+            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            verbs: GuestRequest::prod_safe_verb_names()
+                .iter()
+                .map(|name| VerbId::new(name).expect("the prod-safe catalog contains valid verbs"))
+                .collect(),
+            sig: vec![],
+        };
+        let requests = [
+            GuestRequest::Exec {
+                command: "id".into(),
+                stdin: None,
+                timeout_secs: Some(1),
+            },
+            GuestRequest::ConsoleOpen {
+                cols: 80,
+                rows: 24,
+                env: vec![],
+                argv: vec![],
+            },
+        ];
+
+        for request in requests {
+            assert_eq!(request.class(), RequestClass::DevOnly);
+            assert!(matches!(
+                enforce_verb_grant(&request, Some(&grant)),
+                Some(GuestResponse::VerbNotAuthorized { .. })
+            ));
+        }
+    }
+
     // ---- load_host_signer_verifying_key ----
 
     #[test]

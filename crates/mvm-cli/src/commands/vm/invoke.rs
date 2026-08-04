@@ -196,6 +196,7 @@ fn admit_entrypoint_boot(
         backend_name: params.backend_name,
         rootfs_path: params.rootfs,
         precomputed_image_sha256: None,
+        boot_artifact_identity: None,
         cpus: params.cpus,
         mem_mib: params.mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::instance::InstanceState;
 use crate::node::{NodeInfo, NodeStats};
 use crate::pool::{
-    DesiredCounts, InstanceResources, RegistryArtifact, Role, RuntimePolicy, SecretScope,
-    SleepPolicyConfig, UpdateStrategy,
+    AttestedDeployment, DesiredCounts, InstanceResources, RegistryArtifact, Role, RuntimePolicy,
+    SecretScope, SleepPolicyConfig, UpdateStrategy,
 };
 use crate::routing::RoutingTable;
 use crate::signing::SignedPayload;
@@ -87,6 +87,11 @@ pub struct DesiredPool {
     /// a local Nix build. Falls back to local build if the pull fails.
     #[serde(default)]
     pub registry_artifact: Option<RegistryArtifact>,
+    /// Attested deployment bundle to fetch from mvmd before this pool boots.
+    /// Unlike `registry_artifact`, a failed fetch is terminal for this
+    /// desired revision and must not fall back to a local build.
+    #[serde(default)]
+    pub attested_deployment: Option<AttestedDeployment>,
     /// Distributed-volume mounts attached to every instance of this pool.
     ///
     /// Schema evolution: `#[serde(default)]` keeps the old-coordinator →
@@ -1231,6 +1236,7 @@ mod tests {
                 health_check_timeout_secs: 90,
             })),
             registry_artifact: None,
+            attested_deployment: None,
             mounts: vec![],
         };
         let json = serde_json::to_string(&pool).unwrap();
@@ -1306,6 +1312,7 @@ mod tests {
         let parsed: DesiredPool = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.pool_id, "gateways");
         assert!(parsed.registry_artifact.is_none());
+        assert!(parsed.attested_deployment.is_none());
     }
 
     #[test]
@@ -1372,6 +1379,7 @@ mod tests {
                 template_id: "hello".to_string(),
                 revision: Some("rev-abc123".to_string()),
             }),
+            attested_deployment: None,
             mounts: vec![],
         };
         let json = serde_json::to_string(&pool).unwrap();
@@ -1444,6 +1452,7 @@ mod tests {
             sleep_policy: None,
             default_update_strategy: None,
             registry_artifact: None,
+            attested_deployment: None,
             mounts: vec![mount.clone()],
         };
         let json = serde_json::to_string(&pool).unwrap();

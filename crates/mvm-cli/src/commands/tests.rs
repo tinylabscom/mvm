@@ -4,6 +4,7 @@
 
 use super::*;
 use clap::Parser;
+use std::path::Path;
 
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
@@ -11,6 +12,7 @@ use super::build::build;
 use super::build::compile;
 use super::build::group as build_group;
 use super::catalog;
+use super::deps;
 use super::dispatch::TopLevelCommand;
 use super::env::group as env_group;
 use super::env::{cleanup, init, uninstall};
@@ -35,6 +37,36 @@ use super::shared::{
 };
 
 #[test]
+fn deploy_flags_parse_and_keep_local_output_controls() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "deploy",
+        "--from-ir",
+        "workload.json",
+        "--out",
+        "./sealed",
+        "--boot-artifact",
+        "./rootfs.ext4",
+        "--dep-volume",
+        "./deps/sha256-volume",
+        "--kernel-sha256",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--mvmd-url",
+        "https://mvmd.example",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Deploy(args)
+            if args.from_ir == Some("workload.json".into())
+                && args.out == Some("./sealed".into())
+                && args.boot_artifact == Path::new("./rootfs.ext4")
+                && args.dependency_volume == Some("./deps/sha256-volume".into())
+                && args.mvmd_url == Some("https://mvmd.example".into())
+    ));
+}
+
+#[test]
 fn top_level_command_summaries_stay_short() {
     let longest_allowed = 72;
     let long_summaries = cli_command()
@@ -57,6 +89,133 @@ fn top_level_command_summaries_stay_short() {
         "top-level command summaries must be {longest_allowed} chars or shorter:\n{}",
         long_summaries.join("\n")
     );
+}
+
+#[test]
+fn deps_capture_parses_seal_inputs() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "deps",
+        "capture",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--content-dir",
+        "captured",
+        "--sbom",
+        "sbom.json",
+        "--fetch-log",
+        "fetch.log",
+        "--cve",
+        "cve.json",
+        "--declaration",
+        "dependencies.json",
+        "--lockfile",
+        "uv.lock",
+        "--json",
+    ])
+    .unwrap();
+    let Commands::Deps(args) = cli.command else {
+        panic!("expected deps command")
+    };
+    let deps::DepsAction::Capture(capture) = args.action else {
+        panic!("expected deps capture command")
+    };
+    assert_eq!(capture.volume_hash.len(), 64);
+    assert!(capture.json);
+    assert_eq!(
+        capture.declaration.as_deref(),
+        Some(Path::new("dependencies.json"))
+    );
+    assert_eq!(capture.lockfile.as_deref(), Some(Path::new("uv.lock")));
+}
+
+#[test]
+fn deps_install_parses_development_install_inputs() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "deps",
+        "install",
+        "--lockfile",
+        "uv.lock",
+        "--source-root",
+        "project",
+        "--language",
+        "python",
+        "--cache-root",
+        "cache",
+        "--json",
+    ])
+    .unwrap();
+    let Commands::Deps(args) = cli.command else {
+        panic!("expected deps command")
+    };
+    let deps::DepsAction::Install(install) = args.action else {
+        panic!("expected deps install command")
+    };
+    assert_eq!(install.lockfile, Path::new("uv.lock"));
+    assert_eq!(install.source_root, Path::new("project"));
+    assert!(matches!(
+        install.language,
+        deps::install::LanguageArg::Python
+    ));
+    assert_eq!(install.cache_root.as_deref(), Some(Path::new("cache")));
+    assert!(install.json);
+}
+
+#[test]
+fn deps_capture_live_parses_guest_artifact_inputs() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "deps",
+        "capture-live",
+        "a".repeat(64).as_str(),
+        "--vm",
+        "dev-vm",
+        "--guest-content",
+        "/mvm/deps/content",
+        "--guest-sbom",
+        "/mvm/deps/sbom.cdx.json",
+        "--guest-fetch-log",
+        "/mvm/deps/fetch.log",
+        "--guest-cve",
+        "/mvm/deps/cve.json",
+        "--declaration",
+        "dependencies.json",
+        "--lockfile",
+        "uv.lock",
+        "--max-files",
+        "10",
+    ])
+    .unwrap();
+    let Commands::Deps(args) = cli.command else {
+        panic!("expected deps command")
+    };
+    let deps::DepsAction::CaptureLive(capture) = args.action else {
+        panic!("expected deps capture-live command")
+    };
+    assert_eq!(capture.vm, "dev-vm");
+    assert_eq!(capture.guest_content, "/mvm/deps/content");
+    assert_eq!(capture.max_files, 10);
+    assert_eq!(capture.lockfile.as_deref(), Some(Path::new("uv.lock")));
+}
+
+#[test]
+fn watch_parses_file_backed_ir_and_defaults_to_one_shot_only_when_requested() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "watch",
+        "--from-ir",
+        "workload.json",
+        "--once",
+        "--interval-ms",
+        "1",
+    ])
+    .unwrap();
+    let Commands::Watch(args) = cli.command else {
+        panic!("expected watch command")
+    };
+    assert_eq!(args.from_ir, Some("workload.json".into()));
+    assert!(args.once);
+    assert_eq!(args.interval_ms, 1);
 }
 
 #[test]
@@ -2269,7 +2428,7 @@ fn test_run_cli_flag_overrides_config_memory() {
 
 #[test]
 fn tenant_orchestration_commands_are_not_mvmctl_surface() {
-    for command in ["deploy", "policy", "tenant"] {
+    for command in ["policy", "tenant"] {
         let err = Cli::try_parse_from(["mvmctl", command])
             .expect_err("mvmd-owned command should not parse under mvmctl");
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);

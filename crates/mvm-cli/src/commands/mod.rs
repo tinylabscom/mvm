@@ -3,6 +3,7 @@ mod build;
 mod bundle;
 mod catalog;
 mod cmd_audit;
+mod deploy;
 mod deps;
 mod dispatch;
 pub(crate) mod env;
@@ -23,6 +24,9 @@ mod shared;
 mod storage;
 mod trust;
 pub(crate) mod vm;
+mod watch;
+
+pub(in crate::commands) use build::ir_input::load_ir_json_workload;
 
 #[cfg(test)]
 mod tests;
@@ -88,6 +92,9 @@ pub(in crate::commands) enum Commands {
     /// Build-time commands (image, compile, validate, kernel)
     #[command(display_order = 3)]
     Build(build::group::Args),
+    /// Build, seal, and record a workload locally; optionally ship it to mvmd
+    #[command(display_order = 4)]
+    Deploy(deploy::Args),
     /// Build the custom microVM kernels (builder / workload)
     #[command(display_order = 3)]
     Kernel(build::kernel::Args),
@@ -103,8 +110,11 @@ pub(in crate::commands) enum Commands {
     /// Explain a run after the fact from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
-    /// Manage the versioned pack cache (list/rollback/prune/download/update)
+    /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
+    Watch(watch::Args),
+    /// Manage the versioned pack cache (list/rollback/prune/download/update)
+    #[command(display_order = 9)]
     Pack(pack::Args),
     /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing
     /// transient-run role folded into `machine run`; `run` survives only as the

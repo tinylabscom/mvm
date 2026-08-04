@@ -175,16 +175,23 @@ for detailed scope and acceptance criteria.
 
 - [~] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
-  - [ ] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
-        record; ship to mvmd when a remote is configured, else stop at the
-        local sealed artifact
-  - [ ] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address
-  - [ ] WS3 capture-from-sandbox via `reseal_volume`, converging on the
-        declared-dependency path and keeping the lockfile hash pin
+  - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
+        record; retain the local sealed artifact and ship it to mvmd through
+        the authenticated upload contract when a remote is configured
+  - [x] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address;
+        long-running mode recovers from transient input/compile errors while
+        `--once` remains fail-fast
+  - [x] WS3 capture-from-sandbox via `reseal_volume`, converging on the
+        declared-dependency path and keeping the lockfile hash pin; capture,
+        `deps install`, and bounded `deps capture-live` implementation are
+        present. PR #2132 passed branch and merge-group Test, Lint, and Nix
+        gates and merged into main
   - [~] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
-    - [ ] Bind the tier to an attested artifact and replace the interactive
-          feature/symbol witnesses with conformance scenarios
+    - [~] Bind the tier to an attested artifact and replace the interactive
+          feature/symbol witnesses with conformance scenarios. Grant
+          enforcement now proves a complete ProdSafe grant refuses Exec and
+          ConsoleOpen; feature-fork removal and guest-image validation remain.
 
 - [~] Plan 290 — Sensitive egress redaction
       (`specs/plans/290-sensitive-egress-redaction.md`)
