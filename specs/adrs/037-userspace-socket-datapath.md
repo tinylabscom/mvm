@@ -14,9 +14,11 @@ policy seam, and the guest side unchanged.**
 ADR-036 shipped `l3-vsock` with one working forwarding backend: the Linux
 host TUN, driven through `netns` and `nftables`, requiring root or
 `CAP_NET_ADMIN`. Every other platform got `UnsupportedDatapath` or, on
-macOS, a `MacosUserspaceGateway` that declares
-`ForwardingCapabilities::USERSPACE_SOCKETS` and then refuses at
-`is_available()`.
+macOS, a `MacosUserspaceGateway` that declared
+`ForwardingCapabilities::USERSPACE_SOCKETS` and then refused at
+`is_available()`. That placeholder has since been deleted, along with the
+two tests that asserted its refusal; `UserspaceSocketDatapath` is what
+`host_datapath()` returns in its place.
 
 That refusal is honest — it fails closed rather than degrading, and it
 never routes macOS through a general-purpose proxy runtime — but it means
@@ -154,21 +156,81 @@ The socket cap therefore cannot inherit the flow cap:
   SYN flood parks a connecting descriptor per entry and must hit that
   bound long before the socket cap.
 
-Indicative defaults, consts rather than negotiated values, following the
-precedent in `mvm_protocol::l3::limits` that a ceiling is something a
-hostile guest cannot raise:
+Consts rather than negotiated values, following the precedent in
+`mvm_protocol::l3::limits` that a ceiling is something a hostile guest
+cannot raise. The figures below are what
+`crates/mvm-hostd/src/netd/userspace/limits.rs` holds as shipped; the
+first draft of this table carried indicative numbers that the
+implementation then moved away from, so it is restated from the code
+rather than from intent:
 
 | Const | Value | Rationale |
 |---|---|---|
-| `DEFAULT_MAX_HOST_SOCKETS` | 1024 | Well above real workloads, far below `DEFAULT_MAX_FLOWS` |
+| `DEFAULT_MAX_HOST_SOCKETS` | 256 | Well below `DEFAULT_MAX_FLOWS` (4096); sized against the real per-flow cost below, not against ring buffers alone |
 | `FD_RESERVE` | 64 | Audit log, vsock, control channel, logging, slack |
-| `DEFAULT_MAX_HALF_OPEN` | 128 | A connecting descriptor each; sized for burst, not flood |
+| `DEFAULT_MAX_HALF_OPEN` | 64 | A connecting descriptor each; sized for burst, not flood |
 | `HALF_OPEN_TIMEOUT_MILLIS` | 10_000 | Matches ordinary connect timeouts |
-| Per-socket buffers | 16 KiB rx + 16 KiB tx | 32 KiB per socket |
+| `DEFAULT_MAX_UDP_ASSOCIATIONS` | 64 | A connected datagram socket each, drawn from the same descriptor budget TCP uses |
+| `DATAGRAMS_PER_ASSOCIATION_POLL` | 4 | `DEFAULT_QUEUE_DEPTH / DEFAULT_MAX_UDP_ASSOCIATIONS`: a full poll of every association exactly fills the one guest-bound queue |
+| Per-socket ring buffers | 16 KiB rx + 16 KiB tx | 32 KiB per flow |
+| Per-flow device queues | 31 rx + 65 tx packets at the 1500-byte MTU | 144,000 bytes per flow |
 
-The memory ceiling is therefore `1024 × 32 KiB = 32 MiB` per machine at
-the cap. That number is asserted in a test, not left to be recomputed by
-hand whenever a buffer size changes.
+### The memory ceiling, re-derived
+
+**The `1024 × 32 KiB = 32 MiB` figure this ADR first carried is wrong**,
+and was wrong in three independent ways: the socket cap is 256 rather than
+1024; a flow costs far more than its two ring buffers, because each flow
+got its own smoltcp device with its own packet queues; and UDP
+associations, which landed after this ADR was written, add a term the
+formula had no place for. The arithmetic below is what
+`MEMORY_CEILING_BYTES` actually computes, spelled out so it can be checked
+rather than trusted.
+
+Per established flow:
+
+```text
+ring buffers      16,384 + 16,384                     =  32,768 bytes
+device queues     (31 + 65) packets × 1500 bytes      = 144,000 bytes
+                                                        -------------
+FLOW_BUFFER_BYTES                                       176,768 bytes
+```
+
+The two queue depths are derived, not picked. `FLOW_RX_QUEUE_DEPTH` is
+`ceil(16384 / 536) = 31` — a receive window's worth of segments at the 536
+byte default MSS of RFC 879, which is what a guest whose SYN carries no MSS
+option will use. `FLOW_TX_QUEUE_DEPTH` is `31 + 32 + 2 = 65`: an ACK burst
+as deep as the receive queue (smoltcp answers each segment behind a
+sequence hole with an immediate, un-rate-limited ACK), plus the 32 data
+segments a two-round pump pass can emit, plus one control segment per poll.
+
+Per machine at the cap:
+
+```text
+flows              256 × 176,768                      = 45,252,608 bytes
+machine-wide device  2 × 256 packets × 1500 bytes      =    768,000 bytes
+half-open SYNs      64 × 1500 bytes                    =     96,000 bytes
+one UDP poll batch  64 × 4 × 1500 bytes                =    384,000 bytes
+                                                         --------------
+MEMORY_CEILING_BYTES                                     46,500,608 bytes
+```
+
+**46,500,608 bytes is 44.35 MiB**, not 32 MiB. It is an upper bound and not
+an attainable state — flows, half-open entries and associations all draw on
+the same descriptor budget, so a machine cannot hold 256 of one and 64 each
+of the others at the same instant — but it is summed anyway, because a
+ceiling that has to be reasoned about to be believed is a ceiling nobody
+re-checks. `the_per_machine_memory_ceiling_is_what_we_claim` in `limits.rs`
+asserts every term and the total.
+
+**One discrepancy is worth naming rather than smoothing over.** The doc
+comment on `DEFAULT_MAX_HOST_SOCKETS` says that at a cap of 256 the worst
+case is "back under 44 MiB". That is true only of the per-flow term
+(45,252,608 bytes, 43.16 MiB) and omits the three machine-level terms the
+constant itself sums. Against `MEMORY_CEILING_BYTES` the real figure is
+44.35 MiB, so the comment understates the ceiling by about 1.2 MiB. The
+number to trust is the constant and its test, not the prose beside it; the
+comment should be corrected the next time that file is touched.
+
 - **At capacity the new packet is dropped; a live flow is never evicted.**
   This matches the existing `FlowAdmission` posture rather than
   introducing a second one.
@@ -222,6 +284,10 @@ descriptor on both platforms — kqueue on macOS, epoll on Linux. The new
 readiness accessor on `DatapathHandle` returns that descriptor, and
 `mvm-netd`'s loop registers it alongside the guest data channel. One
 descriptor, no second concurrency model, identical on both platforms.
+
+As shipped the poll set is empty, so the descriptor never fires and the
+datapath advances only on the loop's timer tick. See §"Known defects in
+what shipped".
 
 `mio` is already a workspace dependency, so this adds a dependency *edge*
 from `mvm-hostd` rather than a new third-party dependency to the project.
@@ -295,10 +361,45 @@ All unprivileged, so every case runs on both CI platforms.
 
 ICMP, raw IP protocols, and arbitrary IPv4 forwarding remain unavailable.
 A plan needing them is refused at admission by the capability check, for
-the right reason rather than for "macOS". Closing that gap needs the
-`utun` + PF datapath and the privileged helper ADR-036 §macOS enumerates,
-which remains a separate decision and a separate ADR.
+the right reason rather than for "macOS". That shortfall is now
+**permanent on this backend**, not pending: closing it needs the `utun` +
+PF datapath and the privileged helper ADR-036 §macOS enumerates, and
+[ADR-039](039-macos-network-helper.md) — the ADR that proposed exactly that
+helper — is **Rejected**. mvm adds no root-capable component, so a socket
+gateway is the whole of what an unprivileged host can offer, and a workload
+needing raw IP is refused rather than served badly.
 
-Multi-queue, IPv6, and zero-copy transfer are orthogonal and tracked in
-the deferred set of `specs/plans/285-l3-tun-over-vsock.md` (referenced by
+IPv6 is not carried either. `mvm_net::l3::admit` refuses any packet whose
+`version` is not 4, so a v6 destination never reaches this datapath.
+[ADR-038](038-ipv6-support.md) designs the family; nothing of it has landed.
+
+Multi-queue and zero-copy transfer are orthogonal and tracked in the
+deferred set of `specs/plans/285-l3-tun-over-vsock.md` (referenced by
 filename because `285` is used twice on main).
+
+## Known defects in what shipped
+
+These are open, and none of them is a design property. They are recorded
+here so the ADR is not read as describing a finished thing.
+
+- **A 50 ms latency floor on everything the host originates.**
+  `UserspaceHandle::readiness_fd` hands back a real `mio::Poll`
+  descriptor, and `mvm-netd` registers it — but nothing is registered
+  *behind* it, so it never reports readiness. Every connect resolution and
+  every inbound byte therefore waits for the drive loop's 50 ms timer tick
+  instead of the event that actually made it ready. The loop services the
+  datapath unconditionally rather than gating on the poll token, which is
+  why this is slow rather than broken. Registering each host socket on that
+  poll set is the fix.
+- **`declared_ingress: true` is advertised with no listening socket behind
+  it.** `ForwardingCapabilities::USERSPACE_SOCKETS` sets the flag, so a
+  plan declaring an ingress mapping is admitted, but this datapath opens
+  nothing to serve it. The flag cannot simply be cleared today:
+  `GatewayConfig::new` requires it, so a false value would make every
+  default gateway refuse on the fallback path. This is an over-claim in the
+  capability seam and should be resolved by serving declared ingress or by
+  relaxing the config requirement first — not by leaving both as they are.
+- **`Gateway::poll_inbound` drains without a per-pass budget.** It loops
+  until the datapath returns `WouldBlock`, so a large inbound burst is
+  fully drained before the loop returns to the guest-facing side within
+  that pass. The guest-facing read has such a budget; this does not.

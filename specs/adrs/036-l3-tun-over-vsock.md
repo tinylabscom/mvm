@@ -320,26 +320,39 @@ DNS, flow state, ingress, audit — is shared unchanged. The Linux
 TUN/netns/nftables mechanics are **not** portable to macOS and are not
 pretended to be.
 
-The intended first macOS backend is a **userspace socket gateway**: admitted
-guest flows are translated into host sockets. That needs no privileges at
-all — no `utun`, no routes, no PF anchor, no helper — and covers ordinary
+The macOS backend is a **userspace socket gateway**: admitted guest flows
+are translated into host sockets. That needs no privileges at all — no
+`utun`, no routes, no PF anchor, no helper — and covers ordinary
 application TCP, UDP, and host-terminated DNS. It does not cover raw
 sockets, arbitrary IP protocols, arbitrary ICMP, or multicast, and it does
 not claim to.
 
 **Status: superseded in part by [ADR-037](037-userspace-socket-datapath.md),
 which designs the translator and widens it from a macOS-only backend to a
-platform-neutral unprivileged one.** What shipped with this ADR is
-`MacosUserspaceGateway`: the capability declaration (`tcp`, `udp`,
-`controlled_dns`, `declared_ingress`, `userspace_socket_translation`;
-**not** `full_packet_forwarding`, `icmp`, `arbitrary_ipv4`, or
-`raw_ip_protocols`) plus a refusal at `is_available()`. Until ADR-037
-lands, `l3-vsock` on macOS is refused at admission with a stated reason.
-It is never degraded, and it is never routed through `gvproxy` or any
-other proxy runtime as an interim.
+platform-neutral unprivileged one.** What shipped with *this* ADR was a
+placeholder, `MacosUserspaceGateway` — a capability declaration plus a
+refusal at `is_available()`, so that `l3-vsock` on macOS was refused at
+admission with a stated reason rather than degraded or routed through
+`gvproxy`.
 
-The later full-packet backend needs privileged operations mvm has no helper
-for:
+That placeholder is **deleted**. `host_datapath()` now returns
+`UserspaceSocketDatapath`, which serves the flows the declaration always
+described: it reports `tcp`, `udp`, `controlled_dns`, `declared_ingress`
+and `userspace_socket_translation`, and **not** `full_packet_forwarding`,
+`icmp`, `arbitrary_ipv4`, `arbitrary_ipv6` or `raw_ip_protocols`. A plan
+needing one of those is still refused at admission, and now permanently: it
+would take the privileged helper enumerated below, and
+[ADR-039](039-macos-network-helper.md), which proposed that helper, is
+**Rejected** — mvm adds no root-capable component. Two things the
+declaration claims are not yet true of the datapath behind it: declared
+ingress is advertised with no listening socket serving it, and the
+readiness descriptor it exposes has nothing registered on it, so
+host-originated traffic moves on the drive loop's 50 ms tick rather than on
+the event that made it ready. Both are recorded in ADR-037 §"Known defects
+in what shipped".
+
+The later full-packet backend would need privileged operations mvm has no
+helper for, and — per ADR-039 — will not be getting one:
 
 1. `utun` creation — `socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` +
    `connect()` with `ctl_info` for `com.apple.net.utun_control`. Root; no
@@ -790,7 +803,8 @@ only against measurements like these, not against intuition.
   driver and is required for the mode; it stays out of the builder
   kernel.
 - macOS gains no L3 support in this change, and says so explicitly
-  rather than degrading.
+  rather than degrading. (Since closed: the userspace socket datapath of
+  ADR-037 now serves macOS, within the limits §macOS states.)
 
 ## Future work
 
@@ -800,5 +814,9 @@ only against measurements like these, not against intuition.
   preserved. The header field and negotiation slots exist in v1.
 - UDP ingress.
 - macOS `utun` + PF datapath, behind a narrowly-scoped privileged helper.
-- IPv6 datapath, once the workload kernel enables it.
+  **Closed, not pending:** [ADR-039](039-macos-network-helper.md) proposed
+  that helper and is Rejected. ICMP, raw IP protocols and arbitrary
+  IPv4/IPv6 stay refused at admission on macOS.
+- IPv6 datapath, designed in [ADR-038](038-ipv6-support.md) and unlanded;
+  admission refuses any non-v4 packet today.
 - Zero-copy or batched packet transfer, if measurement justifies it.

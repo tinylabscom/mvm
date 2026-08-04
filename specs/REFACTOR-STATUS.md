@@ -19,9 +19,9 @@ for detailed scope and acceptance criteria.
         mean 300,000 guest frames, and a `mio` poll loop that drains the
         guest channel and the datapath independently so host-to-guest
         traffic no longer stalls while the guest is quiet
-  - [~] Phase B (WS1, #2112) — the smoltcp-backed `UserspaceSocketDatapath`
-        itself, making `l3-vsock` work on hosts with no privileges. Tasks
-        1–15 of 16 landed: the TCP path, the deferred handshake so the
+  - [x] Phase B (WS1, #2112) — the smoltcp-backed `UserspaceSocketDatapath`
+        itself, making `l3-vsock` work on hosts with no privileges. All 16
+        tasks landed: the TCP path, the deferred handshake so the
         guest's `connect()` never reports ESTABLISHED for a destination
         that has not accepted, the destination-integrity assertion, bounded
         queues, deadlines on the two states where no host error can ever
@@ -35,8 +35,20 @@ for detailed scope and acceptance criteria.
         host's guest could not complete a connect — is fixed: the drive
         loop services the datapath it owns. Task 15 adds nine unprivileged
         end-to-end witnesses, six driven through the real `mvm-netd`
-        process rather than a handle the test services itself. Task 16,
-        close-out, remains
+        process rather than a handle the test services itself. Task 16
+        closes it out in the docs: the guide's platform matrix now splits
+        by forwarding backend rather than by platform, ADR-036's
+        present-tense `MacosUserspaceGateway` prose is corrected, and
+        ADR-037's memory ceiling is re-derived from `limits.rs` — its
+        `1024 × 32 KiB = 32 MiB` was wrong three ways over, against a real
+        46,500,608 bytes (44.35 MiB). **Three defects are shipped and
+        recorded rather than hidden**, in ADR-037 §"Known defects in what
+        shipped" and in plan 287's own deferred set: nothing is registered
+        behind `readiness_fd`, so every host-driven step waits for the
+        drive loop's 50 ms tick; `declared_ingress: true` is advertised
+        with no listening socket serving it, and cannot simply be cleared
+        because `GatewayConfig::new` requires it; and `poll_inbound` drains
+        without a per-pass budget
   - [x] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's
         recorded witness surface. **Gates backend selection in WS1 and the
         IPv6 guard in WS3**: the smoltcp ingress parser is unreachable by
@@ -45,9 +57,16 @@ for detailed scope and acceptance criteria.
         rather than after. `fuzz_datapath_ingress` drives admission, the
         datapath's re-read of an admitted packet, and the per-flow smoltcp
         stack; claim 5 now records it in `model/claims.toml` and ADR-001
-  - [ ] WS1c (#2114) — bounds audit; re-derive the memory ceiling from the
+  - [~] WS1c (#2114) — bounds audit; re-derive the memory ceiling from the
         real per-flow and per-association costs and assert it, rather than
-        leaving arithmetic in a doc comment that drifted 24x once already
+        leaving arithmetic in a doc comment that drifted 24x once already.
+        `MEMORY_CEILING_BYTES` and its term-by-term test landed under WS1,
+        and task 16 propagated the corrected figure into ADR-037. What is
+        left is the audit proper — and one live discrepancy it should
+        settle: the doc comment on `DEFAULT_MAX_HOST_SOCKETS` claims the
+        worst case at a cap of 256 is "back under 44 MiB", which counts
+        only the per-flow term (43.16 MiB) and omits the three
+        machine-level terms the constant itself sums (44.35 MiB)
   - [ ] WS2 (#2115) — UDP ingress: declared inbound datagram mappings,
         admitted explicitly rather than inferred from traffic
   - [ ] WS3 (#2116) — IPv6 as a first-class family (ADR-038). Blocked on

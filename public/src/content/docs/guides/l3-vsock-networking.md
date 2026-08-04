@@ -62,8 +62,10 @@ Two consequences worth knowing:
   in production. Host capability is deliberately *not* an input to the
   derivation.
 - **A host that cannot serve the tunnel refuses only the workloads that
-  need it.** On macOS today there is no L3 datapath, so a `raw_ip_stack`
-  workload is refused with a stated reason. Everything else runs normally.
+  need it.** Where the host can carry a workload's TCP and UDP but not raw
+  IP — every macOS host, and any Linux host without `CAP_NET_ADMIN` — the
+  workload is admitted if that is all it needs, and refused with a stated
+  reason if it needs more. Nothing is degraded to make it fit.
 
 ## What you give up
 
@@ -108,7 +110,9 @@ Choosing L3 mode does not weaken the boundary. It still guarantees:
 - return traffic only for flows you opened; unsolicited inbound is dropped;
 - only ingress you declared;
 - bounded queues, flow tables, and DNS state under a hostile guest;
-- no silent fallback — if the tunnel fails, networking is unavailable.
+- no silent fallback — if the tunnel fails, networking is unavailable, and
+  where the host substitutes one forwarding backend for another it says so
+  and says what the substitution costs.
 
 ## Mode comparison
 
@@ -120,19 +124,54 @@ Choosing L3 mode does not weaken the boundary. It still guarantees:
 | HTTP/SNI policy | yes, where owned | **no** |
 | Destination / port / flow policy | yes | yes |
 | Controlled DNS + domain allowlists | yes | yes |
-| Declared ingress | yes | yes |
-| Raw sockets, ICMP, non-TCP/UDP | **no** | yes |
+| Declared ingress | yes | packet backend only; see the limits below |
+| Raw sockets, ICMP, non-TCP/UDP | **no** | only on the packet backend |
 | Works without proxy-env cooperation | partly | yes |
 
 ## Platform support
 
+Two forwarding backends exist, and which one a host gets is not a choice
+you make.
+
+- The **packet backend** moves whole IP packets through a host tunnel
+  device, with routes and a firewall anchor. It needs root or
+  `CAP_NET_ADMIN`. Linux only.
+- The **socket backend** needs no privileges at all. It terminates the
+  guest's TCP and UDP in userspace and re-opens each admitted flow on an
+  ordinary host socket. It carries application traffic and nothing else —
+  see the limits below.
+
+A host uses the packet backend when it can and the socket backend when it
+cannot, and it tells you which, and why, rather than leaving a later
+refusal to be interpreted.
+
 | Platform | Status |
 |---|---|
-| **Linux** (Firecracker) | Supported and tested, including a privileged lane with a real host TUN and nftables, and a live boot witness (below). |
+| **Linux** (Firecracker), privileged | The packet backend: a real host TUN and nftables, with a live boot witness (below). |
+| **Linux** (Firecracker), unprivileged | The socket backend, with the substitution named in the diagnostic. A host without `/dev/net/tun`, root, or `CAP_NET_ADMIN` no longer loses the mode outright. |
 | **Linux** (libkrun) | Not selectable. libkrun attaches a drained virtio-net device; L3 mode requires the guest to have no network device at all, so libkrun does not advertise the capability and selection fails closed. |
-| **macOS** (Apple Silicon) | No L3 datapath. Ordinary workloads run normally on the socket-aware transport; a `raw_ip_stack` workload is refused with a stated reason. The intended backend is a userspace socket gateway (TCP, UDP, controlled DNS); it is not implemented, and is never faked or routed through a proxy runtime. |
+| **macOS** (Apple Silicon) | The socket backend. There is no packet backend on macOS and there will not be one: a tunnel device there needs root, and mvm runs no privileged host helper. |
 | **Windows via WSL2** | Architecturally supported — WSL2 is a Linux node, the guest's vsock terminates inside it, and the Linux backend is used. Not yet validated on a WSL2 runner. |
 | **Native Windows** | **Not supported.** mvm has no native Windows VMM backend. "Works on Windows" here always means WSL2. |
+
+### What the socket backend cannot carry
+
+A gateway that re-opens flows on host sockets cannot put an arbitrary
+packet on the wire, so **ICMP, raw IP protocols, and arbitrary IPv4 or
+IPv6 forwarding are unavailable on it**. A plan needing any of them is
+refused at admission, naming what is missing and naming the backend
+substitution that caused the refusal. It is never partially served.
+
+On macOS this is permanent rather than pending — the privileged helper it
+would take was considered and turned down, because mvm adds no root-capable
+component. On Linux it is a consequence of the privilege the process
+happens to hold: restore `CAP_NET_ADMIN` and the packet backend comes back.
+
+Everything the socket backend *does* carry keeps the guarantees above
+unchanged: the guest still has no NIC, packets still cross the vsock
+boundary and clear admission before anything is opened, and the host still
+asserts that the socket it connected reached the exact address that was
+admitted.
 
 ## How it fits together
 
@@ -180,11 +219,29 @@ address is empty, because a point-to-point IP interface has none.
 
 ## Limits in this version
 
-- IPv4 only. The workload kernel ships without IPv6; the protocol and the
-  host validator handle v6 already, so enabling it later needs no wire
-  change.
+- IPv4 only, on both backends. A packet whose IP version is not 4 is
+  refused at admission, so an IPv6 destination is unreachable rather than
+  slow. The design for carrying v6 exists; none of it has shipped.
 - IP fragments are rejected rather than reassembled. TCP MSS is clamped so
   ordinary traffic does not fragment.
 - One data queue. The protocol reserves the fields for more.
 - TCP ingress only. Declaring UDP ingress is refused at admission rather
   than accepted and ignored.
+
+On the socket backend specifically:
+
+- **Expect about 50 ms of added latency per step the host drives.** The
+  host-side event source that would wake the gateway the instant a
+  connection completes or a reply arrives is wired but has nothing behind
+  it yet, so both wait for the gateway's 50 ms timer instead. Throughput
+  within an established connection is unaffected; the cost lands on
+  connection setup and on the first bytes of each inbound burst. This is a
+  defect being worked, not a property of the design.
+- **Declared ingress is advertised but not served.** A plan that declares
+  an inbound mapping is admitted on this backend, and nothing listens for
+  it. Do not rely on inbound connections reaching a workload here. Egress —
+  connections the guest opens — is unaffected.
+- **A large inbound burst is drained in full before the gateway returns to
+  the guest-facing side**, so a flood of return traffic can delay the
+  guest's own packets within a pass. Bounded by the queue sizes, not by a
+  per-pass budget.

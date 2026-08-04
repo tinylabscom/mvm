@@ -1641,19 +1641,60 @@ git commit -m "test(netd): cover the userspace datapath end to end, unprivileged
 **Files:**
 - Modify: `public/src/content/docs/guides/l3-vsock-networking.md`, `specs/plans/285-l3-tun-over-vsock.md`, `specs/plans/287-userspace-socket-datapath.md`, `specs/REFACTOR-STATUS.md`, `specs/SPRINT.md`
 
-- [ ] **Step 1: Update the platform matrix**
+- [x] **Step 1: Update the platform matrix**
 
 The guide and ADR-036 both state macOS is unsupported. Correct both to describe what now ships, including that ICMP, raw IP protocols, and arbitrary IPv4 remain unavailable and are refused at admission.
 
-- [ ] **Step 2: Tick plan 285's deferred item**
+Done, and widened past what the step asked for, because three things in the
+existing prose were false rather than merely stale:
+
+- The guide's matrix now distinguishes the two forwarding backends instead
+  of the two platforms, since an unprivileged Linux host and a macOS host
+  now get the same backend. ICMP, raw IP protocols and arbitrary
+  IPv4/IPv6 are named as refused at admission, and named as **permanent**
+  on macOS: ADR-039, which proposed the privileged helper that would have
+  bought them, is Rejected.
+- Three open defects are stated as limitations rather than omitted: the
+  50 ms latency floor (the readiness descriptor is exposed and registered
+  but has nothing behind it, so every host-driven step waits for the drive
+  loop's tick), `declared_ingress: true` advertised with no listening
+  socket serving it, and `poll_inbound`'s unbudgeted drain. They are in
+  the guide as user-visible costs and in ADR-037 §"Known defects in what
+  shipped" as engineering record.
+- ADR-036 described `MacosUserspaceGateway` in the present tense. Every
+  reference is corrected; the type is deleted.
+
+**ADR-037's memory ceiling was wrong and is re-derived.** It claimed
+`1024 × 32 KiB = 32 MiB`, wrong in three independent ways: the cap is 256,
+a flow costs 176,768 bytes rather than its 32,768 bytes of ring buffers
+(each flow owns its own smoltcp device and its two packet queues), and UDP
+associations landed after the ADR and add a term the formula had no place
+for. The real figure from `limits.rs` is 46,500,608 bytes — 44.35 MiB —
+with the arithmetic shown term by term in the ADR. Surfaced rather than
+smoothed over: the doc comment on `DEFAULT_MAX_HOST_SOCKETS` says the worst
+case at a cap of 256 is "back under 44 MiB", which holds only for the
+per-flow term (43.16 MiB) and omits the three machine-level terms
+`MEMORY_CEILING_BYTES` itself sums.
+
+- [x] **Step 2: Tick plan 285's deferred item**
 
 Mark "macOS userspace socket gateway" done in plan 285, pointing at this plan.
 
-- [ ] **Step 3: Run the full gate list**
+Ticked. Its sibling `utun` + PF entry is annotated as closed rather than
+queued, and its IPv6 entry's "blocked on `CONFIG_IPV6`" framing is
+corrected per ADR-038.
+
+- [x] **Step 3: Run the full gate list**
 
 Every command in the Gate list section. `xtask check-doc-claims` is the one most likely to object to new prose — it gates claim phrasing.
 
-- [ ] **Step 4: Commit**
+Run for this task: `check-doc-claims`, `check-no-overclaim`,
+`check-claim-catalog`, `check-adr-coverage`, `check-deferrals`,
+`check-no-spec-refs-in-comments`, `cargo nextest run -p mvm-hostd`, and
+`cargo +nightly fmt --all -- --check`. All clean. Neither prose gate
+objected, so no wording was softened to get past one.
+
+- [x] **Step 4: Commit**
 
 ```sh
 git add specs/ public/
@@ -1664,11 +1705,37 @@ git commit -m "docs(plan-287): record the userspace socket datapath as shipped"
 
 ## Deferred (explicitly not in this plan)
 
-- [ ] **`utun` + PF full-packet datapath**, and the privileged helper it needs. Separate ADR, separate decision, gated on explicit sign-off of the helper API.
+- [ ] **`utun` + PF full-packet datapath**, and the privileged helper it needs. Separate ADR, separate decision, gated on explicit sign-off of the helper API. **Resolved as a rejection:** ADR-039 is Rejected — mvm adds no root-capable component — so this is closed, not queued, and reopening it needs a workload with a demonstrated need.
 - [ ] **UDP ingress**, **IPv6**, **multi-queue**, **zero-copy**, **node-to-node transport**, **`mvmd` node-control API**, **WSL2 validation** — tracked in the deferred set of `specs/plans/285-l3-tun-over-vsock.md`.
+
+### Open defects in what this plan shipped
+
+Not scope reductions — three things that are wrong today, recorded so the
+close-out is not read as "finished". ADR-037 §"Known defects in what
+shipped" carries the same list with the mechanism.
+
+- [ ] **Register host sockets on the datapath's poll set.** `readiness_fd`
+      hands back a real `mio::Poll` and `mvm-netd` registers it, but
+      nothing is registered *behind* it, so it never fires. Every connect
+      resolution and every inbound byte therefore waits for the drive
+      loop's 50 ms tick. The loop services the datapath unconditionally
+      rather than gating on the token, which is why this is a latency floor
+      and not a hang.
+- [ ] **Serve declared ingress, or stop advertising it.**
+      `ForwardingCapabilities::USERSPACE_SOCKETS` sets
+      `declared_ingress: true` and this datapath opens no listener for it,
+      so a plan declaring an inbound mapping is admitted and then not
+      served. The flag cannot simply be cleared: `GatewayConfig::new`
+      requires it, so a false value would make every default gateway refuse
+      on the fallback path. Whichever way it resolves, the config
+      requirement has to move first.
+- [ ] **Give `Gateway::poll_inbound` a per-pass budget.** It drains until
+      `WouldBlock`, so a large inbound burst is taken in full before the
+      pass returns to the guest-facing side. The guest-facing read already
+      has such a budget and reports its backlog; this should mirror it.
 
 > **Numbering note.** `285` is used twice on main — `285-l3-tun-over-vsock.md`
 > and `285-hvf-virtio-rng.md` — and so is `284`. Always reference these by
 > filename, never by bare number. `286` is claimed by an in-flight worktree,
 > which is why this plan is `287`.
-- [ ] **ICMP** — needs full packet forwarding; unavailable by construction here.
+- [ ] **ICMP** — needs full packet forwarding; unavailable by construction here, and on macOS unavailable for good, since the helper that would carry it was rejected.

@@ -815,8 +815,8 @@ updates only its own entry below.
       adds `GuestConnection::pollable_fd`, `DatapathHandle::readiness_fd`, a
       `mio` poll loop with a timer tick, an injectable clock, and a bounded
       read drain. Phase B (WS1) — the smoltcp-backed `UserspaceSocketDatapath`
-      that makes `l3-vsock` work on hosts with no privileges — is at tasks
-      1–15 of 16. Selection landed: `host_datapath()` hands back the
+      that makes `l3-vsock` work on hosts with no privileges — is complete
+      at all 16 tasks. Selection landed: `host_datapath()` hands back the
       userspace datapath on macOS and on any Linux host whose TUN probe
       fails, carrying the reason with it, so a capability refusal names the
       substitution that caused it rather than only its symptom. The
@@ -825,8 +825,23 @@ updates only its own entry below.
       `UserspaceHandle::service`, so a fallback host's guest could not
       complete a connect — is fixed: the drive loop services the datapath
       it owns. Task 15 pins that end to end, unprivileged: nine witnesses,
-      six of them driven through the real `mvm-netd` process. Task 16,
-      documentation and ledger close-out, remains.
+      six of them driven through the real `mvm-netd` process. Task 16 is
+      the documentation and ledger close-out: the public guide's platform
+      matrix now splits by forwarding backend rather than by platform,
+      ADR-036 no longer describes a type that has been deleted, and
+      ADR-037's memory ceiling is re-derived from `limits.rs` — its stated
+      `1024 × 32 KiB = 32 MiB` was wrong three ways over, against a real
+      46,500,608 bytes (44.35 MiB). Three defects ship with it and are
+      written down as limitations rather than omitted: nothing is
+      registered behind the datapath's readiness descriptor, so every
+      host-driven step waits for the drive loop's 50 ms tick;
+      `declared_ingress: true` is advertised with no listening socket
+      behind it, and cannot be cleared today because `GatewayConfig::new`
+      requires it; and `poll_inbound` drains with no per-pass budget.
+      Remaining plan-287 workstreams (UDP ingress, IPv6, benchmarking,
+      zero-copy, node-to-node transport, the node-control API, WSL2) are
+      untouched; the `utun` + PF backend is closed by ADR-039's rejection
+      rather than queued.
 
 ---
 
