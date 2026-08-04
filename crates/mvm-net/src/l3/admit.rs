@@ -14,13 +14,13 @@
 //! reference, which makes "policy runs before forwarding" a property the
 //! compiler checks rather than a rule a reviewer has to notice.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::IpNet;
 use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
 use mvm_protocol::l3::{ParsedIpPacket, ip, proto};
 
-use super::alloc::AddressLease;
+use super::alloc::{AddressFamily, AddressLease};
 use super::dns::DnsBindingStore;
 use super::flow::{FlowAdmission, FlowKey, FlowTable};
 use super::ingress::IngressTable;
@@ -308,12 +308,13 @@ impl L3Admitter {
             Err(_) => return OutboundVerdict::Deny(DenyCode::MalformedPacket),
         };
 
-        // Version 1 assigns IPv4 only; an IPv6 packet has no assigned
-        // source to check against, so it can never be anti-spoof clean.
-        if meta.version != 4 {
+        // Anti-spoofing is only meaningful against an address this session
+        // was actually assigned. A family the lease does not carry has
+        // none, so it is refused here rather than checked against nothing.
+        let Some(guest) = self.lease.guest_in(AddressFamily::of(meta.src)) else {
             return OutboundVerdict::Deny(DenyCode::AddressFamilyUnassigned);
-        }
-        if meta.src != IpAddr::V4(self.lease.guest) {
+        };
+        if meta.src != guest {
             return OutboundVerdict::Deny(DenyCode::SpoofedSource);
         }
         if meta.fragment && !self.config.allow_fragments {
@@ -327,7 +328,7 @@ impl L3Admitter {
         // egress. Only the synthetic resolver is offered; everything else
         // to the gateway address is refused, so the gateway presents the
         // smallest surface it can.
-        if meta.dst == IpAddr::V4(self.lease.gateway) {
+        if Some(meta.dst) == self.lease.gateway_in(AddressFamily::of(meta.dst)) {
             let is_dns =
                 matches!(meta.protocol, proto::UDP | proto::TCP) && meta.dst_port == Some(53);
             return if is_dns {
@@ -412,10 +413,12 @@ impl L3Admitter {
             Ok(meta) => meta,
             Err(_) => return InboundVerdict::Deny(DenyCode::MalformedPacket),
         };
-        if meta.version != 4 {
+        // Same as outbound: a family this session holds no address in has
+        // nothing that could be addressed to its guest.
+        let Some(guest) = self.lease.guest_in(AddressFamily::of(meta.dst)) else {
             return InboundVerdict::Deny(DenyCode::AddressFamilyUnassigned);
-        }
-        if meta.dst != IpAddr::V4(self.lease.guest) {
+        };
+        if meta.dst != guest {
             return InboundVerdict::Deny(DenyCode::WrongDestination);
         }
         if meta.fragment && !self.config.allow_fragments {
@@ -426,13 +429,13 @@ impl L3Admitter {
         }
         // A guest must not be able to inject a packet that appears to come
         // from itself.
-        if meta.src == IpAddr::V4(self.lease.guest) {
+        if meta.src == guest {
             return InboundVerdict::Deny(DenyCode::SpoofedSource);
         }
 
         // The gateway's own replies (synthetic DNS answers) are
         // host-originated and already policy-shaped.
-        if meta.src == IpAddr::V4(self.lease.gateway) {
+        if Some(meta.src) == self.lease.gateway_in(AddressFamily::of(meta.src)) {
             return InboundVerdict::Deliver(DeliverablePacket { bytes, meta });
         }
 
@@ -479,10 +482,27 @@ impl L3Admitter {
 
     /// Address-class refusals, checked before any allow-list is consulted
     /// so no rule shape can open them.
+    ///
+    /// An IPv6 address that encodes an IPv4 one is refused for the reason
+    /// that IPv4 address would be refused: [`embedded_v4`] runs first and
+    /// its result goes through the whole v4 check, so only a natively IPv6
+    /// destination ever reaches the v6 rules. Enumerating IPv6 hazards
+    /// instead would be a list that has to be complete, and the datapath's
+    /// destination-integrity assertion cannot be the backstop — it compares
+    /// canonical forms, which collapses exactly the distinction an
+    /// embedded-v4 bypass exploits.
     fn destination_class_denial(&self, dst: IpAddr) -> Option<DenyCode> {
-        let IpAddr::V4(v4) = dst else {
-            return Some(DenyCode::AddressFamilyUnassigned);
-        };
+        match dst {
+            IpAddr::V4(v4) => self.v4_class_denial(v4),
+            IpAddr::V6(v6) => match embedded_v4(v6) {
+                Some(v4) => self.v4_class_denial(v4),
+                None => self.v6_class_denial(v6),
+            },
+        }
+    }
+
+    fn v4_class_denial(&self, v4: Ipv4Addr) -> Option<DenyCode> {
+        let dst = IpAddr::V4(v4);
         if v4.is_loopback() {
             return Some(DenyCode::LoopbackDenied);
         }
@@ -502,6 +522,35 @@ impl L3Admitter {
             return Some(DenyCode::MandatoryDeny);
         }
         if v4.is_private() && !self.private_range_admitted(dst) {
+            return Some(DenyCode::PrivateRangeDenied);
+        }
+        None
+    }
+
+    /// Native IPv6 classes, mirroring the IPv4 rules above range for range.
+    ///
+    /// Link-local is a mandatory refusal rather than an opt-in one:
+    /// `fe80::/10` is where NDP neighbours and routers live, so a guest
+    /// reaching it reaches the host's own interfaces. There is deliberately
+    /// no broadcast rule — IPv6 has none, and `ff02::1` is multicast.
+    fn v6_class_denial(&self, v6: Ipv6Addr) -> Option<DenyCode> {
+        let dst = IpAddr::V6(v6);
+        if v6.is_loopback() {
+            return Some(DenyCode::LoopbackDenied);
+        }
+        if is_v6_link_local(v6) {
+            return Some(DenyCode::LinkLocalDenied);
+        }
+        if v6.is_multicast() {
+            return Some(DenyCode::MulticastDenied);
+        }
+        if v6.is_unspecified() {
+            return Some(DenyCode::ReservedRangeDenied);
+        }
+        if mvm_core::network_policy::is_mandatory_deny(dst) {
+            return Some(DenyCode::MandatoryDeny);
+        }
+        if is_v6_unique_local(v6) && !self.private_range_admitted(dst) {
             return Some(DenyCode::PrivateRangeDenied);
         }
         None
@@ -616,6 +665,65 @@ fn is_icmp_echo_request(protocol: u8, icmp_type: u8) -> bool {
 
 fn is_icmp_echo_reply(protocol: u8, icmp_type: u8) -> bool {
     (protocol == proto::ICMP && icmp_type == 0) || (protocol == proto::ICMPV6 && icmp_type == 129)
+}
+
+/// The IPv4 address an IPv6 address encodes, if it encodes one.
+///
+/// Four encodings, and every one of them reaches `169.254.169.254`:
+///
+/// | form | prefix |
+/// |---|---|
+/// | v4-mapped | `::ffff:0:0/96` |
+/// | v4-compatible (deprecated) | `::/96` |
+/// | NAT64 well-known | `64:ff9b::/96` |
+/// | 6to4 | `2002::/16` |
+///
+/// v4-mapped is the famous one. NAT64 and 6to4 are the forgotten ones, and
+/// a NAT64 gateway on the host network makes the third genuinely routable.
+/// This is the whole defence: whatever comes back here is range-checked as
+/// the IPv4 address it is, so a caller cannot reach an IPv4 destination by
+/// spelling it differently.
+///
+/// `::` and `::1` are excluded. RFC 4291 does not treat them as
+/// v4-compatible addresses — they are the unspecified and loopback
+/// addresses, and the native rules refuse them under their own names rather
+/// than as `0.0.0.0` and `0.0.0.1`.
+///
+/// RFC 6052 also permits a NAT64 prefix at /32 through /64, where the
+/// embedded address straddles the reserved octet. Only the well-known /96
+/// is decoded here, because the others cannot be recognised without knowing
+/// the operator's prefix, and guessing at one would extract an address the
+/// packet does not carry. A destination in one of those forms is a native
+/// IPv6 address to this check, and the surrounding posture is deny by
+/// default: no rule covers it unless a plan wrote one.
+pub(crate) fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = ip.segments();
+    let o = ip.octets();
+    let low = Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+    if s[0..5] == [0, 0, 0, 0, 0] {
+        return match s[5] {
+            0xffff => Some(low),
+            0 if !ip.is_unspecified() && !ip.is_loopback() => Some(low),
+            _ => None,
+        };
+    }
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+        return Some(low);
+    }
+    if s[0] == 0x2002 {
+        return Some(Ipv4Addr::new(o[2], o[3], o[4], o[5]));
+    }
+    None
+}
+
+/// `fe80::/10`.
+fn is_v6_link_local(ip: Ipv6Addr) -> bool {
+    ip.segments()[0] & 0xffc0 == 0xfe80
+}
+
+/// `fc00::/7` — IPv6's RFC1918.
+fn is_v6_unique_local(ip: Ipv6Addr) -> bool {
+    ip.segments()[0] & 0xfe00 == 0xfc00
 }
 
 /// Ranges that are neither routable nor private: this-network, shared
@@ -966,6 +1074,148 @@ mod tests {
         }
     }
 
+    // ---- IPv6 destination classes -----------------------------------
+    //
+    // Driven through `destination_class_denial` directly. It is the whole
+    // defence against an IPv4 address written in IPv6: the datapath's
+    // destination-integrity assertion compares canonical forms, which
+    // collapses exactly the distinction an embedded-v4 bypass exploits, so
+    // nothing downstream would catch what this let through.
+
+    fn v6(s: &str) -> IpAddr {
+        IpAddr::V6(s.parse().expect("a literal IPv6 address"))
+    }
+
+    /// Unrestricted, so nothing but the class check can be what refuses.
+    fn wide_open() -> L3Admitter {
+        admitter_with(L3PolicyConfig {
+            egress: CanonicalEgress::Unrestricted,
+            ..L3PolicyConfig::default()
+        })
+    }
+
+    /// The four ways IPv6 can spell an IPv4 address. Each one reaches the
+    /// cloud metadata service, and each must be refused for the reason the
+    /// bare address is refused — not for being IPv6.
+    #[test]
+    fn a_v4_mapped_address_is_refused_for_the_embedded_addresss_reason() {
+        assert_eq!(
+            wide_open().destination_class_denial(v6("::ffff:169.254.169.254")),
+            Some(DenyCode::LinkLocalDenied)
+        );
+    }
+
+    #[test]
+    fn a_v4_compatible_address_is_refused_for_the_embedded_addresss_reason() {
+        assert_eq!(
+            wide_open().destination_class_denial(v6("::169.254.169.254")),
+            Some(DenyCode::LinkLocalDenied)
+        );
+    }
+
+    #[test]
+    fn a_nat64_address_is_refused_for_the_embedded_addresss_reason() {
+        // A NAT64 gateway on the host network makes this one genuinely
+        // routable, which is what makes it worth more than a curiosity.
+        assert_eq!(
+            wide_open().destination_class_denial(v6("64:ff9b::169.254.169.254")),
+            Some(DenyCode::LinkLocalDenied)
+        );
+    }
+
+    #[test]
+    fn a_6to4_address_is_refused_for_the_embedded_addresss_reason() {
+        assert_eq!(
+            wide_open().destination_class_denial(v6("2002:a9fe:a9fe::")),
+            Some(DenyCode::LinkLocalDenied)
+        );
+    }
+
+    /// The extraction is not a special case wired to the metadata address:
+    /// an embedded address goes through the *entire* v4 class check,
+    /// allow-list included.
+    #[test]
+    fn an_embedded_private_address_follows_the_whole_v4_rule_including_the_allow_list() {
+        assert_eq!(
+            wide_open().destination_class_denial(v6("::ffff:10.42.0.7")),
+            Some(DenyCode::PrivateRangeDenied)
+        );
+        let opened = admitter_with(L3PolicyConfig {
+            egress: CanonicalEgress::Unrestricted,
+            admitted_private: vec!["10.42.0.0/16".parse().unwrap()],
+            ..L3PolicyConfig::default()
+        });
+        assert_eq!(
+            opened.destination_class_denial(v6("::ffff:10.42.0.7")),
+            None,
+            "the rule that opens 10.42.0.0/16 opens the same host written in IPv6"
+        );
+        assert_eq!(
+            opened.destination_class_denial(v6("::ffff:10.43.0.7")),
+            Some(DenyCode::PrivateRangeDenied),
+            "and opens nothing beyond it"
+        );
+    }
+
+    #[test]
+    fn an_embedded_cgnat_address_is_mandatory_denied() {
+        assert_eq!(
+            wide_open().destination_class_denial(v6("::ffff:100.64.0.1")),
+            Some(DenyCode::MandatoryDeny)
+        );
+    }
+
+    /// Native IPv6 policy mirrors IPv4's. Link-local is mandatory rather
+    /// than opt-in: `fe80::/10` is where NDP neighbours and routers live, so
+    /// a guest reaching it reaches the host's own interfaces.
+    #[test]
+    fn native_v6_address_classes_are_refused_like_their_v4_analogues() {
+        let a = wide_open();
+        for (dst, expected) in [
+            ("::1", DenyCode::LoopbackDenied),
+            ("::", DenyCode::ReservedRangeDenied),
+            ("fe80::1", DenyCode::LinkLocalDenied),
+            ("febf:ffff::1", DenyCode::LinkLocalDenied),
+            ("ff02::1", DenyCode::MulticastDenied),
+            ("ff00::1", DenyCode::MulticastDenied),
+        ] {
+            assert_eq!(
+                a.destination_class_denial(v6(dst)),
+                Some(expected),
+                "destination {dst}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_unique_local_v6_range_is_denied_unless_a_rule_opens_it() {
+        assert_eq!(
+            wide_open().destination_class_denial(v6("fd00:1234::5")),
+            Some(DenyCode::PrivateRangeDenied),
+            "fc00::/7 is IPv6's RFC1918 and is closed by default"
+        );
+        let opened = admitter_with(L3PolicyConfig {
+            egress: CanonicalEgress::Unrestricted,
+            admitted_private: vec!["fd00:1234::/32".parse().unwrap()],
+            ..L3PolicyConfig::default()
+        });
+        assert_eq!(opened.destination_class_denial(v6("fd00:1234::5")), None);
+        assert_eq!(
+            opened.destination_class_denial(v6("fd00:9999::5")),
+            Some(DenyCode::PrivateRangeDenied)
+        );
+    }
+
+    /// Without this the four tests above would pass on a class check that
+    /// simply refused every IPv6 address.
+    #[test]
+    fn a_global_v6_destination_passes_the_class_check() {
+        assert_eq!(
+            wide_open().destination_class_denial(v6("2606:4700:4700::1111")),
+            None
+        );
+    }
+
     #[test]
     fn an_explicit_cidr_rule_opens_a_private_range() {
         let mut a = admitter_with(L3PolicyConfig {
@@ -1158,18 +1408,177 @@ mod tests {
         assert_eq!(out(&mut a, &[0x45, 0x00]), Err(DenyCode::MalformedPacket));
     }
 
+    // ---- IPv6 packets -----------------------------------------------
+
+    const GUEST_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 2);
+    const GATEWAY_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 1);
+    const REMOTE_V6: Ipv6Addr = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+
+    /// An admitter whose session holds both families, permitting TCP/443 to
+    /// the example IPv6 address.
+    fn open_443_v6() -> L3Admitter {
+        let mut a = L3Admitter::new(
+            lease().with_v6(GATEWAY_V6, GUEST_V6),
+            L3PolicyConfig {
+                egress: CanonicalEgress::Rules(vec![rule("2606:4700:4700::1111/128", 443)]),
+                ..L3PolicyConfig::default()
+            },
+            FlowTable::with_defaults(),
+            DnsBindingStore::with_defaults(),
+            IngressTable::with_defaults(),
+        );
+        a.set_ready(true);
+        a
+    }
+
+    fn v6_packet(protocol: u8, src: Ipv6Addr, dst: Ipv6Addr, payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8; 40];
+        p[0] = 0x60;
+        p[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        p[6] = protocol;
+        p[8..24].copy_from_slice(&src.octets());
+        p[24..40].copy_from_slice(&dst.octets());
+        p.extend_from_slice(payload);
+        p
+    }
+
     #[test]
-    fn an_ipv6_packet_is_refused_while_no_v6_address_is_assigned() {
+    fn an_admitted_v6_destination_and_port_is_forwarded() {
+        let mut a = open_443_v6();
+        let pkt = v6_packet(
+            proto::TCP,
+            GUEST_V6,
+            REMOTE_V6,
+            &tcp(50000, 443, ip::TCP_SYN),
+        );
+        assert_eq!(out(&mut a, &pkt), Ok(()));
+        assert_eq!(a.flows().len(), 1);
+    }
+
+    #[test]
+    fn a_v6_packet_is_refused_while_the_session_holds_no_v6_address() {
+        // The deny code names the reason: nothing was assigned, so no
+        // source could ever be anti-spoof clean.
         let mut a = admitter_with(L3PolicyConfig {
             egress: CanonicalEgress::Unrestricted,
             ..L3PolicyConfig::default()
         });
-        let mut pkt = vec![0u8; 40];
-        pkt[0] = 0x60;
-        pkt[6] = proto::TCP;
-        pkt.extend_from_slice(&tcp(50000, 443, ip::TCP_SYN));
-        pkt[4..6].copy_from_slice(&20u16.to_be_bytes());
+        let pkt = v6_packet(
+            proto::TCP,
+            GUEST_V6,
+            REMOTE_V6,
+            &tcp(50000, 443, ip::TCP_SYN),
+        );
         assert_eq!(out(&mut a, &pkt), Err(DenyCode::AddressFamilyUnassigned));
+    }
+
+    #[test]
+    fn a_spoofed_v6_source_is_rejected() {
+        let mut a = open_443_v6();
+        for spoof in [
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::UNSPECIFIED,
+            GATEWAY_V6,
+            Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 9),
+        ] {
+            let pkt = v6_packet(proto::TCP, spoof, REMOTE_V6, &tcp(50000, 443, ip::TCP_SYN));
+            assert_eq!(
+                out(&mut a, &pkt),
+                Err(DenyCode::SpoofedSource),
+                "source {spoof} must not be accepted"
+            );
+        }
+    }
+
+    /// An embedded-v4 destination is refused on the packet path too, not
+    /// only when the class check is called directly.
+    #[test]
+    fn a_v6_packet_at_an_embedded_v4_metadata_address_is_refused() {
+        let mut a = L3Admitter::new(
+            lease().with_v6(GATEWAY_V6, GUEST_V6),
+            L3PolicyConfig {
+                egress: CanonicalEgress::Unrestricted,
+                ..L3PolicyConfig::default()
+            },
+            FlowTable::with_defaults(),
+            DnsBindingStore::with_defaults(),
+            IngressTable::with_defaults(),
+        );
+        a.set_ready(true);
+        for dst in [
+            "::ffff:169.254.169.254",
+            "::169.254.169.254",
+            "64:ff9b::169.254.169.254",
+            "2002:a9fe:a9fe::",
+        ] {
+            let pkt = v6_packet(
+                proto::TCP,
+                GUEST_V6,
+                dst.parse().unwrap(),
+                &tcp(50000, 80, ip::TCP_SYN),
+            );
+            assert_eq!(
+                out(&mut a, &pkt),
+                Err(DenyCode::LinkLocalDenied),
+                "destination {dst}"
+            );
+        }
+    }
+
+    #[test]
+    fn v6_dns_to_the_synthetic_resolver_is_terminated_at_the_gateway() {
+        let mut a = open_443_v6();
+        let pkt = v6_packet(proto::UDP, GUEST_V6, GATEWAY_V6, &udp(40000, 53));
+        assert!(matches!(
+            a.admit_outbound(&pkt, 0),
+            OutboundVerdict::Gateway(GatewayService::Dns, _)
+        ));
+        let other = v6_packet(
+            proto::TCP,
+            GUEST_V6,
+            GATEWAY_V6,
+            &tcp(40000, 22, ip::TCP_SYN),
+        );
+        assert_eq!(out(&mut a, &other), Err(DenyCode::GatewayServiceDenied));
+    }
+
+    #[test]
+    fn v6_return_traffic_for_an_admitted_flow_is_delivered() {
+        let mut a = open_443_v6();
+        let outbound = v6_packet(
+            proto::TCP,
+            GUEST_V6,
+            REMOTE_V6,
+            &tcp(50000, 443, ip::TCP_SYN),
+        );
+        out(&mut a, &outbound).unwrap();
+        let reply = v6_packet(
+            proto::TCP,
+            REMOTE_V6,
+            GUEST_V6,
+            &tcp(443, 50000, ip::TCP_SYN | ip::TCP_ACK),
+        );
+        assert_eq!(inbound(&mut a, &reply, 1), Ok(()));
+    }
+
+    #[test]
+    fn unsolicited_v6_inbound_traffic_is_dropped() {
+        let mut a = open_443_v6();
+        let pkt = v6_packet(
+            proto::TCP,
+            REMOTE_V6,
+            GUEST_V6,
+            &tcp(443, 50000, ip::TCP_SYN),
+        );
+        assert_eq!(inbound(&mut a, &pkt, 0), Err(DenyCode::UnsolicitedInbound));
+    }
+
+    #[test]
+    fn v6_inbound_traffic_for_another_address_is_refused() {
+        let mut a = open_443_v6();
+        let elsewhere = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 9);
+        let pkt = v6_packet(proto::TCP, REMOTE_V6, elsewhere, &tcp(443, 50000, 0));
+        assert_eq!(inbound(&mut a, &pkt, 0), Err(DenyCode::WrongDestination));
     }
 
     #[test]

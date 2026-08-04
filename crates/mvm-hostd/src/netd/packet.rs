@@ -1,16 +1,18 @@
-//! Building the IPv4 packets the gateway originates.
+//! Building the packets the gateway originates.
 //!
 //! The synthetic resolver answers the guest from the gateway address, which
-//! means the gateway has to emit a well-formed IPv4/UDP packet — the guest's
-//! stack will drop anything whose checksums do not verify. Kept pure and
-//! separate so the arithmetic is testable without a socket.
+//! means the gateway has to emit a well-formed UDP packet in the family the
+//! query arrived in — the guest's stack will drop anything whose checksums
+//! do not verify, and the two families do not share a pseudo-header. Kept
+//! pure and separate so the arithmetic is testable without a socket.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use mvm_protocol::l3::proto;
 
 /// Sizes of the headers this module writes.
 const IPV4_HEADER_LEN: usize = 20;
+const IPV6_HEADER_LEN: usize = 40;
 const UDP_HEADER_LEN: usize = 8;
 
 /// Build an IPv4/UDP packet.
@@ -51,6 +53,40 @@ pub fn build_udp_v4(
     pkt[udp + 4..udp + 6].copy_from_slice(&udp_len.to_be_bytes());
     pkt[udp + 8..].copy_from_slice(payload);
     let udp_checksum = udp_v4_checksum(src, dst, &pkt[udp..]);
+    pkt[udp + 6..udp + 8].copy_from_slice(&udp_checksum.to_be_bytes());
+
+    pkt
+}
+
+/// Build an IPv6/UDP packet.
+///
+/// No identification field and no Don't Fragment bit: IPv6 routers do not
+/// fragment, so there is nothing to identify a fragment by and nothing to
+/// forbid. `hop_limit` is IPv6's spelling of the TTL.
+pub fn build_udp_v6(
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+    hop_limit: u8,
+) -> Vec<u8> {
+    let udp_len = UDP_HEADER_LEN + payload.len();
+    let mut pkt = vec![0u8; IPV6_HEADER_LEN + udp_len];
+
+    pkt[0] = 0x60; // version 6, traffic class and flow label zero
+    pkt[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    pkt[6] = proto::UDP;
+    pkt[7] = hop_limit;
+    pkt[8..24].copy_from_slice(&src.octets());
+    pkt[24..40].copy_from_slice(&dst.octets());
+
+    let udp = IPV6_HEADER_LEN;
+    pkt[udp..udp + 2].copy_from_slice(&src_port.to_be_bytes());
+    pkt[udp + 2..udp + 4].copy_from_slice(&dst_port.to_be_bytes());
+    pkt[udp + 4..udp + 6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    pkt[udp + 8..].copy_from_slice(payload);
+    let udp_checksum = udp_v6_checksum(src, dst, &pkt[udp..]);
     pkt[udp + 6..udp + 8].copy_from_slice(&udp_checksum.to_be_bytes());
 
     pkt
@@ -119,6 +155,37 @@ fn udp_v4_checksum(src: Ipv4Addr, dst: Ipv4Addr, udp: &[u8]) -> u16 {
     if checksum == 0 { 0xffff } else { checksum }
 }
 
+/// UDP checksum over the IPv6 pseudo-header plus the datagram.
+///
+/// A different pseudo-header from IPv4's — 128-bit addresses and a 32-bit
+/// length — so the two cannot share an implementation, and mandatory rather
+/// than optional: IPv6 has no header checksum to fall back on.
+fn udp_v6_checksum(src: Ipv6Addr, dst: Ipv6Addr, udp: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    for chunk in src.octets().chunks(2).chain(dst.octets().chunks(2)) {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    let len = udp.len() as u32;
+    sum += len >> 16;
+    sum += len & 0xffff;
+    sum += proto::UDP as u32;
+    let mut i = 0;
+    while i + 1 < udp.len() {
+        sum += u16::from_be_bytes([udp[i], udp[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < udp.len() {
+        sum += (udp[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    let checksum = !(sum as u16);
+    // RFC 768: a computed zero is transmitted as all-ones, because zero
+    // means "no checksum" on the wire.
+    if checksum == 0 { 0xffff } else { checksum }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +206,48 @@ mod tests {
         assert_eq!(parsed.dst_port, Some(40000));
         assert!(!parsed.fragment);
         assert_eq!(parsed.total_len, pkt.len());
+    }
+
+    const GATEWAY_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 1);
+    const GUEST_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 2);
+
+    #[test]
+    fn a_built_v6_packet_parses_back_to_what_was_asked_for() {
+        let pkt = build_udp_v6(GATEWAY_V6, GUEST_V6, 53, 40000, b"answer-bytes", 64);
+        let parsed = ip::parse(&pkt).unwrap();
+        assert_eq!(parsed.version, 6);
+        assert_eq!(parsed.protocol, proto::UDP);
+        assert_eq!(parsed.src, std::net::IpAddr::V6(GATEWAY_V6));
+        assert_eq!(parsed.dst, std::net::IpAddr::V6(GUEST_V6));
+        assert_eq!(parsed.src_port, Some(53));
+        assert_eq!(parsed.dst_port, Some(40000));
+        assert!(!parsed.fragment);
+        assert_eq!(parsed.total_len, pkt.len());
+        assert_eq!(
+            ip::udp_payload(&pkt, &parsed),
+            Some(&b"answer-bytes"[..]),
+            "the guest's stack reads the answer out of this packet"
+        );
+    }
+
+    /// IPv6 has no header checksum, so the UDP one is not optional there —
+    /// a guest's stack drops a datagram whose checksum does not verify, and
+    /// the v6 pseudo-header is not the v4 one.
+    #[test]
+    fn the_v6_udp_checksum_verifies() {
+        for len in [0usize, 1, 2, 3, 15, 16, 17] {
+            let payload = vec![0xABu8; len];
+            let pkt = build_udp_v6(GATEWAY_V6, GUEST_V6, 53, 40000, &payload, 64);
+            let mut probe = pkt.clone();
+            // Zero the checksum field and confirm the stored value is what a
+            // full recomputation produces.
+            probe[46..48].copy_from_slice(&[0, 0]);
+            assert_eq!(
+                u16::from_be_bytes([pkt[46], pkt[47]]),
+                udp_v6_checksum(GATEWAY_V6, GUEST_V6, &probe[40..]),
+                "len {len}"
+            );
+        }
     }
 
     #[test]

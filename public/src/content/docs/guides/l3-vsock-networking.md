@@ -162,6 +162,10 @@ IPv6 forwarding are unavailable on it**. A plan needing any of them is
 refused at admission, naming what is missing and naming the backend
 substitution that caused the refusal. It is never partially served.
 
+Carrying a v6 *flow* and emitting an arbitrary v6 *packet* are separate
+capabilities, and the socket backend declares them separately: it carries
+TCP and UDP over IPv6, and it still cannot emit a raw v6 packet.
+
 On macOS this is permanent rather than pending — the privileged helper it
 would take was considered and turned down, because mvm adds no root-capable
 component. On Linux it is a consequence of the privilege the process
@@ -219,9 +223,16 @@ address is empty, because a point-to-point IP interface has none.
 
 ## Limits in this version
 
-- IPv4 only, on both backends. A packet whose IP version is not 4 is
-  refused at admission, so an IPv6 destination is unreachable rather than
-  slow. The design for carrying v6 exists; none of it has shipped.
+- IPv6 is admitted and carried by the host, but **the workload kernel does
+  not yet configure a v6 address**, so a guest cannot originate v6 traffic
+  today. The host-side half — admission, the address-class rules, and flow
+  translation — has shipped; the guest half has not. An IPv6 destination is
+  therefore unreachable from a guest for now, and unreachable rather than
+  slow.
+- Embedded-v4 addresses do not bypass the v4 rules. A v4-mapped,
+  v4-compatible, NAT64, or 6to4 address is collapsed to the v4 address it
+  carries and then judged by the whole v4 policy, so link-local metadata and
+  private ranges stay refused however they are spelled.
 - IP fragments are rejected rather than reassembled. TCP MSS is clamped so
   ordinary traffic does not fragment.
 - One data queue. The protocol reserves the fields for more.

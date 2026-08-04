@@ -299,6 +299,11 @@ fn build_netd_config(config: &mvm_core::vm_backend::VmStartConfig) -> Result<Str
         uds_layout: NetdUdsLayout::PerVmDir,
         gateway_ipv4: lease.gateway,
         guest_ipv4: lease.guest,
+        // No IPv6 pair. The local launch path allocates none, and the
+        // workload kernel is built without IPv6, so a guest handed an
+        // address could not configure it.
+        gateway_ipv6: None,
+        guest_ipv6: None,
         mtu: spec.mtu,
         egress,
         admitted_private_cidrs: spec.admitted_private_cidrs.clone(),

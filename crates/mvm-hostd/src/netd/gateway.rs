@@ -34,7 +34,7 @@ use super::datapath::{
     L3Datapath,
 };
 use super::metrics::GatewayMetrics;
-use super::packet::{build_udp_v4, udp_v4_payload};
+use super::packet::{build_udp_v4, build_udp_v6};
 
 /// How many packets may sit in either direction's queue before the gateway
 /// starts dropping.
@@ -60,6 +60,11 @@ pub const DEFAULT_DNS_QPS: u32 = 50;
 /// when the budget cuts it off, and the loop comes straight back rather than
 /// waiting on a readiness edge it has already spent.
 pub const MAX_INBOUND_PACKETS_PER_PASS: usize = 32;
+
+/// TTL, or hop limit, on a synthesized resolver reply. The guest is one hop
+/// away over the tunnel's own link, so this is only ever decremented by the
+/// guest's own receive path.
+const DNS_REPLY_TTL: u8 = 64;
 
 /// Everything the gateway needs to serve one machine.
 pub struct GatewayConfig {
@@ -305,6 +310,11 @@ impl Gateway {
             gateway: config.lease.gateway,
             guest: config.lease.guest,
             prefix_len: config.lease.prefix_len(),
+            // One lease, read once. A backend addressing a guest in a family
+            // the lease never granted would be addressing somewhere nothing
+            // admitted.
+            gateway_v6: config.lease.gateway_v6,
+            guest_v6: config.lease.guest_v6,
             mtu: config.policy.mtu,
             // Copied out before the table moves into the admitter below. A
             // backend that serves ingress by binding a listener needs the
@@ -729,7 +739,10 @@ impl Gateway {
             });
             return events;
         }
-        let Some(payload) = udp_v4_payload(packet) else {
+        // The protocol crate's extractor rather than this module's v4-only
+        // one: a query may arrive in either family, and it has already
+        // structurally validated this packet.
+        let Some(payload) = ip::udp_payload(packet, meta) else {
             self.metrics.dns_denied += 1;
             events.push(GatewayEvent::DnsDenied {
                 name: String::new(),
@@ -795,19 +808,26 @@ impl Gateway {
         };
 
         // The reply comes from the gateway address, which inbound admission
-        // recognizes as host-originated.
+        // recognizes as host-originated — and in the family the query
+        // arrived in, since that is the only one the guest is listening on
+        // for this exchange.
         let lease = *self.admitter.lease();
         let guest_port = meta.src_port.unwrap_or(0);
         self.ip_id = self.ip_id.wrapping_add(1);
-        let reply = build_udp_v4(
-            lease.gateway,
-            lease.guest,
-            53,
-            guest_port,
-            &response,
-            64,
-            self.ip_id,
-        );
+        let reply = match (lease.gateway_v6, lease.guest_v6, meta.src) {
+            (Some(gateway), Some(guest), IpAddr::V6(_)) => {
+                build_udp_v6(gateway, guest, 53, guest_port, &response, DNS_REPLY_TTL)
+            }
+            _ => build_udp_v4(
+                lease.gateway,
+                lease.guest,
+                53,
+                guest_port,
+                &response,
+                DNS_REPLY_TTL,
+                self.ip_id,
+            ),
+        };
         if reply.len() <= self.admitter.config().mtu as usize {
             self.queue_to_guest(&reply);
         } else {
@@ -957,6 +977,25 @@ mod tests {
 
     fn lease() -> AddressLease {
         AddressAllocator::with_defaults().allocate().unwrap()
+    }
+
+    use std::net::Ipv6Addr;
+
+    const GATEWAY_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 1);
+    const GUEST_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 2);
+
+    /// A minimal well-formed IPv6 packet carrying `payload`, with no
+    /// extension headers.
+    fn v6_packet(protocol: u8, src: Ipv6Addr, dst: Ipv6Addr, payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8; 40];
+        p[0] = 0x60;
+        p[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        p[6] = protocol;
+        p[7] = 64;
+        p[8..24].copy_from_slice(&src.octets());
+        p[24..40].copy_from_slice(&dst.octets());
+        p.extend_from_slice(payload);
+        p
     }
 
     fn rule(net: &str, port: u16) -> CanonicalRule {
@@ -1195,7 +1234,7 @@ mod tests {
         }
 
         fn capabilities(&self) -> ForwardingCapabilities {
-            ForwardingCapabilities::FULL_L3_V4
+            ForwardingCapabilities::FULL_L3
         }
     }
 
@@ -1292,7 +1331,7 @@ mod tests {
         }
 
         fn capabilities(&self) -> ForwardingCapabilities {
-            ForwardingCapabilities::FULL_L3_V4
+            ForwardingCapabilities::FULL_L3
         }
     }
 
@@ -1517,6 +1556,57 @@ mod tests {
         let wire = frame::encode(MessageType::Packet, SESSION.0, 0, &pkt).unwrap();
         let events = gw.ingest_data_bytes(&wire, 11).unwrap();
         assert!(matches!(events[0], GatewayEvent::FlowAdmitted { .. }));
+    }
+
+    /// A query arriving over IPv6 has to be answered over IPv6. The reply
+    /// is built by the gateway, not by a stack that would have picked the
+    /// family for it, so a v4-only builder would leave a dual-stack guest
+    /// waiting on an answer that was never addressed to it.
+    #[test]
+    fn a_v6_dns_query_is_answered_from_the_v6_gateway_address() {
+        let dp = LoopbackDatapath::sink();
+        let resolver =
+            Arc::new(StaticResolver::new().with("api.example.com", &[IpAddr::V4(REMOTE)], 60));
+        let mut gw = Gateway::open(
+            GatewayConfig::new(
+                "vm-a",
+                "sha256:plan",
+                lease().with_v6(GATEWAY_V6, GUEST_V6),
+                L3PolicyConfig::default(),
+            ),
+            SESSION,
+            &dp,
+            resolver,
+        )
+        .unwrap();
+        handshake(&mut gw);
+
+        let query = dns_query("api.example.com");
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&40000u16.to_be_bytes());
+        udp.extend_from_slice(&53u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + query.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&[0, 0]);
+        udp.extend_from_slice(&query);
+        let packet = v6_packet(proto::UDP, GUEST_V6, GATEWAY_V6, &udp);
+
+        let wire = frame::encode(MessageType::Packet, SESSION.0, 0, &packet).unwrap();
+        let events = gw.ingest_data_bytes(&wire, 10).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GatewayEvent::DnsAdmitted { answers: 1, .. })),
+            "{events:?}"
+        );
+
+        let frames = gw.take_guest_frames();
+        assert_eq!(frames.len(), 1, "the guest is owed exactly one answer");
+        let decoded = frame::decode(&frames[0]).unwrap();
+        let reply = ip::parse(decoded.payload).expect("the answer is a well-formed packet");
+        assert_eq!(reply.src, IpAddr::V6(GATEWAY_V6));
+        assert_eq!(reply.dst, IpAddr::V6(GUEST_V6));
+        assert_eq!(reply.src_port, Some(53));
+        assert_eq!(reply.dst_port, Some(40000));
     }
 
     #[test]

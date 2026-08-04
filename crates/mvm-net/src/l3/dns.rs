@@ -356,13 +356,18 @@ fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Collapse an IPv4-mapped IPv6 address so a `::ffff:10.0.0.1` answer
-/// cannot slip past an IPv4-only range test.
+/// Collapse an IPv6 address that encodes an IPv4 one, so a `::ffff:10.0.0.1`
+/// answer cannot slip past an IPv4-only range test.
+///
+/// The same extraction the packet path's class check runs, deliberately:
+/// there are four such encodings, and a second, narrower idea of which of
+/// them count would leave a resolver able to name a range this store
+/// refuses.
 fn normalize(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+        IpAddr::V6(v6) => match super::admit::embedded_v4(v6) {
             Some(v4) => IpAddr::V4(v4),
-            None => IpAddr::V6(v6),
+            None => ip,
         },
         other => other,
     }
@@ -525,6 +530,32 @@ mod tests {
             store.bind_answer("evil.example.com", &[mapped], &[80], 60_000, 1, 0),
             Err(DnsDeny::Rebinding { .. })
         ));
+    }
+
+    /// v4-mapped is the encoding everyone remembers. A resolver answering
+    /// in any of the other three reaches the same host, so the collapse has
+    /// to be the same one the packet path uses rather than a second, older
+    /// idea of what "an IPv4 address in IPv6" looks like.
+    #[test]
+    fn every_embedded_v4_answer_form_is_collapsed_before_the_range_check() {
+        for answer in [
+            "::ffff:169.254.169.254",
+            "::169.254.169.254",
+            "64:ff9b::169.254.169.254",
+            "2002:a9fe:a9fe::",
+            "64:ff9b::10.0.0.1",
+            "2002:0a00:0001::",
+        ] {
+            let mut store = fresh();
+            let ip: IpAddr = answer.parse().expect("a literal IPv6 address");
+            assert!(
+                matches!(
+                    store.bind_answer("evil.example.com", &[ip], &[80], 60_000, 1, 0),
+                    Err(DnsDeny::Rebinding { .. })
+                ),
+                "answer {answer} must be refused for the address it encodes"
+            );
+        }
     }
 
     #[test]

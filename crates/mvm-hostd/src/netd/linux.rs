@@ -179,10 +179,18 @@ impl L3Datapath for LinuxDatapath {
 
     fn capabilities(&self) -> ForwardingCapabilities {
         // A host TUN carries whole IP packets, so every transport the
-        // policy layer understands works. IPv6 stays off until the workload
-        // kernel enables it — claiming it would be claiming a datapath that
-        // has no guest address to talk to.
-        ForwardingCapabilities::FULL_L3_V4
+        // policy layer understands works — in IPv4. The two IPv6 flags stay
+        // off because `configure` assigns only an IPv4 pair and the
+        // nftables ruleset filters on only an IPv4 source: a v6 packet
+        // written into this device would reach a link with no v6 address
+        // and no route, and nothing inbound would be steered back to it.
+        // Turning them on means assigning the v6 pair and extending the
+        // ruleset, not editing this line.
+        ForwardingCapabilities {
+            arbitrary_ipv6: false,
+            ipv6_flows: false,
+            ..ForwardingCapabilities::FULL_L3
+        }
     }
 }
 

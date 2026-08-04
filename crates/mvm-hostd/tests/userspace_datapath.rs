@@ -720,6 +720,8 @@ fn config(vm_id: &str, tcp: &[NetdRule], udp: &[NetdRule]) -> NetdConfig {
         uds_layout: NetdUdsLayout::PerVmDir,
         gateway_ipv4: Ipv4Addr::new(10, 201, 0, 5),
         guest_ipv4: Ipv4Addr::new(10, 201, 0, 6),
+        gateway_ipv6: None,
+        guest_ipv6: None,
         mtu: MTU_V1,
         egress: NetdEgress::Rules(rules),
         admitted_private_cidrs: private,
@@ -990,6 +992,8 @@ impl Translator {
                 gateway: cfg.gateway_ipv4,
                 guest: cfg.guest_ipv4,
                 prefix_len: cfg.lease().prefix_len(),
+                gateway_v6: cfg.gateway_ipv6,
+                guest_v6: cfg.guest_ipv6,
                 mtu: cfg.mtu,
                 ingress: Vec::new(),
             })

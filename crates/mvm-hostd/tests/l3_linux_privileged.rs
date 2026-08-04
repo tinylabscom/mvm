@@ -61,7 +61,16 @@ fn the_datapath_reports_whether_this_host_can_serve_it() {
     let dp = LinuxDatapath::new();
     dp.is_available()
         .expect("the privileged lane needs /dev/net/tun and CAP_NET_ADMIN");
-    assert_eq!(dp.capabilities(), ForwardingCapabilities::FULL_L3_V4);
+    // A full IPv4 packet path. The IPv6 flags are off because this handle
+    // assigns no v6 address and its ruleset filters no v6 source.
+    assert_eq!(
+        dp.capabilities(),
+        ForwardingCapabilities {
+            arbitrary_ipv6: false,
+            ipv6_flows: false,
+            ..ForwardingCapabilities::FULL_L3
+        }
+    );
 }
 
 #[test]

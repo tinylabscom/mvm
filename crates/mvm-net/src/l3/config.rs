@@ -7,7 +7,7 @@
 //! already-admitted contract, which is what keeps the admission decision in
 //! one place.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,13 @@ pub struct NetdConfig {
     /// The assigned point-to-point addressing.
     pub gateway_ipv4: Ipv4Addr,
     pub guest_ipv4: Ipv4Addr,
+    /// The same pair in IPv6, for a machine issued one. Absent means the
+    /// machine has no IPv6 address at all, and admission refuses the family
+    /// rather than checking a source against nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_ipv6: Option<Ipv6Addr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_ipv6: Option<Ipv6Addr>,
     pub mtu: u16,
 
     /// The canonical egress projection, already resolved. Serialized as the
@@ -243,7 +250,14 @@ impl NetdConfig {
 
     /// The address lease this configuration assigns.
     pub fn lease(&self) -> crate::l3::AddressLease {
-        crate::l3::AddressLease::for_test(self.gateway_ipv4, self.guest_ipv4)
+        let lease = crate::l3::AddressLease::for_test(self.gateway_ipv4, self.guest_ipv4);
+        match (self.gateway_ipv6, self.guest_ipv6) {
+            (Some(gateway), Some(guest)) => lease.with_v6(gateway, guest),
+            // A half-configured pair grants nothing: a guest address with no
+            // gateway has no resolver to reach, and a gateway with no guest
+            // address has nothing anti-spoofing could accept.
+            _ => lease,
+        }
     }
 }
 
@@ -260,6 +274,8 @@ mod tests {
             uds_layout: NetdUdsLayout::PerVmDir,
             gateway_ipv4: Ipv4Addr::new(10, 201, 0, 5),
             guest_ipv4: Ipv4Addr::new(10, 201, 0, 6),
+            gateway_ipv6: None,
+            guest_ipv6: None,
             mtu: 1500,
             egress: NetdEgress::Rules(vec![NetdRule {
                 proto: "tcp".into(),

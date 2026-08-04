@@ -49,6 +49,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::netd::datapath::DatapathError;
 
+use super::GuestAddressing;
 use super::limits::{
     ASSOCIATION_LIFETIME_MILLIS, DATAGRAMS_PER_SOURCE_POLL, MAX_DATAGRAM_PAYLOAD_BYTES,
 };
@@ -77,7 +78,7 @@ pub struct DatagramDrops {
     /// Replies too large for the guest's link.
     pub oversized: u64,
     /// Replies that could not be addressed to the guest at all, because the
-    /// flow's remote and the guest's lease are of different families.
+    /// session leased it no address in the flow's family.
     ///
     /// Structurally unreachable — a remote is reached over the interface the
     /// guest's address is configured on — and counted rather than dropped
@@ -120,7 +121,7 @@ impl Association {
     fn drain(
         &mut self,
         key: FlowKey,
-        guest: IpAddr,
+        guest: GuestAddressing,
         out: &mut Vec<Vec<u8>>,
         drops: &mut DatagramDrops,
     ) -> DrainOutcome {
@@ -145,7 +146,10 @@ impl Association {
                 drops.oversized = drops.oversized.saturating_add(1);
                 continue;
             }
-            match synthesize_datagram(&key, guest, &buf[..len]) {
+            match guest
+                .matching(key.remote)
+                .and_then(|guest| synthesize_datagram(&key, guest, &buf[..len]))
+            {
                 Some(packet) => out.push(packet),
                 None => drops.unaddressable = drops.unaddressable.saturating_add(1),
             }
@@ -163,7 +167,7 @@ impl Association {
 pub struct UdpAssociations {
     entries: BTreeMap<FlowKey, Association>,
     capacity: usize,
-    guest: IpAddr,
+    guest: GuestAddressing,
     drops: DatagramDrops,
     /// Every association's socket goes on the datapath's readiness set, so a
     /// peer's reply wakes the drive loop rather than waiting out its tick.
@@ -171,7 +175,7 @@ pub struct UdpAssociations {
 }
 
 impl UdpAssociations {
-    pub fn new(capacity: usize, guest: IpAddr, watch: Watch) -> Self {
+    pub fn new(capacity: usize, guest: GuestAddressing, watch: Watch) -> Self {
         Self {
             entries: BTreeMap::new(),
             capacity,
@@ -365,10 +369,9 @@ fn from_admitted_peer(from: SocketAddr, admitted: SocketAddr) -> bool {
 /// Build the packet a reply becomes on the guest's link: addressed from the
 /// destination the guest dialled, to the address the session leased it.
 ///
-/// `None` only when the leased guest address and the flow's remote are of
-/// different families, which cannot happen — a flow's remote is reached
-/// over the interface the guest's address is configured on. It is not a
-/// statement about which families are supported; both are emitted.
+/// `None` only when the caller could not name a guest address in the flow's
+/// family. It is not a statement about which families are supported; both
+/// are emitted.
 pub(super) fn synthesize_datagram(key: &FlowKey, guest: IpAddr, payload: &[u8]) -> Option<Vec<u8>> {
     let udp = UdpRepr {
         src_port: key.remote_port,
@@ -492,6 +495,13 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(10, 201, 0, 6))
     }
 
+    /// The same lease as the per-family value the tables hold. IPv4 only:
+    /// these fixtures are the IPv4 path, and a v6 remote against this must
+    /// come back unaddressable rather than be sent somewhere invented.
+    fn leased() -> GuestAddressing {
+        GuestAddressing::new(Ipv4Addr::new(10, 201, 0, 6), None)
+    }
+
     fn key() -> FlowKey {
         key_with_port(50_000)
     }
@@ -578,7 +588,7 @@ mod tests {
     #[test]
     fn a_datagram_round_trips_through_a_host_socket() {
         let echo = bind_udp_echo_server();
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         a.send(key_to(echo), b"ping", 0).expect("send");
         let replies = poll_until_nonempty(&mut a, ROUND_TRIP_BUDGET);
         assert_eq!(replies.len(), 1, "the echo server's answer must come back");
@@ -600,7 +610,7 @@ mod tests {
 
     #[test]
     fn associations_expire_on_the_datagram_timeout() {
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         a.send(key(), b"x", 0).expect("send");
         assert_eq!(a.len(), 1);
         assert_eq!(a.expire(ASSOCIATION_LIFETIME_MILLIS), 1);
@@ -609,7 +619,7 @@ mod tests {
 
     #[test]
     fn an_association_inside_its_lifetime_is_not_expired() {
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         a.send(key(), b"x", 0).expect("send");
         assert_eq!(a.expire(ASSOCIATION_LIFETIME_MILLIS - 1), 0);
         assert_eq!(a.len(), 1);
@@ -629,7 +639,7 @@ mod tests {
     #[test]
     fn traffic_does_not_push_out_an_associations_deadline() {
         let (_sink, dst) = bind_udp_sink();
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         let flow = key_to(dst);
         a.send(flow, b"first", 0).expect("send");
         a.send(flow, b"second", ASSOCIATION_LIFETIME_MILLIS - 1)
@@ -656,7 +666,7 @@ mod tests {
     #[test]
     fn a_bound_destination_absorbs_a_second_datagram_rather_than_refusing_it() {
         let (_sink, dst) = bind_udp_sink();
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         let flow = key_to(dst);
         a.send(flow, b"first", 0).expect("send");
         std::thread::sleep(ICMP_SETTLE);
@@ -666,7 +676,7 @@ mod tests {
 
     #[test]
     fn the_association_table_drops_rather_than_evicting() {
-        let mut a = UdpAssociations::new(2, guest(), watch());
+        let mut a = UdpAssociations::new(2, leased(), watch());
         for i in 0..8 {
             let _ = a.send(key_with_port(50_000 + i), b"x", 0);
         }
@@ -680,7 +690,7 @@ mod tests {
 
     #[test]
     fn a_refused_association_reports_rather_than_dropping_silently() {
-        let mut a = UdpAssociations::new(1, guest(), watch());
+        let mut a = UdpAssociations::new(1, leased(), watch());
         a.send(key_with_port(50_000), b"x", 0).expect("inside cap");
         assert!(
             a.send(key_with_port(50_001), b"x", 0).is_err(),
@@ -696,7 +706,7 @@ mod tests {
     #[test]
     fn a_datagram_from_an_off_path_sender_never_reaches_the_guest() {
         let echo = bind_udp_echo_server();
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         let flow = key_to(echo);
         a.send(flow, b"ping", 0).expect("send");
         assert!(
@@ -747,7 +757,7 @@ mod tests {
     #[test]
     fn an_expired_association_delivers_nothing() {
         let echo = bind_udp_echo_server();
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         a.send(key_to(echo), b"ping", 0).expect("send");
         std::thread::sleep(Duration::from_millis(100));
         assert!(
@@ -761,7 +771,7 @@ mod tests {
     /// where the caller can see it rather than silently shortened.
     #[test]
     fn an_oversized_payload_is_refused_rather_than_truncated() {
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         assert!(
             a.send(key(), &vec![0u8; MAX_DATAGRAM_PAYLOAD_BYTES + 1], 0)
                 .is_err()
@@ -778,7 +788,7 @@ mod tests {
     /// reaching it means the handle dispatched to the wrong translation.
     #[test]
     fn a_key_that_is_not_a_datagram_flow_is_refused() {
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         let mut wrong = key();
         wrong.protocol = proto::TCP;
         assert!(a.send(wrong, b"x", 0).is_err());
@@ -789,7 +799,7 @@ mod tests {
     /// one would accumulate across machine restarts.
     #[test]
     fn clear_releases_every_descriptor_and_is_idempotent() {
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         for i in 0..4 {
             a.send(key_with_port(50_000 + i), b"x", 0).expect("send");
         }
@@ -806,7 +816,7 @@ mod tests {
     #[test]
     fn one_poll_takes_a_bounded_number_of_datagrams() {
         let echo = bind_udp_echo_server();
-        let mut a = UdpAssociations::new(64, guest(), watch());
+        let mut a = UdpAssociations::new(64, leased(), watch());
         let flow = key_to(echo);
         for i in 0..(DATAGRAMS_PER_SOURCE_POLL + 3) {
             a.send(flow, &[i as u8], 0).expect("send");

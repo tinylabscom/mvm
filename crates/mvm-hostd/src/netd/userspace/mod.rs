@@ -19,7 +19,7 @@ pub mod tcp;
 pub mod udp;
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::RawFd;
 
 use mvm_net::l3::AdmittedPacket;
@@ -46,6 +46,42 @@ use super::datapath::{
     L3Datapath,
 };
 use super::metrics::GatewayMetrics;
+
+/// Prefix length the gateway's IPv6 address takes on the machine-wide
+/// interface: the IPv6 analogue of the IPv4 /30, the smallest prefix that
+/// leaves the guest on-link and nothing else.
+const GATEWAY_V6_PREFIX_LEN: u8 = 126;
+
+/// The addresses this session leased the guest, one per family.
+///
+/// A host-originated packet — a reset, a synthesized datagram — is addressed
+/// from this and never from the source field of whatever the guest last
+/// sent. Carrying both families in one value rather than one address per
+/// table is what lets a v6 flow's reply be addressed at all: the reply's
+/// family is the flow's, not the session's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestAddressing {
+    v4: Ipv4Addr,
+    /// `None` when the session was issued no IPv6 address. Admission
+    /// refuses the family in that case, so nothing should reach here asking
+    /// for one — and if something does, it is counted as unaddressable
+    /// rather than sent somewhere invented.
+    v6: Option<Ipv6Addr>,
+}
+
+impl GuestAddressing {
+    pub fn new(v4: Ipv4Addr, v6: Option<Ipv6Addr>) -> Self {
+        Self { v4, v6 }
+    }
+
+    /// The leased address in `remote`'s family.
+    pub fn matching(&self, remote: IpAddr) -> Option<IpAddr> {
+        match remote {
+            IpAddr::V4(_) => Some(IpAddr::V4(self.v4)),
+            IpAddr::V6(_) => self.v6.map(IpAddr::V6),
+        }
+    }
+}
 
 /// Concurrent host sockets this process can afford.
 ///
@@ -198,6 +234,11 @@ impl UserspaceSocketDatapath {
             addrs
                 .push(IpCidr::new(IpAddress::Ipv4(req.gateway), req.prefix_len))
                 .expect("a freshly created address list has room for its first entry");
+            if let Some(gateway) = req.gateway_v6 {
+                addrs
+                    .push(IpCidr::new(IpAddress::Ipv6(gateway), GATEWAY_V6_PREFIX_LEN))
+                    .expect("smoltcp's address list holds four");
+            }
         });
 
         // Empty, and it stays empty: an established flow terminates the
@@ -207,7 +248,7 @@ impl UserspaceSocketDatapath {
         // whether or not anything is in it.
         let sockets = SocketSet::new(Vec::new());
 
-        let guest = IpAddr::V4(req.guest);
+        let guest = GuestAddressing::new(req.guest, req.guest_v6);
 
         // Bound before the handle exists, so a machine whose declared
         // mappings cannot all be served does not start. A listener silently
@@ -309,10 +350,10 @@ pub struct UserspaceHandle {
     device: GuestDevice,
     interface: Interface,
     sockets: SocketSet<'static>,
-    /// The address this session leased the guest. The authority on where a
-    /// host-originated packet is addressed — never the source field of
+    /// The addresses this session leased the guest. The authority on where
+    /// a host-originated packet is addressed — never the source field of
     /// whatever the guest last sent.
-    guest: IpAddr,
+    guest: GuestAddressing,
     /// Link MTU, checked once at open and reused for every flow's device so
     /// no flow can be built with buffers the ceiling has not budgeted for.
     mtu: usize,
@@ -862,7 +903,7 @@ mod tests {
     use std::net::{Ipv4Addr, TcpListener};
     use std::time::Duration;
 
-    use super::tcp::{emit_v4_segment, max_bytes_per_pass};
+    use super::tcp::{emit_v4_segment, emit_v6_segment, max_bytes_per_pass};
     use mvm_net::l3::IngressMapping;
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -878,12 +919,19 @@ mod tests {
     /// finishes in a softirq. Only ever a precondition, never an assertion.
     const LOOPBACK_SETTLE: Duration = Duration::from_millis(50);
 
+    /// The fixture session is dual-stack, so the v4 assertions below run
+    /// against exactly the handle shape a v6 flow also runs against.
+    const FIXTURE_GATEWAY_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 1);
+    const FIXTURE_GUEST_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 2);
+
     fn request() -> DatapathRequest {
         DatapathRequest {
             machine_id: "vm-a".into(),
             gateway: std::net::Ipv4Addr::new(10, 201, 0, 5),
             guest: std::net::Ipv4Addr::new(10, 201, 0, 6),
             prefix_len: 30,
+            gateway_v6: Some(FIXTURE_GATEWAY_V6),
+            guest_v6: Some(FIXTURE_GUEST_V6),
             mtu: MTU_V1,
             ingress: Vec::new(),
         }
@@ -1195,7 +1243,14 @@ mod tests {
                 timestamp: None,
                 payload: self.payload,
             };
-            let bytes = emit_v4_segment(request().guest, v4_of(self.dst), &segment);
+            let bytes = match self.dst.ip() {
+                IpAddr::V4(dst) => emit_v4_segment(request().guest, dst, &segment),
+                IpAddr::V6(dst) => emit_v6_segment(
+                    request().guest_v6.expect("the fixture session holds one"),
+                    dst,
+                    &segment,
+                ),
+            };
             let key = FlowKey {
                 protocol: proto::TCP,
                 guest_port: self.guest_port,
@@ -1206,11 +1261,22 @@ mod tests {
         }
     }
 
+    /// The transport header of a packet of either family.
+    ///
+    /// The fixtures emit no IPv6 extension headers, so the payload of a v6
+    /// packet is at the fixed header length; a v4 packet's is at its IHL.
+    fn transport_payload(packet: &[u8]) -> Option<&[u8]> {
+        match packet.first()? >> 4 {
+            4 => packet.get(((packet[0] & 0x0f) as usize) * 4..),
+            6 => packet.get(40..),
+            _ => None,
+        }
+    }
+
     /// The stack's initial sequence number, read out of the SYN-ACK it
     /// produced for `guest_port`.
     fn syn_ack_isn(packet: &[u8], guest_port: u16) -> Option<u32> {
-        let ip = smoltcp::wire::Ipv4Packet::new_checked(packet).ok()?;
-        let seg = smoltcp::wire::TcpPacket::new_checked(ip.payload()).ok()?;
+        let seg = smoltcp::wire::TcpPacket::new_checked(transport_payload(packet)?).ok()?;
         (seg.syn() && seg.ack() && seg.dst_port() == guest_port).then(|| seg.seq_number().0 as u32)
     }
 
@@ -1378,6 +1444,145 @@ mod tests {
             handle.flows.values().any(|f| f.bytes_buffered() > 0),
             "the flow's own device must hold what the guest sent"
         );
+    }
+
+    // ---- IPv6 --------------------------------------------------------
+
+    fn v6_listener() -> TcpListener {
+        TcpListener::bind("[::1]:0").expect("bind a v6 loopback listener")
+    }
+
+    /// A v6 flow, end to end: the guest's SYN opens a real host socket, the
+    /// handshake completes over v6, and bytes cross in both directions.
+    ///
+    /// The datapath was never IPv4-only in shape — its emitters carry both
+    /// families — but nothing addressed a host-originated packet in the
+    /// flow's family until the session could hold a v6 address.
+    #[test]
+    fn a_v6_flow_is_carried_end_to_end_over_a_host_socket() {
+        let held = v6_listener();
+        let dst = held.local_addr().expect("local addr");
+        assert!(dst.is_ipv6(), "the fixture destination must be IPv6");
+        let mut handle = open_test_handle();
+
+        let syn = guest_segment(50_000, dst, TcpControl::Syn, &[]);
+        deliver(&mut handle, &syn).expect("a v6 SYN toward a live listener is accepted");
+        assert!(
+            drive_until(&mut handle, |h| h.flows.len() == 1),
+            "the v6 loopback connect must resolve into a flow"
+        );
+        let (mut peer, _) = held.accept().expect("accept the flow's host socket");
+
+        // The handshake is completed inline rather than through
+        // `complete_handshake`, which discards the SYN-ACK: the addressing
+        // of that packet is half of what this test is checking. It comes
+        // back as IPv6, addressed to the leased v6 address and not the v4
+        // one.
+        let mut buf = [0u8; MTU_V1 as usize];
+        let n = handle
+            .recv_from_network(&mut buf)
+            .expect("the flow's stack answers the replayed SYN");
+        let reply = smoltcp::wire::Ipv6Packet::new_checked(&buf[..n]).expect("an IPv6 reply");
+        assert_eq!(reply.dst_addr(), FIXTURE_GUEST_V6);
+        assert_eq!(reply.src_addr(), Ipv6Addr::LOCALHOST);
+        let ack = syn_ack_isn(&buf[..n], 50_000)
+            .expect("the reply is the SYN-ACK for the guest's port")
+            .wrapping_add(1);
+        let handshake = GuestSegment {
+            guest_port: 50_000,
+            dst,
+            control: TcpControl::None,
+            seq: GUEST_ISN.wrapping_add(1),
+            ack: Some(ack),
+            payload: &[],
+        }
+        .emit();
+        deliver(&mut handle, &handshake).expect("the guest's handshake ACK is accepted");
+        handle.service(0).expect("service");
+        let data = GuestSegment {
+            guest_port: 50_000,
+            dst,
+            control: TcpControl::None,
+            seq: GUEST_ISN + 1,
+            ack: Some(ack),
+            payload: b"over v6",
+        }
+        .emit();
+        deliver(&mut handle, &data).expect("an established v6 flow takes its guest's bytes");
+        assert!(
+            drive_until(&mut handle, |h| h
+                .flows
+                .values()
+                .all(|f| f.bytes_buffered() == 0)),
+            "the guest's bytes must reach the host socket"
+        );
+
+        std::thread::sleep(LOOPBACK_SETTLE);
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut got = [0u8; 7];
+        peer.read_exact(&mut got).expect("the peer reads the bytes");
+        assert_eq!(&got, b"over v6");
+
+        peer.write_all(b"back").expect("the peer answers");
+        std::thread::sleep(LOOPBACK_SETTLE);
+        assert!(
+            drive_until(&mut handle, |h| h
+                .flows
+                .values()
+                .any(|f| f.pending_to_guest() > 0)),
+            "the peer's answer must be queued for the guest"
+        );
+    }
+
+    /// A session holding no v6 address can address nothing to its guest in
+    /// that family, and says so rather than inventing a destination.
+    #[test]
+    fn a_session_without_a_v6_address_can_address_nothing_to_its_guest_in_v6() {
+        let dual = GuestAddressing::new(request().guest, Some(FIXTURE_GUEST_V6));
+        let v4_only = GuestAddressing::new(request().guest, None);
+        let v6_remote = IpAddr::V6(Ipv6Addr::LOCALHOST);
+
+        assert_eq!(dual.matching(v6_remote), Some(IpAddr::V6(FIXTURE_GUEST_V6)));
+        assert_eq!(v4_only.matching(v6_remote), None);
+        assert_eq!(
+            v4_only.matching(LOOPBACK),
+            Some(IpAddr::V4(request().guest))
+        );
+    }
+
+    /// A v6 connect that never completes owes its guest a reset addressed in
+    /// v6, for the reason the v4 one does: without it the guest waits out
+    /// its own connect timeout with nothing to explain the silence.
+    #[test]
+    fn a_failed_v6_connect_resets_the_guest_over_v6() {
+        let dead = {
+            let l = v6_listener();
+            let addr = l.local_addr().expect("local addr");
+            drop(l);
+            addr
+        };
+        let mut handle = open_test_handle();
+        let syn = guest_segment(50_000, dead, TcpControl::Syn, &[]);
+        // The connect may be refused synchronously; either way the reset is
+        // owed and comes out of the read path.
+        let _ = deliver(&mut handle, &syn);
+
+        let mut buf = [0u8; MTU_V1 as usize];
+        let mut reset = None;
+        for pass in 0..SERVICE_ATTEMPTS {
+            handle.service(pass as u64).expect("service");
+            if let Ok(n) = handle.recv_from_network(&mut buf) {
+                reset = Some(buf[..n].to_vec());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let reset = reset.expect("a failed connect owes the guest a reset");
+        let ip = smoltcp::wire::Ipv6Packet::new_checked(&reset[..]).expect("an IPv6 reset");
+        assert_eq!(ip.dst_addr(), FIXTURE_GUEST_V6);
+        let seg = smoltcp::wire::TcpPacket::new_checked(ip.payload()).expect("tcp");
+        assert!(seg.rst(), "the guest is owed a reset, not a silence");
     }
 
     /// Half-open and established entries compete for one descriptor budget.

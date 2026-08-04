@@ -104,11 +104,26 @@ for detailed scope and acceptance criteria.
         46,476,608 bytes (44.32 MiB). `declared_ingress: true` is honest for
         datagrams; declared **TCP** ingress binds nothing here and stays
         recorded as an over-claim
-  - [ ] WS3 (#2116) — IPv6 as a first-class family (ADR-038). Blocked on
-        #2113. One `embedded_v4` extraction ahead of every other rule, then
-        the entire existing v4 class check — v4-mapped, v4-compatible,
-        NAT64 and 6to4 all reach `169.254.169.254`, and the canonical-form
-        peer assertion cannot catch them
+  - [~] WS3 (#2116) — IPv6 as a first-class family (ADR-038). **Host side
+        landed; the guest kernel is untouched and unmeasured.** The fuzz
+        gate that blocked the admission change is closed, so the guard now
+        admits v6. One `embedded_v4` extraction runs ahead of every other
+        rule and hands its result to the entire existing v4 class check —
+        v4-mapped, v4-compatible, NAT64 and 6to4 all reach
+        `169.254.169.254`, and the canonical-form peer assertion collapses
+        exactly the distinction such a bypass exploits, so that check is
+        the only defence rather than a backstop. Mutating the extraction to
+        return `None` reddens seven tests, one of them on the resolver
+        path. Native v6 classes mirror their v4 analogues, link-local a
+        mandatory deny because `fe80::/10` is where NDP neighbours live.
+        The userspace backend carries v6 flows and still cannot emit an
+        arbitrary v6 packet, so `ipv6_flows: true` with
+        `arbitrary_ipv6: false`; `FULL_L3_V4` is renamed `FULL_L3`.
+        **Remaining: `CONFIG_IPV6` in the guest kernel**, which ADR-038
+        requires be measured rather than assumed — work is in flight to
+        shrink guest kernels to the virtual hardware floor and adding it
+        blind would silently reverse part of that. Until that measurement
+        is taken and the guest is configured, no guest can originate v6
   - [ ] WS4 (#2117) — benchmark the datapath, then decide whether
         multi-queue is warranted. The measurement is the deliverable
   - [ ] WS5 (#2118) — zero-copy / batched transfer, gated on the same

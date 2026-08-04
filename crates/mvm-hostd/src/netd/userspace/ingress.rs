@@ -58,6 +58,7 @@ use mvm_protocol::l3::ip::proto;
 
 use crate::netd::datapath::DatapathError;
 
+use super::GuestAddressing;
 use super::limits::{
     ASSOCIATION_LIFETIME_MILLIS, DATAGRAMS_PER_SOURCE_POLL, MAX_DATAGRAM_PAYLOAD_BYTES,
 };
@@ -94,7 +95,7 @@ pub struct IngressDrops {
     /// Datagrams too large for the guest's link.
     pub oversized: u64,
     /// Datagrams that could not be addressed to the guest at all, because
-    /// the peer and the guest's lease are of different families.
+    /// the session leased it no address in the peer's family.
     pub unaddressable: u64,
     /// Reads that failed on a bound listener.
     ///
@@ -126,7 +127,7 @@ impl Listener {
     /// addressed to the guest.
     fn drain(
         &mut self,
-        guest: IpAddr,
+        guest: GuestAddressing,
         now_millis: u64,
         out: &mut Vec<Vec<u8>>,
         drops: &mut IngressDrops,
@@ -164,7 +165,10 @@ impl Listener {
                 remote: from.ip(),
                 remote_port: from.port(),
             };
-            match synthesize_datagram(&key, guest, &buf[..len]) {
+            match guest
+                .matching(key.remote)
+                .and_then(|guest| synthesize_datagram(&key, guest, &buf[..len]))
+            {
                 Some(packet) => out.push(packet),
                 None => drops.unaddressable = drops.unaddressable.saturating_add(1),
             }
@@ -224,13 +228,13 @@ pub struct DatagramIngress {
     /// close a live listener to make room for a newcomer.
     listeners: BTreeMap<(IpAddr, u16), Listener>,
     bounds: IngressBounds,
-    guest: IpAddr,
+    guest: GuestAddressing,
     drops: IngressDrops,
     watch: Watch,
 }
 
 impl DatagramIngress {
-    pub fn new(bounds: IngressBounds, guest: IpAddr, watch: Watch) -> Self {
+    pub fn new(bounds: IngressBounds, guest: GuestAddressing, watch: Watch) -> Self {
         Self {
             listeners: BTreeMap::new(),
             bounds,
@@ -446,6 +450,13 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(10, 201, 0, 6))
     }
 
+    /// The same lease as the per-family value the tables hold. IPv4 only:
+    /// these fixtures are the IPv4 path, and a v6 remote against this must
+    /// come back unaddressable rather than be sent somewhere invented.
+    fn leased() -> GuestAddressing {
+        GuestAddressing::new(Ipv4Addr::new(10, 201, 0, 6), None)
+    }
+
     fn bounds() -> IngressBounds {
         IngressBounds {
             listeners: 8,
@@ -454,7 +465,7 @@ mod tests {
     }
 
     fn ingress(bounds: IngressBounds) -> DatagramIngress {
-        DatagramIngress::new(bounds, guest(), watch())
+        DatagramIngress::new(bounds, leased(), watch())
     }
 
     /// A host port nothing is bound to, for a mapping to declare.

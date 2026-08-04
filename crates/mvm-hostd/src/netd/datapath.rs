@@ -13,7 +13,7 @@
 //!
 //! [`send_to_network`]: DatapathHandle::send_to_network
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use mvm_net::l3::{AdmittedPacket, IngressMapping};
 
@@ -31,8 +31,14 @@ pub struct ForwardingCapabilities {
     /// Host-terminated DNS. Required for domain rules to mean anything.
     pub controlled_dns: bool,
     pub icmp: bool,
+    /// Whether the backend can put an *arbitrary* packet of that family on
+    /// the wire. A socket gateway cannot, in either family.
     pub arbitrary_ipv4: bool,
     pub arbitrary_ipv6: bool,
+    /// Whether TCP and UDP flows are carried over IPv6 at all — a different
+    /// question from `arbitrary_ipv6`, and the one a dual-stack workload is
+    /// actually asking.
+    pub ipv6_flows: bool,
     /// IP protocols other than TCP/UDP/ICMP.
     pub raw_ip_protocols: bool,
     pub declared_ingress: bool,
@@ -55,6 +61,7 @@ impl ForwardingCapabilities {
         icmp: false,
         arbitrary_ipv4: false,
         arbitrary_ipv6: false,
+        ipv6_flows: false,
         raw_ip_protocols: false,
         declared_ingress: false,
         multi_queue: false,
@@ -62,14 +69,16 @@ impl ForwardingCapabilities {
         userspace_socket_translation: false,
     };
 
-    /// A full L3 packet path: whole IPv4 packets, every transport.
-    pub const FULL_L3_V4: Self = Self {
+    /// A full L3 packet path: whole packets of either family, every
+    /// transport.
+    pub const FULL_L3: Self = Self {
         tcp: true,
         udp: true,
         controlled_dns: true,
         icmp: true,
         arbitrary_ipv4: true,
-        arbitrary_ipv6: false,
+        arbitrary_ipv6: true,
+        ipv6_flows: true,
         raw_ip_protocols: true,
         declared_ingress: true,
         multi_queue: false,
@@ -77,8 +86,8 @@ impl ForwardingCapabilities {
         userspace_socket_translation: false,
     };
 
-    /// A userspace socket gateway: ordinary application traffic, nothing
-    /// that needs to put an arbitrary IP packet on the wire.
+    /// A userspace socket gateway: ordinary application traffic in either
+    /// family, nothing that needs to put an arbitrary IP packet on the wire.
     pub const USERSPACE_SOCKETS: Self = Self {
         tcp: true,
         udp: true,
@@ -86,6 +95,7 @@ impl ForwardingCapabilities {
         icmp: false,
         arbitrary_ipv4: false,
         arbitrary_ipv6: false,
+        ipv6_flows: true,
         raw_ip_protocols: false,
         declared_ingress: true,
         multi_queue: false,
@@ -95,7 +105,7 @@ impl ForwardingCapabilities {
 
     /// Capabilities a plan needs that this backend does not have.
     pub fn shortfall(&self, required: &Self) -> Vec<&'static str> {
-        let checks: [(bool, bool, &'static str); 9] = [
+        let checks: [(bool, bool, &'static str); 10] = [
             (required.tcp, self.tcp, "tcp"),
             (required.udp, self.udp, "udp"),
             (
@@ -114,6 +124,7 @@ impl ForwardingCapabilities {
                 self.arbitrary_ipv6,
                 "arbitrary_ipv6",
             ),
+            (required.ipv6_flows, self.ipv6_flows, "ipv6_flows"),
             (
                 required.raw_ip_protocols,
                 self.raw_ip_protocols,
@@ -151,6 +162,11 @@ pub struct DatapathRequest {
     pub guest: Ipv4Addr,
     /// Prefix length of the /30.
     pub prefix_len: u8,
+    /// The same pair in IPv6, when the session was issued one. `None` means
+    /// this machine has no IPv6 address, and admission refuses the family
+    /// before a packet ever reaches a backend.
+    pub gateway_v6: Option<Ipv6Addr>,
+    pub guest_v6: Option<Ipv6Addr>,
     pub mtu: u16,
     /// Ingress mappings the plan declared.
     ///
@@ -337,7 +353,7 @@ impl L3Datapath for LoopbackDatapath {
     }
 
     fn capabilities(&self) -> ForwardingCapabilities {
-        ForwardingCapabilities::FULL_L3_V4
+        ForwardingCapabilities::FULL_L3
     }
 }
 
@@ -455,6 +471,8 @@ mod tests {
             gateway: Ipv4Addr::new(10, 201, 0, 5),
             guest: Ipv4Addr::new(10, 201, 0, 6),
             prefix_len: 30,
+            gateway_v6: None,
+            guest_v6: None,
             mtu: 1500,
             ingress: Vec::new(),
         }
@@ -504,8 +522,7 @@ mod tests {
     #[test]
     fn a_full_l3_backend_satisfies_a_userspace_workload() {
         assert!(
-            ForwardingCapabilities::FULL_L3_V4
-                .satisfies(&ForwardingCapabilities::USERSPACE_SOCKETS)
+            ForwardingCapabilities::FULL_L3.satisfies(&ForwardingCapabilities::USERSPACE_SOCKETS)
         );
     }
 
@@ -520,6 +537,54 @@ mod tests {
         let missing = ForwardingCapabilities::USERSPACE_SOCKETS.shortfall(&required);
         assert_eq!(missing, vec!["icmp", "arbitrary_ipv4", "raw_ip_protocols"]);
         assert!(!ForwardingCapabilities::USERSPACE_SOCKETS.satisfies(&required));
+    }
+
+    /// The two IPv6 questions are different questions, and the capability
+    /// seam has to be able to answer them differently: this backend carries
+    /// v6 flows, and cannot put an arbitrary v6 packet on the wire any more
+    /// than it can an arbitrary v4 one.
+    #[test]
+    fn a_userspace_gateway_carries_v6_flows_without_claiming_arbitrary_v6() {
+        let caps = ForwardingCapabilities::USERSPACE_SOCKETS;
+        assert!(caps.ipv6_flows);
+        assert!(!caps.arbitrary_ipv6);
+
+        let required = ForwardingCapabilities {
+            arbitrary_ipv6: true,
+            ..ForwardingCapabilities::USERSPACE_SOCKETS
+        };
+        assert_eq!(caps.shortfall(&required), vec!["arbitrary_ipv6"]);
+        assert!(!caps.satisfies(&required));
+    }
+
+    #[test]
+    fn a_plan_that_only_needs_v6_flows_is_served_by_the_userspace_gateway() {
+        let required = ForwardingCapabilities {
+            tcp: true,
+            udp: true,
+            ipv6_flows: true,
+            ..ForwardingCapabilities::NONE
+        };
+        assert!(ForwardingCapabilities::USERSPACE_SOCKETS.satisfies(&required));
+        assert_eq!(
+            ForwardingCapabilities::NONE.shortfall(&required),
+            vec!["tcp", "udp", "ipv6_flows"]
+        );
+    }
+
+    #[test]
+    fn a_full_packet_path_carries_both_families() {
+        let needs_v6_packets = ForwardingCapabilities {
+            arbitrary_ipv6: true,
+            ipv6_flows: true,
+            ..ForwardingCapabilities::NONE
+        };
+        assert!(ForwardingCapabilities::FULL_L3.satisfies(&needs_v6_packets));
+        assert_eq!(
+            ForwardingCapabilities::USERSPACE_SOCKETS.shortfall(&needs_v6_packets),
+            vec!["arbitrary_ipv6"],
+            "a socket gateway carries the flows but cannot emit the packets"
+        );
     }
 
     #[test]

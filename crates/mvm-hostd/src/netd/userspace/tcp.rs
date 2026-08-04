@@ -59,6 +59,7 @@ use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
 use crate::netd::datapath::DatapathError;
 use crate::netd::metrics::GatewayMetrics;
 
+use super::GuestAddressing;
 use super::accept_mtu;
 use super::device::{GuestDevice, PushOutcome, QueueDepths};
 use super::limits::{
@@ -113,10 +114,10 @@ impl HalfOpen {
     /// packet the host *originates* should not inherit its destination
     /// from a second component staying correct. The lease is the authority
     /// on where this guest is.
-    pub fn reset_for_guest(&self, guest: IpAddr) -> Option<Vec<u8>> {
+    pub fn reset_for_guest(&self, guest: GuestAddressing) -> Option<Vec<u8>> {
         let parsed = mvm_protocol::l3::ip::parse(&self.syn).ok()?;
         let acknowledging = mvm_protocol::l3::ip::tcp_sequence(&self.syn, &parsed)?;
-        synthesize_rst(&self.key, guest, acknowledging)
+        synthesize_rst(&self.key, guest.matching(self.key.remote)?, acknowledging)
     }
 }
 
@@ -168,14 +169,14 @@ pub struct HalfOpenTable {
     /// so the drive loop learns the kernel has decided one without waiting
     /// out its tick.
     watch: Watch,
-    /// The address this session leased its guest. The authority on where a
-    /// host-originated packet is addressed — see
+    /// The addresses this session leased its guest. The authority on where
+    /// a host-originated packet is addressed — see
     /// [`HalfOpen::reset_for_guest`].
-    guest: IpAddr,
+    guest: GuestAddressing,
 }
 
 impl HalfOpenTable {
-    pub fn new(capacity: usize, guest: IpAddr, watch: Watch) -> Self {
+    pub fn new(capacity: usize, guest: GuestAddressing, watch: Watch) -> Self {
         Self {
             entries: BTreeMap::new(),
             capacity,
@@ -186,7 +187,7 @@ impl HalfOpenTable {
 
     /// The leased guest address, for callers that build their own resets
     /// from what [`Self::expire`] hands back.
-    pub fn guest(&self) -> IpAddr {
+    pub fn guest(&self) -> GuestAddressing {
         self.guest
     }
 
@@ -380,7 +381,12 @@ pub struct Resolved {
 /// being dropped: the visible consequence is a guest hanging until its own
 /// connect timeout, which is exactly the failure the deferred handshake
 /// exists to prevent, so it must not be silent.
-fn fail_flow(out: &mut Resolved, entry: HalfOpen, guest: IpAddr, metrics: &mut GatewayMetrics) {
+fn fail_flow(
+    out: &mut Resolved,
+    entry: HalfOpen,
+    guest: GuestAddressing,
+    metrics: &mut GatewayMetrics,
+) {
     match entry.reset_for_guest(guest) {
         Some(reset) => out.resets.push(reset),
         None => metrics.datapath_errors += 1,
@@ -507,7 +513,7 @@ impl EstablishedFlow {
     /// handshake completes only against a destination that really accepted.
     pub fn from_half_open(
         entry: HalfOpen,
-        guest: IpAddr,
+        guest: GuestAddressing,
         mtu: usize,
         now_millis: u64,
     ) -> Result<Self, DatapathError> {
@@ -522,10 +528,21 @@ impl EstablishedFlow {
     fn open(
         host: Watched<TcpStream>,
         key: FlowKey,
-        guest: IpAddr,
+        guest: GuestAddressing,
         mtu: usize,
         now_millis: u64,
     ) -> Result<Self, DatapathError> {
+        // Resolved once, here, so every packet this flow later originates
+        // for its guest is addressed in the flow's own family.
+        let guest = guest.matching(key.remote).ok_or_else(|| {
+            DatapathError::Io(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                format!(
+                    "this session leased the guest no address in the family of {}",
+                    key.remote
+                ),
+            ))
+        })?;
         // Re-asserted rather than assumed: a blocking write in the pump
         // would park the whole drive loop on one slow destination.
         host.set_nonblocking(true)?;
@@ -1265,14 +1282,14 @@ pub fn assert_peer_matches(socket: &TcpStream, admitted: IpAddr) -> Result<(), D
 /// nothing, and canonicalising cannot make two *different* addresses equal
 /// — the mapping is injective.
 ///
-/// This is an identity test, not a policy test. Whether an address may be
-/// reached at all is decided above this file, by `mvm_net::l3::admit`,
-/// which today refuses **every** non-IPv4 destination outright rather than
-/// collapsing a mapped form and range-checking the result. So a mapped
-/// destination cannot be admitted at all, and this comparison never has to
-/// arbitrate one. A future IPv6 datapath that relaxes that refusal must
-/// collapse the mapped form *before* its range checks; the collapse here is
-/// downstream of policy and is not a substitute for it.
+/// This is an identity test, not a policy test, and it must not be mistaken
+/// for one: canonicalising here collapses exactly the distinction an
+/// embedded-v4 bypass exploits, so this comparison would not notice one.
+/// Whether an address may be reached at all is decided above this file, by
+/// `mvm_net::l3::admit`, which extracts the embedded IPv4 address and
+/// range-checks *that* before any of the four encodings can reach a socket.
+/// The collapse here is downstream of that decision and is no substitute
+/// for it.
 pub(super) fn same_host(reached: IpAddr, admitted: IpAddr) -> bool {
     reached.to_canonical() == admitted.to_canonical()
 }
@@ -1288,10 +1305,9 @@ pub(super) fn same_host(reached: IpAddr, admitted: IpAddr) -> bool {
 /// a reset outside that window is discarded by the guest's stack and is no
 /// reset at all.
 ///
-/// `None` only when the leased guest address and the flow's remote are of
-/// different families, which cannot happen: a flow's remote is reached over
-/// the interface the guest's address is configured on. It is not a
-/// statement about which families are supported — both are emitted.
+/// `None` only when the session leased the guest no address in the flow's
+/// family. It is not a statement about which families are supported — both
+/// are emitted.
 pub fn synthesize_rst(key: &FlowKey, guest: IpAddr, acknowledging: u32) -> Option<Vec<u8>> {
     let tcp = TcpRepr {
         src_port: key.remote_port,
@@ -1349,10 +1365,13 @@ pub(super) fn emit_v4_segment(src: Ipv4Addr, dst: Ipv4Addr, tcp: &TcpRepr<'_>) -
 /// Emit `tcp` inside an IPv6 header. IPv6 has no header checksum, but the
 /// TCP checksum is computed over a different pseudo-header from IPv4's, so
 /// the two cannot share an emitter.
-fn emit_v6_segment(remote: Ipv6Addr, guest: Ipv6Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
+///
+/// Named by direction rather than by role, for the reason
+/// [`emit_v4_segment`] gives.
+pub(super) fn emit_v6_segment(src: Ipv6Addr, dst: Ipv6Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
     let ip = Ipv6Repr {
-        src_addr: remote,
-        dst_addr: guest,
+        src_addr: src,
+        dst_addr: dst,
         next_header: IpProtocol::Tcp,
         payload_len: tcp.buffer_len(),
         hop_limit: RESET_HOP_LIMIT,
@@ -1362,8 +1381,8 @@ fn emit_v6_segment(remote: Ipv6Addr, guest: Ipv6Addr, tcp: &TcpRepr<'_>) -> Vec<
     ip.emit(&mut packet);
     tcp.emit(
         &mut TcpPacket::new_unchecked(packet.payload_mut()),
-        &remote.into(),
-        &guest.into(),
+        &src.into(),
+        &dst.into(),
         &ChecksumCapabilities::default(),
     );
     bytes
@@ -1516,7 +1535,17 @@ mod tests {
     /// the lease, and a fixture where the two agree could not tell which
     /// one the code read.
     fn guest() -> IpAddr {
-        IpAddr::V4(Ipv4Addr::new(10, 201, 0, 6))
+        IpAddr::V4(GUEST_V4)
+    }
+
+    const GUEST_V4: Ipv4Addr = Ipv4Addr::new(10, 201, 0, 6);
+    const GUEST_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 2);
+
+    /// The same lease as the per-family value the tables hold. Dual-stack,
+    /// so a reset owed to a v6 flow is addressed in v6 rather than being
+    /// unaddressable.
+    fn leased() -> GuestAddressing {
+        GuestAddressing::new(GUEST_V4, Some(GUEST_V6))
     }
 
     fn key() -> FlowKey {
@@ -1603,13 +1632,13 @@ mod tests {
     fn held_syn_reset() -> Vec<u8> {
         let held = listener();
         entry_over_a_live_socket(&held, true)
-            .reset_for_guest(guest())
+            .reset_for_guest(leased())
             .expect("an IPv4 flow to an IPv4 guest can always be reset")
     }
 
     #[test]
     fn a_syn_does_not_reach_the_stack_until_the_host_connect_succeeds() {
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         let outcome = t.on_syn(key(), syn_bytes(), unreachable_dst(), 0);
         assert!(matches!(outcome, SynOutcome::Started));
         assert!(
@@ -1622,7 +1651,7 @@ mod tests {
 
     #[test]
     fn a_retransmitted_syn_folds_into_the_existing_entry() {
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         let dst = some_dst();
         t.on_syn(key(), syn_bytes(), dst, 0);
         let again = t.on_syn(key(), syn_bytes(), dst, 10);
@@ -1638,7 +1667,7 @@ mod tests {
     fn a_syn_flood_is_bounded_by_the_half_open_cap() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(4, guest(), watch());
+        let mut t = HalfOpenTable::new(4, leased(), watch());
         for i in 0..64 {
             t.on_syn(key_with_port(40_000 + i), syn_bytes(), dst, 0);
         }
@@ -1653,7 +1682,7 @@ mod tests {
     fn a_full_table_refuses_the_newcomer_and_keeps_the_live_entry() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(1, guest(), watch());
+        let mut t = HalfOpenTable::new(1, leased(), watch());
         assert!(matches!(
             t.on_syn(key_with_port(1), syn_bytes(), dst, 0),
             SynOutcome::Started
@@ -1682,7 +1711,7 @@ mod tests {
     fn a_retransmit_does_not_extend_the_half_open_timeout() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         t.on_syn(key(), syn_bytes(), dst, 0);
         t.on_syn(key(), syn_bytes(), dst, HALF_OPEN_TIMEOUT_MILLIS - 1);
         assert_eq!(
@@ -1698,7 +1727,7 @@ mod tests {
     #[test]
     fn a_half_open_entry_times_out() {
         let held = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         t.entries
             .insert(key(), entry_over_a_live_socket(&held, true));
         let dropped = t.expire(HALF_OPEN_TIMEOUT_MILLIS);
@@ -1710,7 +1739,7 @@ mod tests {
     fn an_entry_inside_its_timeout_is_not_expired() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         t.on_syn(key(), syn_bytes(), dst, 0);
         assert!(t.expire(HALF_OPEN_TIMEOUT_MILLIS - 1).is_empty());
         assert_eq!(t.len(), 1);
@@ -1719,7 +1748,7 @@ mod tests {
     #[test]
     fn a_completed_connect_becomes_replayable_exactly_once() {
         let listener = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         t.on_syn(
             key(),
             syn_bytes(),
@@ -1746,7 +1775,7 @@ mod tests {
     /// destination that rejected us.
     #[test]
     fn a_refused_connect_is_never_replayable() {
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         assert!(matches!(
             t.on_syn(key(), syn_bytes(), unreachable_dst(), 0),
             SynOutcome::Started
@@ -1835,7 +1864,7 @@ mod tests {
     #[test]
     fn expiry_does_not_discard_a_connect_that_already_completed() {
         let held = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         t.entries
             .insert(key(), entry_over_a_live_socket(&held, false));
         assert!(
@@ -1853,7 +1882,7 @@ mod tests {
     fn a_zero_capacity_table_refuses_everything() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(0, guest(), watch());
+        let mut t = HalfOpenTable::new(0, leased(), watch());
         assert!(matches!(
             t.on_syn(key(), syn_bytes(), dst, 0),
             SynOutcome::Refused(DenyCode::FlowTableFull)
@@ -2009,7 +2038,7 @@ mod tests {
             refused_at_open: true,
         };
         let rst = entry
-            .reset_for_guest(guest())
+            .reset_for_guest(leased())
             .expect("a crafted data offset must not suppress the reset");
         let ip = smoltcp::wire::Ipv4Packet::new_checked(&rst).expect("ipv4");
         let tcp = smoltcp::wire::TcpPacket::new_checked(ip.payload()).expect("tcp");
@@ -2068,7 +2097,7 @@ mod tests {
     #[test]
     fn a_peer_that_is_not_the_admitted_destination_never_reaches_established() {
         let held = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         let entry = mismatched_entry(&held);
         t.entries.insert(entry.key, entry);
 
@@ -2097,7 +2126,7 @@ mod tests {
     #[test]
     fn a_peer_mismatch_counts_under_its_own_label_and_a_refusal_counts_at_all() {
         let held = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         let entry = mismatched_entry(&held);
         t.entries.insert(entry.key, entry);
         let mut mismatch = GatewayMetrics::default();
@@ -2112,7 +2141,7 @@ mod tests {
 
         // The same shape of failure, arrived at honestly: the destination
         // refused. No policy event, so no deny.
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         t.on_syn(key(), syn_bytes(), unreachable_dst(), 0);
         let mut refusal = GatewayMetrics::default();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2147,7 +2176,7 @@ mod tests {
     /// anything.
     #[test]
     fn a_failed_connect_hands_back_the_reset_the_guest_is_owed() {
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, leased(), watch());
         t.on_syn(key(), syn_bytes(), unreachable_dst(), 0);
         let mut metrics = GatewayMetrics::default();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2490,7 +2519,7 @@ mod tests {
 
     fn flow_over_with(host: std::net::TcpStream, mut g: FakeGuest) -> (EstablishedFlow, FakeGuest) {
         let entry = half_open_over(host, flow_key(), g.syn());
-        let mut flow = EstablishedFlow::from_half_open(entry, guest(), MTU_V1 as usize, 0)
+        let mut flow = EstablishedFlow::from_half_open(entry, leased(), MTU_V1 as usize, 0)
             .expect("a completed connect becomes a flow");
         g.complete_handshake(&mut flow);
         (flow, g)
@@ -3009,7 +3038,7 @@ mod tests {
         let g = FakeGuest::new(flow_key());
         let entry = half_open_over(host, flow_key(), g.syn());
         assert!(
-            EstablishedFlow::from_half_open(entry, guest(), 9000, 0).is_err(),
+            EstablishedFlow::from_half_open(entry, leased(), 9000, 0).is_err(),
             "a jumbo MTU would silently multiply this flow's share of the ceiling"
         );
     }
@@ -3375,7 +3404,7 @@ mod tests {
         let (host, _peer) = host_pair();
         let g = FakeGuest::new(flow_key());
         let entry = half_open_over(host, flow_key(), g.syn());
-        let mut flow = EstablishedFlow::from_half_open(entry, guest(), MTU_V1 as usize, 0)
+        let mut flow = EstablishedFlow::from_half_open(entry, leased(), MTU_V1 as usize, 0)
             .expect("a completed connect becomes a flow");
         let _ = flow.take_guest_packets();
         assert!(
@@ -3510,15 +3539,16 @@ mod tests {
     #[test]
     fn a_reset_that_cannot_be_built_is_counted_not_dropped() {
         let held = listener();
-        // A guest address of a different family from the flow's remote:
-        // the one input `synthesize_rst` cannot answer.
+        // A flow whose remote is IPv6 against a session that was leased no
+        // IPv6 address: the one input `synthesize_rst` cannot answer.
         let mut t = HalfOpenTable::new(
             DEFAULT_MAX_HALF_OPEN,
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            GuestAddressing::new(GUEST_V4, None),
             watch(),
         );
-        t.entries
-            .insert(key(), entry_over_a_live_socket(&held, true));
+        let mut entry = entry_over_a_live_socket(&held, true);
+        entry.key.remote = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        t.entries.insert(entry.key, entry);
         let mut metrics = GatewayMetrics::default();
         let resolved = t.resolve(&mut metrics);
         assert_eq!(resolved.failed.len(), 1);

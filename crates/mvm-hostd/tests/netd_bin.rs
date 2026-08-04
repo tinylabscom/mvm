@@ -48,6 +48,8 @@ fn config(vm_id: &str) -> NetdConfig {
         uds_layout: NetdUdsLayout::PerVmDir,
         gateway_ipv4: "10.201.0.5".parse().unwrap(),
         guest_ipv4: "10.201.0.6".parse().unwrap(),
+        gateway_ipv6: None,
+        guest_ipv6: None,
         mtu: 1500,
         egress: NetdEgress::Rules(vec![NetdRule {
             proto: "tcp".into(),

@@ -12,7 +12,7 @@
 //! requirement, and a smaller surface is a smaller thing to get wrong.
 
 use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::{IpNet, Ipv4Net};
 
@@ -27,6 +27,26 @@ pub const DEFAULT_POOL: &str = "10.201.0.0/16";
 /// address is never handed out.
 pub const DEFAULT_POOL_CAPACITY: u32 = 16_383;
 
+/// Which address family a packet is in.
+///
+/// An enum rather than the version nibble it comes from: the nibble has
+/// values that are not families, and every caller here has already had one
+/// validated for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressFamily {
+    V4,
+    V6,
+}
+
+impl AddressFamily {
+    pub fn of(addr: IpAddr) -> Self {
+        match addr {
+            IpAddr::V4(_) => Self::V4,
+            IpAddr::V6(_) => Self::V6,
+        }
+    }
+}
+
 /// One machine's assigned point-to-point addressing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressLease {
@@ -38,11 +58,42 @@ pub struct AddressLease {
     /// The address assigned to the guest. Anti-spoofing compares every
     /// outbound packet's source against exactly this.
     pub guest: Ipv4Addr,
+    /// The same pair in IPv6, when this session was issued one.
+    ///
+    /// `None` is the ordinary case today, and it is what keeps IPv6 refused
+    /// rather than carried unchecked: with no assigned address there is
+    /// nothing for anti-spoofing to compare an IPv6 source against, so
+    /// admission refuses the family outright instead of guessing.
+    pub gateway_v6: Option<Ipv6Addr>,
+    pub guest_v6: Option<Ipv6Addr>,
     /// Index within the pool, so release is O(log n) without re-deriving.
     index: u32,
 }
 
 impl AddressLease {
+    /// The same lease with an IPv6 pair alongside the IPv4 one.
+    pub fn with_v6(mut self, gateway: Ipv6Addr, guest: Ipv6Addr) -> Self {
+        self.gateway_v6 = Some(gateway);
+        self.guest_v6 = Some(guest);
+        self
+    }
+
+    /// The address this lease assigned the guest in `family`, if any.
+    pub fn guest_in(&self, family: AddressFamily) -> Option<IpAddr> {
+        match family {
+            AddressFamily::V4 => Some(IpAddr::V4(self.guest)),
+            AddressFamily::V6 => self.guest_v6.map(IpAddr::V6),
+        }
+    }
+
+    /// The gateway address in `family`, if any. Traffic to it is a host
+    /// service rather than egress, in either family.
+    pub fn gateway_in(&self, family: AddressFamily) -> Option<IpAddr> {
+        match family {
+            AddressFamily::V4 => Some(IpAddr::V4(self.gateway)),
+            AddressFamily::V6 => self.gateway_v6.map(IpAddr::V6),
+        }
+    }
     /// The subnet's broadcast address. Packets to it are refused; a
     /// point-to-point link has no use for broadcast.
     pub fn broadcast(&self) -> Ipv4Addr {
@@ -70,6 +121,8 @@ impl AddressLease {
                 .expect("a /30 from an aligned base is valid"),
             gateway,
             guest,
+            gateway_v6: None,
+            guest_v6: None,
             index: 0,
         }
     }
@@ -172,6 +225,8 @@ impl AddressAllocator {
                 subnet,
                 gateway: Ipv4Addr::from(base + 1),
                 guest: Ipv4Addr::from(base + 2),
+                gateway_v6: None,
+                guest_v6: None,
                 index,
             });
         }

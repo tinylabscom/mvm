@@ -248,12 +248,16 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 - [ ] **Native Windows.** No Windows VMM backend exists to attach to.
 - [ ] **Multi-queue.** The header field, the port base, and the
       negotiation slots exist in v1; the runtime opens one queue.
-- [ ] **IPv6 datapath.** Designed in ADR-038, which corrects this entry's
+- [~] **IPv6 datapath.** Designed in ADR-038, which corrects this entry's
       original "blocked on `CONFIG_IPV6`" framing: the parser and the
-      validator already handle v6, and what is missing is the admission
+      validator already handled v6, and what was missing was the admission
       family check plus an `embedded_v4` extraction ahead of every other
-      rule. Nothing has landed — `mvm_net::l3::admit` refuses any packet
-      whose IP version is not 4, on both forwarding backends.
+      rule. **Both landed on the host side**, gated behind the datapath
+      ingress fuzz target as ADR-038 required. What remains is
+      `CONFIG_IPV6` in the workload kernel and the in-guest address
+      configuration beside it — deliberately unmeasured rather than landed
+      blind, since guest kernels are being shrunk to the virtual hardware
+      floor in parallel.
 - [ ] **Zero-copy / batched transfer.** The v1 copy path
       (guest kernel → guest buffer → vsock → host buffer → host TUN) is
       deliberate; optimize only against measurements.

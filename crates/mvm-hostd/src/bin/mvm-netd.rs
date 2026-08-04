@@ -664,7 +664,7 @@ mod tests {
         }
 
         fn capabilities(&self) -> ForwardingCapabilities {
-            ForwardingCapabilities::FULL_L3_V4
+            ForwardingCapabilities::FULL_L3
         }
     }
 
@@ -799,6 +799,8 @@ mod tests {
             uds_layout: NetdUdsLayout::PerVmDir,
             gateway_ipv4: "10.201.0.5".parse().expect("gateway address"),
             guest_ipv4: "10.201.0.6".parse().expect("guest address"),
+            gateway_ipv6: None,
+            guest_ipv6: None,
             mtu: 1500,
             egress: NetdEgress::Rules(vec![NetdRule {
                 proto: "tcp".into(),
@@ -1089,7 +1091,7 @@ mod tests {
         }
 
         fn capabilities(&self) -> ForwardingCapabilities {
-            ForwardingCapabilities::FULL_L3_V4
+            ForwardingCapabilities::FULL_L3
         }
     }
 

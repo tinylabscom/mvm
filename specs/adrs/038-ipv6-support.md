@@ -1,7 +1,21 @@
 # ADR-038 — IPv6 as a first-class address family
 
-**Status: Accepted**
+**Status: Accepted — host side landed 2026-08-04; guest kernel still open**
 **Date: 2026-08-02**
+
+**What shipped.** The admission guard admits IPv6; `embedded_v4` extracts
+all four embedded forms ahead of every other rule and hands the result to
+the unchanged v4 class check; native v6 classes mirror their v4
+analogues; and the capability seam carries `ipv6_flows` separately from
+`arbitrary_ipv6`. The ordering constraint below — fuzz the ingress parser
+*before* relaxing the guard — was honoured: the fuzz target and its IPv6
+corpus landed first.
+
+**What has not.** `CONFIG_IPV6` in the workload kernel, and the in-guest
+address configuration beside it. This ADR requires that delta be measured
+rather than assumed, and no measurement has been taken. Until one is, the
+host admits v6 that no guest can yet originate — which is a gap in reach,
+not in safety, since every refusal above is enforced regardless.
 **Complements ADR-036 (L3 TUN-over-vsock) and ADR-037 (the userspace
 socket datapath). Supersedes nothing; it removes IPv6 from ADR-036's
 deferred set and gives it a design.**
