@@ -69,7 +69,7 @@ pub(super) fn run(args: Args) -> Result<()> {
         &args.fetch_log,
         &args.cve,
     )?;
-    mvm_core::audit_emit!(
+ mvm_core::audit_emit!(
         DepsAudit,
         "prior={},new={},lockfile_hash={}",
         outcome.prior_volume_hash,
