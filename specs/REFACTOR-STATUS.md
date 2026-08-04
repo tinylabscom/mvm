@@ -11,7 +11,7 @@ for detailed scope and acceptance criteria.
   - [ ] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
         record; ship to mvmd when a remote is configured, else stop at the
         local sealed artifact
-  - [ ] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address
+  - [~] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address
   - [~] WS3 capture-from-sandbox via `reseal_volume`, converging on the
         declared-dependency path and keeping the lockfile hash pin
   - [~] WS4 tier follows the attestation

@@ -89,6 +89,26 @@ fn deps_capture_parses_seal_inputs() {
 }
 
 #[test]
+fn watch_parses_file_backed_ir_and_defaults_to_one_shot_only_when_requested() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "watch",
+        "--from-ir",
+        "workload.json",
+        "--once",
+        "--interval-ms",
+        "1",
+    ])
+    .unwrap();
+    let Commands::Watch(args) = cli.command else {
+        panic!("expected watch command")
+    };
+    assert_eq!(args.from_ir, Some("workload.json".into()));
+    assert!(args.once);
+    assert_eq!(args.interval_ms, 1);
+}
+
+#[test]
 fn global_option_summaries_stay_short() {
     let longest_allowed = 48;
     let long_summaries = cli_command()
