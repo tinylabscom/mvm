@@ -1446,6 +1446,45 @@ bindings. Not folded in here because it changes a trait every backend
 implements and belongs in its own red-green cycle, but nothing downstream of
 this plan should treat the fallback as working until it lands.
 
+**Blocker closed** — its own commit, as described above.
+`DatapathHandle::service(now_millis)` exists with a no-op default, so the
+Linux TUN handle and `LoopbackHandle` are untouched;
+`UserspaceHandle`'s impl forwards to the inherent one; `Gateway::
+service_datapath` forwards to the boxed handle without handing it out
+mutably; and `mvm-netd`'s `drive` calls it once a pass with the loop's own
+monotonic clock, before `poll_inbound` — that ordering is what makes a
+connect the kernel decided readable on the same pass. A service failure is
+fatal to the tunnel rather than counted: a datapath that cannot be serviced
+cannot carry traffic, and continuing would restore the silent hang.
+
+Two witnesses, both mutation-proved:
+
+- `the_loop_services_the_datapath_it_owns` (`crates/mvm-hostd/src/bin/
+  mvm-netd.rs`) drives the real `serve` loop against a datapath whose
+  packets are unreadable until a service pass promotes them, and asserts the
+  guest received the packet and that every service pass carried the loop's
+  injected clock value. Removing the `service_datapath` call from `drive`
+  turns it red: `WouldBlock` on the guest's read — the hang itself.
+- `servicing_through_the_trait_object_resolves_a_pending_connect`
+  (`crates/mvm-hostd/src/netd/userspace/mod.rs`) boxes a `UserspaceHandle`
+  as `dyn DatapathHandle`, delivers a SYN toward a live loopback listener,
+  and drives only the trait method until a SYN-ACK comes back. Deleting the
+  `UserspaceHandle` impl so the no-op default stands turns it red, which the
+  first witness cannot catch because it uses a test double.
+
+A test that calls `service` itself catches neither mutation: it exercises
+exactly the thing production was failing to do.
+
+```
+cargo nextest run -p mvm-hostd
+  Summary [4.945s] 1454 tests run: 1454 passed, 2 skipped
+cargo clippy -p mvm-hostd --all-targets -- -D warnings   # clean
+cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-hostd --all-targets
+  Finished `dev` profile in 22.73s
+xtask check-vsock-only-egress / check-uniform-vsock-egress /
+  check-claim-catalog / check-no-spec-refs-in-comments   # all clean
+```
+
 **Open over-claim, not this task's to fix.**
 `ForwardingCapabilities::USERSPACE_SOCKETS` declares `declared_ingress:
 true`, and nothing in the userspace datapath opens a listening socket, so

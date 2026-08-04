@@ -201,6 +201,20 @@ pub trait DatapathHandle: Send {
     /// admission before any of them reach the guest.
     fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError>;
 
+    /// Advance whatever this backend can only advance when driven.
+    ///
+    /// A backend that forwards whole packets moves them inside the two
+    /// calls above and needs nothing here, which is why the default is a
+    /// no-op. A backend that translates flows into host sockets does not:
+    /// a connect the guest asked for completes in the kernel, and until
+    /// something reads that decision the guest is waiting on a handshake no
+    /// one is finishing. That is the difference between "not yet" and a
+    /// hang, so the driver calls this on the same tick it ages everything
+    /// else, with the same clock.
+    fn service(&mut self, _now_millis: u64) -> Result<(), DatapathError> {
+        Ok(())
+    }
+
     /// Tear down every device, namespace, route, and rule this handle
     /// created. Idempotent: it runs on the normal stop path and on the
     /// failed-startup path, and must not care which got there first.
@@ -482,6 +496,16 @@ mod tests {
             ForwardingCapabilities::NONE.shortfall(&required),
             vec!["tcp"]
         );
+    }
+
+    /// A backend that moves packets inside its send and receive calls has
+    /// nothing to advance on a tick, and must not have to say so.
+    #[test]
+    fn a_backend_with_nothing_to_drive_is_serviced_without_implementing_it() {
+        let dp = LoopbackDatapath::sink();
+        let mut handle = dp.open(&request()).expect("open");
+        assert!(handle.service(0).is_ok());
+        assert!(handle.service(10_000).is_ok());
     }
 
     #[test]

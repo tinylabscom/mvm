@@ -354,6 +354,17 @@ impl Gateway {
         self.datapath.as_ref()
     }
 
+    /// Drive the datapath's clock-bound work: connects the kernel has
+    /// decided, transport timers, expiries.
+    ///
+    /// Forwarded rather than handing the handle out mutably. A caller
+    /// holding `&mut dyn DatapathHandle` is one standing beside the
+    /// admitter, and nothing outside this gateway needs that in order to
+    /// make time pass.
+    pub fn service_datapath(&mut self, now_millis: u64) -> Result<(), DatapathError> {
+        self.datapath.service(now_millis)
+    }
+
     /// Handle one complete control frame from the guest.
     ///
     /// Returns the bytes to write back on the control connection, plus what

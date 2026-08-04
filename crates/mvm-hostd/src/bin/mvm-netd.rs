@@ -361,6 +361,19 @@ fn drive(
             }
         }
 
+        // Before the drain below, because this is what turns a connect the
+        // kernel has decided into something there is anything to read: a
+        // datapath that translates flows into host sockets advances only
+        // when driven, and a guest whose handshake nothing completes waits
+        // forever with no error to show for it.
+        //
+        // Fatal rather than counted. A datapath that cannot be serviced
+        // cannot carry traffic, and carrying on would put the tunnel back
+        // in the silent-hang state this call exists to remove.
+        gateway
+            .service_datapath(now)
+            .context("servicing the datapath")?;
+
         // Unconditional, and deliberately not gated on a DATAPATH event: a
         // datapath that reports no descriptor makes progress only here, and
         // a transport's own timers have to be serviced whether or not
@@ -657,6 +670,101 @@ mod tests {
         }
     }
 
+    /// A datapath that only makes progress when it is driven, the way the
+    /// selected userspace one does.
+    ///
+    /// Its packets exist the moment the network produces them, but a guest
+    /// cannot see one until a service pass promotes it — which is exactly
+    /// where a completed host connect lives before something reads the
+    /// kernel's decision about it.
+    #[derive(Clone, Default)]
+    struct ServicedNetwork {
+        state: Arc<std::sync::Mutex<ServicedState>>,
+    }
+
+    #[derive(Default)]
+    struct ServicedState {
+        /// Produced by the network, not yet promoted.
+        staged: std::collections::VecDeque<Vec<u8>>,
+        readable: std::collections::VecDeque<Vec<u8>>,
+        /// Every clock value a service pass was driven with.
+        serviced_at: Vec<u64>,
+    }
+
+    impl ServicedNetwork {
+        fn deliver(&self, packet: Vec<u8>) {
+            self.state
+                .lock()
+                .expect("datapath state")
+                .staged
+                .push_back(packet);
+        }
+
+        fn serviced_at(&self) -> Vec<u64> {
+            self.state
+                .lock()
+                .expect("datapath state")
+                .serviced_at
+                .clone()
+        }
+    }
+
+    impl L3Datapath for ServicedNetwork {
+        fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+            Ok(Box::new(self.clone()))
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities::USERSPACE_SOCKETS
+        }
+    }
+
+    impl DatapathHandle for ServicedNetwork {
+        fn send_to_network(&mut self, _packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn service(&mut self, now_millis: u64) -> Result<(), DatapathError> {
+            let mut state = self.state.lock().expect("datapath state");
+            state.serviced_at.push(now_millis);
+            while let Some(packet) = state.staged.pop_front() {
+                state.readable.push_back(packet);
+            }
+            Ok(())
+        }
+
+        fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
+            match self
+                .state
+                .lock()
+                .expect("datapath state")
+                .readable
+                .pop_front()
+            {
+                Some(packet) => {
+                    let n = packet.len().min(buf.len());
+                    buf[..n].copy_from_slice(&packet[..n]);
+                    Ok(n)
+                }
+                None => Err(DatapathError::Io(std::io::Error::from(
+                    std::io::ErrorKind::WouldBlock,
+                ))),
+            }
+        }
+
+        fn close(&mut self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn description(&self) -> String {
+            "a datapath that advances only when serviced".to_string()
+        }
+    }
+
     fn test_config(vm_id: &str) -> NetdConfig {
         NetdConfig {
             node_id: "node-1".into(),
@@ -683,7 +791,7 @@ mod tests {
         }
     }
 
-    fn open_gateway(config: &NetdConfig, network: &QueuedNetwork) -> Gateway {
+    fn open_gateway(config: &NetdConfig, network: &dyn L3Datapath) -> Gateway {
         let instance = config.instance();
         let mut gateway_config = GatewayConfig::new(
             config.vm_id.clone(),
@@ -985,6 +1093,95 @@ mod tests {
         assert!(
             frame.windows(expected.len()).any(|w| w == expected),
             "the frame the guest received must carry the packet the network delivered"
+        );
+    }
+
+    /// The clock this loop drives a service pass with. Distinctive, inside
+    /// the flow's idle window, and nothing a wall clock could produce, so a
+    /// second time source would be visible rather than plausible.
+    const SERVICE_CLOCK_MILLIS: u64 = OPENED_AT_MILLIS + 7;
+
+    /// The defect this pins: the selected datapath translates flows into
+    /// host sockets, and nothing in the loop drove it. A guest's connect
+    /// completed in the kernel and then sat there — no reset, no SYN-ACK,
+    /// no error, just a guest waiting forever on a handshake nobody
+    /// finished.
+    ///
+    /// Driven through `serve`, not through a hand-called `service`: a test
+    /// that services the handle itself exercises the one thing production
+    /// was failing to do, and stays green through the whole defect.
+    #[test]
+    fn the_loop_services_the_datapath_it_owns() {
+        let config = test_config("netd-serviced-datapath");
+        let network = ServicedNetwork::default();
+        let mut gateway = open_gateway(&config, &network);
+        // The guest opened this flow earlier and then went quiet.
+        gateway
+            .admitter_mut()
+            .flows_mut()
+            .observe_outbound(quiet_flow(), 40, OPENED_AT_MILLIS);
+
+        let (host_control, mut guest_control) = UnixStream::pair().expect("control pair");
+        let (host_data, mut guest_data) = UnixStream::pair().expect("data pair");
+        guest_data
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let data_fd = host_data.as_raw_fd();
+        let mut host_control: Box<dyn GuestStream> = Box::new(host_control);
+        let mut host_data: Box<dyn GuestStream> = Box::new(host_data);
+
+        let clock = || SERVICE_CLOCK_MILLIS;
+        let expected = server_reply(&config);
+
+        let (read, served) = std::thread::scope(|scope| {
+            let served = scope.spawn(|| {
+                serve(
+                    &mut gateway,
+                    &mut *host_control,
+                    &mut *host_data,
+                    data_fd,
+                    &clock,
+                )
+            });
+
+            let mut agent = guest_agent();
+            agent
+                .handshake(&mut guest_control)
+                .expect("the guest completes the handshake");
+            assert_eq!(agent.state(), AgentState::Ready);
+
+            network.deliver(expected.clone());
+
+            let mut frame = vec![0u8; 4096];
+            let read = std::io::Read::read(&mut guest_data, &mut frame).map(|n| {
+                frame.truncate(n);
+                frame
+            });
+
+            drop(guest_data);
+            drop(guest_control);
+            (read, served.join().expect("the serve thread"))
+        });
+
+        served.expect("serve must end cleanly");
+        let frame = read.expect(
+            "a datapath that advances only when driven must still reach the guest: \
+             the loop that owns the handle has to service it",
+        );
+        assert!(
+            frame.windows(expected.len()).any(|w| w == expected),
+            "the frame the guest received must carry the packet the network produced"
+        );
+
+        let serviced_at = network.serviced_at();
+        assert!(
+            !serviced_at.is_empty(),
+            "the loop must service the datapath"
+        );
+        assert!(
+            serviced_at.iter().all(|&at| at == SERVICE_CLOCK_MILLIS),
+            "the service pass must be driven from the loop's own clock, not a \
+             second time source: {serviced_at:?}"
         );
     }
 

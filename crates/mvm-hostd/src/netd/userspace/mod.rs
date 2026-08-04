@@ -625,6 +625,12 @@ impl DatapathHandle for UserspaceHandle {
         self.forward(packet.flow(), packet.meta(), packet.bytes())
     }
 
+    /// The driver holds a trait object, so this is the only `service` it can
+    /// reach. Everything a pending connect needs is behind it.
+    fn service(&mut self, now_millis: u64) -> Result<(), DatapathError> {
+        UserspaceHandle::service(self, now_millis)
+    }
+
     fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
         if self.closed {
             return Err(DatapathError::Io(std::io::Error::from(
@@ -869,6 +875,39 @@ mod tests {
         let mut handle = open_test_handle();
         handle.close().expect("close");
         assert!(handle.service(0).is_err());
+    }
+
+    /// The driver holds a `Box<dyn DatapathHandle>`, so the inherent
+    /// `service` above is not the one production reaches: the trait method
+    /// is. A trait impl left on the no-op default would leave every connect
+    /// pending forever while every test that calls the inherent method
+    /// stayed green.
+    #[test]
+    fn servicing_through_the_trait_object_resolves_a_pending_connect() {
+        let held = listener();
+        let dst = held.local_addr().expect("local addr");
+        let mut handle = open_test_handle();
+        let syn = guest_segment(50_000, dst, TcpControl::Syn, &[]);
+        deliver(&mut handle, &syn).expect("a SYN toward a live listener is accepted");
+
+        let mut boxed: Box<dyn DatapathHandle> = Box::new(handle);
+        let mut buf = [0u8; MTU_V1 as usize];
+        let mut answered = false;
+        for pass in 0..SERVICE_ATTEMPTS {
+            boxed.service(pass as u64).expect("service");
+            if let Ok(n) = boxed.recv_from_network(&mut buf)
+                && syn_ack_isn(&buf[..n], 50_000).is_some()
+            {
+                answered = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            answered,
+            "servicing through the trait object must resolve the connect and \
+             answer the guest's SYN"
+        );
     }
 
     fn v4_of(addr: SocketAddr) -> Ipv4Addr {
