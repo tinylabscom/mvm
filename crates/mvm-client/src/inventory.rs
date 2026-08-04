@@ -302,6 +302,7 @@ mod tests {
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
             manifest: None,
+            deployment: None,
             resolved_digest: None,
             runtime_pack: false,
             net: false,

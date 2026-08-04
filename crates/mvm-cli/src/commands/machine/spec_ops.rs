@@ -30,6 +30,9 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
         if let Some(manifest) = spec.manifest.as_deref() {
             println!("manifest: {}", manifest);
         }
+        if let Some(deployment) = spec.deployment.as_deref() {
+            println!("deployment: {}", deployment);
+        }
         if let Some(resolved_digest) = spec.resolved_digest.as_deref() {
             println!("resolved-digest: {resolved_digest}");
         }

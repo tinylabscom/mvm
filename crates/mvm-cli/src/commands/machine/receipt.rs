@@ -11,6 +11,8 @@ pub(super) struct MachineStartReceiptInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) manifest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) deployment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) resolved_digest: Option<String>,
     pub(super) cpus: u32,
     pub(super) memory: String,
@@ -184,6 +186,7 @@ pub(super) fn machine_start_receipt_input(
         machine_name: spec.name.clone(),
         image: spec.image.clone(),
         manifest: spec.manifest.clone(),
+        deployment: spec.deployment.clone(),
         resolved_digest: spec.resolved_digest.clone(),
         cpus: spec.cpus,
         memory: spec.memory.clone(),
