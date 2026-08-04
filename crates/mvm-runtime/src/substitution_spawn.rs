@@ -12,10 +12,13 @@ use crate::microvm::DriveFile;
 use anyhow::{Result, anyhow, bail};
 use mvm_core::crypto::egress_ca::EgressCa;
 use mvm_core::plan::SecretBinding;
+use mvm_protocol::stream::secret_fingerprint::SecretFingerprint;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
@@ -33,6 +36,76 @@ pub enum EndpointTransport {
     Vsock { port: u32 },
     /// Host UDS the per-port vsock proxy forwards to (Firecracker/libkrun).
     Uds { path: PathBuf },
+}
+
+/// The one line the endpoint writes on stdout once it is bound and ready.
+///
+/// Two things cross here and they are opposites. `env` is what the *guest*
+/// gets: opaque placeholders standing in for credentials it must never see.
+/// `input_fingerprints` is what the *host* gets: the recognisable shape of
+/// each secret this endpoint resolved, so the input gate can refuse bytes
+/// heading back into the guest that look like one.
+///
+/// The fingerprints are computed inside the endpoint because that is the one
+/// process that legitimately holds the plaintext. Nothing on this line is a
+/// secret value — see `mvm_protocol::stream::secret_fingerprint` for what a
+/// fingerprint does and does not disclose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointHandshake {
+    /// `(guest var, placeholder)` pairs to inject into the workload's launch
+    /// environment.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// One fingerprint per resolved secret, for the host→guest input gate.
+    #[serde(default)]
+    pub input_fingerprints: Vec<SecretFingerprint>,
+}
+
+/// The fingerprints the endpoint for `vm_name` reported at spawn.
+///
+/// Process-local and in-memory on purpose. Only the invocation that admits and
+/// boots a workload can stream into its stdin — every other entry point holds
+/// no plan to write under and refuses — so the process that spawned the
+/// endpoint is exactly the process that will later open the input gate.
+/// Persisting these would widen a length-and-hash disclosure to every reader
+/// of the state dir and buy reachability that nothing uses.
+///
+/// Empty for a VM this process did not boot, or one whose plan carried no
+/// secrets: both mean there is nothing for the gate to recognise.
+#[must_use]
+pub fn recorded_secret_fingerprints(vm_name: &str) -> Vec<SecretFingerprint> {
+    fingerprints().get(vm_name).cloned().unwrap_or_default()
+}
+
+/// Record what the endpoint for `vm_name` reported, replacing any earlier set:
+/// a restarted VM's secrets are whatever its new endpoint resolved.
+///
+/// Public so a test can stand in for an endpoint it cannot spawn. Injecting a
+/// fingerprint here is not a privilege: fingerprints only ever cause the input
+/// gate to *refuse*, so the worst a caller can do with this is close a stdin
+/// that would otherwise have been open.
+pub fn record_secret_fingerprints(vm_name: &str, reported: Vec<SecretFingerprint>) {
+    fingerprints().insert(vm_name.to_string(), reported);
+}
+
+/// Drop `vm_name`'s fingerprints — the teardown half of the record made at
+/// spawn, called wherever the endpoint itself is reaped.
+pub fn forget_secret_fingerprints(vm_name: &str) {
+    fingerprints().remove(vm_name);
+}
+
+/// The per-process fingerprint registry.
+///
+/// Recovered rather than propagated on poison: a panicking spawn must not take
+/// every other VM's input gate down with it, and the map is a plain table a
+/// partial update cannot leave inconsistent.
+fn fingerprints() -> MutexGuard<'static, HashMap<String, Vec<SecretFingerprint>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Vec<SecretFingerprint>>>> = OnceLock::new();
+    REGISTRY
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The per-VM egress intermediate cert lands in the guest's `mvm-secrets`
@@ -266,8 +339,15 @@ pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Resul
     if let Some(parent) = env_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| anyhow!("create {}: {e}", parent.display()))?;
     }
-    std::fs::write(&env_path, handshake.trim().as_bytes())
+    // The two halves part company here. Only `env` is persisted, because only
+    // the guest launch env needs to survive into a later `mvmctl` invocation;
+    // the fingerprints stay in this process, which is the one that will open
+    // the input gate.
+    let env_json = serde_json::to_vec(&handshake.env)
+        .map_err(|e| anyhow!("serialize substitution env for {}: {e}", env_path.display()))?;
+    std::fs::write(&env_path, &env_json)
         .map_err(|e| anyhow!("write {}: {e}", env_path.display()))?;
+    record_secret_fingerprints(vm_name, handshake.input_fingerprints);
     process_guard.mark_env_written();
     process_guard.defuse();
     // Detach: drop the child handle without killing. The endpoint runs
@@ -325,15 +405,16 @@ impl Drop for SpawnedEndpointGuard {
     }
 }
 
-/// Read the endpoint's one-line ready handshake from its stdout within
-/// `timeout`. A blocking pipe read can't be timed directly, so read on a
-/// helper thread and bound the wait; on timeout / EOF-without-line, SIGKILL
-/// the endpoint and fail (the caller rolls back the VM — fail closed).
+/// Read and parse the endpoint's one-line ready handshake from its stdout
+/// within `timeout`. A blocking pipe read can't be timed directly, so read on
+/// a helper thread and bound the wait; on timeout / EOF-without-line / a line
+/// that is not a handshake, SIGKILL the endpoint and fail (the caller rolls
+/// back the VM — fail closed).
 fn read_handshake_line(
     stdout: std::process::ChildStdout,
     pid: u32,
     timeout: Duration,
-) -> Result<String> {
+) -> Result<EndpointHandshake> {
     use std::io::{BufRead, BufReader};
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -342,7 +423,10 @@ fn read_handshake_line(
         let _ = tx.send(res);
     });
     match rx.recv_timeout(timeout) {
-        Ok(Ok(line)) if !line.trim().is_empty() => Ok(line),
+        Ok(Ok(line)) if !line.trim().is_empty() => serde_json::from_str(line.trim()).map_err(|e| {
+            kill(pid as libc::pid_t, libc::SIGKILL);
+            anyhow!("parse substitution endpoint handshake: {e}")
+        }),
         Ok(Ok(_)) => {
             kill(pid as libc::pid_t, libc::SIGKILL);
             bail!("substitution endpoint closed stdout without a ready handshake")
@@ -405,6 +489,9 @@ pub fn reap_substitution_endpoint(state_dir: &Path, vm_name: &str) {
     }
     let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
     let _ = std::fs::remove_file(mvm_core::config::vm_substitution_env_path(vm_name));
+    // The endpoint's secrets are gone; the shapes the gate recognised them by
+    // go with them, so a recycled VM name cannot inherit them.
+    forget_secret_fingerprints(vm_name);
 }
 
 // ── pid helpers (local copies — backend modules keep theirs private) ──
@@ -427,6 +514,12 @@ fn kill(pid: libc::pid_t, sig: libc::c_int) {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+    use mvm_protocol::stream::secret_fingerprint::SecretCategory;
+
+    /// What a stub endpoint prints as its ready line: a well-formed handshake
+    /// with one placeholder and one fingerprint, so the spawn path exercises
+    /// the real split rather than a shape it never sees in production.
+    const READY_HANDSHAKE: &str = r#"{"env":[["OPENAI_API_KEY","mvm-secret-ab"]],"input_fingerprints":[{"len":7,"hash":42,"category":"host-secret"}]}"#;
 
     // `stop_vm` reaps the moat BEFORE its not-running early return (so a crashed
     // VM's decrypted-secret endpoint can't outlive the guest). That ordering is
@@ -465,8 +558,9 @@ mod tests {
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\ncat > {}\necho 'ready handshake'\n",
-                cfg_out.display()
+                "#!/bin/sh\ncat > {}\necho '{}'\n",
+                cfg_out.display(),
+                READY_HANDSHAKE
             ),
         )
         .unwrap();
@@ -508,6 +602,129 @@ mod tests {
     }
 
     #[test]
+    fn the_handshakes_two_halves_go_to_two_different_places() {
+        // The placeholders are the guest's and must survive into a later
+        // `mvmctl` invocation, so they are persisted. The fingerprints are the
+        // host's and must not, so they stay in this process. Sending either
+        // one where the other goes is the whole failure this split prevents:
+        // the sidecar would carry a length-and-hash disclosure to every reader
+        // of the state dir, and the gate would find nothing to scan for.
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
+        let dir = std::env::temp_dir().join(format!("mvm-subst-split-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        env.set("MVM_HOME", &dir);
+
+        let stub = dir.join("stub-endpoint.sh");
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\ncat >/dev/null\necho '{READY_HANDSHAKE}'\n"),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
+
+        let vm = "handshake-split-vm";
+        let env_path = mvm_core::config::vm_substitution_env_path(vm);
+        if let Some(parent) = env_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        spawn_substitution_endpoint(SubstitutionSpawnParams {
+            vm_name: vm,
+            state_dir: &dir,
+            tenant: "tenant-x",
+            secrets: &[],
+            redaction: &redaction,
+            transport: EndpointTransport::Uds {
+                path: dir.join("vsock-5253.sock"),
+            },
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: None,
+            raw_egress: false,
+        })
+        .expect("spawn with stub endpoint should succeed");
+
+        let persisted = std::fs::read_to_string(&env_path).expect("the env sidecar");
+        let placeholders: Vec<(String, String)> =
+            serde_json::from_str(&persisted).expect("the sidecar keeps its array shape");
+        assert_eq!(
+            placeholders,
+            vec![("OPENAI_API_KEY".to_string(), "mvm-secret-ab".to_string())]
+        );
+        assert!(
+            !persisted.contains("input_fingerprints") && !persisted.contains("host-secret"),
+            "no fingerprint may be written to disk: {persisted}"
+        );
+
+        let recorded = recorded_secret_fingerprints(vm);
+        assert_eq!(recorded.len(), 1, "the gate's set came off the handshake");
+        assert_eq!(recorded[0].len(), 7);
+        assert_eq!(recorded[0].category(), SecretCategory::HostSecret);
+
+        // And the reap that ends the endpoint ends the set with it, so a
+        // recycled VM name cannot inherit a dead workload's shapes.
+        reap_substitution_endpoint(&dir, vm);
+        assert!(recorded_secret_fingerprints(vm).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_handshake_that_is_not_a_handshake_fails_the_spawn() {
+        // Fail closed. A line the spawner could not parse used to be written
+        // to the env sidecar verbatim, so a broken endpoint produced a VM that
+        // booted with no placeholders and no fingerprints and said nothing.
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
+        let dir = std::env::temp_dir().join(format!("mvm-subst-badline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        env.set("MVM_HOME", &dir);
+
+        let stub = dir.join("stub-endpoint.sh");
+        std::fs::write(&stub, "#!/bin/sh\ncat >/dev/null\necho 'ready handshake'\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
+
+        let vm = "handshake-garbage-vm";
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let err = spawn_substitution_endpoint(SubstitutionSpawnParams {
+            vm_name: vm,
+            state_dir: &dir,
+            tenant: "tenant-x",
+            secrets: &[],
+            redaction: &redaction,
+            transport: EndpointTransport::Uds {
+                path: dir.join("vsock-5253.sock"),
+            },
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: None,
+            raw_egress: false,
+        })
+        .expect_err("an unparseable handshake is not a ready endpoint");
+        assert!(
+            err.to_string()
+                .contains("parse substitution endpoint handshake"),
+            "got {err}"
+        );
+        assert!(recorded_secret_fingerprints(vm).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn spawn_failure_after_pid_write_rolls_back_the_endpoint_sidecar() {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
@@ -532,9 +749,10 @@ mod tests {
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\ncat >/dev/null\necho $$ > {}\ntrap 'echo stopped > {}; exit 0' TERM\necho 'ready handshake'\nwhile :; do sleep 1; done\n",
+                "#!/bin/sh\ncat >/dev/null\necho $$ > {}\ntrap 'echo stopped > {}; exit 0' TERM\necho '{}'\nwhile :; do sleep 1; done\n",
                 pid_capture.display(),
-                stopped.display()
+                stopped.display(),
+                READY_HANDSHAKE
             ),
         )
         .unwrap();

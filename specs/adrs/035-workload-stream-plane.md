@@ -19,9 +19,13 @@ opens the route through `StreamPlane::open_input` under the plan that boot was
 admitted under, pumps the caller's stdin through the gate in acceptance order,
 and closes the workload's stdin on the caller's EOF. Only the invocation that
 admits and boots a workload can stream into it — `--attach` and `session
-attach` hold no admitted plan and refuse. ADR-001's claim 17 stays at status
-`Preview`, now for one reason rather than three: the secret scan has no
-production caller, so its refusal has never fired on a real VM.
+attach` hold no admitted plan and refuse. The gate's secret scan is populated
+too: the per-VM substitution endpoint fingerprints each secret it resolves and
+`StreamPlane::open_input` installs that set — see §"What binding a fingerprint
+discloses". ADR-001's claim 17 stays at status `Preview`, now not because a leg
+is dormant but because of what the enforcement is: a fingerprint match is a
+length-and-hash match, and encoding, derivation and a window-straddling split
+defeat the scan permanently.
 
 Three limits below (§"What this does not do") are stated as limits, not as
 future work. They are true of the shipped code.
@@ -260,8 +264,49 @@ between the bytes and a launcher.
 So the trade is a strong claim over a narrow surface exchanged for a weaker
 claim over the surface the product actually has. The mitigation is that every
 weakening is written down: the grant is in the signed plan, both outcomes are in
-the chain, and ADR-001 carries the claim at `Preview` with four limits rather
+the chain, and ADR-001 carries the claim at `Preview` with five limits rather
 than promoting it on the strength of the tests alone.
+
+### What binding a fingerprint discloses
+
+The gate refuses stdin that carries one of the host's own secrets, and
+recognising a byte sequence means having it. But the gate runs in the CLI
+process while the substitution endpoint that resolves raw credentials runs as a
+separate process, and that separation is load-bearing — it is what claims 12 and
+13 rest on. Copying plaintext into the CLI to populate a scan would create a new
+plaintext location in a process that has none, in order to close a gap on a
+different claim. That trade is not worth making.
+
+So the endpoint computes a **fingerprint** — a length, a 64-bit rolling hash and
+a category — for each secret it resolves, and reports the fingerprints on its
+ready handshake. Only the fingerprints cross. The rolling hash is what makes the
+scan affordable: it slides over the stream at one multiply-add per byte and
+tests every offset, which is how a secret split across two writes is still found.
+
+**What it discloses, stated rather than buried.** Whoever holds a fingerprint
+learns the secret's **length** and holds a 64-bit hash of it. For a high-entropy
+credential that is not a recovery path; for a short low-entropy one, a hash and a
+length are guessable offline. The set lives in the memory of the process that
+booted the VM, is never written to disk, and is dropped when the endpoint is
+reaped. Two disclosures that would be worse were rejected outright: persisting
+the set to the per-VM state dir (which would widen it to every reader of
+`~/.mvm` to buy reachability nothing uses — only the booting invocation can
+stream), and binding fingerprints of each secret's *prefixes*.
+
+Prefix fingerprints are the tempting one, because they are what the plaintext
+scanner had. With them the scanner can tell a suffix that could still become a
+secret from one that provably cannot, and so withhold only the former; without
+them it must withhold a fixed `longest_secret - 1` bytes of every write. They
+are also a byte-at-a-time recovery oracle: guess byte 0 against the length-1
+prefix hash, then byte 1, and the credential falls in 256·L tries. The latency —
+bounded, never dropped, released on the next write or at close, and charged only
+to VMs that bound a secret — is the price of not shipping that oracle.
+
+**And a match is not an identity.** Two byte sequences of the same length can
+hash alike. The gate refuses on a match anyway, because failing closed is the
+right direction, but its refusal says a fingerprint matched rather than that the
+bytes are the secret. An operator told the stronger thing when it was not true
+would spend hours proving a negative.
 
 **What is explicitly not claimed.** The sealed-tier refusal of the grant for a
 shell-shaped entrypoint is a *heuristic* and is documented as one. A wrapper
@@ -342,6 +387,13 @@ the trade; ADR-001 carries the reworded row and the new claim 17 at `Preview`.
 
 **Extended.** Claim 8's admitted plan gains two more decisions it binds — the
 retention mode and the input grant — and matching labels in the chain.
+
+**Unweakened, and worth saying why.** Claims 12 and 13 keep raw secrets inside
+the substitution endpoint's address space. Populating the input gate's scan does
+not move any of that: what leaves the endpoint is a length and a hash, the CLI
+gains no API that could hold a value, and the endpoint's own store reads are
+unchanged. §"What binding a fingerprint discloses" states what the length and
+the hash are worth to a reader of them.
 
 **Not strengthened, despite appearances.** The reader-side anchoring rule
 defeats a *buggy* broker, not a hostile one: nothing cross-checks a claimed

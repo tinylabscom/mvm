@@ -158,9 +158,9 @@ for detailed scope and acceptance criteria.
         grant for a shell-shaped entrypoint; and the claims ledger — claim 15
         reworded (it used to hold by *absence*, there being no host→guest byte
         path at all, and now holds by *policy*) and claim 17 added at status
-        `Preview` with a four-item limits note (T17 below closed two of the
-        four; the known-secret set being empty on every real VM is what keeps
-        the row at `Preview`)
+        `Preview` with a limits note (T17 below closed two; plan 293 WS1 closed
+        the third by giving the scan fingerprints; the two that remain are
+        permanent properties of hashing and of scanning)
   - [x] T16 — the input plane's documentation: a sibling guide
         `guides/workload-input.md` (grant, single-writer lease, secret scan,
         explicit EOF, the `--prod` shell refusal stated as the heuristic it is,
@@ -186,9 +186,7 @@ for detailed scope and acceptance criteria.
         `mvm-meta.json` sidecar — a new `entrypointArgv` field written by both
         the `mkGuest` and OCI build paths, because the host cannot read inside a
         materialized ext4 — and admission **fails closed** when it cannot
-        resolve one, so the shell refusal cannot go dormant again. Claim 17
-        stays `Preview` on limit 1 alone: `InputGate::bind` still has no
-        production caller, so the secret scan is inert on every real VM
+        resolve one, so the shell refusal cannot go dormant again
   - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
         transcript is now sealed by whatever stops the VM. The *follow* half
         remains: the console follower still dies with the starting process, so

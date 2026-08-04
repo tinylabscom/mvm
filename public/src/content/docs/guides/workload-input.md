@@ -87,30 +87,51 @@ can be offered again. A workload that has stopped reading its stdin produces a
 
 ## The secret scan
 
-Secrets known to the host are registered against the VM, and the gate scans the
-byte stream — not each frame in isolation — before anything is delivered:
+The gate scans the byte stream — not each frame in isolation — before anything
+is delivered:
 
-- A tail that is still a live *prefix* of a known secret is **withheld**, not
-  shipped and then regretted. It is released at close, before the workload sees
-  EOF, if the rest of the stream turns out not to complete the match.
-- A completed match refuses the session outright, zeroizes the buffer, and
-  audits the refusal with the secret's category — never its value.
+- A tail the scanner must still be able to see is **withheld**, not shipped and
+  then regretted. It is released on the next write, or at close before the
+  workload sees EOF, once the rest of the stream turns out not to complete a
+  match.
+- A match refuses the session outright, zeroizes the buffer, and audits the
+  refusal with the secret's category — never its value.
 
 Splitting a secret across frames therefore does not reassemble it inside the
 workload, down to one byte per frame.
 
+### What the gate scans against
+
+Not the secrets. The gate runs in the `mvmctl` process, and the substitution
+endpoint that resolves raw credentials runs as a separate process on purpose —
+that separation is what keeps a credential out of everything but the one place
+that needs it. So the endpoint computes a **fingerprint** for each secret it
+resolves — a length, a 64-bit rolling hash and a category — and reports the
+fingerprints at startup. `mvmctl` holds those and nothing else.
+
+Two consequences worth knowing before you rely on it:
+
+**A fingerprint match is a hash match.** Two different byte sequences of the
+same length can match one. The gate refuses either way, because failing closed
+is the right direction, and the refusal says a fingerprint matched rather than
+that your bytes are a secret. If you are certain they are not, that is what a
+collision looks like from the outside.
+
+**A secret-bearing VM lags by up to `longest_secret - 1` bytes.** Without the
+plaintext the scanner cannot tell a live secret prefix from an innocent tail, so
+it holds a fixed window back until your next write or your close. Bounded, never
+dropped, and charged only to workloads whose plan carries a secret — a VM with
+none scans nothing and lags not at all. (The alternative, fingerprinting each
+secret's prefixes, would recover the credential a byte at a time from the
+fingerprint set. See [ADR-035](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/035-workload-stream-plane.md).)
+
 ### What the scan is worth
-
-Two things you must not read into it:
-
-**The known-secret set is empty on every real VM.** The only way a secret is
-registered has no caller outside tests. The scanner is correct and it currently
-has nothing to match against.
 
 **It is a backstop, not a defence.** Base64, hex, URL-escaping, any derivation
 (a hash, a signature, a substring), an unregistered secret, and a split that
 straddles the scan window all pass straight through. It catches a confused
-host-side caller. It does not catch a determined one.
+host-side caller. It does not catch a determined one. A populated fingerprint
+set makes the scan *work*; it does not make it stronger than this.
 
 The real guarantee is upstream and structural: the host has no reason to send a
 secret into a guest at all, because credentials are substituted on the
@@ -207,9 +228,10 @@ That trade is recorded in
 and the claim rows and their limits live in
 [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md).
 The input channel is tracked there as claim 17 at status `Preview`. It stays a
-preview even though the channel now ships: the grant, the lease, the EOF and the
-shell refusal all have production callers, but the secret scan still has none,
-and a claim is worth what its weakest enforced leg is worth.
+preview even though every leg — the grant, the lease, the EOF, the shell refusal
+and the secret scan — now has a production caller: what holds it back is what
+the scan *is* (a fingerprint match, defeated by encoding and derivation), not
+whether it runs.
 
 ## Limits, all of them true today
 
@@ -218,10 +240,10 @@ and a claim is worth what its weakest enforced leg is worth.
    VM and dispatches the call, so the plan authorizing the writes is in the
    hands of the process making them. `--attach`, `session attach`, and any
    other process reaching a machine it did not boot cannot stream.
-2. **The secret scan is inert.** No production code registers a secret, so the
-   known-secret set is empty on every real VM. The scanner is correct and has
-   nothing to match against, so the refusal it exists to produce has never
-   fired outside tests.
+2. **The scan matches fingerprints, not values.** A collision refuses a frame
+   that carried no secret, and the withheld window costs a secret-bearing VM up
+   to `longest_secret - 1` bytes of lag. Both are stated above; both fail in
+   the safe direction.
 3. **The scan is a backstop.** Encoding, derivation, and a window-straddling
    split defeat it. This one is permanent; it is a property of scanning, not a
    gap to close.
@@ -229,9 +251,9 @@ and a claim is worth what its weakest enforced leg is worth.
    image's own build-time record. A wrapper that `exec`s a shell still defeats
    it; see [above](#the-refusal-is-a-heuristic-treat-it-as-one).
 
-Limits 2 and 4 are what keep claim 17 at `Preview`: an enforcement path with no
-production caller (the scan) and a heuristic control are not the same thing as a
-proven guarantee. Limits 1 and 3 stay whatever happens to the other two.
+Limits 2, 3 and 4 are what keep claim 17 at `Preview`: a hash-based scan that
+encoding defeats, and a heuristic control, are not the same thing as a proven
+guarantee. Limit 1 stays whatever happens to the others.
 
 ## See also
 

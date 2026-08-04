@@ -2273,7 +2273,9 @@ Expected: clean.
 workload's stdin and sees its output in the same stream; an ungranted one is
 refused and the refusal is in the chain.
 
-**Phase 2 status: met in the harness, not on a VM.** Both halves are covered by
+**Phase 2 status (as of this plan; superseded — see plan 293 WS1 for the secret
+scan, and ADR-001's Preview 17 limits note for the current state). Met in the
+harness, not on a VM.** Both halves are covered by
 `crates/mvm-hostd/tests/workload_input_plane.rs` against a real `admit_for_run`,
 a real chain and `verify_audit_chain`. Neither is met by an operator, because
 `StreamPlane::open_input` is the only route into the gate and has no caller

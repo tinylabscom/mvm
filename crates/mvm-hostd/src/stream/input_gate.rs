@@ -27,15 +27,22 @@
 //!   path that moves bytes out of a session is gated on it, extraction
 //!   included: a writer that stalled past its TTL must not deliver into a
 //!   stdin its successor now owns.
-//! - **The secret scan spans frame boundaries.** A scanner that inspects one
-//!   frame at a time is defeated by splitting a secret across two writes, so
-//!   [`SecretScanner`] carries a sliding window and, more than that, *withholds*
-//!   the tail of the stream that is still a live prefix of a known secret. A
-//!   refusal that arrives after the first half already reached the guest would
-//!   be theatre. See [`SecretScanner`] for what this cannot catch; it is a
-//!   backstop against a confused caller, not a defence against a determined
-//!   one. The real guarantee is upstream: the host has no reason to send a
-//!   secret into a guest, because secrets are substituted on egress instead.
+//! - **The secret scan spans frame boundaries, and holds no secret.** A
+//!   scanner that inspects one frame at a time is defeated by splitting a
+//!   secret across two writes, so `stream::secret_scan`
+//!   carries a sliding window and, more than that, *withholds* the tail of the
+//!   stream it must still be able to see. A refusal that arrives after the
+//!   first half already reached the guest would be theatre. What it slides
+//!   that window against is a set of [`SecretFingerprint`]s — a length and a
+//!   rolling hash each, computed by the process that legitimately holds the
+//!   plaintext — because this gate runs in a process that must not hold one.
+//!   A fingerprint match is a hash match and nothing stronger, which is why
+//!   [`InputRefusal::SecretMaterial`] says so. See
+//!   `stream::secret_scan` for what this cannot catch;
+//!   it is a backstop against a confused caller, not a defence against a
+//!   determined one. The real guarantee is upstream: the host has no reason to
+//!   send a secret into a guest, because secrets are substituted on egress
+//!   instead.
 //! - **Every refusal is audited, payload-free.** Each refusal, and each grant,
 //!   emits a chain-signed entry naming the binding and the reason. Never the
 //!   frame bytes, and never the matched secret — writing the secret into the
@@ -73,16 +80,21 @@
 //! different opinions about where the stream ended.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use mvm_contract::stream::input::{CloseInput, InputFrame, grants_input};
+use mvm_contract::stream::input::{CloseInput, InputFrame, grants_input};
+use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::plan::ExecutionPlan;
 use zeroize::Zeroize;
 
 use crate::audit::emitter::AuditEmitter;
 use crate::plan_admission::AdmittedPlan;
+use crate::stream::secret_scan::SecretScanner;
+
+/// Category recorded for a secret value the host itself holds for a workload.
+pub use mvm_protocol::stream::secret_fingerprint::CATEGORY_HOST_SECRET;
 
 /// How long a writer keeps the input lease without touching it.
 ///
@@ -90,9 +102,6 @@ use crate::plan_admission::AdmittedPlan;
 /// place; short enough that a consumer which crashed mid-session frees the
 /// VM's stdin inside a coffee break rather than at VM teardown.
 pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
-
-/// Category recorded for a secret value the host itself holds for a workload.
-pub const CATEGORY_HOST_SECRET: &str = "host-secret";
 
 /// Why the gate would not let bytes through.
 ///
@@ -119,8 +128,19 @@ pub enum InputRefusal {
         /// The lease holder that was there first.
         holder: String,
     },
-    /// The bytes carry material the host recognises as one of its own secrets.
-    #[error("input carries recognised secret material ({category})")]
+    /// The bytes match the fingerprint of one of the host's own secrets.
+    ///
+    /// Deliberately *not* "carries a secret". The gate holds fingerprints, not
+    /// values, so a match says the bytes have the same length and the same
+    /// rolling hash as a bound secret — which a collision also does. It
+    /// refuses either way, because failing closed is the right direction; but
+    /// an operator handed "this contained a secret" when it did not would lose
+    /// hours proving the negative, so the sentence has to say what was
+    /// actually checked.
+    #[error(
+        "input matches the fingerprint of known secret material ({category}); \
+         a fingerprint match is a length and hash match, not proof these bytes are that secret"
+    )]
     SecretMaterial {
         /// Which category matched. The category, never the value.
         category: &'static str,
@@ -156,52 +176,6 @@ impl InputRefusal {
             Self::LeaseExpired => "lease-expired",
             Self::OutOfOrder { .. } => "out-of-order",
         }
-    }
-}
-
-/// One secret value the gate should recognise on its way *into* a guest.
-///
-/// Held in the clear because recognising a byte sequence requires having it;
-/// the type earns that by rendering as its category and length only, and by
-/// zeroing itself on drop. There is deliberately no accessor for the bytes.
-pub struct KnownSecret {
-    value: Vec<u8>,
-    category: &'static str,
-}
-
-impl KnownSecret {
-    /// A secret the host holds on the workload's behalf.
-    #[must_use]
-    pub fn host_material(value: impl Into<Vec<u8>>) -> Self {
-        Self::categorized(value, CATEGORY_HOST_SECRET)
-    }
-
-    /// The same, under a caller-chosen category name. `&'static str` because a
-    /// category is a fixed vocabulary word that reaches the audit chain, not a
-    /// value derived from the secret.
-    #[must_use]
-    pub fn categorized(value: impl Into<Vec<u8>>, category: &'static str) -> Self {
-        Self {
-            value: value.into(),
-            category,
-        }
-    }
-}
-
-impl fmt::Debug for KnownSecret {
-    /// Shape only. A derived `Debug` would put the secret in every log line
-    /// that ever formats a binding.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KnownSecret")
-            .field("category", &self.category)
-            .field("len", &self.value.len())
-            .finish()
-    }
-}
-
-impl Drop for KnownSecret {
-    fn drop(&mut self) {
-        self.value.zeroize();
     }
 }
 
@@ -300,30 +274,46 @@ fn audit_refused(
 /// stdin.
 ///
 /// Optional in the sense that an unbound VM still gets default-deny, a lease,
-/// and the process audit chain — what a binding adds is the secret set to
+/// and the process audit chain — what a binding adds is the fingerprint set to
 /// recognise, a VM-specific chain, and a lease lifetime.
 pub struct InputBinding {
-    secrets: Vec<KnownSecret>,
+    fingerprints: Vec<SecretFingerprint>,
     audit: Option<Arc<dyn InputAuditSink>>,
     lease_ttl: Duration,
 }
 
 impl InputBinding {
-    /// An empty binding: no known secrets, the process audit chain, the
+    /// An empty binding: no fingerprints, the process audit chain, the
     /// default lease lifetime.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            secrets: Vec::new(),
+            fingerprints: Vec::new(),
             audit: None,
             lease_ttl: DEFAULT_LEASE_TTL,
         }
     }
 
-    /// Recognise one more secret value on the way into this VM.
+    /// Recognise one more secret on the way into this VM.
+    ///
+    /// A [`SecretFingerprint`] and not a value: the process that binds this is
+    /// not the process that holds the plaintext, and keeping it that way is
+    /// the reason the parameter has this type. There is no overload taking
+    /// bytes.
     #[must_use]
-    pub fn with_secret(mut self, secret: KnownSecret) -> Self {
-        self.secrets.push(secret);
+    pub fn with_fingerprint(mut self, fingerprint: SecretFingerprint) -> Self {
+        self.fingerprints.push(fingerprint);
+        self
+    }
+
+    /// The same for a whole set, which is how one arrives: the substitution
+    /// endpoint fingerprints every secret it resolved for this VM at once.
+    #[must_use]
+    pub fn with_fingerprints(
+        mut self,
+        fingerprints: impl IntoIterator<Item = SecretFingerprint>,
+    ) -> Self {
+        self.fingerprints.extend(fingerprints);
         self
     }
 
@@ -369,10 +359,10 @@ impl Default for InputBinding {
     }
 }
 
-/// A binding as the gate stores it: the secret set shared rather than copied
-/// into every session that opens.
+/// A binding as the gate stores it: the fingerprint set shared rather than
+/// copied into every session that opens.
 struct Bound {
-    secrets: Arc<Vec<KnownSecret>>,
+    fingerprints: Arc<Vec<SecretFingerprint>>,
     audit: Option<Arc<dyn InputAuditSink>>,
     lease_ttl: Duration,
 }
@@ -412,7 +402,7 @@ fn gate() -> MutexGuard<'static, GateState> {
 /// What one VM's binding supplies, resolved once per open.
 struct Resolved {
     audit: Option<Arc<dyn InputAuditSink>>,
-    secrets: Arc<Vec<KnownSecret>>,
+    fingerprints: Arc<Vec<SecretFingerprint>>,
     lease_ttl: Duration,
 }
 
@@ -424,23 +414,53 @@ impl InputGate {
     /// Install what the gate needs to police `vm`'s stdin. Replaces any
     /// previous binding; call it before the workload is reachable.
     ///
-    /// A session snapshots the secret set at [`open`](Self::open) and holds it
-    /// for its lifetime, so re-binding does not change what a *live* session
-    /// recognises — a secret registered mid-session is recognised by the next
-    /// writer, not the current one. Deliberate: the alternative is a scanner
-    /// whose window can change under a partially-scanned stream.
+    /// A session snapshots the fingerprint set at [`open`](Self::open) and
+    /// holds it for its lifetime, so re-binding does not change what a *live*
+    /// session recognises — a secret registered mid-session is recognised by
+    /// the next writer, not the current one. Deliberate: the alternative is a
+    /// scanner whose window can change under a partially-scanned stream.
     pub fn bind(vm: &str, binding: InputBinding) {
         let bound = Bound {
-            secrets: Arc::new(binding.secrets),
+            fingerprints: Arc::new(binding.fingerprints),
             audit: binding.audit,
             lease_ttl: binding.lease_ttl,
         };
         gate().bindings.insert(vm.to_string(), bound);
     }
 
+    /// Replace just the fingerprint set for `vm`, leaving its chain and lease
+    /// lifetime alone.
+    ///
+    /// Two different owners, so two different calls. The fingerprints come
+    /// from the substitution endpoint and change whenever a VM's secrets do;
+    /// the audit chain and the lease lifetime are installed once by whoever
+    /// stood the VM up. A caller refreshing one must not silently reset the
+    /// other — most sharply for the chain, where reverting to the process
+    /// default would move a VM's input decisions into a different log without
+    /// saying so.
+    ///
+    /// Replaces rather than merges: a set that could only grow would let a
+    /// previous boot's fingerprints outlive the secrets they stood for.
+    pub fn bind_fingerprints(vm: &str, fingerprints: Vec<SecretFingerprint>) {
+        let mut state = gate();
+        match state.bindings.get_mut(vm) {
+            Some(bound) => bound.fingerprints = Arc::new(fingerprints),
+            None => {
+                state.bindings.insert(
+                    vm.to_string(),
+                    Bound {
+                        fingerprints: Arc::new(fingerprints),
+                        audit: None,
+                        lease_ttl: DEFAULT_LEASE_TTL,
+                    },
+                );
+            }
+        }
+    }
+
     /// Drop `vm`'s binding and any lease on it — the teardown half of
     /// [`bind`](Self::bind). Leaving the binding behind would keep a dead VM's
-    /// secrets resident.
+    /// fingerprints resident.
     pub fn unbind(vm: &str) {
         let mut state = gate();
         state.bindings.remove(vm);
@@ -503,7 +523,7 @@ impl InputGate {
             holder,
             audit,
             lease_ttl: resolved.lease_ttl,
-            scanner: SecretScanner::new(resolved.secrets),
+            scanner: SecretScanner::new(resolved.fingerprints),
             outbox: Vec::new(),
             highest_accepted_seq: None,
             refused: None,
@@ -578,7 +598,9 @@ impl InputSession {
                 self.highest_accepted_seq = Some(frame.seq);
                 Ok(())
             }
-            Err(category) => Err(self.latch(InputRefusal::SecretMaterial { category })),
+            Err(category) => Err(self.latch(InputRefusal::SecretMaterial {
+                category: category.as_str(),
+            })),
         }
     }
 
@@ -716,12 +738,12 @@ impl Drop for InputSession {
 /// is filesystem work, and holding the one gate lock across it would stall
 /// every other VM's writer behind this VM's disk.
 fn resolve(vm: &str) -> Resolved {
-    let (audit, secrets, lease_ttl) = {
+    let (audit, fingerprints, lease_ttl) = {
         let state = gate();
         match state.bindings.get(vm) {
             Some(bound) => (
                 bound.audit.clone(),
-                Arc::clone(&bound.secrets),
+                Arc::clone(&bound.fingerprints),
                 bound.lease_ttl,
             ),
             None => (None, Arc::new(Vec::new()), DEFAULT_LEASE_TTL),
@@ -729,7 +751,7 @@ fn resolve(vm: &str) -> Resolved {
     };
     Resolved {
         audit: audit.or_else(process_audit),
-        secrets,
+        fingerprints,
         lease_ttl,
     }
 }
@@ -831,112 +853,6 @@ fn build_process_audit() -> anyhow::Result<InputAudit> {
     )?))
 }
 
-/// Recognises known secret material in a byte stream that arrives in
-/// arbitrarily chopped frames.
-///
-/// Two things make it work across frames. It scans the concatenation of the
-/// carried tail and the new payload, so a secret split down the middle is
-/// still a contiguous match; and it *withholds* the longest suffix of the
-/// stream that is still a proper prefix of some known secret, so the first
-/// half of a split secret never reaches the guest ahead of the refusal. A
-/// suffix that is not a prefix of anything ships immediately, which is what
-/// keeps ordinary interactive input from being delayed.
-///
-/// **What it cannot catch**, and this is not a gap that more rules would
-/// close: any encoding of the secret (base64, hex, URL-escaping), any
-/// derivation of it (a hash, a signature, a substring used as a lookup key),
-/// and any secret the host never registered. It is a backstop against a
-/// caller that pasted the wrong thing, not a defence against a caller that
-/// wants the secret in there. The property that actually holds is upstream —
-/// the host substitutes secrets on egress and so has no reason to send one
-/// into a guest at all.
-struct SecretScanner {
-    secrets: Arc<Vec<KnownSecret>>,
-    /// Length of the longest registered secret; the window is one byte short
-    /// of it, because a full-length suffix would be a match, not a prefix.
-    longest: usize,
-    /// The withheld tail: a proper prefix of at least one known secret.
-    pending: Vec<u8>,
-}
-
-impl SecretScanner {
-    fn new(secrets: Arc<Vec<KnownSecret>>) -> Self {
-        // A zero-length "secret" matches everywhere and means nothing, so it
-        // is not allowed to set the window.
-        let longest = secrets.iter().map(|s| s.value.len()).max().unwrap_or(0);
-        Self {
-            secrets,
-            longest,
-            pending: Vec::new(),
-        }
-    }
-
-    /// Clear `payload` for delivery, or name the category it matched.
-    fn admit(&mut self, payload: &[u8]) -> Result<Vec<u8>, &'static str> {
-        if self.longest == 0 {
-            return Ok(payload.to_vec());
-        }
-        let mut buf = std::mem::take(&mut self.pending);
-        buf.extend_from_slice(payload);
-
-        if let Some(category) = self.first_match(&buf) {
-            // The buffer straddles a secret; it is not going anywhere, and it
-            // does not linger in this process either.
-            buf.zeroize();
-            return Err(category);
-        }
-
-        let hold = self.unresolved_tail(&buf);
-        self.pending = buf.split_off(buf.len() - hold);
-        Ok(buf)
-    }
-
-    /// Release the withheld tail. Safe by construction: it is a proper prefix
-    /// of a secret, which is not a secret.
-    fn flush(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending)
-    }
-
-    /// How much is being withheld. A length, not the bytes.
-    fn withheld_len(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// The category of the first known secret contained in `buf`.
-    fn first_match(&self, buf: &[u8]) -> Option<&'static str> {
-        self.secrets
-            .iter()
-            .filter(|secret| !secret.value.is_empty() && secret.value.len() <= buf.len())
-            .find(|secret| {
-                buf.windows(secret.value.len())
-                    .any(|window| window == secret.value.as_slice())
-            })
-            .map(|secret| secret.category)
-    }
-
-    /// How many trailing bytes of `buf` must be held back: the longest suffix
-    /// that is still a proper prefix of some known secret, and zero when the
-    /// stream ends in nothing interesting.
-    fn unresolved_tail(&self, buf: &[u8]) -> usize {
-        let ceiling = self.longest.saturating_sub(1).min(buf.len());
-        (1..=ceiling)
-            .rev()
-            .find(|&k| {
-                let tail = &buf[buf.len() - k..];
-                self.secrets
-                    .iter()
-                    .any(|secret| secret.value.len() > k && secret.value.starts_with(tail))
-            })
-            .unwrap_or(0)
-    }
-}
-
-impl Drop for SecretScanner {
-    fn drop(&mut self) {
-        self.pending.zeroize();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -949,6 +865,8 @@ mod tests {
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, sign_plan};
     use tempfile::TempDir;
+
+    use mvm_protocol::stream::secret_fingerprint::SecretCategory;
 
     use super::*;
     use crate::audit::emitter::stream_audit;
@@ -1093,12 +1011,21 @@ mod tests {
             .collect()
     }
 
-    /// A session on a VM bound to recognise exactly one secret.
+    /// The fingerprint of `secret`, as the substitution endpoint computes it.
+    ///
+    /// A test may hold a literal; the point of the type is that the *gate*
+    /// never does, and this helper is where that transition happens.
+    fn fingerprint(secret: &str) -> SecretFingerprint {
+        SecretFingerprint::of(secret.as_bytes(), SecretCategory::HostSecret)
+            .expect("a non-empty secret fingerprints")
+    }
+
+    /// A session on a VM bound to recognise exactly one secret's fingerprint.
     fn granted_session_with_known_secret(secret: &str) -> InputSession {
         let vm = unique_vm("vm-secret");
         InputGate::bind(
             &vm,
-            InputBinding::new().with_secret(KnownSecret::host_material(secret.as_bytes())),
+            InputBinding::new().with_fingerprint(fingerprint(secret)),
         );
         let plan = admitted_with(vec![stream_service()]);
         InputGate::open(&vm, &plan).expect("the plan grants input")
@@ -1176,7 +1103,7 @@ mod tests {
         let vm = unique_vm("vm-audit");
         InputGate::bind(
             &vm,
-            InputBinding::new().with_secret(KnownSecret::host_material(secret.as_bytes())),
+            InputBinding::new().with_fingerprint(fingerprint(secret)),
         );
         let plan = admitted_from(
             PlanFixture::new()
@@ -1409,7 +1336,7 @@ mod tests {
     fn a_live_secret_prefix_is_withheld_rather_than_delivered_early() {
         // The half of the split-secret defence that a refusal alone does not
         // give you: refusing the second frame is worthless if the first frame
-        // already handed the guest the first twelve bytes.
+        // already handed the guest the first twelve bytes of the key.
         let mut session = granted_session_with_known_secret("AKIAIOSFODNN7EXAMPLE");
         session
             .write(InputFrame {
@@ -1417,53 +1344,71 @@ mod tests {
                 payload: b"echo AKIAIOSFODNN".to_vec(),
             })
             .expect("a prefix is not a match");
+        let cleared = session.take_admitted().expect("the lease is live");
+        assert!(
+            !cleared.ends_with(b"AKIAIOSFODNN"),
+            "the live prefix must not reach the guest ahead of the refusal: {:?}",
+            String::from_utf8_lossy(&cleared)
+        );
         assert_eq!(
-            session.take_admitted().expect("the lease is live"),
-            b"echo ",
-            "the live prefix stays on the host until it is resolved"
+            cleared, b"",
+            "the whole 17-byte frame sits inside the 19-byte carry"
         );
     }
 
     #[test]
-    fn a_tail_that_resolves_to_nothing_ships_on_the_next_frame() {
+    fn the_withheld_tail_is_bounded_and_ships_on_the_next_frame() {
+        // The cost of matching fingerprints rather than values: the scanner
+        // cannot tell a live prefix from an innocent tail, so it holds a fixed
+        // `longest - 1` bytes. Bounded, and never lost — the previous tail
+        // ships the moment the next frame proves nothing straddles.
         let mut session = granted_session_with_known_secret("AKIAIOSFODNN7EXAMPLE");
+        let first = b"the quick brown fox jumps over the lazy dog\n";
         session
             .write(InputFrame {
                 seq: 0,
-                payload: b"AKIA".to_vec(),
+                payload: first.to_vec(),
             })
-            .expect("a prefix is not a match");
-        assert!(
-            session
-                .take_admitted()
-                .expect("the lease is live")
-                .is_empty()
+            .expect("nothing to match");
+        let cleared = session.take_admitted().expect("the lease is live");
+        assert_eq!(
+            cleared.len(),
+            first.len() - 19,
+            "exactly one byte short of the longest secret stays behind"
         );
+        assert_eq!(cleared, &first[..first.len() - 19]);
+
         session
             .write(InputFrame {
                 seq: 1,
-                payload: b"DEMO\n".to_vec(),
+                payload: b"and again\n".to_vec(),
             })
-            .expect("it was never a secret");
+            .expect("still nothing to match");
         assert_eq!(
-            session.take_admitted().expect("the lease is live"),
-            b"AKIADEMO\n"
+            [cleared, session.take_admitted().expect("the lease is live")].concat(),
+            [first.as_slice(), b"and again\n"].concat()[..first.len() + 10 - 19],
+            "every earlier byte came out, in order"
         );
     }
 
     #[test]
-    fn ordinary_input_is_not_delayed_by_the_scanner() {
-        let mut session = granted_session_with_known_secret("AKIAIOSFODNN7EXAMPLE");
+    fn a_vm_that_bound_no_fingerprints_is_not_delayed_at_all() {
+        // The carry is the price of scanning, so it must be charged only to
+        // workloads that actually have a secret to leak.
+        let vm = unique_vm("vm-undelayed");
+        InputGate::bind(&vm, InputBinding::new());
+        let plan = admitted_with(vec![stream_service()]);
+        let mut session = InputGate::open(&vm, &plan).expect("the plan grants input");
         session
             .write(InputFrame {
                 seq: 0,
                 payload: b"ls -la\n".to_vec(),
             })
-            .expect("nothing to match");
+            .expect("nothing bound");
         assert_eq!(
             session.take_admitted().expect("the lease is live"),
             b"ls -la\n",
-            "a suffix that is not a prefix of any secret ships immediately"
+            "with no fingerprints there is nothing to slide a window against"
         );
     }
 
@@ -1549,10 +1494,70 @@ mod tests {
     }
 
     #[test]
-    fn a_known_secret_never_renders_its_value() {
-        let rendered = format!("{:?}", KnownSecret::host_material(b"AKIAIOSFODNN7EXAMPLE"));
+    fn the_gate_holds_no_secret_value_anywhere_a_binding_can_put_one() {
+        // The type surface is the guarantee, not a comment: the only way a
+        // secret enters this gate is `with_fingerprint`, whose parameter is a
+        // length, a hash and a vocabulary word. There is no byte-taking
+        // overload to reach for, so a caller that has no plaintext cannot be
+        // tempted into acquiring some, and one that does cannot hand it over.
+        let binding = InputBinding::new().with_fingerprint(fingerprint("AKIAIOSFODNN7EXAMPLE"));
+        let rendered = format!("{:?}", binding.fingerprints);
         assert!(!rendered.contains("AKIA"), "got {rendered}");
-        assert!(rendered.contains(CATEGORY_HOST_SECRET), "got {rendered}");
+        assert!(rendered.contains("len: 20"), "got {rendered}");
+        assert_eq!(
+            std::mem::size_of::<SecretFingerprint>(),
+            std::mem::size_of::<u64>() * 2,
+            "a fingerprint is fixed-width and inline: two words hold a length, a \
+             hash and a category, and there is no room for a pointer to a value"
+        );
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<SecretFingerprint>();
+
+        // And the source says the same thing: no constructor on the binding
+        // takes bytes.
+        let src = include_str!("input_gate.rs");
+        let (production, _tests) = src
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("this module keeps its tests at the end");
+        assert!(
+            !production.contains("KnownSecret"),
+            "the plaintext-carrying binding type must stay deleted, not deprecated"
+        );
+        assert!(
+            production
+                .contains("pub fn with_fingerprint(mut self, fingerprint: SecretFingerprint)"),
+            "the one secret-facing setter must take a fingerprint"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret() {
+        // A fingerprint match is a length-and-hash match; a collision produces
+        // the same refusal from bytes that are nobody's secret. Refusing is
+        // right — it fails closed — but an operator told "this contained a
+        // secret" when it did not would spend hours proving the negative, so
+        // the sentence has to say what was actually checked.
+        let refusal = InputRefusal::SecretMaterial {
+            category: CATEGORY_HOST_SECRET,
+        };
+        let said = refusal.to_string();
+        assert!(
+            said.contains("matches the fingerprint"),
+            "the refusal must name what it compared: {said}"
+        );
+        assert!(
+            said.contains("not proof"),
+            "and must disclaim the certainty it does not have: {said}"
+        );
+        assert!(
+            !said.contains("carries recognised secret material"),
+            "the old wording asserted identity from a hash: {said}"
+        );
+        assert_eq!(
+            refusal.reason(),
+            "secret-material",
+            "the wire-stable reason word an operator greps for does not move"
+        );
     }
 
     // --- close ordering ----------------------------------------------------
@@ -1651,10 +1656,18 @@ mod tests {
             ),
             "a repeat is not an advance"
         );
+        assert!(
+            session
+                .take_admitted()
+                .expect("the lease is live")
+                .is_empty(),
+            "eight bytes sit inside the carried window"
+        );
         assert_eq!(
-            session.take_admitted().expect("the lease is live"),
+            session.close().expect("the lease is live").trailing,
             b"7EXAMPLE",
-            "the reordered half never entered the stream"
+            "the accepted half comes out at close; the reordered one never \
+             entered the stream at all"
         );
     }
 

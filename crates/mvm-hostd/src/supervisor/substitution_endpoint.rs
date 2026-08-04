@@ -23,9 +23,16 @@ use serde::{Deserialize, Serialize};
 
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore, default_secrets_dir};
 use mvm_core::plan::SecretBinding;
+use mvm_protocol::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
 
 use crate::keyholder::{FileBindingStore, HandedPlaceholders};
 use crate::supervisor::substitution_proxy::SubstitutionService;
+
+/// The endpoint's ready-handshake line. Defined next to
+/// [`spawn_substitution_endpoint`](mvm_runtime::spawn_substitution_endpoint)'s
+/// reader and re-exported here so the bin, its tests and the spawner share one
+/// wire definition without a dependency cycle.
+pub use mvm_runtime::EndpointHandshake;
 
 /// Default forward-leg timeout (host → real destination) in seconds.
 fn default_forward_timeout_secs() -> u64 {
@@ -241,6 +248,60 @@ pub fn assemble(
     Ok((service, handed))
 }
 
+/// Fingerprint every secret this endpoint can resolve, for the host→guest
+/// input gate.
+///
+/// This is the one process that legitimately holds these values, which is why
+/// the fingerprints are computed here and not where they are used. Only the
+/// fingerprints leave — a length, a rolling hash and a category each — so the
+/// process that scans a workload's stdin never has to hold a credential in
+/// order to recognise one. What a fingerprint discloses is stated on
+/// [`SecretFingerprint`].
+///
+/// Best effort per secret rather than fail-closed: a `SecretRef` with no value
+/// in the store is a secret the workload has no way to receive either, so
+/// there is nothing for the gate to recognise and nothing is weakened by
+/// skipping it. A resolver failure is logged, not fatal — refusing to boot a
+/// VM because one of its credentials is not set yet would be a new failure
+/// mode introduced by a backstop.
+pub fn fingerprint_bound_secrets(cfg: &EndpointConfig) -> anyhow::Result<Vec<SecretFingerprint>> {
+    use crate::keyholder::{LocalResolver, SecretResolver, assemble_registry};
+    use secrecy::ExposeSecret;
+
+    let secret_store: Arc<dyn SecretStore> = Arc::new(match &cfg.secret_store_dir {
+        Some(dir) => FileSecretStore::with_dir(dir),
+        None => FileSecretStore::with_dir(default_secrets_dir()?),
+    });
+    let bindings = match &cfg.binding_store_dir {
+        Some(dir) => FileBindingStore::with_dir(dir),
+        None => FileBindingStore::default_location()?,
+    };
+    let (registry, handed) = assemble_registry(&cfg.secrets, &cfg.tenant_id, &bindings)
+        .context("assembling the substitution registry to fingerprint its secrets")?;
+    let resolver = LocalResolver::new(cfg.tenant_id.clone(), secret_store);
+
+    let mut out = Vec::with_capacity(handed.len());
+    for (_guest_var, placeholder) in &handed {
+        let Some(secret_ref) = registry.resolve(placeholder.as_str()) else {
+            continue;
+        };
+        match resolver.resolve(secret_ref) {
+            // The exposed bytes are read once, hashed, and dropped with the
+            // zeroizing box at the end of this iteration.
+            Ok(value) => out.extend(SecretFingerprint::of(
+                value.expose_secret().as_slice(),
+                SecretCategory::HostSecret,
+            )),
+            Err(err) => tracing::warn!(
+                secret = %secret_ref.name,
+                error = %err,
+                "secret not resolvable; the input gate will not recognise it"
+            ),
+        }
+    }
+    Ok(out)
+}
+
 /// Build a chain-signed audit [`Recorder`] from the standard host paths
 /// (`<keys>/host-signer.ed25519` + `<audit>/`), or `None` if the signer key
 /// isn't present (the endpoint then serves un-audited, matching the prior
@@ -268,6 +329,8 @@ mod tests {
     use super::*;
     use crate::keyholder::{BindingStore, SecretBindingMeta};
     use mvm_contract::ir::AuthType;
+    use mvm_contract::ir::AuthType;
+    use mvm_contract::stream::secret_fingerprint::SecretCategory;
     use mvm_core::plan::SecretSource;
     use mvm_core::util::test_env::TestEnv;
     use secrecy::SecretBox;
@@ -566,6 +629,93 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("SUPERSECRET"), "key leaked via Debug: {dbg}");
         assert!(dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn the_endpoint_fingerprints_what_it_resolved_and_reports_no_value() {
+        // Where the plaintext is, is where the fingerprint is computed. This
+        // process opens the store; the process that scans a workload's stdin
+        // gets a length, a hash and a category, and could not reconstruct the
+        // credential from them.
+        const SECRET: &str = "sk-live-abcdef0123456789";
+        let dir = tempdir().unwrap();
+        FileBindingStore::with_dir(dir.path().join("bindings"))
+            .put(
+                "local",
+                "openai",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
+                },
+            )
+            .unwrap();
+        FileSecretStore::with_dir(dir.path().join("secrets"))
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new(SECRET.to_string())),
+            )
+            .unwrap();
+
+        let cfg = vsock_cfg(
+            vec![SecretBinding {
+                name: "OPENAI_API_KEY".into(),
+                source: SecretSource::Keystore {
+                    address: "openai".into(),
+                },
+            }],
+            dir.path(),
+        );
+        let fingerprints = fingerprint_bound_secrets(&cfg).unwrap();
+        assert_eq!(fingerprints.len(), 1);
+        assert_eq!(fingerprints[0].len(), SECRET.len());
+        assert_eq!(fingerprints[0].category(), SecretCategory::HostSecret);
+        assert!(
+            fingerprints[0].matches_window(SECRET.as_bytes()),
+            "the fingerprint has to recognise the value it came from, or the \
+             gate is scanning for the wrong thing"
+        );
+
+        // The handshake this rides on carries no part of the credential.
+        let wire = serde_json::to_string(&EndpointHandshake {
+            env: Vec::new(),
+            input_fingerprints: fingerprints,
+        })
+        .unwrap();
+        assert!(!wire.contains(SECRET), "got {wire}");
+        assert!(!wire.contains("sk-live"), "nor any part of it: {wire}");
+    }
+
+    #[test]
+    fn a_secret_with_no_stored_value_is_skipped_rather_than_fatal() {
+        // A credential the operator has bound but not set is one the workload
+        // cannot receive either, so there is nothing for the gate to
+        // recognise. Refusing to boot over it would be a new failure mode
+        // introduced by a backstop.
+        let dir = tempdir().unwrap();
+        FileBindingStore::with_dir(dir.path().join("bindings"))
+            .put(
+                "local",
+                "openai",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
+                },
+            )
+            .unwrap();
+
+        let cfg = vsock_cfg(
+            vec![SecretBinding {
+                name: "OPENAI_API_KEY".into(),
+                source: SecretSource::Keystore {
+                    address: "openai".into(),
+                },
+            }],
+            dir.path(),
+        );
+        assert!(fingerprint_bound_secrets(&cfg).unwrap().is_empty());
     }
 
     #[test]

@@ -469,7 +469,15 @@ mod tests {
     use mvm_core::plan::test_support::PlanFixture;
 
     use super::*;
-    use crate::stream::input_gate::{InputBinding, KnownSecret};
+    use mvm_protocol::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
+
+    use crate::stream::input_gate::InputBinding;
+
+    /// The fingerprint of `secret`, as the substitution endpoint computes it.
+    fn fingerprint(secret: &str) -> SecretFingerprint {
+        SecretFingerprint::of(secret.as_bytes(), SecretCategory::HostSecret)
+            .expect("a non-empty secret fingerprints")
+    }
 
     /// What a transport was asked to carry, in the order it was asked.
     ///
@@ -568,7 +576,7 @@ mod tests {
     fn route_on(vm: &str, secret: Option<&str>) -> (InputRoute, Recorder) {
         let mut binding = InputBinding::new();
         if let Some(secret) = secret {
-            binding = binding.with_secret(KnownSecret::host_material(secret.as_bytes()));
+            binding = binding.with_fingerprint(fingerprint(secret));
         }
         InputGate::bind(vm, binding);
         let recorder = Recorder::default();
@@ -619,8 +627,8 @@ mod tests {
 
     #[test]
     fn delivery_order_is_acceptance_order_even_when_a_frame_clears_nothing() {
-        // The guarantee this module exists for. The gate withholds
-        // "AKIAIOSFODNN" as a live prefix, so frame 0 clears only "echo " —
+        // The guarantee this module exists for. The gate carries a tail one
+        // byte short of the longest bound secret, so frame 0 clears nothing —
         // and the wire still carries a frame at seq 0, so the sequence the
         // guest sees is the sequence the gate accepted, gaps and all.
         let vm = unique_vm("route-order");
@@ -636,13 +644,19 @@ mod tests {
         assert_eq!(carried.seqs(), [0, 1], "one wire frame per accepted frame");
         assert_eq!(
             carried.carried().frames[0].payload,
-            b"echo ",
-            "the live prefix stays on the host until it is resolved"
+            b"",
+            "the whole 17-byte frame sits inside the carried window"
         );
         assert_eq!(
             carried.stdin_bytes(),
+            b"ech",
+            "and the earliest bytes arrive, in order, once later ones push them out"
+        );
+        route.close().expect("the lease is live");
+        assert_eq!(
+            carried.stdin_bytes(),
             b"echo AKIAIOSFODNNDEMO\n",
-            "and arrives, in order, once it resolves to nothing"
+            "close releases the rest: every byte the writer sent, in order"
         );
     }
 
@@ -685,13 +699,13 @@ mod tests {
             .expect("a prefix is not a match");
         assert_eq!(
             carried.carried().frames[0].payload,
-            b"echo ",
+            b"",
             "the tail is withheld while the stream is open"
         );
 
         route.close().expect("the lease is live");
         let closed = carried.carried().closed.clone().expect("the stream ended");
-        assert_eq!(closed.trailing, b"AKIAIOSFODNN");
+        assert_eq!(closed.trailing, b"echo AKIAIOSFODNN");
         assert_eq!(
             carried.stdin_bytes(),
             b"echo AKIAIOSFODNN",
@@ -914,7 +928,7 @@ mod tests {
         let vm = unique_vm("route-displaced");
         InputGate::bind(
             &vm,
-            InputBinding::new().with_secret(KnownSecret::host_material(b"AKIAIOSFODNN7EXAMPLE")),
+            InputBinding::new().with_fingerprint(fingerprint("AKIAIOSFODNN7EXAMPLE")),
         );
         let mut route = InputRoute::open(
             &vm,

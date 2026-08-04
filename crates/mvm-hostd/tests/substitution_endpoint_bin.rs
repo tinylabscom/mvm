@@ -107,7 +107,9 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     // Handshake: one JSON line of (guest var, placeholder) pairs.
     let mut line = String::new();
     stdout.read_line(&mut line).expect("read handshake line");
-    let handed: Vec<(String, String)> = serde_json::from_str(line.trim()).expect("handshake json");
+    let handshake: mvm_runtime::EndpointHandshake =
+        serde_json::from_str(line.trim()).expect("handshake json");
+    let handed = handshake.env.clone();
     assert_eq!(handed.len(), 1);
     assert_eq!(handed[0].0, "OPENAI_API_KEY");
     let placeholder = handed[0].1.clone();
@@ -206,7 +208,9 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
 
     let mut line = String::new();
     stdout.read_line(&mut line).expect("read handshake line");
-    let handed: Vec<(String, String)> = serde_json::from_str(line.trim()).expect("handshake json");
+    let handshake: mvm_runtime::EndpointHandshake =
+        serde_json::from_str(line.trim()).expect("handshake json");
+    let handed = handshake.env.clone();
     let placeholder = handed[0].1.clone();
 
     let mut conn = UnixStream::connect(&sock).expect("connect to endpoint UDS");
@@ -273,7 +277,9 @@ fn endpoint_bin_raw_no_secret_mode_handshakes_without_placeholders() {
 
     let mut line = String::new();
     stdout.read_line(&mut line).expect("read handshake line");
-    let handed: Vec<(String, String)> = serde_json::from_str(line.trim()).expect("handshake json");
+    let handshake: mvm_runtime::EndpointHandshake =
+        serde_json::from_str(line.trim()).expect("handshake json");
+    let handed = handshake.env.clone();
     assert!(
         handed.is_empty(),
         "raw no-secret endpoint should hand out no placeholders"

@@ -745,4 +745,69 @@ mod tests {
         );
         drop(keys);
     }
+
+    #[test]
+    fn the_cli_holds_no_workload_secret_for_the_input_gate_to_scan_for() {
+        // The gate refuses stdin that looks like one of the host's own
+        // secrets. Recognising a byte sequence normally means having it, and
+        // this process must not: the substitution endpoint that resolves raw
+        // credentials is a separate process, and that separation is load
+        // bearing. So what the gate matches is a fingerprint — a length, a
+        // hash and a category — and the CLI's part is to hold none of the
+        // machinery that could carry a value.
+        //
+        // Asserted on the surface, not on a comment: the fingerprint type has
+        // no accessor that returns bytes, and this crate names neither it nor
+        // the gate binding that takes it.
+        let fingerprint = mvm_protocol::stream::secret_fingerprint::SecretFingerprint::of(
+            b"AKIAIOSFODNN7EXAMPLE",
+            mvm_protocol::stream::secret_fingerprint::SecretCategory::HostSecret,
+        )
+        .expect("a non-empty secret fingerprints");
+        assert!(!format!("{fingerprint:?}").contains("AKIA"));
+        assert_eq!(
+            std::mem::size_of_val(&fingerprint),
+            std::mem::size_of::<u64>() * 2,
+            "fixed-width and inline: no room for a pointer to a value"
+        );
+
+        let named = cli_sources_naming(&["InputBinding", "with_fingerprint", "SecretFingerprint"]);
+        assert!(
+            named.is_empty(),
+            "the CLI must reach the gate only through `StreamPlane::open_input`, which \
+             installs the fingerprint set the substitution endpoint reported; naming the \
+             binding here would be this crate acquiring a reason to hold secret shapes \
+             of its own: {named:?}"
+        );
+    }
+
+    /// Files under this crate's `src/` mentioning any of `needles`, excluding
+    /// this test's own source (which names them to assert their absence).
+    fn cli_sources_naming(needles: &[&str]) -> Vec<String> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        files
+            .into_iter()
+            .filter(|path| path.file_name().is_some_and(|n| n != "stdin_stream.rs"))
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .is_ok_and(|src| needles.iter().any(|needle| src.contains(needle)))
+            })
+            .map(|path| path.display().to_string())
+            .collect()
+    }
 }

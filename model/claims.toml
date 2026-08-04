@@ -247,17 +247,23 @@ level = "build"
 witness_kinds = ["fn"]
 suite = "workload_input"
 statement = "Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited"
-# Preview, not shipped: one leg still has no production caller — the
-# known-secret set is empty on every real VM because `InputGate::bind` is
-# never called outside tests, so the scan's refusal has never fired in
-# production. The operator surface and the shell-entrypoint refusal are now
-# live. The limits are stated in full, marked closed or open individually, in
-# the ADR-001 ledger's "Preview 17 limits" note; do not read this row as
-# enforced without it.
+# Preview, not shipped. Every leg now has a production caller: the operator
+# surface, the shell-entrypoint refusal, and the secret scan, whose set the
+# per-VM substitution endpoint fingerprints and `StreamPlane::open_input`
+# installs. What keeps it a preview is what the enforcement is rather than
+# whether it runs — a fingerprint match is a length-and-hash match, not an
+# identity, and encoding, derivation and a window-straddling split defeat the
+# scan permanently. The limits are stated in full, marked closed or open
+# individually, in the ADR-001 ledger's "Preview 17 limits" note; do not read
+# this row as enforced without it.
 witnesses = [
     "fn:input_is_refused_without_a_plan_grant",
     "fn:a_second_writer_is_refused_while_the_lease_is_held",
     "fn:secret_material_split_across_frames_is_still_refused",
     "fn:every_refusal_is_audited",
     "fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason",
+    "fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value",
+    "fn:the_handshakes_two_halves_go_to_two_different_places",
+    "fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload",
+    "fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret",
 ]

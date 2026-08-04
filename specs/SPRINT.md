@@ -472,9 +472,15 @@ updates only its own entry below.
       because the host cannot read inside a materialized ext4), and admission
       **fails closed** when it cannot resolve one — so the shell refusal cannot
       go dormant again by a caller forgetting to resolve.
-      Claim 17 stays `Preview` on one limit: `InputGate::bind` has no
-      production caller, so the secret scan's known set is empty on every real
-      VM and its refusal has never fired outside tests.
+      Plan 293 WS1 then closed the last dormant leg: the per-VM substitution
+      endpoint — the one process holding a workload's credentials in the clear
+      — fingerprints each secret it resolves and reports `(length, rolling
+      hash, category)` on its ready handshake, and `StreamPlane::open_input`
+      installs that set on the gate. No plaintext crosses into `mvmctl`.
+      Claim 17 stays `Preview`, now for what the enforcement *is* rather than
+      whether it runs: a fingerprint match is a length-and-hash match, not an
+      identity, and encoding, derivation and a window-straddling split defeat
+      the scan permanently.
 
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added

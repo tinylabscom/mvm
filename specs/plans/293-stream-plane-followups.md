@@ -22,8 +22,22 @@ user or an auditor.
 
 ## Workstreams
 
-- [ ] **WS1 — give the scan fingerprints, not plaintext, and close claim 17's
-      last reachability limit.**
+- [x] **WS1 — give the scan fingerprints, not plaintext, and close claim 17's
+      last reachability limit.** Landed. `mvm_protocol::stream::secret_fingerprint`
+      defines `(length, rolling hash, category)` and the rolling primitives;
+      `mvm-hostd`'s substitution endpoint computes a fingerprint per resolved
+      secret and reports them on its ready handshake; `spawn_substitution_endpoint`
+      splits the handshake — placeholders persist to the guest env sidecar,
+      fingerprints stay in this process — and `StreamPlane::open_input` installs
+      the set before a writer's first frame. `KnownSecret` is deleted rather than
+      deprecated, so no binding takes bytes. Two costs recorded rather than
+      discovered: a collision refuses a legitimate frame (the refusal names what
+      it compared and disclaims identity), and, unable to tell a live prefix from
+      an innocent tail, the scanner withholds a fixed `longest_secret - 1` bytes
+      on a secret-bearing VM. ADR-001's limit 1 is CLOSED, a new permanent limit 5
+      records the hash-match cost, and ADR-035 §"What binding a fingerprint
+      discloses" carries the length disclosure and why prefix fingerprints were
+      rejected. Row 17 stays `Preview`: the scan works now, it is not stronger.
 
   `InputGate::bind` has no production caller, so the cross-frame secret scan
   matches against an empty set on every real VM. The scan is correct and

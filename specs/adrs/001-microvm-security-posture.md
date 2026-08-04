@@ -157,31 +157,34 @@ signed plan.
 
 Neither is claimed here, for different reasons. The construction half is
 excluded because this row's three witnesses do not check it. The policy
-half is excluded because one leg of its enforcement — the secret scan —
-still has no production caller. Both are stated and witnessed as Preview 17,
+half is excluded because promoting it is a separate maintainer decision,
+mirroring rows 14 and 16. Both are stated and witnessed as Preview 17,
 with their limits, rather than asserted as part of a shipped claim.
 
 **Preview 17 — workload stdin is grant-gated, single-writer, secret-scanned
 and audited.** The host→guest input plane refuses every write unless the
 workload's signed `ExecutionPlan` carries the input grant; it arbitrates
 concurrent writers with a per-VM lease so two consumers cannot interleave
-into one byte stream; it scans across frame boundaries and withholds a
-tail that is still a live prefix of a known secret rather than shipping it
-and refusing afterwards; it emits a chain-signed, payload-free entry for
+into one byte stream; it scans across frame boundaries and withholds the
+tail it must still be able to see rather than shipping it and refusing
+afterwards; it emits a chain-signed, payload-free entry for
 every refusal and every grant, and declines the decision entirely when it
 cannot record it; and under a sealed production posture it refuses the
 grant outright for a shell-shaped entrypoint, since streaming stdin to a
 shell is interactive access wearing a different hat.
 
-This is a preview, not a shipped claim. The channel now has an operator
-surface — `mvmctl machine run --entrypoint --stdin -` — and the grant, the
-lease, the explicit EOF and the shell-entrypoint refusal all have production
-callers; the refusal reads the entrypoint out of the image's own build-time
-record and fails closed when it cannot. What is still dormant is the secret
-scan: `InputGate::bind` has no caller outside tests, so the known-secret set
-is empty on every real VM and the refusal it exists to produce has never
-fired in production. A claim is worth what its weakest enforced leg is worth,
-so the row stays `Preview`. The four limits are stated in the ledger's
+This is a preview, not a shipped claim. Every leg now has a production
+caller: the channel has an operator surface (`mvmctl machine run
+--entrypoint --stdin -`), the shell-entrypoint refusal reads the entrypoint
+out of the image's own build-time record and fails closed when it cannot,
+and the secret scan is populated — `StreamPlane::open_input` installs the
+fingerprints the per-VM substitution endpoint computed for the secrets it
+resolved. What keeps the row at `Preview` is no longer dormancy but what the
+enforcement *is*: a fingerprint match is a length-and-hash match rather than
+an identity, and encoding, derivation and a window-straddling split defeat
+the scan permanently. Promotion is therefore a maintainer decision about
+whether a numbered claim's prose can carry those qualifications — the same
+posture rows 14 and 16 sit in. The five limits are stated in the ledger's
 "Preview 17 limits" note below, marked as closed or open individually, and
 are load-bearing.
 
@@ -545,7 +548,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md) | Shipped |
 | 15 | A sealed production microVM has no shell, no do_exec, and no PTY | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + interactive-gated agent (Plan 165 WS-C, ADR-001 §W4.3 extension). The host→guest input plane is deliberately *not* claimed here: its properties are policy, not absence, and are witnessed at row 17 | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
-| 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
+| 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason, fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value, fn:the_handshakes_two_halves_go_to_two_different_places, fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload, fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + fingerprint-matching sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
 
 Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
 it is registered here for witness machine-checking and tracked by its own doc
@@ -556,19 +559,36 @@ shipped broker delivery; row 16 backs the same two invariants on the egress
 substitution path.
 
 **Preview 17 limits — what the input plane does and does not enforce.** Row 17
-is `Preview` rather than `Shipped`. Two of the four limits below closed when
-the channel gained an operator surface; two did not, and the row stays where
-its weakest enforced leg puts it. Stating that here is the point of a ledger;
-a row that read as enforced while the enforcement was dormant would be the
-exact failure this table exists to prevent.
+is `Preview` rather than `Shipped`. Three of the five limits below are closed;
+the two that remain are permanent properties of what the enforcement *is*, not
+gaps waiting on work. Stating that here is the point of a ledger; a row that
+read as enforced while the enforcement was dormant would be the exact failure
+this table exists to prevent.
 
-1. **The secret scan is inert in production. (OPEN.)** `InputGate::bind` — the
-   only way a known secret enters the scanner — has no caller outside tests, so
-   the known-secret set is empty on every real VM. The scanner is correct
-   and witnessed (`fn:secret_material_split_across_frames_is_still_refused`
-   and its siblings hold across three-way and one-byte-at-a-time splits);
-   it currently has nothing to match against. This is the limit that keeps
-   row 17 at `Preview`.
+1. **The secret scan is populated in production. (CLOSED.)** It used to be
+   inert: `InputGate::bind` had no caller outside tests, so the known-secret
+   set was empty on every real VM. The per-VM substitution endpoint — the one
+   host process that holds a workload's credentials in the clear — now
+   fingerprints each secret it resolves and reports the fingerprints on its
+   ready handshake, and `StreamPlane::open_input` installs that set on the gate
+   before a writer's first frame. Witnessed by
+   `fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value` and
+   `fn:the_handshakes_two_halves_go_to_two_different_places`;
+   `fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload`
+   drives the whole path, from the endpoint's report through a real plane to a
+   workload process that must not receive the bytes.
+
+   Three things the closure does not say. **Fingerprints, not values**: what
+   crosses into the scanning process is a length, a 64-bit rolling hash and a
+   category — never a credential, because the endpoint is a separate process
+   and keeping it that way is the point (claims 12/13, and row 16). What that
+   discloses, and why prefix fingerprints were rejected, is in ADR-035
+   §"What binding a fingerprint discloses". **Scoped to the booting
+   process**: the set is in memory, held by the invocation that spawned the
+   endpoint — which is exactly the invocation that can stream, per limit 3, so
+   this costs no reachability. **Scoped to secret-bearing plans**: a workload
+   whose plan carries no secrets binds an empty set, which is the correct
+   answer rather than a dormant one.
 2. **The shell-entrypoint refusal now fires on a real entrypoint. (CLOSED.)**
    It used to be dormant: every production call site passed an empty
    `entrypoint_argv`, so the gate never saw a shell. The entrypoint is now
@@ -595,17 +615,31 @@ exact failure this table exists to prevent.
    another process and hold no plan to write under, so they refuse.
 4. **The scan is a backstop, not a defence. (OPEN, permanent.)** Base64, hex,
    any derivation, and a split that straddles the sliding window all defeat
-   it. It catches a confused host-side caller, not a determined one. The real
-   guarantee is upstream and structural: the host has no reason to send a
-   secret into a guest, because secrets are substituted on egress (rows 13 and
-   16) rather than handed over. The same "heuristic, not proof" caveat applies
-   to the shell classification in limit 2: a wrapper that `exec`s a shell
-   defeats it, and no test over argv could separate a program that reads stdin
-   from one that interprets it.
+   it. It catches a confused host-side caller, not a determined one. Giving
+   the scan a populated set makes it *work*; it does not make it stronger than
+   this. The real guarantee is upstream and structural: the host has no reason
+   to send a secret into a guest, because secrets are substituted on egress
+   (rows 13 and 16) rather than handed over. The same "heuristic, not proof"
+   caveat applies to the shell classification in limit 2: a wrapper that
+   `exec`s a shell defeats it, and no test over argv could separate a program
+   that reads stdin from one that interprets it.
+5. **A match is a hash match, not an identity. (OPEN, permanent.)** The gate
+   holds fingerprints because it must not hold values, so two different byte
+   sequences of the same length can match one. The gate refuses either way —
+   failing closed is the right direction — and the refusal says what was
+   compared rather than asserting the bytes are the secret
+   (`fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret`). The
+   cost is the mirror image of limit 4: limit 4 is what the scan misses, this
+   is what it may refuse without cause. A second cost rides with it: unable to
+   tell a live secret prefix from an innocent tail, the scanner withholds a
+   fixed `longest_secret - 1` bytes of every write on a secret-bearing VM
+   until the next write or the close. Bounded, never dropped, and charged only
+   to workloads that have a secret to leak.
 
-Promotion of row 17 to a numbered claim requires limit 1 to close. Limit 4 is
-permanent and is a property of scanning and of argv classification, not a gap
-to fix.
+Limits 4 and 5 are permanent — properties of scanning and of hashing, not gaps
+to fix. Promotion of row 17 to a numbered claim is therefore a decision about
+whether numbered prose can carry them and the argv heuristic in limit 2, not a
+decision waiting on work.
 
 **Claim 3 backend scoping (ADR-107).** Claim 3's witness, dm-verity, is
 block-device-specific: it ratifies the claim on the **block+ext4** backends
