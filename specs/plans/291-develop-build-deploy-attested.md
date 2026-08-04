@@ -1,7 +1,7 @@
 # Develop → build → deploy: one stupidly simple path to an attested workload image
 
-**Status:** Proposed. No implementation yet. Written to be disagreed with before
-any code exists.
+**Status:** In progress. The run-derived agent-verb tier prerequisite is
+landed; deploy attestation and the remaining WS4 work are still open.
 
 **Goal:** A developer starts from an OCI image or a Nix flake, iterates on a
 machine until the workload actually works — including discovering the
@@ -40,7 +40,8 @@ confusing:
 1. **Image contents** — whether console/exec are compiled into the agent.
    *This distinction goes away.* One image, always the same bytes.
 2. **Run tier** — whether a given run may be interacted with.
-   *Follows from (3), not from a build flag.*
+   *Follows from the admitted run and, once available, its attestation — not
+   from image bytes.*
 3. **Attestation** — the image is hashed, recorded, and traceable.
    *This is what `deploy` produces, and it is not going away.*
 
@@ -86,8 +87,8 @@ commands live in mvmd, not mvmctl. Sealing, hashing and recording are artifact
 construction and belong in mvm; pushing to a control plane, tenants and
 placement belong in mvmd. This plan assumes `mvmctl deploy` performs the former
 and delegates the latter. If `mvmctl deploy` is meant to own the control-plane
-conversation directly, that is an architectural change and needs deciding before
-WS1 starts.
+conversation directly, that is an architectural change and needs deciding
+before WS1 starts.
 
 ### WS2 — `mvmctl watch`
 
@@ -114,8 +115,11 @@ same sealed, hash-pinned, CVE-scanned volume.
 
 ### WS4 — the tier follows the attestation
 
-- [ ] The run tier comes from whether the run uses an attested artifact, not
-      from a build variant and not from an unattested CLI flag.
+- [x] Make the agent-verb grant depend on the admitted run shape rather than
+      the image sidecar: a baked-entrypoint boot on a non-dev profile receives
+      ProdSafe verbs; a PTY or ad-hoc argv receives DevOnly verbs.
+- [ ] Make the run tier come from whether the run uses an attested artifact,
+      not from a build variant and not from an unattested CLI flag.
 - [ ] Retire the `interactive` Cargo feature fork so one agent binary serves
       both tiers; the existing `RequestClass::{ProdSafe, DevOnly}` gate and the
       signed `VerbGrant` already do the enforcement.
@@ -134,7 +138,8 @@ same sealed, hash-pinned, CVE-scanned volume.
 ## Sequencing
 
 WS1 is independently useful and unblocks the rest, because the deploy record is
-what WS4's tier signal reads. WS2 is standalone and can land any time. WS3
-depends on WS1 only for where the captured volume is recorded. WS4 should land
-last: it changes user-visible interactive access and should do so once, when the
-attestation it keys on exists.
+what the remaining WS4 tier signal reads. The run-shape prerequisite is landed
+early so the grant no longer depends on an image artifact bit. WS2 is standalone
+and can land any time. WS3 depends on WS1 only for where the captured volume is
+recorded. The remaining WS4 work should land once the attestation it keys on
+exists, so user-visible interactive access changes only once.

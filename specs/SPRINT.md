@@ -10,6 +10,14 @@
 
 ## Current issue delivery
 
+- [~] Develop → build → deploy an attested workload image — **plan 291**.
+      The agent-verb grant now derives from the admitted run shape: baked
+      entrypoints on non-dev profiles receive the attenuated ProdSafe grant,
+      while PTY and ad-hoc argv runs remain DevOnly. This prerequisite no
+      longer keys interactive reachability on an image sidecar bit. Deploy
+      attestation, the remaining tier binding, and conformance witnesses stay
+      open in WS1–WS4.
+
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
       scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
