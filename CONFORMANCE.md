@@ -53,7 +53,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-05` | `build` | Vsock framing + supervisor-config JSON are fuzzed | `ci:fuzz_guest_request`, `ci:fuzz_authenticated_frame`, `ci:fuzz_supervisor_config` |
+| `MVM-SEC-05` | `build` | Vsock framing, supervisor-config JSON, and the userspace datapath's guest-facing ingress are fuzzed | `ci:fuzz_guest_request`, `ci:fuzz_authenticated_frame`, `ci:fuzz_supervisor_config`, `ci:fuzz_datapath_ingress` |
 
 ## guest_privilege
 

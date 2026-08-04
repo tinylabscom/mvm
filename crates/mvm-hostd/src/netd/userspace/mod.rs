@@ -152,9 +152,12 @@ impl UserspaceSocketDatapath {
     /// Build the concrete handle.
     ///
     /// Kept separate from [`L3Datapath::open`], which just boxes this, so
-    /// tests can reach handle-only methods (`service`,
-    /// `open_socket_count`) without downcasting a trait object.
-    fn open_handle(&self, req: &DatapathRequest) -> Result<UserspaceHandle, DatapathError> {
+    /// tests and the fuzz harness can reach handle-only methods (`service`,
+    /// `open_socket_count`) without downcasting a trait object. It opens no
+    /// door a caller does not already have: [`DatapathHandle::send_to_network`]
+    /// still takes an `AdmittedPacket`, so a concrete handle carries no more
+    /// authority than a boxed one.
+    pub fn open_handle(&self, req: &DatapathRequest) -> Result<UserspaceHandle, DatapathError> {
         let lim = read_and_raise_nofile_limit();
         // `libc::rlim_t` is `u64` on every target this crate builds for, so
         // this is a direct pass-through rather than a conversion.

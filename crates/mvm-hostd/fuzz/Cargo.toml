@@ -22,12 +22,21 @@ libfuzzer-sys = "0.4"
 # lock here (cargo-fuzz gitignores it), so the bound lives in the manifest —
 # drop it once rcgen or time resolves the coherence clash.
 time = ">=0.3, <0.3.48"
+# The admitter's private-range list is `IpNet`, so a harness that opens one
+# has to name the type.
+ipnet = "2"
 
 [dependencies.mvm-hostd]
 path = ".."
 
 [dependencies.mvm-core]
 path = "../../mvm-core"
+
+[dependencies.mvm-net]
+path = "../../mvm-net"
+
+[dependencies.mvm-protocol]
+path = "../../mvm-protocol"
 
 # Fuzz the gateway packet parser + payload rebuilder.
 # `packet::parse` runs on every frame the guest puts on the wire (the
@@ -39,6 +48,20 @@ path = "../../mvm-core"
 [[bin]]
 name = "fuzz_packet_parse"
 path = "fuzz_targets/fuzz_packet_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz the userspace socket datapath's guest-facing ingress.
+# Guest bytes off the vsock channel reach `L3Admitter::admit_outbound`
+# (the first parse, IPv4 and IPv6), then the datapath's own re-read of an
+# admitted packet in `send_to_network`, then the per-flow smoltcp stack via
+# `deliver_from_guest`. All three sit on untrusted-guest bytes (claim 5).
+# Harness goal: never panic on any input — a deny, a drop, or an `Err`, but
+# never an abort and never an unwrap on a guest-written length.
+[[bin]]
+name = "fuzz_datapath_ingress"
+path = "fuzz_targets/fuzz_datapath_ingress.rs"
 test = false
 doc = false
 bench = false

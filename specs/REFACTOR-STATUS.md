@@ -27,12 +27,14 @@ for detailed scope and acceptance criteria.
         queues, and deadlines on the two states where no host error can
         ever arrive. Tasks 13–16 remain: UDP associations, backend
         selection, the unprivileged end-to-end suite, and close-out
-  - [ ] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's
+  - [x] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's
         recorded witness surface. **Gates backend selection in WS1 and the
         IPv6 guard in WS3**: the smoltcp ingress parser is unreachable by
         any guest today, and selection is precisely what puts it on a
         guest-controlled input path, so it is fuzzed before it is exposed
-        rather than after
+        rather than after. `fuzz_datapath_ingress` drives admission, the
+        datapath's re-read of an admitted packet, and the per-flow smoltcp
+        stack; claim 5 now records it in `model/claims.toml` and ADR-001
   - [ ] WS1c (#2114) — bounds audit; re-derive the memory ceiling from the
         real per-flow and per-association costs and assert it, rather than
         leaving arithmetic in a doc comment that drifted 24x once already

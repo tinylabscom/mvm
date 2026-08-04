@@ -444,6 +444,23 @@ jobs:
         # path, not a panic).
         run: cargo fuzz run fuzz_packet_parse -- -max_total_time="$DURATION"
 
+      - name: Fuzz userspace datapath ingress (fuzz_datapath_ingress)
+        working-directory: crates/mvm-hostd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # The userspace socket datapath is the guest-facing ingress on any
+        # host with no privileged TUN path. Guest bytes off the vsock channel
+        # reach `L3Admitter::admit_outbound` (the first parse, IPv4 and IPv6),
+        # then the datapath's own re-read of an admitted packet in
+        # `send_to_network`, then the per-flow smoltcp stack — the only place
+        # guest bytes reach `Interface::poll`. Same "never panic on any input"
+        # contract as the other ingress targets. The IPv6 corpus is there even
+        # though admission refuses IPv6: the bounded extension-header walk runs
+        # before the version check refuses the packet, and smoltcp's
+        # `process_hopbyhop` runs before any address check.
+        run: cargo fuzz run fuzz_datapath_ingress -- -max_total_time="$DURATION"
+
       - name: Fuzz runtime recording (SDK trace)
         working-directory: crates/mvm-sdk
         env:
@@ -513,6 +530,8 @@ jobs:
             crates/mvm-fs/fuzz-oci/artifacts/
             crates/mvm-hostd/fuzz-vmhost/corpus/
             crates/mvm-hostd/fuzz-vmhost/artifacts/
+            crates/mvm-hostd/fuzz/corpus/
+            crates/mvm-hostd/fuzz/artifacts/
             crates/mvm-sdk/fuzz/corpus/
             crates/mvm-sdk/fuzz/artifacts/
 
