@@ -1493,7 +1493,10 @@ merely cosmetic now that this backend is reachable: `GatewayConfig::new`
 requires `declared_ingress`, so flipping the flag to the truth would make
 every default gateway refuse on the fallback path and strand the whole
 plan. The honest fix is a listener per declared mapping, which belongs with
-the deferred "UDP ingress" item rather than here.
+the deferred "UDP ingress" item rather than here. **Resolved in WS2 for
+datagrams** — a listener per declared UDP mapping now exists, so the flag
+became true rather than false and the config requirement never had to move.
+Stream ingress on this backend remains unserved and is recorded as such.
 
 - [x] **Step 5: Commit**
 
@@ -1708,7 +1711,7 @@ git commit -m "docs(plan-287): record the userspace socket datapath as shipped"
 ## Deferred (explicitly not in this plan)
 
 - [ ] **`utun` + PF full-packet datapath**, and the privileged helper it needs. Separate ADR, separate decision, gated on explicit sign-off of the helper API. **Resolved as a rejection:** ADR-039 is Rejected — mvm adds no root-capable component — so this is closed, not queued, and reopening it needs a workload with a demonstrated need.
-- [ ] **UDP ingress**, **IPv6**, **multi-queue**, **zero-copy**, **node-to-node transport**, **`mvmd` node-control API**, **WSL2 validation** — tracked in the deferred set of `specs/plans/285-l3-tun-over-vsock.md`.
+- [x] **UDP ingress** — shipped as WS2, below. **IPv6**, **multi-queue**, **zero-copy**, **node-to-node transport**, **`mvmd` node-control API**, **WSL2 validation** remain — tracked in the deferred set of `specs/plans/285-l3-tun-over-vsock.md`.
 
 ### Open defects in what this plan shipped
 
@@ -1775,14 +1778,29 @@ three with the mechanism.
       `every_bounded_step_can_hold_the_pass_off_the_wait` (red when the flag
       is dropped from `Backlog::any`). Every one asserts on backlog state,
       none on elapsed time. Found while closing the two defects above.
-- [ ] **Serve declared ingress, or stop advertising it.**
-      `ForwardingCapabilities::USERSPACE_SOCKETS` sets
-      `declared_ingress: true` and this datapath opens no listener for it,
-      so a plan declaring an inbound mapping is admitted and then not
-      served. The flag cannot simply be cleared: `GatewayConfig::new`
-      requires it, so a false value would make every default gateway refuse
-      on the fallback path. Whichever way it resolves, the config
-      requirement has to move first.
+- [x] **Serve declared ingress, or stop advertising it.** Served, for
+      datagrams, as WS2 — and the half that is still not served is stated
+      rather than rounded off. `DatapathRequest` now carries the
+      declarations, `Gateway::open` copies them out of the same table
+      admission will check against, and `DatagramIngress` binds one host
+      listener per declared UDP mapping on **exactly** the address it
+      named. Binding is not admitting: a synthesized packet leaves through
+      the handle's read path and goes back through `admit_inbound`, so
+      withdrawing a declaration stops delivery while the socket is still
+      bound — witnessed by
+      `an_inbound_datagram_reaches_the_guest_only_while_its_mapping_is_declared`,
+      which delivers first and refuses second so neither half is vacuous.
+      The guest port comes from the declaration and never from the
+      datagram's own destination port, and a guest answer leaves a listener
+      only toward a peer that has already written to that mapping —
+      otherwise the unconnected listener socket would be an egress route
+      around the admitted-destination check. The config requirement did not
+      have to move, because the flag became true rather than false.
+      **Still open: TCP.** A declared stream mapping is admitted and binds
+      nothing on this backend; serving one needs a listener whose accepted
+      connections are originated toward the guest. It is skipped at open
+      rather than refused, opens no socket, and is recorded in ADR-037
+      §"Known defects in what shipped" as the remaining over-claim.
 - [x] **Give `Gateway::poll_inbound` a per-pass budget.** Done, mirroring
       the guest-facing drain rather than inventing a second mechanism:
       bounded by `MAX_INBOUND_PACKETS_PER_PASS`, reporting

@@ -843,10 +843,14 @@ updates only its own entry below.
       tail no longer waits out the tick, and the association fixture that
       aimed at a closed loopback port — an ICMP unreachable the next `send`
       surfaced as `ECONNREFUSED`, deterministic on Linux — now aims at a
-      destination that exists and discards. Still open: `declared_ingress:
-      true` is advertised with no listening socket behind it, and cannot be
-      cleared today because `GatewayConfig::new` requires it.
-      Remaining plan-287 workstreams (UDP ingress, IPv6, benchmarking,
+      destination that exists and discards. The last of the three is now
+      closed for datagrams by WS2: `declared_ingress: true` is backed by a
+      real host listener per declared UDP mapping, bound on exactly the
+      address the mapping named, with delivery still decided by
+      `admit_inbound` rather than by the datapath. Declared **TCP** ingress
+      on this backend stays unserved and is recorded as the remaining
+      over-claim rather than smoothed over.
+      Remaining plan-287 workstreams (IPv6, benchmarking,
       zero-copy, node-to-node transport, the node-control API, WSL2) are
       untouched; the `utun` + PF backend is closed by ADR-039's rejection
       rather than queued.

@@ -216,10 +216,16 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 
 ## Deferred (explicitly not in this change)
 
-- [ ] **UDP ingress.** TCP ingress ships; UDP ingress needs a
-      per-mapping datagram association table with its own bounds and is
-      not implemented. Declaring a UDP ingress mapping is rejected at
-      admission rather than silently ignored.
+- [x] **UDP ingress.** Delivered by
+      `specs/plans/287-userspace-socket-datapath.md` WS2. A UDP mapping is
+      declarable end to end — plan, lease, netd config, `IngressTable` —
+      and the userspace socket datapath binds a host listener per mapping,
+      with a bounded per-listener peer table for the reply path. Delivery
+      still goes through `admit_inbound`, so a withdrawn declaration stops
+      it. **TCP** ingress remains unserved on the socket backend: it needs
+      a listener whose accepted connections are originated toward the
+      guest, which that backend does not build. The packet backend serves
+      both.
 - [x] **macOS userspace socket gateway.** Delivered by
       `specs/plans/287-userspace-socket-datapath.md` (ADR-037), and widened
       on the way: `UserspaceSocketDatapath` is platform-neutral, so it also

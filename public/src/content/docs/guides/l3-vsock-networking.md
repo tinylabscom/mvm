@@ -124,7 +124,7 @@ Choosing L3 mode does not weaken the boundary. It still guarantees:
 | HTTP/SNI policy | yes, where owned | **no** |
 | Destination / port / flow policy | yes | yes |
 | Controlled DNS + domain allowlists | yes | yes |
-| Declared ingress | yes | packet backend only; see the limits below |
+| Declared ingress | yes | TCP on the packet backend; UDP on both; see the limits below |
 | Raw sockets, ICMP, non-TCP/UDP | **no** | only on the packet backend |
 | Works without proxy-env cooperation | partly | yes |
 
@@ -225,15 +225,27 @@ address is empty, because a point-to-point IP interface has none.
 - IP fragments are rejected rather than reassembled. TCP MSS is clamped so
   ordinary traffic does not fragment.
 - One data queue. The protocol reserves the fields for more.
-- TCP ingress only. Declaring UDP ingress is refused at admission rather
-  than accepted and ignored.
+- Ingress mappings may declare `tcp` or `udp`. A protocol that is neither
+  is refused at admission rather than accepted and ignored.
 
 On the socket backend specifically:
 
-- **Declared ingress is advertised but not served.** A plan that declares
-  an inbound mapping is admitted on this backend, and nothing listens for
-  it. Do not rely on inbound connections reaching a workload here. Egress —
-  connections the guest opens — is unaffected.
+- **Declared UDP ingress is served; declared TCP ingress is not.** A
+  datagram mapping binds a host listener on exactly the address it names,
+  and datagrams arriving on it are delivered to the guest port the mapping
+  declares — subject to the same admission check every inbound packet
+  passes, so withdrawing the mapping stops delivery. A *stream* mapping is
+  admitted and binds nothing: serving one needs a listener whose accepted
+  connections are originated toward the guest, which this backend does not
+  build. Do not rely on inbound TCP reaching a workload here. Egress —
+  connections the guest opens — is unaffected either way.
+- A UDP mapping answers only peers that have written to it. The guest's
+  reply leaves by the listener the conversation arrived on, so the peer
+  sees it from the address it dialled; a datagram the guest aims anywhere
+  else takes the ordinary outbound path and is subject to egress policy
+  like any other. A peer entry lasts as long as a datagram association
+  does, so a conversation quiet for longer than that is answered from a
+  fresh source port, which a peer sees as a rebind.
 
 Two limitations this backend used to carry are gone. The gateway is now
 woken by the host sockets themselves, so a completed connection and an

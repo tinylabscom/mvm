@@ -306,6 +306,12 @@ impl Gateway {
             guest: config.lease.guest,
             prefix_len: config.lease.prefix_len(),
             mtu: config.policy.mtu,
+            // Copied out before the table moves into the admitter below. A
+            // backend that serves ingress by binding a listener needs the
+            // same declarations admission will check inbound packets
+            // against — one source, read twice, rather than two lists that
+            // can disagree about which ports are exposed.
+            ingress: config.ingress.iter().copied().collect(),
         })?;
 
         let admitter = L3Admitter::new(
@@ -939,10 +945,12 @@ mod tests {
     use super::*;
     use crate::netd::datapath::LoopbackDatapath;
     use crate::netd::test_packets::{tcp, v4_packet};
+    use crate::netd::userspace::UserspaceSocketDatapath;
     use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
     use mvm_net::l3::{AddressAllocator, AdmittedPacket, IngressMapping};
     use mvm_protocol::l3::proto;
     use std::sync::Arc;
+    use std::time::Duration;
 
     const REMOTE: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
     const SESSION: SessionId = SessionId(0x1122_3344_5566_7788);
@@ -1370,6 +1378,88 @@ mod tests {
             gw.admitter_mut().admit_inbound(&inbound, 5),
             InboundVerdict::Deliver(_)
         ));
+    }
+
+    /// Drive the gateway the way its loop does — service the datapath,
+    /// then drain what it produced — until `ready` holds. Bounded: a
+    /// condition that never comes true must fail an assertion, never hang.
+    fn drive_gateway_until(gw: &mut Gateway, ready: impl Fn(&Gateway) -> bool) -> bool {
+        for pass in 0..200u64 {
+            gw.service_datapath(pass).expect("service");
+            gw.poll_inbound(pass);
+            if ready(gw) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+
+    /// **Default-deny holds across the seam, for a real inbound datagram.**
+    ///
+    /// The userspace datapath binds a host listener because the plan
+    /// declared a mapping — but binding is not admitting. Every datagram
+    /// that listener produces leaves through the datapath's read path and
+    /// goes back through `admit_inbound`, which refuses one whose guest
+    /// port has no declared mapping. Withdrawing the declaration stops
+    /// delivery while the socket is still bound and still receiving, which
+    /// is the only arrangement in which "the datapath cannot smuggle an
+    /// undeclared delivery" means anything: the packet exists, it reaches
+    /// the seam, and the seam is what turns it away.
+    #[test]
+    fn an_inbound_datagram_reaches_the_guest_only_while_its_mapping_is_declared() {
+        let host_port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .expect("probe a free port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut config =
+            GatewayConfig::new("vm-a", "sha256:plan", lease(), L3PolicyConfig::default());
+        config
+            .ingress
+            .declare(IngressMapping::udp(loopback, host_port, 5140))
+            .expect("declare a datagram mapping");
+        let dp = UserspaceSocketDatapath::new();
+        let mut gw = Gateway::open(config, SESSION, &dp, Arc::new(StaticResolver::new()))
+            .expect("the backend advertises declared ingress, so this plan is servable");
+        handshake(&mut gw);
+
+        let declared = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a peer");
+        declared
+            .send_to(b"declared", (Ipv4Addr::LOCALHOST, host_port))
+            .expect("a peer datagram toward the declared mapping");
+        assert!(
+            drive_gateway_until(&mut gw, |g| g.metrics().packets_ingress > 0),
+            "a datagram for a declared mapping must reach the guest, or the refusal \
+             below proves nothing"
+        );
+        assert_eq!(gw.metrics().denies_for(DenyCode::UnsolicitedInbound), 0);
+
+        gw.admitter_mut()
+            .ingress_mut()
+            .withdraw(loopback, host_port);
+
+        // A second peer, deliberately. The first one's datagram opened a
+        // flow-table entry, so anything further from that exact 4-tuple is
+        // return traffic and would be admitted on the flow rather than on
+        // the declaration — which would make this assert nothing.
+        let stranger = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a second peer");
+        stranger
+            .send_to(b"undeclared", (Ipv4Addr::LOCALHOST, host_port))
+            .expect("send");
+        assert!(
+            drive_gateway_until(&mut gw, |g| g
+                .metrics()
+                .denies_for(DenyCode::UnsolicitedInbound)
+                > 0),
+            "a datagram whose guest port is no longer declared must be refused and counted"
+        );
+        assert_eq!(
+            gw.metrics().packets_ingress,
+            1,
+            "and nothing beyond the declared one reached the guest"
+        );
     }
 
     // ---- DNS --------------------------------------------------------

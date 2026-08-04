@@ -15,7 +15,7 @@
 
 use std::net::Ipv4Addr;
 
-use mvm_net::l3::AdmittedPacket;
+use mvm_net::l3::{AdmittedPacket, IngressMapping};
 
 /// What a forwarding backend can actually carry.
 ///
@@ -152,6 +152,16 @@ pub struct DatapathRequest {
     /// Prefix length of the /30.
     pub prefix_len: u8,
     pub mtu: u16,
+    /// Ingress mappings the plan declared.
+    ///
+    /// Here rather than left to admission because the two backends need
+    /// different things from a declaration: one that forwards whole packets
+    /// needs nothing bound — an inbound packet reaches its device on its
+    /// own — while one that translates flows into host sockets has to open
+    /// a listener for each mapping, and can only do that if it is told what
+    /// was declared. Admission still decides delivery either way; this is
+    /// what makes the packet exist to be decided about.
+    pub ingress: Vec<IngressMapping>,
 }
 
 /// Why a datapath could not be opened or used.
@@ -446,6 +456,7 @@ mod tests {
             guest: Ipv4Addr::new(10, 201, 0, 6),
             prefix_len: 30,
             mtu: 1500,
+            ingress: Vec::new(),
         }
     }
 

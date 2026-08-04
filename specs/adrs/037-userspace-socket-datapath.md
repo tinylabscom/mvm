@@ -166,12 +166,14 @@ rather than from intent:
 
 | Const | Value | Rationale |
 |---|---|---|
-| `DEFAULT_MAX_HOST_SOCKETS` | 256 | An affordability bound, not a demand: what the host can carry at 44.35 MiB against the real per-flow cost below, held well under `DEFAULT_MAX_FLOWS` (4096) because a descriptor costs more than a table entry |
+| `DEFAULT_MAX_HOST_SOCKETS` | 256 | An affordability bound, not a demand: what the host can carry at 44.32 MiB against the real per-flow cost below, held well under `DEFAULT_MAX_FLOWS` (4096) because a descriptor costs more than a table entry |
 | `FD_RESERVE` | 64 | Uncounted slack for audit log, vsock, control channel, logging and the readiness pair; binds only when the raised `RLIMIT_NOFILE` is under 320 |
 | `DEFAULT_MAX_HALF_OPEN` | 64 | A connecting descriptor each; sized for a real connect burst — page-load fan-out, parallel package install, sidecar startup — not for a flood |
 | `HALF_OPEN_TIMEOUT_MILLIS` | 10_000 | Matches ordinary connect timeouts |
 | `DEFAULT_MAX_UDP_ASSOCIATIONS` | 64 | Sized against what a workload opens once DNS is excluded — QUIC, NTP, syslog, metrics — and held to a quarter of the socket cap so datagrams cannot starve TCP of the shared descriptor budget |
-| `DATAGRAMS_PER_ASSOCIATION_POLL` | 4 | `DEFAULT_QUEUE_DEPTH / DEFAULT_MAX_UDP_ASSOCIATIONS`: a full poll of every association exactly fills the one guest-bound queue |
+| `DEFAULT_MAX_UDP_INGRESS_LISTENERS` | 16 | Declared inbound datagram mappings this datapath binds a listener for. A handful of named services, not a range — and far under the policy layer's own 64, because a mapping there is a table row while a listener here holds a descriptor for the machine's whole life and is never reclaimed |
+| `PEERS_PER_INGRESS_LISTENER` | 32 | Peers one listener remembers so the guest's answer can go back to whoever asked. Sized for the concurrent conversations an exposed datagram service really has; a datagram from a peer past the cap is dropped rather than delivered, since the answer would have nowhere to go |
+| `DATAGRAMS_PER_SOURCE_POLL` | 3 | `DEFAULT_QUEUE_DEPTH / (DEFAULT_MAX_UDP_ASSOCIATIONS + DEFAULT_MAX_UDP_INGRESS_LISTENERS)`: one divisor, because associations and listeners empty onto the one guest-bound queue. Sizing either against the whole depth would let whichever is polled first fill it and leave the other reading datagrams off host sockets only to discard them |
 | Per-socket ring buffers | 16 KiB rx + 16 KiB tx | 32 KiB per flow |
 | Per-flow device queues | 31 rx + 65 tx packets at the 1500-byte MTU | 144,000 bytes per flow |
 
@@ -209,15 +211,17 @@ Per machine at the cap:
 flows              256 × 176,768                      = 45,252,608 bytes
 machine-wide device  2 × 256 packets × 1500 bytes      =    768,000 bytes
 half-open SYNs      64 × 1500 bytes                    =     96,000 bytes
-one UDP poll batch  64 × 4 × 1500 bytes                =    384,000 bytes
+one UDP poll batch  64 × 3 × 1500 bytes                =    288,000 bytes
+one ingress batch   16 × 3 × 1500 bytes                =     72,000 bytes
                                                          --------------
-MEMORY_CEILING_BYTES                                     46,500,608 bytes
+MEMORY_CEILING_BYTES                                     46,476,608 bytes
 ```
 
-**46,500,608 bytes is 44.35 MiB**, not 32 MiB. It is an upper bound and not
-an attainable state — flows, half-open entries and associations all draw on
-the same descriptor budget, so a machine cannot hold 256 of one and 64 each
-of the others at the same instant — but it is summed anyway, because a
+**46,476,608 bytes is 44.32 MiB**, not 32 MiB. It is an upper bound and not
+an attainable state — flows, half-open entries, associations and ingress
+listeners all draw on the same descriptor budget, so a machine cannot hold
+256 of one and the full cap of each of the others at the same instant — but
+it is summed anyway, because a
 ceiling that has to be reasoned about to be believed is a ceiling nobody
 re-checks. `the_per_machine_memory_ceiling_is_what_we_claim` in `limits.rs`
 asserts every term and the total.
@@ -226,13 +230,17 @@ The discrepancy this section used to record is closed. The doc comment on
 `DEFAULT_MAX_HOST_SOCKETS` said the worst case at a cap of 256 was "back
 under 44 MiB", which counted only the per-flow term (45,252,608 bytes,
 43.16 MiB) and omitted the three machine-level terms the constant itself
-sums; it now states 44.35 MiB and names both figures so the smaller one
+sums; it now states 44.32 MiB and names both figures so the smaller one
 cannot be mistaken for the ceiling again.
 
-Each of the four terms is asserted separately as well as in the total,
-including the machine-wide device. That is not redundancy: dropping the
-machine-wide device term and dropping the UDP term each move the total by
-exactly 384,000 bytes, so the total on its own cannot say which one went.
+Each of the five terms is asserted separately as well as in the total, and
+the machine-wide device — the one with no named constant — is asserted as
+the **residual** of the four that do. That is not redundancy: two terms of
+equal size move the total identically, so a total on its own cannot say
+which one went, and a residual form makes a dropped term fail under its own
+name. Declared UDP ingress added the fifth term, and adding it is what
+moved the association batch from 4 datagrams per poll to 3: the two share
+one guest-bound queue and one divisor.
 
 - **At capacity the new packet is dropped; a live flow is never evicted.**
   This matches the existing `FlowAdmission` posture rather than
@@ -419,14 +427,41 @@ The third is open.
   straight back instead of waiting. A stall is not a backlog and is not
   reported as one — what frees the stack's send buffer is the guest's ACK,
   and that arrives on the guest channel, which wakes the loop by itself.
-- **`declared_ingress: true` is advertised with no listening socket behind
-  it.** `ForwardingCapabilities::USERSPACE_SOCKETS` sets the flag, so a
-  plan declaring an ingress mapping is admitted, but this datapath opens
-  nothing to serve it. The flag cannot simply be cleared today:
-  `GatewayConfig::new` requires it, so a false value would make every
-  default gateway refuse on the fallback path. This is an over-claim in the
-  capability seam and should be resolved by serving declared ingress or by
-  relaxing the config requirement first — not by leaving both as they are.
+- **`declared_ingress: true` is now true for datagrams and still not true
+  for streams.** Half closed, and the open half is stated rather than
+  rounded off.
+
+  **Closed for UDP.** A declared datagram mapping binds a host listener on
+  exactly the address it named, and the datagrams it receives are
+  synthesized into packets addressed to the guest port the *declaration*
+  named — never the datagram's own destination port, which names the host
+  listener. Binding is not admitting: those packets leave through the
+  handle's read path and go back through `admit_inbound`, which refuses any
+  whose guest port has no declared mapping there, so withdrawing a
+  declaration stops delivery while the socket is still bound.
+
+  What a mapping accepts from is the address it declared and nothing else,
+  and no second per-source allow-list was invented — the plan carries none,
+  so one written in the datapath would be policy the datapath chose. What
+  the datapath owes that decision is to bind exactly what was declared; the
+  wildcard case is already gated behind explicit admission in
+  `IngressTable`. In the other direction the listener is strict: its socket
+  is unconnected, so a guest datagram leaves it only toward a peer that has
+  already written to that mapping, inside that peer's lifetime. Anything
+  else falls through to the outbound association path, whose socket is
+  connected to an admitted destination — the fail-closed direction.
+
+  **Open for TCP.** A declared stream mapping is admitted and binds
+  nothing here. Serving one needs a listener whose accepted connections are
+  originated *toward* the guest — the mirror of the deferred handshake,
+  with the guest as the side that must be dialled — and this datapath does
+  not build that. It is skipped at open rather than refused, so a plan
+  carrying one still runs its outbound traffic, and it opens no socket, so
+  nothing can be mistaken for serving it. The packet-forwarding backend
+  serves both, since an inbound packet reaches its device with nothing
+  bound. Until stream ingress lands here, `declared_ingress: true` remains
+  an over-claim for TCP on this backend, and saying so is the point of this
+  entry.
 - ~~**`Gateway::poll_inbound` drains without a per-pass budget.**~~
   **Closed.** The drain is bounded by `MAX_INBOUND_PACKETS_PER_PASS` and
   reports `InboundDrain::Backlogged` when the budget is what stopped it, so

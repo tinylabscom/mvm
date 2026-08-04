@@ -217,6 +217,7 @@ fn open_handle() -> Option<mvm_hostd::netd::userspace::UserspaceHandle> {
             guest: GUEST,
             prefix_len: 30,
             mtu: MTU_V1,
+            ingress: Vec::new(),
         })
         .ok()
 }

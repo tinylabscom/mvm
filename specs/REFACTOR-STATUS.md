@@ -58,9 +58,9 @@ for detailed scope and acceptance criteria.
         the association fixture that aimed at a closed loopback port — where
         the ICMP unreachable surfaced on the next `send` as `ECONNREFUSED`,
         deterministically on Linux — now aims at a destination that exists
-        and discards. Still open: `declared_ingress:
-        true` is advertised with no listening socket serving it, and cannot
-        simply be cleared because `GatewayConfig::new` requires it
+        and discards. The last of the three is closed for datagrams by WS2;
+        declared **TCP** ingress on this backend stays unserved and is
+        recorded as the remaining over-claim
   - [x] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's
         recorded witness surface. **Gates backend selection in WS1 and the
         IPv6 guard in WS3**: the smoltcp ingress parser is unreachable by
@@ -81,8 +81,29 @@ for detailed scope and acceptance criteria.
         and `DEFAULT_MAX_HOST_SOCKETS` is an affordability ceiling rather
         than a demand figure, and both comments now say so instead of
         implying a derivation neither has
-  - [ ] WS2 (#2115) — UDP ingress: declared inbound datagram mappings,
-        admitted explicitly rather than inferred from traffic
+  - [x] WS2 (#2115) — UDP ingress: declared inbound datagram mappings,
+        admitted explicitly rather than inferred from traffic. A UDP
+        mapping is declarable end to end (plan, lease, netd config,
+        `IngressTable`), `DatapathRequest` carries the declarations, and
+        `DatagramIngress` binds one host listener per mapping on **exactly**
+        the address declared — the bind address is the exposure decision,
+        and no second per-source allow-list was invented because the plan
+        carries none. The guest port comes from the declaration, never from
+        the datagram's own destination port. Binding is not admitting: a
+        synthesized packet goes back through `admit_inbound`, so a withdrawn
+        declaration stops delivery while the socket is still bound
+        (`an_inbound_datagram_reaches_the_guest_only_while_its_mapping_is_declared`,
+        mutation-proved). A guest answer leaves a listener only toward a
+        peer that has written to that mapping, since the listener's socket
+        is unconnected and would otherwise be an egress route around the
+        admitted-destination check. Bounded like the rest of the module —
+        16 listeners, 32 peers each, both dropping the newcomer rather than
+        evicting — and the memory ceiling moved with it: a fifth term,
+        `UDP_INGRESS_BUFFER_BYTES`, and one shared per-poll divisor took the
+        association batch from 4 datagrams to 3, so the ceiling is now
+        46,476,608 bytes (44.32 MiB). `declared_ingress: true` is honest for
+        datagrams; declared **TCP** ingress binds nothing here and stays
+        recorded as an over-claim
   - [ ] WS3 (#2116) — IPv6 as a first-class family (ADR-038). Blocked on
         #2113. One `embedded_v4` extraction ahead of every other rule, then
         the entire existing v4 class check — v4-mapped, v4-compatible,

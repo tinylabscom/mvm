@@ -991,6 +991,7 @@ impl Translator {
                 guest: cfg.guest_ipv4,
                 prefix_len: cfg.lease().prefix_len(),
                 mtu: cfg.mtu,
+                ingress: Vec::new(),
             })
             .expect("opening a userspace handle needs no privileges");
         Self { admitter, handle }

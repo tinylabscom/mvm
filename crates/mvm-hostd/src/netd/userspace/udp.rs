@@ -50,7 +50,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::netd::datapath::DatapathError;
 
 use super::limits::{
-    ASSOCIATION_LIFETIME_MILLIS, DATAGRAMS_PER_ASSOCIATION_POLL, MAX_DATAGRAM_PAYLOAD_BYTES,
+    ASSOCIATION_LIFETIME_MILLIS, DATAGRAMS_PER_SOURCE_POLL, MAX_DATAGRAM_PAYLOAD_BYTES,
 };
 use super::readiness::{Watch, Watched};
 use super::tcp::{is_terminal_host_error, same_host};
@@ -129,7 +129,7 @@ impl Association {
         // to the buffer and discards the rest, so a read that fills this is
         // one that lost bytes.
         let mut buf = [0u8; MAX_DATAGRAM_PAYLOAD_BYTES + 1];
-        for _ in 0..DATAGRAMS_PER_ASSOCIATION_POLL {
+        for _ in 0..DATAGRAMS_PER_SOURCE_POLL {
             let (len, from) = match self.socket.recv_from(&mut buf) {
                 Ok(read) => read,
                 Err(e) if !is_terminal_host_error(e.kind()) => return DrainOutcome::Idle,
@@ -369,7 +369,7 @@ fn from_admitted_peer(from: SocketAddr, admitted: SocketAddr) -> bool {
 /// different families, which cannot happen — a flow's remote is reached
 /// over the interface the guest's address is configured on. It is not a
 /// statement about which families are supported; both are emitted.
-fn synthesize_datagram(key: &FlowKey, guest: IpAddr, payload: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn synthesize_datagram(key: &FlowKey, guest: IpAddr, payload: &[u8]) -> Option<Vec<u8>> {
     let udp = UdpRepr {
         src_port: key.remote_port,
         dst_port: key.guest_port,
@@ -808,13 +808,13 @@ mod tests {
         let echo = bind_udp_echo_server();
         let mut a = UdpAssociations::new(64, guest(), watch());
         let flow = key_to(echo);
-        for i in 0..(DATAGRAMS_PER_ASSOCIATION_POLL + 3) {
+        for i in 0..(DATAGRAMS_PER_SOURCE_POLL + 3) {
             a.send(flow, &[i as u8], 0).expect("send");
         }
         // Give every echo time to come back before the bound is measured,
         // so a short read is the bound and not the network.
         std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(a.poll(1).len(), DATAGRAMS_PER_ASSOCIATION_POLL);
+        assert_eq!(a.poll(1).len(), DATAGRAMS_PER_SOURCE_POLL);
     }
 
     /// Both families are emitted, and a reply the datapath cannot address

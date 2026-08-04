@@ -74,13 +74,15 @@ pub enum L3IcmpPolicy {
 
 /// One declared ingress mapping: a host listener forwarding into the guest.
 ///
-/// Version 1 implements TCP. A `udp` protocol is refused at admission rather
-/// than accepted and ignored, so a workload never believes it is reachable
-/// on a port nothing is listening for.
+/// `"tcp"` and `"udp"` are both declarable; anything else is refused at
+/// admission rather than accepted and ignored, so a workload never believes
+/// it is reachable on a port nothing is listening for. Whether a declared
+/// mapping is *served* is a property of the selected forwarding backend and
+/// is reported through its capabilities, not decided here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct L3IngressMapping {
-    /// `"tcp"`. Any other value is refused at admission.
+    /// `"tcp"` or `"udp"`. Any other value is refused at admission.
     pub proto: String,
     /// Host address the listener binds. `0.0.0.0` is a wildcard exposure.
     pub host_addr: String,

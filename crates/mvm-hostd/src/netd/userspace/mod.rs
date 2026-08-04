@@ -12,6 +12,7 @@
 //! descriptor budget are different numbers.
 
 pub mod device;
+pub mod ingress;
 pub mod limits;
 pub mod readiness;
 pub mod tcp;
@@ -32,8 +33,10 @@ use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
 use self::device::{GuestDevice, PushOutcome, QueueDepths};
+use self::ingress::{DatagramIngress, IngressBounds, ReplyOutcome};
 use self::limits::{
-    DEFAULT_MAX_HALF_OPEN, DEFAULT_MAX_HOST_SOCKETS, DEFAULT_MAX_UDP_ASSOCIATIONS, FD_RESERVE,
+    DEFAULT_MAX_HALF_OPEN, DEFAULT_MAX_HOST_SOCKETS, DEFAULT_MAX_UDP_ASSOCIATIONS,
+    DEFAULT_MAX_UDP_INGRESS_LISTENERS, FD_RESERVE, PEERS_PER_INGRESS_LISTENER,
 };
 use self::readiness::ReadinessSet;
 use self::tcp::{EstablishedFlow, HalfOpenTable, SynOutcome};
@@ -205,6 +208,35 @@ impl UserspaceSocketDatapath {
         let sockets = SocketSet::new(Vec::new());
 
         let guest = IpAddr::V4(req.guest);
+
+        // Bound before the handle exists, so a machine whose declared
+        // mappings cannot all be served does not start. A listener silently
+        // skipped is a workload told it is reachable on a port nothing
+        // answers, which is the failure a declaration exists to prevent.
+        let mut ingress = DatagramIngress::new(
+            IngressBounds {
+                // Against the same descriptor budget, for the same reason
+                // as the tables above — and more strictly, since a listener
+                // holds its descriptor for the machine's whole life.
+                listeners: DEFAULT_MAX_UDP_INGRESS_LISTENERS.min(budget),
+                peers_per_listener: PEERS_PER_INGRESS_LISTENER,
+            },
+            guest,
+            watch.clone(),
+        );
+        for mapping in &req.ingress {
+            // TCP ingress is declarable and is not served here: it would
+            // need a listener whose accepted connections are originated
+            // *toward* the guest, which this datapath does not build. It is
+            // skipped rather than refused so a plan carrying one still runs
+            // its outbound traffic; the gap is recorded in the capability
+            // seam rather than hidden behind a bound socket.
+            if mapping.proto != mvm_core::policy::projection::Proto::Udp {
+                continue;
+            }
+            ingress.declare(*mapping)?;
+        }
+
         Ok(UserspaceHandle {
             machine_id: req.machine_id.clone(),
             readiness: Some(readiness),
@@ -223,7 +255,12 @@ impl UserspaceSocketDatapath {
             // Bounded against the same budget, and for the same reason: an
             // association parks a descriptor drawn from the one pool TCP is
             // also drawing on.
-            udp: UdpAssociations::new(DEFAULT_MAX_UDP_ASSOCIATIONS.min(budget), guest, watch),
+            udp: UdpAssociations::new(
+                DEFAULT_MAX_UDP_ASSOCIATIONS.min(budget),
+                guest,
+                watch.clone(),
+            ),
+            ingress,
             flows: BTreeMap::new(),
             metrics: GatewayMetrics::default(),
             now_millis: 0,
@@ -285,6 +322,10 @@ pub struct UserspaceHandle {
     half_open: HalfOpenTable,
     /// Guest datagram conversations, each on its own connected host socket.
     udp: UdpAssociations,
+    /// Host listeners for the declared inbound datagram mappings. Nothing
+    /// is ever added here after open: a mapping exists because the plan
+    /// declared it, never because traffic arrived.
+    ingress: DatagramIngress,
     flows: BTreeMap<FlowKey, EstablishedFlow>,
     metrics: GatewayMetrics,
     /// The clock the last [`Self::service`] ran at.
@@ -317,7 +358,7 @@ impl UserspaceHandle {
     /// a reclaimed flow actually gave its descriptor back, and the end-to-end
     /// suite that asserts it lives outside this crate's netd module tree.
     pub fn open_socket_count(&self) -> usize {
-        self.flows.len() + self.half_open.len() + self.udp.len()
+        self.flows.len() + self.half_open.len() + self.udp.len() + self.ingress.len()
     }
 
     /// This machine's counters.
@@ -361,6 +402,10 @@ impl UserspaceHandle {
         // ends it.
         self.poll_associations(now_millis);
         self.expire_associations(now_millis);
+        // Same order, for the same reason: a datagram that arrived inside a
+        // peer's lifetime still reaches the guest on the pass that ends it.
+        self.poll_ingress(now_millis);
+        self.expire_ingress(now_millis);
         let drain = self.pump_flows(now_millis);
         let now = SmolInstant::from_millis(now_millis as i64);
         self.interface
@@ -422,6 +467,37 @@ impl UserspaceHandle {
             .metrics
             .datapath_errors
             .saturating_add(drops.unaddressable);
+    }
+
+    /// Put what every declared mapping's peers sent in front of the guest.
+    ///
+    /// Queued, not delivered: these packets leave through the handle's read
+    /// path and go back through `mvm_net::l3::admit`, which refuses any
+    /// whose guest port has no declared mapping there. This side opens the
+    /// socket; admission decides what reaches the guest.
+    fn poll_ingress(&mut self, now_millis: u64) {
+        for packet in self.ingress.poll(now_millis) {
+            self.queue_for_guest(packet);
+        }
+        let drops = self.ingress.take_drops();
+        // A peer the listener had no room to remember is refused for the
+        // same reason a flow past the table's cap is.
+        self.metrics
+            .record_denies(DenyCode::FlowTableFull, drops.peers_full);
+        self.metrics
+            .record_denies(DenyCode::OversizedPacket, drops.oversized);
+        self.metrics.datapath_errors = self
+            .metrics
+            .datapath_errors
+            .saturating_add(drops.unaddressable)
+            .saturating_add(drops.read_errors);
+    }
+
+    /// Reclaim ingress peers that have reached their deadline. The
+    /// listeners themselves stay: they are declared.
+    fn expire_ingress(&mut self, now_millis: u64) {
+        let expired = self.ingress.expire(now_millis) as u64;
+        self.metrics.flows_expired = self.metrics.flows_expired.saturating_add(expired);
     }
 
     /// Reclaim associations that have reached their deadline.
@@ -521,6 +597,24 @@ impl UserspaceHandle {
                 "a UDP packet whose declared length names no readable payload",
             ))
         })?;
+        // The ingress path first. A conversation a declared mapping started
+        // is answered on the listener it arrived on, so the peer sees the
+        // reply come from the address it dialled — an ephemeral source port
+        // from a fresh association would be a different 4-tuple, and the
+        // peer would discard it as belonging to nothing.
+        match self.ingress.reply(&flow, payload, self.now_millis) {
+            ReplyOutcome::Sent => {
+                self.metrics.packets_egress = self.metrics.packets_egress.saturating_add(1);
+                return Ok(());
+            }
+            ReplyOutcome::Failed(e) => {
+                self.metrics.datapath_errors += 1;
+                return Err(e);
+            }
+            // Not an ingress conversation. Falls through to the association
+            // path, whose socket is connected to an admitted destination.
+            ReplyOutcome::NotIngress => {}
+        }
         if !self.udp.holds(&flow) && (self.open_socket_count() >= self.budget || self.udp.is_full())
         {
             // Drop the newcomer, never a live association — the posture the
@@ -694,6 +788,7 @@ impl DatapathHandle for UserspaceHandle {
         self.flows.clear();
         self.half_open.clear();
         self.udp.clear();
+        self.ingress.clear();
         // Dropped after the tables above, so every socket deregisters
         // itself while the set is still there to deregister from. Dropped
         // now rather than whenever the handle happens to: the readiness
@@ -768,6 +863,9 @@ mod tests {
     use std::time::Duration;
 
     use super::tcp::{emit_v4_segment, max_bytes_per_pass};
+    use mvm_net::l3::IngressMapping;
+
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
     /// Service passes a fixture will wait through for a loopback connect to
     /// resolve. Bounded, so a fixture that never resolves fails an
@@ -787,6 +885,7 @@ mod tests {
             guest: std::net::Ipv4Addr::new(10, 201, 0, 6),
             prefix_len: 30,
             mtu: MTU_V1,
+            ingress: Vec::new(),
         }
     }
 
@@ -1852,6 +1951,180 @@ mod tests {
         let mut handle = open_test_handle();
         deliver(&mut handle, &udp_segment(50_000, echo, b"x"))
             .expect("the advertised capability has to be true of the datapath behind it");
+    }
+
+    // ---- declared inbound datagram mappings -------------------------
+
+    /// A host port nothing is bound to, for a mapping to declare. Probed
+    /// rather than fixed, for the reason the `ingress` module's own fixture
+    /// gives: a hard-coded port collides with whatever else this
+    /// process-parallel suite is running.
+    fn free_host_port() -> u16 {
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .expect("probe a free port")
+            .local_addr()
+            .expect("local addr")
+            .port()
+    }
+
+    fn handle_serving(mappings: Vec<IngressMapping>) -> UserspaceHandle {
+        let mut req = request();
+        req.ingress = mappings;
+        UserspaceSocketDatapath::new()
+            .open_handle(&req)
+            .expect("opening a userspace handle needs no privileges")
+    }
+
+    /// A peer that will talk to a declared mapping, with a bounded read so
+    /// an answer that never comes fails an assertion rather than hanging.
+    fn ingress_peer() -> std::net::UdpSocket {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a peer");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("a bounded read");
+        socket
+    }
+
+    /// The end-to-end ingress witness at the handle: a peer's datagram in
+    /// on a declared listener, the same bytes out of the read path,
+    /// addressed to the guest port the *declaration* named.
+    #[test]
+    fn a_declared_mapping_puts_a_peers_datagram_in_front_of_the_guest() {
+        let host_port = free_host_port();
+        let mut handle = handle_serving(vec![IngressMapping::udp(LOOPBACK, host_port, 5140)]);
+        assert_eq!(
+            handle.open_socket_count(),
+            1,
+            "a listener parks a descriptor from the same budget TCP uses"
+        );
+
+        let peer = ingress_peer();
+        peer.send_to(b"probe", (Ipv4Addr::LOCALHOST, host_port))
+            .expect("a peer datagram toward the declared mapping");
+        assert!(
+            drive_until(&mut handle, |h| h.device.pending_to_guest() > 0),
+            "the declared mapping must put the datagram in front of the guest"
+        );
+
+        let mut buf = [0u8; MTU_V1 as usize];
+        let n = handle.recv_from_network(&mut buf).expect("the datagram");
+        let meta = ip::parse(&buf[..n]).expect("the packet parses");
+        assert_eq!(meta.protocol, proto::UDP);
+        assert_eq!(
+            meta.dst,
+            IpAddr::V4(request().guest),
+            "addressed to the address the session leased"
+        );
+        assert_eq!(
+            meta.dst_port,
+            Some(5140),
+            "and to the guest port the declaration named, not the host port"
+        );
+        assert_eq!(meta.src, LOOPBACK);
+        assert_eq!(meta.src_port, Some(peer.local_addr().expect("addr").port()));
+        assert_eq!(ip::udp_payload(&buf[..n], &meta), Some(&b"probe"[..]));
+    }
+
+    /// The guest's answer must reach the peer from the address it dialled,
+    /// and must not cost a second descriptor: an answer sent from a fresh
+    /// association's ephemeral port is a different 4-tuple, which the peer
+    /// discards as belonging to no conversation of its own.
+    #[test]
+    fn an_ingress_answer_leaves_by_the_listener_rather_than_a_new_socket() {
+        let host_port = free_host_port();
+        let mut handle = handle_serving(vec![IngressMapping::udp(LOOPBACK, host_port, 5140)]);
+        let peer = ingress_peer();
+        let peer_addr = peer.local_addr().expect("addr");
+        peer.send_to(b"probe", (Ipv4Addr::LOCALHOST, host_port))
+            .expect("send");
+        assert!(
+            drive_until(&mut handle, |h| h.device.pending_to_guest() > 0),
+            "the peer's datagram must arrive, or the answer proves nothing"
+        );
+
+        let before = handle.open_socket_count();
+        deliver(&mut handle, &udp_segment(5140, peer_addr, b"answer"))
+            .expect("the guest's answer to a declared conversation");
+        assert_eq!(
+            handle.open_socket_count(),
+            before,
+            "answering on the listener must not open an association as well"
+        );
+
+        let mut buf = [0u8; 64];
+        let (n, from) = peer.recv_from(&mut buf).expect("the guest's answer");
+        assert_eq!(&buf[..n], b"answer");
+        assert_eq!(
+            from,
+            SocketAddr::new(LOOPBACK, host_port),
+            "the answer must come from the address the peer dialled"
+        );
+    }
+
+    /// A guest datagram toward somewhere the mapping never heard from is
+    /// not the listener's to send. It takes the ordinary outbound path,
+    /// whose socket is connected to the admitted destination.
+    #[test]
+    fn a_guest_datagram_for_an_unheard_destination_opens_an_association_instead() {
+        let host_port = free_host_port();
+        let mut handle = handle_serving(vec![IngressMapping::udp(LOOPBACK, host_port, 5140)]);
+        assert_eq!(handle.open_socket_count(), 1);
+
+        let echo = udp_echo_server();
+        deliver(&mut handle, &udp_segment(5140, echo, b"x")).expect("carried");
+        assert_eq!(
+            handle.open_socket_count(),
+            2,
+            "the listener, plus the association the outbound path opened"
+        );
+    }
+
+    /// A listener parks a descriptor exactly as an association does, so a
+    /// close that only cleared the other tables would leak one per machine.
+    #[test]
+    fn close_releases_ingress_listeners_too() {
+        let mut handle = handle_serving(vec![
+            IngressMapping::udp(LOOPBACK, free_host_port(), 5140),
+            IngressMapping::udp(LOOPBACK, free_host_port(), 5141),
+        ]);
+        assert_eq!(handle.open_socket_count(), 2);
+        handle.close().expect("close");
+        assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    /// The capability advertisement is a promise admission enforces. A
+    /// backend that claims `declared_ingress` and binds nothing would have
+    /// a plan admitted against a datapath that cannot serve it — which is
+    /// exactly what this backend used to do.
+    #[test]
+    fn advertising_declared_ingress_means_a_datagram_mapping_is_actually_bound() {
+        // Compile-time: withdrawing the advertisement has to break the
+        // build here, so the promise and the listener below cannot drift
+        // apart silently.
+        const { assert!(ForwardingCapabilities::USERSPACE_SOCKETS.declared_ingress) };
+        let host_port = free_host_port();
+        let handle = handle_serving(vec![IngressMapping::udp(LOOPBACK, host_port, 5140)]);
+        assert_eq!(
+            handle.open_socket_count(),
+            1,
+            "the advertised capability has to be true of the datapath behind it"
+        );
+    }
+
+    /// **The part of the advertisement that is still not true.** A declared
+    /// TCP mapping needs a listener whose accepted connections are
+    /// originated *toward* the guest, and this datapath does not build one.
+    /// It is skipped rather than refused, so a plan carrying one still runs
+    /// its outbound traffic — and it opens no socket, so nothing here can
+    /// be mistaken for serving it.
+    #[test]
+    fn a_declared_tcp_mapping_binds_nothing_here_and_does_not_stop_the_machine() {
+        let handle = handle_serving(vec![IngressMapping::tcp(LOOPBACK, free_host_port(), 80)]);
+        assert_eq!(
+            handle.open_socket_count(),
+            0,
+            "stream ingress is not served by this backend"
+        );
     }
 
     /// A segment for a connection the datapath has no state for — most

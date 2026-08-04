@@ -13,7 +13,7 @@ use mvm_protocol::l3::limits::{MIN_IPV4_HEADER, MTU_V1};
 /// An affordability bound rather than a demand figure, and worth saying so:
 /// nothing here claims a workload needs 256 concurrent connections. What
 /// the number is set against is [`MEMORY_CEILING_BYTES`], which at this cap
-/// is **46,500,608 bytes, 44.35 MiB** — the whole ceiling, machine-level
+/// is **46,476,608 bytes, 44.32 MiB** — the whole ceiling, machine-level
 /// terms included, not the per-flow term alone (that is 45,252,608 bytes,
 /// 43.16 MiB, and quoting it as the ceiling understates by 1.2 MiB).
 ///
@@ -73,19 +73,60 @@ pub const HALF_OPEN_TIMEOUT_MILLIS: u64 = 10_000;
 /// that end of it.
 pub const DEFAULT_MAX_UDP_ASSOCIATIONS: usize = 64;
 
-/// Datagrams one association may hand back in a single poll.
+/// Declared inbound datagram mappings this datapath binds a host listener
+/// for.
+///
+/// Sized against what a workload exposes, not against what the policy layer
+/// will accept. A machine that takes inbound datagrams at all takes them on
+/// a handful of named services — a metrics or syslog receiver, a QUIC
+/// endpoint, a discovery port — never on a range, because every one of them
+/// is a port a human had to write into the plan.
+///
+/// It sits well below the policy layer's own cap
+/// (`mvm_net::l3::ingress::DEFAULT_MAX_MAPPINGS`) because the two bound
+/// different things: a mapping there is a table row, while a mapping here
+/// is a descriptor held for the machine's **whole life**. An association
+/// ages out and gives its descriptor back; a listener cannot, since a
+/// declared port that stopped answering because it had been quiet would be
+/// a mapping silently withdrawn by traffic. Past this count a mapping is
+/// refused and nothing already bound is displaced.
+pub const DEFAULT_MAX_UDP_INGRESS_LISTENERS: usize = 16;
+
+/// Peers one ingress listener remembers, so the guest's answer can go back
+/// to whoever asked.
+///
+/// What it must accommodate is the concurrent conversations an exposed
+/// datagram service really has — a scrape from each collector in a small
+/// fleet, a handful of QUIC clients, a burst of discovery probes — rather
+/// than every source that has ever sent. A datagram from a peer past this
+/// count is dropped rather than delivered: the guest's answer would have
+/// nowhere to go, and a one-way conversation the guest believes it is
+/// having is worse than one it never sees. Nothing already remembered is
+/// evicted to make room, for the reason every other table here refuses at
+/// capacity.
+pub const PEERS_PER_INGRESS_LISTENER: usize = 32;
+
+/// Datagram sources one poll drains onto the machine-wide guest-bound
+/// queue: every association and every ingress listener.
+///
+/// One divisor rather than two, because the queue they empty onto is one
+/// queue. Sizing each side against the whole depth independently would let
+/// the side polled first fill it and the other read datagrams off host
+/// sockets only to discard them.
+const DATAGRAM_SOURCES: usize = DEFAULT_MAX_UDP_ASSOCIATIONS + DEFAULT_MAX_UDP_INGRESS_LISTENERS;
+
+/// Datagrams one source — an association or an ingress listener — may hand
+/// back in a single poll.
 ///
 /// Derived, not chosen. Everything a poll produces goes onto the one
 /// machine-wide guest-bound queue, which is [`DEFAULT_QUEUE_DEPTH`] deep,
-/// so a full poll of every association at this rate exactly fills it.
-/// Anything larger would be read off a host socket only to be discarded on
-/// the way to the guest — a drop that costs a real datagram and buys
-/// nothing.
+/// so a full poll of every source at this rate fits inside it. Anything
+/// larger would be read off a host socket only to be discarded on the way
+/// to the guest — a drop that costs a real datagram and buys nothing.
 ///
 /// It bounds one pass, not the conversation: whatever is left sits in the
 /// kernel's own receive buffer and comes out on the next pass.
-pub const DATAGRAMS_PER_ASSOCIATION_POLL: usize =
-    DEFAULT_QUEUE_DEPTH / DEFAULT_MAX_UDP_ASSOCIATIONS;
+pub const DATAGRAMS_PER_SOURCE_POLL: usize = DEFAULT_QUEUE_DEPTH / DATAGRAM_SOURCES;
 
 /// The largest UDP payload this datapath carries in either direction: an
 /// MTU-sized packet less its IPv4 and UDP headers.
@@ -309,36 +350,55 @@ pub const HALF_OPEN_BUFFER_BYTES: usize = DEFAULT_MAX_HALF_OPEN * MTU_V1 as usiz
 /// in the *kernel's* socket receive buffer, which is not this process's
 /// allocation and not what this ceiling counts. What this process does
 /// allocate is the batch [`super::udp::UdpAssociations::poll`] returns:
-/// [`DATAGRAMS_PER_ASSOCIATION_POLL`] packets per association, each an
+/// [`DATAGRAMS_PER_SOURCE_POLL`] packets per association, each an
 /// IP+UDP packet bounded by the link MTU.
 ///
-/// 64 associations x 4 datagrams x 1500 bytes. Transient — the batch is
+/// 64 associations x 3 datagrams x 1500 bytes. Transient — the batch is
 /// drained onto the guest-bound queue and dropped — so this is a peak, not
 /// a resident cost, and it is counted separately from that queue because
 /// the two coexist while the batch is being moved onto it.
 pub const UDP_BUFFER_BYTES: usize =
-    DEFAULT_MAX_UDP_ASSOCIATIONS * DATAGRAMS_PER_ASSOCIATION_POLL * MTU_V1 as usize;
+    DEFAULT_MAX_UDP_ASSOCIATIONS * DATAGRAMS_PER_SOURCE_POLL * MTU_V1 as usize;
+
+/// Worst-case bytes the declared-ingress path holds: the packets one poll
+/// synthesizes for the guest, across every listener at once.
+///
+/// The same arithmetic as [`UDP_BUFFER_BYTES`] and for the same reason. A
+/// listener owns a bound host socket and a table of peer addresses with
+/// their deadlines — all inline, all tens of bytes each, none of it heap —
+/// and its buffered datagrams live in the *kernel's* receive buffer, which
+/// is not this process's allocation. What this process allocates is the
+/// batch [`super::ingress::DatagramIngress::poll`] returns.
+///
+/// 16 listeners x 3 datagrams x 1500 bytes. A separate term from the
+/// association batch rather than folded into it, so that dropping either
+/// one fails under its own name.
+pub const UDP_INGRESS_BUFFER_BYTES: usize =
+    DEFAULT_MAX_UDP_INGRESS_LISTENERS * DATAGRAMS_PER_SOURCE_POLL * MTU_V1 as usize;
 
 /// Worst-case buffer footprint for one machine at the socket cap: every
 /// flow at its own bound, plus the machine-wide guest-facing device the
 /// datapath handle owns, plus the SYNs its half-open table is holding, plus
-/// the datagram batch its associations can produce in one poll.
+/// the datagram batches its associations and its ingress listeners can each
+/// produce in one poll.
 ///
 /// An upper bound, not an attainable state: half-open entries, established
-/// flows, and UDP associations share one descriptor budget, so a machine
-/// cannot in fact hold [`DEFAULT_MAX_HOST_SOCKETS`] flows *and*
-/// [`DEFAULT_MAX_HALF_OPEN`] half-open entries *and*
-/// [`DEFAULT_MAX_UDP_ASSOCIATIONS`] associations at once. Summed anyway,
+/// flows, UDP associations, and ingress listeners share one descriptor
+/// budget, so a machine cannot in fact hold [`DEFAULT_MAX_HOST_SOCKETS`]
+/// flows *and* [`DEFAULT_MAX_HALF_OPEN`] half-open entries *and*
+/// [`DEFAULT_MAX_UDP_ASSOCIATIONS`] associations *and*
+/// [`DEFAULT_MAX_UDP_INGRESS_LISTENERS`] listeners at once. Summed anyway,
 /// because a ceiling that has to be reasoned about to be believed is a
 /// ceiling nobody will re-check.
 ///
-/// As shipped: 46,500,608 bytes, 44.35 MiB. The figure belongs in the test
+/// As shipped: 46,476,608 bytes, 44.32 MiB. The figure belongs in the test
 /// beside it and not only here — a ceiling that lives as arithmetic in a
 /// comment drifts the first time a buffer changes.
 pub const MEMORY_CEILING_BYTES: usize = DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES
     + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize
     + HALF_OPEN_BUFFER_BYTES
-    + UDP_BUFFER_BYTES;
+    + UDP_BUFFER_BYTES
+    + UDP_INGRESS_BUFFER_BYTES;
 
 #[cfg(test)]
 mod tests {
@@ -368,32 +428,37 @@ mod tests {
         assert_eq!(FLOW_BUFFER_BYTES, 32_768 + 144_000);
         // 64 held SYNs, each at most an MTU.
         assert_eq!(HALF_OPEN_BUFFER_BYTES, 96_000);
-        // A 256-deep guest-bound queue shared between 64 associations.
-        assert_eq!(DATAGRAMS_PER_ASSOCIATION_POLL, 4);
-        // 64 associations × 4 datagrams × 1500 bytes.
-        assert_eq!(UDP_BUFFER_BYTES, 384_000);
+        // A 256-deep guest-bound queue shared between 64 associations and
+        // 16 ingress listeners.
+        assert_eq!(DATAGRAMS_PER_SOURCE_POLL, 3);
+        // 64 associations × 3 datagrams × 1500 bytes.
+        assert_eq!(UDP_BUFFER_BYTES, 288_000);
+        // 16 ingress listeners × 3 datagrams × 1500 bytes.
+        assert_eq!(UDP_INGRESS_BUFFER_BYTES, 72_000);
         // The handle's own guest-facing device: one machine-wide queue in
         // each direction, DEFAULT_QUEUE_DEPTH deep, at the link MTU. It is
         // the one term with no named constant, so it is subtracted back out
         // of the ceiling rather than left to the total — where dropping it
-        // and dropping UDP_BUFFER_BYTES move the sum by the same 384,000
-        // bytes and are therefore indistinguishable.
+        // and dropping another term of the same size would move the sum
+        // identically and be indistinguishable.
         assert_eq!(
             MEMORY_CEILING_BYTES
                 - DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES
                 - HALF_OPEN_BUFFER_BYTES
-                - UDP_BUFFER_BYTES,
+                - UDP_BUFFER_BYTES
+                - UDP_INGRESS_BUFFER_BYTES,
             2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize
         );
         assert_eq!(2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize, 768_000);
         // 256 flows at that, plus the handle's own 2 × 256 × 1500, plus the
-        // SYNs the half-open table holds, plus one poll's datagram batch.
+        // SYNs the half-open table holds, plus one poll's association batch
+        // and one poll's ingress batch.
         assert_eq!(
             MEMORY_CEILING_BYTES,
-            256 * 176_768 + 768_000 + 96_000 + 384_000
+            256 * 176_768 + 768_000 + 96_000 + 288_000 + 72_000
         );
-        // 44.35 MiB. Not 43.16 — that is the per-flow term on its own.
-        assert_eq!(MEMORY_CEILING_BYTES, 46_500_608);
+        // 44.32 MiB. Not 43.16 — that is the per-flow term on its own.
+        assert_eq!(MEMORY_CEILING_BYTES, 46_476_608);
         const {
             assert!(
                 DEFAULT_MAX_HOST_SOCKETS < mvm_net::l3::flow::DEFAULT_MAX_FLOWS,
@@ -472,26 +537,37 @@ mod tests {
         const { assert!(DEFAULT_MAX_HALF_OPEN * 3 < DEFAULT_MAX_HOST_SOCKETS) };
     }
 
-    /// Associations draw on the same descriptor budget TCP does, and the
-    /// batch one poll produces is emptied onto the one machine-wide
-    /// guest-bound queue. Both are properties of a *pair* of constants, so
-    /// re-sizing either has to be argued for here rather than silently
+    /// Every datagram source draws on the same descriptor budget TCP does,
+    /// and the batch one poll produces is emptied onto the one machine-wide
+    /// guest-bound queue. Both are properties of a *set* of constants, so
+    /// re-sizing any of them has to be argued for here rather than silently
     /// making a poll produce datagrams it can only drop.
     #[test]
-    fn the_association_bounds_fit_the_budget_and_the_queue_they_share() {
+    fn the_datagram_bounds_fit_the_budget_and_the_queue_they_share() {
         const {
             assert!(
                 DEFAULT_MAX_UDP_ASSOCIATIONS * 3 < DEFAULT_MAX_HOST_SOCKETS,
                 "associations must not be able to consume the socket budget TCP shares"
             );
+            // Eight times over rather than the associations' three, because
+            // a listener's descriptor is never given back: it is bound for
+            // the machine's whole life, so every one of them permanently
+            // removes a socket from the pool TCP draws on.
             assert!(
-                DATAGRAMS_PER_ASSOCIATION_POLL > 0,
-                "an association that may take nothing per poll carries no traffic at all"
+                DEFAULT_MAX_UDP_INGRESS_LISTENERS * 8 <= DEFAULT_MAX_HOST_SOCKETS,
+                "listeners hold their descriptors permanently and must stay a small share"
             );
             assert!(
-                DEFAULT_MAX_UDP_ASSOCIATIONS * DATAGRAMS_PER_ASSOCIATION_POLL
-                    <= DEFAULT_QUEUE_DEPTH,
+                DATAGRAMS_PER_SOURCE_POLL > 0,
+                "a source that may take nothing per poll carries no traffic at all"
+            );
+            assert!(
+                DATAGRAM_SOURCES * DATAGRAMS_PER_SOURCE_POLL <= DEFAULT_QUEUE_DEPTH,
                 "a poll must not read more datagrams than the queue it empties onto can hold"
+            );
+            assert!(
+                PEERS_PER_INGRESS_LISTENER > 0,
+                "a listener that can remember no peer can answer none of them"
             );
         };
         // 1500 byte MTU less a 20 byte IPv4 header and an 8 byte UDP one.

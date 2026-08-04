@@ -220,8 +220,9 @@ pub enum LeaseError {
     NoAddress,
     #[error("lease route {0:?} is not a CIDR")]
     MalformedRoute(String),
-    #[error("lease declares UDP ingress, which is not implemented")]
-    UdpIngressUnsupported,
+    /// A lease named an ingress protocol nothing lowers.
+    #[error("lease declares ingress protocol {0:?} (expected \"tcp\" or \"udp\")")]
+    UnknownIngressProto(String),
 }
 
 /// What the verifier checks a lease against.
@@ -303,8 +304,12 @@ pub fn verify_lease(
     if lease.ipv4.is_none() && lease.ipv6.is_none() {
         return Err(LeaseError::NoAddress);
     }
-    if lease.ingress.iter().any(|i| i.proto != "tcp") {
-        return Err(LeaseError::UdpIngressUnsupported);
+    if let Some(unknown) = lease
+        .ingress
+        .iter()
+        .find(|i| !matches!(i.proto.as_str(), "tcp" | "udp"))
+    {
+        return Err(LeaseError::UnknownIngressProto(unknown.proto.clone()));
     }
     lease.parsed_routes()?;
     Ok(())
@@ -704,8 +709,10 @@ mod tests {
         ));
     }
 
+    /// A protocol nothing lowers is refused rather than carried into a
+    /// gateway that would have to guess what it meant.
     #[test]
-    fn udp_ingress_in_a_lease_is_refused_rather_than_ignored() {
+    fn an_unknown_ingress_protocol_in_a_lease_is_refused_rather_than_ignored() {
         let authority = authority();
         let instance = instance();
         let lease = authority.issue(&LeaseRequest {
@@ -716,7 +723,7 @@ mod tests {
             dns_name: None,
             routes: &[],
             ingress: &[LeaseIngress {
-                proto: "udp".into(),
+                proto: "sctp".into(),
                 host_addr: "127.0.0.1".into(),
                 host_port: 5353,
                 guest_port: 53,
@@ -727,7 +734,7 @@ mod tests {
         });
         assert!(matches!(
             verify_lease(&lease, &authority, &ctx(&instance, NOW)),
-            Err(LeaseError::UdpIngressUnsupported)
+            Err(LeaseError::UnknownIngressProto(_))
         ));
     }
 

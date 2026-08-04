@@ -62,7 +62,7 @@ pub struct NetdConfig {
     #[serde(default = "default_dns_qps")]
     pub dns_qps: u32,
 
-    /// Declared ingress mappings. TCP only.
+    /// Declared ingress mappings, `"tcp"` or `"udp"`.
     #[serde(default)]
     pub ingress: Vec<NetdIngress>,
 }
@@ -140,8 +140,6 @@ pub enum NetdConfigError {
     Unparseable { field: &'static str, value: String },
     #[error("unknown protocol {0:?} (expected \"tcp\" or \"udp\")")]
     UnknownProto(String),
-    #[error("UDP ingress is not implemented in protocol version 1")]
-    UdpIngressUnsupported,
     #[error("{0}")]
     Ingress(#[from] crate::l3::IngressError),
 }
@@ -216,14 +214,11 @@ impl NetdConfig {
         })
     }
 
-    /// Lower the declared ingress mappings, refusing UDP rather than
-    /// silently ignoring it.
+    /// Lower the declared ingress mappings, refusing a protocol nobody
+    /// named rather than guessing one.
     pub fn to_ingress_table(&self) -> Result<crate::l3::IngressTable, NetdConfigError> {
         let mut table = crate::l3::IngressTable::with_defaults();
         for mapping in &self.ingress {
-            if mapping.proto != "tcp" {
-                return Err(NetdConfigError::UdpIngressUnsupported);
-            }
             let host_addr =
                 mapping
                     .host_addr
@@ -232,11 +227,16 @@ impl NetdConfig {
                         field: "ingress host address",
                         value: mapping.host_addr.clone(),
                     })?;
-            table.declare(crate::l3::IngressMapping::tcp(
-                host_addr,
-                mapping.host_port,
-                mapping.guest_port,
-            ))?;
+            let declared = match mapping.proto.as_str() {
+                "tcp" => {
+                    crate::l3::IngressMapping::tcp(host_addr, mapping.host_port, mapping.guest_port)
+                }
+                "udp" => {
+                    crate::l3::IngressMapping::udp(host_addr, mapping.host_port, mapping.guest_port)
+                }
+                other => return Err(NetdConfigError::UnknownProto(other.to_string())),
+            };
+            table.declare(declared)?;
         }
         Ok(table)
     }
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_ingress_is_refused_rather_than_dropped() {
+    fn declared_udp_ingress_lowers_into_the_table() {
         let mut cfg = config();
         cfg.ingress = vec![NetdIngress {
             proto: "udp".into(),
@@ -355,9 +355,27 @@ mod tests {
             host_port: 5353,
             guest_port: 53,
         }];
+        let table = cfg.to_ingress_table().unwrap();
+        assert!(table.admits(mvm_protocol::l3::proto::UDP, 53));
+        assert!(
+            !table.admits(mvm_protocol::l3::proto::TCP, 53),
+            "a datagram mapping opens no stream port"
+        );
+    }
+
+    /// A protocol nobody named is refused rather than defaulted to one.
+    #[test]
+    fn an_unknown_ingress_protocol_is_refused() {
+        let mut cfg = config();
+        cfg.ingress = vec![NetdIngress {
+            proto: "sctp".into(),
+            host_addr: "127.0.0.1".into(),
+            host_port: 5353,
+            guest_port: 53,
+        }];
         assert!(matches!(
             cfg.to_ingress_table(),
-            Err(NetdConfigError::UdpIngressUnsupported)
+            Err(NetdConfigError::UnknownProto(_))
         ));
     }
 

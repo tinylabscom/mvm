@@ -28,6 +28,7 @@ fn request(machine_id: &str, third_octet: u8) -> DatapathRequest {
         guest: Ipv4Addr::new(10, 201, third_octet, 2),
         prefix_len: 30,
         mtu: 1500,
+        ingress: Vec::new(),
     }
 }
 
