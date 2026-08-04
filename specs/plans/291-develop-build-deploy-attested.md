@@ -1,8 +1,8 @@
 # Develop → build → deploy: one stupidly simple path to an attested workload image
 
-**Status:** In progress. WS3 capture, install, and live-capture paths are
-implemented; the deploy artifact path is also present, while authenticated
-remote transport and host-wide test gates remain.
+**Status:** In progress. WS1–WS3 are merged and their required queue gates are
+green; WS4 attestation binding and the universal-agent/conformance closure
+remain open.
 
 **Goal:** A developer starts from an OCI image or a Nix flake, iterates on a
 machine until the workload actually works — including discovering the
@@ -74,34 +74,31 @@ bug.
 
 ### WS1 — `mvmctl deploy`
 
-- [~] Seal the built image, compute its BLAKE3 identity, and write a deploy
+- [x] Seal the built image, compute its BLAKE3 identity, and write a deploy
       record: workload address (`ir_hash`), image BLAKE3, image SHA-256, the
       environment pin, sealed dep-volume hash, and the SBOM/CVE verdicts already
       produced by claim 11's pipeline.
-- [~] If a remote is configured, use the authenticated shipping contract. Until
+- [x] If a remote is configured, use the authenticated shipping contract. Until
       mvmd exposes that contract, fail closed after writing the local record;
       without a remote, stop at the local sealed artifact.
-- [~] Refuse to record an artifact whose dep volume fails
+- [x] Refuse to record an artifact whose dep volume fails
       `verify_sealed_volume`, so a deploy cannot launder a tampered volume.
-      The SDK path and tamper regression are green; full CLI/workspace gates
-      remain.
+      The SDK path and tamper regression are covered by the merged PR's branch
+      and merge-group Test, Lint, and Nix gates.
 
-**Open question for the owner.** `CLAUDE.md` states that deploy-to-control-plane
-commands live in mvmd, not mvmctl. Sealing, hashing and recording are artifact
-construction and belong in mvm; pushing to a control plane, tenants and
-placement belong in mvmd. This plan assumes `mvmctl deploy` performs the former
-and delegates the latter. If `mvmctl deploy` is meant to own the control-plane
-conversation directly, that is an architectural change and needs deciding
-before WS1 starts.
+The control-plane split is settled: sealing, hashing, and recording remain
+artifact construction in mvm; authenticated shipping, tenants, and placement
+remain mvmd responsibilities. `mvmctl deploy` performs the former and delegates
+the latter through mvmd's authenticated upload contract.
 
 ### WS2 — `mvmctl watch`
 
-- [~] Watch the workload source and rebuild the image on change.
+- [x] Watch the workload source and rebuild the image on change.
       The file-backed IR watcher polls local source inputs and invokes the
       existing deterministic compiler when the input fingerprint changes.
-- [~] Reuse the existing content addresses to skip no-op rebuilds: if the
+- [x] Reuse the existing content addresses to skip no-op rebuilds: if the
       `ir_hash` and inputs are unchanged, do nothing.
-- [~] Surface what changed and what it cost, so the loop teaches the developer
+- [x] Surface what changed and what it cost, so the loop teaches the developer
       what their workload actually depends on.
       Each iteration reports whether it rebuilt or found an unchanged state;
       rebuilds identify whether IR or source inputs changed and report compile
@@ -111,17 +108,17 @@ before WS1 starts.
 
 ### WS3 — capture dependencies from the sandbox
 
-- [~] `mvmctl deps capture` imports a sandbox-installed dependency tree and
+- [x] `mvmctl deps capture` imports a sandbox-installed dependency tree and
       its fresh SBOM, fetch log, and CVE result, then reseals it atomically
       through the existing volume verifier and lockfile index.
-- [~] Install into a development sandbox, then reseal via `reseal_volume` to
+- [x] Install into a development sandbox, then reseal via `reseal_volume` to
       capture it — new volume hash, refreshed SBOM, fresh CVE scan. The SDK's
       existing development `install_package` helpers perform the install;
       `mvmctl deps capture-live` requires a running development VM, exports
       bounded regular-file content and matching guest sidecars, and hands them
       to the atomic reseal path. `mvmctl deps install` covers the declared
       lockfile route.
-- [~] Emit the captured set back out as the canonical dependency declaration
+- [x] Emit the captured set back out as the canonical dependency declaration
       the developer can commit,
       so an interactively-discovered dependency becomes a declared one. The
       capture path must converge on the declared path, not fork from it. The
@@ -129,7 +126,7 @@ before WS1 starts.
       SHA-256 and emits the same `Dependencies` IR shape used by normal builds.
       It refuses declaration targets that would overwrite the lockfile or
       enter the sealed dependency cache.
-- [~] Keep the lockfile hash-pin requirement intact: a captured dependency is
+- [x] Keep the lockfile hash-pin requirement intact: a captured dependency is
       pinned like a declared one, or the seal refuses.
 
 **The opencv case, end to end:** the developer either declares it (works today)

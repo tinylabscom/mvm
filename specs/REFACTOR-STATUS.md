@@ -8,17 +8,17 @@ for detailed scope and acceptance criteria.
 ## In-flight plans
 - [~] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
-  - [~] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
+  - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
         record; retain the local sealed artifact and ship it to mvmd through
         the authenticated upload contract when a remote is configured
-  - [~] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address;
+  - [x] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address;
         long-running mode recovers from transient input/compile errors while
         `--once` remains fail-fast
-  - [~] WS3 capture-from-sandbox via `reseal_volume`, converging on the
+  - [x] WS3 capture-from-sandbox via `reseal_volume`, converging on the
         declared-dependency path and keeping the lockfile hash pin; capture,
         `deps install`, and bounded `deps capture-live` implementation are
-        present. Focused mvm-cli (33) and mvm-build (21) tests, compile, build,
-        and Clippy gates pass; workspace/Linux-builder gates remain
+        present. PR #2132 passed branch and merge-group Test, Lint, and Nix
+        gates and merged into main
   - [~] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
     - [~] Bind the tier to an attested artifact and replace the interactive
