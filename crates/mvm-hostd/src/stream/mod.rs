@@ -71,8 +71,8 @@ pub use fanout::{
     ReaderHandle, ReaderStart,
 };
 pub use input_gate::{
-    CATEGORY_HOST_SECRET, DEFAULT_LEASE_TTL, InputAudit, InputAuditSink, InputBinding, InputGate,
-    InputRefusal, InputSession,
+    CATEGORY_HOST_SECRET, DEFAULT_IDLE_FLUSH_AFTER, DEFAULT_LEASE_TTL, InputAudit, InputAuditSink,
+    InputBinding, InputGate, InputRefusal, InputSession,
 };
 pub use input_route::{
     DisplacedRoute, InputRoute, InputRouteError, InputTransport, MAX_UNDELIVERED_INPUT_BYTES,

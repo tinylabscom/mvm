@@ -35,11 +35,16 @@
 //!
 //! Deliberately absent: any fingerprint of a *prefix* of a secret. Prefix
 //! hashes would let a scanner withhold only the tails that could still become
-//! a secret — the behaviour that plaintext gives — but they also turn the
-//! fingerprint set into a byte-at-a-time recovery oracle: guess byte 0 against
-//! the length-1 prefix hash, then byte 1, and so on. The latency the scanner
-//! pays for withholding a fixed-size tail is the price of not shipping that
-//! oracle.
+//! a secret — the behaviour plaintext gives — and without them a scanner must
+//! withhold a fixed-size tail of every write, which stalls a workload that
+//! answers per line. That is a real defect, and prefix hashes are still not
+//! the answer, because under this hash they *are* the value: `h(k) =
+//! h(k-1)·BASE + s[k-1]`, so every byte falls out by one subtraction and
+//! `h(1)` is the first byte outright. A different hash would only turn that
+//! subtraction into a 256-guess-per-byte search, since anything the scanner
+//! can evaluate, code sharing its address space can evaluate too. Exact
+//! precision about a one-byte tail and secrecy of a one-byte prefix are the
+//! same quantity; no hash buys both.
 
 use alloc::vec::Vec;
 
@@ -248,8 +253,16 @@ mod tests {
         // The scanner trusts these two to be the same function. If they drift,
         // it either misses secrets or refuses innocent frames, and neither
         // failure announces itself.
-        let data = b"the quick brown fox jumps over the lazy dog";
-        for len in 1..=8usize {
+        //
+        // The window sizes swept are the ones real credentials have — an API
+        // key is 20 to 60 bytes, not 8. `leading_weight` accumulates `BASE`
+        // once per byte of the window, so a defect in that loop only shows up
+        // past the length where the loop does real work; a sweep that stopped
+        // in single digits would agree with a weight that was wrong for every
+        // secret anyone binds.
+        let data = b"the quick brown fox jumps over the lazy dog, \
+                     then AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI0K7MDENG+bPxRfiCY";
+        for len in 1..=64usize {
             let weight = leading_weight(len);
             let mut rolled = window_hash(&data[..len]);
             for start in 1..=data.len() - len {

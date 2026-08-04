@@ -293,14 +293,92 @@ the set to the per-VM state dir (which would widen it to every reader of
 `~/.mvm` to buy reachability nothing uses — only the booting invocation can
 stream), and binding fingerprints of each secret's *prefixes*.
 
-Prefix fingerprints are the tempting one, because they are what the plaintext
-scanner had. With them the scanner can tell a suffix that could still become a
-secret from one that provably cannot, and so withhold only the former; without
-them it must withhold a fixed `longest_secret - 1` bytes of every write. They
-are also a byte-at-a-time recovery oracle: guess byte 0 against the length-1
-prefix hash, then byte 1, and the credential falls in 256·L tries. The latency —
-bounded, never dropped, released on the next write or at close, and charged only
-to VMs that bound a secret — is the price of not shipping that oracle.
+**What the memory-only choice rests on, and what breaking it looks like.** It
+rests on limit 3: only the invocation that admitted and booted a workload may
+stream into it, so the process that spawned the endpoint is the process that
+later opens the gate. Should that stop being true — the resident per-tenant
+daemon this project is heading toward would do it, with boot in one process and
+`stream` in another — the registry read returns an empty set, the gate binds an
+empty set, and the scan silently reverts to matching nothing. That is limit 1
+re-opening, and **nothing goes red when it does**: an empty read is
+indistinguishable from a plan that carried no secrets, and both are legitimate.
+The failure is therefore invisible by construction, not merely untested, and
+splitting boot from stream must come with a registry that spans the split or
+with a gate that refuses when it cannot tell the two cases apart.
+
+**Why the carry is blanket, and why that is the safe choice.** Without prefix
+fingerprints the scanner cannot ask "could this tail still become a secret", so
+it withholds a fixed `longest_secret - 1` bytes of every write rather than the
+exact live prefix. That reads as the lazy option and is the load-bearing one.
+
+Precision here would be a **prefix oracle**. The withhold-or-deliver decision is
+observable — anyone holding the input grant writes a byte and sees whether
+anything came out — so a scanner that withheld only what could still complete a
+secret would be answering, for each byte offered, "is this a live prefix?". Walk
+that: 256 tries recover byte 0, 256 more recover byte 1, and a 40-byte
+credential falls in about 40·256 probes instead of 256^40. That is a
+secret-extraction path against precisely what row 13 protects, and it is
+strictly worse than any amount of withholding. A blanket carry leaks nothing
+*because* it is blanket: the decision carries no information about the content.
+The imprecision is the mechanism, not a shortcut.
+
+Binding prefix fingerprints — the tempting repair, and what the plaintext
+scanner effectively had — is the same mistake with an extra disclosure on top.
+Under this polynomial hash the prefix chain *is* the plaintext: `h(k) =
+h(k-1)·BASE + s[k-1] (mod 2^64)`, so `s[k-1] = h(k) − h(k-1)·BASE` recovers each
+byte by subtraction, and `h(1)` is literally the first byte. Changing the hash
+does not save it: any function a scanner can evaluate, code in that same process
+can evaluate, so an *exact* prefix-membership test over a byte alphabet is a
+decoder in 256·L tries whatever the hash. Precision about short tails and
+non-disclosure of short prefixes are the same quantity; you cannot buy one
+without selling the other.
+
+**What the blanket carry cost, and how that cost is paid.** Left alone it is a
+deadlock rather than latency. With a 40-byte bound secret the carry is 39, so an
+operator running a line-oriented workload under `machine run --entrypoint
+--stdin -` and typing an 11-byte request line delivers **zero** bytes: the
+workload never sees a line, never answers, so the operator never writes again,
+and the tail ships only at EOF. "A program that reads a request off stdin and
+writes a response" is a shape this plane exists for, so that was not a tolerable
+resting place.
+
+The gate therefore **releases the withheld tail after 50ms of writer silence**
+(`DEFAULT_IDLE_FLUSH_AFTER`). Two properties make this the right shape rather
+than a quiet weakening of the paragraph above, and both have witnesses:
+
+- **The release is content-independent.** It fires on elapsed time since the
+  scanner last took bytes and on nothing else — never on what the withheld bytes
+  are. So it opens no oracle: an observer learns when they stopped writing,
+  which they already knew. Witnessed by
+  `fn:the_idle_release_does_not_depend_on_what_the_withheld_bytes_are` and
+  `fn:what_is_withheld_is_a_length_and_never_a_verdict_about_the_bytes`, which
+  drive a genuine live prefix of a bound secret and an innocent payload of the
+  same length through the whole path and require the two to be
+  indistinguishable.
+- **The release can never hand over a secret.** What the scanner holds already
+  survived a scan of the buffer it came from, so no window inside it matches.
+  What is lost is *context*: a secret split across the silence is no longer
+  contiguous and is missed. That needs the sender to pause mid-credential — a
+  confused caller does not, and a determined one has no reason to, since base64
+  defeats the scan outright. It therefore falls inside the existing "backstop,
+  not a defence" limit and does not widen it. Witnessed from both sides by
+  `fn:a_secret_split_across_two_writes_inside_the_threshold_is_still_refused`
+  and `fn:a_secret_split_across_the_idle_gap_is_missed_and_that_is_the_price`.
+
+50ms sits between two gaps that differ by orders of magnitude: the gap inside
+one writer's burst (a buffer copy and one vsock round trip — microseconds to low
+milliseconds, and the split a confused caller actually produces, which must stay
+covered) and the gap a human or a request/response peer leaves, which is at
+minimum the workload's own think time. It is roughly fifty times the first and
+half the ~100ms at which delay becomes perceptible. The CLI's idle attendant
+visits every half-threshold, so a released line reaches the guest within about
+one and a half thresholds of the last keystroke.
+
+Exact live-prefix precision *within* a burst is still available without the
+oracle — anchoring the carry to a delimiter no bound secret contains, or moving
+the scan into the process that holds the plaintext. Both are costed in
+`specs/plans/293-stream-plane-followups.md`; neither is needed for the shapes
+the plane serves today.
 
 **And a match is not an identity.** Two byte sequences of the same length can
 hash alike. The gate refuses on a match anyway, because failing closed is the

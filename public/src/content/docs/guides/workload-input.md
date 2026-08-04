@@ -117,21 +117,37 @@ is the right direction, and the refusal says a fingerprint matched rather than
 that your bytes are a secret. If you are certain they are not, that is what a
 collision looks like from the outside.
 
-**A secret-bearing VM lags by up to `longest_secret - 1` bytes.** Without the
-plaintext the scanner cannot tell a live secret prefix from an innocent tail, so
-it holds a fixed window back until your next write or your close. Bounded, never
-dropped, and charged only to workloads whose plan carries a secret — a VM with
-none scans nothing and lags not at all. (The alternative, fingerprinting each
-secret's prefixes, would recover the credential a byte at a time from the
-fingerprint set. See [ADR-035](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/035-workload-stream-plane.md).)
+**On a secret-bearing VM your last `longest_secret - 1` bytes arrive about 50ms
+late.** Without the plaintext the scanner cannot tell a live secret prefix from
+an innocent tail, so it holds a fixed window back — with a 40-byte bound secret
+that is 39 bytes, wider than most request lines. Your next write pushes it out;
+if there is no next write, the gate releases it once you have been quiet for
+50ms. So a typed line reaches the workload a fraction of a second after you
+stop typing rather than when you type the next one, and nothing is ever lost.
+A VM whose plan carries no secret scans nothing and withholds nothing.
+
+The release is on elapsed time only — never on what your bytes are. That is
+deliberate and it is the reason the window is a blanket one: a scanner that
+withheld only the tails that could still complete a secret would be answering
+"is this a live prefix?" for every byte you sent, which is a way to read the
+credential out one byte at a time. The same reasoning rules out fingerprinting
+each secret's prefixes, which is the repair that looks free.
+
+The residual: a secret you split with a pause longer than 50ms in the middle is
+no longer contiguous to the scanner and goes through. That takes deliberately
+pausing mid-credential — see [what the scan is worth](#what-the-scan-is-worth)
+below, and
+[ADR-035](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/035-workload-stream-plane.md).
 
 ### What the scan is worth
 
 **It is a backstop, not a defence.** Base64, hex, URL-escaping, any derivation
-(a hash, a signature, a substring), an unregistered secret, and a split that
-straddles the scan window all pass straight through. It catches a confused
-host-side caller. It does not catch a determined one. A populated fingerprint
-set makes the scan *work*; it does not make it stronger than this.
+(a hash, a signature, a substring), an unregistered secret, a split that
+straddles the scan window, and a split you separate with a deliberate pause all
+pass straight through. It catches a confused host-side caller. It does not catch
+a determined one — anyone patient enough to pause mid-credential would simply
+base64 it. A populated fingerprint set makes the scan *work*; it does not make
+it stronger than this.
 
 The real guarantee is upstream and structural: the host has no reason to send a
 secret into a guest at all, because credentials are substituted on the
@@ -241,19 +257,25 @@ whether it runs.
    hands of the process making them. `--attach`, `session attach`, and any
    other process reaching a machine it did not boot cannot stream.
 2. **The scan matches fingerprints, not values.** A collision refuses a frame
-   that carried no secret, and the withheld window costs a secret-bearing VM up
-   to `longest_secret - 1` bytes of lag. Both are stated above; both fail in
-   the safe direction.
-3. **The scan is a backstop.** Encoding, derivation, and a window-straddling
-   split defeat it. This one is permanent; it is a property of scanning, not a
-   gap to close.
-4. **The shell refusal is a heuristic over argv**, and the argv comes from the
+   that carried no secret. Stated above, and it fails in the safe direction.
+3. **On a secret-bearing VM your last bytes are ~50ms late.** The withheld
+   window is `longest_secret - 1` bytes, wider than a typed request line, so a
+   line arrives shortly after you stop typing rather than the instant you send
+   it. Nothing is lost, and a VM with no bound secret waits not at all. The
+   window is blanket rather than precise on purpose: a precise one would answer
+   "is this a live prefix?" for every byte you sent. Stated above.
+4. **The scan is a backstop.** Encoding, derivation, a window-straddling split,
+   and a split separated by a pause longer than the release threshold all
+   defeat it. This one is permanent; it is a property of scanning, not a gap to
+   close.
+5. **The shell refusal is a heuristic over argv**, and the argv comes from the
    image's own build-time record. A wrapper that `exec`s a shell still defeats
    it; see [above](#the-refusal-is-a-heuristic-treat-it-as-one).
 
-Limits 2, 3 and 4 are what keep claim 17 at `Preview`: a hash-based scan that
+Limits 2, 4 and 5 are what keep claim 17 at `Preview`: a hash-based scan that
 encoding defeats, and a heuristic control, are not the same thing as a proven
-guarantee. Limit 1 stays whatever happens to the others.
+guarantee. Limit 3 is the price of the first two rather than a defect of its
+own. Limit 1 stays whatever happens to the others.
 
 ## See also
 

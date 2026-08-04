@@ -253,7 +253,12 @@ statement = "Workload stdin is grant-gated, single-writer, secret-scanned across
 # installs. What keeps it a preview is what the enforcement is rather than
 # whether it runs — a fingerprint match is a length-and-hash match, not an
 # identity, and encoding, derivation and a window-straddling split defeat the
-# scan permanently. The limits are stated in full, marked closed or open
+# scan permanently. "Across frames" is exact within a writer's burst and stops
+# there: because the scan holds fingerprints rather than values it withholds a
+# blanket `longest_secret - 1` tail — precision would be a prefix oracle — and
+# the gate releases that tail on writer silence, so a secret split across a
+# pause longer than the threshold is missed (ADR-001 limit 6, whose residual
+# sits inside limit 4). The limits are stated in full, marked closed or open
 # individually, in the ADR-001 ledger's "Preview 17 limits" note; do not read
 # this row as enforced without it.
 witnesses = [
@@ -266,4 +271,7 @@ witnesses = [
     "fn:the_handshakes_two_halves_go_to_two_different_places",
     "fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload",
     "fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret",
+    "fn:a_secret_split_across_two_writes_inside_the_threshold_is_still_refused",
+    "fn:the_idle_release_does_not_depend_on_what_the_withheld_bytes_are",
+    "fn:what_is_withheld_is_a_length_and_never_a_verdict_about_the_bytes",
 ]

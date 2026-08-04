@@ -305,13 +305,17 @@ impl StreamPlane {
         self.inputs().contains_key(vm)
     }
 
-    /// Extend `vm`'s input lease without writing anything.
+    /// Tell `vm`'s gate that its writer is idle but alive.
     ///
-    /// The lease exists to free a stdin whose writer died, not to punish one
-    /// that is thinking: without this, an interactive writer that paused past
-    /// the TTL would find its next write refused *and* its close refused,
-    /// which drops the tail the gate withheld. Keeping the lease alive is the
-    /// holder's job, and this is the only way to do it without sending bytes.
+    /// Two things ride on the same call. The lease exists to free a stdin
+    /// whose writer died, not to punish one that is thinking: without this, an
+    /// interactive writer that paused past the TTL would find its next write
+    /// refused *and* its close refused, which drops the tail the gate
+    /// withheld. And on a secret-bearing VM the gate releases that withheld
+    /// tail once the silence is long enough, which is what lets a workload
+    /// reading one request line at a time ever receive one. Both are the
+    /// holder's job, and this is the only way to do either without sending
+    /// bytes.
     pub fn refresh_input(&self, vm: &str) -> Result<(), InputRouteError> {
         let shared = self.route(vm)?;
         let mut held = shared.lock().unwrap_or_else(PoisonError::into_inner);

@@ -169,8 +169,20 @@
       ]
     },
     {
+<<<<<<< HEAD
       "path": "crates/mvm-contract/src/policy/network_policy.rs",
       "package": "mvm-contract",
+=======
+      "path": "crates/mvm-hostd/src/supervisor/substitution_endpoint.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        17
+      ]
+    },
+    {
+      "path": "crates/mvm-protocol/src/policy/network_policy.rs",
+      "package": "mvm-protocol",
+>>>>>>> b1153c154 (fix(hostd): release the withheld tail on writer silence)
       "claims": [
         10
       ]
@@ -202,6 +214,13 @@
       "package": "mvm-runtime",
       "claims": [
         10
+      ]
+    },
+    {
+      "path": "crates/mvm-runtime/src/substitution_spawn.rs",
+      "package": "mvm-runtime",
+      "claims": [
+        17
       ]
     },
     {

@@ -29,11 +29,17 @@
 //!   re-offers only the first, and drains the second by asking the route to
 //!   flush what it is already holding.
 //!
-//! - **The lease outlives a pause.** A writer thinking for longer than the
-//!   lease TTL would come back to find its next write refused *and* its close
-//!   refused, which drops the tail the gate withheld. A blocking read on a
-//!   quiet stdin is exactly that pause, so refreshing cannot be something the
-//!   read loop does between reads: it gets its own ticker.
+//! - **Somebody has to attend a writer that has stopped typing.** Two things
+//!   go wrong while a reader is parked in `read` and neither is visible from
+//!   there. A writer thinking for longer than the lease TTL comes back to find
+//!   its next write refused *and* its close refused, which drops the tail the
+//!   gate withheld. And on a secret-bearing VM the gate is withholding a
+//!   blanket tail of everything typed so far, which it releases only once the
+//!   writer has been quiet for long enough — so a pause is exactly when the
+//!   typed line becomes deliverable. Both are answered by
+//!   [`WorkloadInput::refresh`], and neither can be something the read loop
+//!   does between reads, because the read is where it is stuck. They get their
+//!   own attendant thread.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +47,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use mvm_contract::stream::input::InputFrame;
-use mvm_hostd::stream::{DEFAULT_LEASE_TTL, InputRouteError, StreamPlane};
+use mvm_hostd::stream::{DEFAULT_IDLE_FLUSH_AFTER, InputRouteError, StreamPlane};
 
 /// How much of the caller's stdin travels in one frame.
 ///
@@ -62,16 +68,20 @@ const RETRY_PAUSE: Duration = Duration::from_millis(25);
 /// forever would leave a thread spinning against a dead VM.
 const DELIVERY_PATIENCE: Duration = Duration::from_secs(60);
 
-/// How often the ticker touches the lease. A third of the TTL, so one missed
-/// tick is not a lapsed lease.
-fn keepalive_period() -> Duration {
-    DEFAULT_LEASE_TTL / 3
+/// How often the attendant tells the gate its writer is idle but alive.
+///
+/// Set by the tighter of the two deadlines it serves, which is the gate's idle
+/// release rather than the lease. The gate hands over the tail its secret scan
+/// withheld once the writer has been silent for [`DEFAULT_IDLE_FLUSH_AFTER`],
+/// and nothing happens until somebody asks — so the operator's wait for a
+/// typed line is the threshold plus however long the attendant takes to come
+/// round.
+/// Half the threshold keeps that under one and a half thresholds, well inside
+/// what a person reads as instant, and it refreshes the lease two orders of
+/// magnitude more often than the TTL needs.
+fn attend_period() -> Duration {
+    DEFAULT_IDLE_FLUSH_AFTER / 2
 }
-
-/// How long the ticker sleeps between checks of the stop flag. Shorter than
-/// [`keepalive_period`] so shutting the stream down is prompt rather than
-/// waiting out a full refresh interval.
-const TICK: Duration = Duration::from_millis(250);
 
 /// One workload's stdin, as the pump reaches it.
 ///
@@ -84,7 +94,8 @@ pub(in crate::commands::vm) trait WorkloadInput: Send + Sync {
     /// the two outcomes are different [`InputRouteError`] variants and the
     /// pump treats them differently.
     fn write(&self, frame: InputFrame) -> Result<(), InputRouteError>;
-    /// Extend the lease without sending anything.
+    /// Say the writer is idle but alive: hold the lease, and let the gate
+    /// release the tail its secret scan withheld.
     fn refresh(&self) -> Result<(), InputRouteError>;
     /// Deliver the withheld tail and close the workload's stdin.
     fn close(&self) -> Result<(), InputRouteError>;
@@ -133,13 +144,13 @@ pub(in crate::commands::vm) struct StreamedInputReport {
     pub stopped_because: Option<String>,
 }
 
-/// A live host→guest stdin stream: the reader thread, the lease ticker, and
-/// the flag that ends both.
+/// A live host→guest stdin stream: the reader thread, the idle attendant,
+/// and the flag that ends both.
 pub(in crate::commands::vm) struct StdinStream {
     stop: Arc<AtomicBool>,
     input: Arc<dyn WorkloadInput>,
     report: Arc<Mutex<StreamedInputReport>>,
-    ticker: Option<std::thread::JoinHandle<()>>,
+    attendant: Option<std::thread::JoinHandle<()>>,
 }
 
 impl StdinStream {
@@ -167,15 +178,16 @@ impl StdinStream {
 
         let tick_stop = Arc::clone(&stop);
         let tick_input = Arc::clone(&input);
-        let period = keepalive_period();
-        let ticker =
-            std::thread::spawn(move || keep_lease_alive(tick_input.as_ref(), &tick_stop, period));
+        let period = attend_period();
+        let attendant = std::thread::spawn(move || {
+            attend_idle_writer(tick_input.as_ref(), &tick_stop, period);
+        });
 
         Self {
             stop,
             input,
             report,
-            ticker: Some(ticker),
+            attendant: Some(attendant),
         }
     }
 
@@ -186,8 +198,8 @@ impl StdinStream {
     /// both ends may call it.
     pub(in crate::commands::vm) fn finish(mut self) -> StreamedInputReport {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(ticker) = self.ticker.take() {
-            let _ = ticker.join();
+        if let Some(attendant) = self.attendant.take() {
+            let _ = attendant.join();
         }
         match self.input.close() {
             Ok(()) | Err(InputRouteError::NoSession) => {}
@@ -206,8 +218,8 @@ impl Drop for StdinStream {
         // still stop the threads; the close it skips is the plane's to do at
         // release.
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(ticker) = self.ticker.take() {
-            let _ = ticker.join();
+        if let Some(attendant) = self.attendant.take() {
+            let _ = attendant.join();
         }
     }
 }
@@ -354,30 +366,28 @@ fn count(report: &Mutex<StreamedInputReport>, bytes: u64) {
     report.bytes = report.bytes.saturating_add(bytes);
 }
 
-/// Touch the lease every `period` while the writer is idle, until the stream
-/// ends.
+/// Tell the gate every `period` that this writer is idle but alive, until the
+/// stream ends.
+///
+/// One call does both jobs: it holds the lease a parked reader would otherwise
+/// let lapse, and it is what makes the gate release the tail its secret scan
+/// withheld — so a workload waiting on a request line gets one. A loop that
+/// only refreshed on the lease's own schedule would leave the second job
+/// running two orders of magnitude too slowly.
 ///
 /// `period` is a parameter rather than a constant read inside so a test can
-/// watch the lease actually being touched without waiting out a share of the
-/// real TTL — the thing this function exists to do is the thing that had no
-/// witness.
-fn keep_lease_alive(input: &dyn WorkloadInput, stop: &AtomicBool, period: Duration) {
-    // Never poll the stop flag less often than the lease is refreshed:
-    // shutdown stays prompt, and a period shorter than the default poll is
-    // still honoured rather than rounded up to it.
-    let tick = TICK.min(period);
-    let mut next = Instant::now() + period;
+/// watch it working without waiting out the real interval.
+fn attend_idle_writer(input: &dyn WorkloadInput, stop: &AtomicBool, period: Duration) {
     while !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(tick);
-        if Instant::now() < next {
-            continue;
+        std::thread::sleep(period);
+        if stop.load(Ordering::SeqCst) {
+            return;
         }
-        next = Instant::now() + period;
         match input.refresh() {
             // The stream ended under us; there is no lease left to hold.
             Err(InputRouteError::NoSession) => return,
             Err(error) => {
-                tracing::debug!(error = %error, "could not refresh the workload input lease");
+                tracing::debug!(error = %error, "could not attend the idle workload input writer");
             }
             Ok(()) => {}
         }
@@ -388,6 +398,7 @@ fn keep_lease_alive(input: &dyn WorkloadInput, stop: &AtomicBool, period: Durati
 mod tests {
     use super::*;
     use anyhow::anyhow;
+    use mvm_hostd::stream::DEFAULT_LEASE_TTL;
 
     /// A destination that records what it was offered, in the order it was
     /// offered, and can be told to fail a given number of times first.
@@ -584,15 +595,18 @@ mod tests {
     }
 
     #[test]
-    fn the_ticker_stops_when_the_stream_does() {
+    fn the_attendant_stops_when_the_stream_does() {
         let recorder = Arc::new(Recorder::default());
         let stop = Arc::new(AtomicBool::new(false));
         let held = Arc::clone(&recorder);
         let flag = Arc::clone(&stop);
-        let ticker =
-            std::thread::spawn(move || keep_lease_alive(held.as_ref(), &flag, keepalive_period()));
+        let attendant = std::thread::spawn(move || {
+            attend_idle_writer(held.as_ref(), &flag, attend_period());
+        });
         stop.store(true, Ordering::SeqCst);
-        ticker.join().expect("the ticker must not outlive the stop");
+        attendant
+            .join()
+            .expect("the attendant must not outlive the stop");
     }
 
     /// Spin until `ready` or the deadline. Returns whether it happened, so the
@@ -609,39 +623,52 @@ mod tests {
     }
 
     #[test]
-    fn the_ticker_touches_the_lease_while_the_writer_is_idle() {
-        // The failure this pins is silent: an operator who stops typing for
-        // longer than the TTL comes back to a lease that lapsed, so the next
-        // write *and* the close are refused and the tail the gate withheld is
-        // dropped with nothing on screen to say so. A ticker that runs without
-        // refreshing looks identical to one that works.
+    fn the_attendant_keeps_visiting_an_idle_writer() {
+        // Two silent failures ride on this one call, and an attendant that
+        // loops without calling `refresh` looks identical to one that works.
+        // An operator who stops typing for longer than the TTL comes back to a
+        // lapsed lease, so the next write *and* the close are refused and the
+        // withheld tail is dropped with nothing on screen to say so. And on a
+        // secret-bearing VM the line they already typed is sitting in the
+        // gate's carry, released only when somebody says the writer went quiet.
         let recorder = Arc::new(Recorder::default());
         let stop = Arc::new(AtomicBool::new(false));
         let held = Arc::clone(&recorder);
         let flag = Arc::clone(&stop);
-        let ticker = std::thread::spawn(move || {
-            keep_lease_alive(held.as_ref(), &flag, Duration::from_millis(10))
+        let attendant = std::thread::spawn(move || {
+            attend_idle_writer(held.as_ref(), &flag, Duration::from_millis(10));
         });
 
         let refreshed = within(Duration::from_secs(5), || recorder.refreshes() >= 3);
         stop.store(true, Ordering::SeqCst);
-        ticker.join().expect("the ticker must not outlive the stop");
+        attendant
+            .join()
+            .expect("the attendant must not outlive the stop");
         assert!(
             refreshed,
-            "an idle writer's lease must keep being refreshed; saw {} refresh(es)",
+            "an idle writer must keep being attended; saw {} visit(s)",
             recorder.refreshes()
         );
     }
 
     #[test]
-    fn the_refresh_interval_leaves_room_for_a_missed_tick() {
-        // The other half: refreshing on a period the lease outlives is the
-        // same lapse. Two periods must still fit inside the TTL, so one
-        // missed tick costs nothing.
+    fn the_attend_period_serves_both_deadlines_it_is_responsible_for() {
+        // The period is one number answering to two clocks, and drifting past
+        // either is silent. Too slow against the gate's idle release and a
+        // typed line waits whole tick-times for a delivery the gate is already
+        // willing to make; too slow against the lease and the writer loses its
+        // place while it was still there.
         assert!(
-            keepalive_period() * 2 < DEFAULT_LEASE_TTL,
-            "refresh period {:?} leaves no room inside the {:?} lease",
-            keepalive_period(),
+            attend_period() <= DEFAULT_IDLE_FLUSH_AFTER,
+            "attend period {:?} is longer than the {:?} idle release it exists to \
+             collect, so a released line waits on the tick rather than the threshold",
+            attend_period(),
+            DEFAULT_IDLE_FLUSH_AFTER
+        );
+        assert!(
+            attend_period() * 2 < DEFAULT_LEASE_TTL,
+            "attend period {:?} leaves no room for a missed visit inside the {:?} lease",
+            attend_period(),
             DEFAULT_LEASE_TTL
         );
     }
@@ -723,13 +750,12 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_stream_ends_its_ticker() {
+    fn dropping_a_stream_ends_its_attendant() {
         // An early `?` on the dispatch path drops the stream without ever
-        // calling `finish`, and the ticker holds a lease for a writer that no
-        // longer exists. `Drop` joins the ticker, so a stop it failed to set
-        // parks the dropping thread on a loop whose next move is ten seconds
-        // out — run it somewhere this test can outlive rather than hanging in
-        // it.
+        // calling `finish`, and the attendant holds a lease for a writer that
+        // no longer exists. `Drop` joins it, so a stop it failed to set parks
+        // the dropping thread on a loop that never ends — run it somewhere
+        // this test can outlive rather than hanging in it.
         let (keys, reader, _entered) = typed();
         let held: Arc<dyn WorkloadInput> = Arc::new(Recorder::default());
         let dropped = Arc::new(AtomicBool::new(false));

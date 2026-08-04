@@ -477,10 +477,16 @@ updates only its own entry below.
       — fingerprints each secret it resolves and reports `(length, rolling
       hash, category)` on its ready handshake, and `StreamPlane::open_input`
       installs that set on the gate. No plaintext crosses into `mvmctl`.
+      Holding fingerprints instead of values costs the scan its live-prefix
+      precision, so it withholds a blanket `longest_secret - 1` tail — a
+      *precise* carry would make withhold-or-deliver depend on content, which
+      is a prefix oracle — and the gate releases that tail after 50ms of writer
+      silence, on elapsed time alone, which is what lets a workload reading one
+      request line at a time ever receive one.
       Claim 17 stays `Preview`, now for what the enforcement *is* rather than
       whether it runs: a fingerprint match is a length-and-hash match, not an
-      identity, and encoding, derivation and a window-straddling split defeat
-      the scan permanently.
+      identity, and encoding, derivation, a window-straddling split and a split
+      the sender separated by a deliberate pause defeat the scan permanently.
 
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added

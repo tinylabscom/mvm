@@ -81,10 +81,16 @@ pub fn recorded_secret_fingerprints(vm_name: &str) -> Vec<SecretFingerprint> {
 /// Record what the endpoint for `vm_name` reported, replacing any earlier set:
 /// a restarted VM's secrets are whatever its new endpoint resolved.
 ///
-/// Public so a test can stand in for an endpoint it cannot spawn. Injecting a
-/// fingerprint here is not a privilege: fingerprints only ever cause the input
-/// gate to *refuse*, so the worst a caller can do with this is close a stdin
-/// that would otherwise have been open.
+/// Public so a test can stand in for an endpoint it cannot spawn. Not a
+/// privilege boundary — every caller is already inside the process that booted
+/// the VM — but the worst case runs the other way from the obvious one.
+/// *Adding* a fingerprint only ever makes the gate refuse more. *Replacing* is
+/// the sharp edge: this overwrites rather than merges, so an in-process caller
+/// passing an empty set leaves the next `open_input` with nothing to scan
+/// against, and the gate goes quiet without any refusal to notice. Overwriting
+/// is still right — a set that could only grow would outlive the secrets it
+/// stood for — so the protection is that the endpoint spawn is the one caller
+/// that writes it in production.
 pub fn record_secret_fingerprints(vm_name: &str, reported: Vec<SecretFingerprint>) {
     fingerprints().insert(vm_name.to_string(), reported);
 }

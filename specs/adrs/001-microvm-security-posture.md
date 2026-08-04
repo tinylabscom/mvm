@@ -630,16 +630,41 @@ this table exists to prevent.
    compared rather than asserting the bytes are the secret
    (`fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret`). The
    cost is the mirror image of limit 4: limit 4 is what the scan misses, this
-   is what it may refuse without cause. A second cost rides with it: unable to
-   tell a live secret prefix from an innocent tail, the scanner withholds a
-   fixed `longest_secret - 1` bytes of every write on a secret-bearing VM
-   until the next write or the close. Bounded, never dropped, and charged only
-   to workloads that have a secret to leak.
+   is what it may refuse without cause.
+6. **The carry is blanket, and is released on silence. (CLOSED; its residual
+   lives inside limit 4.)** Unable to tell a live secret prefix from an
+   innocent tail, the scanner withholds a fixed `longest_secret - 1` bytes of
+   every write on a secret-bearing VM. That imprecision is deliberate. A
+   *precise* carry would make the withhold-or-deliver decision depend on
+   content, and that decision is observable: a caller holding the input grant
+   feeds one byte, watches whether anything came out, and walks a 40-byte
+   credential out in about 40·256 probes rather than 256^40 — a
+   secret-extraction path against exactly what row 13 protects. The blanket
+   carry is what denies that signal.
+   Its cost was a deadlock rather than latency: with a 40-byte bound secret the
+   carry is 39, so a typed 11-byte request line delivered **zero** bytes, a
+   workload answering per line never answered, and the write that would release
+   the held tail never came. The gate now releases the withheld tail after
+   `DEFAULT_IDLE_FLUSH_AFTER` (50ms) of writer silence, on **elapsed time
+   alone** — never on what the bytes are, which is what keeps the oracle shut
+   (`fn:the_idle_release_does_not_depend_on_what_the_withheld_bytes_are`,
+   `fn:what_is_withheld_is_a_length_and_never_a_verdict_about_the_bytes`). The
+   release cannot hand over a secret: what it releases already survived a scan
+   of the buffer it came from. What it costs is context — a secret split across
+   a silence longer than the threshold is no longer contiguous in the scanner
+   and is missed
+   (`fn:a_secret_split_across_two_writes_inside_the_threshold_is_still_refused`
+   pins the covered side;
+   `fn:a_secret_split_across_the_idle_gap_is_missed_and_that_is_the_price` pins
+   the uncovered one). That needs the *sender* to pause mid-credential, which a
+   confused caller does not do and a determined one does not need — base64
+   already defeats the scan — so it sits inside limit 4 and does not widen it.
 
 Limits 4 and 5 are permanent — properties of scanning and of hashing, not gaps
-to fix. Promotion of row 17 to a numbered claim is therefore a decision about
-whether numbered prose can carry them and the argv heuristic in limit 2, not a
-decision waiting on work.
+to fix. Limit 6 is closed; what it leaves behind is a residual inside limit 4
+rather than a limit of its own. Promotion of row 17 to a numbered claim is
+therefore a decision about whether numbered prose can carry limits 4 and 5 plus
+the argv heuristic in limit 2, not a decision waiting on work.
 
 **Claim 3 backend scoping (ADR-107).** Claim 3's witness, dm-verity, is
 block-device-specific: it ratifies the claim on the **block+ext4** backends

@@ -1,6 +1,10 @@
 # Refactor status
 
+<<<<<<< HEAD
 Last updated: 2026-08-05
+=======
+Last updated: 2026-08-04
+>>>>>>> b1153c154 (fix(hostd): release the withheld tail on writer silence)
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -159,8 +163,9 @@ for detailed scope and acceptance criteria.
         reworded (it used to hold by *absence*, there being no host→guest byte
         path at all, and now holds by *policy*) and claim 17 added at status
         `Preview` with a limits note (T17 below closed two; plan 293 WS1 closed
-        the third by giving the scan fingerprints; the two that remain are
-        permanent properties of hashing and of scanning)
+        the third by giving the scan fingerprints, and its follow-on closed the
+        blanket carry's stall with a content-independent idle release; the two
+        that remain are permanent properties of hashing and of scanning)
   - [x] T16 — the input plane's documentation: a sibling guide
         `guides/workload-input.md` (grant, single-writer lease, secret scan,
         explicit EOF, the `--prod` shell refusal stated as the heuristic it is,
