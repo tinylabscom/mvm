@@ -11,7 +11,7 @@ use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
 };
-use mvm_sdk::deploy::{BootArtifactIdentity, verify_boot_artifact};
+use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
 use crate::commands::vm::audit_chain::AuditEmitter;
 use crate::commands::vm::host_signer::{PUBLIC_FILENAME, load_or_init_at};
@@ -172,8 +172,13 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     if p.no_supervisor {
         return Ok(None);
     }
-    let attested_sha = p
-        .boot_artifact_identity
+    let sibling_identity = if p.boot_artifact_identity.is_none() {
+        sibling_deploy_boot_artifact(p.rootfs_path)?
+    } else {
+        None
+    };
+    let boot_artifact_identity = p.boot_artifact_identity.or(sibling_identity.as_ref());
+    let attested_sha = boot_artifact_identity
         .map(|identity| {
             verify_boot_artifact(p.rootfs_path, identity).map_err(|error| {
                 anyhow::anyhow!(
@@ -397,6 +402,29 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         policy_bundle,
         host_signer_public_path: signer.public_path,
     }))
+}
+
+/// Resolve a local deployment record only when it sits beside the exact
+/// rootfs selected for boot. A record elsewhere is not an authority for this
+/// path, and an invalid sibling record refuses admission rather than silently
+/// falling back to an unrecorded boot.
+fn sibling_deploy_boot_artifact(
+    rootfs_path: &std::path::Path,
+) -> Result<Option<BootArtifactIdentity>> {
+    let Some(parent) = rootfs_path.parent() else {
+        return Ok(None);
+    };
+    let record_path = parent.join("deploy.json");
+    if !record_path.is_file() {
+        return Ok(None);
+    }
+    let record = read_deploy_record(&record_path).with_context(|| {
+        format!(
+            "reading deployment attestation beside boot artifact {}",
+            rootfs_path.display()
+        )
+    })?;
+    Ok(Some(record.boot_artifact))
 }
 
 /// Resolve the image digest used by the signed plan, verifying any caller-
@@ -793,6 +821,34 @@ mod admit_plan_tests {
             err.to_string()
                 .contains("precomputed rootfs sha256 mismatch")
         );
+    }
+
+    #[test]
+    fn sibling_deploy_record_is_only_used_for_its_rootfs_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(dir.path(), b"recorded rootfs");
+        let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
+        let record = mvm_sdk::deploy::DeployRecord {
+            schema_version: mvm_sdk::deploy::DEPLOY_RECORD_SCHEMA_VERSION,
+            workload_id: "vm-test".to_string(),
+            ir_hash: "ir-hash".to_string(),
+            image: mvm_sdk::deploy::ArtifactDigests {
+                blake3: "b".repeat(64),
+                sha256: "a".repeat(64),
+                size_bytes: 1,
+            },
+            boot_artifact: boot_artifact.clone(),
+            environment: None,
+            dependency_volume: None,
+        };
+        mvm_sdk::deploy::write_deploy_record(&record, &dir.path().join("deploy.json")).unwrap();
+
+        assert_eq!(
+            sibling_deploy_boot_artifact(&rootfs).unwrap(),
+            Some(boot_artifact)
+        );
+        let unrelated = dir.path().join("other").join("rootfs.ext4");
+        assert!(sibling_deploy_boot_artifact(&unrelated).unwrap().is_none());
     }
 
     #[test]
