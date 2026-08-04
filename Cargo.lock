@@ -2804,6 +2804,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ed25519-dalek",
  "ext4-view",
  "flate2",
  "hex",
