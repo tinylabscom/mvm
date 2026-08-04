@@ -2696,8 +2696,8 @@ dependencies = [
  "hickory-proto",
  "ipnet",
  "libc",
+ "mvm-contract",
  "mvm-core",
- "mvm-protocol",
  "nix 0.29.0",
  "rand 0.8.6",
  "schemars",
@@ -2771,11 +2771,11 @@ dependencies = [
  "mvm-agentd",
  "mvm-build",
  "mvm-client",
+ "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
  "mvm-net",
- "mvm-protocol",
  "mvm-runtime",
  "mvm-sdk",
  "notify",
@@ -2810,10 +2810,10 @@ dependencies = [
  "flate2",
  "hex",
  "mvm-build",
+ "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
- "mvm-protocol",
  "mvm-runtime",
  "rand 0.8.6",
  "secrecy",
@@ -2841,17 +2841,36 @@ dependencies = [
  "hex",
  "mvm-build",
  "mvm-cli",
+ "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
  "mvm-net",
- "mvm-protocol",
  "mvm-runtime",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tar",
  "tempfile",
+ "tokio",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "mvm-contract"
+version = "0.18.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "chrono",
+ "ed25519-dalek",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
 ]
@@ -2872,8 +2891,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "keyring",
- "mvm-protocol",
- "mvm-volume-contract",
+ "mvm-contract",
  "rand 0.8.6",
  "rcgen",
  "regex",
@@ -2911,7 +2929,7 @@ dependencies = [
  "ext4-view",
  "hex",
  "libc",
- "mvm-protocol",
+ "mvm-contract",
  "reqwest",
  "rustix",
  "rustls",
@@ -2959,9 +2977,9 @@ dependencies = [
  "libkrun-sys",
  "mvm-agentd",
  "mvm-build",
+ "mvm-contract",
  "mvm-core",
  "mvm-net",
- "mvm-protocol",
  "mvm-runtime",
  "mvm-sdk",
  "rand 0.8.6",
@@ -2992,27 +3010,12 @@ name = "mvm-net"
 version = "0.18.0"
 dependencies = [
  "ipnet",
+ "mvm-contract",
  "mvm-core",
- "mvm-protocol",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "mvm-protocol"
-version = "0.18.0"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "toml 0.8.23",
 ]
 
 [[package]]
@@ -3036,11 +3039,10 @@ dependencies = [
  "mio",
  "mvm-agentd",
  "mvm-build",
+ "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-net",
- "mvm-protocol",
- "mvm-volume-contract",
  "nix 0.29.0",
  "object_store",
  "rand 0.8.6",
@@ -3074,8 +3076,8 @@ dependencies = [
  "globset",
  "hex",
  "mvm-agentd",
+ "mvm-contract",
  "mvm-core",
- "mvm-protocol",
  "reqwest",
  "rustls",
  "schemars",
@@ -3092,20 +3094,6 @@ dependencies = [
  "tree-sitter-nix",
  "tree-sitter-python",
  "tree-sitter-typescript",
-]
-
-[[package]]
-name = "mvm-volume-contract"
-version = "0.18.0"
-dependencies = [
- "anyhow",
- "bytes",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]

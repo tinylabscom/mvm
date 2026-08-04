@@ -19,7 +19,7 @@ The incumbent stack:
   `ControlRequest`, and audit entries are byte-identical across mvm↔mvmd,
   canonicalized and Ed25519-signed (ADR-014, ADR-015, ADR-019). Every
   host↔guest type is `#[serde(deny_unknown_fields)]` (fail-closed) and
-  fuzzed. `mvm-protocol` is `no_std` + `alloc` and compiles on
+  fuzzed. `mvm-contract` is `no_std` + `alloc` and compiles on
   `wasm32` for the in-browser core goal (ADR-024).
 - **Crypto:** `ed25519-dalek` (signing, chain-signed audit),
   `ring`/`rustls`/`rcgen` (egress-substitution TLS re-origination,

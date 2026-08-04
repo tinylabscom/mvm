@@ -145,7 +145,7 @@ within a day", not "within a PR".
 - [x] Nightly `mutation-witnesses` job in `security.yml`, marked
       `continue-on-error` until the baseline covers the whole surface.
 - [x] Seed `accepted_misses` from a real run of the claim-10 anchor
-      (`crates/mvm-protocol/src/policy/network_policy.rs`): 52 mutants,
+      (`crates/mvm-contract/src/policy/network_policy.rs`): 52 mutants,
       35 caught, 12 unviable, 1 timeout, **4 missed**.
 - [x] Confine `--run` to a throwaway `HOME` + `MVM_HOME` (#1958, closing
       \#1946). A mutant is the enforcement code with a check removed, so
@@ -203,7 +203,7 @@ within a day", not "within a PR".
       test go red. `network_policy.rs` now measures 52 mutants, 0
       surviving. What the first run showed:
   - [x] `is_banned_ssh_port -> false` survives. Only the negative
-        direction is asserted inside mvm-protocol, so pinning the
+        direction is asserted inside mvm-contract, so pinning the
         predicate to false goes unnoticed while flipping its `==` is
         caught. The SSH ban has real callers in mvm-core and mvm-cli;
         the owning crate should assert port 22 *is* banned.

@@ -15,10 +15,10 @@ use crate::commands::vm::up::SdkSidecarAttachment;
 /// from carrying a binding no handler could ever satisfy.
 pub(crate) fn parse_host_service_bindings(
     raw: &[String],
-) -> Result<Vec<mvm_protocol::protocol::broker::ServiceId>> {
+) -> Result<Vec<mvm_contract::protocol::broker::ServiceId>> {
     let mut out = Vec::with_capacity(raw.len());
     for value in raw {
-        let id = mvm_protocol::protocol::broker::ServiceId::parse(value.trim())
+        let id = mvm_contract::protocol::broker::ServiceId::parse(value.trim())
             .map_err(|e| anyhow::anyhow!("invalid --host-service '{value}': {e}"))?;
         if !out.contains(&id) {
             out.push(id);
@@ -37,7 +37,7 @@ pub(crate) fn parse_host_service_bindings(
 pub(crate) fn resolve_bindings_and_sidecar(
     raw: &[String],
 ) -> Result<(
-    Vec<mvm_protocol::protocol::broker::ServiceId>,
+    Vec<mvm_contract::protocol::broker::ServiceId>,
     Option<SdkSidecarAttachment>,
 )> {
     let bindings = parse_host_service_bindings(raw)?;

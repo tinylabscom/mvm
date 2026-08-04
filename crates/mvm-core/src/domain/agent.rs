@@ -120,7 +120,7 @@ fn default_compression() -> String {
 /// `MountVolume` / `UnmountVolume` verbs.
 ///
 /// This is deliberately a separate type from the IR `Mount`
-/// (`mvm-protocol::ir::workload`) — the IR describes a single workload's
+/// (`mvm-contract::ir::workload`) — the IR describes a single workload's
 /// authored intent, while this describes coordinator-resolved fleet
 /// state pushed to agents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,7 +158,7 @@ pub struct DesiredMount {
 /// Read-only vs read-write for a [`DesiredMount`].
 ///
 /// Mirrors (rather than reuses) the IR `MountMode`
-/// (`mvm-protocol::ir::workload`) so the signed desired-state schema
+/// (`mvm-contract::ir::workload`) so the signed desired-state schema
 /// stays self-contained; the wire values (`"ro"` / `"rw"`) are
 /// identical by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

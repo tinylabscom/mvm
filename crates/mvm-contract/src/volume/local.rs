@@ -233,8 +233,8 @@ impl VolumeBackend for LocalBackend {
 
 #[cfg(test)]
 mod tests {
+    use super::super::contract::assert_backend_contract;
     use super::*;
-    use crate::contract::assert_backend_contract;
 
     #[tokio::test]
     async fn passes_canonical_contract() {

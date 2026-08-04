@@ -629,7 +629,7 @@ details.
 ### Repository layout
 
 14-crate Cargo workspace. The dependency spine runs low → high:
-`mvm-protocol` (`no_std` + alloc: wire types / Workload IR / policy / audit-log
+`mvm-contract` (`no_std` + alloc: wire types / Workload IR / policy / audit-log
 verify — wasm-capable) → `mvm-core` (std: config / paths / crypto / signed
 execution plans — no async by default) → { `mvm-fs` (ext4 / OCI / overlay),
 `mvm-net` (vsock + egress tunnel), `mvm-build` (Nix builder pipeline) } →

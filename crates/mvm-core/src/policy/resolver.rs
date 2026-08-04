@@ -31,7 +31,7 @@
 //! every cell of the precedence matrix and asserts the output.
 //!
 //! `EmergencyDeny` and `EffectivePolicy` — the wire DTOs this module
-//! produces and consumes — live in `mvm_protocol::policy::resolver`,
+//! produces and consumes — live in `mvm_contract::policy::resolver`,
 //! re-exported below so every existing
 //! `crate::policy::resolver::{EmergencyDeny, EffectivePolicy}` path
 //! keeps resolving unchanged.
@@ -41,7 +41,7 @@ use chrono::{DateTime, Utc};
 use crate::plan::TenantId;
 use crate::policy::bundle::PolicyBundle;
 
-pub use mvm_protocol::policy::resolver::{EffectivePolicy, EmergencyDeny};
+pub use mvm_contract::policy::resolver::{EffectivePolicy, EmergencyDeny};
 
 /// Resolve `bundle` for `tenant` at `now`, with `emergency` applied
 /// last. Pure function; no I/O.
@@ -389,5 +389,5 @@ mod tests {
 
     // `EmergencyDeny` serde-shape tests (roundtrip, omitted-expiry,
     // unknown-field-rejected) moved with the type to
-    // `mvm_protocol::policy::resolver`.
+    // `mvm_contract::policy::resolver`.
 }

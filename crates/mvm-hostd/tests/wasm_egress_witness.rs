@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
+use mvm_contract::ir::AuthType;
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::plan::{SecretBinding, SecretSource, TenantId};
 use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
@@ -49,7 +50,6 @@ use mvm_hostd::supervisor::substitution_endpoint::build_egress_gate;
 use mvm_hostd::supervisor::substitution_proxy::{
     ForwardError, ForwardResponse, Forwarder, PreparedRequest, SubstitutionService,
 };
-use mvm_protocol::ir::AuthType;
 use mvm_runtime::wasm_backend::WasmBackend;
 use secrecy::SecretBox;
 

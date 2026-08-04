@@ -393,7 +393,7 @@ pub fn resolve_surface(workspace: &Path) -> Result<Surface> {
     Ok(Surface { files, uncovered })
 }
 
-/// `crates/mvm-protocol/src/policy/network_policy.rs` -> `mvm-protocol`.
+/// `crates/mvm-contract/src/policy/network_policy.rs` -> `mvm-contract`.
 pub fn package_for(rel_path: &str) -> Option<String> {
     let mut parts = rel_path.split('/');
     if parts.next()? != "crates" {
@@ -1057,10 +1057,10 @@ mod tests {
     /// prove the parser matches my assumption about the format; this
     /// proves it matches the tool.
     const REAL_MISSED_REPORT: &str = "\
-crates/mvm-protocol/src/policy/network_policy.rs:92:5: replace is_banned_ssh_port -> bool with false
-crates/mvm-protocol/src/policy/network_policy.rs:140:9: replace NetworkPreset::is_deny_all -> bool with false
-crates/mvm-protocol/src/policy/network_policy.rs:140:9: replace NetworkPreset::is_deny_all -> bool with true
-crates/mvm-protocol/src/policy/network_policy.rs:271:9: replace NetworkPolicy::trusted_build_egress -> Self with Default::default()
+crates/mvm-contract/src/policy/network_policy.rs:92:5: replace is_banned_ssh_port -> bool with false
+crates/mvm-contract/src/policy/network_policy.rs:140:9: replace NetworkPreset::is_deny_all -> bool with false
+crates/mvm-contract/src/policy/network_policy.rs:140:9: replace NetworkPreset::is_deny_all -> bool with true
+crates/mvm-contract/src/policy/network_policy.rs:271:9: replace NetworkPolicy::trusted_build_egress -> Self with Default::default()
 ";
 
     #[test]
@@ -1074,7 +1074,7 @@ crates/mvm-protocol/src/policy/network_policy.rs:271:9: replace NetworkPolicy::t
         assert!(
             misses
                 .iter()
-                .all(|m| m.file == "crates/mvm-protocol/src/policy/network_policy.rs")
+                .all(|m| m.file == "crates/mvm-contract/src/policy/network_policy.rs")
         );
         // The `-> Self with Default::default()` form carries both `::`
         // and `()`; a naive field split would truncate it.
@@ -1114,8 +1114,8 @@ a.rs:5:1: replace x with y
     #[test]
     fn package_derivation_handles_flat_and_nested_crates() {
         assert_eq!(
-            package_for("crates/mvm-protocol/src/policy/network_policy.rs").as_deref(),
-            Some("mvm-protocol")
+            package_for("crates/mvm-contract/src/policy/network_policy.rs").as_deref(),
+            Some("mvm-contract")
         );
         assert_eq!(
             package_for("crates/deps/libkrun-sys/src/sys.rs").as_deref(),

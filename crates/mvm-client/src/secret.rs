@@ -42,15 +42,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
+use mvm_contract::ir::host_matches;
 use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore};
-use mvm_protocol::ir::host_matches;
 use serde::Serialize;
 
 pub use audit::SecretAudit;
 pub use input::SecretValueInput;
+pub use mvm_contract::ir::{AuthType, Sigv4Params};
 pub use mvm_hostd::keyholder::SecretBindingMeta;
-pub use mvm_protocol::ir::{AuthType, Sigv4Params};
 pub use refs::{MachineSecretRef, MachineSecretRefSet};
 
 /// Typed refusals and failures for secret lifecycle operations. Never

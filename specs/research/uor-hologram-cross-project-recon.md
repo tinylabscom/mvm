@@ -219,7 +219,7 @@ and each aligns with a lesson mvm already learned the hard way.
 - **Source:** UOR Gate-4 "positive/negative/edge/replay vectors must pass on ≥2
   independent implementations."
 - **Now:** mvm already maintains multiple verifiers of the same wire format:
-  `mvm_hostd` file-based `verify_audit_chain`, the `mvm_protocol` no_std/wasm
+  `mvm_hostd` file-based `verify_audit_chain`, the `mvm_contract` no_std/wasm
   `verify_audit_chain_bytes` (`MirrorEntry`, CI-pinned by
   `mvm_verify_matches_supervisor_chain`), and the riscv32 ESP32 verifier (edge tier).
 - **Upgrade:** ship the U4 replay corpus as *one shared vector set* that host + wasm
@@ -692,7 +692,7 @@ mvmd identity work:
   verifier must not share code with the emitter" — reinforces §6 U5's ≥2-implementation
   bar.
 - **Machine-checked reference spec (Lean 4) as the third oracle.** The endpoint of §6 U5:
-  model the small, pure, `no_std` audit-chain verifier (`mvm_protocol::verify`) plus the
+  model the small, pure, `no_std` audit-chain verifier (`mvm_contract::verify`) plus the
   canonicalization/address algebra (JCS+NFC, RFC-6962 Merkle) as a Lean-4 *specification*, and
   make the host + wasm + ESP32 Rust verifiers conform to it over the U4 golden-vector corpus.
   Lean becomes a machine-checked oracle — exactly the shape of UOR's `F1`, a serious Lean-4
@@ -808,4 +808,4 @@ Selected code anchors validated during the read (external repos cloned under
 | `hologram-storage/src/ontology/certificate.rs` | Fail-closed (σ==1.0) content-addressed proof artifact |
 | mvm `crates/mvm-core/src/semantic_address.rs:59,152,168` | `sha256(JCS(NFC(IR)))`; already NFC-normalizes (corrects §5.3) |
 | mvm `crates/mvm-core/src/plan/bundle.rs:616,954` | `verify_plan_bundle` / `read_and_verify_bundle` rejection ladders |
-| mvm `crates/mvm-protocol/src/verify.rs:169`, `merkle.rs` | no_std audit-chain verifier + RFC-6962 transparency tree (the "≥2 impls" bar, §6 U5) |
+| mvm `crates/mvm-contract/src/verify.rs:169`, `merkle.rs` | no_std audit-chain verifier + RFC-6962 transparency tree (the "≥2 impls" bar, §6 U5) |

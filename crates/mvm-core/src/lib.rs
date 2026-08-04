@@ -57,10 +57,10 @@ pub mod kernel_format;
 /// Flat launch-metadata parsers for `mvm-init` (no JSON in PID 1).
 pub mod launch_metadata;
 // Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host
-// contract) are a pure-DTO leaf that now lives in `mvm-protocol`;
+// contract) are a pure-DTO leaf that now lives in `mvm-contract`;
 // re-exported here as a module alias so every existing
 // `crate::lifecycle::X` path keeps resolving unchanged.
-pub use mvm_protocol::lifecycle;
+pub use mvm_contract::lifecycle;
 /// Resident-memory accounting for warm pools (learned charge + admission).
 pub mod memory_budget;
 pub mod metering;
@@ -85,7 +85,7 @@ pub mod release_trust;
 pub mod semantic_address;
 pub mod user_config;
 
-/// Test-only drift-lock proving `mvm_protocol::ir::canonicalize` and
+/// Test-only drift-lock proving `mvm_contract::ir::canonicalize` and
 /// `serde_jcs` emit byte-identical canonical form for the same workload.
 #[cfg(test)]
 mod canonicalizer_equivalence;

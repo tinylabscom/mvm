@@ -127,7 +127,7 @@ fn serve(
     control: &mut Box<dyn mvm_net::channel::GuestStream>,
     data: &mut Box<dyn mvm_net::channel::GuestStream>,
 ) -> Result<()> {
-    let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
+    let mut buf = vec![0u8; mvm_contract::l3::MAX_WIRE_LEN];
     let mut now: u64 = 0;
 
     // Handshake: HELLO on control, CONFIG back, then READY.

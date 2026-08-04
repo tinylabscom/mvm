@@ -1,5 +1,5 @@
+use mvm_contract::ir::{App, Entrypoint, EnvValue, SecretMount, Workload};
 use mvm_core::plan::{SecretBinding, SecretReleasePolicy, SecretSource};
-use mvm_protocol::ir::{App, Entrypoint, EnvValue, SecretMount, Workload};
 
 // allow(secret-debug): `SecretBinding` is a reference type carrying
 // only metadata (provider id, binding name, release policy) — it does
@@ -74,7 +74,7 @@ fn secret_release_for_bindings(bindings: &[SecretBinding]) -> SecretReleasePolic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::ir::{Image, Resources, Source};
+    use mvm_contract::ir::{Image, Resources, Source};
     use std::collections::BTreeMap;
 
     fn app_with_envs(
@@ -115,10 +115,10 @@ mod tests {
 
     fn secret_env_ref(name: &str, var: &str) -> EnvValue {
         EnvValue::SecretRef {
-            reference: mvm_protocol::ir::SecretRef {
+            reference: mvm_contract::ir::SecretRef {
                 name: name.into(),
                 mount: SecretMount::Env { var: var.into() },
-                auth_type: mvm_protocol::ir::AuthType::Bearer,
+                auth_type: mvm_contract::ir::AuthType::Bearer,
                 allowed_hosts: vec!["api.example.com".into()],
                 sigv4: None,
             },

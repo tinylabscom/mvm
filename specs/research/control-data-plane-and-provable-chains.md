@@ -160,7 +160,7 @@ merkle-or-hash-chain construction:
 
 The audit verifier is even re-implemented byte-for-byte as `#![no_std]`/wasm so
 anyone can verify a downloaded log in a browser with no host and no server trust
-(`crates/mvm-protocol/src/verify.rs:169-236`); a supervisor-side test pins the
+(`crates/mvm-contract/src/verify.rs:169-236`); a supervisor-side test pins the
 two implementations equivalent (`audit_file.rs:366-400`).
 
 So the primitives the scratch note asks about — merkle trees, hash chains,

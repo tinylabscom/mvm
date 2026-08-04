@@ -4,7 +4,7 @@ The authoring pipeline (SDK) and the verification pipeline (BDD-first testing) �
 
 ## SDK
 
-`mvm-sdk` keeps the existing pipeline shape: **tree-sitter → Workload IR → nix template**. The IR itself moves to `mvm-protocol` (see the crate map in [02-architecture.md](02-architecture.md)); `mvm-sdk` retains authoring, the decorator, runtime-authoring support, and the pipeline logic that walks source through tree-sitter into that IR and out to a nix template. The template base is a user-specified **base OCI image**.
+`mvm-sdk` keeps the existing pipeline shape: **tree-sitter → Workload IR → nix template**. The IR itself moves to `mvm-contract` (see the crate map in [02-architecture.md](02-architecture.md)); `mvm-sdk` retains authoring, the decorator, runtime-authoring support, and the pipeline logic that walks source through tree-sitter into that IR and out to a nix template. The template base is a user-specified **base OCI image**.
 
 ### `PackageType` trait
 

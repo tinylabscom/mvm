@@ -1,5 +1,5 @@
 [package]
-name = "mvm-protocol"
+name = "mvm-contract"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "no_std + alloc core for mvm: audit-log verifier (and, incrementally, the Workload IR + wire protocol + policy DTOs). The wasm/browser-capable foundation."
+description = "Feature-gated no_std protocol and storage contracts shared by mvm and fleet orchestrators"
 
 [dependencies]
 # All no_std + alloc — pinned directly (not `workspace = true`) because
@@ -20,7 +20,7 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 # `std` and `no_std` — the `clock` feature only gates `Utc::now()`
 # (wall-clock reads), never serialization — so plan DTOs keep their
 # `DateTime<Utc>` fields byte-identical across the move.
-chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"], optional = true }
 ed25519-dalek = { version = "3", default-features = false }
 # Only under the `schema` feature (IR JSON-Schema codegen for
 # `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins). schemars 0.8's
@@ -32,6 +32,9 @@ ed25519-dalek = { version = "3", default-features = false }
 # `VerbGrant::not_after` needs it under this feature the same way
 # `mvm-core`'s schemars dep already carries it.
 schemars = { version = "0.8", default-features = false, features = ["derive", "chrono"], optional = true }
+anyhow = { workspace = true, optional = true }
+bytes = { version = "1", optional = true }
+tokio = { workspace = true, features = ["fs", "io-util"], optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.11", default-features = false }
@@ -52,14 +55,18 @@ toml.workspace = true
 # wasm32-unknown-unknown lib build, so the wasm-clean gate stays chrono
 # clock-free.
 chrono = { version = "0.4", features = ["clock"] }
+tempfile.workspace = true
 
 [features]
-default = []
+default = ["protocol"]
+protocol = ["dep:chrono"]
+volume = ["dep:anyhow", "dep:bytes"]
+local = ["volume", "dep:chrono", "chrono/clock", "dep:tokio"]
 # Derive `schemars::JsonSchema` on the Workload IR types so
 # `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins can emit the IR's
 # JSON Schema. Off by default: the schema is a build-time codegen
 # input, never linked into the wasm-clean verifier build.
-schema = ["dep:schemars"]
+schema = ["protocol", "dep:schemars"]
 
 [lints]
 workspace = true

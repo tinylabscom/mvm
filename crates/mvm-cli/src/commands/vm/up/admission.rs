@@ -100,7 +100,7 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// anything absent from this set, and the launch path reads the same set to
     /// decide whether the optional glibc SDK sidecar must be attached. Empty
     /// (the common case) means the workload calls no host service.
-    pub services: Vec<mvm_protocol::protocol::broker::ServiceId>,
+    pub services: Vec<mvm_contract::protocol::broker::ServiceId>,
     /// True iff this run should receive an attenuated (ProdSafe-only) agent-verb
     /// grant. Set this with `grant_eligible(pty, has_ad_hoc_argv, is_dev_profile)`.
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs

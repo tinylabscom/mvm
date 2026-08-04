@@ -237,7 +237,7 @@ Each surface this claim path opens or widens, with the witness that covers it.
   `spawn_standby` / `claim_standby`; reuse its substitution-endpoint spawn and
   confinement helpers (factor the cold-boot sequence into `ClaimGuards`).
 - Standby types + pool: `StandbySpec` / `StandbyClaim` / `StandbyHandle` /
-  `StandbyState` (`crates/mvm-protocol/src/protocol/vm_backend.rs`),
+  `StandbyState` (`crates/mvm-contract/src/protocol/vm_backend.rs`),
   `SupervisorStandbyPool` (`crates/mvm-runtime/src/standby_pool.rs`),
   `try_warm_claim` / `replenish_after_launch` (`crates/mvm-cli/src/commands/pool.rs`,
   wired in `crates/mvm-cli/src/exec.rs`).

@@ -93,7 +93,7 @@ Rust, safetensors-native, HF-backed, and builds static for a small guest.
 
 Being precise: **candle uses `unsafe`** — memory-mapped safetensors access and
 SIMD intrinsics at minimum. This is a meaningful reduction from a C++ runtime,
-not the `forbid(unsafe_code)` guarantee `mvm-protocol` provides. Any claim
+not the `forbid(unsafe_code)` guarantee `mvm-contract` provides. Any claim
 written about a runtime must say "no C/C++ on the workload path" only where that
 is true of *that* runtime, never as a global property of `ai`.
 
@@ -195,7 +195,7 @@ Following the existing dependency direction (high → low):
 
 | Crate | Addition | Why here |
 |---|---|---|
-| `mvm-protocol` | `ModelRequirements`, `RuntimeCapabilities`, `Generate` DTOs | Already owns the Workload IR and policy DTOs; keeps these `no_std` and wasm-buildable |
+| `mvm-contract` | `ModelRequirements`, `RuntimeCapabilities`, `Generate` DTOs | Already owns the Workload IR and policy DTOs; keeps these `no_std` and wasm-buildable |
 | `mvm-fs` | `mvm_fs::model` — bounded format readers, one per accepted format | Pure parsing beside the ext4 writer and OCI unpacker; keeps mvm-fs a zero-mvm-dep leaf, so parsers are trivially fuzzable |
 | `mvm-core` | `policy/model_requirements.rs` — derivation, `Profile::satisfies`, runtime registry and the three-party match; the `model` and `runtime` sections on `ExecutionPlan` | Derivation and matching are policy, not parsing; separating them makes the arithmetic unit-testable with no I/O |
 | `mvm-hostd` | Admission check in `plan_admission.rs`, including the conformance gate | Where sealed-volume verification and plan admission already live |
@@ -525,7 +525,7 @@ first, anything needing a booted VM last.
   and measure it; set `AI_GUEST_STORAGE_BUDGET` from that measurement. First
   because it is the only result that can invalidate the runtime choice, and
   everything downstream is wasted if it lands somewhere absurd.
-- **WS-1** — `mvm-protocol` DTOs; the bounded safetensors header reader in
+- **WS-1** — `mvm-contract` DTOs; the bounded safetensors header reader in
   `mvm-fs` plus its fuzz target. Pure, no VM.
 - **WS-2** — requirement derivation, `Profile::satisfies`, the runtime registry,
   the three-party match. Pure, no I/O.

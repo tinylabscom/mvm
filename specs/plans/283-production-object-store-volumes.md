@@ -108,7 +108,7 @@ to the PR CI matrix and the WS2/WS6 builder-VM lanes.
 The cross-repository implementation also exposed that pulling the complete mvm
 facade into mvmd couples unrelated, mutually exclusive crypto graphs. The exact
 same validated types, trait, conformance fixture, and local implementation now
-live in the dependency-light `mvm-volume-contract` leaf and are re-exported from
+live in the dependency-light `mvm-contract` leaf and are re-exported from
 the original core/runtime paths. The object-safe trait and wire types remain
 async-runtime-free by default, while the canonical local implementation is
 feature-gated. This preserves mvm ownership while allowing mvmd to implement the

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use mvm_protocol::ir::Workload;
+use mvm_contract::ir::Workload;
 
 /// A resolved place to read IR-JSON bytes from.
 #[derive(Debug)]

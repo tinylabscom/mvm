@@ -12,12 +12,12 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 
+use mvm_contract::ir::AuthType;
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::plan::{SecretBinding, SecretSource};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 use mvm_hostd::supervisor::substitution_endpoint::{EgressMode, EndpointConfig, EndpointTransport};
-use mvm_protocol::ir::AuthType;
 use secrecy::SecretBox;
 
 const BIN: &str = env!("CARGO_BIN_EXE_mvm-substitution-endpoint");

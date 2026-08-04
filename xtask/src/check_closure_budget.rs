@@ -68,13 +68,10 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// for streamed multi-hundred-megabyte kernel verification. Its `blake3`
 /// package and three small support crates are part of the default host binary.
 ///
-/// 274 (was 273): the canonical `mvm-volume-contract` leaf is now the single
-/// volume contract consumed by both mvm and fleet orchestrators; the leaf
-/// itself is the only new crate in the default closure.
-///
-/// 275 (was 274): the exact-pinned, zero-dependency `leakguard` detector adds
-/// one crate to enforce default-on credential masking on protected egress.
-const CLOSURE_BUDGET: usize = 275;
+/// 274 (was 275): consolidating the protocol and volume contracts into the
+/// feature-gated `mvm-contract` package removes one package from the default
+/// closure while preserving the protocol-only default feature set.
+const CLOSURE_BUDGET: usize = 274;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

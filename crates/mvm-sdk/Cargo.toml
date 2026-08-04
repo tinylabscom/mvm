@@ -9,12 +9,12 @@ authors.workspace = true
 
 [dependencies]
 mvm-core = { workspace = true }
-# The Workload IR itself (`mvm_sdk::ir` re-exports `mvm_protocol::ir`
+# The Workload IR itself (`mvm_sdk::ir` re-exports `mvm_contract::ir`
 # unchanged — see `src/lib.rs`). `schema` derives `JsonSchema` on the IR
 # types for `emit_schema`/`emit_addon_schema`; mvm-sdk already pulls
 # schemars unconditionally for its own `AddonManifest` below, so this
 # adds no new default-build weight.
-mvm-protocol = { workspace = true, features = ["schema"] }
+mvm-contract = { workspace = true, features = ["schema"] }
 # The subprocess-backed MvmClient facade uses the trait + DTOs from
 # `mvm-core`'s `client` module (behind that crate's `client` feature). Kept off
 # by default so the mvmctl default closure gains no `async-trait`; the facade

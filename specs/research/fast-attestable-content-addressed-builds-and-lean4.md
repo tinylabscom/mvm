@@ -15,7 +15,7 @@
 
 Concretely:
 
-1. **Action identity and artifact identity live in `mvm-core`/`mvm-protocol`, not in Nix.** A canonical `BuildPlan` type (§6.2) is hashed to an `ActionDigest`; the canonical Merkle tree of outputs is hashed to an `ArtifactDigest`. Nix remains one `BuildBackend` implementation that can produce artifacts matching this contract.
+1. **Action identity and artifact identity live in `mvm-core`/`mvm-contract`, not in Nix.** A canonical `BuildPlan` type (§6.2) is hashed to an `ActionDigest`; the canonical Merkle tree of outputs is hashed to an `ArtifactDigest`. Nix remains one `BuildBackend` implementation that can produce artifacts matching this contract.
 2. **A small MVM-native content-addressed store (CAS) and action cache (AC) become first-class crates** (`mvm-cas` or a module inside `mvm-fs`/`mvm-core`). They store blobs and signed action-results locally first, with a stable seam for future `mvmd` shared storage.
 3. **The builder VM itself is a first-class MVM microVM whose workload is to realize a `BuildPlan`.** It is not a generic Nix executor: MVM owns its guest image, boot policy, lifecycle, output contract, and log stream. Inside the VM, Nix may still run as the cold-path derivation engine, but the only outputs MVM accepts are the canonical MVM artifacts (vmlinux, rootfs.ext4, initramfs, sidecars) materialized into the host CAS and canonicalized before attestation. Network fetch is a separate, policy-controlled action; compile actions run without guest networking. The VM still streams structured build logs — errors, warnings, debug lines — to the host over the existing vsock/UDS control plane so failures remain observable without exposing a guest network interface.
 
@@ -96,7 +96,7 @@ The CLI build command is `mvmctl build`:
 - Snapshot store: `crates/mvm-fs/src/snapshot_store.rs` — `SnapshotId`, `FsSnapshotStore`, ref-counted content-addressed snapshots.
 - Image lineage: `crates/mvm-core/src/image_lineage.rs` — `ImageNode`, `ImageBuildIdentity`, `ImageIdentity`, `ImageProvenance`, hash-linked chain.
 - Build provenance: `crates/mvm-build/src/provenance.rs` — `record_provenance` hashes kernel/rootfs/initramfs and assembles `BuildProvenance`.
-- Signed execution plans: `crates/mvm-protocol/src/plan/types.rs` — `ExecutionPlan`, `PlanId`, `BuildProvenance`, `ArtifactDigests`; signing/verification in `mvm-core/src/plan/signing.rs` and `synthesis.rs`.
+- Signed execution plans: `crates/mvm-contract/src/plan/types.rs` — `ExecutionPlan`, `PlanId`, `BuildProvenance`, `ArtifactDigests`; signing/verification in `mvm-core/src/plan/signing.rs` and `synthesis.rs`.
 - Release signature verification: `crates/mvm-build/src/release_signature.rs` — Sigstore/cosign keyless bundle verification.
 
 ### 2.4 Control plane and sandboxing
@@ -368,7 +368,7 @@ For MVM's constraints, the ranking is:
           │ canonical plan  │ action digest
           ▼                 ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         mvm-core / mvm-protocol                       │
+│                         mvm-core / mvm-contract                       │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐ │
 │  │  BuildPlan   │  │ ActionDigest │  │ ArtifactManifest / MerkleTree│ │
 │  │  Material    │  │ArtifactDigest│  │ ExecutionPolicy / Evidence   │ │
@@ -631,7 +631,7 @@ The new layer should touch existing code at these narrow seams:
 - `crates/mvm-build/src/pipeline/dev_build.rs` — replace the ad-hoc `build_cache_fingerprint` + `cached_build_result` with calls to the new `ActionCache`/`ContentStore`. Nix backend stays.
 - `crates/mvm-build/src/provenance.rs` — extend `record_provenance` to emit a full `ArtifactManifest`/`ArtifactDigest`, not just per-file SHA-256.
 - `crates/mvm-core/src/image_lineage.rs` — lineage nodes can reference `ArtifactDigest` in addition to the existing per-file digests.
-- `crates/mvm-protocol/src/plan/types.rs` — add `BuildPlan`/`ActionDigest`/`ArtifactDigest` DTOs (keeping `#![no_std]` compatibility where possible).
+- `crates/mvm-contract/src/plan/types.rs` — add `BuildPlan`/`ActionDigest`/`ArtifactDigest` DTOs (keeping `#![no_std]` compatibility where possible).
 - `crates/mvm-hostd/src/audit/emitter.rs` — emit `build.action_requested`, `build.artifact_produced`, `build.cache_hit` events.
 - `crates/mvm-fs/src/snapshot_store.rs` — reuse `ContentStore` for snapshot blob storage.
 
@@ -824,7 +824,7 @@ The migration must be staged, additive, and no-flag-day. Current MVM workflows m
 **Goal:** Introduce `BuildPlan`, `ActionDigest`, `ArtifactDigest`, `ArtifactManifest`, `ActionResult`, `AttestationBundle`, and a local CAS/AC module. Nix backend remains the only build backend.
 
 **Changes:**
-- Add types to `mvm-protocol` (no_std where feasible) and `mvm-core`.
+- Add types to `mvm-contract` (no_std where feasible) and `mvm-core`.
 - Implement `ContentStore` (file-backed blobs + trees under `~/.mvm/cas/`) and `ActionCache` (signed results under `~/.mvm/ac/`).
 - Wire `dev_build` to check the AC before invoking Nix; on miss, run Nix, canonicalize outputs, store artifact, sign result.
 - Add CLI: `mvmctl build --cache-hit-only` or similar for testing.
@@ -961,7 +961,7 @@ These are non-overlapping issues for the recommended architecture. They assume t
 
 ### Issue 1: Canonical action/artifact types
 
-- Files/modules: `crates/mvm-protocol/src/plan/build_plan.rs` (new), `crates/mvm-protocol/src/plan/artifact.rs` (new), `crates/mvm-core/src/cas/digest.rs` (new).
+- Files/modules: `crates/mvm-contract/src/plan/build_plan.rs` (new), `crates/mvm-contract/src/plan/artifact.rs` (new), `crates/mvm-core/src/cas/digest.rs` (new).
 - Acceptance: types compile under `#![no_std]` where feasible; serde/CBOR roundtrip tests; schema-version and domain-separation tests.
 - Security review: ensure no spec references in comments; no secrets in Debug.
 
@@ -1056,7 +1056,7 @@ These are questions that genuinely cannot be answered from the repository, safe 
    **Wrap and reduce its role.** Retain Nix as a cold-path build backend. Do not invoke it when an attested MVM artifact already exists.
 
 2. **What component should own action identity, content identity, the CAS, and attestations?**
-   **MVM itself** — specifically new `mvm-core`/`mvm-protocol` types and a new `mvm-cas` store — not Nix, not REAPI, not BuildKit.
+   **MVM itself** — specifically new `mvm-core`/`mvm-contract` types and a new `mvm-cas` store — not Nix, not REAPI, not BuildKit.
 
 3. **Should MVM adopt REAPI or another existing protocol?**
    **Not as the primary local protocol.** Adopt REAPI *concepts* and possibly a compatible remote seam in the future, but start with a small MVM-native CAS/AC to avoid dependency and complexity overhead.

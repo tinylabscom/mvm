@@ -21,10 +21,10 @@ use secrecy::SecretBox;
 use tempfile::tempdir;
 use tokio::net::{UnixListener, UnixStream};
 
+use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::plan::{SecretBinding, SecretSource, TenantId};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
-use mvm_protocol::ir::{AuthType, SecretMount, SecretRef};
 
 use mvm_hostd::framing::{read_json_frame, write_json_frame};
 use mvm_hostd::keyholder::{

@@ -24,9 +24,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use mvm_agentd::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
+use mvm_contract::ir::HealthCheck;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::health::{HealthAction, HealthPolicy, HealthState, HealthTracker, ProbeResult, fold};
-use mvm_protocol::ir::HealthCheck;
 use mvm_runtime::machine::persist::load_machine_spec;
 use mvm_runtime::vm::name_registry::record_readiness;
 

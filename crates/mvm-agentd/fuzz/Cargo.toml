@@ -32,8 +32,8 @@ path = ".."
 [dependencies.mvm-core]
 path = "../../mvm-core"
 
-[dependencies.mvm-protocol]
-path = "../../mvm-protocol"
+[dependencies.mvm-contract]
+path = "../../mvm-contract"
 
 # `fuzz_builder_request` covers the
 # `HostVmRequest`/`HostVmResponse` payloads in

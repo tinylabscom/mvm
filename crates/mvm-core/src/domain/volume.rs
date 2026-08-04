@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
-pub use mvm_volume_contract::{VolumeEntry, VolumeError, VolumePath};
+pub use mvm_contract::{VolumeEntry, VolumeError, VolumePath};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================

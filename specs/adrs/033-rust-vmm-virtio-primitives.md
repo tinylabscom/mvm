@@ -99,7 +99,7 @@ They are forbidden in:
 - **`mvm-agentd`** (the in-guest agent), whose default closure stays
   tokio-free and dependency-lean — the sealed-agent posture behind
   claims 4 and 15.
-- **`mvm-core`** and **`mvm-protocol`** — the `no_std`/`wasm32`
+- **`mvm-core`** and **`mvm-contract`** — the `no_std`/`wasm32`
   foundation, which carries no async and no host-VMM code.
 - **The embedded cross-compiled host-vm bins** (`mvm-host-vm-init`,
   `mvm-egress-proxy`), built static `aarch64-unknown-linux-musl` in

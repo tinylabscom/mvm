@@ -1196,7 +1196,7 @@ dependencies = [
  "ipnet",
  "libc",
  "mvm-core",
- "mvm-protocol",
+ "mvm-contract",
  "nix",
  "rand",
  "seccompiler",
@@ -1259,7 +1259,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "keyring",
- "mvm-protocol",
+ "mvm-contract",
  "rand",
  "rcgen",
  "regex",
@@ -1287,7 +1287,7 @@ dependencies = [
  "ext4-view",
  "hex",
  "libc",
- "mvm-protocol",
+ "mvm-contract",
  "reqwest",
  "rustix",
  "rustls",
@@ -1307,11 +1307,11 @@ name = "mvm-net"
 version = "0.18.0"
 dependencies = [
  "mvm-core",
- "mvm-protocol",
+ "mvm-contract",
 ]
 
 [[package]]
-name = "mvm-protocol"
+name = "mvm-contract"
 version = "0.18.0"
 dependencies = [
  "base64",
@@ -1348,7 +1348,7 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-fs",
- "mvm-protocol",
+ "mvm-contract",
  "nix",
  "prost",
  "prost-types",
@@ -1389,7 +1389,7 @@ dependencies = [
  "globset",
  "hex",
  "mvm-core",
- "mvm-protocol",
+ "mvm-contract",
  "schemars",
  "serde",
  "serde_json",

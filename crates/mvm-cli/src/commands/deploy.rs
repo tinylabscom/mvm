@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 
+use mvm_contract::ir::ir_hash;
 use mvm_core::user_config::MvmConfig;
-use mvm_protocol::ir::ir_hash;
 use mvm_sdk::deploy::{
     EnvironmentPin, MvmdClient, build_deploy_bundle, build_deploy_record, write_deploy_record,
 };

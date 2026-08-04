@@ -1,17 +1,17 @@
-//! `#[wasm_bindgen]` shim exposing `mvm_protocol::verify` to a browser tab.
+//! `#[wasm_bindgen]` shim exposing `mvm_contract::verify` to a browser tab.
 //!
 //! The page (`index.html`) hands this two strings — the audit JSONL the
 //! operator downloaded and the host signer's Ed25519 public key in hex —
 //! and renders the JSON this returns. No host, no server: the wasm runs
 //! the exact same chain verification `mvm-supervisor` runs natively.
-//! Keeping the logic in `mvm-protocol` (a real, tested workspace crate)
+//! Keeping the logic in `mvm-contract` (a real, tested workspace crate)
 //! means this file stays a dumb adapter.
 
-use mvm_protocol::merkle::{
+use mvm_contract::merkle::{
     InclusionProof, SignedAuditRoot, verify_inclusion as merkle_verify_inclusion,
     verify_signed_root as merkle_verify_signed_root,
 };
-use mvm_protocol::verify::{verify_audit_chain_bytes, verifying_key_from_hex};
+use mvm_contract::verify::{verify_audit_chain_bytes, verifying_key_from_hex};
 use wasm_bindgen::prelude::*;
 
 /// Verify a chain-signed audit stream against an Ed25519 public key.

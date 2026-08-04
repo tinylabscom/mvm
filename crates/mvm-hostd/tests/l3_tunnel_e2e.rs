@@ -15,13 +15,13 @@ use std::sync::Arc;
 use mvm_agentd::l3::{
     AgentState, MemoryTun, NetAgent, RecordingConfigurator, RecordingPrivilegeDropper,
 };
+use mvm_contract::l3::{MessageType, frame, ip, proto};
 use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
 use mvm_hostd::netd::{Gateway, GatewayConfig, GatewayEvent, LoopbackDatapath, StaticResolver};
 use mvm_net::channel::{GuestService, VmInstanceIdentity};
 use mvm_net::l3::{
     AddressAllocator, AddressLease, DenyCode, IngressMapping, L3PolicyConfig, SessionId,
 };
-use mvm_protocol::l3::{MessageType, frame, ip, proto};
 
 const REMOTE: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
 /// A routable public address the policy does not admit. Deliberately not a
@@ -185,7 +185,7 @@ fn agent_send_hello(
         MessageType::Hello,
         0,
         0,
-        &mvm_protocol::l3::Hello::v1().encode(),
+        &mvm_contract::l3::Hello::v1().encode(),
     )
     .unwrap();
     let (config_frame, _) = gateway
@@ -824,7 +824,7 @@ fn every_guest_packet_leaves_as_exactly_one_framed_message() {
 fn the_guest_agent_never_asserts_its_own_identity() {
     // HELLO carries a version, feature bits, and a queue count — nothing
     // that names a machine, a tenant, or a boot. Identity is the host's.
-    let hello = mvm_protocol::l3::Hello::v1().encode();
-    assert_eq!(hello.len(), mvm_protocol::l3::message::HELLO_LEN);
+    let hello = mvm_contract::l3::Hello::v1().encode();
+    assert_eq!(hello.len(), mvm_contract::l3::message::HELLO_LEN);
     assert_eq!(hello.len(), 7);
 }

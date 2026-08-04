@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 //! Minimal, dependency-light contract for mvm volume backends.
 //!
-//! Fleet orchestrators depend on this leaf crate without linking mvm's VMM,
+//! Fleet orchestrators depend on this feature without linking mvm's VMM,
 //! signing, guest-agent, or provider dependency graphs. The mvm facade and
 //! runtime re-export the same types and trait.
 

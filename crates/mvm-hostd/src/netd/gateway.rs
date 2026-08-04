@@ -18,16 +18,16 @@
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 
+use mvm_contract::l3::{
+    Config, ErrorCode, ErrorMessage, Hello, Ipv4Config, MessageType, ParsedIpPacket, Ready,
+    Shutdown, ShutdownReason, frame, ip, limits, message,
+};
+use mvm_contract::protocol::dns::{DnsRcode, DnsRecordType, decode_query, encode_response};
 use mvm_net::channel::VmInstanceIdentity;
 use mvm_net::l3::{
     AddressLease, DenyCode, DnsBindingStore, DnsLimits, FlowLimits, FlowTable, GatewayService,
     InboundVerdict, IngressTable, L3Admitter, L3PolicyConfig, OutboundVerdict, SessionId,
 };
-use mvm_protocol::l3::{
-    Config, ErrorCode, ErrorMessage, Hello, Ipv4Config, MessageType, ParsedIpPacket, Ready,
-    Shutdown, ShutdownReason, frame, ip, limits, message,
-};
-use mvm_protocol::protocol::dns::{DnsRcode, DnsRecordType, decode_query, encode_response};
 
 use super::datapath::{
     DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
@@ -668,7 +668,7 @@ impl Gateway {
         // Version 1 serves UDP DNS. TCP DNS to the resolver is admitted by
         // policy but not answered here; a guest that falls back to TCP sees
         // a refused connection rather than a hang.
-        if meta.protocol != mvm_protocol::l3::proto::UDP {
+        if meta.protocol != mvm_contract::l3::proto::UDP {
             self.metrics.dns_denied += 1;
             events.push(GatewayEvent::DnsDenied {
                 name: String::new(),
@@ -891,9 +891,9 @@ pub fn belongs_to(lease: &AddressLease, addr: Ipv4Addr) -> bool {
 mod tests {
     use super::*;
     use crate::netd::datapath::LoopbackDatapath;
+    use mvm_contract::l3::proto;
     use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
     use mvm_net::l3::{AddressAllocator, IngressMapping};
-    use mvm_protocol::l3::proto;
     use std::sync::Arc;
 
     const REMOTE: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);

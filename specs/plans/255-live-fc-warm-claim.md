@@ -76,7 +76,7 @@ override, `standby_pool` is still `false`, `warm_to_target` still calls
 
 ## Key facts verified against the code (do not re-derive)
 
-- `StandbyHandle` is defined in **`mvm-protocol`** (`src/protocol/vm_backend.rs:744`); `CheckpointId` is in **`mvm-core`** (`src/checkpoint.rs:12`). **`mvm-protocol` does not depend on `mvm-core`** and must not — it is the `no_std` foundation. The new handle field is therefore `Option<String>`, converted at the `mvm-runtime` boundary.
+- `StandbyHandle` is defined in **`mvm-contract`** (`src/protocol/vm_backend.rs:744`); `CheckpointId` is in **`mvm-core`** (`src/checkpoint.rs:12`). **`mvm-contract` does not depend on `mvm-core`** and must not — it is the `no_std` foundation. The new handle field is therefore `Option<String>`, converted at the `mvm-runtime` boundary.
 - `capture_vm_full` writes content blobs `rootfs.ext4`, `memory.bin`, optional `machine-id`, backend extras via `extra_content` (Firecracker's `vmstate.bin`), guest sidecars, and **`device-anchors.json`** (written unconditionally, `checkpoint/mod.rs:638-648`). It **pauses, captures, and resumes** the VM, resuming on every exit path.
 - `FcForkRestorer::restore_fork` expects, in `child_dir`: `memory.bin` (renamed to `mem.bin`) and `device-anchors.json`. Both come from the parent's content dir.
 - `materialize_child_from_parent` (`warm_snapshot.rs:37-56`) clones the **whole** content dir into `child_dir`, so a `vm_full` triple flows through the existing claim path unchanged.
@@ -91,7 +91,7 @@ override, `standby_pool` is still `false`, `warm_to_target` still calls
 
 | File | Responsibility | Task |
 |---|---|---|
-| `crates/mvm-protocol/src/protocol/vm_backend.rs` | `StandbyHandle.parent_checkpoint` field | 1 |
+| `crates/mvm-contract/src/protocol/vm_backend.rs` | `StandbyHandle.parent_checkpoint` field | 1 |
 | `crates/mvm-runtime/src/standby_pool.rs` | round-trips the new field | 1 |
 | `crates/mvm-runtime/src/driver/traits.rs` | `vm_full_control` trait method (fail-closed default) | 2 |
 | `crates/mvm-runtime/src/driver/fc.rs` | `spawn_standby_parent` + `vm_full_control` | 2 |
@@ -110,12 +110,12 @@ override, `standby_pool` is still `false`, `warm_to_target` still calls
 A claim must find the checkpoint its parent was captured as. `StandbySpec` has no checkpoint field and `StandbyHandle` has none, so the id has nowhere to live between spawn and claim.
 
 **Files:**
-- Modify: `crates/mvm-protocol/src/protocol/vm_backend.rs:744-757`
+- Modify: `crates/mvm-contract/src/protocol/vm_backend.rs:744-757`
 - Test: `crates/mvm-runtime/src/standby_pool.rs` (inline `#[cfg(test)]` module)
 
 **Interfaces:**
 - Consumes: nothing (first task).
-- Produces: `StandbyHandle.parent_checkpoint: Option<String>` — the checkpoint id as a plain string, because `mvm-protocol` cannot see `mvm-core`'s `CheckpointId`. Task 4 constructs it; Task 5 reads it.
+- Produces: `StandbyHandle.parent_checkpoint: Option<String>` — the checkpoint id as a plain string, because `mvm-contract` cannot see `mvm-core`'s `CheckpointId`. Task 4 constructs it; Task 5 reads it.
 
 - [x] **Step 1: Write the failing tests**
 
@@ -170,7 +170,7 @@ Expected: FAIL — `no field 'parent_checkpoint' on type 'StandbyHandle'`.
 
 - [x] **Step 3: Add the field**
 
-In `crates/mvm-protocol/src/protocol/vm_backend.rs`, immediately after `image_sha256`:
+In `crates/mvm-contract/src/protocol/vm_backend.rs`, immediately after `image_sha256`:
 
 ```rust
     /// The content-addressed checkpoint this parent was captured as, set once
