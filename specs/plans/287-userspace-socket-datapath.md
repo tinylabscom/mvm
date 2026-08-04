@@ -1674,7 +1674,9 @@ with the arithmetic shown term by term in the ADR. Surfaced rather than
 smoothed over: the doc comment on `DEFAULT_MAX_HOST_SOCKETS` says the worst
 case at a cap of 256 is "back under 44 MiB", which holds only for the
 per-flow term (43.16 MiB) and omits the three machine-level terms
-`MEMORY_CEILING_BYTES` itself sums.
+`MEMORY_CEILING_BYTES` itself sums. The bounds audit corrected that comment
+and gave the machine-wide device term an assertion of its own, since losing
+it and losing the UDP term each move the total by the same 384,000 bytes.
 
 - [x] **Step 2: Tick plan 285's deferred item**
 

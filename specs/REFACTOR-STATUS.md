@@ -69,16 +69,18 @@ for detailed scope and acceptance criteria.
         rather than after. `fuzz_datapath_ingress` drives admission, the
         datapath's re-read of an admitted packet, and the per-flow smoltcp
         stack; claim 5 now records it in `model/claims.toml` and ADR-001
-  - [~] WS1c (#2114) — bounds audit; re-derive the memory ceiling from the
-        real per-flow and per-association costs and assert it, rather than
-        leaving arithmetic in a doc comment that drifted 24x once already.
-        `MEMORY_CEILING_BYTES` and its term-by-term test landed under WS1,
-        and task 16 propagated the corrected figure into ADR-037. What is
-        left is the audit proper — and one live discrepancy it should
-        settle: the doc comment on `DEFAULT_MAX_HOST_SOCKETS` claims the
-        worst case at a cap of 256 is "back under 44 MiB", which counts
-        only the per-flow term (43.16 MiB) and omits the three
-        machine-level terms the constant itself sums (44.35 MiB)
+  - [x] WS1c (#2114) — bounds audit. The `DEFAULT_MAX_HOST_SOCKETS` comment
+        said "back under 44 MiB", which counted only the per-flow term
+        (43.16 MiB) and omitted the three machine-level terms the constant
+        itself sums; it now states 44.35 MiB and names both. The
+        machine-wide device term gained an assertion of its own — losing it
+        and losing the UDP term each move the total by the same 384,000
+        bytes, so the total alone could not say which. Thirteen mutations
+        drove every component constant and every term of the formula; all
+        thirteen red. No bound was changed: `FD_RESERVE` is uncounted slack
+        and `DEFAULT_MAX_HOST_SOCKETS` is an affordability ceiling rather
+        than a demand figure, and both comments now say so instead of
+        implying a derivation neither has
   - [ ] WS2 (#2115) — UDP ingress: declared inbound datagram mappings,
         admitted explicitly rather than inferred from traffic
   - [ ] WS3 (#2116) — IPv6 as a first-class family (ADR-038). Blocked on

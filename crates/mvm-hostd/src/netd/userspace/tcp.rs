@@ -2795,9 +2795,9 @@ mod tests {
     /// The device queues are per-flow state whose filling a guest drives,
     /// and they are the *larger* term in a flow's footprint. A guest that
     /// floods them must hit the flow's bound, not the host's memory:
-    /// multiplied by the socket cap, a queue depth chosen for one queue
-    /// per machine is the difference between a 68 MiB ceiling and an
-    /// 800 MiB one.
+    /// multiplied by the socket cap, a queue depth chosen for one queue per
+    /// machine rather than for one flow is the difference between the
+    /// 44.35 MiB ceiling that ships and a 196.7 MiB one.
     #[test]
     fn a_guest_that_floods_the_device_queue_stays_inside_the_flow_bound() {
         let (mut flow, _peer, mut g) = established_flow_with_full_host_buffer();

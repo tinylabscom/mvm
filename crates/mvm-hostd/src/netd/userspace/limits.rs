@@ -10,16 +10,34 @@ use mvm_protocol::l3::limits::{MIN_IPV4_HEADER, MTU_V1};
 
 /// Ceiling on concurrent host sockets for one machine.
 ///
-/// Sized against [`FLOW_BUFFER_BYTES`], the real per-flow cost (both socket
-/// ring buffers plus both per-flow device queues at MTU size) rather than
-/// the 32 KiB of ring buffers alone: the per-flow figure is 176,768 bytes,
-/// 5.4x the ring-buffer-only estimate this cap was first set against. At
-/// 1024 that put the worst case per machine near 173 MiB; at 256 it is back
-/// under 44 MiB, which is where the cap was always assumed to sit.
+/// An affordability bound rather than a demand figure, and worth saying so:
+/// nothing here claims a workload needs 256 concurrent connections. What
+/// the number is set against is [`MEMORY_CEILING_BYTES`], which at this cap
+/// is **46,500,608 bytes, 44.35 MiB** — the whole ceiling, machine-level
+/// terms included, not the per-flow term alone (that is 45,252,608 bytes,
+/// 43.16 MiB, and quoting it as the ceiling understates by 1.2 MiB).
+///
+/// The per-flow cost is [`FLOW_BUFFER_BYTES`]: 176,768 bytes, both socket
+/// ring buffers plus both per-flow device queues at MTU size, 5.4x the
+/// 32 KiB of ring buffers this cap was first set against. That is what made
+/// 1024 wrong — it put the worst case near 173 MiB — rather than anything
+/// about 1024 itself.
+///
+/// It must also sit below `mvm_net`'s flow cap, since a descriptor costs
+/// more than a table entry.
+/// `the_per_machine_memory_ceiling_is_what_we_claim` asserts both the
+/// figure and that ordering.
 pub const DEFAULT_MAX_HOST_SOCKETS: usize = 256;
 
-/// Descriptors held back for the process itself: audit log, vsock,
-/// control channel, logging, and slack.
+/// Descriptors held back for the process itself: audit log, vsock, control
+/// channel, logging, the readiness set's own pair, and slack.
+///
+/// Deliberate slack rather than a counted figure — the process's whole
+/// descriptor set is not enumerable from here, so this is sized to sit
+/// comfortably above it rather than derived from it. Over-reserving is free
+/// until the raised `RLIMIT_NOFILE` drops below
+/// [`DEFAULT_MAX_HOST_SOCKETS`] + this; under that, every descriptor
+/// reserved is one the socket table does not get.
 pub const FD_RESERVE: usize = 64;
 
 /// Concurrent half-open connections. Each parks a connecting descriptor,
@@ -39,17 +57,20 @@ pub const HALF_OPEN_TIMEOUT_MILLIS: u64 = 10_000;
 /// Concurrent UDP associations, each holding a connected host datagram
 /// socket.
 ///
-/// A quarter of [`DEFAULT_MAX_HOST_SOCKETS`], the same share
-/// [`DEFAULT_MAX_HALF_OPEN`] takes, and for the same reason: an
-/// association parks a real descriptor out of the one budget TCP is also
-/// drawing on, so datagram traffic must not be able to starve connections.
-///
 /// Sized against what a workload actually opens. DNS is not in the count —
 /// it terminates above this seam and never reaches a host socket here — so
 /// what is left is QUIC, NTP, syslog, and metrics exporters: a handful of
 /// long-lived conversations per workload rather than the per-request fan-out
 /// TCP sees. Past this count the table refuses the newcomer; nothing is
 /// evicted, because evicting would let one guest flow end another's.
+///
+/// That it lands at a quarter of [`DEFAULT_MAX_HOST_SOCKETS`], the same
+/// share [`DEFAULT_MAX_HALF_OPEN`] takes, is a property the number has to
+/// satisfy rather than where it came from: an association parks a real
+/// descriptor out of the one budget TCP is also drawing on, so datagram
+/// traffic must not be able to starve connections.
+/// `the_association_bounds_fit_the_budget_and_the_queue_they_share` holds
+/// that end of it.
 pub const DEFAULT_MAX_UDP_ASSOCIATIONS: usize = 64;
 
 /// Datagrams one association may hand back in a single poll.
@@ -310,6 +331,10 @@ pub const UDP_BUFFER_BYTES: usize =
 /// [`DEFAULT_MAX_UDP_ASSOCIATIONS`] associations at once. Summed anyway,
 /// because a ceiling that has to be reasoned about to be believed is a
 /// ceiling nobody will re-check.
+///
+/// As shipped: 46,500,608 bytes, 44.35 MiB. The figure belongs in the test
+/// beside it and not only here — a ceiling that lives as arithmetic in a
+/// comment drifts the first time a buffer changes.
 pub const MEMORY_CEILING_BYTES: usize = DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES
     + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize
     + HALF_OPEN_BUFFER_BYTES
@@ -323,9 +348,13 @@ mod tests {
     /// cap. Asserting it here means neither a buffer size nor a queue
     /// depth can silently multiply the worst-case footprint.
     ///
-    /// Every term is spelled out rather than recomputed from the same
-    /// expression the constant uses, so a change to the formula has to be
-    /// argued for here rather than propagating into the assertion.
+    /// Every term is spelled out as a literal rather than recomputed from
+    /// the same expression the constant uses, so a change to the formula
+    /// has to be argued for here rather than propagating into the
+    /// assertion. The machine-wide device is the one exception: it has no
+    /// named constant, so it is taken as the residual of the three that do,
+    /// which is what makes a term dropped from the formula fail under its
+    /// own name instead of as an anonymous shortfall in the total.
     #[test]
     fn the_per_machine_memory_ceiling_is_what_we_claim() {
         assert_eq!(SOCKET_RX_BUFFER + SOCKET_TX_BUFFER, 32 * 1024);
@@ -343,12 +372,27 @@ mod tests {
         assert_eq!(DATAGRAMS_PER_ASSOCIATION_POLL, 4);
         // 64 associations × 4 datagrams × 1500 bytes.
         assert_eq!(UDP_BUFFER_BYTES, 384_000);
+        // The handle's own guest-facing device: one machine-wide queue in
+        // each direction, DEFAULT_QUEUE_DEPTH deep, at the link MTU. It is
+        // the one term with no named constant, so it is subtracted back out
+        // of the ceiling rather than left to the total — where dropping it
+        // and dropping UDP_BUFFER_BYTES move the sum by the same 384,000
+        // bytes and are therefore indistinguishable.
+        assert_eq!(
+            MEMORY_CEILING_BYTES
+                - DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES
+                - HALF_OPEN_BUFFER_BYTES
+                - UDP_BUFFER_BYTES,
+            2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize
+        );
+        assert_eq!(2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize, 768_000);
         // 256 flows at that, plus the handle's own 2 × 256 × 1500, plus the
         // SYNs the half-open table holds, plus one poll's datagram batch.
         assert_eq!(
             MEMORY_CEILING_BYTES,
             256 * 176_768 + 768_000 + 96_000 + 384_000
         );
+        // 44.35 MiB. Not 43.16 — that is the per-flow term on its own.
         assert_eq!(MEMORY_CEILING_BYTES, 46_500_608);
         const {
             assert!(

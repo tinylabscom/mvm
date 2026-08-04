@@ -166,11 +166,11 @@ rather than from intent:
 
 | Const | Value | Rationale |
 |---|---|---|
-| `DEFAULT_MAX_HOST_SOCKETS` | 256 | Well below `DEFAULT_MAX_FLOWS` (4096); sized against the real per-flow cost below, not against ring buffers alone |
-| `FD_RESERVE` | 64 | Audit log, vsock, control channel, logging, slack |
-| `DEFAULT_MAX_HALF_OPEN` | 64 | A connecting descriptor each; sized for burst, not flood |
+| `DEFAULT_MAX_HOST_SOCKETS` | 256 | An affordability bound, not a demand: what the host can carry at 44.35 MiB against the real per-flow cost below, held well under `DEFAULT_MAX_FLOWS` (4096) because a descriptor costs more than a table entry |
+| `FD_RESERVE` | 64 | Uncounted slack for audit log, vsock, control channel, logging and the readiness pair; binds only when the raised `RLIMIT_NOFILE` is under 320 |
+| `DEFAULT_MAX_HALF_OPEN` | 64 | A connecting descriptor each; sized for a real connect burst — page-load fan-out, parallel package install, sidecar startup — not for a flood |
 | `HALF_OPEN_TIMEOUT_MILLIS` | 10_000 | Matches ordinary connect timeouts |
-| `DEFAULT_MAX_UDP_ASSOCIATIONS` | 64 | A connected datagram socket each, drawn from the same descriptor budget TCP uses |
+| `DEFAULT_MAX_UDP_ASSOCIATIONS` | 64 | Sized against what a workload opens once DNS is excluded — QUIC, NTP, syslog, metrics — and held to a quarter of the socket cap so datagrams cannot starve TCP of the shared descriptor budget |
 | `DATAGRAMS_PER_ASSOCIATION_POLL` | 4 | `DEFAULT_QUEUE_DEPTH / DEFAULT_MAX_UDP_ASSOCIATIONS`: a full poll of every association exactly fills the one guest-bound queue |
 | Per-socket ring buffers | 16 KiB rx + 16 KiB tx | 32 KiB per flow |
 | Per-flow device queues | 31 rx + 65 tx packets at the 1500-byte MTU | 144,000 bytes per flow |
@@ -222,14 +222,17 @@ ceiling that has to be reasoned about to be believed is a ceiling nobody
 re-checks. `the_per_machine_memory_ceiling_is_what_we_claim` in `limits.rs`
 asserts every term and the total.
 
-**One discrepancy is worth naming rather than smoothing over.** The doc
-comment on `DEFAULT_MAX_HOST_SOCKETS` says that at a cap of 256 the worst
-case is "back under 44 MiB". That is true only of the per-flow term
-(45,252,608 bytes, 43.16 MiB) and omits the three machine-level terms the
-constant itself sums. Against `MEMORY_CEILING_BYTES` the real figure is
-44.35 MiB, so the comment understates the ceiling by about 1.2 MiB. The
-number to trust is the constant and its test, not the prose beside it; the
-comment should be corrected the next time that file is touched.
+The discrepancy this section used to record is closed. The doc comment on
+`DEFAULT_MAX_HOST_SOCKETS` said the worst case at a cap of 256 was "back
+under 44 MiB", which counted only the per-flow term (45,252,608 bytes,
+43.16 MiB) and omitted the three machine-level terms the constant itself
+sums; it now states 44.35 MiB and names both figures so the smaller one
+cannot be mistaken for the ceiling again.
+
+Each of the four terms is asserted separately as well as in the total,
+including the machine-wide device. That is not redundancy: dropping the
+machine-wide device term and dropping the UDP term each move the total by
+exactly 384,000 bytes, so the total on its own cannot say which one went.
 
 - **At capacity the new packet is dropped; a live flow is never evicted.**
   This matches the existing `FlowAdmission` posture rather than
