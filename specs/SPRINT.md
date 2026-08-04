@@ -25,9 +25,10 @@
       #2109 is merged and its required queue gates passed.
 - [~] Develop → build → deploy an attested workload image — **plan 291**.
       WS1–WS3 are merged with their queue-gate evidence. WS4 remains open:
-      the run tier must bind to the deploy record, the universal-agent design
-      needs its security decision, and guest-image conformance must replace
-      symbol-only witnesses.
+      local `machine run --deployment` now verifies and persists an exact
+      deploy record/rootfs binding, while remote record extraction and boot,
+      the universal-agent design decision, and guest-image conformance remain
+      open. Tracking issue #2144 owns the local/remote boot acceptance matrix.
 - [x] `mvmctl deploy` — **plan 291 WS1**. Local deployment now has a durable
       sealed archive and deploy record path, with BLAKE3 as the native artifact
       identity, SHA-256 retained for interoperability, optional environment

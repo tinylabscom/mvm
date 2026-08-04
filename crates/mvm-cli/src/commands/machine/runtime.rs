@@ -12,13 +12,14 @@ pub(super) fn resolve_persistent_spec(
     let direct_boot = std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1");
     let has_source = args.image.is_some()
         || args.manifest.is_some()
+        || args.deployment.is_some()
         || resolved_manifest_slot.is_some()
         || direct_boot;
     if !has_source {
         return match existing {
             Some(spec) => Ok((spec, SpecReconcile::Reuse)),
             None => anyhow::bail!(
-                "machine {name:?} does not exist; pass --image, --manifest, or --flake to create it"
+                "machine {name:?} does not exist; pass --image, --manifest, --deployment, or --flake to create it"
             ),
         };
     }
@@ -194,6 +195,11 @@ pub(super) fn resolve_machine_build_mode(manifest: Option<&str>, name: &str) -> 
 }
 
 fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<String>) -> Result<()> {
+    if args.deployment.is_some() {
+        anyhow::bail!(
+            "machine run --entrypoint does not accept --deployment; use a manifest or flake source"
+        );
+    }
     if args.image.is_some() {
         anyhow::bail!(
             "machine run --entrypoint dispatches a manifest/flake image's baked \
@@ -262,6 +268,11 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     } else {
         None
     };
+    let local_deployment = args
+        .deployment
+        .as_deref()
+        .map(super::resolve_local_deployment)
+        .transpose()?;
 
     // Settle the networking configuration before any build or boot work.
     // There is no mode to choose: the derivation picks the strongest
@@ -292,7 +303,11 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             run_args.warm_pool_size = warm_pool_size;
             use std::io::IsTerminal as _;
             run_args.stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
-            run_secure(cli, run_args, cfg)
+            let source = local_deployment
+                .as_ref()
+                .map(super::local_deployment_image_source)
+                .transpose()?;
+            run_secure_with_source(cli, run_args, cfg, source)
         }
         MachineRunMode::Persistent => {
             run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())
@@ -307,7 +322,11 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             run_args.pty = true;
             run_args.warm_pool_size = warm_pool_size;
             run_args.stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
-            run_secure(cli, run_args, cfg)
+            let source = local_deployment
+                .as_ref()
+                .map(super::local_deployment_image_source)
+                .transpose()?;
+            run_secure_with_source(cli, run_args, cfg, source)
         }
     }
 }
@@ -330,6 +349,7 @@ pub(in crate::commands) fn boot_persistent_by_name(
             detach: true,
             image: None,
             manifest: None,
+            deployment: None,
             runtime_pack: false,
             flake_profile: None,
             net: false,
