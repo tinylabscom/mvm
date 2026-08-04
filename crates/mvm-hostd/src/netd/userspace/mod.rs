@@ -310,7 +310,11 @@ impl UserspaceHandle {
     /// pass reaps it. That over-counts by at most one pass's worth, in the
     /// direction of refusing a newcomer rather than over-subscribing the
     /// process's descriptors.
-    pub(crate) fn open_socket_count(&self) -> usize {
+    ///
+    /// `pub`, like [`Self::metrics`]: the budget is the observable that says
+    /// a reclaimed flow actually gave its descriptor back, and the end-to-end
+    /// suite that asserts it lives outside this crate's netd module tree.
+    pub fn open_socket_count(&self) -> usize {
         self.flows.len() + self.half_open.len() + self.udp.len()
     }
 

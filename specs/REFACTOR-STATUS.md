@@ -21,7 +21,7 @@ for detailed scope and acceptance criteria.
         traffic no longer stalls while the guest is quiet
   - [~] Phase B (WS1, #2112) — the smoltcp-backed `UserspaceSocketDatapath`
         itself, making `l3-vsock` work on hosts with no privileges. Tasks
-        1–14 of 16 landed: the TCP path, the deferred handshake so the
+        1–15 of 16 landed: the TCP path, the deferred handshake so the
         guest's `connect()` never reports ESTABLISHED for a destination
         that has not accepted, the destination-integrity assertion, bounded
         queues, deadlines on the two states where no host error can ever
@@ -30,11 +30,13 @@ for detailed scope and acceptance criteria.
         Linux TUN probe fails, carrying the reason for the substitution so
         a later capability refusal is not a bare `missing: ["icmp"]`.
         `MacosUserspaceGateway`, the placeholder whose whole behaviour was
-        a refusal, is deleted. Tasks 15–16 remain: the unprivileged
-        end-to-end suite and close-out — plus one blocker selection
-        exposed, recorded under task 14: nothing in production drives
-        `UserspaceHandle::service`, so a fallback host's guest cannot yet
-        complete a connect
+        a refusal, is deleted. The blocker exposed under task 14 — nothing
+        in production drove `UserspaceHandle::service`, so a fallback
+        host's guest could not complete a connect — is fixed: the drive
+        loop services the datapath it owns. Task 15 adds nine unprivileged
+        end-to-end witnesses, six driven through the real `mvm-netd`
+        process rather than a handle the test services itself. Task 16,
+        close-out, remains
   - [x] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's
         recorded witness surface. **Gates backend selection in WS1 and the
         IPv6 guard in WS3**: the smoltcp ingress parser is unreachable by

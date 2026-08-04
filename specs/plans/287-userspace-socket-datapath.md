@@ -1509,7 +1509,7 @@ git commit -m "feat(netd): select the userspace datapath, with an honest fallbac
 **Files:**
 - Create: `crates/mvm-hostd/tests/userspace_datapath.rs`
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 ```rust
 /// The decision this makes executable: the guest must not see
@@ -1592,12 +1592,42 @@ Test helpers (`open_userspace_handle`, `open_userspace_handle_with_budget`,
 `mvm_net::l3`'s admitter — the type cannot be built any other way, which
 is the point of the seam.
 
-- [ ] **Step 2: Run them**
+**What was written instead, and why.** Three corrections to the sketch
+above, all forced by what the code actually is:
+
+- *No handle a test services alone.* Six of the nine witnesses drive the
+  **`mvm-netd` process** — its pump loop, its trait object, its service
+  pass — through the real guest agent over the real Unix sockets. A suite
+  built only on `open_userspace_handle()` + `h.service(0)` would drive the
+  exact thing production can fail to drive, and would have stayed green
+  through the defect Task 14 fixed. Only the flow-lifetime bounds, whose
+  deadlines are 10s and 60s, use a directly-serviced handle with an
+  injected clock.
+- *No loopback destination.* `L3Admitter` refuses loopback outright and an
+  `AdmittedPacket` comes from nowhere else, so `127.0.0.1:0` cannot be a
+  fixture destination at all. Every listener binds a **private
+  non-loopback address the host owns**, discovered by `getifaddrs` at
+  runtime. A host with no such interface skips with the reason printed.
+- *"Before the listener accepts" is not observable.* A listening socket's
+  backlog completes the handshake in the kernel with no `accept()`
+  anywhere, so no host socket can distinguish the two. The deferred
+  handshake is pinned on a destination that **refuses**: the guest gets a
+  reset and never a SYN-ACK. Mutation-checked — promoting a failed
+  connect into a flow turns that witness red.
+
+Malformed-segment and descriptor-exhaustion coverage stayed where it
+already is (Task 8's fuzz target; the in-crate budget tests), rather than
+being restated here against a seam that cannot construct the inputs.
+
+- [x] **Step 2: Run them**
 
 Run: `cargo nextest run -p mvm-hostd --test userspace_datapath`
 Expected: **PASS.** Tasks 6–14 all precede this one, so the datapath already exists — this task is the end-to-end suite over finished parts, not a red-green cycle. If any test here fails, the bug is in Tasks 6–14 and belongs in that task's fix loop, not patched here.
 
-- [ ] **Step 3: Commit**
+Observed: 9 passed, and the whole `mvm-hostd` suite at 1463 passed. No
+failure indicated a defect in Tasks 6–14.
+
+- [x] **Step 3: Commit**
 
 ```sh
 git add crates/mvm-hostd/tests/userspace_datapath.rs
