@@ -1805,14 +1805,46 @@ So the flow count does not buy parallelism. It amortizes a fixed per-pass
 tax over more bytes, which is why the curve rises and then flattens onto the
 per-byte asymptote.
 
+### Re-measured 2026-08-04, after the drain stopped asking twice
+
+The drain used to end on a poll that reported nothing, and on macOS that is
+the expensive shape. It now stops on a *short* return instead — see the
+closed defect below — which removes one empty `kevent` from every pass whose
+set had anything on it. Same host, same session, medians across runs.
+
+| Measurement | Before | After | |
+|---|---|---|---|
+| guest→host, one flow | 1.9 Gb/s | **5.5 Gb/s** | **2.9×** |
+| guest→host, ns/pass | 35,156 | **12,275** | |
+| host→guest, one flow | 7.0 Gb/s | **7.8 Gb/s** | 1.12× |
+| host→guest, ns/pass | 17,865 | **15,968** | |
+| host→guest, 16 flows | 20.9 Gb/s | 21.2 Gb/s | |
+| guest→host→guest round trip, p50 | 68 µs | **53 µs** | |
+| idle pass, 1 flow | 12,951 ns | 12,313 ns | unchanged |
+
+The idle figures are unchanged **by construction**, and that is the shape of
+the whole result: a pass whose set is empty makes one poll before and one
+after, and it is that *first* poll which costs the 12 µs. What the change
+removes is the second one, so the gain lands wherever the set actually had
+something on it. Counted directly, by instrumenting the drain and running
+each direction: ~96% of guest→host drains find events, against ~37% of
+host→guest ones. Hence 2.9× one way and 1.12× the other.
+
+That also retires the projection below, which said removing the drain tax
+would put a single flow near 18–19 Gb/s. Half the tax is gone and host→guest
+moved 12%. The other half is the empty first poll, and it is **not**
+removable by asking less often — see the deferred item.
+
 ### Decision: multi-queue is not warranted
 
 1. **A single queue already scales.** 3.2× from 1 to 16 flows. The serial
    service pass is not preventing concurrent flows from getting throughput,
    which is the premise multi-queue rests on.
-2. **What limits one flow is a syscall, not serialization.** Removing the
-   drain tax would put a single flow near 18–19 Gb/s — roughly today's
-   eight-flow figure — with no concurrency work at all.
+2. **What limits one flow is a syscall, not serialization.** Half that tax
+   has since been removed and single-flow guest→host went 2.9×, host→guest
+   12% — see the re-measurement above. The projection this line originally
+   carried (18–19 Gb/s) was wrong, but its argument held: the ceiling on one
+   flow was never the serial pass.
 3. **Multi-queue would multiply the tax rather than remove it.** Each queue
    is its own drive loop paying its own ~12.8 µs zero-return wait per pass.
 4. **The asymptote is ~26 Gb/s on one core**, against a guest reachable only
@@ -1926,25 +1958,70 @@ three with the mechanism.
       which records both sides' turns in one log and asserts no run of
       inbound turns exceeds the budget.
 
-- [ ] **Every service pass pays one ~12.8 us zero-return `kevent` on macOS.**
-      Found by WS4's measurement, and it dominates single-flow throughput:
-      74% of a one-flow pass. `ReadinessSet::drain_for` only stops when a
-      poll returns zero events, so the drain's *last* call is always a
-      zero-return one -- and on this platform that is the pathological case.
-      Measured in pure C, with no Rust and none of this code in the picture:
-      a zero-timeout `kevent` that returns an event costs 171-430 ns, one
-      that returns nothing costs ~12,600 ns, and a trivial syscall
-      (`close(-1)`) costs 70 ns. So the cost is not the syscall, it is
-      specifically the empty return. Two independent halves to a fix, either
-      useful alone: stop making the terminating call at all when the previous
-      poll returned fewer events than `Events` capacity, since a short return
-      already proves the queue is drained; and let the drive loop skip the
-      drain on a pass it was not woken by readiness for. Worth roughly 2.8x
-      on single-flow throughput -- more than multi-queue was ever going to
-      buy, for a fraction of the risk. Not fixed here: WS4's remit was to
-      measure and decide, and this changes the shipped drive loop.
-      **Unmeasured on Linux**; `epoll_wait` is not known to share the
-      behaviour, so this may be macOS-only.
+- [x] **Every service pass pays one ~12.8 us zero-return `kevent` on macOS.**
+      Fixed, in the half that is sound. Found by WS4's measurement:
+      `ReadinessSet::drain_for` only stopped when a poll returned zero
+      events, so the drain's *last* call was always a zero-return one -- and
+      on this platform that is the pathological case. Measured in pure C,
+      with no Rust and none of this code in the picture: a zero-timeout
+      `kevent` that returns an event costs 171-430 ns, one that returns
+      nothing costs ~12,600 ns, and a trivial syscall (`close(-1)`) costs
+      70 ns. So the cost is not the syscall, it is specifically the empty
+      return.
+
+      The drain now stops on a **short** return -- fewer events than the
+      buffer offered room for. Both kqueue and epoll copy out ready events
+      until the ready list runs out or the caller's buffer does, so a short
+      return already *is* the "nothing left" report and the terminating call
+      could only repeat it. It drops no edge, and strictly improves the
+      set-left-dirty hazard: a short return means the set is empty, where
+      before the loop could bail on its pass bound with events still on it.
+      Witnessed by `a_drain_that_empties_the_set_stops_without_a_further_poll`,
+      which asserts on **poll count** rather than elapsed time -- a latency
+      fix witnessed by a stopwatch is a flake -- and paired with
+      `a_drain_keeps_going_while_each_poll_fills_the_buffer` so the stop
+      cannot be over-narrowed into "stop after the first poll". Both
+      mutation-proven: restoring `if n == 0` reddens the first, an
+      unconditional `break` reddens the second. Measured effect in the
+      re-measurement above: **2.9x guest→host, 1.12x host→guest**.
+
+      **Linux: measured, and there is no pathology there.** On 6.8.0
+      x86_64, an `epoll_wait` returning zero events costs ~480 ns against
+      ~610 ns for one returning an event -- the two shapes cost the same, so
+      the fix saves one cheap syscall rather than one expensive one. Harmless
+      either way; the gain is macOS-only.
+
+- [ ] **The empty *first* poll of a drain still costs ~12 µs on macOS, and
+      the obvious fix is unsound.** What is left after the fix above. A pass
+      whose readiness set is empty still asks the kernel once, and on macOS
+      that question costs ~12 µs however it is phrased. Roughly 63% of
+      host→guest passes are in this state, which is why that direction moved
+      only 12%.
+
+      The tempting fix -- let the drive loop skip the drain on a pass it was
+      not woken by readiness for -- **must not be taken as stated**. Measured
+      with a nested-kqueue probe: an outer kqueue watching an inner one is
+      edge-triggered on the inner set's transition into *non-empty*, and a
+      set that is already non-empty never transitions again. Not even a
+      further event on it re-reports. So the unconditional drain is not only
+      how the edge is spent, it is the only thing that **repairs** a
+      readiness descriptor left dirty by anything -- a poll error, the
+      `DRAIN_PASSES` bound. Make the drain conditional on having been woken
+      by readiness and a dirty set is stranded permanently: the drive loop
+      stops waking on readiness for the rest of that machine's life and
+      silently degrades to its 50 ms tick. Any future attempt needs a
+      guaranteed repair pass and a witness for it, and it is worth ~12 µs on
+      backlog-re-entry and tick passes only.
+
+      A cheaper *emptiness check* was measured and rejected too: `poll(2)` on
+      the kqueue descriptor costs ~6,600 ns when the set is empty. Half the
+      price, still two orders of magnitude off the non-empty case, and it
+      adds ~360 ns to every busy pass.
+
+      The other lead this exposed is more promising and unexplored: those
+      63% are passes where the flow socket still held data but had raised no
+      new edge -- backlog re-entries under `max_bytes_per_pass`. Raising that
+      budget would cut the number of passes rather than the cost of one.
 - [x] **`l3_linux_privileged.rs` did not compile for Linux.** Fixed here. The
       IPv6 work gave `DatapathRequest` its `gateway_v6`/`guest_v6` fields and
       did not update this file, which is `#![cfg(target_os = "linux")]` and

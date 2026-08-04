@@ -136,9 +136,21 @@ for detailed scope and acceptance criteria.
         zero-timeout `kevent` returning **no** events costs ~12,600 ns
         against 171–430 ns when it returns one, reproduced in pure C with
         none of this code in the picture, and `drain_for` only terminates on
-        a zero return. Fixing that is worth ~2.8× on single-flow — more than
-        multi-queue would have bought — and is recorded as an open defect
-        rather than fixed here, since WS4's remit was to measure and decide.
+        a zero return. **Since fixed**: the drain now stops on a *short*
+        return, which a drained queue is already reporting, so the
+        terminating empty call is gone. Re-measured on the same host —
+        guest→host **2.9×** (1.9 → 5.5 Gb/s), host→guest 1.12× (7.0 → 7.8),
+        round-trip p50 68 → 53 µs. The gain splits that way because the
+        removed call is the *second* one, and only ~37% of host→guest drains
+        find anything to make a second call about. The remaining ~12 µs is
+        the empty *first* poll, and the obvious fix for it — skip the drain
+        when readiness did not wake the pass — is measurably **unsound**: an
+        outer kqueue is edge-triggered on the inner set going non-empty, so
+        a set left dirty never wakes the drive loop again, and the
+        unconditional drain is the only thing that repairs it. Recorded as a
+        new deferred item with the probe results. On Linux, measured:
+        `epoll_wait` costs the same either way (~480 vs ~610 ns), so the fix
+        is harmless there and buys nothing.
         Per-byte capacity is ≈26 Gb/s on one core; latency p50 68–73 µs
         round trip, 78–130 µs connect→established. The guest→host figure
         (2.0 Gb/s) is a floor bounded by the benchmark's own send window,

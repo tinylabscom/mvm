@@ -41,11 +41,15 @@ const DRAIN_CAPACITY: usize = 128;
 /// as separate events. It is here because a loop with no bound at all is a
 /// loop a future change can wedge, not because leftovers are expected.
 ///
-/// They would not be lost if there were any: an outer poll set is woken by
-/// this one *transitioning* into having events, so a set left non-empty
-/// would not wake it again — the drive loop's tick would carry the leftovers
-/// on its next pass, which is the pre-registration behaviour rather than a
-/// stall.
+/// They would not be lost if there were any, but only because the next pass
+/// drains unconditionally. An outer poll set is woken by this one
+/// *transitioning* into having events, and a set already holding some never
+/// transitions again — measured, not assumed: an outer kqueue watching a
+/// dirty inner one stays silent even as further events land on it. So a set
+/// left non-empty stops waking the drive loop entirely, and what recovers it
+/// is the tick's own service pass emptying it. That is why the drain is not
+/// conditional on having been woken by readiness: the unconditional call is
+/// also the repair.
 ///
 /// [`DEFAULT_MAX_HOST_SOCKETS`]: super::limits::DEFAULT_MAX_HOST_SOCKETS
 const DRAIN_PASSES: usize = 8;
@@ -61,16 +65,28 @@ pub struct ReadinessSet {
     poll: Poll,
     registry: Arc<Registry>,
     events: Events,
+    /// Polls this set has issued, so a drain can be witnessed by the syscall
+    /// count it costs rather than by how long it took. Only a test reads it,
+    /// and a latency fix asserted on wall-clock is a flake, so it is the one
+    /// observable that makes the property checkable at all.
+    #[cfg(test)]
+    polls: usize,
 }
 
 impl ReadinessSet {
     pub fn new() -> io::Result<Self> {
+        Self::with_drain_capacity(DRAIN_CAPACITY)
+    }
+
+    fn with_drain_capacity(capacity: usize) -> io::Result<Self> {
         let poll = Poll::new()?;
         let registry = Arc::new(poll.registry().try_clone()?);
         Ok(Self {
             poll,
             registry,
-            events: Events::with_capacity(DRAIN_CAPACITY),
+            events: Events::with_capacity(capacity),
+            #[cfg(test)]
+            polls: 0,
         })
     }
 
@@ -122,11 +138,29 @@ impl ReadinessSet {
                 // rather than to a stall.
                 Err(_) => break,
             }
+            #[cfg(test)]
+            {
+                self.polls += 1;
+            }
             let n = self.events.iter().count();
-            if n == 0 {
+            taken += n;
+            // A poll that filled fewer slots than it offered has emptied
+            // the set: both kqueue and epoll copy out ready events until
+            // the ready list runs out or the caller's buffer does, so a
+            // short return *is* the "nothing left" report and asking again
+            // can only repeat it. Stopping here is not one syscall saved
+            // out of thriftiness — on macOS a `kevent` that returns zero
+            // events costs ~12 µs against a few hundred nanoseconds for one
+            // that returns an event, and a drain that stopped only on an
+            // empty return always ended with the expensive shape.
+            //
+            // It drops no edge. Readiness that arrives after this stops is
+            // queued behind a set the kernel has just emptied, so it is a
+            // transition into non-empty — exactly what the outer poll set
+            // watching this descriptor wakes on.
+            if n < self.events.capacity() {
                 break;
             }
-            taken += n;
         }
         taken
     }
@@ -334,6 +368,68 @@ mod tests {
                 DRAIN_PASSES * DRAIN_CAPACITY >= 2 * super::super::limits::DEFAULT_MAX_HOST_SOCKETS
             )
         };
+    }
+
+    /// The defect this pins: a drain that stops only on a poll reporting
+    /// nothing always ends with one, and on macOS that call is the expensive
+    /// shape — a `kevent` returning zero events measures ~12 µs against a
+    /// few hundred nanoseconds for one returning an event, which is most of
+    /// what a single-flow service pass costs. A poll that fills fewer slots
+    /// than it offered has already emptied the set, so the terminating call
+    /// buys nothing.
+    ///
+    /// Asserts on the poll count rather than on elapsed time: this is a
+    /// latency fix, and a latency fix witnessed by a stopwatch is a flake.
+    #[test]
+    fn a_drain_that_empties_the_set_stops_without_a_further_poll() {
+        let mut set = ReadinessSet::new().expect("readiness set");
+        let (host, mut peer) = pair();
+        let _registration =
+            Registration::new(&set.watch(), host.as_raw_fd()).expect("registration");
+
+        peer.write_all(b"x").expect("write");
+        assert!(
+            set.drain_for(SILENCE_WINDOW) > 0,
+            "a registered descriptor must report"
+        );
+        assert_eq!(
+            set.polls, 1,
+            "one poll returned fewer events than it had room for, which \
+             means the set was empty; a second poll can only report nothing"
+        );
+    }
+
+    /// The other half of the same property, and the reason it is a *short*
+    /// return rather than "stop after the first poll": a set holding more
+    /// than one poll's worth must still be emptied, or the leftovers wait
+    /// out the drive loop's tick.
+    #[test]
+    fn a_drain_keeps_going_while_each_poll_fills_the_buffer() {
+        // Small on purpose. Overflowing the production buffer would need
+        // hundreds of descriptors, and the loop under test does not care
+        // how big the buffer is — only whether a poll filled it.
+        const CAPACITY: usize = 2;
+        let mut set = ReadinessSet::with_drain_capacity(CAPACITY).expect("readiness set");
+        let mut held = Vec::new();
+        for _ in 0..(CAPACITY * 2) {
+            let (host, mut peer) = pair();
+            let registration =
+                Registration::new(&set.watch(), host.as_raw_fd()).expect("registration");
+            peer.write_all(b"x").expect("write");
+            held.push((host, peer, registration));
+        }
+
+        let taken = set.drain_for(SILENCE_WINDOW);
+        assert!(
+            taken >= held.len(),
+            "every registered descriptor has something to report: took {taken} \
+             of at least {}",
+            held.len()
+        );
+        assert!(
+            set.polls > 1,
+            "a set holding more than one poll's worth needs more than one poll"
+        );
     }
 
     #[test]
