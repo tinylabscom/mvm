@@ -22,7 +22,6 @@ use super::admission::{
     AdmitPlanForBootParams, admit_plan_for_boot, attach_guest_boot_config, emit_failed_if,
     emit_launched_if, enforce_shares_if, guest_profile_for_boot,
 };
-use super::kernel::persistent_oci_uses_prod_kernel;
 use super::policy::shares_from_volume_cfg;
 use super::runtime_source::{
     attach_runtime_overlay_if_cached, attach_universal_initramfs_if_cached,
@@ -214,10 +213,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         // Resolve just the workload kernel — same as the transient OCI path
         // (`exec.rs`) — rather than building/downloading a whole default-microvm
         // image whose rootfs we'd discard.
-        ensure_workload_kernel(persistent_oci_uses_prod_kernel(
-            profile,
-            runtime_source_policy,
-        ))?
+        ensure_workload_kernel()?
     };
     let initrd_path = persistent_oci_effective_initrd(rootfs_path, runtime_source_policy)?;
 
@@ -228,6 +224,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         backend_name,
         rootfs_path,
         precomputed_image_sha256: None,
+        boot_artifact_identity: None,
         cpus,
         mem_mib: u64::from(memory_mib),
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -251,7 +248,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             false,
             has_ad_hoc_argv,
             profile == "dev",
-            image_sealed,
         ),
         services: Vec::new(),
         entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
@@ -645,30 +641,6 @@ mod runtime_source_policy_for_workload_boot_tests {
             resolved.as_deref(),
             Some(sibling.to_str().expect("utf-8 initrd path"))
         );
-    }
-
-    #[test]
-    fn persistent_oci_required_overlay_forces_prod_kernel_even_on_dev_profile() {
-        assert!(super::super::kernel::persistent_oci_uses_prod_kernel(
-            "dev",
-            RuntimeSourcePolicy::RequiredOverlay
-        ));
-    }
-
-    #[test]
-    fn persistent_oci_prefer_overlay_keeps_dev_kernel_lane_for_dev_profile() {
-        assert!(!super::super::kernel::persistent_oci_uses_prod_kernel(
-            "dev",
-            RuntimeSourcePolicy::PreferOverlay
-        ));
-    }
-
-    #[test]
-    fn persistent_oci_non_dev_profiles_keep_prod_kernel_lane() {
-        assert!(super::super::kernel::persistent_oci_uses_prod_kernel(
-            "prod",
-            RuntimeSourcePolicy::PreferOverlay
-        ));
     }
 }
 

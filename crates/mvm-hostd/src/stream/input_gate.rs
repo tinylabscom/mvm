@@ -1004,6 +1004,7 @@ mod tests {
         const FIXTURE_SHA: &str =
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         SynthesisInput {
+            kernel_sha256: None,
             vm_name,
             tenant: None,
             backend_name: "firecracker",

@@ -1207,9 +1207,9 @@ mod tests {
 
     #[test]
     fn sealed_restore_derives_the_attenuated_grant_and_refuses_console() {
-        // A restore of a sealed image reuses the fork boot, which derives the
-        // attenuated ProdSafe grant from `image_is_sealed` (no console/exec) and
-        // whose backend records accessible=false — exactly as fork does.
+        // A restore reuses the fork boot, which takes the attenuated ProdSafe
+        // grant (no console/exec) from the shape of the run, and whose backend
+        // records accessible=false — exactly as fork does.
         let tmp = tempfile::tempdir().unwrap();
         let rootfs = tmp.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"fake").unwrap();
@@ -1229,17 +1229,15 @@ mod tests {
         };
         sidecar.write_to_dir(tmp.path()).unwrap();
 
-        // The sealed rootfs qualifies for the attenuated grant the fork boot sets
-        // on the restored VM's admitted plan.
+        // The restore qualifies for the attenuated grant the fork boot sets on
+        // the restored VM's admitted plan. The image's sealed bit no longer
+        // enters that decision — the shape of the run does — but the sidecar is
+        // still written here because the console gate below reads the posture
+        // the backend records from it.
         assert!(crate::commands::vm::agent_verbs::image_is_sealed(&rootfs));
         assert!(
-            crate::commands::vm::agent_verbs::grant_eligible(
-                false,
-                false,
-                false,
-                crate::commands::vm::agent_verbs::image_is_sealed(&rootfs),
-            ),
-            "a sealed restore must receive the attenuated ProdSafe grant"
+            crate::commands::vm::agent_verbs::grant_eligible(false, false, false),
+            "a restore must receive the attenuated ProdSafe grant"
         );
 
         // And a restored VM whose recorded runtime meta is sealed refuses the

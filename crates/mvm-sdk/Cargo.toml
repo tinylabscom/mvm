@@ -23,12 +23,15 @@ mvm-protocol = { workspace = true, features = ["schema"] }
 async-trait = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest.workspace = true
+rustls.workspace = true
 thiserror.workspace = true
 
 # Runtime record mode encodes `Sandbox.files.write` bytes
 # as base64 in the recording JSON so the lowering can re-emit them
 # as a `before_start` shell hook.
 base64 = { workspace = true }
+blake3 = { workspace = true }
 
 # Addon module deps.
 flate2 = { workspace = true }

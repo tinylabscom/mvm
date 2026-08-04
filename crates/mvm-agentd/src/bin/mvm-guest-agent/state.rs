@@ -446,6 +446,22 @@ mod tests {
         enforce_verb_grant(req, verb_grant.as_ref())
     }
 
+    /// Mirror the dispatcher order: profile eligibility is checked before the
+    /// signed grant intersection. This keeps the conformance test at the same
+    /// policy seam as the production request loop.
+    fn gate_control_rpc_with_profile(
+        boot_state: &AgentBootState,
+        req: &GuestRequest,
+    ) -> Option<GuestResponse> {
+        if !req.allowed_in(boot_state.profile) {
+            return Some(GuestResponse::UnsupportedInProfile {
+                profile: boot_state.profile,
+                verb: req.verb_name().to_string(),
+            });
+        }
+        gate_control_rpc(boot_state, req)
+    }
+
     /// A host-signed grant listing exactly `verbs` (plus the always-answerable
     /// baseline). The signing key is irrelevant to enforcement — the pinned grant
     /// is trusted once seated — so any fixed key suffices here.
@@ -566,21 +582,43 @@ mod tests {
         assert_eq!(bs.profile, AgentProfile::SealedProd);
         bs.set_verb_grant(signed_grant(&["update-idle-timeout"]));
 
-        // Layer 1 — profile gate: a DevOnly verb never runs in SealedProd, even
-        // if a grant were to list it. (The handler emits UnsupportedInProfile
-        // ahead of the grant gate.)
-        let dev_only = GuestRequest::RunDetached {
-            argv: vec!["/bin/true".into()],
-            env: vec![],
-        };
-        assert!(matches!(
-            dev_only.class(),
-            mvm_agentd::vsock::RequestClass::DevOnly
-        ));
-        assert!(
-            !dev_only.allowed_in(bs.profile),
-            "DevOnly verb must be refused in SealedProd"
-        );
+        // Layer 1 — profile gate: DevOnly verbs never run in SealedProd, even
+        // if a grant were to list them. (The handler emits
+        // UnsupportedInProfile ahead of the grant gate.)
+        let dev_only = [
+            GuestRequest::Exec {
+                command: "id".into(),
+                stdin: None,
+                timeout_secs: Some(1),
+            },
+            GuestRequest::ConsoleOpen {
+                cols: 80,
+                rows: 24,
+                env: vec![],
+                argv: vec![],
+            },
+            GuestRequest::RunDetached {
+                argv: vec!["/bin/true".into()],
+                env: vec![],
+            },
+        ];
+        for req in dev_only {
+            assert!(matches!(
+                req.class(),
+                mvm_agentd::vsock::RequestClass::DevOnly
+            ));
+            assert!(
+                !req.allowed_in(bs.profile),
+                "DevOnly verb must be refused in SealedProd"
+            );
+            assert!(matches!(
+                gate_control_rpc_with_profile(&bs, &req),
+                Some(GuestResponse::UnsupportedInProfile {
+                    profile: AgentProfile::SealedProd,
+                    ..
+                })
+            ));
+        }
 
         // Layer 2 — grant gate: unlisted ProdSafe verb refused, listed served.
         match gate_control_rpc(&bs, &GuestRequest::WorkerStatus) {

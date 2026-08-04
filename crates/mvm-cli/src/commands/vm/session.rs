@@ -1018,6 +1018,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             backend_name: &admit_backend,
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
+            boot_artifact_identity: None,
             cpus,
             mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -1034,8 +1035,11 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: agent_verb_override.clone(),
-            restrict_agent_verbs: !is_dev
-                && crate::commands::vm::agent_verbs::image_is_sealed(rootfs),
+            // A session is started and attached to separately, so at boot there
+            // is neither a PTY nor ad-hoc argv — the profile alone decides.
+            restrict_agent_verbs: crate::commands::vm::agent_verbs::grant_eligible(
+                false, false, is_dev,
+            ),
             services: Vec::new(),
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                 "the session boot path resolves no entrypoint",

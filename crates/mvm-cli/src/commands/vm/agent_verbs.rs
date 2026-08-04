@@ -19,19 +19,19 @@ pub(crate) fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether a run should receive an attenuated default agent-verb grant. Only a
-/// baked-entrypoint run, on a non-dev profile, of a **sealed** image qualifies:
-/// those issue only ProdSafe verbs and the image's agent has no console/exec
-/// baked in. An interactive PTY (ConsoleOpen) or ad-hoc command (Exec) needs
-/// DevOnly verbs; a dev profile stays permissive by contract; and an interactive /
-/// OCI image (not sealed) must stay reachable via `machine exec` / `console`.
-pub(crate) fn grant_eligible(
-    pty: bool,
-    has_ad_hoc_argv: bool,
-    is_dev_profile: bool,
-    image_sealed: bool,
-) -> bool {
-    !pty && !has_ad_hoc_argv && !is_dev_profile && image_sealed
+/// Whether a run should receive an attenuated default agent-verb grant: a
+/// baked-entrypoint run on a non-dev profile, which is issued only ProdSafe
+/// verbs. An interactive PTY (`ConsoleOpen`) or ad-hoc command (`Exec`) needs
+/// DevOnly verbs, and a dev profile stays permissive by contract.
+///
+/// Deliberately not a function of the image. This used to also require the
+/// image's sidecar to say `sealed`, so an OCI image stayed interactively
+/// reachable — but `is_dev_profile` already expresses that, and keying it on
+/// the image made the tier a property of the artifact rather than of the run.
+/// One image now runs in either tier, and which one it gets is decided by the
+/// admitted profile.
+pub(crate) fn grant_eligible(pty: bool, has_ad_hoc_argv: bool, is_dev_profile: bool) -> bool {
+    !pty && !has_ad_hoc_argv && !is_dev_profile
 }
 
 /// The verbs that carry bytes into a running workload's stdin. Granted only to
@@ -163,28 +163,33 @@ mod tests {
     }
 
     #[test]
-    fn grant_eligible_only_for_nonpty_noargv_nondev_sealed() {
-        // Baked-entrypoint, prod profile, SEALED image → eligible.
-        assert!(grant_eligible(false, false, false, true));
-        // Same run but the image is NOT sealed (interactive / OCI) → NOT eligible.
-        assert!(!grant_eligible(false, false, false, false));
-        // Interactive (pty) → NOT eligible even when sealed.
-        assert!(!grant_eligible(true, false, false, true));
-        // Ad-hoc command (argv) → NOT eligible even when sealed.
-        assert!(!grant_eligible(false, true, false, true));
-        // Dev profile → NOT eligible even when sealed.
-        assert!(!grant_eligible(false, false, true, true));
-        // Every disqualifier at once → NOT eligible.
-        assert!(!grant_eligible(true, true, true, false));
+    fn grant_eligible_is_decided_by_the_run_not_the_image() {
+        // Baked-entrypoint run on a prod profile → attenuated ProdSafe grant.
+        assert!(grant_eligible(false, false, false));
+        // Interactive (pty) needs DevOnly verbs → no attenuated grant.
+        assert!(!grant_eligible(true, false, false));
+        // Ad-hoc command (argv) is an Exec, also DevOnly → no attenuated grant.
+        assert!(!grant_eligible(false, true, false));
+        // Dev profile stays permissive by contract.
+        assert!(!grant_eligible(false, false, true));
+        // Every disqualifier at once.
+        assert!(!grant_eligible(true, true, true));
     }
 
+    /// The same run is decided identically whatever image it boots. This used to
+    /// depend on the image sidecar's `sealed` bit, which made an OCI image
+    /// permanently interactive and a sealed image permanently not — the tier was
+    /// a property of the artifact instead of the run.
     #[test]
-    fn persistent_with_trailing_argv_is_not_eligible() {
-        // `machine run -d --image X -- cmd` runs an ad-hoc Exec (DevOnly): no grant,
-        // regardless of sealed state.
-        assert!(!grant_eligible(false, true, false, true));
-        // Sealed baked-entrypoint on non-dev profile IS eligible.
-        assert!(grant_eligible(false, false, false, true));
+    fn identical_runs_agree_regardless_of_image() {
+        for is_dev in [false, true] {
+            let expected = !is_dev;
+            assert_eq!(
+                grant_eligible(false, false, is_dev),
+                expected,
+                "a baked-entrypoint run on is_dev={is_dev} must not depend on the image"
+            );
+        }
     }
 
     #[test]

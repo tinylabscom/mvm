@@ -985,6 +985,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         backend_name: "firecracker",
         rootfs_path: &rootfs_blob,
         precomputed_image_sha256: recorded_sha,
+        boot_artifact_identity: None,
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -1001,13 +1002,10 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         agent_verb_override: parent_agent_verbs.clone(),
+        // A restored child is never interactive, never carries ad-hoc argv, and
+        // is always prod-profile, so it qualifies for the attenuated grant.
         restrict_agent_verbs: !parent_agent_verbs.is_empty()
-            || super::agent_verbs::grant_eligible(
-                false,
-                false,
-                false,
-                super::agent_verbs::image_is_sealed(&rootfs_blob),
-            ),
+            || super::agent_verbs::grant_eligible(false, false, false),
         services: Vec::new(),
         entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
             "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
@@ -1223,6 +1221,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         backend_name: &effective_hypervisor,
         rootfs_path: p.instance_rootfs,
         precomputed_image_sha256: None,
+        boot_artifact_identity: None,
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -1239,15 +1238,11 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         agent_verb_override: parent_agent_verbs.clone(),
-        // A sealed baked-entrypoint child qualifies for an attenuated grant.
-        // Forks never carry trailing argv and are always prod-profile.
+        // A baked-entrypoint child qualifies for an attenuated grant. Forks are
+        // never interactive, never carry trailing argv, and are always
+        // prod-profile.
         restrict_agent_verbs: !parent_agent_verbs.is_empty()
-            || super::agent_verbs::grant_eligible(
-                false,
-                false,
-                false,
-                super::agent_verbs::image_is_sealed(p.instance_rootfs),
-            ),
+            || super::agent_verbs::grant_eligible(false, false, false),
         services: Vec::new(),
         entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
             "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",

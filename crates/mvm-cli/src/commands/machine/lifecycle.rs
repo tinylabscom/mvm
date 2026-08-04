@@ -102,7 +102,15 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
             "direct-boot".to_string(),
         )
     } else {
-        let (label, rootfs, digest) = if let Some(slot_hash) = &spec.manifest {
+        let (label, rootfs, digest) = if let Some(deployment_path) = &spec.deployment {
+            let deployment =
+                super::resolve_local_deployment(std::path::Path::new(deployment_path))?;
+            (
+                format!("deployment:{}", deployment.directory.display()),
+                deployment.rootfs,
+                deployment.boot_artifact_sha256,
+            )
+        } else if let Some(slot_hash) = &spec.manifest {
             let (_, _vmlinux, _initrd, rootfs, rev) =
                 mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
                     .with_context(|| {
@@ -136,7 +144,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
             )
         } else {
             anyhow::bail!(
-                "machine {name:?} spec has neither image nor manifest — use `machine rm` to remove and recreate it",
+                "machine {name:?} spec has neither deployment, image, nor manifest — use `machine rm` to remove and recreate it",
                 name = spec.name
             );
         };

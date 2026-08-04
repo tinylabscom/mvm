@@ -305,6 +305,25 @@ fn run_runtime_pack_conflicts_with_image_manifest_and_flake() {
 }
 
 #[test]
+fn run_parses_deployment_source_and_conflicts_with_other_sources() {
+    let args = parse_run(&["run", "--deployment", "/tmp/deployment", "--", "true"])
+        .expect("deployment source parses");
+    assert_eq!(args.deployment, Some(PathBuf::from("/tmp/deployment")));
+
+    let err = parse_run(&[
+        "run",
+        "--deployment",
+        "/tmp/deployment",
+        "--image",
+        "alpine",
+        "--",
+        "true",
+    ])
+    .expect_err("deployment and image must be mutually exclusive");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
 fn run_parses_and_forwards_net_flags() {
     let args = parse_run(&[
         "run",
@@ -575,6 +594,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         name: name.to_string(),
         image: Some("alpine:latest".to_string()),
         manifest: None,
+        deployment: None,
         resolved_digest: None,
         runtime_pack: false,
         net: false,
@@ -624,6 +644,58 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
     assert!(spec.init.is_empty());
     // No --agent-verb: spec stores an empty list (computed default applies at start).
     assert!(spec.agent_verb.is_empty());
+}
+
+#[test]
+fn deployment_source_is_verified_and_persisted_as_canonical_directory() {
+    let dir = tempfile::tempdir().expect("deployment dir");
+    let rootfs = dir.path().join("rootfs.ext4");
+    std::fs::write(&rootfs, b"rootfs bytes").expect("rootfs");
+    let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).expect("digest");
+    let record = mvm_sdk::deploy::DeployRecord {
+        schema_version: mvm_sdk::deploy::DEPLOY_RECORD_SCHEMA_VERSION,
+        workload_id: "demo".to_string(),
+        ir_hash: "ir".to_string(),
+        image: mvm_sdk::deploy::ArtifactDigests {
+            blake3: "0".repeat(64),
+            sha256: "0".repeat(64),
+            size_bytes: 0,
+        },
+        boot_artifact,
+        environment: None,
+        dependency_volume: None,
+    };
+    mvm_sdk::deploy::write_deploy_record(&record, &dir.path().join("deploy.json")).expect("record");
+
+    let args = parse_run(&[
+        "run",
+        "--deployment",
+        dir.path().to_str().expect("utf8 path"),
+        "--name",
+        "web",
+        "-d",
+    ])
+    .expect("parse");
+    let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
+    assert_eq!(
+        spec.deployment.as_deref(),
+        Some(
+            dir.path()
+                .canonicalize()
+                .expect("canonical")
+                .to_str()
+                .expect("utf8")
+        )
+    );
+    assert!(spec.image.is_none());
+    assert!(spec.manifest.is_none());
+
+    std::fs::write(&rootfs, b"tampered").expect("tamper");
+    let err = resolve_local_deployment(dir.path()).expect_err("tampered rootfs refused");
+    assert!(
+        err.to_string()
+            .contains("verifying deployment boot artifact")
+    );
 }
 
 #[test]
@@ -1374,6 +1446,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         name: "web".to_string(),
         image: Some("alpine:latest".to_string()),
         manifest: None,
+        deployment: None,
         resolved_digest: None,
         runtime_pack: false,
         net: false,
@@ -1560,6 +1633,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         name: "web".to_string(),
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
+        deployment: None,
         resolved_digest: Some("sha256:abc".to_string()),
         runtime_pack: false,
         net: false,
@@ -1606,6 +1680,7 @@ fn machine_start_receipt_is_signed_and_verifiable() {
         machine_name: "web".to_string(),
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
+        deployment: None,
         resolved_digest: Some("sha256:abc".to_string()),
         cpus: 2,
         memory: "512M".to_string(),
@@ -1645,6 +1720,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         name: "web".to_string(),
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
+        deployment: None,
         resolved_digest: None,
         runtime_pack: false,
         net: false,
@@ -1700,6 +1776,7 @@ fn create_refuses_overwrite_without_force() {
         name: "web".to_string(),
         image: Some("alpine:latest".to_string()),
         manifest: None,
+        deployment: None,
         resolved_digest: None,
         runtime_pack: false,
         net: false,
@@ -1729,6 +1806,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         name: "web".to_string(),
         image: Some("alpine:latest".to_string()),
         manifest: None,
+        deployment: None,
         resolved_digest: None,
         runtime_pack: false,
         net: false,
@@ -1760,6 +1838,7 @@ fn seed_machine_spec(name: &str) {
         name: name.to_string(),
         image: Some(format!("example/{name}:latest")),
         manifest: None,
+        deployment: None,
         resolved_digest: None,
         runtime_pack: false,
         net: false,
@@ -2197,6 +2276,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         name: "web".into(),
         image: Some("img:1".into()),
         manifest: None,
+        deployment: None,
         resolved_digest: None,
         runtime_pack: false,
         net: false,

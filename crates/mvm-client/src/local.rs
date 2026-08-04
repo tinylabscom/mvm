@@ -1328,6 +1328,7 @@ mod tests {
             created_at: None,
             last_started_at: None,
             health_check: None,
+            deployment: None,
         };
         save_machine_spec(&spec, false).expect("persist_test_spec: save failed");
     }

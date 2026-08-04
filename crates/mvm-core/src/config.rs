@@ -731,6 +731,12 @@ pub fn images_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("images")
 }
 
+/// Local sealed deploy store: `<mvm_home>/deployments/`. Each workload
+/// identity gets a directory containing its archive and deploy record.
+pub fn deployments_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("deployments")
+}
+
 /// Chain-signed audit logs: `<mvm_home>/audit/`.
 pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("audit")

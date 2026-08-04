@@ -240,6 +240,41 @@ inside the microVM.
 
 ---
 
+
+### From dev loop to attested image
+
+The three routes above are the *start* of one path: pick a base, iterate until
+the workload actually works, then end with a sealed, hashed, recorded artifact.
+
+What that looks like today:
+
+```bash
+mvmctl build compile app.py --out ./out   # declared deps; lockfiles must be hash-pinned
+mvmctl machine build --flake ./out        # installs deps into a SEALED volume
+mvmctl deps install --lockfile uv.lock --language python  # dev install + seal
+mvmctl deps capture-live HASH --vm dev-vm \
+  --guest-content /mvm/deps/content \
+  --guest-sbom /mvm/deps/sbom.cdx.json \
+  --guest-fetch-log /mvm/deps/fetch.log \
+  --guest-cve /mvm/deps/cve.json              # export + reseal
+mvmctl deps inspect                       # SBOM + CVE + hash-chained meta, no VM needed
+mvmctl machine run --entrypoint --flake ./out
+```
+
+Dependencies land in a sealed volume rather than in the image: hash-locked
+content, an SBOM, a CVE scan, and a hash-chained `meta.json`. The supervisor
+verifies that volume before launch and refuses a tampered one, and `--prod`
+fails closed on high/critical findings or a stub SBOM. A lockfile entry with no
+integrity hash is rejected at compile time.
+
+`mvmctl deploy`, `mvmctl watch`, and the remaining attested-image steps are
+**designed but not yet built** — see
+[plan 291](specs/plans/291-develop-build-deploy-attested.md). Until they land,
+the declared route above is the supported way to get a dependency into an
+attested workload.
+
+Full walkthrough: [From dev loop to attested image](public/src/content/docs/guides/develop-to-attested.md).
+
 ## SDKs
 
 Two SDK families, three languages. Both are deliberately **thin**: they drive

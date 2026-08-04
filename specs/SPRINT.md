@@ -10,6 +10,39 @@
 
 ## Current issue delivery
 
+- [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
+      dependency tree with fresh audit sidecars, updates the lockfile index,
+      refuses tampered or unpinned source volumes, and can emit the canonical
+      `Dependencies` declaration after verifying the matching lockfile pin;
+      implementation is merged. PR #2132 passed branch and merge-group Test,
+      Lint, and Nix gates.
+
+- [x] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
+      polls local source inputs, recompiles only when the semantic IR address
+      or source fingerprint changes, and reports rebuild/no-op iterations.
+      Long-running mode now waits for the next change after transient input or
+      compile errors, while `--once` remains fail-fast for automation. PR
+      #2109 is merged and its required queue gates passed.
+- [~] Develop → build → deploy an attested workload image — **plan 291**.
+      WS1–WS3 are merged with their queue-gate evidence. WS4 remains open:
+      local `machine run --deployment` now verifies and persists an exact
+      deploy record/rootfs binding, while remote record extraction and boot,
+      the universal-agent design decision, and guest-image conformance remain
+      open. Tracking issue #2144 owns the local/remote boot acceptance matrix.
+- [x] `mvmctl deploy` — **plan 291 WS1**. Local deployment now has a durable
+      sealed archive and deploy record path, with BLAKE3 as the native artifact
+      identity, SHA-256 retained for interoperability, optional environment
+      pinning, and fail-closed verification of an explicitly supplied sealed
+      dependency volume. A configured remote now ships the record and bundle
+      through mvmd’s authenticated upload contract. PR #2131 passed branch and
+      merge-group Test, Lint, and Nix gates and merged into main.
+- [x] `mvmctl deps install` runs the lockfile-pinned development install in the
+      builder boundary and publishes its sealed volume. `mvmctl deps
+      capture-live` exports bounded guest content and sidecars before handing
+      them to the atomic reseal path, and requires a running development VM;
+      implementation is merged through PR #2132, whose branch and merge-group
+      Test, Lint, and Nix gates passed.
+
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
       scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
@@ -64,11 +97,64 @@ updates only its own entry below.
       duplicate-name/unknown-posture matrix, serde round-trips,
       unknown-field rejection, and the no-secret/no-host-path guarantees.
 
-- [ ] #2080 — reusable local encrypted-volume lifecycle service.
+- [x] #2080 — reusable local encrypted-volume lifecycle service.
+      `mvm_client::volume` now owns the canonical lifecycle behind the
+      object-safe `VolumeService` contract with strict secret-free DTOs:
+      encrypted block-volume create, unlock/lock with DEK-binding tamper
+      refusal, typed attachments (mount allow-roots, read-only default,
+      dev-profile gate for read-write), exclusive persistent launch leases
+      with RAII rollback, just-in-time unlock with re-seal on final release,
+      idempotent crash/orphan recovery, and immutable snapshot/restore. The
+      CLI volume commands, launch merge, and stop-path release are thin shims
+      over the service (host-encryption probe injected from doctor); the
+      former CLI-private lifecycle is deleted, not duplicated. 41 service
+      tests plus 8 CLI shim tests cover create/list, RO + permitted RW
+      attach, duplicate guest paths, exclusive-lease refusal, profile
+      refusal, detach/relock, failed-launch cleanup, orphan recovery,
+      persistent restart, tampered-ciphertext refusal, and key-material
+      absence from DTOs/debug output. The live KVM BDD scenario extends to
+      prove relock after the final release; guest write/read + restart remain
+      covered by the existing `s26_volumes` firecracker scenarios.
 
-- [ ] #2081 — reusable write-only local secret lifecycle service.
+- [x] #2081 — reusable write-only local secret lifecycle service.
+      Delivered `mvm_client::secret::SecretService`: one canonical service
+      composing `SecretStore` (unchanged keyring/file selection),
+      `BindingStore` egress bindings, a new per-machine secret-reference
+      sidecar (`secret-refs.json`, metadata only), and JSONL +
+      chain-signed audit (`secret.create/replace/bind/unbind/remove/
+      remove_refused`). Inputs are `SecretValueInput` (zeroize-on-drop,
+      redacted Debug, crate-private accessor); no reveal method or
+      value-carrying response type exists. `remove` refuses while an
+      existing persistent machine references the secret (no force path);
+      `validate_for_admission` fails closed on missing secrets,
+      missing/malformed bindings, unauthorized destinations (via
+      `host_matches`), and cross-scope references. `mvmctl secret
+      put/set/get/ls/rm` now consumes the service (`get` is a pure
+      presence check — no decryption). 53 new/ported tests (36 in
+      mvm-client, 17 in mvm-cli) including no-leak assertions across
+      responses, serialization, Debug, errors, audit records, and
+      persisted sidecars.
 
-- [ ] #2082 — normalized verified local audit events for UI consumers.
+- [x] #2082 — normalized verified local audit events for UI consumers.
+      Delivered `mvm_client::audit::LocalAuditReader`: discovers the
+      per-tenant lifecycle chains and per-VM workload chains under
+      `<mvm_home>/audit/`, verifies each through the canonical seams
+      (`mvm_hostd::supervisor::verify_audit_chain_entries` and the new
+      `mvm_hostd::audit_signer::verify::verify_workload_chain_entries`,
+      extracted from the existing count-only verifier), enforces a
+      per-source tenant-scope check, and returns normalized
+      `VerifiedAuditEvent`s (stable `(source, seq)` identity; newest-first
+      ordering by signed timestamp → source rank → chain position) with
+      typed per-source `AuditSourceRefusal`s — a failed source yields zero
+      events, never a partial prefix. Bounded reads with typed cursor plus
+      machine/tenant/kind/time filters; all free text sanitized (ANSI/OSC
+      strip, control-char drop, length caps, sensitive-label exclusion,
+      host-path redaction) at the service boundary; workload `fields`
+      payloads are never rendered. `mvmctl audit verify` now runs through
+      the same `verify_sources` seam. 53 new tests including the
+      refusal matrix (tamper, reorder, truncation, wrong key, cross-scope),
+      pagination walk, serde/unknown-field pins, and seeded property loops
+      over untrusted audit input.
 
 - [ ] #2079 — persistent + transient launch lifecycle through
       `LocalBackend` (starts after #2078/#2080/#2081 land the shared
@@ -133,9 +219,12 @@ updates only its own entry below.
       defect reported as #2052, and the exact Apple-container E2E now passes on
       current main, closing #2054. #2048 now caches confirmed default-release
       404s per version and architecture for 24 hours while mirrors and transient
-      failures remain retryable. The production-volume epic #2040 and the
-      subsequently filed entropy issue #2060 are also closed with merged
-      evidence. The final GitHub open-issue query returned zero results.
+      failures remain retryable. The production-volume epic #2040 was closed
+      with the then-available evidence, but was subsequently reopened after the
+      claimed cross-worker proof was found to cover gateway-local directories
+      rather than the gateway→agent→hostd data plane. The subsequently filed
+      entropy issue #2060 is closed with merged evidence. The historical
+      open-issue query at that point returned zero results.
       A scheduled run on an older commit subsequently filed #2067: the no-SSH
       scanner had not classified a protected-credential-path refusal test as
       deny-only, and the `mvm-cli` mutation shard lacked the pinned Zig
@@ -162,7 +251,9 @@ updates only its own entry below.
       local/block attachment, encrypted durable checkpoints and cross-worker
       restore, working remote CLI/API policy, MinIO integration, and Linux/KVM
       persistence/restore proof. Registry-only, compile-only, and mocked-only
-      paths do not satisfy the issue.
+      paths do not satisfy the issue. Follow-up verification closed the original
+      gateway-local proof gap with the canonical gateway→agent→hostd worker data
+      plane; mvm PR #2100 and mvmd PR #203 are merged with green final matrices.
   - [x] WS1: external implementations can run the canonical trait-object
         contract; the unregistered member-only S3 mount provider is removed;
         template-registry S3 remains independently gated; the two-surface gate
@@ -214,15 +305,23 @@ updates only its own entry below.
         lifecycle parser tests, touched-crate checks, all-target Clippy, and the
         complete 115-scenario / 523-step BDD suite pass.
   - [x] WS4/WS5 policy/WS6/WS7: mvmd PRs #199, #201, and #202 deliver durable
-        manifests and encrypted checkpoints, fresh-worker restore, fencing,
+        manifests and encrypted checkpoints, gateway-local restore, fencing,
         retention/GC, API policy, metrics, signed lifecycle/refusal audits, and
         operator documentation. The real MinIO lane proves encrypted multipart
         I/O, conditional conflict handling, pagination beyond 1,000 objects,
         and cleanup. A live Firecracker/KVM run proves encrypted attach, restart
         persistence, checkpoint, mutation, restore into fresh state, digest
         recovery, and clean teardown. mvm PR #2064 supplies the authenticated
-        remote CLI. Issue #2040 records the rejected speculative clauses that
-        conflict with the shipped resource and artifact contracts.
+        remote CLI. The follow-up now supplies the missing canonical
+        `VolumeRecord` gateway→agent→hostd transfer, exact-node placement,
+        worker-local LUKS derivation, lease renewal/watchdog, and protocol v3.
+        The composed Linux/KVM proof is now green: two isolated production
+        workers preserve boot counts 1→2 across a source restart, transfer the
+        encrypted image through gateway→agent→hostd, and observe boot count 3
+        after destination restore. Both follow-up PR matrices are green, mvm
+        PR #2100 passed its full merge-group matrix including the Nix 50 MB
+        guest-artifact footprint gate, and mvmd PR #203 passed all 11 final-head
+        checks before both changes landed.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout

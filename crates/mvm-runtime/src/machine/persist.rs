@@ -39,6 +39,10 @@ pub struct MachineSpec {
     /// image-backed machines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
+    /// Local attested deployment directory containing `deploy.json` and
+    /// `rootfs.ext4`. Present for machines created with `--deployment`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_digest: Option<String>,
     /// Boot from the verified downloadable runtime pack instead of an OCI
@@ -163,6 +167,7 @@ pub fn list_machine_specs() -> Result<Vec<MachineSpec>> {
 pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
     a.image == b.image
         && a.manifest == b.manifest
+        && a.deployment == b.deployment
         && a.runtime_pack == b.runtime_pack
         && a.net == b.net
         && a.allow_host == b.allow_host
@@ -184,6 +189,7 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     // without this a manifest-only swap recreates with an empty `changed` list.
     if current.image != desired.image
         || current.manifest != desired.manifest
+        || current.deployment != desired.deployment
         || current.runtime_pack != desired.runtime_pack
     {
         changed.push("source");
@@ -343,6 +349,7 @@ mod tests {
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
             manifest: None,
+            deployment: None,
             resolved_digest: None,
             runtime_pack: false,
             net: false,
@@ -409,6 +416,7 @@ mod tests {
             spec.agent_verb.is_empty(),
             "agent_verb should default empty"
         );
+        assert!(spec.deployment.is_none());
         assert!(spec.volumes.is_empty(), "volumes should default empty");
         assert!(spec.init.is_empty(), "init should default empty");
         assert!(spec.created_at.is_none());
@@ -517,6 +525,7 @@ mod tests {
             name: "web".into(),
             image: Some("img:1".into()),
             manifest: None,
+            deployment: None,
             resolved_digest: None,
             runtime_pack: false,
             net: false,
@@ -593,6 +602,17 @@ mod tests {
         desired.manifest = Some("slot-bbbb".to_string());
         let changed = machine_config_diff(&current, &desired);
         assert!(changed.contains("source"), "changed: {changed}");
+    }
+
+    #[test]
+    fn config_diff_reports_deployment_source_change() {
+        let current = spec_fixture("web");
+        let mut desired = spec_fixture("web");
+        desired.image = None;
+        desired.deployment = Some("/tmp/deployment".to_string());
+        let changed = machine_config_diff(&current, &desired);
+        assert!(changed.contains("source"), "changed: {changed}");
+        assert!(!machine_config_matches(&current, &desired));
     }
 
     #[test]

@@ -107,6 +107,19 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         &[Rule::HomeRead, Rule::HomeLiteral],
         "manual smoke example in the FFI crate, which sits below mvm-core and cannot call the resolver",
     ),
+    (
+        "crates/mvm-client/src/audit/sanitize.rs",
+        &[Rule::HomeLiteral],
+        "the path-redaction detector: matches the .mvm literal inside untrusted audit text to \
+         scrub it before UI exposure, and its tests feed .mvm-shaped fixtures to prove the scrub; \
+         it derives no mvm path",
+    ),
+    (
+        "crates/mvm-client/src/audit/normalize.rs",
+        &[Rule::HomeLiteral],
+        ".mvm-shaped test fixtures asserting host paths are redacted from normalized event detail; \
+         it derives no mvm path",
+    ),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

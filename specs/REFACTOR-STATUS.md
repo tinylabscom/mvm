@@ -1,11 +1,33 @@
 # Refactor status
 
-Last updated: 2026-08-03
+Last updated: 2026-08-04
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] Plan 291 — Develop → build → deploy an attested workload image
+      (`specs/plans/291-develop-build-deploy-attested.md`)
+  - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
+        record; retain the local sealed artifact and ship it to mvmd through
+        the authenticated upload contract when a remote is configured
+  - [x] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address;
+        long-running mode recovers from transient input/compile errors while
+        `--once` remains fail-fast
+  - [x] WS3 capture-from-sandbox via `reseal_volume`, converging on the
+        declared-dependency path and keeping the lockfile hash pin; capture,
+        `deps install`, and bounded `deps capture-live` implementation are
+        present. PR #2132 passed branch and merge-group Test, Lint, and Nix
+        gates and merged into main
+  - [~] WS4 tier follows the attestation
+    - [x] Agent-verb grant derives from admitted run shape, not image sidecar
+    - [~] Bind the tier to an attested artifact and replace the interactive
+          feature/symbol witnesses with conformance scenarios. Local
+          `machine run --deployment` verifies and persists the signed record
+          plus exact rootfs binding; remote extraction/boot, feature-fork
+          removal, and guest-image validation remain. Grant enforcement now
+          proves a complete ProdSafe grant refuses Exec and ConsoleOpen.
+
 - [~] Plan 290 — Sensitive egress redaction
       (`specs/plans/290-sensitive-egress-redaction.md`)
   - [x] Validated byte detector and pinned, no-default-feature LeakGuard adapter
@@ -73,7 +95,8 @@ for detailed scope and acceptance criteria.
   - [x] Live local/block attachment through the admitted VM launch path
   - [x] mvmd OpenDAL → `object_store` migration with mandatory encryption
   - [x] Authenticated remote volume CLI/client lifecycle with typed failures
-  - [x] Durable encrypted checkpoint/API policy and cross-worker restore closeout
+  - [x] Canonical worker handoff, Linux/KVM composition proof, and follow-up PR
+        matrices are green
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
   - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 

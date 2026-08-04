@@ -79,7 +79,20 @@ pub fn admit_and_boot_local(
     let sha = mvm_core::crypto::image_verify::sha256_file_cached(&req.rootfs_path)
         .with_context(|| format!("hashing rootfs at {}", req.rootfs_path.display()))?;
 
+    // Pin the kernel into the signed plan. Deliberately the uncached digest: a
+    // path+mtime-keyed cache can hand back a stale hash, which for an integrity
+    // pin would defeat the point of having one.
+    let kernel_sha = req
+        .kernel_path
+        .as_ref()
+        .map(|k| {
+            mvm_core::crypto::image_verify::sha256_file(k)
+                .with_context(|| format!("hashing kernel at {}", k.display()))
+        })
+        .transpose()?;
+
     let synthesis = SynthesisInput {
+        kernel_sha256: kernel_sha.as_deref(),
         network_mode: Default::default(),
         l3_network: None,
         vm_name: &req.name,

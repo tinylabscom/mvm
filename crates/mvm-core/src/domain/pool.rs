@@ -250,6 +250,18 @@ pub struct RegistryArtifact {
     pub revision: Option<String>,
 }
 
+/// Reference to an attested deployment bundle stored by mvmd.
+///
+/// The revision is the bundle's SHA-256 transport identity. The agent must
+/// fetch and verify the deploy record and its embedded boot artifact before it
+/// makes this revision current; it must not substitute a local build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestedDeployment {
+    /// SHA-256 revision returned by the authenticated deploy-artifact upload.
+    pub revision: String,
+}
+
 // ============================================================================
 // Pool spec
 // ============================================================================
@@ -665,6 +677,22 @@ mod tests {
         // revision: None should be omitted or null
         let parsed: RegistryArtifact = serde_json::from_str(&json).unwrap();
         assert!(parsed.revision.is_none());
+    }
+
+    #[test]
+    fn test_attested_deployment_serde_roundtrip() {
+        let deployment = AttestedDeployment {
+            revision: "a".repeat(64),
+        };
+        let json = serde_json::to_string(&deployment).unwrap();
+        let parsed: AttestedDeployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, deployment);
+    }
+
+    #[test]
+    fn test_attested_deployment_rejects_unknown_fields() {
+        let json = format!(r#"{{"revision":"{}","tenant_id":"other"}}"#, "a".repeat(64));
+        assert!(serde_json::from_str::<AttestedDeployment>(&json).is_err());
     }
 
     #[test]

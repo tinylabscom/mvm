@@ -264,6 +264,7 @@ fn admit_entrypoint_boot(
         backend_name: params.backend_name,
         rootfs_path: params.rootfs,
         precomputed_image_sha256: None,
+        boot_artifact_identity: None,
         cpus: params.cpus,
         mem_mib: params.mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -280,8 +281,13 @@ fn admit_entrypoint_boot(
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: params.network_policy.clone(),
         agent_verb_override: params.agent_verb_override.to_vec(),
-        restrict_agent_verbs: !params.keep_alive_dev
-            && super::agent_verbs::image_is_sealed(params.rootfs),
+        // An invoke drives the baked entrypoint over agent RPC: no PTY, no
+        // ad-hoc argv, so the profile alone decides.
+        restrict_agent_verbs: super::agent_verbs::grant_eligible(
+            false,
+            false,
+            params.keep_alive_dev,
+        ),
         // Default-deny, and conditional on the caller having asked. A plan
         // carrying this token is a plan whose workload's stdin can be driven
         // from the host; a plan without it leaves that stdin unreachable from
