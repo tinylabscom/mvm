@@ -230,18 +230,15 @@ address is empty, because a point-to-point IP interface has none.
 
 On the socket backend specifically:
 
-- **Expect about 50 ms of added latency per step the host drives.** The
-  host-side event source that would wake the gateway the instant a
-  connection completes or a reply arrives is wired but has nothing behind
-  it yet, so both wait for the gateway's 50 ms timer instead. Throughput
-  within an established connection is unaffected; the cost lands on
-  connection setup and on the first bytes of each inbound burst. This is a
-  defect being worked, not a property of the design.
 - **Declared ingress is advertised but not served.** A plan that declares
   an inbound mapping is admitted on this backend, and nothing listens for
   it. Do not rely on inbound connections reaching a workload here. Egress —
   connections the guest opens — is unaffected.
-- **A large inbound burst is drained in full before the gateway returns to
-  the guest-facing side**, so a flood of return traffic can delay the
-  guest's own packets within a pass. Bounded by the queue sizes, not by a
-  per-pass budget.
+
+Two limitations this backend used to carry are gone. The gateway is now
+woken by the host sockets themselves, so a completed connection and an
+arriving reply no longer wait out its 50 ms timer; that timer is back to
+being what advances time-driven work such as idle expiry. And a large
+inbound burst is taken a bounded number of packets at a time, so a flood of
+return traffic can no longer delay the guest's own packets while the
+gateway works through it.

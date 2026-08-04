@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use mvm_hostd::netd::config::{NETD_READY_MARKER, NetdConfig, NetdUdsLayout};
 use mvm_hostd::netd::{
-    Gateway, GatewayConfig, GatewayError, GatewayEvent, GatewayState, StaticResolver,
+    Gateway, GatewayConfig, GatewayError, GatewayEvent, GatewayState, InboundDrain, StaticResolver,
     UdsGuestChannelProvider, select_host_datapath,
 };
 use mvm_net::channel::{GuestChannelProvider, GuestService};
@@ -161,10 +161,12 @@ fn explain_open_failure(err: GatewayError, fallback: Option<&str>) -> anyhow::Er
 
 /// How long a poll waits before servicing the tunnel anyway.
 ///
-/// The floor on progress, not a latency budget: a datapath with nothing to
-/// poll advances only on this tick, and idle flows, DNS bindings, and
-/// transport timers must age on elapsed time rather than on the guest
-/// happening to transmit.
+/// The floor on progress, not a latency budget. Idle flows, DNS bindings,
+/// and transport timers age on elapsed time rather than on either side
+/// happening to transmit, so something has to make time pass with both
+/// quiet. A datapath that reports no readiness descriptor advances only
+/// here; one that does — every host socket it holds is registered behind
+/// it — is driven by the event instead, and this stays what ages it.
 const TICK_MILLIS: libc::c_int = 50;
 const TICK: Duration = Duration::from_millis(TICK_MILLIS as u64);
 
@@ -212,6 +214,23 @@ enum Delivery {
     /// The guest is gone, or has stopped reading for long enough to count as
     /// gone. Either way the session is over.
     GuestGone,
+}
+
+/// Which side still has work its last pass could not finish.
+///
+/// Both drains are bounded and both report what the bound cut off. Waiting
+/// on readiness with either flag set would be waiting on an edge already
+/// spent, so a pass that ends backlogged comes straight back.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Backlog {
+    guest: bool,
+    inbound: bool,
+}
+
+impl Backlog {
+    fn any(&self) -> bool {
+        self.guest || self.inbound
+    }
 }
 
 /// What a drain of the guest data channel concluded.
@@ -338,12 +357,9 @@ fn drive(
     clock: &dyn Fn() -> u64,
 ) -> Result<()> {
     let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
-    // Set when the guest still has bytes waiting after its read budget ran
-    // out, so the next pass does not wait on readiness that has already
-    // been reported and will not be reported again.
-    let mut backlogged = false;
+    let mut backlog = Backlog::default();
     loop {
-        let wait = if backlogged { Duration::ZERO } else { TICK };
+        let wait = if backlog.any() { Duration::ZERO } else { TICK };
         match poll.poll(events, Some(wait)) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -353,11 +369,11 @@ fn drive(
         }
         let now = clock();
 
-        if backlogged || events.iter().any(|event| event.token() == GUEST_DATA) {
+        if backlog.guest || events.iter().any(|event| event.token() == GUEST_DATA) {
             match drain_guest_data(gateway, data, &mut buf, now)? {
                 GuestChannel::Ended => return Ok(()),
-                GuestChannel::Backlogged => backlogged = true,
-                GuestChannel::Idle => backlogged = false,
+                GuestChannel::Backlogged => backlog.guest = true,
+                GuestChannel::Idle => backlog.guest = false,
             }
         }
 
@@ -378,9 +394,11 @@ fn drive(
         // datapath that reports no descriptor makes progress only here, and
         // a transport's own timers have to be serviced whether or not
         // either side sent anything.
-        for event in gateway.poll_inbound(now) {
-            log_event(&event);
+        let inbound = gateway.poll_inbound(now);
+        for event in &inbound.events {
+            log_event(event);
         }
+        backlog.inbound = inbound.drain == InboundDrain::Backlogged;
         for frame in gateway.take_guest_frames() {
             let delivered = write_frame(data, data_fd, &frame, WRITE_STALL_DEADLINE)
                 .context("writing to the guest")?;
@@ -595,6 +613,7 @@ mod tests {
     use mvm_hostd::netd::config::{NetdEgress, NetdRule};
     use mvm_hostd::netd::{
         DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
+        MAX_INBOUND_PACKETS_PER_PASS,
     };
     use mvm_net::channel::GuestStream;
     use mvm_net::l3::{AdmittedPacket, FlowKey};
@@ -936,6 +955,215 @@ mod tests {
             "the drain must yield on its read budget rather than keep reading \
              until the guest happens to pause"
         );
+    }
+
+    /// Reads a `PacedGuest` serves before it ends the session. Six passes'
+    /// worth at the guest-facing budget: past the inbound burst below, so
+    /// the loop runs out of guest before it runs out of network and the
+    /// alternation is observed rather than truncated.
+    const PACED_GUEST_READS: usize = MAX_GUEST_READS_PER_PASS * 6;
+
+    /// Inbound packets waiting when the loop starts. Four passes' worth at
+    /// the inbound budget, so a drain that ignored the budget would show up
+    /// as one run of four passes' packets.
+    const INBOUND_BURST: usize = MAX_INBOUND_PACKETS_PER_PASS * 4;
+
+    /// One side's turn at the loop, recorded in the order the loop took it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Turn {
+        GuestRead,
+        InboundPacket,
+    }
+
+    type TurnLog = Arc<std::sync::Mutex<Vec<Turn>>>;
+
+    fn record(log: &TurnLog, turn: Turn) {
+        log.lock().expect("turn log").push(turn);
+    }
+
+    /// A guest that always has more, like `StreamingGuest`, but which
+    /// records each turn the loop gives it and ends the session once it has
+    /// had enough of them.
+    struct PacedGuest {
+        log: TurnLog,
+        reads: usize,
+    }
+
+    impl std::io::Read for PacedGuest {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.reads >= PACED_GUEST_READS {
+                return Ok(0);
+            }
+            record(&self.log, Turn::GuestRead);
+            self.reads += 1;
+            if self.reads == 1 {
+                let len = u32::try_from(mvm_protocol::l3::limits::MAX_FRAME_LEN).expect("len");
+                buf[..4].copy_from_slice(&len.to_be_bytes());
+                return Ok(4);
+            }
+            buf[0] = 0;
+            Ok(1)
+        }
+    }
+
+    impl std::io::Write for PacedGuest {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `QueuedNetwork` with the same recording, so both sides' turns land in
+    /// one ordered log and the interleaving is a fact rather than an
+    /// inference from two counters.
+    #[derive(Clone)]
+    struct PacedNetwork {
+        inbound: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+        log: TurnLog,
+    }
+
+    impl PacedNetwork {
+        fn new(log: TurnLog) -> Self {
+            Self {
+                inbound: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+                log,
+            }
+        }
+
+        fn deliver(&self, packet: Vec<u8>) {
+            self.inbound
+                .lock()
+                .expect("inbound queue")
+                .push_back(packet);
+        }
+    }
+
+    impl L3Datapath for PacedNetwork {
+        fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+            Ok(Box::new(self.clone()))
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities::FULL_L3_V4
+        }
+    }
+
+    impl DatapathHandle for PacedNetwork {
+        fn send_to_network(&mut self, _packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
+            match self.inbound.lock().expect("inbound queue").pop_front() {
+                Some(packet) => {
+                    record(&self.log, Turn::InboundPacket);
+                    let n = packet.len().min(buf.len());
+                    buf[..n].copy_from_slice(&packet[..n]);
+                    Ok(n)
+                }
+                None => Err(DatapathError::Io(std::io::Error::from(
+                    std::io::ErrorKind::WouldBlock,
+                ))),
+            }
+        }
+
+        fn close(&mut self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn description(&self) -> String {
+            "a host network whose turns the test records".to_string()
+        }
+    }
+
+    /// Put the gateway in `Ready` without a guest process. The handshake has
+    /// its own witnesses; this test is about what the steady-state loop does
+    /// once it is past one.
+    fn make_ready(gateway: &mut Gateway, session: u64) {
+        use mvm_protocol::l3::{Config, Hello, MessageType, Ready, frame};
+        let hello = frame::encode(MessageType::Hello, 0, 0, &Hello::v1().encode()).expect("hello");
+        let (config_frame, _) = gateway
+            .handle_control_frame(&hello, 0)
+            .expect("the gateway answers a hello");
+        let parsed = frame::decode(&config_frame).expect("the config frame decodes");
+        let config = Config::decode(parsed.payload).expect("the config payload decodes");
+        let ready = Ready {
+            policy_epoch: config.policy_epoch,
+            mtu: config.mtu,
+            resolver_configured: true,
+        };
+        let ready_frame =
+            frame::encode(MessageType::Ready, session, 0, &ready.encode()).expect("ready");
+        gateway
+            .handle_control_frame(&ready_frame, 1)
+            .expect("the gateway accepts a ready");
+        assert_eq!(gateway.state(), GatewayState::Ready);
+    }
+
+    /// The defect this pins: the inbound drain ran to `WouldBlock`, so a
+    /// burst was taken in full before the loop looked at the guest again.
+    /// Both sides record into one log, and the assertion is on the *shape*
+    /// of that log — a run of inbound turns longer than the budget is a pass
+    /// that serviced one side to exhaustion.
+    #[test]
+    fn the_loop_alternates_rather_than_draining_one_side_to_exhaustion() {
+        let config = test_config("netd-fair-drain");
+        let log: TurnLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let network = PacedNetwork::new(Arc::clone(&log));
+        let mut gateway = open_gateway(&config, &network);
+        make_ready(&mut gateway, mint_session_id(&config.instance()));
+        // The guest opened this flow earlier, so the burst below is return
+        // traffic the gateway delivers rather than refuses.
+        gateway
+            .admitter_mut()
+            .flows_mut()
+            .observe_outbound(quiet_flow(), 40, OPENED_AT_MILLIS);
+        for _ in 0..INBOUND_BURST {
+            network.deliver(server_reply(&config));
+        }
+
+        // The loop polls this descriptor for the guest's readiness but reads
+        // the stream above, so one byte is enough to make the first pass
+        // enter the drain; the drain's own backlog report carries the rest.
+        let (host_data, mut guest_data) = UnixStream::pair().expect("data pair");
+        std::io::Write::write_all(&mut guest_data, b"x").expect("make the host end readable");
+        let data_fd = host_data.as_raw_fd();
+        let mut guest = PacedGuest {
+            log: Arc::clone(&log),
+            reads: 0,
+        };
+
+        pump(&mut gateway, &mut guest, data_fd, &|| OPENED_AT_MILLIS)
+            .expect("the loop ends with the guest, not with an error");
+
+        let turns = log.lock().expect("turn log").clone();
+        assert_eq!(
+            turns.iter().filter(|t| **t == Turn::InboundPacket).count(),
+            INBOUND_BURST,
+            "the whole burst must reach the guest: a budget that dropped \
+             packets would not be fairness"
+        );
+        let mut run = 0usize;
+        for turn in &turns {
+            match turn {
+                Turn::InboundPacket => {
+                    run += 1;
+                    assert!(
+                        run <= MAX_INBOUND_PACKETS_PER_PASS,
+                        "the loop took {run} inbound packets without once returning \
+                         to the guest; the budget is {MAX_INBOUND_PACKETS_PER_PASS}"
+                    );
+                }
+                Turn::GuestRead => run = 0,
+            }
+        }
     }
 
     /// An interrupted syscall must cost the same budget a real read does.

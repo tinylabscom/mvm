@@ -1710,17 +1710,45 @@ git commit -m "docs(plan-287): record the userspace socket datapath as shipped"
 
 ### Open defects in what this plan shipped
 
-Not scope reductions — three things that are wrong today, recorded so the
-close-out is not read as "finished". ADR-037 §"Known defects in what
-shipped" carries the same list with the mechanism.
+Not scope reductions — things that are wrong, recorded so the close-out is
+not read as "finished". Three were listed at close-out; two of those are now
+closed and two more were found while closing them. ADR-037 §"Known defects in
+what shipped" carries the original three with the mechanism.
 
-- [ ] **Register host sockets on the datapath's poll set.** `readiness_fd`
-      hands back a real `mio::Poll` and `mvm-netd` registers it, but
-      nothing is registered *behind* it, so it never fires. Every connect
-      resolution and every inbound byte therefore waits for the drive
-      loop's 50 ms tick. The loop services the datapath unconditionally
-      rather than gating on the token, which is why this is a latency floor
-      and not a hang.
+- [x] **Register host sockets on the datapath's poll set.** Done. Every
+      host socket the datapath opens — half-open connect, established flow,
+      datagram association — is registered on the set behind `readiness_fd`,
+      so the drive loop wakes on the event rather than on its 50 ms tick.
+      The registration lives with the socket (`readiness::Watched` owns both
+      and drops them in that order), so it cannot go stale at any of the
+      places a socket is dropped out of a table. Witnessed by
+      `a_resolved_connect_reports_on_the_readiness_descriptor`, which asserts
+      on readiness rather than on elapsed time, and by
+      `a_dropped_registration_stops_reporting`, which drops the registration
+      while the descriptor stays open — the only arrangement in which
+      "it stopped reporting" means deregistration.
+- [ ] **`traffic_does_not_push_out_an_associations_deadline` aims at a dead
+      port.** The fixture opens an association toward `127.0.0.1:443` with
+      nothing listening, so the first datagram draws an ICMP port
+      unreachable and the connected socket reports `ECONNREFUSED` on the
+      second `send` — which the table treats as terminal, correctly, and
+      the fixture's `expect` panics. It **fails deterministically on Linux**
+      and intermittently on macOS (about one full-suite run in ten), which
+      is why it reads as a flake there. The behaviour under test — a
+      deadline taken once and never pushed out — needs a destination that
+      answers, the way the sibling fixtures use `bind_udp_echo_server`.
+      Pre-existing; found while closing the two defects above.
+- [ ] **Report a datapath backlog the way both drains now do.** A flow's
+      host-to-guest pump is bounded per pass (`max_bytes_per_pass`), and the
+      service pass consumes the readiness edge before pumping — which is the
+      right order, since an edge cleared afterwards is one for bytes nothing
+      would go back for. The consequence is that a peer which sends more than
+      one pass's budget and then goes quiet leaves its tail waiting for the
+      50 ms tick rather than for an edge. Bounded, and strictly better than
+      the pre-registration behaviour where everything waited for the tick,
+      but it is the same shape as the two defects above and wants the same
+      answer: `service` should say it stopped on its budget, and the drive
+      loop should treat that as a backlog. Found while closing those two.
 - [ ] **Serve declared ingress, or stop advertising it.**
       `ForwardingCapabilities::USERSPACE_SOCKETS` sets
       `declared_ingress: true` and this datapath opens no listener for it,
@@ -1729,10 +1757,15 @@ shipped" carries the same list with the mechanism.
       requires it, so a false value would make every default gateway refuse
       on the fallback path. Whichever way it resolves, the config
       requirement has to move first.
-- [ ] **Give `Gateway::poll_inbound` a per-pass budget.** It drains until
-      `WouldBlock`, so a large inbound burst is taken in full before the
-      pass returns to the guest-facing side. The guest-facing read already
-      has such a budget and reports its backlog; this should mirror it.
+- [x] **Give `Gateway::poll_inbound` a per-pass budget.** Done, mirroring
+      the guest-facing drain rather than inventing a second mechanism:
+      bounded by `MAX_INBOUND_PACKETS_PER_PASS`, reporting
+      `InboundDrain::Backlogged` so the loop resumes instead of waiting on a
+      spent readiness edge. Witnessed at the unit level by
+      `the_inbound_drain_stops_at_its_budget_and_says_so` and at the loop
+      level by `the_loop_alternates_rather_than_draining_one_side_to_exhaustion`,
+      which records both sides' turns in one log and asserts no run of
+      inbound turns exceeds the budget.
 
 > **Numbering note.** `285` is used twice on main — `285-l3-tun-over-vsock.md`
 > and `285-hvf-virtio-rng.md` — and so is `284`. Always reference these by

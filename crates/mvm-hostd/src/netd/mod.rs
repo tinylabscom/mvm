@@ -53,7 +53,7 @@ pub use datapath::{
 };
 pub use gateway::{
     Direction, Gateway, GatewayConfig, GatewayError, GatewayEvent, GatewayState, HostResolver,
-    ResolveError, StaticResolver,
+    InboundDrain, InboundPass, MAX_INBOUND_PACKETS_PER_PASS, ResolveError, StaticResolver,
 };
 pub use metrics::GatewayMetrics;
 pub use uds_channel::{UdsGuestChannelProvider, UdsLayout};

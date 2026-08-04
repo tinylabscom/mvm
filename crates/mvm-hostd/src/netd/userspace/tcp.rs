@@ -66,6 +66,7 @@ use super::limits::{
     HANDSHAKE_COMPLETION_TIMEOUT_MILLIS, KEEPALIVE_IDLE_SECS, KEEPALIVE_PROBE_INTERVAL_SECS,
     KEEPALIVE_PROBE_RETRIES, RESET_DELIVERY_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
 };
+use super::readiness::{Watch, Watched};
 
 /// A guest SYN held back from the stack while its host connect runs.
 pub struct HalfOpen {
@@ -74,7 +75,7 @@ pub struct HalfOpen {
     /// side is real, so smoltcp emits the SYN-ACK against the packet the
     /// guest actually sent rather than one reconstructed from the key.
     syn: Vec<u8>,
-    socket: TcpStream,
+    socket: Watched<TcpStream>,
     opened_at_millis: u64,
     /// Latched because a synchronous connect failure — what loopback to a
     /// closed port reports on some platforms — hands the error to the
@@ -95,7 +96,11 @@ impl HalfOpen {
 
     /// Take ownership of the connected host socket this flow re-originates
     /// on, leaving the rest behind.
-    pub fn into_socket(self) -> TcpStream {
+    ///
+    /// The registration travels with it. Promotion does not close and
+    /// reopen anything, so re-registering would mean deregistering a
+    /// descriptor that never left the poll set.
+    pub fn into_socket(self) -> Watched<TcpStream> {
         self.socket
     }
 
@@ -159,6 +164,10 @@ enum ConnectProgress {
 pub struct HalfOpenTable {
     entries: BTreeMap<FlowKey, HalfOpen>,
     capacity: usize,
+    /// Every connect this table starts goes on the datapath's readiness set,
+    /// so the drive loop learns the kernel has decided one without waiting
+    /// out its tick.
+    watch: Watch,
     /// The address this session leased its guest. The authority on where a
     /// host-originated packet is addressed — see
     /// [`HalfOpen::reset_for_guest`].
@@ -166,10 +175,11 @@ pub struct HalfOpenTable {
 }
 
 impl HalfOpenTable {
-    pub fn new(capacity: usize, guest: IpAddr) -> Self {
+    pub fn new(capacity: usize, guest: IpAddr, watch: Watch) -> Self {
         Self {
             entries: BTreeMap::new(),
             capacity,
+            watch,
             guest,
         }
     }
@@ -230,6 +240,12 @@ impl HalfOpenTable {
             Err(ConnectStartError::NoSocket) => {
                 return SynOutcome::Refused(DenyCode::HostSocketUnavailable);
             }
+        };
+        // Registered before the entry exists, so a table never holds a
+        // connect the loop cannot be woken for. A set that will not take it
+        // is a closed datapath, which is the same shortfall as no socket.
+        let Ok(socket) = Watched::new(&self.watch, socket) else {
+            return SynOutcome::Refused(DenyCode::HostSocketUnavailable);
         };
         self.entries.insert(
             key,
@@ -430,8 +446,9 @@ pub struct EstablishedFlow {
     /// flow owes it.
     guest: IpAddr,
     /// `Option` so the descriptor can be released deterministically rather
-    /// than whenever the flow happens to drop.
-    host: Option<TcpStream>,
+    /// than whenever the flow happens to drop. Releasing it takes its
+    /// readiness registration with it.
+    host: Option<Watched<TcpStream>>,
     device: GuestDevice,
     interface: Interface,
     sockets: SocketSet<'static>,
@@ -493,7 +510,7 @@ impl EstablishedFlow {
     }
 
     fn open(
-        host: TcpStream,
+        host: Watched<TcpStream>,
         key: FlowKey,
         guest: IpAddr,
         mtu: usize,
@@ -511,7 +528,7 @@ impl EstablishedFlow {
         // design, and quietness is not a fault. When the probes go
         // unanswered the socket errors, and the ordinary host-error path
         // resets the guest and gives the descriptor back.
-        SockRef::from(&host).set_tcp_keepalive(
+        SockRef::from(&*host).set_tcp_keepalive(
             &TcpKeepalive::new()
                 .with_time(std::time::Duration::from_secs(KEEPALIVE_IDLE_SECS))
                 .with_interval(std::time::Duration::from_secs(
@@ -1443,6 +1460,24 @@ mod tests {
         DATA_SEGMENTS_PER_PASS, DEFAULT_MAX_HALF_OPEN, FLOW_BUFFER_BYTES, HALF_OPEN_TIMEOUT_MILLIS,
         POLLS_PER_PASS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
     };
+    use super::super::readiness::ReadinessSet;
+
+    /// A readiness set for a table under test, with its poll side dropped.
+    ///
+    /// These tests drive the table directly rather than waiting on it, so
+    /// nothing here polls. What the sockets need is somewhere to register
+    /// and unregister, and that outlives the set the watch came from.
+    fn watch() -> Watch {
+        ReadinessSet::new()
+            .expect("a readiness set needs no privileges")
+            .watch()
+    }
+
+    /// A socket registered on a set nothing polls, for fixtures that build a
+    /// table entry by hand.
+    fn watched<S: std::os::fd::AsRawFd>(socket: S) -> Watched<S> {
+        Watched::new(&watch(), socket).expect("registering a fixture socket")
+    }
 
     impl EstablishedFlow {
         /// A pass whose drop counter nobody is reading. Tests that assert
@@ -1520,7 +1555,7 @@ mod tests {
         HalfOpen {
             key: key(),
             syn: syn_bytes(),
-            socket: connected_socket(held),
+            socket: watched(connected_socket(held)),
             opened_at_millis: 0,
             refused_at_open,
         }
@@ -1550,7 +1585,7 @@ mod tests {
 
     #[test]
     fn a_syn_does_not_reach_the_stack_until_the_host_connect_succeeds() {
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         let outcome = t.on_syn(key(), syn_bytes(), unreachable_dst(), 0);
         assert!(matches!(outcome, SynOutcome::Started));
         assert!(
@@ -1563,7 +1598,7 @@ mod tests {
 
     #[test]
     fn a_retransmitted_syn_folds_into_the_existing_entry() {
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         let dst = some_dst();
         t.on_syn(key(), syn_bytes(), dst, 0);
         let again = t.on_syn(key(), syn_bytes(), dst, 10);
@@ -1579,7 +1614,7 @@ mod tests {
     fn a_syn_flood_is_bounded_by_the_half_open_cap() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(4, guest());
+        let mut t = HalfOpenTable::new(4, guest(), watch());
         for i in 0..64 {
             t.on_syn(key_with_port(40_000 + i), syn_bytes(), dst, 0);
         }
@@ -1594,7 +1629,7 @@ mod tests {
     fn a_full_table_refuses_the_newcomer_and_keeps_the_live_entry() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(1, guest());
+        let mut t = HalfOpenTable::new(1, guest(), watch());
         assert!(matches!(
             t.on_syn(key_with_port(1), syn_bytes(), dst, 0),
             SynOutcome::Started
@@ -1623,7 +1658,7 @@ mod tests {
     fn a_retransmit_does_not_extend_the_half_open_timeout() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         t.on_syn(key(), syn_bytes(), dst, 0);
         t.on_syn(key(), syn_bytes(), dst, HALF_OPEN_TIMEOUT_MILLIS - 1);
         assert_eq!(
@@ -1639,7 +1674,7 @@ mod tests {
     #[test]
     fn a_half_open_entry_times_out() {
         let held = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         t.entries
             .insert(key(), entry_over_a_live_socket(&held, true));
         let dropped = t.expire(HALF_OPEN_TIMEOUT_MILLIS);
@@ -1651,7 +1686,7 @@ mod tests {
     fn an_entry_inside_its_timeout_is_not_expired() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         t.on_syn(key(), syn_bytes(), dst, 0);
         assert!(t.expire(HALF_OPEN_TIMEOUT_MILLIS - 1).is_empty());
         assert_eq!(t.len(), 1);
@@ -1660,7 +1695,7 @@ mod tests {
     #[test]
     fn a_completed_connect_becomes_replayable_exactly_once() {
         let listener = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         t.on_syn(
             key(),
             syn_bytes(),
@@ -1687,7 +1722,7 @@ mod tests {
     /// destination that rejected us.
     #[test]
     fn a_refused_connect_is_never_replayable() {
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         assert!(matches!(
             t.on_syn(key(), syn_bytes(), unreachable_dst(), 0),
             SynOutcome::Started
@@ -1776,7 +1811,7 @@ mod tests {
     #[test]
     fn expiry_does_not_discard_a_connect_that_already_completed() {
         let held = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         t.entries
             .insert(key(), entry_over_a_live_socket(&held, false));
         assert!(
@@ -1794,7 +1829,7 @@ mod tests {
     fn a_zero_capacity_table_refuses_everything() {
         let held = listener();
         let dst = held.local_addr().expect("local addr");
-        let mut t = HalfOpenTable::new(0, guest());
+        let mut t = HalfOpenTable::new(0, guest(), watch());
         assert!(matches!(
             t.on_syn(key(), syn_bytes(), dst, 0),
             SynOutcome::Refused(DenyCode::FlowTableFull)
@@ -1945,7 +1980,7 @@ mod tests {
         let entry = HalfOpen {
             key: key(),
             syn,
-            socket: connected_socket(&listener()),
+            socket: watched(connected_socket(&listener())),
             opened_at_millis: 0,
             refused_at_open: true,
         };
@@ -2009,7 +2044,7 @@ mod tests {
     #[test]
     fn a_peer_that_is_not_the_admitted_destination_never_reaches_established() {
         let held = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         let entry = mismatched_entry(&held);
         t.entries.insert(entry.key, entry);
 
@@ -2038,7 +2073,7 @@ mod tests {
     #[test]
     fn a_peer_mismatch_counts_under_its_own_label_and_a_refusal_counts_at_all() {
         let held = listener();
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         let entry = mismatched_entry(&held);
         t.entries.insert(entry.key, entry);
         let mut mismatch = GatewayMetrics::default();
@@ -2053,7 +2088,7 @@ mod tests {
 
         // The same shape of failure, arrived at honestly: the destination
         // refused. No policy event, so no deny.
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         t.on_syn(key(), syn_bytes(), unreachable_dst(), 0);
         let mut refusal = GatewayMetrics::default();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2088,7 +2123,7 @@ mod tests {
     /// anything.
     #[test]
     fn a_failed_connect_hands_back_the_reset_the_guest_is_owed() {
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest(), watch());
         t.on_syn(key(), syn_bytes(), unreachable_dst(), 0);
         let mut metrics = GatewayMetrics::default();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2403,7 +2438,7 @@ mod tests {
         HalfOpen {
             key,
             syn,
-            socket: host,
+            socket: watched(host),
             opened_at_millis: 0,
             refused_at_open: false,
         }
@@ -3371,7 +3406,7 @@ mod tests {
             .as_ref()
             .expect("the fixture flow holds its socket");
         assert!(
-            SockRef::from(host)
+            SockRef::from(&**host)
                 .keepalive()
                 .expect("reading the keepalive flag back"),
             "a flow whose peer vanishes must be able to find out"
@@ -3387,7 +3422,11 @@ mod tests {
         let held = listener();
         // A guest address of a different family from the flow's remote:
         // the one input `synthesize_rst` cannot answer.
-        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, IpAddr::V6(Ipv6Addr::LOCALHOST));
+        let mut t = HalfOpenTable::new(
+            DEFAULT_MAX_HALF_OPEN,
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            watch(),
+        );
         t.entries
             .insert(key(), entry_over_a_live_socket(&held, true));
         let mut metrics = GatewayMetrics::default();

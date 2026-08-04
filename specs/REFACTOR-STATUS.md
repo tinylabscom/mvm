@@ -41,14 +41,19 @@ for detailed scope and acceptance criteria.
         present-tense `MacosUserspaceGateway` prose is corrected, and
         ADR-037's memory ceiling is re-derived from `limits.rs` — its
         `1024 × 32 KiB = 32 MiB` was wrong three ways over, against a real
-        46,500,608 bytes (44.35 MiB). **Three defects are shipped and
+        46,500,608 bytes (44.35 MiB). **Three defects were shipped and
         recorded rather than hidden**, in ADR-037 §"Known defects in what
-        shipped" and in plan 287's own deferred set: nothing is registered
-        behind `readiness_fd`, so every host-driven step waits for the
-        drive loop's 50 ms tick; `declared_ingress: true` is advertised
-        with no listening socket serving it, and cannot simply be cleared
-        because `GatewayConfig::new` requires it; and `poll_inbound` drains
-        without a per-pass budget
+        shipped" and in plan 287's own deferred set; **two are now
+        closed**. Every host socket the datapath opens is registered on the
+        set behind `readiness_fd`, so a resolved connect and an arriving
+        byte wake the drive loop rather than waiting out its 50 ms tick —
+        the registration lives with the socket, so it cannot go stale at any
+        of the places one is dropped out of a table. `poll_inbound` is
+        bounded by `MAX_INBOUND_PACKETS_PER_PASS` and reports
+        `InboundDrain::Backlogged`, mirroring the guest-facing drain rather
+        than inventing a second mechanism. Still open: `declared_ingress:
+        true` is advertised with no listening socket serving it, and cannot
+        simply be cleared because `GatewayConfig::new` requires it
   - [x] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's
         recorded witness surface. **Gates backend selection in WS1 and the
         IPv6 guard in WS3**: the smoltcp ingress parser is unreachable by

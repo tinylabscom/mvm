@@ -831,13 +831,15 @@ updates only its own entry below.
       ADR-036 no longer describes a type that has been deleted, and
       ADR-037's memory ceiling is re-derived from `limits.rs` — its stated
       `1024 × 32 KiB = 32 MiB` was wrong three ways over, against a real
-      46,500,608 bytes (44.35 MiB). Three defects ship with it and are
-      written down as limitations rather than omitted: nothing is
-      registered behind the datapath's readiness descriptor, so every
-      host-driven step waits for the drive loop's 50 ms tick;
-      `declared_ingress: true` is advertised with no listening socket
-      behind it, and cannot be cleared today because `GatewayConfig::new`
-      requires it; and `poll_inbound` drains with no per-pass budget.
+      46,500,608 bytes (44.35 MiB). Three defects shipped with it and were
+      written down as limitations rather than omitted; two are now closed.
+      Every host socket the datapath opens is registered on the set behind
+      its readiness descriptor, so a resolved connect and an arriving byte
+      wake the drive loop rather than waiting out its 50 ms tick, and
+      `poll_inbound` is bounded per pass and reports its backlog the way
+      the guest-facing drain already did. Still open: `declared_ingress:
+      true` is advertised with no listening socket behind it, and cannot be
+      cleared today because `GatewayConfig::new` requires it.
       Remaining plan-287 workstreams (UDP ingress, IPv6, benchmarking,
       zero-copy, node-to-node transport, the node-control API, WSL2) are
       untouched; the `utun` + PF backend is closed by ADR-039's rejection

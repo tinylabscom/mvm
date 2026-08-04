@@ -47,6 +47,19 @@ pub const DEFAULT_QUEUE_DEPTH: usize = 256;
 /// Ceiling on DNS queries per second for one machine.
 pub const DEFAULT_DNS_QPS: u32 = 50;
 
+/// Packets one [`Gateway::poll_inbound`] pass may take off the datapath.
+///
+/// A burst that arrives faster than the guest can be handed it must not be
+/// able to hold the drive loop inside this drain and starve the guest-facing
+/// side. The guest-facing read has carried the same budget since it shipped;
+/// this is that treatment pointed the other way, and the number matches
+/// because a guest read yields about one packet too.
+///
+/// Not a throughput ceiling: the pass reports [`InboundDrain::Backlogged`]
+/// when the budget cuts it off, and the loop comes straight back rather than
+/// waiting on a readiness edge it has already spent.
+pub const MAX_INBOUND_PACKETS_PER_PASS: usize = 32;
+
 /// Everything the gateway needs to serve one machine.
 pub struct GatewayConfig {
     /// Host-owned identity of the VM boot this gateway serves. Everything
@@ -163,6 +176,26 @@ pub enum GatewayEvent {
     RateLimited,
     /// The session ended and its resources were released.
     CleanedUp { session: SessionId },
+}
+
+/// What one [`Gateway::poll_inbound`] pass concluded.
+///
+/// The ingress mirror of the guest-facing drain's own report: a caller that
+/// waits on readiness has already spent the edge that woke it, so a pass cut
+/// off by its budget has to say so or the rest sits until the next tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundDrain {
+    /// The datapath had nothing more to give.
+    Idle,
+    /// The budget ran out with packets still waiting.
+    Backlogged,
+}
+
+/// One pass of [`Gateway::poll_inbound`].
+#[derive(Debug)]
+pub struct InboundPass {
+    pub events: Vec<GatewayEvent>,
+    pub drain: InboundDrain,
 }
 
 /// Which way a packet was going.
@@ -545,25 +578,36 @@ impl Gateway {
         events
     }
 
-    /// Drain whatever the host network has for this machine, admit it, and
-    /// queue the survivors for the guest. Returns what happened.
-    pub fn poll_inbound(&mut self, now_millis: u64) -> Vec<GatewayEvent> {
+    /// Take up to one pass's worth of what the host network has for this
+    /// machine, admit it, and queue the survivors for the guest.
+    ///
+    /// Bounded by [`MAX_INBOUND_PACKETS_PER_PASS`], and it says so when the
+    /// bound is what stopped it. Draining to `WouldBlock` would let a burst
+    /// hold the caller here while the guest-facing side went unserviced —
+    /// the starvation the guest-facing drain's own budget exists to prevent,
+    /// pointed the other way. A guest picks the destinations that reply, so
+    /// it has a hand on the rate.
+    pub fn poll_inbound(&mut self, now_millis: u64) -> InboundPass {
         let mut events = Vec::new();
-        loop {
+        let mut drain = InboundDrain::Backlogged;
+        for _ in 0..MAX_INBOUND_PACKETS_PER_PASS {
             let mut buf = std::mem::take(&mut self.recv_buf);
             let n = match self.datapath.recv_from_network(&mut buf) {
                 Ok(0) => {
                     self.recv_buf = buf;
+                    drain = InboundDrain::Idle;
                     break;
                 }
                 Ok(n) => n,
                 Err(DatapathError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     self.recv_buf = buf;
+                    drain = InboundDrain::Idle;
                     break;
                 }
                 Err(_) => {
                     self.metrics.datapath_errors += 1;
                     self.recv_buf = buf;
+                    drain = InboundDrain::Idle;
                     break;
                 }
             };
@@ -592,7 +636,7 @@ impl Gateway {
                 }
             }
         }
-        events
+        InboundPass { events, drain }
     }
 
     /// Take everything queued for the guest's data connection.
@@ -904,7 +948,7 @@ mod tests {
     use crate::netd::datapath::LoopbackDatapath;
     use crate::netd::test_packets::{tcp, v4_packet};
     use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
-    use mvm_net::l3::{AddressAllocator, IngressMapping};
+    use mvm_net::l3::{AddressAllocator, AdmittedPacket, IngressMapping};
     use mvm_protocol::l3::proto;
     use std::sync::Arc;
 
@@ -1107,12 +1151,126 @@ mod tests {
         let wire = frame::encode(MessageType::Packet, SESSION.0, 0, &pkt).unwrap();
         gw.ingest_data_bytes(&wire, 2).unwrap();
 
-        let events = gw.poll_inbound(3);
+        let pass = gw.poll_inbound(3);
         assert!(
-            matches!(events[0], GatewayEvent::InboundDelivered { .. }),
-            "{events:?}"
+            matches!(pass.events[0], GatewayEvent::InboundDelivered { .. }),
+            "{:?}",
+            pass.events
         );
         assert_eq!(gw.take_guest_frames().len(), 1);
+    }
+
+    /// A datapath whose inbound queue the test fills, so one pass meets far
+    /// more than it is allowed to take.
+    ///
+    /// `LoopbackDatapath` cannot stand in: it produces at most one reply per
+    /// packet the guest sent, so a burst larger than the guest's own traffic
+    /// is unreachable through it.
+    #[derive(Clone, Default)]
+    struct BurstNetwork {
+        inbound: Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>,
+    }
+
+    impl BurstNetwork {
+        fn deliver(&self, packet: Vec<u8>) {
+            self.inbound
+                .lock()
+                .expect("inbound queue")
+                .push_back(packet);
+        }
+
+        /// Packets the network is still holding.
+        fn queued(&self) -> usize {
+            self.inbound.lock().expect("inbound queue").len()
+        }
+    }
+
+    impl L3Datapath for BurstNetwork {
+        fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+            Ok(Box::new(self.clone()))
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities::FULL_L3_V4
+        }
+    }
+
+    impl DatapathHandle for BurstNetwork {
+        fn send_to_network(&mut self, _packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
+            match self.inbound.lock().expect("inbound queue").pop_front() {
+                Some(packet) => {
+                    let n = packet.len().min(buf.len());
+                    buf[..n].copy_from_slice(&packet[..n]);
+                    Ok(n)
+                }
+                None => Err(DatapathError::Io(std::io::Error::from(
+                    std::io::ErrorKind::WouldBlock,
+                ))),
+            }
+        }
+
+        fn close(&mut self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn description(&self) -> String {
+            "a host network holding a burst the test queued".to_string()
+        }
+    }
+
+    /// The defect this pins: the drain ran until the datapath said
+    /// `WouldBlock`, so a burst was taken in full before the pass returned
+    /// to the guest-facing side. The guest-facing read has had a budget and
+    /// a backlog report since it shipped; this is the same treatment
+    /// pointed the other way.
+    #[test]
+    fn the_inbound_drain_stops_at_its_budget_and_says_so() {
+        let dp = BurstNetwork::default();
+        let mut gw = open_443(&dp);
+        handshake(&mut gw);
+        let guest = gw.admitter().lease().guest;
+        // Unsolicited, so each packet is refused rather than delivered: the
+        // budget is spent per packet the drain takes off the datapath, and a
+        // refusal costs the same pass as a delivery.
+        let burst = MAX_INBOUND_PACKETS_PER_PASS * 3;
+        for _ in 0..burst {
+            dp.deliver(v4_packet(proto::TCP, REMOTE, guest, &tcp(443, 50000, 0)));
+        }
+
+        for pass in 0..3 {
+            let taken = gw.poll_inbound(3);
+            assert_eq!(
+                taken.events.len(),
+                MAX_INBOUND_PACKETS_PER_PASS,
+                "pass {pass} must take its budget and no more"
+            );
+            assert_eq!(
+                taken.drain,
+                InboundDrain::Backlogged,
+                "a pass its budget cut off has to say so, or the rest waits for \
+                 a readiness edge that has already been spent"
+            );
+            assert_eq!(
+                dp.queued(),
+                burst - MAX_INBOUND_PACKETS_PER_PASS * (pass + 1),
+                "the packets the budget cut off must still be on the datapath, \
+                 not dropped"
+            );
+        }
+        let after = gw.poll_inbound(3);
+        assert!(
+            after.events.is_empty(),
+            "the burst is exhausted, so the pass after it takes nothing"
+        );
+        assert_eq!(after.drain, InboundDrain::Idle);
     }
 
     #[test]

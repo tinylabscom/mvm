@@ -33,6 +33,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use libfuzzer_sys::fuzz_target;
 use mvm_core::policy::projection::CanonicalEgress;
 use mvm_hostd::netd::userspace::UserspaceSocketDatapath;
+use mvm_hostd::netd::userspace::readiness::ReadinessSet;
 use mvm_hostd::netd::userspace::tcp::{EstablishedFlow, HalfOpenTable};
 use mvm_hostd::netd::{DatapathHandle, DatapathRequest, GatewayMetrics};
 use mvm_net::l3::alloc::AddressLease;
@@ -67,7 +68,13 @@ fuzz_target!(|data: &[u8]| {
     let mut admitter = admitter();
     let mut metrics = GatewayMetrics::default();
     let mut handle = open_handle();
-    let mut half_open = HalfOpenTable::new(HALF_OPEN_CAPACITY, IpAddr::V4(GUEST));
+    // The sockets a half-open entry parks register here. Nothing polls it:
+    // this harness drives the table directly, and what the entries need is
+    // somewhere to register and unregister.
+    let Ok(readiness) = ReadinessSet::new() else {
+        return;
+    };
+    let mut half_open = HalfOpenTable::new(HALF_OPEN_CAPACITY, IpAddr::V4(GUEST), readiness.watch());
     let mut flow: Option<EstablishedFlow> = None;
     let mut now: u64 = 0;
 

@@ -122,7 +122,7 @@ impl Tunnel {
     /// guest.
     fn poll_host(&mut self) -> Vec<GatewayEvent> {
         self.now += 1;
-        let events = self.gateway.poll_inbound(self.now);
+        let events = self.gateway.poll_inbound(self.now).events;
         self.drain_to_guest();
         events
     }

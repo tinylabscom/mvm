@@ -379,18 +379,32 @@ filename because `285` is used twice on main).
 
 ## Known defects in what shipped
 
-These are open, and none of them is a design property. They are recorded
-here so the ADR is not read as describing a finished thing.
+None of these is a design property. Two of the three are now closed and
+are kept here, struck through, with what closed them: an ADR that quietly
+deleted its own defect list would leave nothing to check the fix against.
+The third is open.
 
-- **A 50 ms latency floor on everything the host originates.**
-  `UserspaceHandle::readiness_fd` hands back a real `mio::Poll`
-  descriptor, and `mvm-netd` registers it — but nothing is registered
-  *behind* it, so it never reports readiness. Every connect resolution and
-  every inbound byte therefore waits for the drive loop's 50 ms timer tick
-  instead of the event that actually made it ready. The loop services the
-  datapath unconditionally rather than gating on the poll token, which is
-  why this is slow rather than broken. Registering each host socket on that
-  poll set is the fix.
+- ~~**A 50 ms latency floor on everything the host originates.**~~
+  **Closed.** Every host socket this datapath opens — a half-open connect,
+  an established flow, a datagram association — is now registered on the
+  set behind `readiness_fd`, so a connect the kernel has decided and a byte
+  a peer sent wake the drive loop rather than waiting out its tick. The tick
+  remains the floor on time-driven work (expiries, half-open timeouts,
+  transport timers), which is what it was always for.
+
+  Registration is an ownership fact rather than a bookkeeping one:
+  `readiness::Watched` owns the socket and its registration together and
+  drops them in that order, so a socket that exists is registered and one
+  that has gone is not. The alternative — deregistering at each of the
+  dozen places a socket can be dropped out of a table — works until the
+  thirteenth is added, and a descriptor that closes while the set still
+  names it frees its *number* for the next `open` in the process.
+
+  The set costs two descriptors per machine rather than one: the poll
+  side, which `readiness_fd` hands the drive loop, and an owned reference
+  to the same kernel object that goes to every socket. mio's registry is
+  borrowed from its poll set, and a borrow cannot outlive it into a
+  socket's `Drop`.
 - **`declared_ingress: true` is advertised with no listening socket behind
   it.** `ForwardingCapabilities::USERSPACE_SOCKETS` sets the flag, so a
   plan declaring an ingress mapping is admitted, but this datapath opens
@@ -399,7 +413,13 @@ here so the ADR is not read as describing a finished thing.
   default gateway refuse on the fallback path. This is an over-claim in the
   capability seam and should be resolved by serving declared ingress or by
   relaxing the config requirement first — not by leaving both as they are.
-- **`Gateway::poll_inbound` drains without a per-pass budget.** It loops
-  until the datapath returns `WouldBlock`, so a large inbound burst is
-  fully drained before the loop returns to the guest-facing side within
-  that pass. The guest-facing read has such a budget; this does not.
+- ~~**`Gateway::poll_inbound` drains without a per-pass budget.**~~
+  **Closed.** The drain is bounded by `MAX_INBOUND_PACKETS_PER_PASS` and
+  reports `InboundDrain::Backlogged` when the budget is what stopped it, so
+  the drive loop comes straight back rather than waiting on a readiness edge
+  it has already spent. It is the guest-facing drain's own mechanism pointed
+  the other way, at the same number — never a second one. This was a
+  fairness and latency defect rather than an unbounded-memory one: the
+  datapath's queues are bounded, so a pass capped out in the thousands. A
+  guest still has a hand on the rate, since it chooses which destinations
+  reply.

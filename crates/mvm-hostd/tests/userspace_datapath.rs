@@ -38,11 +38,18 @@
 //!
 //! # Timing
 //!
-//! The datapath's readiness descriptor never fires today, so the drive
-//! loop's 50ms tick is what advances everything. Nothing here asserts a
-//! latency below that tick; the deadlines are seconds, with room for several
-//! ticks. Once the readiness descriptor reports real work, these budgets can
-//! shrink.
+//! The datapath's host sockets are registered on its readiness descriptor,
+//! so a resolved connect and an arriving byte wake the drive loop rather
+//! than waiting out its 50ms tick; the tick is now the floor on *time-driven*
+//! work only — expiries, half-open timeouts, transport timers.
+//!
+//! The deadlines here stay in seconds anyway, and are deliberately not
+//! tightened. What they are sized against is not the tick: these spawn a real
+//! process, may prompt a host firewall on a first run, and run under a
+//! process-parallel suite. A budget cut to the latency this datapath can now
+//! achieve would be measuring the test host's scheduler. The witness that
+//! readiness actually fires belongs where it can assert on readiness rather
+//! than on elapsed time, and it lives in the datapath's own module tree.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};

@@ -13,14 +13,14 @@
 
 pub mod device;
 pub mod limits;
+pub mod readiness;
 pub mod tcp;
 pub mod udp;
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::RawFd;
 
-use mio::Poll;
 use mvm_net::l3::AdmittedPacket;
 use mvm_net::l3::admit::DenyCode;
 use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
@@ -35,6 +35,7 @@ use self::device::{GuestDevice, PushOutcome, QueueDepths};
 use self::limits::{
     DEFAULT_MAX_HALF_OPEN, DEFAULT_MAX_HOST_SOCKETS, DEFAULT_MAX_UDP_ASSOCIATIONS, FD_RESERVE,
 };
+use self::readiness::ReadinessSet;
 use self::tcp::{EstablishedFlow, HalfOpenTable, SynOutcome};
 use self::udp::UdpAssociations;
 use super::datapath::{
@@ -163,11 +164,12 @@ impl UserspaceSocketDatapath {
         // this is a direct pass-through rather than a conversion.
         let budget = socket_budget(lim.rlim_cur, lim.rlim_max);
 
-        let poll = Poll::new().map_err(|source| DatapathError::SetupFailed {
+        let readiness = ReadinessSet::new().map_err(|source| DatapathError::SetupFailed {
             what: "userspace datapath poll set",
             machine_id: req.machine_id.clone(),
             source,
         })?;
+        let watch = readiness.watch();
 
         // Symmetric, and at the machine-wide default: this is the one
         // device a machine has, so its depth does not multiply by the
@@ -204,7 +206,7 @@ impl UserspaceSocketDatapath {
         let guest = IpAddr::V4(req.guest);
         Ok(UserspaceHandle {
             machine_id: req.machine_id.clone(),
-            poll: Some(poll),
+            readiness: Some(readiness),
             device,
             interface,
             sockets,
@@ -216,11 +218,11 @@ impl UserspaceSocketDatapath {
             // smaller than that demand cannot honour it, and a table
             // allowed to hold more entries than the process has descriptors
             // would refuse at `socket()` rather than at its own bound.
-            half_open: HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN.min(budget), guest),
+            half_open: HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN.min(budget), guest, watch.clone()),
             // Bounded against the same budget, and for the same reason: an
             // association parks a descriptor drawn from the one pool TCP is
             // also drawing on.
-            udp: UdpAssociations::new(DEFAULT_MAX_UDP_ASSOCIATIONS.min(budget), guest),
+            udp: UdpAssociations::new(DEFAULT_MAX_UDP_ASSOCIATIONS.min(budget), guest, watch),
             flows: BTreeMap::new(),
             metrics: GatewayMetrics::default(),
             now_millis: 0,
@@ -248,17 +250,16 @@ impl L3Datapath for UserspaceSocketDatapath {
 /// One machine's open userspace datapath.
 pub struct UserspaceHandle {
     machine_id: String,
-    /// Backs [`DatapathHandle::readiness_fd`]. `Option` because `close`
-    /// must drop it: the readiness contract promises that closing releases
-    /// the descriptor number for reuse, and a `Poll` still alive inside a
-    /// handle that merely says it is closed would keep holding it.
+    /// Backs [`DatapathHandle::readiness_fd`]. Every host socket this
+    /// datapath opens is registered here, so a connect the kernel has
+    /// decided or a peer that has sent wakes the drive loop instead of
+    /// waiting out its tick.
     ///
-    /// Nothing is registered on it yet — a later task registers each host
-    /// socket here as it opens — so today it never reports readiness. The
-    /// outer driver still services this handle on its timer tick
-    /// regardless of readiness (see `netd/mod.rs`'s pump loop, which does
-    /// not gate the datapath call on a datapath event).
-    poll: Option<Poll>,
+    /// `Option` because `close` must drop it: the readiness contract
+    /// promises that closing releases the descriptor number for reuse, and
+    /// a set still alive inside a handle that merely says it is closed
+    /// would keep holding it.
+    readiness: Option<ReadinessSet>,
     /// The machine-wide guest-facing device.
     ///
     /// Carries no flow traffic — each flow terminates in its own stack over
@@ -338,6 +339,13 @@ impl UserspaceHandle {
             )));
         }
         self.now_millis = now_millis;
+        // Spend the readiness this pass was woken by before reading a single
+        // socket. An edge cleared afterwards would be one for bytes that
+        // landed between the two, and nothing would go back for them until
+        // the tick — which is the wait this whole mechanism removes.
+        if let Some(readiness) = self.readiness.as_mut() {
+            readiness.drain();
+        }
         self.resolve_connects(now_millis);
         self.expire_half_open();
         // Polled before expiring, so a reply that arrived inside an
@@ -666,10 +674,19 @@ impl DatapathHandle for UserspaceHandle {
         self.flows.clear();
         self.half_open.clear();
         self.udp.clear();
-        // Drop now, not whenever the handle itself happens to drop: the
-        // readiness contract promises that closing frees the descriptor
-        // number for the next `open` anywhere in the process to reuse.
-        self.poll = None;
+        // Dropped after the tables above, so every socket deregisters
+        // itself while the set is still there to deregister from. Dropped
+        // now rather than whenever the handle happens to: the readiness
+        // contract promises that closing frees the descriptor number
+        // `readiness_fd` reported, for the next `open` anywhere in the
+        // process to reuse.
+        //
+        // The set's second descriptor — the owned reference the tables
+        // register through — goes when the handle itself drops, because the
+        // tables outlive this call. It names the same kernel object, nothing
+        // waits on it, and there is nothing left registered on it by the
+        // time this returns.
+        self.readiness = None;
         Ok(())
     }
 
@@ -683,7 +700,7 @@ impl DatapathHandle for UserspaceHandle {
     }
 
     fn readiness_fd(&self) -> Option<RawFd> {
-        self.poll.as_ref().map(Poll::as_raw_fd)
+        self.readiness.as_ref().map(ReadinessSet::readiness_fd)
     }
 }
 
@@ -834,6 +851,75 @@ mod tests {
         assert!(
             handle.readiness_fd().is_some(),
             "the handle owns a poll set even before any socket is registered on it"
+        );
+    }
+
+    /// How long a readiness assertion waits before calling it a failure.
+    ///
+    /// A ceiling on a wait, not a latency budget: a registered descriptor
+    /// reports a resolved loopback connect in microseconds, and the margin
+    /// is here so a loaded test host cannot fail the assertion. What makes
+    /// this a witness is that it asserts on *readiness*, not on elapsed
+    /// time — an unregistered descriptor waits this out and reports nothing,
+    /// however fast the machine is.
+    const READINESS_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// Wait for the handle's readiness descriptor to report something.
+    ///
+    /// Driven from an outer poll set, because that is what `mvm-netd` does
+    /// with `readiness_fd`: a test that polled the datapath's own set would
+    /// be exercising a nesting production never performs.
+    fn readiness_fires(handle: &UserspaceHandle) -> bool {
+        let fd = handle
+            .readiness_fd()
+            .expect("an open handle exposes its readiness descriptor");
+        let mut outer = mio::Poll::new().expect("outer poll set");
+        outer
+            .registry()
+            .register(
+                &mut mio::unix::SourceFd(&fd),
+                mio::Token(0),
+                mio::Interest::READABLE,
+            )
+            .expect("registering the datapath's readiness descriptor");
+        let mut events = mio::Events::with_capacity(8);
+        let deadline = std::time::Instant::now() + READINESS_DEADLINE;
+        loop {
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            outer.poll(&mut events, Some(left)).expect("outer poll");
+            if !events.is_empty() {
+                return true;
+            }
+        }
+    }
+
+    /// The defect this pins: `readiness_fd` handed the drive loop a poll set
+    /// with nothing registered behind it, so a connect the kernel had
+    /// already decided woke nobody and the guest waited out the loop's tick
+    /// instead. Registering the host sockets this datapath owns is what
+    /// turns that descriptor from decorative into the thing that drives the
+    /// loop.
+    #[test]
+    fn a_resolved_connect_reports_on_the_readiness_descriptor() {
+        let held = listener();
+        let dst = held.local_addr().expect("local addr");
+        let mut handle = open_test_handle();
+        let syn = guest_segment(50_000, dst, TcpControl::Syn, &[]);
+        deliver(&mut handle, &syn).expect("a SYN toward a live listener is accepted");
+
+        assert!(
+            readiness_fires(&handle),
+            "the host socket this datapath opened for the guest's connect must \
+             be registered on the descriptor the drive loop waits on"
+        );
+        handle.service(0).expect("service");
+        assert_eq!(
+            handle.flows.len(),
+            1,
+            "the wake must mean the connect is resolvable, not merely that \
+             something fired"
         );
     }
 
