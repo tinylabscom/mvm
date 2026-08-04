@@ -171,7 +171,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// the in-memory mock backend. Gated behind `test-support` along with the
 /// mock backend itself — a production build never has a mock VM dir to
 /// find, so it goes straight to the real probe.
-pub(super) fn fs_request(name: &str, req: GuestRequest) -> Result<FsResult> {
+pub(in crate::commands) fn fs_request(name: &str, req: GuestRequest) -> Result<FsResult> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     #[cfg(feature = "test-support")]
     {
@@ -221,11 +221,21 @@ fn cmd_write(
     Ok(())
 }
 
-pub(super) fn read_guest_chunks(
+pub(in crate::commands) fn read_guest_chunks(
     name: &str,
     path: &str,
     start_offset: u64,
     length: u64,
+) -> Result<Vec<u8>> {
+    read_guest_chunks_with_symlink_policy(name, path, start_offset, length, true)
+}
+
+pub(in crate::commands) fn read_guest_chunks_with_symlink_policy(
+    name: &str,
+    path: &str,
+    start_offset: u64,
+    length: u64,
+    follow_symlinks: bool,
 ) -> Result<Vec<u8>> {
     let chunk_cap =
         u64::try_from(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE).expect("wire chunk size fits u64");
@@ -235,12 +245,7 @@ pub(super) fn read_guest_chunks(
     let mut remaining = length;
     while remaining > 0 {
         let requested = remaining.min(chunk_cap);
-        let req = GuestRequest::FsRead {
-            path: path.to_string(),
-            offset: Some(offset),
-            length: requested,
-            follow_symlinks: true,
-        };
+        let req = fs_read_request(path, offset, requested, follow_symlinks);
         super::shared::emit_vsock_rpc_audit(name, &req);
         match unwrap_fs(fs_request(name, req)?)? {
             FsResult::Read {
@@ -264,6 +269,15 @@ pub(super) fn read_guest_chunks(
         }
     }
     Ok(content)
+}
+
+fn fs_read_request(path: &str, offset: u64, length: u64, follow_symlinks: bool) -> GuestRequest {
+    GuestRequest::FsRead {
+        path: path.to_string(),
+        offset: Some(offset),
+        length,
+        follow_symlinks,
+    }
 }
 
 pub(super) fn write_guest_chunks(
@@ -427,5 +441,24 @@ fn cmd_mv(name: &str, from: &str, to: &str) -> Result<()> {
             Ok(())
         }
         other => bail!("Unexpected FsResult variant for Move: {:?}", other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_request_preserves_symlink_policy() {
+        let request = fs_read_request("/deps/site.py", 8, 16, false);
+        assert!(matches!(
+            request,
+            GuestRequest::FsRead {
+                path,
+                offset: Some(8),
+                length: 16,
+                follow_symlinks: false,
+            } if path == "/deps/site.py"
+        ));
     }
 }

@@ -422,6 +422,8 @@ const DEPS_SUB: &[(&str, AuditPosture)] = &[
     ("inspect", AuditPosture::ReadOnly),
     ("audit", AuditPosture::Emits("DepsAudit")),
     ("capture", AuditPosture::Emits("DepsAudit")),
+    ("install", AuditPosture::Emits("DepsAudit")),
+    ("capture-live", AuditPosture::Emits("DepsAudit")),
 ];
 
 /// Every top-level `mvmctl` subcommand keyed by its clap name.

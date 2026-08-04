@@ -251,6 +251,12 @@ What that looks like today:
 ```bash
 mvmctl build compile app.py --out ./out   # declared deps; lockfiles must be hash-pinned
 mvmctl machine build --flake ./out        # installs deps into a SEALED volume
+mvmctl deps install --lockfile uv.lock --language python  # dev install + seal
+mvmctl deps capture-live HASH --vm dev-vm \
+  --guest-content /mvm/deps/content \
+  --guest-sbom /mvm/deps/sbom.cdx.json \
+  --guest-fetch-log /mvm/deps/fetch.log \
+  --guest-cve /mvm/deps/cve.json              # export + reseal
 mvmctl deps inspect                       # SBOM + CVE + hash-chained meta, no VM needed
 mvmctl machine run --entrypoint --flake ./out
 ```
@@ -261,8 +267,8 @@ verifies that volume before launch and refuses a tampered one, and `--prod`
 fails closed on high/critical findings or a stub SBOM. A lockfile entry with no
 integrity hash is rejected at compile time.
 
-`mvmctl deploy`, `mvmctl watch`, and capturing a dependency you installed inside
-a dev sandbox are **designed but not yet built** — see
+`mvmctl deploy`, `mvmctl watch`, and the remaining attested-image steps are
+**designed but not yet built** — see
 [plan 291](specs/plans/291-develop-build-deploy-attested.md). Until they land,
 the declared route above is the supported way to get a dependency into an
 attested workload.

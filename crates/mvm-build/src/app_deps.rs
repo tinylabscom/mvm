@@ -295,38 +295,75 @@ pub trait InstallDriver {
     ) -> Result<BuilderArtifacts, BuilderVmError>;
 }
 
-/// Blanket impl: any [`BuilderVm`] is also an [`InstallDriver`].
-/// The driver wraps the `BuilderJob::Install` call with the
-/// canonical mount layout (source_root → `/work`, artifact_out
-/// → `/out`). Host-Nix store reuse is intentionally absent for
-/// install jobs — uv / pnpm don't touch `/nix/store`.
-impl<T: BuilderVm> InstallDriver for T {
+/// Adapter that exposes a dynamically selected builder as an install driver.
+///
+/// Builder selection returns a trait object because the backend is chosen at
+/// runtime. Keeping this adapter beside the install contract avoids requiring
+/// callers to know the concrete builder type or to duplicate the canonical
+/// install mount layout.
+pub struct BuilderInstallDriver<'a> {
+    builder: &'a dyn BuilderVm,
+}
+
+impl<'a> BuilderInstallDriver<'a> {
+    /// Wrap a dynamically selected builder for [`install_app_deps`].
+    pub fn new(builder: &'a dyn BuilderVm) -> Self {
+        Self { builder }
+    }
+}
+
+impl InstallDriver for BuilderInstallDriver<'_> {
     fn run_install(
         &self,
         spec_path: &Path,
         source_root: &Path,
         artifact_out: &Path,
     ) -> Result<BuilderArtifacts, BuilderVmError> {
-        let job = BuilderJob::Install {
-            spec_path: spec_path.to_path_buf(),
-        };
-        // Install jobs don't embed host-vm binaries into a rootfs, so
-        // host_bin_dir is unused. Use a private temp dir as a valid
-        // placeholder so validate_mounts passes.
-        let _host_bins_tmp = tempfile::TempDir::new().map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("creating temp host_bin_dir: {e}"))
-        })?;
-        let mounts = BuilderMounts {
-            flake_src: source_root.to_path_buf(),
-            host_nix_store: None,
-            artifact_out: artifact_out.to_path_buf(),
-            host_bin_dir: _host_bins_tmp.path().to_path_buf(),
-            // App-dep installs stage an install spec, not a user flake; no
-            // mvm override applies.
-            staged_user_flake: None,
-        };
-        self.run_build(&job, &mounts)
+        run_install_with_builder(self.builder, spec_path, source_root, artifact_out)
     }
+}
+
+/// Blanket impl: any [`BuilderVm`] is also an [`InstallDriver`].
+/// The driver wraps the `BuilderJob::Install` call with the
+/// canonical mount layout (source_root → `/work`, artifact_out
+/// → `/out`). Host-Nix store reuse is intentionally absent for
+/// install jobs — uv / pnpm don't touch `/nix/store`.
+impl<T: BuilderVm + ?Sized> InstallDriver for T {
+    fn run_install(
+        &self,
+        spec_path: &Path,
+        source_root: &Path,
+        artifact_out: &Path,
+    ) -> Result<BuilderArtifacts, BuilderVmError> {
+        run_install_with_builder(self, spec_path, source_root, artifact_out)
+    }
+}
+
+fn run_install_with_builder<T: BuilderVm + ?Sized>(
+    builder: &T,
+    spec_path: &Path,
+    source_root: &Path,
+    artifact_out: &Path,
+) -> Result<BuilderArtifacts, BuilderVmError> {
+    let job = BuilderJob::Install {
+        spec_path: spec_path.to_path_buf(),
+    };
+    // Install jobs don't embed host-vm binaries into a rootfs, so
+    // host_bin_dir is unused. Use a private temp dir as a valid
+    // placeholder so validate_mounts passes.
+    let _host_bins_tmp = tempfile::TempDir::new().map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("creating temp host_bin_dir: {e}"))
+    })?;
+    let mounts = BuilderMounts {
+        flake_src: source_root.to_path_buf(),
+        host_nix_store: None,
+        artifact_out: artifact_out.to_path_buf(),
+        host_bin_dir: _host_bins_tmp.path().to_path_buf(),
+        // App-dep installs stage an install spec, not a user flake; no
+        // mvm override applies.
+        staged_user_flake: None,
+    };
+    builder.run_build(&job, &mounts)
 }
 
 /// Resolve a deps install for `spec`. Cache-hit path is pure I/O
@@ -485,6 +522,10 @@ fn run_install_via_driver(
     let mut annotations = BTreeMap::new();
     annotations.insert("language".to_string(), spec.language.token().to_string());
     annotations.insert("gate".to_string(), spec.gate.token().to_string());
+    annotations.insert(
+        "lockfile_relative_path".to_string(),
+        lockfile_relative_path(spec).to_string_lossy().into_owned(),
+    );
     annotations.insert("lockfile_sha256".to_string(), lockfile_sha256.to_string());
     annotations.insert("lockfile_hash".to_string(), lockfile_hash.to_string());
     let created_at = Utc::now().to_rfc3339();
@@ -556,20 +597,21 @@ fn install_spec_json(spec: &InstallSpec) -> String {
         // an absolute lockfile that isn't under source_root we
         // fall back to the bare file name (rare but possible
         // for callers that constructed `spec.lockfile` manually).
-        path = json_string_escape(
-            &spec
-                .lockfile
-                .strip_prefix(&spec.source_root)
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|_| spec
-                    .lockfile
-                    .file_name()
-                    .map(PathBuf::from)
-                    .unwrap_or_default())
-                .to_string_lossy()
-        ),
+        path = json_string_escape(&lockfile_relative_path(spec).to_string_lossy()),
         gate = spec.gate.token(),
     )
+}
+
+fn lockfile_relative_path(spec: &InstallSpec) -> PathBuf {
+    spec.lockfile
+        .strip_prefix(&spec.source_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| {
+            spec.lockfile
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_default()
+        })
 }
 
 /// JSON-string escaper matching the one in
@@ -689,6 +731,18 @@ mod tests {
     //! exercise the public API.
     use super::*;
 
+    struct FailingBuilder;
+
+    impl BuilderVm for FailingBuilder {
+        fn run_build(
+            &self,
+            _job: &BuilderJob,
+            _mounts: &BuilderMounts,
+        ) -> Result<BuilderArtifacts, BuilderVmError> {
+            Err(BuilderVmError::NotYetImplemented)
+        }
+    }
+
     #[test]
     fn lockfile_hash_differs_across_languages() {
         let h_py = derive_lockfile_hash("aa", Language::Python, GateLevel::Dev);
@@ -714,5 +768,19 @@ mod tests {
     fn resolve_cache_root_prefers_override() {
         let p = PathBuf::from("/tmp/forced");
         assert_eq!(resolve_cache_root(Some(&p)), p);
+    }
+
+    #[test]
+    fn dynamic_builder_install_adapter_delegates_to_builder() {
+        let builder = FailingBuilder;
+        let adapter = BuilderInstallDriver::new(&builder);
+        let error = adapter
+            .run_install(
+                Path::new("spec.json"),
+                Path::new("source"),
+                Path::new("out"),
+            )
+            .expect_err("the fixture builder must be called");
+        assert!(matches!(error, BuilderVmError::NotYetImplemented));
     }
 }

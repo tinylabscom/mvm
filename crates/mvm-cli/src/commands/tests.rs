@@ -4,6 +4,7 @@
 
 use super::*;
 use clap::Parser;
+use std::path::Path;
 
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
@@ -102,6 +103,10 @@ fn deps_capture_parses_seal_inputs() {
         "fetch.log",
         "--cve",
         "cve.json",
+        "--declaration",
+        "dependencies.json",
+        "--lockfile",
+        "uv.lock",
         "--json",
     ])
     .unwrap();
@@ -113,6 +118,81 @@ fn deps_capture_parses_seal_inputs() {
     };
     assert_eq!(capture.volume_hash.len(), 64);
     assert!(capture.json);
+    assert_eq!(
+        capture.declaration.as_deref(),
+        Some(Path::new("dependencies.json"))
+    );
+    assert_eq!(capture.lockfile.as_deref(), Some(Path::new("uv.lock")));
+}
+
+#[test]
+fn deps_install_parses_development_install_inputs() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "deps",
+        "install",
+        "--lockfile",
+        "uv.lock",
+        "--source-root",
+        "project",
+        "--language",
+        "python",
+        "--cache-root",
+        "cache",
+        "--json",
+    ])
+    .unwrap();
+    let Commands::Deps(args) = cli.command else {
+        panic!("expected deps command")
+    };
+    let deps::DepsAction::Install(install) = args.action else {
+        panic!("expected deps install command")
+    };
+    assert_eq!(install.lockfile, Path::new("uv.lock"));
+    assert_eq!(install.source_root, Path::new("project"));
+    assert!(matches!(
+        install.language,
+        deps::install::LanguageArg::Python
+    ));
+    assert_eq!(install.cache_root.as_deref(), Some(Path::new("cache")));
+    assert!(install.json);
+}
+
+#[test]
+fn deps_capture_live_parses_guest_artifact_inputs() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "deps",
+        "capture-live",
+        "a".repeat(64).as_str(),
+        "--vm",
+        "dev-vm",
+        "--guest-content",
+        "/mvm/deps/content",
+        "--guest-sbom",
+        "/mvm/deps/sbom.cdx.json",
+        "--guest-fetch-log",
+        "/mvm/deps/fetch.log",
+        "--guest-cve",
+        "/mvm/deps/cve.json",
+        "--declaration",
+        "dependencies.json",
+        "--lockfile",
+        "uv.lock",
+        "--max-files",
+        "10",
+    ])
+    .unwrap();
+    let Commands::Deps(args) = cli.command else {
+        panic!("expected deps command")
+    };
+    let deps::DepsAction::CaptureLive(capture) = args.action else {
+        panic!("expected deps capture-live command")
+    };
+    assert_eq!(capture.vm, "dev-vm");
+    assert_eq!(capture.guest_content, "/mvm/deps/content");
+    assert_eq!(capture.max_files, 10);
+    assert_eq!(capture.lockfile.as_deref(), Some(Path::new("uv.lock")));
 }
 
 #[test]

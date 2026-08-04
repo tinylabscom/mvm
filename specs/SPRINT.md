@@ -12,7 +12,11 @@
 
 - [~] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
-      and refuses tampered or unpinned source volumes.
+      refuses tampered or unpinned source volumes, and can emit the canonical
+      `Dependencies` declaration after verifying the matching lockfile pin;
+      implementation is present. Focused mvm-cli dependency tests (33) and
+      mvm-build app-dependency tests (21) pass; workspace and Linux-builder
+      gates remain.
 
 - [~] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
       polls local source inputs, recompiles only when the semantic IR address
@@ -38,6 +42,11 @@
       dependency volume. A configured remote now ships the record and bundle
       through mvmd’s authenticated upload contract. Host compilation and the
       remaining workspace gates remain pending.
+- [~] `mvmctl deps install` runs the lockfile-pinned development install in the
+      builder boundary and publishes its sealed volume. `mvmctl deps
+      capture-live` exports bounded guest content and sidecars before handing
+      them to the atomic reseal path, and requires a running development VM;
+      implementation is present, with full workspace validation pending.
 
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated

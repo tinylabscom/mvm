@@ -15,7 +15,10 @@ for detailed scope and acceptance criteria.
         long-running mode recovers from transient input/compile errors while
         `--once` remains fail-fast
   - [~] WS3 capture-from-sandbox via `reseal_volume`, converging on the
-        declared-dependency path and keeping the lockfile hash pin
+        declared-dependency path and keeping the lockfile hash pin; capture,
+        `deps install`, and bounded `deps capture-live` implementation are
+        present. Focused mvm-cli (33) and mvm-build (21) tests, compile, build,
+        and Clippy gates pass; workspace/Linux-builder gates remain
   - [~] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
     - [~] Bind the tier to an attested artifact and replace the interactive
