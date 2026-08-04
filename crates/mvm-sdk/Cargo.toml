@@ -23,6 +23,8 @@ mvm-protocol = { workspace = true, features = ["schema"] }
 async-trait = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
+rustls.workspace = true
 thiserror.workspace = true
 
 # Runtime record mode encodes `Sandbox.files.write` bytes

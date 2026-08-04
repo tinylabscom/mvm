@@ -1,9 +1,9 @@
 //! Deploy-bundle assembly for mvmd-owned control-plane flows.
 //!
 //! The local side builds the archive, embeds the mvmd-side `mvmd-spec.json`,
-//! and records the resulting attestation. Remote shipping remains a separate
-//! authenticated transport contract; until that transport is available,
-//! requesting it fails closed after the local record has been written.
+//! and records the resulting attestation. When configured, the remote side
+//! receives the archive and attestation through one authenticated, replay-safe
+//! multipart request.
 //!
 //! ## Archive layout
 //!
@@ -179,10 +179,7 @@ pub struct DeployBundle {
     pub schema_version: String,
 }
 
-/// All deploy failure modes the caller might want to handle. v1 only
-/// surfaces compile + io errors; the HTTP shipping stub will grow
-/// signature / quota / tenant rejection arms once the real client
-/// lands.
+/// All deploy failure modes the caller might want to handle.
 #[derive(Debug)]
 pub enum DeployError {
     Compile(CompileError),
@@ -190,6 +187,9 @@ pub enum DeployError {
     Serialize(serde_json::Error),
     DependencyVolume { path: PathBuf, reason: String },
     RemoteTransportUnavailable { base_url: String },
+    RemoteCredentialMissing { base_url: String },
+    RemoteHttp { base_url: String, status: u16 },
+    RemoteProtocol { base_url: String, reason: String },
 }
 
 impl std::fmt::Display for DeployError {
@@ -209,6 +209,17 @@ impl std::fmt::Display for DeployError {
                 f,
                 "remote artifact transport is unavailable for {base_url}; local deployment was preserved"
             ),
+            Self::RemoteCredentialMissing { base_url } => write!(
+                f,
+                "MVM_MVMD_API_KEY is required for authenticated remote deployment to {base_url}"
+            ),
+            Self::RemoteHttp { base_url, status } => write!(
+                f,
+                "mvmd rejected remote deployment to {base_url} with HTTP {status}"
+            ),
+            Self::RemoteProtocol { base_url, reason } => {
+                write!(f, "invalid mvmd response from {base_url}: {reason}")
+            }
         }
     }
 }
@@ -428,26 +439,127 @@ fn hook_phase_hash(cmds: &[crate::ir::HookCmd]) -> String {
     hex::encode(digest)
 }
 
-/// Remote artifact client seam.
+/// Stable response returned by mvmd after accepting a deploy artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteArtifact {
+    /// SHA-256 revision used as the replay/idempotency key.
+    pub revision: String,
+    /// BLAKE3 identity of the uploaded archive.
+    pub blake3: String,
+    /// Workload identifier from the deploy record.
+    pub workload_id: String,
+    /// Current remote lifecycle status.
+    pub status: String,
+    /// Exact archive size in bytes.
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteResponse {
+    data: RemoteArtifact,
+}
+
+/// Authenticated remote artifact client.
 pub struct MvmdClient {
     /// The configured mvmd endpoint.
     pub base_url: String,
+    api_key: String,
 }
 
 impl MvmdClient {
-    /// Construct a new client for `base_url`.
-    pub fn new(base_url: impl Into<String>) -> Self {
+    /// Construct a new client for `base_url` with a bearer credential.
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            api_key: api_key.into(),
         }
     }
 
-    /// Refuse to claim a remote deployment until the authenticated transport
-    /// is available. The local record is intentionally unaffected.
-    pub fn ship(&self, _bundle: &DeployBundle) -> Result<(), DeployError> {
-        Err(DeployError::RemoteTransportUnavailable {
-            base_url: self.base_url.clone(),
-        })
+    /// Upload the bundle and its attestation as one authenticated request.
+    ///
+    /// Redirects are disabled so the bearer credential is never sent to a
+    /// host other than the configured endpoint. The server binds ownership to
+    /// the authenticated workspace and treats the archive SHA-256 as the
+    /// idempotency key.
+    pub fn ship(
+        &self,
+        bundle: &DeployBundle,
+        record: &DeployRecord,
+    ) -> Result<RemoteArtifact, DeployError> {
+        let endpoint = remote_upload_endpoint(&self.base_url)?;
+        let record_json = serde_json::to_string(record)?;
+        let bundle_part = reqwest::blocking::multipart::Part::file(&bundle.archive_path)
+            .map_err(|error| DeployError::RemoteProtocol {
+                base_url: self.base_url.clone(),
+                reason: format!("opening bundle: {error}"),
+            })?
+            .file_name("image.tar.gz");
+        let form = reqwest::blocking::multipart::Form::new()
+            .text("record", record_json)
+            .part("bundle", bundle_part);
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| DeployError::RemoteProtocol {
+                base_url: self.base_url.clone(),
+                reason: format!("building HTTP client: {error}"),
+            })?;
+        let response = client
+            .post(endpoint)
+            .bearer_auth(&self.api_key)
+            .multipart(form)
+            .send()
+            .map_err(|error| DeployError::RemoteTransportUnavailable {
+                base_url: format!("{} ({error})", self.base_url),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(DeployError::RemoteHttp {
+                base_url: self.base_url.clone(),
+                status: status.as_u16(),
+            });
+        }
+        let payload: RemoteResponse =
+            response
+                .json()
+                .map_err(|error| DeployError::RemoteProtocol {
+                    base_url: self.base_url.clone(),
+                    reason: error.to_string(),
+                })?;
+        Ok(payload.data)
+    }
+}
+
+fn remote_upload_endpoint(base_url: &str) -> Result<String, DeployError> {
+    let parsed = reqwest::Url::parse(base_url).map_err(|error| DeployError::RemoteProtocol {
+        base_url: base_url.to_string(),
+        reason: format!("invalid URL: {error}"),
+    })?;
+    let allowed =
+        parsed.scheme() == "https" || (parsed.scheme() == "http" && is_loopback_url(&parsed));
+    if !allowed {
+        return Err(DeployError::RemoteTransportUnavailable {
+            base_url: base_url.to_string(),
+        });
+    }
+    Ok(format!(
+        "{}/api/v1/deploy-artifacts",
+        base_url.trim_end_matches('/')
+    ))
+}
+
+fn is_loopback_url(url: &reqwest::Url) -> bool {
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false),
+        None => false,
     }
 }
 
@@ -694,8 +806,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_client_fails_closed_until_transport_exists() {
-        let client = MvmdClient::new("https://mvmd.test/v1");
+    fn remote_client_fails_closed_for_unreachable_transport() {
+        let client = MvmdClient::new("http://127.0.0.1:1", "test-token");
         let tmp = tempfile::tempdir().unwrap();
         let archive = tmp.path().join("hello.tar.gz");
         std::fs::write(&archive, b"fake-bytes").unwrap();
@@ -704,13 +816,33 @@ mod tests {
             workload_id: "hello".into(),
             schema_version: "0.1".into(),
         };
+        let record = DeployRecord {
+            schema_version: DEPLOY_RECORD_SCHEMA_VERSION,
+            workload_id: "hello".into(),
+            ir_hash: "ir-hash".into(),
+            image: ArtifactDigests {
+                blake3: "b".repeat(64),
+                sha256: "a".repeat(64),
+                size_bytes: 10,
+            },
+            environment: None,
+            dependency_volume: None,
+        };
         let error = client
-            .ship(&bundle)
+            .ship(&bundle, &record)
             .expect_err("remote shipping must not report a false success");
         assert!(matches!(
             error,
-            DeployError::RemoteTransportUnavailable { base_url }
-                if base_url == "https://mvmd.test/v1"
+            DeployError::RemoteTransportUnavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn remote_endpoint_rejects_cleartext_non_loopback() {
+        let error = remote_upload_endpoint("http://mvmd.example").unwrap_err();
+        assert!(matches!(
+            error,
+            DeployError::RemoteTransportUnavailable { .. }
         ));
     }
 }

@@ -1,8 +1,8 @@
 //! `mvmctl deploy` — build, seal, and record a local workload artifact.
 //!
-//! Local recording is the durable result of this command. A configured mvmd
-//! endpoint is rejected closed until its authenticated upload transport exists;
-//! the local record remains available for retry.
+//! Local recording is written before any remote operation. A configured mvmd
+//! endpoint requires `MVM_MVMD_API_KEY`; the local record remains available if
+//! remote transport or admission fails.
 
 use std::path::{Path, PathBuf};
 
@@ -103,9 +103,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
     println!("  image sha256: {}", record.image.sha256);
 
     if let Some(base_url) = resolve_mvmd_url(mvmd_url.as_deref(), cfg) {
-        let client = MvmdClient::new(&base_url);
+        let api_key = std::env::var("MVM_MVMD_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("MVM_MVMD_API_KEY is required when mvmd is configured")
+            })?;
+        let client = MvmdClient::new(&base_url, api_key);
         client
-            .ship(&bundle)
+            .ship(&bundle, &record)
             .map_err(anyhow::Error::from)
             .with_context(|| format!("shipping deployment to {base_url}"))?;
         println!("remote deployment requested: {base_url}");
