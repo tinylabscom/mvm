@@ -22,6 +22,7 @@
 //! - `mod.rs` — `Args` / `Action` enum, dispatch, shared types.
 //! - `inspect.rs` — pretty-printer for sealed artifacts.
 //! - `audit.rs` — re-audit logic + `AuditRunner` trait for testing.
+//! - `capture.rs` — import a sandbox capture and publish its resealed volume.
 //!
 //! Cache root resolution always routes through
 //! [`mvm_build::app_deps::resolve_cache_root`] so the supervisor's
@@ -39,6 +40,7 @@ use mvm_core::user_config::MvmConfig;
 use super::Cli;
 
 pub(super) mod audit;
+pub(super) mod capture;
 pub(super) mod inspect;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -94,6 +96,8 @@ pub(in crate::commands) enum DepsAction {
     /// Bring `pip-audit` / `pnpm` if they aren't already on PATH; the
     /// runner surfaces a clear error pointing at install instructions.
     Audit(audit::Args),
+    /// Capture a sandbox-installed dependency tree and reseal the volume.
+    Capture(capture::Args),
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -104,5 +108,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             json,
         } => inspect::run(&volume_hash, cache_root.as_deref(), json),
         DepsAction::Audit(a) => audit::run(a),
+        DepsAction::Capture(a) => capture::run(a),
     }
 }

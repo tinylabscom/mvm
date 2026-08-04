@@ -433,7 +433,7 @@ fn copy_volume_skeleton(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
+pub(super) fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
     for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let entry = entry?;
@@ -454,7 +454,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
 
 /// Update `<cache_root>/index/<lockfile_hash>` so the orchestrator's
 /// cache hit on the same lockfile picks up the resealed volume.
-fn refresh_index_pointer(
+pub(super) fn refresh_index_pointer(
     cache_root: &Path,
     lockfile_hash: &str,
     new_volume_hash: &str,

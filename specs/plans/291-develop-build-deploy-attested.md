@@ -100,6 +100,9 @@ before WS1 starts.
 
 ### WS3 — capture dependencies from the sandbox
 
+- [~] `mvmctl deps capture` imports a sandbox-installed dependency tree and
+      its fresh SBOM, fetch log, and CVE result, then reseals it atomically
+      through the existing volume verifier and lockfile index.
 - [ ] `install`-into-sandbox during development, then reseal via
       `reseal_volume` to capture it — new volume hash, refreshed SBOM, fresh CVE
       scan.

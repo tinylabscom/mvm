@@ -12,7 +12,7 @@ for detailed scope and acceptance criteria.
         record; ship to mvmd when a remote is configured, else stop at the
         local sealed artifact
   - [ ] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address
-  - [ ] WS3 capture-from-sandbox via `reseal_volume`, converging on the
+  - [~] WS3 capture-from-sandbox via `reseal_volume`, converging on the
         declared-dependency path and keeping the lockfile hash pin
   - [~] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
