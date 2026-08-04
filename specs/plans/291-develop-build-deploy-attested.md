@@ -1,14 +1,16 @@
 # Develop → build → deploy: one stupidly simple path to an attested workload image
 
-**Status:** In progress. The run-derived agent-verb tier prerequisite is
-landed; deploy attestation and the remaining WS4 work are still open.
+**Status:** In progress. WS3 capture, install, and live-capture paths are
+implemented; the deploy artifact path is also present, while authenticated
+remote transport and host-wide test gates remain.
 
 **Goal:** A developer starts from an OCI image or a Nix flake, iterates on a
 machine until the workload actually works — including discovering the
 dependencies it needs — and then runs one command that seals, hashes, and
-records the result as an attested image. If a remote (`mvmd`) is configured that
-same command ships it; if not, the developer still ends up holding a sealed,
-recorded artifact.
+records the result as an attested image. If a remote (`mvmd`) is configured,
+authenticated transport is required before it can be shipped; until that
+contract exists, the developer still ends up holding a sealed, recorded
+artifact locally.
 
 ## Why this plan exists
 
@@ -112,13 +114,22 @@ before WS1 starts.
 - [~] `mvmctl deps capture` imports a sandbox-installed dependency tree and
       its fresh SBOM, fetch log, and CVE result, then reseals it atomically
       through the existing volume verifier and lockfile index.
-- [ ] `install`-into-sandbox during development, then reseal via
-      `reseal_volume` to capture it — new volume hash, refreshed SBOM, fresh CVE
-      scan.
-- [ ] Emit the captured set back out as a declaration the developer can commit,
+- [~] Install into a development sandbox, then reseal via `reseal_volume` to
+      capture it — new volume hash, refreshed SBOM, fresh CVE scan. The SDK's
+      existing development `install_package` helpers perform the install;
+      `mvmctl deps capture-live` requires a running development VM, exports
+      bounded regular-file content and matching guest sidecars, and hands them
+      to the atomic reseal path. `mvmctl deps install` covers the declared
+      lockfile route.
+- [~] Emit the captured set back out as the canonical dependency declaration
+      the developer can commit,
       so an interactively-discovered dependency becomes a declared one. The
-      capture path must converge on the declared path, not fork from it.
-- [ ] Keep the lockfile hash-pin requirement intact: a captured dependency is
+      capture path must converge on the declared path, not fork from it. The
+      capture command verifies the supplied lockfile bytes against the sealed
+      SHA-256 and emits the same `Dependencies` IR shape used by normal builds.
+      It refuses declaration targets that would overwrite the lockfile or
+      enter the sealed dependency cache.
+- [~] Keep the lockfile hash-pin requirement intact: a captured dependency is
       pinned like a declared one, or the seal refuses.
 
 **The opencv case, end to end:** the developer either declares it (works today)
