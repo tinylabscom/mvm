@@ -109,7 +109,12 @@ impl Args {
                 .kinds(self.stream.filter())
                 .build(),
             history_tail: Some(self.lines as usize),
+            // The byte figure stays as the coarse read-window hint; the line
+            // count is what bounds the console fallback, because `-n` is a
+            // line request and an estimate answers it only approximately —
+            // short lines under-trim and return more than was asked for.
             console_tail_bytes: Some(u64::from(self.lines) * CONSOLE_BYTES_PER_RECORD),
+            console_tail_lines: Some(self.lines as usize),
         }
     }
 }

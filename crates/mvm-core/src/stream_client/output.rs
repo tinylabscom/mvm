@@ -277,6 +277,9 @@ pub struct OutputRequest {
     /// rather than records because the console has no record boundaries to
     /// count. `None` reads it whole.
     pub console_tail_bytes: Option<u64>,
+    /// Exact line count for the console fallback, when the caller asked for
+    /// one. Preferred over `console_tail_bytes`, which can only estimate.
+    pub console_tail_lines: Option<usize>,
 }
 
 /// Everything needed to find one VM's output sources.
@@ -587,7 +590,9 @@ fn open_console_behind_history(
         return None;
     }
     let mut console = ConsoleTail::open(&locator.console_log, request.opts.follow);
-    if let Some(tail) = request.console_tail_bytes {
+    if let Some(lines) = request.console_tail_lines {
+        let _ = console.seek_to_last_lines(lines);
+    } else if let Some(tail) = request.console_tail_bytes {
         let _ = console.seek_to_last(tail);
     }
     Some(console)
@@ -654,9 +659,13 @@ fn open_console(
         });
     }
     let mut console = ConsoleTail::open(&locator.console_log, request.opts.follow);
-    if let Some(tail) = request.console_tail_bytes {
-        // Best effort: a stat that fails leaves the reader at the start, which
-        // shows more than asked rather than less.
+    // Best effort on both: a read or stat that fails leaves the reader at the
+    // start, which shows more than asked rather than less. The line count wins
+    // when present — `-n` is a line request and the byte figure only estimates
+    // it, so a short-lined capture over-delivers.
+    if let Some(lines) = request.console_tail_lines {
+        let _ = console.seek_to_last_lines(lines);
+    } else if let Some(tail) = request.console_tail_bytes {
         let _ = console.seek_to_last(tail);
     }
     Ok(console)

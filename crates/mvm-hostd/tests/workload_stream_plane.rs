@@ -164,6 +164,7 @@ impl Follower {
             let request = OutputRequest {
                 opts: StreamOpts::builder().follow(true).kinds(kinds).build(),
                 history_tail: Some(0),
+                console_tail_lines: None,
                 console_tail_bytes: None,
             };
             let mut stream = open_vm_output(&vm, request).expect("open the output stream");

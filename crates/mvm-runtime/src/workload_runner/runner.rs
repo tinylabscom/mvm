@@ -1149,7 +1149,18 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // sidecars. A teardown helper may remove marker files as part of its own
         // cleanup; the live handle must already own everything needed to stop
         // and verify the VMM independently of those mutable markers.
-        let vm = self.driver.attach(id)?;
+        let vm = match self.driver.attach(id) {
+            Ok(vm) => vm,
+            Err(err) => {
+                // A VM the driver cannot attach to still has a follower
+                // registered here. Propagating straight out strands that
+                // thread and leaves the transcript unsealed — so the capture
+                // is released on the way past, the same unconditional release
+                // the kill path performs, on the path that never reaches it.
+                self.console_streamer.stop(&id.0);
+                return Err(err);
+            }
+        };
         // Reap the per-VM secrets endpoint first, so a crashed VM's
         // decrypted-secret process can't outlive the guest. Idempotent + a no-op
         // when the VM spawned none.

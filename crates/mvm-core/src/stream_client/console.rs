@@ -122,6 +122,39 @@ impl ConsoleTail {
         Ok(())
     }
 
+    /// Position at the start of the last `lines` newline-delimited lines.
+    ///
+    /// `--lines` is a line-oriented request, and a byte estimate answers it
+    /// only approximately — a short line count under-trims and returns more
+    /// than was asked for. The console is the one source where honouring it
+    /// exactly is safe: it is the unchained, unredacted fallback, so moving
+    /// the start to a line boundary re-frames nothing the chain covers.
+    pub fn seek_to_last_lines(&mut self, lines: usize) -> io::Result<()> {
+        let contents = std::fs::read(&self.path)?;
+        if lines == 0 {
+            self.offset = contents.len() as u64;
+            return Ok(());
+        }
+        // Step over one trailing newline so a file ending in `\n` does not
+        // spend a line on the empty remainder after it.
+        let mut i = contents.len();
+        if i > 0 && contents[i - 1] == b'\n' {
+            i -= 1;
+        }
+        let mut seen = 0usize;
+        while i > 0 {
+            if contents[i - 1] == b'\n' {
+                seen += 1;
+                if seen == lines {
+                    break;
+                }
+            }
+            i -= 1;
+        }
+        self.offset = i as u64;
+        Ok(())
+    }
+
     /// The next chunk of console output, or `None` when a non-following reader
     /// reaches the end.
     pub fn next_record(&mut self) -> io::Result<Option<OutputRecord>> {
