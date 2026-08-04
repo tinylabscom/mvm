@@ -10,6 +10,10 @@
 
 ## Current issue delivery
 
+- [~] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
+      dependency tree with fresh audit sidecars, updates the lockfile index,
+      and refuses tampered or unpinned source volumes.
+
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
       scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,

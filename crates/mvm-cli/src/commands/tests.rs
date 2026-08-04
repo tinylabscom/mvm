@@ -11,6 +11,7 @@ use super::build::build;
 use super::build::compile;
 use super::build::group as build_group;
 use super::catalog;
+use super::deps;
 use super::dispatch::TopLevelCommand;
 use super::env::group as env_group;
 use super::env::{cleanup, init, uninstall};
@@ -57,6 +58,34 @@ fn top_level_command_summaries_stay_short() {
         "top-level command summaries must be {longest_allowed} chars or shorter:\n{}",
         long_summaries.join("\n")
     );
+}
+
+#[test]
+fn deps_capture_parses_seal_inputs() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "deps",
+        "capture",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--content-dir",
+        "captured",
+        "--sbom",
+        "sbom.json",
+        "--fetch-log",
+        "fetch.log",
+        "--cve",
+        "cve.json",
+        "--json",
+    ])
+    .unwrap();
+    let Commands::Deps(args) = cli.command else {
+        panic!("expected deps command")
+    };
+    let deps::DepsAction::Capture(capture) = args.action else {
+        panic!("expected deps capture command")
+    };
+    assert_eq!(capture.volume_hash.len(), 64);
+    assert!(capture.json);
 }
 
 #[test]
