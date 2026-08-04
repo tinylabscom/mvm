@@ -366,6 +366,14 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Load entrypoint secrets from workload IR.
     #[arg(long, value_name = "PATH", requires = "entrypoint")]
     pub from_workload_ir: Option<PathBuf>,
+    /// Feed the entrypoint's stdin from PATH, or `-` to stream yours.
+    // Deliberately one line: this crate's help-length rule measures clap's
+    // long help, which is the whole doc comment, so extended paragraphs here
+    // would land in `machine run --help` and break it. The difference between
+    // a PATH payload and a `-` stream, and the input grant the latter needs,
+    // is in the CLI reference and the workload-input guide.
+    #[arg(long, value_name = "PATH", requires = "entrypoint")]
+    pub stdin: Option<String>,
     /// Run the entrypoint on an existing named machine.
     #[arg(
         long,
@@ -1423,6 +1431,9 @@ fn run_args_for_image_revert(
             hypervisor: run.hypervisor,
             json: run.json,
             name: None,
+            // Restoring an image node replays a recorded workload rather than
+            // carrying a caller's stdin, so it requests no input grant.
+            stdin: None,
             manifest,
             runtime_pack: false,
             flake_profile: None,

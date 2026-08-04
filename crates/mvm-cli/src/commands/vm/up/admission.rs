@@ -13,6 +13,7 @@ use mvm_hostd::plan_admission::{
 };
 
 use crate::commands::vm::audit_chain::AuditEmitter;
+use crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint;
 use crate::commands::vm::host_signer::{PUBLIC_FILENAME, load_or_init_at};
 use crate::commands::vm::policy_resolver::{
     LOCAL_DEFAULT, resolve_policy_bundle, resolve_policy_bundle_with_dir,
@@ -101,17 +102,18 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs
     /// (ConsoleOpen, Exec) that a ProdSafe grant would refuse.
     pub restrict_agent_verbs: bool,
-    /// The resolved entrypoint's argv, when the caller has resolved one.
+    /// What the caller worked out this image will run.
+    ///
     /// Feeds [`entrypoint_is_shell_shaped`], which refuses the workload input
     /// grant under a sealed production posture (`restrict_agent_verbs`) when
-    /// this looks like a shell. Empty means "unresolved", not "known safe" —
-    /// no launch path resolves this yet (see the doc on the check site in
-    /// `admit_plan_for_boot`), so this is a hook for a future caller rather
-    /// than an enforced gate today.
-    pub entrypoint_argv: Vec<String>,
-    /// The entrypoint's shebang line, when it is a script and the caller has
-    /// read it. `None` skips that limb of [`entrypoint_is_shell_shaped`].
-    pub entrypoint_shebang: Option<Vec<u8>>,
+    /// the entrypoint looks like a shell.
+    /// [`Unresolved`](ResolvedEntrypoint::Unresolved) refuses that grant too:
+    /// a launch that cannot say what it runs has not established that what it
+    /// runs is not a shell, and admitting on that basis would leave a control
+    /// that reports present and never fires. Callers that never request the
+    /// input grant may pass `Unresolved` freely — the check is reached only
+    /// through the grant.
+    pub entrypoint: ResolvedEntrypoint,
 }
 
 /// Shell basenames [`entrypoint_is_shell_shaped`] refuses on direct match.
@@ -237,16 +239,27 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     // interactive, or ad-hoc-argv run already carries a DevOnly Exec grant, so
     // refining its input grant would not close anything the Exec grant hasn't
     // already opened.
-    if p.restrict_agent_verbs
-        && mvm_protocol::stream::input::grants_input_for(&p.services)
-        && entrypoint_is_shell_shaped(&p.entrypoint_argv, p.entrypoint_shebang.as_deref())
-    {
-        anyhow::bail!(
-            "refusing the workload input grant: the resolved entrypoint {:?} is \
-             shell-shaped, and under a sealed production posture streaming stdin \
-             to a shell is interactive access wearing a different hat",
-            p.entrypoint_argv,
-        );
+    if p.restrict_agent_verbs && mvm_protocol::stream::input::grants_input_for(&p.services) {
+        match &p.entrypoint {
+            ResolvedEntrypoint::Known { argv, shebang } => {
+                if entrypoint_is_shell_shaped(argv, shebang.as_deref()) {
+                    anyhow::bail!(
+                        "refusing the workload input grant: the resolved entrypoint {argv:?} is \
+                         shell-shaped, and under a sealed production posture streaming stdin \
+                         to a shell is interactive access wearing a different hat",
+                    );
+                }
+            }
+            // Fail closed. The alternative — admit and hope — is what leaves a
+            // refusal that reports present and can never fire, which is worse
+            // than no refusal at all because it is believed.
+            ResolvedEntrypoint::Unresolved { because } => anyhow::bail!(
+                "refusing the workload input grant: this launch cannot say what the \
+                 workload runs ({because}), so it cannot rule out a shell — and under \
+                 a sealed production posture streaming stdin to a shell is interactive \
+                 access wearing a different hat",
+            ),
+        }
     }
     let sha = match p.precomputed_image_sha256 {
         Some(sha) => sha,
@@ -851,8 +864,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
@@ -889,8 +901,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -948,8 +959,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -993,8 +1003,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .unwrap()
         .unwrap();
@@ -1022,8 +1031,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .unwrap()
         .unwrap();
@@ -1076,8 +1084,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1152,8 +1159,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1206,8 +1212,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1267,8 +1272,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
-            entrypoint_argv: Vec::new(),
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1354,8 +1358,10 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
-            entrypoint_argv: vec!["python".to_string(), "-m".to_string(), "app".to_string()],
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::Known {
+                argv: vec!["python".to_string(), "-m".to_string(), "app".to_string()],
+                shebang: None,
+            },
         })
         .expect("a non-shell entrypoint must not be refused")
         .expect("Some when admission ran");
@@ -1395,12 +1401,14 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(), // no host.stream.v1 grant
-            entrypoint_argv: vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                "echo hi".to_string(),
-            ],
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::Known {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "echo hi".to_string(),
+                ],
+                shebang: None,
+            },
         })
         .expect("a shell entrypoint must still boot when nothing granted it input")
         .expect("Some when admission ran");
@@ -1440,12 +1448,14 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
-            entrypoint_argv: vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                "echo hi".to_string(),
-            ],
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::Known {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "echo hi".to_string(),
+                ],
+                shebang: None,
+            },
         })
         .expect_err("a shell entrypoint carrying the grant must be refused");
 
@@ -1454,6 +1464,102 @@ mod admit_plan_tests {
             rendered.contains("shell-shaped"),
             "the refusal must name the reason: {rendered}"
         );
+    }
+
+    #[test]
+    fn an_unresolved_entrypoint_with_the_grant_is_refused() {
+        // The gate's fail-closed arm. Before it, every launch path passed an
+        // empty argv and the shell refusal could never fire — a control that
+        // reported present and was structurally dormant. An entrypoint nobody
+        // resolved is one nobody checked, and the grant is refused on that
+        // basis rather than on having found a shell.
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"unresolved-entrypoint-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-entrypoint-unknown",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: vec![stream_grant_service()],
+            entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
+        })
+        .expect_err("an unresolved entrypoint carrying the grant must be refused");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("cannot say what the workload runs"),
+            "the refusal must name what it could not establish: {rendered}"
+        );
+        assert!(
+            rendered.contains("this launch path resolves no entrypoint"),
+            "and must quote the resolver's own reason: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_entrypoint_without_the_grant_still_boots() {
+        // Every launch path that never asks for streamed stdin passes an
+        // unresolved entrypoint, so the fail-closed arm above must be
+        // reachable only through the grant — otherwise this would refuse to
+        // boot most of the CLI.
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"unresolved-no-grant-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-entrypoint-unknown-ungranted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
+        })
+        .expect("an unresolved entrypoint that asked for nothing must still boot")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
     }
 
     #[test]
@@ -1492,12 +1598,14 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: false,
             services: vec![stream_grant_service()],
-            entrypoint_argv: vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                "echo hi".to_string(),
-            ],
-            entrypoint_shebang: None,
+            entrypoint: ResolvedEntrypoint::Known {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "echo hi".to_string(),
+                ],
+                shebang: None,
+            },
         })
         .expect("dev-tier runs are out of the shell-entrypoint refusal's scope")
         .expect("Some when admission ran");

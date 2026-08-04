@@ -47,6 +47,7 @@ pub struct ExecBuilder<'a> {
     commands: Vec<Vec<String>>,
     timeout: Option<Duration>,
     stdin: Vec<u8>,
+    stream_input: bool,
 }
 
 impl<'a> ExecBuilder<'a> {
@@ -57,7 +58,20 @@ impl<'a> ExecBuilder<'a> {
             commands: Vec::new(),
             timeout: None,
             stdin: Vec::new(),
+            stream_input: false,
         }
+    }
+
+    /// Keep the entrypoint's stdin open past the payload, so a host writer can
+    /// keep sending and the EOF becomes the host's to send.
+    ///
+    /// Off by default, which is the only safe default: with it on, a workload
+    /// that reads to EOF never sees one unless something is holding the VM's
+    /// input route and eventually closes it. Setting it without a writer
+    /// behind it hangs the workload, not the caller.
+    pub fn stream_input(mut self, stream_input: bool) -> Self {
+        self.stream_input = stream_input;
+        self
     }
 
     /// Bytes to supply as stdin for the `Exec` command(s). Empty ⇒ no stdin
@@ -144,7 +158,15 @@ impl<'a> ExecBuilder<'a> {
         let mut stream = self.connect()?;
         let mut session = ControlSession::open(&mut stream)?;
         stage_files(&mut session, &mut stream, &self.stages)?;
-        run_entrypoint(&mut session, &mut stream, stdin, self.timeout)
+        run_entrypoint(
+            &mut session,
+            &mut stream,
+            EntrypointStdin {
+                payload: stdin,
+                streamed: self.stream_input,
+            },
+            self.timeout,
+        )
     }
 
     /// Tier-2: run the whole staged batch (files + every command) in **one
@@ -299,10 +321,21 @@ fn run_exec(
     })
 }
 
+/// How one `RunEntrypoint` call supplies the workload's stdin.
+///
+/// The two fields are one decision, not two knobs: `streamed` says whether the
+/// guest keeps the pipe open after writing `payload`, which is the difference
+/// between a workload that sees EOF and one that waits for a host writer to
+/// send it.
+struct EntrypointStdin {
+    payload: Vec<u8>,
+    streamed: bool,
+}
+
 fn run_entrypoint(
     session: &mut ControlSession,
     stream: &mut UnixStream,
-    stdin: Vec<u8>,
+    stdin: EntrypointStdin,
     timeout: Option<Duration>,
 ) -> Result<ExecOutcome> {
     let start = Instant::now();
@@ -313,10 +346,10 @@ fn run_entrypoint(
         .call_streaming(
             stream,
             &GuestRequest::RunEntrypoint {
-                stdin,
+                stdin: stdin.payload,
                 timeout_secs: timeout.map_or(0, |d| d.as_secs()),
                 env: Vec::new(),
-                stream_input: false,
+                stream_input: stdin.streamed,
             },
             |ev| {
                 if let GuestResponse::EntrypointEvent(e) = ev {
@@ -449,7 +482,10 @@ mod tests {
         let out = run_entrypoint(
             &mut session,
             &mut stream,
-            b"input".to_vec(),
+            EntrypointStdin {
+                payload: b"input".to_vec(),
+                streamed: false,
+            },
             Some(Duration::from_secs(5)),
         )
         .unwrap();

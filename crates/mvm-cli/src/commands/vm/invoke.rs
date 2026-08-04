@@ -45,10 +45,8 @@ pub(in crate::commands) struct EntrypointCall {
     /// as `machine exec --manifest`. With `attach`, this is the running VM's
     /// name instead.
     pub source: String,
-    /// Bytes to pipe into the baked entrypoint's stdin. Empty ⇒ the default
-    /// no-argument payload (`[[], {}]`). Populated from host stdin at the
-    /// dispatch site when the host is not a TTY.
-    pub stdin: Vec<u8>,
+    /// What reaches the baked entrypoint's stdin, and when.
+    pub stdin: EntrypointStdin,
     /// Wall-clock timeout for the call, in seconds.
     pub timeout: u64,
     /// vCPU count for the booted VM.
@@ -90,6 +88,51 @@ pub(in crate::commands) struct EntrypointCall {
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
+/// How a call's stdin is supplied.
+///
+/// The two are not variations on a theme; they are different contracts with
+/// the guest. A one-shot payload is complete before the call starts, so the
+/// guest writes it and closes the pipe — a workload reading to EOF sees one.
+/// A streamed stdin has no such moment, so the guest keeps the pipe open and
+/// EOF becomes something the host must send, which is why it needs a signed
+/// grant, a lease, and a scan, and a one-shot payload needs none of them.
+pub(in crate::commands) enum EntrypointStdin {
+    /// Every byte, known before the call. Empty ⇒ the default no-argument
+    /// payload (`[[], {}]`), because the wrapper's wire contract needs a JSON
+    /// `[args, kwargs]` body and an empty one is a decode error in the guest.
+    OneShot(Vec<u8>),
+    /// mvmctl's own stdin, carried into the workload while it runs, with the
+    /// caller's EOF closing the workload's stdin.
+    ///
+    /// Requested explicitly (`--stdin -` on the entrypoint action), never
+    /// inferred: it is what puts the input grant on the signed plan, and a
+    /// plan that carries the grant is one the sealed-production shell refusal
+    /// applies to. Inferring it from a piped stdin would move every existing
+    /// piped call onto that path without anybody asking.
+    Streaming,
+}
+
+impl EntrypointStdin {
+    /// Whether this call asks for a host→guest stdin stream — the one thing
+    /// that puts `host.stream.v1` on the plan.
+    fn is_streaming(&self) -> bool {
+        matches!(self, Self::Streaming)
+    }
+
+    /// The payload the `RunEntrypoint` frame carries.
+    ///
+    /// A streaming call carries none: its bytes arrive as frames afterwards,
+    /// and substituting the no-argument body here would put `[[], {}]` in
+    /// front of whatever the caller actually piped.
+    fn prologue(self) -> Vec<u8> {
+        match self {
+            Self::OneShot(bytes) if bytes.is_empty() => b"[[], {}]".to_vec(),
+            Self::OneShot(bytes) => bytes,
+            Self::Streaming => Vec::new(),
+        }
+    }
+}
+
 struct EntrypointAdmission {
     context: super::up::AdmissionContext,
     substrate: crate::exec::SessionAuditSubstrate,
@@ -105,6 +148,9 @@ struct EntrypointAdmissionParams<'a> {
     agent_verb_override: &'a [String],
     keep_alive_dev: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
+    /// Whether this call asked for a host→guest stdin stream. The only thing
+    /// that puts the input-plane grant on the signed plan.
+    stream_stdin: bool,
 }
 
 impl<'a> EntrypointAdmissionParams<'a> {
@@ -123,6 +169,7 @@ impl<'a> EntrypointAdmissionParams<'a> {
             agent_verb_override: &[],
             keep_alive_dev: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stream_stdin: false,
         }
     }
 }
@@ -137,6 +184,7 @@ struct EntrypointAdmissionParamsBuilder<'a> {
     agent_verb_override: &'a [String],
     keep_alive_dev: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
+    stream_stdin: bool,
 }
 
 impl<'a> EntrypointAdmissionParamsBuilder<'a> {
@@ -173,6 +221,11 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
         self
     }
 
+    fn stream_stdin(mut self, stream_stdin: bool) -> Self {
+        self.stream_stdin = stream_stdin;
+        self
+    }
+
     fn build(self) -> EntrypointAdmissionParams<'a> {
         EntrypointAdmissionParams {
             rootfs: self.rootfs,
@@ -186,8 +239,19 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
             agent_verb_override: self.agent_verb_override,
             keep_alive_dev: self.keep_alive_dev,
             network_policy: self.network_policy,
+            stream_stdin: self.stream_stdin,
         }
     }
+}
+
+/// The signed-plan token that says this workload's stdin may be driven from
+/// the host. One spelling, parsed from the protocol constant, so a typo here
+/// could not quietly mint a grant the gate does not recognise.
+fn input_grant_service() -> mvm_protocol::protocol::broker::ServiceId {
+    mvm_protocol::protocol::broker::ServiceId::parse(
+        mvm_protocol::stream::input::INPUT_GRANT_SERVICE,
+    )
+    .expect("the input-plane grant token is a valid service id")
 }
 
 fn admit_entrypoint_boot(
@@ -218,9 +282,19 @@ fn admit_entrypoint_boot(
         agent_verb_override: params.agent_verb_override.to_vec(),
         restrict_agent_verbs: !params.keep_alive_dev
             && super::agent_verbs::image_is_sealed(params.rootfs),
-        services: Vec::new(),
-        entrypoint_argv: Vec::new(),
-        entrypoint_shebang: None,
+        // Default-deny, and conditional on the caller having asked. A plan
+        // carrying this token is a plan whose workload's stdin can be driven
+        // from the host; a plan without it leaves that stdin unreachable from
+        // outside the guest no matter what the host-side gate would decide.
+        services: if params.stream_stdin {
+            vec![input_grant_service()]
+        } else {
+            Vec::new()
+        },
+        // Resolved from the image beside the rootfs rather than assumed, and
+        // resolved on every boot rather than only when the grant is asked for,
+        // so the path that feeds the refusal is the ordinary path.
+        entrypoint: super::entrypoint_resolve::resolve_for_rootfs(params.rootfs),
     })?;
     let Some(ctx) = ctx else { return Ok(None) };
 
@@ -263,16 +337,29 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         // substitution env (HTTP_PROXY + placeholders) via `substitution_env`,
         // so a secret-declaring entrypoint runs with live egress substitution.
         // No transient boot, no teardown — the VM is the user's to reap.
-        let stdin_bytes = if call.stdin.is_empty() {
-            b"[[], {}]".to_vec()
-        } else {
-            call.stdin
-        };
+        if call.stdin.is_streaming() {
+            // The grant lives on the plan the *boot* was admitted under, and
+            // that admission happened in whatever process ran `machine run
+            // --name`. This one holds no admitted plan for the VM, so there is
+            // nothing here that could authorize a write — and a message saying
+            // so beats a refusal from three layers down.
+            anyhow::bail!(
+                "streamed stdin needs the run that boots the workload: the input grant \
+                 rides on the plan admitted at boot, and `--attach` dispatches into a \
+                 machine another invocation admitted — drop `--attach`, or pipe a \
+                 complete payload with `--stdin <PATH>`"
+            );
+        }
         ui::info(&format!(
             "entrypoint: dispatching into running workload '{}'",
             call.source
         ));
-        let exit_code = dispatch(&call.source, stdin_bytes, call.timeout, None)?;
+        let exit_code = dispatch(EntrypointDispatch {
+            vm_name: &call.source,
+            stdin: DispatchStdin::OneShot(call.stdin.prologue()),
+            timeout_secs: call.timeout,
+            session_id: None,
+        })?;
         if exit_code != 0 {
             std::process::exit(exit_code);
         }
@@ -308,11 +395,8 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
     };
 
-    let stdin_bytes = if call.stdin.is_empty() {
-        b"[[], {}]".to_vec()
-    } else {
-        call.stdin
-    };
+    let stream_stdin = call.stdin.is_streaming();
+    let stdin_prologue = call.stdin.prologue();
 
     let lifecycle_label = if call.keep_alive {
         "warm session"
@@ -350,6 +434,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                 .agent_verb_override(&agent_verb_override)
                 .keep_alive_dev(keep_alive_dev)
                 .network_policy(admit_network_policy.clone())
+                .stream_stdin(stream_stdin)
                 .build(),
         )?;
         let Some(admitted) = admitted else {
@@ -408,7 +493,37 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     // Run the call. Pass the session id so a transport drop coincident
     // with `mvmctl session kill` is attributed as `SessionKilled`
     // rather than a generic I/O error.
-    let dispatch_result = dispatch(&vm.vm_name, stdin_bytes, call.timeout, session_id.as_ref());
+    //
+    // The admitted plan is borrowed across the dispatch because a streamed
+    // stdin is opened under it: the gate takes the proof-carrying type, not a
+    // copy of the token, so the authority for every byte written here is the
+    // plan this very boot was admitted under.
+    let admitted = admit_ctx.borrow();
+    let dispatch_stdin = match (stream_stdin, admitted.as_ref()) {
+        (true, Some(ctx)) => DispatchStdin::Streaming(&ctx.admitted),
+        (true, None) => {
+            // `--no-supervisor` short-circuits admission, and an unsigned boot
+            // has no plan to grant anything. Refusing beats streaming into a
+            // workload nothing authorized.
+            crate::exec::tear_down_session_vm(crate::exec::SessionVm {
+                vm_name: vm.vm_name.clone(),
+            });
+            deregister_invoke_session(session_id.as_ref());
+            anyhow::bail!(
+                "streamed stdin needs an admitted plan, and this boot was not admitted \
+                 (--no-supervisor): the input grant is what authorizes a write, so there \
+                 is nothing here to write under"
+            );
+        }
+        (false, _) => DispatchStdin::OneShot(stdin_prologue),
+    };
+    let dispatch_result = dispatch(EntrypointDispatch {
+        vm_name: &vm.vm_name,
+        stdin: dispatch_stdin,
+        timeout_secs: call.timeout,
+        session_id: session_id.as_ref(),
+    });
+    drop(admitted);
 
     // Tear down lifecycle:
     //   - default: kill the VM and drop the session record (matches
@@ -583,13 +698,9 @@ pub(in crate::commands) fn read_auto_stdin(is_tty: bool) -> anyhow::Result<Vec<u
 /// I/O error. This is host-side synthesis — the agent itself can't
 /// emit `SessionKilled` because by the time the kill takes effect
 /// it's already going down.
-pub(in crate::commands) fn dispatch(
-    vm_name: &str,
-    stdin: Vec<u8>,
-    timeout_secs: u64,
-    session_id: Option<&mvm_core::session::SessionId>,
-) -> Result<i32> {
-    match dispatch_inner(vm_name, stdin, timeout_secs) {
+pub(in crate::commands) fn dispatch(call: EntrypointDispatch<'_>) -> Result<i32> {
+    let session_id = call.session_id;
+    match dispatch_inner(call) {
         Ok(code) => Ok(code),
         Err(err) => {
             if let Some(id) = session_id
@@ -607,12 +718,55 @@ pub(in crate::commands) fn dispatch(
     }
 }
 
-fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i32> {
+/// One `RunEntrypoint` dispatch against a reachable guest agent.
+pub(in crate::commands) struct EntrypointDispatch<'a> {
+    /// The running microVM to dispatch into.
+    pub vm_name: &'a str,
+    /// What reaches the workload's stdin.
+    pub stdin: DispatchStdin<'a>,
+    /// Wall-clock kill window for the call.
+    pub timeout_secs: u64,
+    /// Session record to consult when the transport drops, so an external
+    /// `session kill` is reported as one.
+    pub session_id: Option<&'a mvm_core::session::SessionId>,
+}
+
+/// Stdin as the dispatch sees it, once the caller's request has been resolved
+/// against a real admission.
+pub(in crate::commands) enum DispatchStdin<'a> {
+    /// The complete payload, carried in the `RunEntrypoint` frame itself.
+    OneShot(Vec<u8>),
+    /// A live stream opened under this boot's admitted plan.
+    ///
+    /// Holding the [`AdmittedPlan`](mvm_hostd::plan_admission::AdmittedPlan)
+    /// rather than a bool is the point: the gate takes the type only admission
+    /// mints, so what authorizes these bytes is the same signed, verified,
+    /// window-checked plan the VM booted under, not a flag this module set.
+    Streaming(&'a mvm_hostd::plan_admission::AdmittedPlan),
+}
+
+fn dispatch_inner(call: EntrypointDispatch<'_>) -> Result<i32> {
+    let EntrypointDispatch {
+        vm_name,
+        stdin,
+        timeout_secs,
+        session_id: _,
+    } = call;
     let transport = mvm_runtime::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on '{vm_name}'"))?;
     let mut stream = transport
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on '{vm_name}'"))?;
+
+    // Opened before the call is sent, and deliberately: the guest has a stdin
+    // to hand frames to only once the entrypoint's child exists, and the pump
+    // is built to ride out that window. Opening afterwards would mean opening
+    // it from inside the loop that is streaming the workload's output.
+    let streamed = match &stdin {
+        DispatchStdin::Streaming(admitted) => Some(open_streamed_stdin(vm_name, admitted)?),
+        DispatchStdin::OneShot(_) => None,
+    };
+    let streaming = streamed.is_some();
 
     // The entrypoint half of the VM's output capture, for this call only.
     let mut capture = mvm_hostd::stream::EntrypointSink::for_vm(vm_name);
@@ -621,19 +775,28 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
     let terminal = mvm_agentd::vsock::send_run_entrypoint(
         &mut stream,
         mvm_agentd::vsock::RunEntrypointCall {
-            stdin,
+            stdin: match stdin {
+                DispatchStdin::OneShot(bytes) => bytes,
+                // The bytes travel as frames, not in this envelope.
+                DispatchStdin::Streaming(_) => Vec::new(),
+            },
             timeout_secs,
             // Secret-bearing workloads route through the in-guest forward proxy;
             // plain vsock-egress workloads route through the loopback SOCKS5 client.
             env: workload_egress_env(vm_name),
-            // This dispatch writes its payload once and has no writer behind
-            // it, so the guest closes stdin and a read-to-EOF workload exits.
-            stream_input: false,
+            // A one-shot dispatch writes its payload once and has no writer
+            // behind it, so the guest closes stdin and a read-to-EOF workload
+            // exits. A streamed one keeps the pipe open, because the EOF is
+            // the host's to send when the caller's own stdin ends.
+            stream_input: streaming,
         },
         |event| write_entrypoint_event(event, &mut capture, &mut out),
     )
     .context("Streaming RunEntrypoint response")?;
     drop(capture);
+    if let Some(streamed) = streamed {
+        report_streamed_stdin(vm_name, &mut out, streamed.finish());
+    }
 
     // After the output, before the exit: the caller has just been handed the
     // workload's own bytes, and this is where it learns whether the copy an
@@ -645,6 +808,69 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
     let _ = std::io::stderr().flush();
 
     Ok(exit_code_for(&terminal))
+}
+
+/// Open this VM's host→guest stdin route under `admitted` and start pumping
+/// the caller's own stdin into it.
+///
+/// Everything that decides whether this may happen is below the call to
+/// [`StreamPlane::open_input`](mvm_hostd::stream::StreamPlane::open_input) —
+/// the grant on the signed plan, the single-writer lease, the chain-signed
+/// record — so a refusal here is a decision that has already been made and
+/// logged, and there is nothing left for this function to check.
+fn open_streamed_stdin(
+    vm_name: &str,
+    admitted: &mvm_hostd::plan_admission::AdmittedPlan,
+) -> Result<super::stdin_stream::StdinStream> {
+    let plane = mvm_hostd::stream::host_stream_plane().context(
+        "this process holds no workload stream plane, so there is no route to open into \
+         the workload's stdin",
+    )?;
+    plane
+        .open_input(
+            vm_name,
+            admitted,
+            Box::new(mvm_hostd::stream::VsockInput::new(vm_name)),
+        )
+        .map_err(|refusal| {
+            anyhow::anyhow!("the workload input gate refused this writer: {refusal}")
+        })?;
+    Ok(super::stdin_stream::StdinStream::start(
+        std::sync::Arc::new(super::stdin_stream::PlaneInput::new(plane, vm_name)),
+        std::io::stdin(),
+    ))
+}
+
+/// Tell the caller, on stderr, when the stdin it streamed did not all land.
+///
+/// Silent on the ordinary outcome — the caller's stdin ended, the workload's
+/// stdin was closed — because a notice that fires every time stops being read.
+fn report_streamed_stdin(
+    vm_name: &str,
+    out: &mut CallOutput<'_>,
+    report: super::stdin_stream::StreamedInputReport,
+) {
+    if let Some(reason) = &report.stopped_because {
+        notice(
+            &mut out.sinks,
+            &format!(
+                "streamed stdin to {vm_name:?} stopped early after {} byte(s) in {} frame(s): \
+                 {reason}",
+                report.bytes, report.frames
+            ),
+        );
+        return;
+    }
+    if !report.reached_eof {
+        notice(
+            &mut out.sinks,
+            &format!(
+                "the call ended before your stdin did: {} byte(s) in {} frame(s) reached \
+                 {vm_name:?}, and anything after that was not sent",
+                report.bytes, report.frames
+            ),
+        );
+    }
 }
 
 /// Where a streamed entrypoint event's bytes land. Behind a struct so a test
@@ -1237,6 +1463,151 @@ mod streaming_tests {
         }
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    }
+}
+
+#[cfg(test)]
+mod stdin_grant_tests {
+    //! What `machine run --entrypoint --stdin -` asks admission for, and what
+    //! admission does about it.
+    //!
+    //! Driven through [`admit_entrypoint_boot`] rather than through
+    //! `admit_plan_for_boot` directly, because the thing worth proving is the
+    //! join: the entrypoint action resolves what the image runs *from the
+    //! image*, and hands that resolution to the gate. A test that passed the
+    //! argv in by hand would prove the gate classifies strings, which was
+    //! never in doubt — what was in doubt is whether anything real ever
+    //! reaches it.
+
+    use super::{EntrypointAdmissionParams, admit_entrypoint_boot};
+    use mvm_build::builder_vm::GuestSidecar;
+    use mvm_core::util::test_env::TestEnv;
+
+    /// One image on disk: a rootfs stand-in and the sidecar beside it, which
+    /// is everything the host can see about a workload before it boots.
+    struct Image {
+        rootfs: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+        _env: TestEnv,
+        _home: tempfile::TempDir,
+    }
+
+    impl Image {
+        /// `argv = None` writes a sidecar with no recorded entrypoint — an
+        /// image built before the build path recorded one.
+        fn sealed_running(argv: Option<&[&str]>) -> Self {
+            let mut env = TestEnv::new();
+            let home = tempfile::tempdir().expect("an isolated MVM_HOME");
+            env.isolate_mvm_home(home.path());
+
+            let dir = tempfile::tempdir().expect("an image dir");
+            let rootfs = dir.path().join("rootfs.ext4");
+            std::fs::write(&rootfs, b"rootfs bytes").expect("write the rootfs stand-in");
+            let sidecar = GuestSidecar::for_oci_run("stdin-grant", true, true);
+            let sidecar = match argv {
+                Some(argv) => {
+                    sidecar.with_entrypoint_argv(argv.iter().map(|a| (*a).to_string()).collect())
+                }
+                None => sidecar,
+            };
+            sidecar.write_to_dir(dir.path()).expect("write the sidecar");
+
+            Self {
+                rootfs,
+                _dir: dir,
+                _env: env,
+                _home: home,
+            }
+        }
+
+        fn admit(
+            &self,
+            vm: &str,
+            stream_stdin: bool,
+        ) -> anyhow::Result<Option<super::EntrypointAdmission>> {
+            let lowered = super::super::managed_secrets::LoweredPlanSecrets::default();
+            admit_entrypoint_boot(
+                EntrypointAdmissionParams::builder(&self.rootfs, vm, "firecracker")
+                    .lowered_secrets(&lowered)
+                    .stream_stdin(stream_stdin)
+                    .build(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_shell_entrypoint_read_off_the_image_is_refused_the_stdin_grant() {
+        // The whole point of the resolver. The argv is not supplied by the
+        // test: it is written where a build writes it and read where
+        // admission reads it, so this is the refusal firing on a real image
+        // rather than on a string a test handed it.
+        let image = Image::sealed_running(Some(&["/bin/sh", "-i"]));
+        // Matched rather than `expect_err`: the success arm carries the audit
+        // substrate, and widening that type's debug surface to satisfy a test
+        // assertion is the wrong trade.
+        let err = match image.admit("vm-stdin-shell", true) {
+            Ok(_) => panic!("a shell entrypoint asking for streamed stdin must be refused"),
+            Err(err) => err,
+        };
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("shell-shaped"),
+            "the refusal must name the reason: {rendered}"
+        );
+        assert!(rendered.contains("/bin/sh"), "{rendered}");
+    }
+
+    #[test]
+    fn an_image_that_cannot_say_what_it_runs_is_refused_the_stdin_grant() {
+        // Fail closed. An unresolved entrypoint is not a safe one — it is an
+        // unchecked one, and admitting on it is what turns the refusal above
+        // into a control that reports present and never fires.
+        let image = Image::sealed_running(None);
+        let err = match image.admit("vm-stdin-unknown", true) {
+            Ok(_) => panic!("an unresolvable entrypoint must not be handed a stdin writer"),
+            Err(err) => err,
+        };
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("cannot say what the workload runs"),
+            "the refusal must say it could not tell, not that it found a shell: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_shell_entrypoint_that_asked_for_nothing_still_boots() {
+        // The refusal is scoped to the grant. A shell-entrypoint image with no
+        // streamed stdin is the ordinary dev workflow and must be untouched by
+        // any of this.
+        let image = Image::sealed_running(Some(&["/bin/sh", "-i"]));
+        let admitted = image
+            .admit("vm-stdin-none", false)
+            .expect("a call that asked for no input grant must not be refused")
+            .expect("admission ran");
+        assert!(
+            admitted.context.admitted.plan().services.is_empty(),
+            "a call that did not ask for streamed stdin must carry no grant"
+        );
+    }
+
+    #[test]
+    fn a_non_shell_entrypoint_that_asked_for_it_carries_the_grant_on_the_signed_plan() {
+        // The other side of default-deny: asking, on an image that resolves to
+        // something that is not a shell, actually gets you the token — and the
+        // token is on the *signed plan*, which is what the gate reads.
+        let image = Image::sealed_running(Some(&["/usr/bin/worker", "--serve"]));
+        let admitted = image
+            .admit("vm-stdin-granted", true)
+            .expect("a non-shell entrypoint may be granted streamed stdin")
+            .expect("admission ran");
+
+        let services = &admitted.context.admitted.plan().services;
+        assert!(
+            mvm_protocol::stream::input::grants_input_for(services),
+            "the admitted plan must carry the input grant: {services:?}"
+        );
     }
 }
 

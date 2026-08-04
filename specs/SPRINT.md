@@ -350,19 +350,25 @@ updates only its own entry below.
       Phase 2 (input, T11–T16) builds the host→guest stdin channel — grant in
       the signed plan (`host.stream.v1`), single-writer lease, cross-frame
       secret scan, explicit EOF, chain-signed refusals, and a sealed-tier
-      refusal of the grant for a shell-shaped entrypoint — and it is **not
-      reachable**. `StreamPlane::open_input` has no caller outside
-      `crates/mvm-hostd/tests/workload_input_plane.rs`, `mvmctl invoke`
-      hardcodes `stream_input: false`, and nothing refreshes the lease, so the
-      known-secret set is empty on every real VM and the shell refusal never
-      sees an entrypoint to classify. ADR-001 reworded claim 15 from
-      enforced-by-absence to enforced-by-policy and added claim 17 at `Preview`
-      with those limits; ADR-035 records why the trade was worth making. T16
+      refusal of the grant for a shell-shaped entrypoint. ADR-001 reworded
+      claim 15 from enforced-by-absence to enforced-by-policy and added claim
+      17 at `Preview`; ADR-035 records why the trade was worth making. T16
       documented the channel (`guides/workload-input.md`) and reconciled the
       user-facing prose that still asserted claim 15 in its absence form.
-      **Next:** a follow-on plan must land the operator surface and a live
-      entrypoint resolver together, or the shell refusal ships as a label
-      rather than as a control.
+      T17 made it reachable and did so with a live entrypoint resolver in the
+      same change, which the plan required: `machine run --entrypoint --stdin
+      -` opens the route under the plan that boot was admitted under, pumps the
+      caller's stdin through the gate in acceptance order on its own thread,
+      keeps the lease alive on a ticker, and closes the workload's stdin on the
+      caller's EOF; the grant is minted only for a call that asked. The
+      entrypoint now comes from the image's own `mvm-meta.json` sidecar (a new
+      `entrypointArgv` field, written by the `mkGuest` and OCI build paths,
+      because the host cannot read inside a materialized ext4), and admission
+      **fails closed** when it cannot resolve one — so the shell refusal cannot
+      go dormant again by a caller forgetting to resolve.
+      Claim 17 stays `Preview` on one limit: `InputGate::bind` has no
+      production caller, so the secret scan's known set is empty on every real
+      VM and its refusal has never fired outside tests.
 
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added

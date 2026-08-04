@@ -438,16 +438,16 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 
 `Preview` claim 17 — **workload stdin is grant-gated, single-writer,
 secret-scanned across frames, and every refusal audited**
-(`crates/mvm-hostd/src/stream/input_gate.rs`). It is a preview and not a
-numbered claim because three of its four legs have no production caller
-yet: the known-secret set is empty on every real VM (`InputGate::bind`
-is never called outside tests), the sealed-tier shell-entrypoint refusal
-is dormant (every call site passes an empty `entrypoint_argv`), and the
-granted half has no operator surface (nothing calls `open_input`,
-`invoke` always sends `stream_input: false`). The ungranted-refusal half
-*is* proven end to end against a real `admit_for_run` and
-`verify_audit_chain`. ADR-001's ledger carries the full limits note; do
-not paraphrase this row as enforced without it.
+(`crates/mvm-hostd/src/stream/input_gate.rs`). The channel is reachable:
+`mvmctl machine run --entrypoint --stdin -` opens the route under the plan
+that boot was admitted under, and the sealed-tier shell-entrypoint refusal
+now classifies an entrypoint resolved from the image's own `mvm-meta.json`
+sidecar, failing closed when it cannot resolve one. It stays a preview and
+not a numbered claim because one leg still has no production caller: the
+known-secret set is empty on every real VM (`InputGate::bind` is never
+called outside tests), so the secret scan's refusal has never fired in
+production. ADR-001's ledger carries the full limits note, marked closed or
+open individually; do not paraphrase this row as enforced without it.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port

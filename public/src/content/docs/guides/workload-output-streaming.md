@@ -176,9 +176,10 @@ signed execution plan, as `stream_retention`:
 **Nothing selects `ephemeral` today.** Every production caller builds the plan
 with the default, so every real run is `persist`. The mode is admitted and
 signed, and the field is read on the boot path, but there is no operator-facing
-way to set it — the same shape as the [input
-channel](/guides/workload-input/), which is built and dormant. Read this
-section as the contract the mode is bound by, not as a switch you can throw.
+way to set it. Read this section as the contract the mode is bound by, not as
+a switch you can throw. (The [input channel](/guides/workload-input/) used to
+be described here as the same shape; it is not any more — it has an operator
+surface.)
 
 Were it selected, `ephemeral` would still not mean no bytes land on disk. The
 backend writes its own `console.log` regardless — outside this plane,
@@ -263,7 +264,8 @@ bytes survive the trip.
 
 - [Workload input](/guides/workload-input/) — the other direction. Output is a
   property of running a workload; input is a capability that has to be granted
-  in the signed plan, and it has no operator surface yet.
+  in the signed plan, and you ask for it with
+  `machine run --entrypoint --stdin -`.
 - [Audit and receipts](/guides/audit-and-receipts/) — the chain that carries
   the retention mode and the subscribe events.
 - [Observability and results](/guides/observability-and-results/) — how

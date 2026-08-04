@@ -1,16 +1,30 @@
 ---
 title: Workload input
-description: The host-to-guest stdin channel — the grant it needs in the signed plan, the single-writer lease, the secret scan, explicit EOF, and why a sealed production run refuses a shell entrypoint. No command reaches it yet.
+description: The host-to-guest stdin channel — how to stream into a workload with `machine run --entrypoint --stdin -`, the grant it needs in the signed plan, the single-writer lease, the secret scan, explicit EOF, and why a sealed production run refuses a shell entrypoint.
 ---
 
 `mvm` can carry bytes from the host into a running workload's stdin. This page
-is the contract that channel enforces.
+is the contract that channel enforces, and how to reach it.
 
-**Nothing on this page is reachable from the CLI today.** No `mvmctl` verb opens
-an input stream, `mvmctl invoke` always asks for input off, and no client
-refreshes the lease. The mechanism is built, tested, and dormant; the operator
-surface is not written. Read this as what the surface will be bound by, not as
-something you can run.
+```sh
+# Stream this terminal's stdin into the workload as you type or pipe it.
+# Your EOF (Ctrl-D, or the end of the pipe) closes the workload's stdin.
+generate-events | mvmctl machine run --entrypoint --manifest ./app --stdin -
+```
+
+`--stdin -` is what asks for the stream. Anything else keeps the behaviour this
+command has always had: a piped stdin, or `--stdin <PATH>`, is read to the end
+and sent as one complete payload with the call, and the workload's stdin closes
+behind it. The request matters because streaming is what puts the input grant on
+the signed plan — see below — and a grant nobody asked for is a grant nobody
+reviewed.
+
+Two shapes are deliberately not covered:
+
+- `--attach` dispatches into a machine some earlier invocation admitted, so this
+  process holds no admitted plan to write under. `--stdin -` there is refused
+  with that explanation rather than a refusal from three layers down.
+- `mvmctl session attach --stdin` is a one-shot payload for the same reason.
 
 Output goes the other way and *does* work today — see
 [Workload output streaming](/guides/workload-output-streaming/).
@@ -151,10 +165,27 @@ with what it reads. The shell refusal raises the cost of laundering interactive
 access past claim 15 through a plan that otherwise looks ordinary. It does not
 close the path, and it was never going to.
 
-It also **cannot fire today**: every production admission passes an empty
-entrypoint argv, so the gate never sees an entrypoint to classify. Whoever makes
-the grant live has to resolve a real entrypoint in the same change, or the
-refusal ships as a label rather than as a control.
+### Where the entrypoint comes from
+
+The host cannot read inside a materialized rootfs — it is an ext4 blob, and
+mounting a guest filesystem on the host is a privilege `mvm` does not take. The
+argv is therefore recorded at build time in the `mvm-meta.json` sidecar written
+beside the rootfs, by both the Nix (`mkGuest`) and OCI image paths, and read
+back from there at admission.
+
+An image whose sidecar records **no** argv — built before the build path
+recorded one — is *unresolved*, and unresolved is refused, not admitted:
+
+```
+refusing the workload input grant: this launch cannot say what the workload
+runs (the image sidecar in … records no entrypoint argv), so it cannot rule out
+a shell
+```
+
+That is deliberate. An entrypoint nobody resolved is one nobody checked, and
+admitting on it is exactly what turns the refusal above into a control that
+reports present and never fires. Rebuild the image to get a sidecar that carries
+its argv.
 
 ## What this costs claim 15
 
@@ -175,24 +206,32 @@ That trade is recorded in
 [ADR-035](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/035-workload-stream-plane.md),
 and the claim rows and their limits live in
 [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md).
-The input channel is tracked there as claim 17 at status `Preview` — a preview
-precisely because most of its enforcement has no production caller.
+The input channel is tracked there as claim 17 at status `Preview`. It stays a
+preview even though the channel now ships: the grant, the lease, the EOF and the
+shell refusal all have production callers, but the secret scan still has none,
+and a claim is worth what its weakest enforced leg is worth.
 
 ## Limits, all of them true today
 
-1. **No operator surface.** No CLI verb opens an input stream, `mvmctl invoke`
-   always asks for input off, and nothing refreshes the lease from a client. The
-   granted half runs in tests only.
+1. **One surface, one lifecycle.** `machine run --entrypoint --stdin -` is the
+   only way in. It works because that one invocation admits the plan, boots the
+   VM and dispatches the call, so the plan authorizing the writes is in the
+   hands of the process making them. `--attach`, `session attach`, and any
+   other process reaching a machine it did not boot cannot stream.
 2. **The secret scan is inert.** No production code registers a secret, so the
-   known-secret set is empty on every real VM.
-3. **The shell refusal cannot fire.** Every production admission passes an empty
-   entrypoint argv.
-4. **The scan is a backstop.** Encoding, derivation, and a window-straddling
+   known-secret set is empty on every real VM. The scanner is correct and has
+   nothing to match against, so the refusal it exists to produce has never
+   fired outside tests.
+3. **The scan is a backstop.** Encoding, derivation, and a window-straddling
    split defeat it. This one is permanent; it is a property of scanning, not a
    gap to close.
+4. **The shell refusal is a heuristic over argv**, and the argv comes from the
+   image's own build-time record. A wrapper that `exec`s a shell still defeats
+   it; see [above](#the-refusal-is-a-heuristic-treat-it-as-one).
 
-Limits 1 to 3 are what keep claim 17 at `Preview`. Limit 4 stays whatever
-happens to the other three.
+Limits 2 and 4 are what keep claim 17 at `Preview`: an enforcement path with no
+production caller (the scan) and a heuristic control are not the same thing as a
+proven guarantee. Limits 1 and 3 stay whatever happens to the other two.
 
 ## See also
 

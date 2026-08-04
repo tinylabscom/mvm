@@ -247,10 +247,12 @@ level = "build"
 witness_kinds = ["fn"]
 suite = "workload_input"
 statement = "Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited"
-# Preview, not shipped: three of the four legs have no production caller yet
-# (empty known-secret set, dormant shell-entrypoint refusal, no operator
-# surface for the granted half). The limits are stated in full in the
-# ADR-001 ledger's "Preview 17 limits" note; do not read this row as
+# Preview, not shipped: one leg still has no production caller — the
+# known-secret set is empty on every real VM because `InputGate::bind` is
+# never called outside tests, so the scan's refusal has never fired in
+# production. The operator surface and the shell-entrypoint refusal are now
+# live. The limits are stated in full, marked closed or open individually, in
+# the ADR-001 ledger's "Preview 17 limits" note; do not read this row as
 # enforced without it.
 witnesses = [
     "fn:input_is_refused_without_a_plan_grant",

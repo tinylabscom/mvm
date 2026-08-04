@@ -1009,8 +1009,9 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
                 super::agent_verbs::image_is_sealed(&rootfs_blob),
             ),
         services: Vec::new(),
-        entrypoint_argv: Vec::new(),
-        entrypoint_shebang: None,
+        entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+            "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
+        ),
     })?;
 
     let child_plan_json = admission.as_ref().map(|ctx| {
@@ -1248,8 +1249,9 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
                 super::agent_verbs::image_is_sealed(p.instance_rootfs),
             ),
         services: Vec::new(),
-        entrypoint_argv: Vec::new(),
-        entrypoint_shebang: None,
+        entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+            "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
+        ),
     })?;
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig {
@@ -1897,6 +1899,7 @@ mod tests {
             accessible: false,
             sealed: true,
             entrypoint_kind: "command".to_string(),
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             expected_boot_ms: 300,
             agent_binary: "real".to_string(),
@@ -1924,6 +1927,7 @@ mod tests {
             accessible: true,
             sealed: false,
             entrypoint_kind: "shell".to_string(),
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             expected_boot_ms: 300,
             agent_binary: "real".to_string(),
@@ -2003,6 +2007,7 @@ mod tests {
             accessible: false,
             sealed: true,
             entrypoint_kind: "command".to_string(),
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             expected_boot_ms: 300,
             agent_binary: "real".to_string(),

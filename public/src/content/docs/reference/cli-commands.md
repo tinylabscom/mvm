@@ -49,6 +49,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --manifest <path>` | Boot a pre-built manifest (`mvm.toml`, its directory, or a slot name; short form `-m`). Mutually exclusive with `--flake`/`--image` |
 | `mvmctl machine run --image <ref>` | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest` |
 | `mvmctl machine run --name <name>` | Run under a machine identity (auto-generated if omitted) |
+| `mvmctl machine run --entrypoint --stdin <PATH>` | Feed the baked entrypoint's stdin from a file, sent as one complete payload with the call |
+| `mvmctl machine run --entrypoint --stdin -` | **Stream** this process's own stdin into the running workload: bytes arrive as they are written and your EOF closes the workload's stdin. Puts the `host.stream.v1` input grant on the signed plan, so a sealed production image whose entrypoint is shell-shaped — or whose entrypoint the host cannot resolve — is refused at admission. Not available with `--attach`, which dispatches into a machine this process did not admit. See [Workload input](/guides/workload-input/) |
 | `mvmctl machine run -d` | Boot a **persistent** machine detached and return immediately |
 | `mvmctl machine run --healthcheck '<cmd>'` | Declare the workload a long-running service: presence alone promotes the run to the **persistent** lifecycle (registered, shows in `machine ls`, torn down via `machine stop <name>`). Runs in the foreground unless combined with `-d`. `<cmd>` is exec'd in the guest by the resident host-agent daemon as its liveness check (exit 0 = healthy), actively probed on `--health-interval`; an unhealthy or crashed service is restarted with bounded exponential backoff. A run whose entrypoint exits still tears down on that exit code — a healthcheck on a run-to-completion task is a no-op |
 | `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec and actively enforced by the host-agent daemon's probe loop |
@@ -479,7 +481,7 @@ records rather than being throttled or killed, and the loss is announced as a
 gap or truncation notice on stderr.
 
 Recording is on by default. `ExecutionPlan.stream_retention` (`persist` /
-`ephemeral`) is a signed plan field, deliberately not a CLI flag, recorded on
+`ephemeral`) is a signed plan field, not a CLI flag, recorded on
 the `plan.admitted` audit entry so an absent transcript is attributable rather
 than ambiguous. Nothing selects `ephemeral` today — every production caller
 takes the default — so treat the field as the place a future opt-out will live

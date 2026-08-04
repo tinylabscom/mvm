@@ -157,9 +157,9 @@ signed plan.
 
 Neither is claimed here, for different reasons. The construction half is
 excluded because this row's three witnesses do not check it. The policy
-half is excluded because the code enforcing it has no production caller
-yet. Both are stated and witnessed as Preview 17, with their limits,
-rather than asserted as part of a shipped claim.
+half is excluded because one leg of its enforcement — the secret scan —
+still has no production caller. Both are stated and witnessed as Preview 17,
+with their limits, rather than asserted as part of a shipped claim.
 
 **Preview 17 — workload stdin is grant-gated, single-writer, secret-scanned
 and audited.** The host→guest input plane refuses every write unless the
@@ -173,18 +173,17 @@ cannot record it; and under a sealed production posture it refuses the
 grant outright for a shell-shaped entrypoint, since streaming stdin to a
 shell is interactive access wearing a different hat.
 
-This is a preview, not a shipped claim, and the reason is that most of the
-enforcement has no production caller yet. The four limits are stated in
-the ledger's "Preview 17 limits" note below and are load-bearing: the
-known-secret set is empty on every real VM, the shell-entrypoint refusal
-is dormant, the granted half of the path has no operator surface, and the
-scan is a backstop rather than a defence. The ungranted-refusal half —
-the default-deny that matters most — *is* exercised against the real
-admission pipeline and the real audit chain, but in a test process: the
-only route into the gate has no caller outside
-`crates/mvm-hostd/tests/workload_input_plane.rs`, so no real VM has
-executed either half. Promotion to a numbered claim waits on the rest
-becoming live.
+This is a preview, not a shipped claim. The channel now has an operator
+surface — `mvmctl machine run --entrypoint --stdin -` — and the grant, the
+lease, the explicit EOF and the shell-entrypoint refusal all have production
+callers; the refusal reads the entrypoint out of the image's own build-time
+record and fails closed when it cannot. What is still dormant is the secret
+scan: `InputGate::bind` has no caller outside tests, so the known-secret set
+is empty on every real VM and the refusal it exists to produce has never
+fired in production. A claim is worth what its weakest enforced leg is worth,
+so the row stays `Preview`. The four limits are stated in the ledger's
+"Preview 17 limits" note below, marked as closed or open individually, and
+are load-bearing.
 
 **Preview 16 — egress substitution keeps a raw secret off the guest.** A
 tokenized-replacement mechanism on the host-owned substitution proxy
@@ -556,45 +555,57 @@ decision. It does not restate or replace the broker rows 12/13 — those are the
 shipped broker delivery; row 16 backs the same two invariants on the egress
 substitution path.
 
-**Preview 17 limits — what the input plane does not enforce yet.** Row 17
-is `Preview` rather than `Shipped` because three of its four legs have no
-production caller. Stating that here is the point of a ledger; a row that
-read as enforced while the enforcement was dormant would be the exact
-failure this table exists to prevent.
+**Preview 17 limits — what the input plane does and does not enforce.** Row 17
+is `Preview` rather than `Shipped`. Two of the four limits below closed when
+the channel gained an operator surface; two did not, and the row stays where
+its weakest enforced leg puts it. Stating that here is the point of a ledger;
+a row that read as enforced while the enforcement was dormant would be the
+exact failure this table exists to prevent.
 
-1. **The secret scan is inert in production.** `InputGate::bind` — the only
-   way a known secret enters the scanner — has no caller outside tests, so
+1. **The secret scan is inert in production. (OPEN.)** `InputGate::bind` — the
+   only way a known secret enters the scanner — has no caller outside tests, so
    the known-secret set is empty on every real VM. The scanner is correct
    and witnessed (`fn:secret_material_split_across_frames_is_still_refused`
    and its siblings hold across three-way and one-byte-at-a-time splits);
-   it currently has nothing to match against.
-2. **The shell-entrypoint refusal cannot fire yet.** Every production call
-   site passes an empty `entrypoint_argv` to `admit_plan_for_boot`, so the
-   gate never sees a shell to refuse. It is dormant *safely* only because
-   the grant is dormant too. Whoever makes the input grant live must wire a
-   live entrypoint resolver in the same change, or the refusal ships as a
-   label rather than a control.
-3. **Neither half of the input plane runs on a real VM.**
-   `StreamPlane::open_input` is the only route to `InputGate::open`, and its
-   only callers are in `crates/mvm-hostd/tests/workload_input_plane.rs` — no
-   CLI verb calls it, `mvmctl invoke` always sends `stream_input: false`, and
-   nothing refreshes the lease from the client side. So the gate has never
-   executed outside a test process, granted or refused. The *ungranted-refusal*
-   half is exercised at full fidelity — against a real `admit_for_run`, a real
-   chain, and `verify_audit_chain`
-   (`fn:a_plan_from_the_real_admission_pipeline_opens_the_gate`,
-   `fn:every_refusal_is_audited`) — which is a statement about the test's
-   fidelity, not about the channel being live. This is the reader-favourable
-   fact: nothing can misuse a channel nothing can open.
-4. **The scan is a backstop, not a defence.** Base64, hex, any derivation,
-   and a split that straddles the sliding window all defeat it. It catches
-   a confused host-side caller, not a determined one. The real guarantee is
-   upstream and structural: the host has no reason to send a secret into a
-   guest, because secrets are substituted on egress (rows 13 and 16) rather
-   than handed over.
+   it currently has nothing to match against. This is the limit that keeps
+   row 17 at `Preview`.
+2. **The shell-entrypoint refusal now fires on a real entrypoint. (CLOSED.)**
+   It used to be dormant: every production call site passed an empty
+   `entrypoint_argv`, so the gate never saw a shell. The entrypoint is now
+   resolved from the image's own build-time record — the `mvm-meta.json`
+   sidecar beside the rootfs, written by both the `mkGuest` and OCI build
+   paths — and read at admission, so the classification runs against what the
+   image will actually exec. The gate also **fails closed**: an image whose
+   entrypoint cannot be resolved is refused the grant rather than admitted
+   unchecked, so the control cannot become dormant again by a caller
+   forgetting to resolve one. Witnessed by
+   `fn:a_shell_entrypoint_read_off_the_image_is_refused_the_stdin_grant` and
+   `fn:an_image_that_cannot_say_what_it_runs_is_refused_the_stdin_grant`.
+   What remains true is that the refusal is a heuristic over argv (limit 4).
+3. **The input plane has an operator surface and runs on a real VM.
+   (CLOSED.)** `mvmctl machine run --entrypoint --stdin -` opens the route
+   through `StreamPlane::open_input` under the plan that boot was admitted
+   under, pumps the caller's stdin through the gate in acceptance order,
+   refreshes the lease while the writer is idle, and closes the workload's
+   stdin on the caller's EOF. The grant is conditional on that request: a call
+   that did not ask carries no `host.stream.v1` and its workload's stdin stays
+   unreachable from outside the guest. Scope worth stating: only the
+   invocation that *admits and boots* the workload can stream into it —
+   `--attach` and `mvmctl session attach` dispatch into machines admitted by
+   another process and hold no plan to write under, so they refuse.
+4. **The scan is a backstop, not a defence. (OPEN, permanent.)** Base64, hex,
+   any derivation, and a split that straddles the sliding window all defeat
+   it. It catches a confused host-side caller, not a determined one. The real
+   guarantee is upstream and structural: the host has no reason to send a
+   secret into a guest, because secrets are substituted on egress (rows 13 and
+   16) rather than handed over. The same "heuristic, not proof" caveat applies
+   to the shell classification in limit 2: a wrapper that `exec`s a shell
+   defeats it, and no test over argv could separate a program that reads stdin
+   from one that interprets it.
 
-Promotion of row 17 to a numbered claim requires limits 1–3 to close. Limit
-4 is permanent and is a property of scanning, not a gap to fix.
+Promotion of row 17 to a numbered claim requires limit 1 to close. Limit 4 is
+permanent and is a property of scanning and of argv classification, not a gap
+to fix.
 
 **Claim 3 backend scoping (ADR-107).** Claim 3's witness, dm-verity, is
 block-device-specific: it ratifies the claim on the **block+ext4** backends

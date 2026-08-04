@@ -207,6 +207,19 @@ pub struct GuestSidecar {
     /// Form of the entrypoint declaration: "shell", "command", or
     /// "services". Information; not load-bearing for runtime gates.
     pub entrypoint_kind: String,
+    /// The argv PID 1 actually execs for this image, as the build path
+    /// resolved it: `entrypoint.command` for a command-form mkGuest image,
+    /// the interactive shell for the shell form, the image's own
+    /// Entrypoint/Cmd for an OCI rootfs.
+    ///
+    /// Load-bearing, unlike [`Self::entrypoint_kind`]: the host has no way to
+    /// read inside a materialized ext4, so this is the only place admission
+    /// can learn what a workload will run before it runs it. Empty means the
+    /// build path did not record one — an image built before the field
+    /// existed, or one whose shape the builder could not resolve — and a
+    /// caller gating on it must treat empty as *unknown*, never as safe.
+    #[serde(default)]
+    pub entrypoint_argv: Vec<String>,
     /// Init system in use; "busybox" today.
     pub init_system: String,
     /// Per-backend boot floor in milliseconds. Used by perf gates to
@@ -302,6 +315,9 @@ impl GuestSidecar {
             accessible: !sealed,
             sealed,
             entrypoint_kind: "command".to_string(),
+            // The caller knows the image's resolved Entrypoint/Cmd, not this
+            // constructor; `with_entrypoint_argv` is how it gets recorded.
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             // Unknown for an arbitrary OCI image; not load-bearing
             // (perf gates only apply to the curated image set).
@@ -315,6 +331,14 @@ impl GuestSidecar {
             overlay_aware: true,
             runtime_lean,
         }
+    }
+
+    /// Record the argv PID 1 will exec, so a host-side gate can see what the
+    /// image runs without opening the ext4.
+    #[must_use]
+    pub fn with_entrypoint_argv(mut self, argv: Vec<String>) -> Self {
+        self.entrypoint_argv = argv;
+        self
     }
 
     /// Read the sidecar from a directory. Returns `Ok(None)` if the
@@ -1296,6 +1320,7 @@ mod tests {
             accessible: true,
             sealed: false,
             entrypoint_kind: "shell".to_string(),
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             expected_boot_ms: 300,
             agent_binary: "stub".to_string(),

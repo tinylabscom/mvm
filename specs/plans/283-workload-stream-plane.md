@@ -2314,41 +2314,49 @@ arrive, and EOF on their end should close the workload's stdin.
 (`plane.rs:263-330`); `InputGate::open(vm, &AdmittedPlan)`; `InputFrame`,
 `CloseInput`; `INPUT_GRANT_SERVICE` (`host.stream.v1`).
 
-- [ ] **Step 1: Write the failing test** — `mvmctl invoke --stdin -` against a
-  workload that echoes its stdin returns those bytes, with the input arriving
-  while the workload runs rather than as a pre-call payload. Must fail today.
+- [x] **Step 1: Write the failing test.** Landed as a different shape than
+  written, because the brief's premise was stale: there is no `mvmctl invoke`
+  verb and no `--stdin` flag on the entrypoint action — stdin is auto-read at
+  the `machine run --entrypoint` dispatch site. The surface added is `machine
+  run --entrypoint --stdin <PATH|->`, mirroring `session attach --stdin`'s
+  existing value grammar, where `-` streams and a path stays one-shot. Tests
+  cover the pump (`stdin_stream.rs`) and the grant/refusal join
+  (`invoke.rs::stdin_grant_tests`).
 
-- [ ] **Step 2: Run to verify it fails.**
+- [x] **Step 2: Run to verify it fails.** The pump tests fail to compile
+  against the pre-task tree (no `stdin_stream` module); the grant tests fail
+  against it because `admit_entrypoint_boot` passed `services: Vec::new()`
+  unconditionally, so nothing was ever refused.
 
-- [ ] **Step 3: Grant the service.** `invoke.rs:221` passes `services:
+- [x] **Step 3: Grant the service.** `invoke.rs:221` passes `services:
   Vec::new()`. Add `host.stream.v1` **only when the caller actually requested
   streaming stdin** — a plan that did not ask for input must keep granting
   nothing, because default-deny is the property the whole gate rests on.
 
-- [ ] **Step 4: Flip `stream_input`** at both sites, driven by the same request
+- [x] **Step 4: Flip `stream_input`** at both sites, driven by the same request
   rather than unconditionally.
 
-- [ ] **Step 5: Resolve a live entrypoint.** Every admission call site passes an
+- [x] **Step 5: Resolve a live entrypoint.** Every admission call site passes an
   empty `entrypoint_argv`, so the `--prod` shell refusal cannot fire. Resolve the
   real entrypoint at admission. **This must land in this change**, not after: a
   grant that goes live while the refusal is still dormant ships a control that
   cannot fire.
 
-- [ ] **Step 6: Pump, refresh, close.** Stream from the caller's stdin through
+- [x] **Step 6: Pump, refresh, close.** Stream from the caller's stdin through
   `write_input` in arrival order, `refresh_input` before the 30s lease expires,
   and `close_input` on EOF so a read-to-EOF workload terminates.
 
-- [ ] **Step 7: Prove the refusals still bite.** An ungranted caller is refused
+- [x] **Step 7: Prove the refusals still bite.** An ungranted caller is refused
   and audited; a shell entrypoint with the grant is refused under `--prod`; a
   second concurrent writer is refused by the lease.
 
-- [ ] **Step 8: Update the docs and the claim.** The guide, `cli-commands.md`,
+- [x] **Step 8: Update the docs and the claim.** The guide, `cli-commands.md`,
   and ADR-001's Preview-17 limits all currently state that no operator surface
   exists. Correct them to what ships, and reassess whether claim 17 still belongs
   at `Preview` — the secret scan stays inert until `InputGate::bind` has a
   production caller, so say plainly which limits closed and which did not.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```sh
 git commit -am "feat(cli): stream stdin into a running workload"

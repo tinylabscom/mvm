@@ -133,10 +133,9 @@ for detailed scope and acceptance criteria.
         grant for a shell-shaped entrypoint; and the claims ledger — claim 15
         reworded (it used to hold by *absence*, there being no host→guest byte
         path at all, and now holds by *policy*) and claim 17 added at status
-        `Preview` with a four-item limits note, because three of its four legs
-        have no production caller yet: the known-secret set is empty on every
-        real VM, the shell-entrypoint refusal is dormant behind an empty
-        `entrypoint_argv`, and the granted half has no operator surface
+        `Preview` with a four-item limits note (T17 below closed two of the
+        four; the known-secret set being empty on every real VM is what keeps
+        the row at `Preview`)
   - [x] T16 — the input plane's documentation: a sibling guide
         `guides/workload-input.md` (grant, single-writer lease, secret scan,
         explicit EOF, the `--prod` shell refusal stated as the heuristic it is,
@@ -151,12 +150,20 @@ for detailed scope and acceptance criteria.
         has no caller outside `tests/workload_input_plane.rs`, so *neither* half
         of the input plane has run on a real VM — "proven end to end" described
         test fidelity, not liveness
-  - [ ] Phase 2 has no operator surface. Nothing outside tests opens an input
-        stream, `mvmctl invoke` hardcodes `stream_input: false`, and no client
-        refreshes the lease — so the secret scan's known set is empty on every
-        real VM and the shell-entrypoint refusal never sees an entrypoint to
-        classify. Claim 17 stays `Preview` until a follow-on lands the surface
-        and a live entrypoint resolver together
+  - [x] T17 — the operator surface, landed with a live entrypoint resolver in
+        the same change as the plan required. `machine run --entrypoint --stdin
+        -` opens the route under the plan that boot was admitted under, pumps
+        the caller's stdin through the gate in acceptance order on its own
+        thread, refreshes the lease on a ticker while the writer is idle, and
+        closes the workload's stdin on the caller's EOF. The grant is
+        conditional on the request, so a call that did not ask carries no
+        `host.stream.v1`. The entrypoint is resolved from the image's
+        `mvm-meta.json` sidecar — a new `entrypointArgv` field written by both
+        the `mkGuest` and OCI build paths, because the host cannot read inside a
+        materialized ext4 — and admission **fails closed** when it cannot
+        resolve one, so the shell refusal cannot go dormant again. Claim 17
+        stays `Preview` on limit 1 alone: `InputGate::bind` still has no
+        production caller, so the secret scan is inert on every real VM
   - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
         transcript is now sealed by whatever stops the VM. The *follow* half
         remains: the console follower still dies with the starting process, so

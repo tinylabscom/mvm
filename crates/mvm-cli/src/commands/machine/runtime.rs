@@ -271,8 +271,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
     // Resolve `--net` / `--allow-host` into the egress policy exactly as the
     // transient argv path does, so a baked entrypoint enforces the same posture.
     let network_policy = shared::resolve_run_network_policy(args.net, &args.allow_host)?;
-    use std::io::IsTerminal as _;
-    let stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+    let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     invoke::run_entrypoint(invoke::EntrypointCall {
         source,
         stdin,
@@ -289,6 +288,33 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         attach: args.attach,
         network_policy,
     })
+}
+
+/// Turn `--stdin` into what the entrypoint call should do about stdin.
+///
+/// Three shapes, and the flag's value is what picks between them:
+/// - absent — read a piped stdin to the end and send it as one payload, which
+///   is what this command has always done and what nothing should change for a
+///   caller who did not ask;
+/// - `-` — stream this process's own stdin, which is a different contract with
+///   the guest (its stdin stays open, EOF is something the host sends) and so
+///   needs the input grant on the signed plan;
+/// - a path — read that file and send it as one payload; a file has an end the
+///   host already knows, so there is nothing to stream.
+fn resolve_entrypoint_stdin(spec: Option<&str>) -> Result<invoke::EntrypointStdin> {
+    match spec {
+        Some("-") => Ok(invoke::EntrypointStdin::Streaming),
+        Some(path) => Ok(invoke::EntrypointStdin::OneShot(
+            std::fs::read(path)
+                .with_context(|| format!("reading the entrypoint's stdin payload from {path}"))?,
+        )),
+        None => {
+            use std::io::IsTerminal as _;
+            Ok(invoke::EntrypointStdin::OneShot(invoke::read_auto_stdin(
+                std::io::stdin().is_terminal(),
+            )?))
+        }
+    }
 }
 
 /// Whether the launch's workload declared that it needs a real in-guest IP
@@ -381,6 +407,9 @@ pub(in crate::commands) fn boot_persistent_by_name(
             flake,
             kernel_pin,
             hypervisor,
+            // Booting by name carries no caller stdin, so it requests no input
+            // grant and the plan stays ungranted.
+            stdin: None,
             detach: true,
             image: None,
             manifest: None,

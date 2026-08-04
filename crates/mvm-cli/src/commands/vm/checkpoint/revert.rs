@@ -1218,6 +1218,7 @@ mod tests {
             accessible: false,
             sealed: true,
             entrypoint_kind: "command".to_string(),
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             expected_boot_ms: 300,
             agent_binary: "real".to_string(),

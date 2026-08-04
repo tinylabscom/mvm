@@ -14,11 +14,14 @@ DTOs and the plan grant (`mvm-protocol::stream::input`), the gate
 delivery with explicit EOF (`mvm-agentd::stream_input`), and the sealed-tier
 refusal of the grant for a shell-shaped entrypoint.
 
-The input half is **built and dormant**. Nothing outside tests reaches
-`StreamPlane::open_input`, so no real VM has ever executed either the grant path
-or the refusal path. ADR-001's claim 17 carries it at status `Preview` with the
-four limits that keep it there. This ADR records the decision; it does not
-record an operating channel.
+The input half is **reachable**: `mvmctl machine run --entrypoint --stdin -`
+opens the route through `StreamPlane::open_input` under the plan that boot was
+admitted under, pumps the caller's stdin through the gate in acceptance order,
+and closes the workload's stdin on the caller's EOF. Only the invocation that
+admits and boots a workload can stream into it — `--attach` and `session
+attach` hold no admitted plan and refuse. ADR-001's claim 17 stays at status
+`Preview`, now for one reason rather than three: the secret scan has no
+production caller, so its refusal has never fired on a real VM.
 
 Three limits below (§"What this does not do") are stated as limits, not as
 future work. They are true of the shipped code.
