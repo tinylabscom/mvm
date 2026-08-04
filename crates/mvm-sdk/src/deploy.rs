@@ -23,6 +23,7 @@
 //! is the additional sidecar the receiver reads to make scheduling
 //! decisions without unpacking the rest.
 
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -489,15 +490,12 @@ impl MvmdClient {
     ) -> Result<RemoteArtifact, DeployError> {
         let endpoint = remote_upload_endpoint(&self.base_url)?;
         let record_json = serde_json::to_string(record)?;
-        let bundle_part = reqwest::blocking::multipart::Part::file(&bundle.archive_path)
-            .map_err(|error| DeployError::RemoteProtocol {
+        let bundle_bytes =
+            fs::read(&bundle.archive_path).map_err(|error| DeployError::RemoteProtocol {
                 base_url: self.base_url.clone(),
                 reason: format!("opening bundle: {error}"),
-            })?
-            .file_name("image.tar.gz");
-        let form = reqwest::blocking::multipart::Form::new()
-            .text("record", record_json)
-            .part("bundle", bundle_part);
+            })?;
+        let (content_type, form_body) = deploy_multipart_body(&record_json, &bundle_bytes);
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -509,7 +507,8 @@ impl MvmdClient {
         let response = client
             .post(endpoint)
             .bearer_auth(&self.api_key)
-            .multipart(form)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(form_body)
             .send()
             .map_err(|error| DeployError::RemoteTransportUnavailable {
                 base_url: format!("{} ({error})", self.base_url),
@@ -530,6 +529,24 @@ impl MvmdClient {
                 })?;
         Ok(payload.data)
     }
+}
+
+fn deploy_multipart_body(record_json: &str, bundle_bytes: &[u8]) -> (String, Vec<u8>) {
+    let boundary = format!("mvm-deploy-{}", blake3::hash(bundle_bytes).to_hex());
+    let mut body = Vec::with_capacity(record_json.len() + bundle_bytes.len() + 512);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"record\"\r\nContent-Type: application/json\r\n\r\n",
+    );
+    body.extend_from_slice(record_json.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"bundle\"; filename=\"image.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\n",
+    );
+    body.extend_from_slice(bundle_bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
 fn remote_upload_endpoint(base_url: &str) -> Result<String, DeployError> {
@@ -844,5 +861,16 @@ mod tests {
             error,
             DeployError::RemoteTransportUnavailable { .. }
         ));
+    }
+
+    #[test]
+    fn deploy_multipart_body_contains_record_and_bundle_parts() {
+        let (content_type, body) = deploy_multipart_body(r#"{"workload_id":"demo"}"#, b"bundle");
+        let body = String::from_utf8(body).expect("multipart test body is UTF-8");
+        assert!(content_type.starts_with("multipart/form-data; boundary=mvm-deploy-"));
+        assert!(body.contains("name=\"record\""));
+        assert!(body.contains("{\"workload_id\":\"demo\"}"));
+        assert!(body.contains("name=\"bundle\"; filename=\"image.tar.gz\""));
+        assert!(body.ends_with("\r\n"));
     }
 }
