@@ -247,7 +247,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             false,
             has_ad_hoc_argv,
             profile == "dev",
-            image_sealed,
         ),
         services: Vec::new(),
     })?;

@@ -212,8 +212,13 @@ fn admit_entrypoint_boot(
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: params.network_policy.clone(),
         agent_verb_override: params.agent_verb_override.to_vec(),
-        restrict_agent_verbs: !params.keep_alive_dev
-            && super::agent_verbs::image_is_sealed(params.rootfs),
+        // An invoke drives the baked entrypoint over agent RPC: no PTY, no
+        // ad-hoc argv, so the profile alone decides.
+        restrict_agent_verbs: super::agent_verbs::grant_eligible(
+            false,
+            false,
+            params.keep_alive_dev,
+        ),
         services: Vec::new(),
     })?;
     let Some(ctx) = ctx else { return Ok(None) };

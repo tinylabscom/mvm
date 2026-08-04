@@ -6,7 +6,7 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
-- [ ] Plan 291 — Develop → build → deploy an attested workload image
+- [~] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
   - [ ] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
         record; ship to mvmd when a remote is configured, else stop at the
@@ -14,8 +14,10 @@ for detailed scope and acceptance criteria.
   - [ ] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address
   - [ ] WS3 capture-from-sandbox via `reseal_volume`, converging on the
         declared-dependency path and keeping the lockfile hash pin
-  - [ ] WS4 tier follows the attestation; retire the `interactive` feature fork
-        and replace the symbol-absence witnesses with conformance scenarios
+  - [~] WS4 tier follows the attestation
+    - [x] Agent-verb grant derives from admitted run shape, not image sidecar
+    - [ ] Bind the tier to an attested artifact and replace the interactive
+          feature/symbol witnesses with conformance scenarios
 
 - [~] Plan 290 — Sensitive egress redaction
       (`specs/plans/290-sensitive-egress-redaction.md`)
