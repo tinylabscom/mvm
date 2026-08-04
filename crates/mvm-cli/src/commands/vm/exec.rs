@@ -448,7 +448,6 @@ pub(in crate::commands) fn run_secure_with_source(
                 admit_pty,
                 admit_has_argv,
                 admit_is_dev,
-                crate::commands::vm::agent_verbs::image_is_sealed(rootfs),
             ),
             services: admit_host_services.clone(),
         })?;
@@ -1926,13 +1925,13 @@ mod tests {
     #[test]
     fn transient_grant_eligibility_matches_run_mode() {
         use crate::commands::vm::agent_verbs::grant_eligible;
-        // Interactive transient (pty) → not eligible even when sealed.
-        assert!(!grant_eligible(true, false, false, true));
-        // Ad-hoc transient (argv) → not eligible even when sealed.
-        assert!(!grant_eligible(false, true, false, true));
-        // Transient baked-entrypoint (no pty, no argv, prod, sealed) → eligible.
-        assert!(grant_eligible(false, false, false, true));
-        // Same run but image not sealed (interactive / OCI) → NOT eligible.
-        assert!(!grant_eligible(false, false, false, false));
+        // Interactive transient (pty) issues ConsoleOpen → not eligible.
+        assert!(!grant_eligible(true, false, false));
+        // Ad-hoc transient (argv) issues Exec → not eligible.
+        assert!(!grant_eligible(false, true, false));
+        // Transient baked-entrypoint (no pty, no argv, prod profile) → eligible.
+        assert!(grant_eligible(false, false, false));
+        // Dev profile stays permissive by contract.
+        assert!(!grant_eligible(false, false, true));
     }
 }
