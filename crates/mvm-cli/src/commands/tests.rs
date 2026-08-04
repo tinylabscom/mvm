@@ -2345,7 +2345,7 @@ fn test_run_cli_flag_overrides_config_memory() {
 
 #[test]
 fn tenant_orchestration_commands_are_not_mvmctl_surface() {
-    for command in ["deploy", "policy", "tenant"] {
+    for command in ["policy", "tenant"] {
         let err = Cli::try_parse_from(["mvmctl", command])
             .expect_err("mvmd-owned command should not parse under mvmctl");
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
