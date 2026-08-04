@@ -1,7 +1,7 @@
 # ADR-039 — The macOS privileged network helper
 
-**Status: Proposed — requires maintainer sign-off before any implementation**
-**Date: 2026-08-02**
+**Status: Rejected — 2026-08-03. mvm adds no root-capable component.**
+**Date: proposed 2026-08-02, rejected 2026-08-03. Tracked as issue #2122.**
 **Complements ADR-036 (L3 TUN-over-vsock) §"macOS (Apple Silicon)", which
 enumerated the four privileged operations, and ADR-037 (the userspace
 socket datapath), which deliberately avoids needing any of them.**
@@ -127,8 +127,23 @@ broker, and reusing it would mean giving it a second unrelated purpose.
 
 ## Status
 
-**Proposed.** Not to be implemented until a maintainer signs off on
-introducing a root-capable component, and only if a workload need for raw
-IP on macOS is identified. If no such need exists, reject this and record
-the rejection — a documented "we decided not to" is worth more than an
-open question.
+**Rejected, 2026-08-03.** mvm adds no root-capable component. The
+recommended default in "Alternatives considered" is the decision: keep the
+userspace socket datapath as the sole macOS backend, and leave ICMP, raw
+IP, and arbitrary IPv4/IPv6 refused at admission.
+
+The question this ADR asked was not "can we build this safely" but "does a
+workload actually need raw IP on macOS." Nothing does. Paying a permanent
+root process — and the blast radius that any bug in it would carry, from
+one VM's networking to root on the host — for capabilities nothing asks
+for is a bad trade. The capability seam already refuses those plans with
+the shortfall named, rather than degrading silently.
+
+Reopening requires a workload with a demonstrated need, not a hypothetical
+one. Everything above stays as the design of record for that case: the
+four operations, the structural refusals, and the `LOCAL_PEERCRED`
+ownership binding remain what a helper would have to look like. The
+requirement that those be properties of the wire format rather than of a
+validation layer is the part most worth preserving — a validator can be
+bypassed by a bug in the validator; a protocol that cannot express "run
+this command" cannot be talked into one.

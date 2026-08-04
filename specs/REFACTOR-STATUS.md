@@ -8,6 +8,9 @@ for detailed scope and acceptance criteria.
 ## In-flight plans
 - [~] Plan 287 — Userspace socket datapath
       (`specs/plans/287-userspace-socket-datapath.md`, ADR-037)
+      Tracked end to end under epic #2111, which also carries plan 285's
+      deferred set. Every workstream below has its own issue; the epic
+      records the ordering and the two gates that are not preference.
   - [x] Phase A (WS0) — fix the two platform-neutral defects in the shipped
         `mvm-netd` drive loop that blocked this work and affected Linux
         today: a pollable descriptor out of `GuestConnection`, a
@@ -16,12 +19,47 @@ for detailed scope and acceptance criteria.
         mean 300,000 guest frames, and a `mio` poll loop that drains the
         guest channel and the datapath independently so host-to-guest
         traffic no longer stalls while the guest is quiet
-  - [~] Phase B (WS1) — the smoltcp-backed `UserspaceSocketDatapath` itself,
-        making `l3-vsock` work on hosts with no privileges. Tasks 1–12 of 16
-        landed: the TCP path, deferred handshake, destination-integrity
-        assertion, bounded queues and flow lifetimes. UDP associations,
-        backend selection, the unprivileged end-to-end suite and close-out
-        remain, as do the ingress fuzz gate and the bounds audit
+  - [~] Phase B (WS1, #2112) — the smoltcp-backed `UserspaceSocketDatapath`
+        itself, making `l3-vsock` work on hosts with no privileges. Tasks
+        1–12 of 16 landed: the TCP path, the deferred handshake so the
+        guest's `connect()` never reports ESTABLISHED for a destination
+        that has not accepted, the destination-integrity assertion, bounded
+        queues, and deadlines on the two states where no host error can
+        ever arrive. Tasks 13–16 remain: UDP associations, backend
+        selection, the unprivileged end-to-end suite, and close-out
+  - [ ] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's
+        recorded witness surface. **Gates backend selection in WS1 and the
+        IPv6 guard in WS3**: the smoltcp ingress parser is unreachable by
+        any guest today, and selection is precisely what puts it on a
+        guest-controlled input path, so it is fuzzed before it is exposed
+        rather than after
+  - [ ] WS1c (#2114) — bounds audit; re-derive the memory ceiling from the
+        real per-flow and per-association costs and assert it, rather than
+        leaving arithmetic in a doc comment that drifted 24x once already
+  - [ ] WS2 (#2115) — UDP ingress: declared inbound datagram mappings,
+        admitted explicitly rather than inferred from traffic
+  - [ ] WS3 (#2116) — IPv6 as a first-class family (ADR-038). Blocked on
+        #2113. One `embedded_v4` extraction ahead of every other rule, then
+        the entire existing v4 class check — v4-mapped, v4-compatible,
+        NAT64 and 6to4 all reach `169.254.169.254`, and the canonical-form
+        peer assertion cannot catch them
+  - [ ] WS4 (#2117) — benchmark the datapath, then decide whether
+        multi-queue is warranted. The measurement is the deliverable
+  - [ ] WS5 (#2118) — zero-copy / batched transfer, gated on the same
+        measurement; must keep the memory ceiling assertable
+  - [ ] WS7 (#2119) — node-to-node transport for cross-host VM traffic,
+        preserving policy, audit and identity binding across the hop
+  - [ ] WS8 (#2120) — mvmd-facing node-control API, mvm side only; the
+        fleet-orchestration half stays in the mvmd repository
+  - [ ] WS9 (#2121) — WSL2 validation on a real runner; documented and
+        scheduled rather than claimed, since no live Windows host is
+        available
+  - [x] WS6 (#2122) — **rejected 2026-08-03**: mvm adds no root-capable
+        component. macOS raw IP would need a `utun`, which needs root and
+        which no entitlement avoids. ICMP, raw IP and arbitrary IPv4/IPv6
+        stay refused at admission on the userspace backend, honestly and
+        for a stated reason. ADR-039 status Rejected; reopening requires a
+        workload with a demonstrated need
 
 - [~] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
