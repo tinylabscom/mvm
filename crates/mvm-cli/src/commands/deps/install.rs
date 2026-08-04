@@ -89,18 +89,7 @@ pub(super) fn run(args: Args) -> Result<()> {
         cache_root_override: cache_root,
     };
 
-    #[cfg(feature = "builder-vm")]
-    let result: mvm_build::app_deps::InstallResult = {
-        let driver = mvm_build::builder_backend_select::resolve_builder_backend();
-        let install_driver = mvm_build::app_deps::BuilderInstallDriver::new(driver.as_ref());
-        mvm_build::app_deps::install_app_deps(&spec, Some(&install_driver))
-            .context("installing declared dependencies in the builder environment")?
-    };
-    #[cfg(not(feature = "builder-vm"))]
-    let result: mvm_build::app_deps::InstallResult = {
-        let _ = spec;
-        bail!("mvmctl deps install requires the builder-vm feature")
-    };
+    let result = install_in_builder(&spec)?;
 
     let outcome = InstallOutcome {
         volume_hash: result.volume_hash,
@@ -135,6 +124,19 @@ pub(super) fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "builder-vm")]
+fn install_in_builder(spec: &InstallSpec) -> Result<mvm_build::app_deps::InstallResult> {
+    let driver = mvm_build::builder_backend_select::resolve_builder_backend();
+    let install_driver = mvm_build::app_deps::BuilderInstallDriver::new(driver.as_ref());
+    mvm_build::app_deps::install_app_deps(spec, Some(&install_driver))
+        .context("installing declared dependencies in the builder environment")
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn install_in_builder(_spec: &InstallSpec) -> Result<mvm_build::app_deps::InstallResult> {
+    bail!("mvmctl deps install requires the builder-vm feature")
+}
+
 fn existing_path(path: &Path, label: &str) -> Result<PathBuf> {
     fs::canonicalize(path).with_context(|| format!("resolving {label} `{}`", path.display()))
 }
@@ -165,5 +167,23 @@ mod tests {
         fs::write(&file, b"data").unwrap();
         let error = existing_directory(&file, "source root").unwrap_err();
         assert!(error.to_string().contains("not a directory"));
+    }
+
+    #[cfg(not(feature = "builder-vm"))]
+    #[test]
+    fn install_reports_missing_builder_feature() {
+        let spec = InstallSpec {
+            lockfile: PathBuf::from("Cargo.lock"),
+            source_root: PathBuf::from("."),
+            language: Language::Python,
+            gate: GateLevel::Dev,
+            cache_root_override: None,
+        };
+        let error = install_in_builder(&spec).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires the builder-vm feature")
+        );
     }
 }
