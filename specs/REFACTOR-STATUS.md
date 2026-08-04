@@ -8,9 +8,9 @@ for detailed scope and acceptance criteria.
 ## In-flight plans
 - [~] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
-  - [ ] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
-        record; ship to mvmd when a remote is configured, else stop at the
-        local sealed artifact
+  - [~] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
+        record; retain the local sealed artifact and ship it to mvmd through
+        the authenticated upload contract when a remote is configured
   - [~] WS2 `mvmctl watch`: rebuild on change, skip no-op rebuilds by address;
         long-running mode recovers from transient input/compile errors while
         `--once` remains fail-fast

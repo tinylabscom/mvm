@@ -83,9 +83,9 @@ pub mod compile;
 /// Closed `mvm.*` helper allowlist; non-literal kwargs rejected.
 pub mod decorator;
 
-/// Deploy-bundle assembly + shipping for mvmd-owned control-plane flows.
-/// Builds the single signed `.tar.gz` (compile output + embedded
-/// `mvmd-spec.json`) and ships it via `MvmdClient::ship`.
+/// Deploy-bundle assembly and local attestation for mvmd-owned control-plane
+/// flows. Builds the single `.tar.gz` (compile output plus embedded
+/// `mvmd-spec.json`) and exposes the authenticated shipping seam.
 pub mod deploy;
 
 /// Runtime record-mode core — recording shape + lowering. The host

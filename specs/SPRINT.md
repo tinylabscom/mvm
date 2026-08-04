@@ -28,6 +28,16 @@
       open in WS1–WS4. A ProdSafe-grant conformance test now proves both
       Exec and ConsoleOpen are refused; the interactive feature fork and
       guest-image validation remain open.
+- [~] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
+      polls local source inputs, recompiles only when the semantic IR address
+      or source fingerprint changes, and reports rebuild/no-op iterations.
+- [~] `mvmctl deploy` — **plan 291 WS1**. Local deployment now has a durable
+      sealed archive and deploy record path, with BLAKE3 as the native artifact
+      identity, SHA-256 retained for interoperability, optional environment
+      pinning, and fail-closed verification of an explicitly supplied sealed
+      dependency volume. A configured remote now ships the record and bundle
+      through mvmd’s authenticated upload contract. Host compilation and the
+      remaining workspace gates remain pending.
 
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated

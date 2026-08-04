@@ -3,6 +3,7 @@ mod build;
 mod bundle;
 mod catalog;
 mod cmd_audit;
+mod deploy;
 mod deps;
 mod dispatch;
 pub(crate) mod env;
@@ -91,6 +92,9 @@ pub(in crate::commands) enum Commands {
     /// Build-time commands (image, compile, validate, kernel)
     #[command(display_order = 3)]
     Build(build::group::Args),
+    /// Build, seal, and record a workload locally; optionally ship it to mvmd
+    #[command(display_order = 4)]
+    Deploy(deploy::Args),
     /// Build the custom microVM kernels (builder / workload)
     #[command(display_order = 3)]
     Kernel(build::kernel::Args),

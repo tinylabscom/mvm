@@ -72,15 +72,17 @@ bug.
 
 ### WS1 — `mvmctl deploy`
 
-- [ ] Seal the built image, compute its BLAKE3 identity, and write a deploy
+- [~] Seal the built image, compute its BLAKE3 identity, and write a deploy
       record: workload address (`ir_hash`), image BLAKE3, image SHA-256, the
       environment pin, sealed dep-volume hash, and the SBOM/CVE verdicts already
       produced by claim 11's pipeline.
-- [ ] If a remote is configured, ship the recorded artifact to it. If not, stop
-      at the local sealed artifact — deploying without a cloud is a supported
-      outcome, not a failure.
-- [ ] Refuse to record an artifact whose dep volume fails
+- [~] If a remote is configured, use the authenticated shipping contract. Until
+      mvmd exposes that contract, fail closed after writing the local record;
+      without a remote, stop at the local sealed artifact.
+- [~] Refuse to record an artifact whose dep volume fails
       `verify_sealed_volume`, so a deploy cannot launder a tampered volume.
+      The SDK path and tamper regression are green; full CLI/workspace gates
+      remain.
 
 **Open question for the owner.** `CLAUDE.md` states that deploy-to-control-plane
 commands live in mvmd, not mvmctl. Sealing, hashing and recording are artifact
