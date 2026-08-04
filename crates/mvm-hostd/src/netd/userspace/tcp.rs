@@ -1111,7 +1111,7 @@ impl std::fmt::Debug for EstablishedFlow {
 /// non-blocking socket saying "not now" and a syscall interrupted by a
 /// signal. Treating either as fatal would tear down healthy flows under
 /// exactly the load that produces them.
-fn is_terminal_host_error(kind: io::ErrorKind) -> bool {
+pub(super) fn is_terminal_host_error(kind: io::ErrorKind) -> bool {
     !matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
 }
 
@@ -1232,7 +1232,7 @@ pub fn assert_peer_matches(socket: &TcpStream, admitted: IpAddr) -> Result<(), D
 /// arbitrate one. A future IPv6 datapath that relaxes that refusal must
 /// collapse the mapped form *before* its range checks; the collapse here is
 /// downstream of policy and is not a substitute for it.
-fn same_host(reached: IpAddr, admitted: IpAddr) -> bool {
+pub(super) fn same_host(reached: IpAddr, admitted: IpAddr) -> bool {
     reached.to_canonical() == admitted.to_canonical()
 }
 

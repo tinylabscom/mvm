@@ -317,13 +317,18 @@ fn parse_transport(protocol: u8, buf: &[u8]) -> Result<Transport, IpParseError> 
     }
 }
 
-/// Where a validated packet's TCP header starts, for the readers below.
+/// Where a validated packet's transport header starts, for the readers
+/// below.
 ///
 /// One definition of the offset rather than one per field: the IPv6 arm
 /// walks an extension chain, and a second copy of that walk is a second
 /// place for it to be wrong.
-fn tcp_header_offset(buf: &[u8], packet: &ParsedIpPacket) -> Option<usize> {
-    if packet.protocol != proto::TCP || packet.fragment {
+///
+/// `expected` is checked against what [`parse`] recorded rather than taken
+/// on the caller's word, so a reader cannot pull a UDP length out of a TCP
+/// packet by asking for the wrong offset.
+fn transport_header_offset(buf: &[u8], packet: &ParsedIpPacket, expected: u8) -> Option<usize> {
+    if packet.protocol != expected || packet.fragment {
         return None;
     }
     match packet.version {
@@ -335,6 +340,39 @@ fn tcp_header_offset(buf: &[u8], packet: &ParsedIpPacket) -> Option<usize> {
         ),
         _ => None,
     }
+}
+
+fn tcp_header_offset(buf: &[u8], packet: &ParsedIpPacket) -> Option<usize> {
+    transport_header_offset(buf, packet, proto::TCP)
+}
+
+/// Bytes in a UDP header. Fixed by RFC 768 — there are no options.
+pub const UDP_HEADER_LEN: usize = 8;
+
+/// The UDP payload of a validated packet.
+///
+/// Needed by a datapath that re-originates a guest datagram on a host
+/// socket: the socket carries payload, so the transport header has to be
+/// stripped somewhere, and it is stripped here rather than by a second
+/// walk of the extension chain elsewhere.
+///
+/// The UDP length field is guest-written and is honoured only after being
+/// checked against what [`parse`] already validated. A declared length
+/// that runs past the packet's own total length, or that is shorter than
+/// the header it includes, yields `None` — a clamp would hand the caller a
+/// silently truncated datagram, which is corrupt data delivered as if it
+/// were whole.
+pub fn udp_payload<'a>(buf: &'a [u8], packet: &ParsedIpPacket) -> Option<&'a [u8]> {
+    let offset = transport_header_offset(buf, packet, proto::UDP)?;
+    let declared = u16::from_be_bytes([*buf.get(offset + 4)?, *buf.get(offset + 5)?]) as usize;
+    if declared < UDP_HEADER_LEN {
+        return None;
+    }
+    let end = offset.checked_add(declared)?;
+    if end > packet.total_len {
+        return None;
+    }
+    buf.get(offset + UDP_HEADER_LEN..end)
 }
 
 /// Read the TCP flag byte from a validated packet's buffer, if it has one.
@@ -387,7 +425,7 @@ mod tests {
         t
     }
 
-    fn udp_payload(src_port: u16, dst_port: u16) -> Vec<u8> {
+    fn udp_header(src_port: u16, dst_port: u16) -> Vec<u8> {
         let mut u = vec![0u8; 8];
         u[0..2].copy_from_slice(&src_port.to_be_bytes());
         u[2..4].copy_from_slice(&dst_port.to_be_bytes());
@@ -435,7 +473,7 @@ mod tests {
             proto::UDP,
             [10, 0, 0, 2],
             [1, 1, 1, 1],
-            &udp_payload(1234, 53),
+            &udp_header(1234, 53),
         );
         let parsed = parse(&pkt).unwrap();
         assert_eq!(parsed.protocol, proto::UDP);
@@ -457,7 +495,7 @@ mod tests {
         // Widen the header to 24 bytes and append the UDP header after it.
         pkt[0] = 0x46;
         pkt.extend_from_slice(&[0u8; 4]);
-        pkt.extend_from_slice(&udp_payload(7, 9));
+        pkt.extend_from_slice(&udp_header(7, 9));
         let total = pkt.len();
         pkt[2..4].copy_from_slice(&(total as u16).to_be_bytes());
         let parsed = parse(&pkt).unwrap();
@@ -489,7 +527,7 @@ mod tests {
 
     #[test]
     fn rejects_an_ipv4_ihl_below_the_minimum() {
-        let mut pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_payload(1, 2));
+        let mut pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_header(1, 2));
         pkt[0] = 0x44; // IHL 4 → 16 bytes
         assert!(matches!(
             parse(&pkt),
@@ -509,7 +547,7 @@ mod tests {
 
     #[test]
     fn rejects_a_total_length_that_overruns_the_buffer() {
-        let mut pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_payload(1, 2));
+        let mut pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_header(1, 2));
         pkt[2..4].copy_from_slice(&9000u16.to_be_bytes());
         assert!(matches!(
             parse(&pkt),
@@ -519,7 +557,7 @@ mod tests {
 
     #[test]
     fn rejects_a_total_length_below_its_own_header() {
-        let mut pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_payload(1, 2));
+        let mut pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_header(1, 2));
         pkt[2..4].copy_from_slice(&10u16.to_be_bytes());
         assert!(matches!(
             parse(&pkt),
@@ -548,7 +586,7 @@ mod tests {
     #[test]
     fn detects_ipv4_fragments_both_ways() {
         // More-fragments set on the first fragment.
-        let mut first = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_payload(1, 2));
+        let mut first = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_header(1, 2));
         first[6..8].copy_from_slice(&0x2000u16.to_be_bytes());
         assert!(parse(&first).unwrap().fragment);
 
@@ -584,7 +622,7 @@ mod tests {
 
     #[test]
     fn rejects_an_ipv6_payload_length_that_overruns_the_buffer() {
-        let mut pkt = v6(proto::UDP, [1; 16], [2; 16], &udp_payload(1, 2));
+        let mut pkt = v6(proto::UDP, [1; 16], [2; 16], &udp_header(1, 2));
         pkt[4..6].copy_from_slice(&4000u16.to_be_bytes());
         assert!(matches!(
             parse(&pkt),
@@ -596,7 +634,7 @@ mod tests {
     fn walks_a_single_ipv6_extension_header() {
         // Hop-by-hop: next=UDP, len=0 → 8 bytes.
         let mut rest = vec![proto::UDP, 0, 0, 0, 0, 0, 0, 0];
-        rest.extend_from_slice(&udp_payload(53, 5353));
+        rest.extend_from_slice(&udp_header(53, 5353));
         let pkt = v6(0, [1; 16], [2; 16], &rest);
         let parsed = parse(&pkt).unwrap();
         assert_eq!(parsed.protocol, proto::UDP);
@@ -606,7 +644,7 @@ mod tests {
     #[test]
     fn detects_an_ipv6_fragment_header() {
         let mut rest = vec![proto::UDP, 0, 0, 0, 0, 0, 0, 0];
-        rest.extend_from_slice(&udp_payload(1, 2));
+        rest.extend_from_slice(&udp_header(1, 2));
         let pkt = v6(44, [1; 16], [2; 16], &rest);
         let parsed = parse(&pkt).unwrap();
         assert!(parsed.fragment);
@@ -622,7 +660,7 @@ mod tests {
         }
         let tail = rest.len() - 8;
         rest[tail] = proto::UDP;
-        rest.extend_from_slice(&udp_payload(1, 2));
+        rest.extend_from_slice(&udp_header(1, 2));
         let pkt = v6(ext::DESTINATION_OPTIONS, [1; 16], [2; 16], &rest);
         assert!(matches!(
             parse(&pkt),
@@ -671,7 +709,7 @@ mod tests {
 
     #[test]
     fn tcp_flags_returns_none_for_non_tcp() {
-        let pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_payload(1, 2));
+        let pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_header(1, 2));
         let parsed = parse(&pkt).unwrap();
         assert_eq!(tcp_flags(&pkt, &parsed), None);
     }
@@ -687,7 +725,7 @@ mod tests {
 
     #[test]
     fn tcp_sequence_returns_none_for_non_tcp() {
-        let pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_payload(1, 2));
+        let pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_header(1, 2));
         let parsed = parse(&pkt).unwrap();
         assert_eq!(tcp_sequence(&pkt, &parsed), None);
     }
@@ -706,6 +744,110 @@ mod tests {
         let parsed = parse(&pkt).unwrap();
         assert_eq!(tcp_sequence(&pkt, &parsed), Some(7));
         assert_eq!(tcp_flags(&pkt, &parsed), Some(TCP_SYN));
+    }
+
+    /// A UDP datagram with a body, read back through the length field the
+    /// sender declared.
+    fn udp_datagram(src_port: u16, dst_port: u16, body: &[u8]) -> Vec<u8> {
+        let mut u = udp_header(src_port, dst_port);
+        u[4..6].copy_from_slice(&((UDP_HEADER_LEN + body.len()) as u16).to_be_bytes());
+        u.extend_from_slice(body);
+        u
+    }
+
+    #[test]
+    fn udp_payload_returns_the_body_a_datagram_declares() {
+        let pkt = v4(
+            proto::UDP,
+            [10, 0, 0, 2],
+            [1, 1, 1, 1],
+            &udp_datagram(50_000, 443, b"body"),
+        );
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(udp_payload(&pkt, &parsed), Some(&b"body"[..]));
+    }
+
+    #[test]
+    fn an_empty_datagram_has_an_empty_payload_rather_than_none() {
+        let pkt = v4(
+            proto::UDP,
+            [10, 0, 0, 2],
+            [1, 1, 1, 1],
+            &udp_datagram(50_000, 443, &[]),
+        );
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(udp_payload(&pkt, &parsed), Some(&[][..]));
+    }
+
+    /// The length field is guest-written. Honouring one that runs past the
+    /// packet would read whatever followed in the caller's buffer;
+    /// clamping it would hand back a truncated datagram as though it were
+    /// whole. Neither is a payload, so there is none.
+    #[test]
+    fn a_length_field_that_overruns_the_packet_yields_no_payload() {
+        let mut pkt = v4(
+            proto::UDP,
+            [10, 0, 0, 2],
+            [1, 1, 1, 1],
+            &udp_datagram(50_000, 443, b"body"),
+        );
+        pkt[20 + 4..20 + 6].copy_from_slice(&u16::MAX.to_be_bytes());
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(udp_payload(&pkt, &parsed), None);
+    }
+
+    /// A length shorter than the header it is supposed to include cannot
+    /// name a payload either.
+    #[test]
+    fn a_length_field_below_the_header_size_yields_no_payload() {
+        let mut pkt = v4(
+            proto::UDP,
+            [10, 0, 0, 2],
+            [1, 1, 1, 1],
+            &udp_datagram(50_000, 443, b"body"),
+        );
+        pkt[20 + 4..20 + 6].copy_from_slice(&1u16.to_be_bytes());
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(udp_payload(&pkt, &parsed), None);
+    }
+
+    /// Trailing link padding is normal on IPv4 and is not payload: the
+    /// declared lengths decide, not the slice the packet arrived in.
+    #[test]
+    fn trailing_link_padding_is_not_read_as_payload() {
+        let mut pkt = v4(
+            proto::UDP,
+            [10, 0, 0, 2],
+            [1, 1, 1, 1],
+            &udp_datagram(50_000, 443, b"body"),
+        );
+        pkt.extend_from_slice(&[0xAA; 16]);
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(udp_payload(&pkt, &parsed), Some(&b"body"[..]));
+    }
+
+    #[test]
+    fn udp_payload_returns_none_for_a_tcp_packet() {
+        let pkt = v4(
+            proto::TCP,
+            [10, 0, 0, 2],
+            [1, 1, 1, 1],
+            &tcp_payload(50_000, 443, TCP_SYN),
+        );
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(udp_payload(&pkt, &parsed), None);
+    }
+
+    /// The IPv6 arm has to walk the extension chain to find the header,
+    /// which is the whole reason the offset has one definition.
+    #[test]
+    fn udp_payload_walks_the_ipv6_extension_chain() {
+        let mut rest = vec![proto::UDP, 0, 0, 0, 0, 0, 0, 0];
+        rest.extend_from_slice(&udp_datagram(50_000, 443, b"body"));
+        let pkt = v6(ext::HOP_BY_HOP, [1; 16], [2; 16], &rest);
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(parsed.protocol, proto::UDP);
+        assert_eq!(udp_payload(&pkt, &parsed), Some(&b"body"[..]));
     }
 
     /// Every packet that reaches a sequence-number reader has been through

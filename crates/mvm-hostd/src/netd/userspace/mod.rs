@@ -14,6 +14,7 @@
 pub mod device;
 pub mod limits;
 pub mod tcp;
+pub mod udp;
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -31,8 +32,11 @@ use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
 use self::device::{GuestDevice, PushOutcome, QueueDepths};
-use self::limits::{DEFAULT_MAX_HALF_OPEN, DEFAULT_MAX_HOST_SOCKETS, FD_RESERVE};
+use self::limits::{
+    DEFAULT_MAX_HALF_OPEN, DEFAULT_MAX_HOST_SOCKETS, DEFAULT_MAX_UDP_ASSOCIATIONS, FD_RESERVE,
+};
 use self::tcp::{EstablishedFlow, HalfOpenTable, SynOutcome};
+use self::udp::UdpAssociations;
 use super::datapath::{
     DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
 };
@@ -210,6 +214,10 @@ impl UserspaceSocketDatapath {
             // allowed to hold more entries than the process has descriptors
             // would refuse at `socket()` rather than at its own bound.
             half_open: HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN.min(budget), guest),
+            // Bounded against the same budget, and for the same reason: an
+            // association parks a descriptor drawn from the one pool TCP is
+            // also drawing on.
+            udp: UdpAssociations::new(DEFAULT_MAX_UDP_ASSOCIATIONS.min(budget), guest),
             flows: BTreeMap::new(),
             metrics: GatewayMetrics::default(),
             now_millis: 0,
@@ -270,6 +278,8 @@ pub struct UserspaceHandle {
     /// the process's actual descriptor budget.
     budget: usize,
     half_open: HalfOpenTable,
+    /// Guest datagram conversations, each on its own connected host socket.
+    udp: UdpAssociations,
     flows: BTreeMap<FlowKey, EstablishedFlow>,
     metrics: GatewayMetrics,
     /// The clock the last [`Self::service`] ran at.
@@ -287,10 +297,10 @@ pub struct UserspaceHandle {
 impl UserspaceHandle {
     /// Host sockets currently open for this machine.
     ///
-    /// Half-open and established entries are counted **together** because
-    /// each one parks a real descriptor and they compete for the same
-    /// budget. Two separate counters whose sum can exceed what the process
-    /// was granted would not be a budget.
+    /// Half-open entries, established flows, and datagram associations are
+    /// counted **together** because each one parks a real descriptor and
+    /// they compete for the same budget. Three separate counters whose sum
+    /// can exceed what the process was granted would not be a budget.
     ///
     /// A flow that released its socket early — a host error resets and
     /// closes in the same step — still counts here until the next service
@@ -298,7 +308,7 @@ impl UserspaceHandle {
     /// direction of refusing a newcomer rather than over-subscribing the
     /// process's descriptors.
     pub(crate) fn open_socket_count(&self) -> usize {
-        self.flows.len() + self.half_open.len()
+        self.flows.len() + self.half_open.len() + self.udp.len()
     }
 
     /// This machine's counters.
@@ -323,6 +333,11 @@ impl UserspaceHandle {
         self.now_millis = now_millis;
         self.resolve_connects(now_millis);
         self.expire_half_open();
+        // Polled before expiring, so a reply that arrived inside an
+        // association's lifetime still reaches the guest on the pass that
+        // ends it.
+        self.poll_associations(now_millis);
+        self.expire_associations(now_millis);
         self.pump_flows(now_millis);
         let now = SmolInstant::from_millis(now_millis as i64);
         self.interface
@@ -366,6 +381,30 @@ impl UserspaceHandle {
             }
             self.metrics.flows_expired += 1;
         }
+    }
+
+    /// Put what every association's peer sent in front of the guest.
+    fn poll_associations(&mut self, now_millis: u64) {
+        for packet in self.udp.poll(now_millis) {
+            self.queue_for_guest(packet);
+        }
+        let drops = self.udp.take_drops();
+        // A datagram from a source this guest never addressed is an
+        // injection attempt the kernel's own filter should have stopped.
+        self.metrics
+            .record_denies(DenyCode::UnsolicitedInbound, drops.off_path);
+        self.metrics
+            .record_denies(DenyCode::OversizedPacket, drops.oversized);
+        self.metrics.datapath_errors = self
+            .metrics
+            .datapath_errors
+            .saturating_add(drops.unaddressable);
+    }
+
+    /// Reclaim associations that have reached their deadline.
+    fn expire_associations(&mut self, now_millis: u64) {
+        let expired = self.udp.expire(now_millis) as u64;
+        self.metrics.flows_expired = self.metrics.flows_expired.saturating_add(expired);
     }
 
     /// Move both directions of every established flow, and reap the ones
@@ -423,9 +462,60 @@ impl UserspaceHandle {
             )));
         }
         accept_packet_size(bytes.len())?;
-        if meta.protocol != proto::TCP {
-            return Err(self.refuse_protocol(meta.protocol));
+        match meta.protocol {
+            proto::TCP => self.forward_segment(flow, meta, bytes),
+            proto::UDP => self.forward_datagram(flow, meta, bytes),
+            other => Err(self.refuse_protocol(other)),
         }
+    }
+
+    /// Re-originate one guest datagram on a host socket.
+    ///
+    /// DNS never arrives here: it is answered above this seam by the
+    /// host-terminated resolver, so no query reaches a nameserver through a
+    /// socket this datapath opened.
+    fn forward_datagram(
+        &mut self,
+        flow: FlowKey,
+        meta: &ParsedIpPacket,
+        bytes: &[u8],
+    ) -> Result<(), DatapathError> {
+        let payload = ip::udp_payload(bytes, meta).ok_or_else(|| {
+            DatapathError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "a UDP packet whose declared length names no readable payload",
+            ))
+        })?;
+        if !self.udp.holds(&flow) && (self.open_socket_count() >= self.budget || self.udp.is_full())
+        {
+            // Drop the newcomer, never a live association — the posture the
+            // rest of this subsystem takes at capacity.
+            self.metrics.record_deny(DenyCode::FlowTableFull);
+            return Err(DatapathError::Io(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                format!("{} host sockets already open for this machine", self.budget),
+            )));
+        }
+        match self.udp.send(flow, payload, self.now_millis) {
+            Ok(()) => {
+                self.metrics.packets_egress = self.metrics.packets_egress.saturating_add(1);
+                Ok(())
+            }
+            Err(e) => {
+                self.metrics.datapath_errors += 1;
+                Err(e)
+            }
+        }
+    }
+
+    /// Carry one guest TCP segment into the flow that owns it, opening one
+    /// if this is a SYN.
+    fn forward_segment(
+        &mut self,
+        flow: FlowKey,
+        meta: &ParsedIpPacket,
+        bytes: &[u8],
+    ) -> Result<(), DatapathError> {
         // Established first, so a SYN retransmitted after the handshake
         // completed reaches the flow that owns it instead of opening a
         // second host socket for a connection that already exists.
@@ -499,10 +589,9 @@ impl UserspaceHandle {
 
     /// Refuse a transport this datapath cannot translate.
     ///
-    /// Refused rather than dropped. A silently discarded UDP datagram is a
-    /// guest whose resolver or QUIC connection hangs with nothing anywhere
-    /// to say why; an error reaches the caller's `datapath_errors` counter
-    /// on the very first packet.
+    /// Refused rather than dropped. A silently discarded packet is a guest
+    /// that hangs with nothing anywhere to say why; an error reaches the
+    /// caller's `datapath_errors` counter on the very first packet.
     fn refuse_protocol(&mut self, protocol: u8) -> DatapathError {
         self.metrics.record_deny(DenyCode::ProtocolDenied);
         DatapathError::Unsupported {
@@ -556,13 +645,14 @@ impl DatapathHandle for UserspaceHandle {
             return Ok(());
         }
         self.closed = true;
-        // Every entry in either table parks a host descriptor, so dropping
+        // Every entry in every table parks a host descriptor, so dropping
         // them here is what actually closes those. Deferring to the
         // handle's own drop would leak them for as long as anything still
         // holds the handle — and this runs on the failed-startup path too,
         // where the tables may never have held anything at all.
         self.flows.clear();
         self.half_open.clear();
+        self.udp.clear();
         // Drop now, not whenever the handle itself happens to drop: the
         // readiness contract promises that closing frees the descriptor
         // number for the next `open` anywhere in the process to reuse.
@@ -616,8 +706,8 @@ fn fold_throughput(metrics: &mut GatewayMetrics, stats: &tcp::PumpStats) {
 #[cfg(test)]
 mod tests {
     use super::limits::{
-        HALF_CLOSED_TIMEOUT_MILLIS, HANDSHAKE_COMPLETION_TIMEOUT_MILLIS,
-        RESET_DELIVERY_TIMEOUT_MILLIS,
+        ASSOCIATION_LIFETIME_MILLIS, HALF_CLOSED_TIMEOUT_MILLIS,
+        HANDSHAKE_COMPLETION_TIMEOUT_MILLIS, RESET_DELIVERY_TIMEOUT_MILLIS,
     };
     use super::*;
     use crate::netd::test_packets::v4_packet;
@@ -919,11 +1009,12 @@ mod tests {
         (handle, dst, peer, ack)
     }
 
-    fn udp_segment(guest_port: u16, dst: SocketAddr) -> (FlowKey, Vec<u8>) {
+    fn udp_segment(guest_port: u16, dst: SocketAddr, payload: &[u8]) -> (FlowKey, Vec<u8>) {
         let mut datagram = vec![0u8; 8];
         datagram[0..2].copy_from_slice(&guest_port.to_be_bytes());
         datagram[2..4].copy_from_slice(&dst.port().to_be_bytes());
-        datagram[4..6].copy_from_slice(&8u16.to_be_bytes());
+        datagram[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        datagram.extend_from_slice(payload);
         let bytes = v4_packet(proto::UDP, request().guest, v4_of(dst), &datagram);
         let key = FlowKey {
             protocol: proto::UDP,
@@ -1381,17 +1472,193 @@ mod tests {
         assert_eq!(handle.metrics().bytes_ingress, b"a-response".len() as u64);
     }
 
-    /// Until UDP has a translation of its own, a datagram must be refused
-    /// where the caller can see it. A silently dropped datagram is a guest
-    /// that hangs with nothing anywhere to explain it.
+    /// A loopback UDP echo server, bounded in datagram count and read
+    /// timeout so its thread cannot outlive the test that started it.
+    fn udp_echo_server() -> SocketAddr {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind an echo server");
+        let addr = socket.local_addr().expect("local addr");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("a bounded read");
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            for _ in 0..16 {
+                let Ok((n, from)) = socket.recv_from(&mut buf) else {
+                    return;
+                };
+                if socket.send_to(&buf[..n], from).is_err() {
+                    return;
+                }
+            }
+        });
+        addr
+    }
+
+    /// The end-to-end datagram witness at the trait seam: a guest datagram
+    /// in, the same bytes out of a host socket a real peer answered, and
+    /// the answer back through the datapath's own read path.
     #[test]
-    fn udp_is_refused_rather_than_silently_dropped() {
+    fn a_guest_datagram_crosses_a_host_socket_and_the_reply_reaches_the_guest() {
+        let echo = udp_echo_server();
         let mut handle = open_test_handle();
-        let datagram = udp_segment(50_000, dead_destination());
-        let err = deliver(&mut handle, &datagram).expect_err("UDP is not translated yet");
+        let datagram = udp_segment(50_000, echo, b"ping");
+        deliver(&mut handle, &datagram).expect("a datagram toward a live peer is carried");
+        assert_eq!(
+            handle.open_socket_count(),
+            1,
+            "an association parks a descriptor drawn from the same budget TCP uses"
+        );
+
+        assert!(
+            drive_until(&mut handle, |h| h.device.pending_to_guest() > 0),
+            "the peer's answer must reach the guest-bound queue"
+        );
+        let mut buf = [0u8; MTU_V1 as usize];
+        let n = handle.recv_from_network(&mut buf).expect("the reply");
+        let meta = ip::parse(&buf[..n]).expect("the reply parses");
+        assert_eq!(meta.protocol, proto::UDP);
+        assert_eq!(
+            meta.src,
+            echo.ip(),
+            "addressed from the destination policy admitted"
+        );
+        assert_eq!(
+            meta.dst,
+            IpAddr::V4(request().guest),
+            "and to the address the session leased, not to anything the guest wrote"
+        );
+        assert_eq!(meta.dst_port, Some(50_000));
+        assert_eq!(
+            ip::udp_payload(&buf[..n], &meta),
+            Some(&b"ping"[..]),
+            "and it carries what the peer sent"
+        );
+    }
+
+    /// Associations age out on their own deadline, and the descriptor and
+    /// the budget slot come back with them.
+    #[test]
+    fn an_association_the_guest_stops_using_does_not_pin_the_budget() {
+        let echo = udp_echo_server();
+        let mut handle = open_test_handle();
+        deliver(&mut handle, &udp_segment(50_000, echo, b"ping")).expect("carried");
+        assert_eq!(handle.open_socket_count(), 1);
+
+        handle
+            .service(ASSOCIATION_LIFETIME_MILLIS)
+            .expect("past the association's deadline");
+        assert_eq!(
+            handle.open_socket_count(),
+            0,
+            "an association must not outlive the lifetime it was given"
+        );
+        assert_eq!(handle.metrics().flows_expired, 1);
+    }
+
+    /// Datagram associations compete with flows for one descriptor budget.
+    #[test]
+    fn associations_and_flows_share_one_socket_budget() {
+        let echo = udp_echo_server();
+        let mut handle = open_test_handle();
+        handle.budget = 1;
+        deliver(&mut handle, &udp_segment(50_000, echo, b"x")).expect("inside the budget");
+
+        let held = listener();
+        let syn = guest_segment(
+            50_001,
+            held.local_addr().expect("addr"),
+            TcpControl::Syn,
+            &[],
+        );
+        assert!(
+            deliver(&mut handle, &syn).is_err(),
+            "a connect must not be able to overdraw the budget an association is holding"
+        );
+        assert_eq!(handle.metrics().denies_for(DenyCode::FlowTableFull), 1);
+        assert_eq!(handle.open_socket_count(), 1);
+    }
+
+    /// At capacity the newcomer is refused where the caller can see it.
+    /// UDP gives the guest no reset to read, so an error at the seam is the
+    /// only signal there is.
+    #[test]
+    fn a_datagram_past_the_budget_is_refused_rather_than_evicting_one() {
+        let echo = udp_echo_server();
+        let mut handle = open_test_handle();
+        handle.budget = 1;
+        deliver(&mut handle, &udp_segment(50_000, echo, b"x")).expect("inside the budget");
+        assert!(deliver(&mut handle, &udp_segment(50_001, echo, b"x")).is_err());
+        assert_eq!(handle.metrics().denies_for(DenyCode::FlowTableFull), 1);
+        assert_eq!(handle.open_socket_count(), 1);
+        assert!(
+            handle.udp.holds(&udp_segment(50_000, echo, b"x").0),
+            "the association that was already open is the one that survives"
+        );
+    }
+
+    /// An association parks a descriptor exactly as a flow does, so a close
+    /// that only cleared the flow tables would leak one per machine.
+    #[test]
+    fn close_releases_datagram_associations_too() {
+        let echo = udp_echo_server();
+        let mut handle = open_test_handle();
+        for i in 0..4 {
+            deliver(&mut handle, &udp_segment(50_000 + i, echo, b"x")).expect("carried");
+        }
+        assert_eq!(handle.open_socket_count(), 4);
+        handle.close().expect("close");
+        assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    #[test]
+    fn a_closed_handle_opens_no_association() {
+        let echo = udp_echo_server();
+        let mut handle = open_test_handle();
+        handle.close().expect("close");
+        assert!(deliver(&mut handle, &udp_segment(50_000, echo, b"x")).is_err());
+        assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    /// A transport with no socket translation is still refused where the
+    /// caller can see it — the property the UDP arm used to carry, now
+    /// witnessed by a protocol that really has no translation.
+    #[test]
+    fn a_transport_without_a_translation_is_refused_rather_than_dropped() {
+        let mut handle = open_test_handle();
+        let bytes = v4_packet(
+            proto::ICMP,
+            request().guest,
+            v4_of(dead_destination()),
+            &[8, 0, 0, 0],
+        );
+        let meta = ip::parse(&bytes).expect("the fixture packet parses");
+        let key = FlowKey {
+            protocol: proto::ICMP,
+            guest_port: 0,
+            remote: meta.dst,
+            remote_port: 0,
+        };
+        let err = handle
+            .forward(key, &meta, &bytes)
+            .expect_err("ICMP has no socket translation");
         assert!(matches!(err, DatapathError::Unsupported { .. }));
         assert_eq!(handle.metrics().denies_for(DenyCode::ProtocolDenied), 1);
         assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    /// The capability advertisement is a promise admission enforces. A
+    /// backend that claims `udp` and refuses datagrams would have a plan
+    /// admitted against a datapath that cannot serve it.
+    #[test]
+    fn advertising_udp_means_a_datagram_is_actually_carried() {
+        // Compile-time: withdrawing the advertisement has to break the
+        // build here, so the promise and the datagram below cannot drift
+        // apart silently.
+        const { assert!(ForwardingCapabilities::USERSPACE_SOCKETS.udp) };
+        let echo = udp_echo_server();
+        let mut handle = open_test_handle();
+        deliver(&mut handle, &udp_segment(50_000, echo, b"x"))
+            .expect("the advertised capability has to be true of the datapath behind it");
     }
 
     /// A segment for a connection the datapath has no state for — most

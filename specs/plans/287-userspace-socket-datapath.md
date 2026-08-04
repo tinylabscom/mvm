@@ -466,7 +466,7 @@ git commit -m "docs(plan-287): record the drive-loop fix as landed"
 **Interfaces:**
 - Produces: `DEFAULT_MAX_HOST_SOCKETS: usize`, `FD_RESERVE: usize`, `DEFAULT_MAX_HALF_OPEN: usize`, `HALF_OPEN_TIMEOUT_MILLIS: u64`, `SOCKET_RX_BUFFER: usize`, `SOCKET_TX_BUFFER: usize`, `MEMORY_CEILING_BYTES: usize`.
 
-- [ ] **Step 1: Add smoltcp**
+- [x] **Step 1: Add smoltcp**
 
 ```sh
 cargo add smoltcp -p mvm-hostd --no-default-features \
@@ -475,7 +475,7 @@ cargo add smoltcp -p mvm-hostd --no-default-features \
 
 Then review `deny.toml` for the new licence and any duplicate-major it introduces, and run `cargo run -p xtask -- check-duplicate-majors`. Both gates, not either.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 In `limits.rs`:
 
@@ -507,12 +507,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run it and confirm it fails**
+- [x] **Step 3: Run it and confirm it fails**
 
 Run: `cargo nextest run -p mvm-hostd the_per_machine_memory_ceiling`
 Expected: FAIL — module does not exist.
 
-- [ ] **Step 4: Write the constants**
+- [x] **Step 4: Write the constants**
 
 ```rust
 //! Bounds for the userspace socket datapath.
@@ -574,12 +574,12 @@ The two directions are separate constants now, and `GuestDevice` takes a named `
 
 `MTU_V1` in the formula is the configured MTU too, because `accept_mtu` refuses anything above it at both entry points (`open_handle` and `EstablishedFlow::from_half_open`). Failing closed rather than computing from the configured value keeps the ceiling a compile-time constant: `MTU_V1` is fixed and not negotiated by design, and a ceiling a configuration can raise is not a ceiling.
 
-- [ ] **Step 5: Run tests and confirm they pass**
+- [x] **Step 5: Run tests and confirm they pass**
 
 Run: `cargo nextest run -p mvm-hostd -E 'test(memory_ceiling) or test(half_open_is_far)'`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/netd/userspace/ crates/mvm-hostd/src/netd/mod.rs crates/mvm-hostd/Cargo.toml Cargo.lock deny.toml
@@ -596,7 +596,7 @@ git commit -m "feat(netd): bound the userspace socket datapath"
 **Interfaces:**
 - Produces: `GuestQueues { rx: VecDeque<Vec<u8>>, tx: VecDeque<Vec<u8>> }` and `struct GuestDevice` implementing `smoltcp::phy::Device`. `GuestDevice::push_from_guest(&mut self, bytes: &[u8])`, `GuestDevice::pop_for_guest(&mut self) -> Option<Vec<u8>>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -619,21 +619,21 @@ fn the_queue_drops_rather_than_growing_without_bound() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `cargo nextest run -p mvm-hostd a_packet_pushed_from_the_guest`
 Expected: FAIL — `GuestDevice` not defined.
 
-- [ ] **Step 3: Implement the device**
+- [x] **Step 3: Implement the device**
 
 Implement `smoltcp::phy::Device` where `receive()` pops from the guest-to-stack queue and `transmit()` pushes onto the stack-to-guest queue. Both queues are bounded by the depth passed to `new`; `push_from_guest` drops on a full queue and reports it so the caller can count it.
 
-- [ ] **Step 4: Run tests and confirm they pass**
+- [x] **Step 4: Run tests and confirm they pass**
 
 Run: `cargo nextest run -p mvm-hostd -E 'test(guest_device) or test(pushed_from_the_guest) or test(without_bound)'`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/netd/userspace/device.rs
@@ -653,7 +653,7 @@ git commit -m "feat(netd): add the guest-facing smoltcp device"
 - Produces (driver entry point, used by Tasks 11–15): `UserspaceHandle::service(&mut self, now_millis: u64) -> Result<(), DatapathError>` — polls smoltcp, resolves completed connects, pumps established flows, and expires timed-out state. `mvm-netd` reaches it through `recv_from_network`; the tests call it directly.
 - Produces (test-facing accessors, `pub(crate)`): `UserspaceHandle::open_socket_count(&self) -> usize`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 /// macOS ships a soft RLIMIT_NOFILE of 256. Inheriting the flow cap of
@@ -678,12 +678,12 @@ fn the_userspace_datapath_reports_socket_translation_capabilities() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `cargo nextest run -p mvm-hostd the_socket_budget_respects`
 Expected: FAIL — not defined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// Concurrent host sockets this process can afford.
@@ -699,12 +699,12 @@ pub fn socket_budget(rlimit_soft: u64, rlimit_hard: u64) -> usize {
 
 `UserspaceSocketDatapath::open` reads `RLIMIT_NOFILE`, raises the soft limit toward the hard limit, computes the budget, and builds a `UserspaceHandle` owning a `mio::Poll`, a `GuestDevice`, a smoltcp `Interface`, a `SocketSet`, and the tables from Tasks 9 and 13. `readiness_fd` returns the `mio::Poll` descriptor.
 
-- [ ] **Step 4: Run tests and confirm they pass**
+- [x] **Step 4: Run tests and confirm they pass**
 
 Run: `cargo nextest run -p mvm-hostd -E 'test(socket_budget) or test(socket_translation_capabilities)'`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/netd/userspace/mod.rs
@@ -726,7 +726,7 @@ Given a listening socket, smoltcp answers a SYN itself. Interception before the 
 
 `DenyCode` is the existing deny enum in `mvm_net::l3::admit` — reuse it rather than minting a parallel reason type.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -764,21 +764,21 @@ fn a_half_open_entry_times_out() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `cargo nextest run -p mvm-hostd a_syn_does_not_reach_the_stack`
 Expected: FAIL — `HalfOpenTable` not defined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `on_syn` keys on the guest 4-tuple. An existing entry returns `Folded` without opening a second socket. A full table returns `Refused`, dropping the SYN rather than evicting a live entry. Otherwise it opens a non-blocking `TcpStream` toward the destination, stores the SYN bytes, and returns `Started`. `replayable()` yields only entries whose connect has completed successfully.
 
-- [ ] **Step 4: Run tests and confirm they pass**
+- [x] **Step 4: Run tests and confirm they pass**
 
 Run: `cargo nextest run -p mvm-hostd -E 'test(syn)'`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/netd/userspace/tcp.rs
@@ -1262,7 +1262,7 @@ which refuses. Both are wiring above this seam.
 **Interfaces:**
 - Produces: `struct UdpAssociations`; `UdpAssociations::send(&mut self, key: FlowKey, payload: &[u8], now_millis: u64) -> Result<(), DatapathError>`; `UdpAssociations::poll(&mut self, now_millis: u64) -> Vec<Vec<u8>>`; `UdpAssociations::expire(&mut self, now_millis: u64) -> usize`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -1289,21 +1289,27 @@ fn the_association_table_drops_rather_than_evicting() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [~] **Step 2 (not observed): Run and confirm failure**
 
 Run: `cargo nextest run -p mvm-hostd a_datagram_round_trips`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+The implementer was stopped before reporting, so whether the red state was
+ever observed is unknown. Marked not-observed rather than done: the tests
+and the implementation both exist and pass, but nobody recorded watching
+them fail first, and a test never seen red is a test whose failure mode is
+unproven.
+
+- [x] **Step 3: Implement**
 
 One host `UdpSocket` per association keyed on the guest 4-tuple. Replies are synthesized back as IP+UDP toward the guest. DNS never reaches here — it terminates above the seam.
 
-- [ ] **Step 4: Run tests and confirm they pass**
+- [x] **Step 4: Run tests and confirm they pass**
 
 Run: `cargo nextest run -p mvm-hostd -E 'test(datagram) or test(association)'`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/netd/userspace/udp.rs

@@ -61,7 +61,22 @@ pub struct GatewayMetrics {
 impl GatewayMetrics {
     /// Count one policy refusal.
     pub fn record_deny(&mut self, code: DenyCode) {
-        *self.denies.entry(code.as_str()).or_insert(0) += 1;
+        self.record_denies(code, 1);
+    }
+
+    /// Count `count` refusals of one reason at once.
+    ///
+    /// For callers that batch: a datapath pass reports how many datagrams
+    /// it refused, not one call per datagram, so the counter does not
+    /// depend on a loop somebody has to remember to write. A zero count
+    /// still creates no label — a reason nothing has happened for must not
+    /// appear in the deny map.
+    pub fn record_denies(&mut self, code: DenyCode, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let entry = self.denies.entry(code.as_str()).or_insert(0);
+        *entry = entry.saturating_add(count);
     }
 
     /// Refusals for one reason.

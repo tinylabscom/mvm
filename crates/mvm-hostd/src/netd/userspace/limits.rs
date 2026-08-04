@@ -6,7 +6,7 @@
 //! rather than inherited from the flow table.
 
 use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
-use mvm_protocol::l3::limits::MTU_V1;
+use mvm_protocol::l3::limits::{MIN_IPV4_HEADER, MTU_V1};
 
 /// Ceiling on concurrent host sockets for one machine.
 ///
@@ -35,6 +35,71 @@ pub const DEFAULT_MAX_HALF_OPEN: usize = 64;
 
 /// How long a half-open entry waits for its host connect.
 pub const HALF_OPEN_TIMEOUT_MILLIS: u64 = 10_000;
+
+/// Concurrent UDP associations, each holding a connected host datagram
+/// socket.
+///
+/// A quarter of [`DEFAULT_MAX_HOST_SOCKETS`], the same share
+/// [`DEFAULT_MAX_HALF_OPEN`] takes, and for the same reason: an
+/// association parks a real descriptor out of the one budget TCP is also
+/// drawing on, so datagram traffic must not be able to starve connections.
+///
+/// Sized against what a workload actually opens. DNS is not in the count —
+/// it terminates above this seam and never reaches a host socket here — so
+/// what is left is QUIC, NTP, syslog, and metrics exporters: a handful of
+/// long-lived conversations per workload rather than the per-request fan-out
+/// TCP sees. Past this count the table refuses the newcomer; nothing is
+/// evicted, because evicting would let one guest flow end another's.
+pub const DEFAULT_MAX_UDP_ASSOCIATIONS: usize = 64;
+
+/// Datagrams one association may hand back in a single poll.
+///
+/// Derived, not chosen. Everything a poll produces goes onto the one
+/// machine-wide guest-bound queue, which is [`DEFAULT_QUEUE_DEPTH`] deep,
+/// so a full poll of every association at this rate exactly fills it.
+/// Anything larger would be read off a host socket only to be discarded on
+/// the way to the guest — a drop that costs a real datagram and buys
+/// nothing.
+///
+/// It bounds one pass, not the conversation: whatever is left sits in the
+/// kernel's own receive buffer and comes out on the next pass.
+pub const DATAGRAMS_PER_ASSOCIATION_POLL: usize =
+    DEFAULT_QUEUE_DEPTH / DEFAULT_MAX_UDP_ASSOCIATIONS;
+
+/// The largest UDP payload this datapath carries in either direction: an
+/// MTU-sized packet less its IPv4 and UDP headers.
+///
+/// The guest's link cannot carry more, and this datapath refuses fragments
+/// rather than reassembling them, so a larger datagram has nowhere to go.
+/// A reply above this is dropped rather than truncated — a short datagram
+/// delivered as though it were whole is corrupt data the guest has no way
+/// to detect.
+pub const MAX_DATAGRAM_PAYLOAD_BYTES: usize =
+    MTU_V1 as usize - MIN_IPV4_HEADER - mvm_protocol::l3::ip::UDP_HEADER_LEN;
+
+/// How long an association lives, measured from the datagram that opened
+/// it and never extended.
+///
+/// The figure is `mvm_net`'s datagram idle bound, so a host socket and the
+/// flow-table entry that admitted it are not reclaimed on different clocks.
+/// What is local to here is that it is **absolute**: a conversation's later
+/// datagrams do not push it out.
+///
+/// UDP offers nothing that says a conversation ended, so an association can
+/// only ever be reclaimed on a timer — and a timer traffic refreshes is one
+/// a guest holds open for the machine's whole life by sending a byte a
+/// minute, 64 descriptors at a time. The same argument that made the TCP
+/// path's deadlines absolute rather than smoltcp's refreshable
+/// `set_timeout`.
+///
+/// The cost is stated rather than hidden: a UDP conversation still running
+/// after a minute is cut, and the guest's next datagram opens a fresh
+/// association behind a different host source port, which its peer sees as
+/// a rebind. That is the same event a NAT ahead of a real host would
+/// produce, and long-lived datagram protocols already handle it. An
+/// occasional rebind is the price of not handing a guest a descriptor it
+/// can pin permanently.
+pub const ASSOCIATION_LIFETIME_MILLIS: u64 = mvm_net::l3::flow::DEFAULT_DATAGRAM_IDLE_MILLIS;
 
 /// How long a quiet established connection waits before the host starts
 /// asking whether its peer is still there.
@@ -213,18 +278,42 @@ pub const FLOW_BUFFER_BYTES: usize = SOCKET_RX_BUFFER
 /// guest-bound queue, which is already counted below.
 pub const HALF_OPEN_BUFFER_BYTES: usize = DEFAULT_MAX_HALF_OPEN * MTU_V1 as usize;
 
+/// Worst-case bytes the UDP path holds: the packets one poll synthesizes
+/// for the guest, across every association at once.
+///
+/// This is the whole userspace footprint of an association, and the
+/// arithmetic is worth reading rather than trusting. An association owns a
+/// connected host socket, an admitted `SocketAddr`, and a deadline — all
+/// inline, all tens of bytes, none of it heap. Its buffered datagrams live
+/// in the *kernel's* socket receive buffer, which is not this process's
+/// allocation and not what this ceiling counts. What this process does
+/// allocate is the batch [`super::udp::UdpAssociations::poll`] returns:
+/// [`DATAGRAMS_PER_ASSOCIATION_POLL`] packets per association, each an
+/// IP+UDP packet bounded by the link MTU.
+///
+/// 64 associations x 4 datagrams x 1500 bytes. Transient — the batch is
+/// drained onto the guest-bound queue and dropped — so this is a peak, not
+/// a resident cost, and it is counted separately from that queue because
+/// the two coexist while the batch is being moved onto it.
+pub const UDP_BUFFER_BYTES: usize =
+    DEFAULT_MAX_UDP_ASSOCIATIONS * DATAGRAMS_PER_ASSOCIATION_POLL * MTU_V1 as usize;
+
 /// Worst-case buffer footprint for one machine at the socket cap: every
 /// flow at its own bound, plus the machine-wide guest-facing device the
-/// datapath handle owns, plus the SYNs its half-open table is holding.
+/// datapath handle owns, plus the SYNs its half-open table is holding, plus
+/// the datagram batch its associations can produce in one poll.
 ///
-/// An upper bound, not an attainable state: half-open and established
-/// entries share one descriptor budget, so a machine cannot in fact hold
-/// [`DEFAULT_MAX_HOST_SOCKETS`] flows *and* [`DEFAULT_MAX_HALF_OPEN`]
-/// half-open entries at once. Summed anyway, because a ceiling that has to
-/// be reasoned about to be believed is a ceiling nobody will re-check.
+/// An upper bound, not an attainable state: half-open entries, established
+/// flows, and UDP associations share one descriptor budget, so a machine
+/// cannot in fact hold [`DEFAULT_MAX_HOST_SOCKETS`] flows *and*
+/// [`DEFAULT_MAX_HALF_OPEN`] half-open entries *and*
+/// [`DEFAULT_MAX_UDP_ASSOCIATIONS`] associations at once. Summed anyway,
+/// because a ceiling that has to be reasoned about to be believed is a
+/// ceiling nobody will re-check.
 pub const MEMORY_CEILING_BYTES: usize = DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES
     + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize
-    + HALF_OPEN_BUFFER_BYTES;
+    + HALF_OPEN_BUFFER_BYTES
+    + UDP_BUFFER_BYTES;
 
 #[cfg(test)]
 mod tests {
@@ -250,10 +339,17 @@ mod tests {
         assert_eq!(FLOW_BUFFER_BYTES, 32_768 + 144_000);
         // 64 held SYNs, each at most an MTU.
         assert_eq!(HALF_OPEN_BUFFER_BYTES, 96_000);
+        // A 256-deep guest-bound queue shared between 64 associations.
+        assert_eq!(DATAGRAMS_PER_ASSOCIATION_POLL, 4);
+        // 64 associations × 4 datagrams × 1500 bytes.
+        assert_eq!(UDP_BUFFER_BYTES, 384_000);
         // 256 flows at that, plus the handle's own 2 × 256 × 1500, plus the
-        // SYNs the half-open table holds.
-        assert_eq!(MEMORY_CEILING_BYTES, 256 * 176_768 + 768_000 + 96_000);
-        assert_eq!(MEMORY_CEILING_BYTES, 46_116_608);
+        // SYNs the half-open table holds, plus one poll's datagram batch.
+        assert_eq!(
+            MEMORY_CEILING_BYTES,
+            256 * 176_768 + 768_000 + 96_000 + 384_000
+        );
+        assert_eq!(MEMORY_CEILING_BYTES, 46_500_608);
         const {
             assert!(
                 DEFAULT_MAX_HOST_SOCKETS < mvm_net::l3::flow::DEFAULT_MAX_FLOWS,
@@ -330,5 +426,31 @@ mod tests {
     #[test]
     fn half_open_is_far_smaller_than_the_socket_cap() {
         const { assert!(DEFAULT_MAX_HALF_OPEN * 3 < DEFAULT_MAX_HOST_SOCKETS) };
+    }
+
+    /// Associations draw on the same descriptor budget TCP does, and the
+    /// batch one poll produces is emptied onto the one machine-wide
+    /// guest-bound queue. Both are properties of a *pair* of constants, so
+    /// re-sizing either has to be argued for here rather than silently
+    /// making a poll produce datagrams it can only drop.
+    #[test]
+    fn the_association_bounds_fit_the_budget_and_the_queue_they_share() {
+        const {
+            assert!(
+                DEFAULT_MAX_UDP_ASSOCIATIONS * 3 < DEFAULT_MAX_HOST_SOCKETS,
+                "associations must not be able to consume the socket budget TCP shares"
+            );
+            assert!(
+                DATAGRAMS_PER_ASSOCIATION_POLL > 0,
+                "an association that may take nothing per poll carries no traffic at all"
+            );
+            assert!(
+                DEFAULT_MAX_UDP_ASSOCIATIONS * DATAGRAMS_PER_ASSOCIATION_POLL
+                    <= DEFAULT_QUEUE_DEPTH,
+                "a poll must not read more datagrams than the queue it empties onto can hold"
+            );
+        };
+        // 1500 byte MTU less a 20 byte IPv4 header and an 8 byte UDP one.
+        assert_eq!(MAX_DATAGRAM_PAYLOAD_BYTES, 1_472);
     }
 }
