@@ -18,8 +18,10 @@ for detailed scope and acceptance criteria.
         declared-dependency path and keeping the lockfile hash pin
   - [~] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
-    - [ ] Bind the tier to an attested artifact and replace the interactive
-          feature/symbol witnesses with conformance scenarios
+    - [~] Bind the tier to an attested artifact and replace the interactive
+          feature/symbol witnesses with conformance scenarios. Grant
+          enforcement now proves a complete ProdSafe grant refuses Exec and
+          ConsoleOpen; feature-fork removal and guest-image validation remain.
 
 - [~] Plan 290 — Sensitive egress redaction
       (`specs/plans/290-sensitive-egress-redaction.md`)
