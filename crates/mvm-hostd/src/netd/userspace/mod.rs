@@ -139,8 +139,8 @@ fn read_and_raise_nofile_limit() -> libc::rlimit {
 /// Opens userspace socket datapaths.
 ///
 /// Needs no privileges at all — no `utun`, no routes, no PF anchor — which
-/// is its entire reason for existing: [`super::MacosUserspaceGateway`] is
-/// the capability declaration this type makes real.
+/// is its entire reason for existing, and why it is what every host without
+/// a usable tunnel device forwards through.
 #[derive(Debug, Default)]
 pub struct UserspaceSocketDatapath;
 

@@ -17,8 +17,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use mvm_hostd::netd::config::{NETD_READY_MARKER, NetdConfig, NetdUdsLayout};
 use mvm_hostd::netd::{
-    Gateway, GatewayConfig, GatewayEvent, GatewayState, StaticResolver, UdsGuestChannelProvider,
-    host_datapath,
+    Gateway, GatewayConfig, GatewayError, GatewayEvent, GatewayState, StaticResolver,
+    UdsGuestChannelProvider, select_host_datapath,
 };
 use mvm_net::channel::{GuestChannelProvider, GuestService};
 use mvm_net::l3::{DnsLimits, FlowLimits};
@@ -56,10 +56,17 @@ fn run() -> Result<()> {
     // The datapath is checked before the ready marker, so an unserveable
     // platform refuses the launch rather than letting the VM boot into a
     // tunnel that will never carry a packet.
-    let datapath = host_datapath();
-    datapath
+    let selection = select_host_datapath();
+    selection
+        .datapath
         .is_available()
         .map_err(|e| anyhow!("this host cannot serve the l3-vsock datapath: {e}"))?;
+    // Logged before anything can refuse for a capability the fallback does
+    // not carry, so the substitution is already in the log when the refusal
+    // names its consequence.
+    if let Some(reason) = &selection.fallback_reason {
+        eprintln!("mvm-netd: {reason}");
+    }
 
     let policy = config.to_policy().context("lowering the network policy")?;
     let ingress = config
@@ -84,8 +91,13 @@ fn run() -> Result<()> {
 
     let session = mvm_net::l3::SessionId(mint_session_id(&instance));
     let resolver = std::sync::Arc::new(StaticResolver::new());
-    let mut gateway = Gateway::open(gateway_config, session, datapath.as_ref(), resolver)
-        .context("opening the gateway")?;
+    let mut gateway = Gateway::open(
+        gateway_config,
+        session,
+        selection.datapath.as_ref(),
+        resolver,
+    )
+    .map_err(|err| explain_open_failure(err, selection.fallback_reason.as_deref()))?;
 
     // Both channels are bound and the gateway holds a datapath: it is now
     // safe to start the VM.
@@ -132,6 +144,19 @@ fn run() -> Result<()> {
     let _ = data.close();
     let _ = provider.revoke_instance(&instance);
     result
+}
+
+/// Attach the datapath fallback reason to a failure to open the gateway.
+///
+/// A capability shortfall states what the plan asked for and did not get,
+/// which is true and useless on its own: `missing: ["icmp"]` describes a
+/// symptom of a substitution the operator was never told about. Whatever
+/// caused the fallback goes in the same message as what it cost.
+fn explain_open_failure(err: GatewayError, fallback: Option<&str>) -> anyhow::Error {
+    match fallback {
+        Some(reason) => anyhow!("opening the gateway: {err}\n{reason}"),
+        None => anyhow!("opening the gateway: {err}"),
+    }
 }
 
 /// How long a poll waits before servicing the tunnel anyway.
@@ -1035,5 +1060,33 @@ mod tests {
             "the loop must expire the idle flow from the clock it was handed, \
              with no guest frame to count"
         );
+    }
+
+    fn icmp_shortfall() -> GatewayError {
+        GatewayError::Datapath(DatapathError::CapabilityShortfall {
+            backend: "selected forwarding backend",
+            missing: vec!["icmp"],
+        })
+    }
+
+    #[test]
+    fn a_capability_refusal_arrives_with_the_substitution_that_caused_it() {
+        let msg = format!(
+            "{:#}",
+            explain_open_failure(icmp_shortfall(), Some("the host fell back because of X"))
+        );
+        assert!(msg.contains("icmp"), "{msg}");
+        assert!(
+            msg.contains("the host fell back because of X"),
+            "a shortfall names a symptom; without the cause beside it the \
+             operator has nothing to act on: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_host_on_its_own_datapath_is_told_no_story_about_a_fallback() {
+        let msg = format!("{:#}", explain_open_failure(icmp_shortfall(), None));
+        assert!(msg.contains("icmp"), "{msg}");
+        assert!(msg.contains("opening the gateway"), "{msg}");
     }
 }

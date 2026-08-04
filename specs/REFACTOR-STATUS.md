@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-03
+Last updated: 2026-08-04
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -21,12 +21,20 @@ for detailed scope and acceptance criteria.
         traffic no longer stalls while the guest is quiet
   - [~] Phase B (WS1, #2112) — the smoltcp-backed `UserspaceSocketDatapath`
         itself, making `l3-vsock` work on hosts with no privileges. Tasks
-        1–12 of 16 landed: the TCP path, the deferred handshake so the
+        1–14 of 16 landed: the TCP path, the deferred handshake so the
         guest's `connect()` never reports ESTABLISHED for a destination
         that has not accepted, the destination-integrity assertion, bounded
-        queues, and deadlines on the two states where no host error can
-        ever arrive. Tasks 13–16 remain: UDP associations, backend
-        selection, the unprivileged end-to-end suite, and close-out
+        queues, deadlines on the two states where no host error can ever
+        arrive, UDP associations, and backend selection — `host_datapath()`
+        now hands back the userspace datapath on macOS and wherever the
+        Linux TUN probe fails, carrying the reason for the substitution so
+        a later capability refusal is not a bare `missing: ["icmp"]`.
+        `MacosUserspaceGateway`, the placeholder whose whole behaviour was
+        a refusal, is deleted. Tasks 15–16 remain: the unprivileged
+        end-to-end suite and close-out — plus one blocker selection
+        exposed, recorded under task 14: nothing in production drives
+        `UserspaceHandle::service`, so a fallback host's guest cannot yet
+        complete a connect
   - [x] WS1b (#2113) — fuzz the datapath ingress, and correct claim 5's
         recorded witness surface. **Gates backend selection in WS1 and the
         IPv6 guard in WS3**: the smoltcp ingress parser is unreachable by

@@ -356,13 +356,12 @@ impl DatapathHandle for LoopbackHandle {
     }
 }
 
-/// The macOS datapath.
+/// A datapath that refuses, naming the platform it refuses for.
 ///
-/// Not shipped: a `utun` device, its addresses, its routes, and an mvm-owned
-/// PF anchor all require root, and mvm has no privileged host helper to ask.
-/// Rather than degrade — and specifically rather than route macOS through a
-/// general-purpose proxy runtime — the mode is refused at admission with the
-/// reason stated.
+/// Kept for a platform that can serve no forwarding at all, and for the
+/// tests that need a backend whose availability check fails. It is not what
+/// a host without a tunnel device gets — that host forwards through
+/// userspace sockets and is told so.
 #[derive(Debug, Default)]
 pub struct UnsupportedDatapath {
     pub platform: &'static str,
@@ -394,60 +393,6 @@ impl L3Datapath for UnsupportedDatapath {
 
     fn capabilities(&self) -> ForwardingCapabilities {
         ForwardingCapabilities::NONE
-    }
-}
-
-/// The staged macOS forwarding backend: a userspace socket gateway.
-///
-/// The intended first macOS implementation translates admitted guest flows
-/// into host sockets, which needs no privileges at all — no `utun`, no
-/// routes, no PF anchor. That buys ordinary application TCP, UDP, and
-/// host-terminated DNS, which is what almost every workload wants, without
-/// a privileged helper.
-///
-/// It is **not implemented in this change**. What exists here is the
-/// capability declaration and the refusal, so that:
-///
-/// - `l3-vsock` on macOS fails at admission with a stated reason rather
-///   than booting and dropping every packet;
-/// - a plan that needs ICMP, raw IP protocols, or arbitrary-IPv4 forwarding
-///   is refused by the capability check even once the gateway lands, rather
-///   than appearing to work for TCP and silently failing elsewhere;
-/// - macOS is never quietly routed through a general-purpose proxy runtime.
-///
-/// The remaining work is a userspace TCP/UDP flow translator; the full
-/// packet backend (`utun` + scoped routes + an mvm-owned PF anchor) is a
-/// later, privileged-helper-bearing step and is a separate decision.
-#[derive(Debug, Default)]
-pub struct MacosUserspaceGateway;
-
-impl MacosUserspaceGateway {
-    fn refusal(&self) -> DatapathError {
-        DatapathError::Unsupported {
-            platform: "macos",
-            detail: "the userspace socket gateway is not implemented yet; \
-                     no privileged utun/PF backend is shipped either, so l3-vsock \
-                     is refused rather than degraded"
-                .to_string(),
-        }
-    }
-}
-
-impl L3Datapath for MacosUserspaceGateway {
-    fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
-        Err(self.refusal())
-    }
-
-    fn is_available(&self) -> Result<(), DatapathError> {
-        Err(self.refusal())
-    }
-
-    fn capabilities(&self) -> ForwardingCapabilities {
-        // What the backend *will* offer once implemented. Declared now so
-        // the admission check against it is already the real one, and so a
-        // plan needing packet-level forwarding is refused for the right
-        // reason rather than for "macOS".
-        ForwardingCapabilities::USERSPACE_SOCKETS
     }
 }
 
@@ -537,30 +482,6 @@ mod tests {
             ForwardingCapabilities::NONE.shortfall(&required),
             vec!["tcp"]
         );
-    }
-
-    #[test]
-    fn the_macos_gateway_declares_its_intended_capabilities_but_refuses_to_open() {
-        let dp = MacosUserspaceGateway;
-        assert_eq!(dp.capabilities(), ForwardingCapabilities::USERSPACE_SOCKETS);
-        assert!(dp.capabilities().tcp && dp.capabilities().udp && dp.capabilities().controlled_dns);
-        assert!(
-            !dp.capabilities().full_packet_forwarding,
-            "a socket gateway must not claim to forward arbitrary packets"
-        );
-        // Declaring capabilities is not claiming support.
-        assert!(dp.is_available().is_err());
-        assert!(dp.open(&request()).is_err());
-    }
-
-    #[test]
-    fn an_unimplemented_backend_states_why_rather_than_naming_the_platform_alone() {
-        let msg = MacosUserspaceGateway
-            .is_available()
-            .unwrap_err()
-            .to_string();
-        assert!(msg.contains("not implemented"), "{msg}");
-        assert!(msg.contains("refused rather than degraded"), "{msg}");
     }
 
     #[test]

@@ -1329,9 +1329,10 @@ Every reference, so the deletion compiles: `datapath.rs:405,407,419,527,541` and
 **Interfaces:**
 - Consumes: `UserspaceSocketDatapath` (Task 8).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn macos_selects_the_userspace_datapath() {
     let dp = host_datapath();
@@ -1343,30 +1344,122 @@ fn macos_selects_the_userspace_datapath() {
 /// for `missing: ["icmp"]` with nothing saying the fallback caused it.
 #[test]
 fn the_linux_fallback_explains_itself() {
-    let reason = fallback_reason_for_test(TunProbe::Unavailable);
-    assert!(reason.contains("CAP_NET_ADMIN"));
-    assert!(reason.contains("userspace socket translation"));
+    let reason =
+        fallback_reason(TunProbe::Unavailable).expect("a fallback must state its reason");
+    assert!(reason.contains("CAP_NET_ADMIN"), "{reason}");
+    assert!(reason.contains("userspace socket translation"), "{reason}");
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+Two deviations from the sketch, both deliberate. The helper is
+`fallback_reason`, not `fallback_reason_for_test`: a `_for_test` name on a
+shipped function reads as a test-only back door, and this one is the
+production path. And the first test is `cfg(not(target_os = "linux"))`,
+because a Linux host that *passes* its TUN probe correctly reports
+`userspace_socket_translation: false` — asserting otherwise there would
+demand a lie. Three further tests cover what the sketch left open: the
+`Available` arm explains nothing; the `Unsupported` arm does not tell a
+platform to go and acquire a capability it cannot hold; and the selected
+datapath's availability and its reason agree, so a fallback always carries a
+reason and the packet-level path never does. Two more in `mvm-netd` pin the
+message an operator actually reads:
+`a_capability_refusal_arrives_with_the_substitution_that_caused_it` and
+`a_host_on_its_own_datapath_is_told_no_story_about_a_fallback`.
 
-Run: `cargo nextest run -p mvm-hostd macos_selects_the_userspace`
-Expected: FAIL — still returns the refusing gateway.
+- [x] **Step 2: Run and confirm failure**
 
-- [ ] **Step 3: Implement**
+Run: `cargo nextest run -p mvm-hostd -E 'test(macos_selects_the_userspace_datapath) or test(the_linux_fallback_explains_itself)'`
 
-`host_datapath()` returns `LinuxDatapath` on Linux when its TUN probe succeeds, and `UserspaceSocketDatapath` otherwise — on every platform. Delete `MacosUserspaceGateway`: it was a placeholder whose entire behaviour was a refusal, and per this repo's no-back-compat posture it is removed rather than left as a shim. Carry the fallback reason into the diagnostic.
+Both observed red, and for behavioural reasons rather than compile errors:
 
-- [ ] **Step 4: Run tests and confirm they pass**
+```
+thread 'netd::tests::macos_selects_the_userspace_datapath' panicked at
+  crates/mvm-hostd/src/netd/mod.rs:105:9:
+  assertion failed: dp.is_available().is_ok()
+thread 'netd::tests::the_linux_fallback_explains_itself' panicked at
+  crates/mvm-hostd/src/netd/mod.rs:114:52:
+  a fallback must state its reason
+Summary [0.010s] 2 tests run: 0 passed, 2 failed, 1448 skipped
+```
 
-Run: `cargo nextest run -p mvm-hostd && just check-linux`
-Expected: PASS on both.
+The first is the refusing gateway, exactly as predicted. The second needed
+`TunProbe` and `fallback_reason` to exist at all before it could compile, so
+they were introduced first with the body `None` — which is not a straw man
+but literally the prior state: nothing anywhere carried a reason. The red is
+the real absence, not a placeholder arranged to fail.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 3: Implement**
+
+`select_host_datapath()` returns a `DatapathSelection` — the datapath plus
+the reason it is not the packet-level one. `LinuxDatapath` when its probe
+passes; `UserspaceSocketDatapath` otherwise, on every platform including
+Linux. `host_datapath()` survives as the thin accessor for the two callers
+that only ask whether this host can serve one at all.
+`MacosUserspaceGateway` is deleted outright, along with the two tests that
+asserted its refusal. The reason reaches the operator in two places in
+`mvm-netd`: logged at selection, before anything can refuse, and appended to
+a `Gateway::open` failure, so a capability shortfall arrives next to the
+substitution that caused it rather than as a bare `missing: ["icmp"]`.
+
+- [x] **Step 4: Run tests and confirm they pass**
+
+One mutation, to prove the diagnostic test earns its name. Dropping the
+`fallback` argument from `explain_open_failure` turns it red with exactly the
+message this task exists to prevent:
+
+```
+opening the gateway: selected forwarding backend cannot serve this plan:
+  missing icmp
+```
+
+That is the whole of what the operator would have had — true, and no use to
+anyone. Restored, and the suites below are the post-restore run.
+
+```
+cargo nextest run -p mvm-hostd
+  Summary [7.135s] 1451 tests run: 1451 passed, 2 skipped
+cargo clippy -p mvm-hostd --all-targets -- -D warnings   # clean
+cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-hostd --all-targets
+  Finished `dev` profile in 1m 01s
+xtask check-vsock-only-egress / check-uniform-vsock-egress /
+  check-claim-catalog / check-no-spec-refs-in-comments /
+  check-no-overclaim / check-honesty                     # all clean
+```
+
+`--all-targets` on the Linux cross-build rather than `just check-linux`,
+which is `--lib` only and would have compiled neither the `mvm-netd` bin nor
+this task's tests. The flaky trio (`host_agent_restart`,
+`per_tenant_isolation`, `broker_audit_round_trip`) passed in the full run.
+
+**Blocker this task exposes, and does not close.** Selecting the datapath is
+necessary but not sufficient: nothing in production calls
+`UserspaceHandle::service`, and `DatapathHandle` has no `service` method for
+`mvm-netd`'s pump loop to reach through its trait object. `service` is the
+only thing that resolves connects, promotes them into flows, polls UDP
+associations, and pumps established flows, so on a host that falls back
+today a guest's `connect()` never completes. Task 12 recorded this as
+"wiring above this seam" while the fallback was unreachable; selection is
+what makes it load-bearing. It needs a `DatapathHandle::service(now_millis)`
+defaulting to a no-op — the Linux TUN handle genuinely has nothing to do on
+a tick — called from the same tick that already ages flows and DNS
+bindings. Not folded in here because it changes a trait every backend
+implements and belongs in its own red-green cycle, but nothing downstream of
+this plan should treat the fallback as working until it lands.
+
+**Open over-claim, not this task's to fix.**
+`ForwardingCapabilities::USERSPACE_SOCKETS` declares `declared_ingress:
+true`, and nothing in the userspace datapath opens a listening socket, so
+host-initiated inbound to a declared guest port cannot be served. It is not
+merely cosmetic now that this backend is reachable: `GatewayConfig::new`
+requires `declared_ingress`, so flipping the flag to the truth would make
+every default gateway refuse on the fallback path and strand the whole
+plan. The honest fix is a listener per declared mapping, which belongs with
+the deferred "UDP ingress" item rather than here.
+
+- [x] **Step 5: Commit**
 
 ```sh
-git add crates/mvm-hostd/src/netd/
+git add crates/mvm-hostd/src/netd/ crates/mvm-hostd/src/bin/mvm-netd.rs
 git commit -m "feat(netd): select the userspace datapath, with an honest fallback reason"
 ```
 

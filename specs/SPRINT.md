@@ -815,8 +815,15 @@ updates only its own entry below.
       adds `GuestConnection::pollable_fd`, `DatapathHandle::readiness_fd`, a
       `mio` poll loop with a timer tick, an injectable clock, and a bounded
       read drain. Phase B (WS1) — the smoltcp-backed `UserspaceSocketDatapath`
-      that makes `l3-vsock` work on hosts with no privileges — remains
-      outstanding.
+      that makes `l3-vsock` work on hosts with no privileges — is at tasks
+      1–14 of 16. Selection landed: `host_datapath()` hands back the
+      userspace datapath on macOS and on any Linux host whose TUN probe
+      fails, carrying the reason with it, so a capability refusal names the
+      substitution that caused it rather than only its symptom. The
+      `MacosUserspaceGateway` placeholder is deleted. One blocker remains
+      before the fallback carries traffic: nothing in production drives
+      `UserspaceHandle::service`, so a fallback host's guest cannot complete
+      a connect — recorded under task 14 in the plan.
 
 ---
 
