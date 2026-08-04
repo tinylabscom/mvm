@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 
 use crate::security::SIG_ALG_ED25519;
 
-pub use mvm_protocol::protocol::signed_config::{SignedConfigEnvelope, SignedConfigError};
+pub use mvm_contract::protocol::signed_config::{SignedConfigEnvelope, SignedConfigError};
 
 // ============================================================================
 // Key id
@@ -38,7 +38,7 @@ pub use mvm_protocol::protocol::signed_config::{SignedConfigEnvelope, SignedConf
 /// public key bytes.
 ///
 /// A free function rather than an inherent method on
-/// [`SignedConfigEnvelope`]: that type now lives in `mvm-protocol`, and
+/// [`SignedConfigEnvelope`]: that type now lives in `mvm-contract`, and
 /// the orphan rule forbids `mvm-core` from adding inherent `impl`s to a
 /// foreign type.
 pub fn key_id_for(verifying_key: &VerifyingKey) -> String {

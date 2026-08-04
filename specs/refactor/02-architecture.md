@@ -6,7 +6,7 @@ The target crate map, binary model, feature model, directory model, backend/egre
 
 | New crate | Absorbs | Role | `no_std`? |
 |---|---|---|---|
-| **mvm-protocol** | `mvm-sdk::ir` + protocol wire types + policy types + `mvm-verify` | Workload IR, wire protocol, policy/audit types, audit-log verifier. The wasm/browser-capable core. | **yes** (`no_std` + `alloc`) |
+| **mvm-contract** | `mvm-sdk::ir` + protocol wire types + policy types + `mvm-verify` | Workload IR, wire protocol, policy/audit types, audit-log verifier. The wasm/browser-capable core. | **yes** (`no_std` + `alloc`) |
 | **mvm-core** | `mvm-core` (std parts) | Single-dir config/paths, crypto (keystore/attestation/signing), catalog. | no (std) |
 | **mvm-fs** | `mvm-ext4` + `mvm-oci` + build's rootfs/overlay/unpack | Turn any image (OCI **or** nix) into a mountable rootfs + `vmlinux`; ext4 writer/reader; runtime overlay; mount ordering/policy; OCI registry fetch + unpack. | no |
 | **mvm-net** | `mvm-network` + hostd gateway/dns + guest net/netinit | vsock transport, DNS, network-policy enforcement, secret-substitution + PII-redaction seam. | no |
@@ -27,7 +27,7 @@ Note: the crate map above and the deviations recorded in [07-progress-and-decisi
 ### Dependency direction (high → low), acyclic
 
 ```
-mvm-cli → mvm-client → mvm-runtime → {mvm-build, mvm-net, mvm-fs} → mvm-core → mvm-protocol
+mvm-cli → mvm-client → mvm-runtime → {mvm-build, mvm-net, mvm-fs} → mvm-core → mvm-contract
 ```
 
 `mvm-hostd`/`mvm-agentd` sit at the top as bin crates nothing depends on (as a library); `libkrun-sys` is a near-leaf pulled by runtime/build.
@@ -78,7 +78,7 @@ Full networking design (protocol, frame shape, data path): [03-networking.md](03
 The `VmBackend` seam, the `Workload` IR, and the one host-mediated egress/audit boundary are hypervisor-agnostic by construction — so the **same architecture also runs a workload as a wasm container, not only as a microVM**. This is a core goal, not a stretch: it is how mvm's sandbox reaches environments without KVM/HVF (CI runners, edge, the browser), and it is the clearest proof that the design *supports more backends from one model*.
 
 - **`WasmBackend`** implements the same `VmBackend`/Workload contract as libkrun/HVF/Firecracker and is selected through the same `BackendKind` registry (never string-matched). Instead of booting a Linux microVM it instantiates the workload as a WASI wasm module under a wasm runtime — host-side (`wasmtime`/`wasmer`) and, for the browser path, wasm-in-wasm.
-- **`no_std` is the enabling discipline, and it is CI-gated.** `mvm-protocol` (Workload IR + wire protocol + policy/audit DTOs + audit-log verifier) is `#![no_std] + alloc`, `unsafe_code = "forbid"`, and builds — with its tests — on `wasm32-unknown-unknown` in CI, so mvm's core contract compiles *into* the wasm sandbox and the browser (the holospaces path). Everything workload-execution-relevant stays `no_std`-clean; anything that reaches for `std`/OS/crypto-impl stays above the protocol line in `mvm-core` and up. This is exactly the boundary the `mvm-protocol` extraction has to draw (see [07-progress-and-decisions.md](07-progress-and-decisions.md)) — the wasm-container goal is now a **second, independent reason that cut must be clean**, which is why 1a-protocol and 1b are one designed pass. A `no_std` slice of `mvm-fs` (the OCI layer decoders, per holospaces) feeds the browser path.
+- **`no_std` is the enabling discipline, and it is CI-gated.** `mvm-contract` (Workload IR + wire protocol + policy/audit DTOs + audit-log verifier) is `#![no_std] + alloc`, `unsafe_code = "forbid"`, and builds — with its tests — on `wasm32-unknown-unknown` in CI, so mvm's core contract compiles *into* the wasm sandbox and the browser (the holospaces path). Everything workload-execution-relevant stays `no_std`-clean; anything that reaches for `std`/OS/crypto-impl stays above the protocol line in `mvm-core` and up. This is exactly the boundary the `mvm-contract` extraction has to draw (see [07-progress-and-decisions.md](07-progress-and-decisions.md)) — the wasm-container goal is now a **second, independent reason that cut must be clean**, which is why 1a-protocol and 1b are one designed pass. A `no_std` slice of `mvm-fs` (the OCI layer decoders, per holospaces) feeds the browser path.
 - **Same security model, WASI transport.** A wasm container has no vsock, so its egress rides WASI host-calls — but through the *same* default-deny, audited, secret-substituting host seam. The `VmDuplexTransport` abstraction ([03-networking.md](03-networking.md)) gains a WASI variant alongside Firecracker-UDS / libkrun-unixgram / HVF-vsock. A wasm guest **sees no secrets and emits no PII, identically to a microVM guest**; the chain-signed audit log covers it identically. Secrets stay host-side and are substituted only on a bound destination, `${NAME}` placeholders and all.
 - **Open design questions** (resolved when the seam is built — tracked in [06-execution-plan.md](06-execution-plan.md) WS11): what a wasm *workload* is (a user-supplied WASI module vs. an mvm-compiled workload), how the runtime-overlay/agent model maps onto a wasm instance that has no Linux init, and which slice of `mvm-fs` the browser path actually needs.
 

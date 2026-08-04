@@ -27,7 +27,7 @@ Mechanism: `serde_jcs`'s object serializer buffers entries as
 map's byte order. UTF-8 lexicographic order is identical to scalar-value order,
 not to UTF-16 code-unit order.
 
-mvm's own hand-rolled `no_std` canonicalizer (`mvm_protocol::ir::canonicalize`)
+mvm's own hand-rolled `no_std` canonicalizer (`mvm_contract::ir::canonicalize`)
 sorts keys by `str` `Ord` (also scalar-value order), so the two agree with each
 other — which is why mvm's internal `semantic-address ↔ ir-hash` equivalence
 holds byte-for-byte. This is pinned as a drift-lock in
@@ -67,7 +67,7 @@ the fix.
   that `ir::canonicalize` must adopt the same UTF-16 order in lockstep).
 - If mvm ever needs true cross-language address parity with a spec-correct JCS
   SDK, adopt the UTF-16 ordering in **both** `serde_jcs` (or its replacement)
-  and `mvm_protocol::ir::canonicalize` together, and add cross-language
+  and `mvm_contract::ir::canonicalize` together, and add cross-language
   conformance vectors.
 
 ## Sources

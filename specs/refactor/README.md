@@ -12,9 +12,9 @@ Two capabilities are **core goals** in their own right, not by-products of simpl
 
 **Phase 0 — COMPLETE.** Spec sweep, ADR consolidation (92 → 30, contiguous, absolute decision form), dead-dep drop, BDD harness scaffolding, worktree sweep, SDK relocation, `bin/dev` → `scripts/dev`, and the `${NAME}` secrets decision are all landed. Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
 
-**Phase 1a — crate consolidations (7/7) + the `mvm-protocol` extraction COMPLETE.** Crate count 20 → 14; the long pole — pulling all `plan/`+`policy/`+`protocol/` wire/policy DTOs (through the signed `ExecutionPlan` itself) down into the `#![no_std]` `mvm-protocol`, which compiles on `wasm32` — landed in 13 subagent-driven batches (design of record: [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md)). The full `nextest --workspace` behavioral gate is met (green after every move). Remaining Phase-1 absorptions: `mvm-fs` (1c) + `mvm-net` (1d) fold-ins, `mvm-build` slim (1f), `mvm-sdk` `PackageType` (1g), and the `mvm-client` facade + CLI routing (1h/1i). Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
+**Phase 1a — crate consolidations (7/7) + the `mvm-contract` extraction COMPLETE.** Crate count 20 → 14; the long pole — pulling all `plan/`+`policy/`+`protocol/` wire/policy DTOs (through the signed `ExecutionPlan` itself) down into the `#![no_std]` `mvm-contract`, which compiles on `wasm32` — landed in 13 subagent-driven batches (design of record: [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md)). The full `nextest --workspace` behavioral gate is met (green after every move). Remaining Phase-1 absorptions: `mvm-fs` (1c) + `mvm-net` (1d) fold-ins, `mvm-build` slim (1f), `mvm-sdk` `PackageType` (1g), and the `mvm-client` facade + CLI routing (1h/1i). Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
 
-**Phases 1b–4 — not started** (1b `mvm-core`-on-`mvm-protocol` is largely subsumed by the completed extraction; the `WasmBackend` seam WS11 is now unblocked).
+**Phases 1b–4 — not started** (1b `mvm-core`-on-`mvm-contract` is largely subsumed by the completed extraction; the `WasmBackend` seam WS11 is now unblocked).
 
 This status line is the single source of truth for "where are we" — if any other doc in this set implies a later stage is further along, this line wins.
 
@@ -35,7 +35,7 @@ This status line is the single source of truth for "where are we" — if any oth
 | [07-progress-and-decisions.md](07-progress-and-decisions.md) | Execution reality: what's done, what's deviated from plan and why, what's left |
 | [08-adr-consolidation.md](08-adr-consolidation.md) | The ADR consolidation: 92 legacy ADRs → 30 contiguous, and the cluster mapping |
 | [09-closeout.md](09-closeout.md) | Issue/PR disposition table and the biggest confirmed code removals |
-| [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md) | The `mvm-core` → `mvm-protocol` wire/policy DTO split — per-module cut, extraction order, byte-identity invariant (design of record for the Phase 1a long pole) |
+| [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md) | The `mvm-core` → `mvm-contract` wire/policy DTO split — per-module cut, extraction order, byte-identity invariant (design of record for the Phase 1a long pole) |
 | [11-wasm-backend.md](11-wasm-backend.md) | The `WasmBackend` seam (WS11 core goal) — scoped as the claim-free portability tier, the three resolved open questions, the seam + WASI egress transport, the POC gate, and the P1–P4 plan |
 | [12-semantic-address-pilot.md](12-semantic-address-pilot.md) | Decision-ready pilot: a UOR-ADDR-compatible `SemanticAddress` (JCS+SHA-256) for the Workload IR — additive host-side, zero new deps, the security boundary it must not cross, and the deferred `uor-addr`-crate/browser (WS11 P4) decision |
 

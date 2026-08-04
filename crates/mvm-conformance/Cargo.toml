@@ -70,7 +70,7 @@ mvm-hostd.workspace = true
 # sessions, leases, and the guest-channel service map are all pure, so the
 # scenarios decide without a VM.
 mvm-net.workspace = true
-mvm-protocol.workspace = true
+mvm-contract.workspace = true
 sha2.workspace = true
 hex.workspace = true
 # The apple-container scenarios pin the fake cached kernel with a BLAKE3

@@ -19,7 +19,7 @@ use thiserror::Error;
 use crate::plan::execution_plan::ExecutionPlan;
 use crate::plan::types::Nonce;
 
-pub use mvm_protocol::plan::validity::FreshnessClaims;
+pub use mvm_contract::plan::validity::FreshnessClaims;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PlanValidityError {
@@ -68,7 +68,7 @@ impl Freshness for ExecutionPlan {
 
 /// Fail-closed conversion of a wire [`FreshnessClaims`] to a verifiable
 /// value: absent freshness is never valid. A free function, not an
-/// inherent method — `FreshnessClaims` lives in `mvm-protocol`, and
+/// inherent method — `FreshnessClaims` lives in `mvm-contract`, and
 /// `mvm-core` may not add inherent methods to a foreign type.
 pub fn checked(claims: &FreshnessClaims) -> Result<CheckedFreshness, PlanValidityError> {
     match (claims.valid_from, claims.valid_until, claims.nonce.clone()) {

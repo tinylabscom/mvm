@@ -1,12 +1,12 @@
 //! Host-agent control protocol sign/verify — the crypto half of
-//! `mvm_protocol::protocol::broker_control`.
+//! `mvm_contract::protocol::broker_control`.
 //!
 //! The DTOs ([`RegisterVm`], [`DeregisterVm`], [`ControlRequest`],
-//! [`SignedControl`], [`ControlResponse`]) live in `mvm-protocol`, re-exported
+//! [`SignedControl`], [`ControlResponse`]) live in `mvm-contract`, re-exported
 //! here so every existing `crate::protocol::broker_control::X` path keeps
 //! resolving unchanged. `sign`/`sign_with_key_bytes`/`verify` stay in
 //! `mvm-core` as free functions — they need `serde_jcs` + `ed25519-dalek`,
-//! neither available in the no_std `mvm-protocol` crate, and the orphan rule
+//! neither available in the no_std `mvm-contract` crate, and the orphan rule
 //! forbids adding inherent `impl`s to a foreign type from here.
 //!
 //! `ControlRequest`'s serde shape is a signed byte-for-byte contract: it is
@@ -17,7 +17,7 @@
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
-pub use mvm_protocol::protocol::broker_control::{
+pub use mvm_contract::protocol::broker_control::{
     ControlRequest, ControlResponse, DeregisterVm, RegisterVm, SignedControl,
 };
 
@@ -98,7 +98,7 @@ mod tests {
             workload_chain_head_path: Some("/run/state/vm-1/audit-signer.head".into()),
             audit_signer_uds_path: Some("/run/state/vm-1/audit-signer.sock".into()),
             services_bindings: vec![
-                mvm_protocol::protocol::broker::ServiceId::parse("host.time.v1").unwrap(),
+                mvm_contract::protocol::broker::ServiceId::parse("host.time.v1").unwrap(),
             ],
         })
     }

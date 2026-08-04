@@ -4,11 +4,11 @@
 //! The DTO half (`HostPort`, `NetworkPreset`, `EgressMode`,
 //! `NetworkPolicy`, the `BANNED_SSH_PORT`/`MANDATORY_DENY_RANGES`
 //! consts, `is_banned_ssh_port`, and every pure constructor/accessor)
-//! lives in `mvm_protocol::policy::network_policy` and is re-exported
+//! lives in `mvm_contract::policy::network_policy` and is re-exported
 //! below so every existing `crate::policy::network_policy::X` /
 //! `mvm_core::policy::network_policy::X` path keeps resolving unchanged.
 
-pub use mvm_protocol::policy::network_policy::{
+pub use mvm_contract::policy::network_policy::{
     BANNED_SSH_PORT, EgressMode, HostPort, MANDATORY_DENY_RANGES, NetworkPolicy,
     NetworkPolicyParseError, NetworkPreset, is_banned_ssh_port,
 };
@@ -22,7 +22,7 @@ const SSH_BANNER_HEX_PREFIX: &str = "|5353482d|";
 /// the bridge device and FORWARD chain are already set up.
 ///
 /// A free function rather than an inherent method on [`NetworkPolicy`]:
-/// that type now lives in `mvm-protocol`, and the orphan rule forbids
+/// that type now lives in `mvm-contract`, and the orphan rule forbids
 /// `mvm-core` from adding inherent `impl`s to a foreign type.
 pub fn iptables_script(policy: &NetworkPolicy, bridge_dev: &str, guest_ip: &str) -> Option<String> {
     let rules = policy.resolve_rules()?;

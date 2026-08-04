@@ -21,10 +21,10 @@ use base64::engine::general_purpose::STANDARD as B64;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
+use mvm_contract::ir::AuthType;
 use mvm_core::crypto::secret_store::SecretStore;
 use mvm_core::plan::SecretBinding;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
-use mvm_protocol::ir::AuthType;
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
@@ -1556,8 +1556,8 @@ pub mod vsock {
 mod tests {
     use super::*;
     use crate::keyholder::{LocalResolver, SubstitutionRegistry};
+    use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_protocol::ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1583,7 +1583,7 @@ mod tests {
     }
 
     fn sigv4_ref(name: &str, hosts: &[&str], service: &str, region: &str) -> SecretRef {
-        use mvm_protocol::ir::Sigv4Params;
+        use mvm_contract::ir::Sigv4Params;
         SecretRef {
             name: name.into(),
             mount: SecretMount::Env { var: "K".into() },
@@ -1974,8 +1974,8 @@ mod tests {
 mod server_tests {
     use super::*;
     use crate::keyholder::LocalResolver;
+    use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_protocol::ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::sync::Mutex;
     use tempfile::tempdir;

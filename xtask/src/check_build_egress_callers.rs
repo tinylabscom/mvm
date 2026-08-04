@@ -47,7 +47,7 @@ const ALLOWED_CALLERS: &[&str] = &[
 
 /// The file that defines the constructor, plus its own tests. Not a "caller"
 /// in the sense this gate polices.
-const DEFINING_FILE: &str = "crates/mvm-protocol/src/policy/network_policy.rs";
+const DEFINING_FILE: &str = "crates/mvm-contract/src/policy/network_policy.rs";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let mut offenders: Vec<String> = Vec::new();
@@ -160,7 +160,7 @@ mod tests {
         let tmp = workspace_with(&[
             allowed_caller(),
             (
-                "crates/mvm-protocol/src/policy/network_policy.rs",
+                "crates/mvm-contract/src/policy/network_policy.rs",
                 "pub fn trusted_build_egress() -> Self { Self::unrestricted() }",
             ),
         ]);

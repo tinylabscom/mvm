@@ -331,7 +331,7 @@ fn main() -> Result<()> {
                 "  check-core-runtime-free                 Plan 126 B5: assert mvm-core's default build pulls no tokio"
             );
             eprintln!(
-                "  check-content-address-determinism       Assert serde_json in mvm-core/mvm-protocol has no preserve_order (stable key order → deterministic plan_id/checkpoint digests)"
+                "  check-content-address-determinism       Assert serde_json in mvm-core/mvm-contract has no preserve_order (stable key order → deterministic plan_id/checkpoint digests)"
             );
             eprintln!(
                 "  check-deferrals                         Verify no deferred TODO/FIXME/unimplemented!/placeholder markers"

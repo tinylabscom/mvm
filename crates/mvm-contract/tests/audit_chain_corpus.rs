@@ -11,7 +11,7 @@
 //! `frozen_corpus` module there — and asserts it still matches what the signer
 //! emits, so the two ends cannot drift apart silently.
 
-use mvm_protocol::verify::{AuditVerifyError, verify_audit_chain_bytes, verifying_key_from_hex};
+use mvm_contract::verify::{AuditVerifyError, verify_audit_chain_bytes, verifying_key_from_hex};
 
 const CHAIN: &str = include_str!("../../../tests/vectors/audit-chain-v1.jsonl");
 const PUBKEY_HEX: &str = include_str!("../../../tests/vectors/audit-chain-v1.pubkey");
@@ -53,7 +53,7 @@ fn content_address_labels_round_trip_through_the_mirror() {
     // that dropped or reordered labels would break fork verification while
     // still "verifying" the chain.
     let forked_line = CHAIN.lines().nth(2).expect("third entry present");
-    let envelope: mvm_protocol::verify::SignedEnvelope =
+    let envelope: mvm_contract::verify::SignedEnvelope =
         serde_json::from_str(forked_line).expect("mirror parses the forked entry");
 
     assert_eq!(

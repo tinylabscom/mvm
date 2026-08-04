@@ -1,6 +1,8 @@
 [workspace]
 members = [
-    "crates/mvm-volume-contract",
+    # Feature-gated no_std protocol and storage contracts shared by mvm and
+    # fleet orchestrators. `volume`/`local` are opt-in; the default is protocol.
+    "crates/mvm-contract",
     "crates/mvm-core",
     # plan 123 Phase A — NetworkProvider trait + provisioning/policy seam.
     # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-runtime
@@ -37,7 +39,7 @@ members = [
     # tenant policy, and cryptographic routing belong in mvmd.
     # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
     # mvm-sdk is the builder surface; the canonical Workload IR now
-    # lives in the no_std foundation crate `mvm-protocol` and is
+    # lives in the no_std foundation crate `mvm-contract` and is
     # re-exported here unchanged as `mvm_sdk::ir`. The mvm-sdk-macros
     # proc-macro crate was removed (Plan 199 C) as an orphaned empty
     # placeholder — re-add it when the
@@ -78,7 +80,6 @@ members = [
     # wasm32 (the browser transparency tool in `web/audit-verify/`,
     # which is excluded from this workspace to keep wasm-bindgen out of
     # the main build).
-    "crates/mvm-protocol",
     # The dev-only cucumber-rs BDD conformance harness: runs the Gherkin
     # scenarios under features/suites/ against the built mvmctl binary and
     # (as later suites land) the mvm-client facade. Never a dependency of
@@ -138,7 +139,7 @@ exclude = [
     "crates/mvm-fs/fuzz-ext4",
     # Browser audit-log verifier. Excluded so wasm-bindgen +
     # the wasm32 target stay out of `cargo build --workspace` and CI;
-    # it depends on the in-workspace `mvm-protocol` crate by path and is
+    # it depends on the in-workspace `mvm-contract` crate by path and is
     # built separately with `wasm-pack` (see web/audit-verify/README.md).
     "web/audit-verify",
 ]
@@ -341,11 +342,8 @@ tree-sitter-typescript = "0.23.2"
 # here because member crates can't override that on a workspace-inherited
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
-mvm-volume-contract = { path = "crates/mvm-volume-contract", version = "0.18.0", default-features = false }
+mvm-contract = { path = "crates/mvm-contract", version = "0.18.0", default-features = false, features = ["protocol"] }
 mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
-# no_std + alloc foundation crate (audit-log verifier today; Workload IR
-# + wire protocol + policy DTOs incrementally). No default features.
-mvm-protocol = { path = "crates/mvm-protocol", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }

@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use mvm_agentd::l3::{
     AgentState, MemoryTun, NetAgent, RecordingConfigurator, RecordingPrivilegeDropper,
 };
+use mvm_contract::l3::{ip, proto};
 use mvm_hostd::netd::config::{NETD_READY_MARKER, NetdConfig, NetdEgress, NetdRule, NetdUdsLayout};
 use mvm_net::channel::GuestService;
-use mvm_protocol::l3::{ip, proto};
 
 const BIN: &str = env!("CARGO_BIN_EXE_mvm-netd");
 

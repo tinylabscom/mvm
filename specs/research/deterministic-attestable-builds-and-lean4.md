@@ -74,7 +74,7 @@ This is the most important finding in the report: **mvm has already done most of
 |---|---|---|
 | Identity taxonomy (semantic / exact-byte / trust / ephemeral) | `crates/mvm-core/src/semantic_address.rs:28-41` | Explicitly enumerated in prose *and* enforced by the type system — no `From`/`Into`/`Deref` between the four families. This is exactly the four-way split §5 of the brief asks for, already articulated. |
 | Plan content-address | `crates/mvm-core/src/plan/content_id.rs:44-56` | `sha256(serde_json(plan − plan_id))`. Deterministic because `serde_json::Value` is a `BTreeMap`. |
-| Determinism gate for the above | `xtask/src/check_content_address_determinism.rs:1-56` | CI-enforced: `serde_json`'s `preserve_order` feature must not be reachable from `mvm-core`/`mvm-protocol`. |
+| Determinism gate for the above | `xtask/src/check_content_address_determinism.rs:1-56` | CI-enforced: `serde_json`'s `preserve_order` feature must not be reachable from `mvm-core`/`mvm-contract`. |
 | Signed, content-addressed workload bundle | `crates/mvm-core/src/plan/bundle.rs` | `.mvmpkg` = tar of `manifest.json` + `manifest.sig` + `artifacts/`; `BundleRegistry` is a CAS keyed by `bundle_sha256` (`bundle.rs:269-300`); out-of-band trust store; re-verified at fetch **and** at admit. |
 | SLSA-shaped provenance manifest | `crates/mvm-core/src/packs.rs:136-147, 191-199, 275-297, 346-350` | `PackManifest { inputs, outputs, provenance, trust }` where `PackInputs` already carries `flake_locks`, `derivations`, `nar_hashes`, `oci_images`, `setup_commands`, `source_revisions`, `toolchain_versions`, and `PackProvenance` carries `builder_identity`, `build_environment_identity`, `build_timestamp`, `ReproducibilityStatus`, `SbomReference`, `SignatureBundle` (Ed25519 **or** Sigstore keyless) and `TransparencyLogReference`. |
 | Verify-on-read CAS | `crates/mvm-core/src/pack_cache.rs:1-40` | Staged → verified in place → copied to a same-filesystem quarantine → atomic `rename` onto the content-addressed dir. **Every use re-verifies.** Exactly the discipline plan 276 WS6 wants, already implemented for packs. |
@@ -94,14 +94,14 @@ This is the most important finding in the report: **mvm has already done most of
 3. **`BuildProvenance` is recorded at launch, from whatever bytes are on disk.** `record_provenance` (`provenance.rs:42-65`) hashes the files it is handed and records the digests in the signed plan. That makes the launch *traceable* — the audit log says exactly which bytes booted — but it cannot *detect substitution*, because there is no independently-established expected value to compare against. This is a genuine and important distinction: it is provenance-of-record, not integrity enforcement.
 
 4. **Four different "canonical" JSON forms coexist.** **[fact]**
-   - `mvm_protocol::ir::canonicalize` — hand-rolled `no_std` JCS writer feeding `ir_hash`.
+   - `mvm_contract::ir::canonicalize` — hand-rolled `no_std` JCS writer feeding `ir_hash`.
    - `serde_jcs` over an NFC-normalized value — `SemanticAddress` (`semantic_address.rs:9-26`).
    - `serde_json::to_vec` over a `serde_json::Value` (sorted keys, but *not* JCS number/string rules) — `compute_plan_id` (`content_id.rs:47-55`).
    - `serde_json::to_vec` over the struct directly (**declaration order**, not sorted) — `canonical_manifest_bytes` (`bundle.rs:104-106`) and `PackManifest::canonical_bytes` (`packs.rs:150-152`).
 
    `canonicalizer_equivalence.rs:1-23` locks the first two together and documents the known astral-plane divergence in `serde_jcs` 0.1.0 (UTF-8 byte order vs RFC 8785's UTF-16 code-unit order). The third and fourth are unlocked. The fourth is the one that signs bundles and packs — reordering a struct field silently changes the signature payload. This is not currently a bug (Rust field order is stable per build), but it is a canonicalization hazard with no gate, and it is precisely what a Lean spec would eliminate.
 
-5. **Build actions cannot run with networking off.** `trusted_build_egress()` is literally `unrestricted()` (`crates/mvm-protocol/src/policy/network_policy.rs:262-272`), and that is the policy the builder VM runs under. The tight allowlist (`crates/mvm-build/src/egress_proxy/allowlist.rs:59-72` — pypi, npm, crates.io, cache.nixos.org, github, cdn.kernel.org, port 443 only) applies to the **app-deps install** path, not to `nix build`. There is no network-off build mode today — but the framing matters: this is an *external* goal, not an mvm invariant. ADR-001 makes the builder a Tier-2 dev/test tier where claim-10 egress enforcement is deliberately unwired, so unrestricted builder egress is a **tier decision, not a violation**. A network-off build is therefore a *proposed stricter posture* for reproducible release builds (§5.3), not a today-broken requirement. **[fact/inference]**
+5. **Build actions cannot run with networking off.** `trusted_build_egress()` is literally `unrestricted()` (`crates/mvm-contract/src/policy/network_policy.rs:262-272`), and that is the policy the builder VM runs under. The tight allowlist (`crates/mvm-build/src/egress_proxy/allowlist.rs:59-72` — pypi, npm, crates.io, cache.nixos.org, github, cdn.kernel.org, port 443 only) applies to the **app-deps install** path, not to `nix build`. There is no network-off build mode today — but the framing matters: this is an *external* goal, not an mvm invariant. ADR-001 makes the builder a Tier-2 dev/test tier where claim-10 egress enforcement is deliberately unwired, so unrestricted builder egress is a **tier decision, not a violation**. A network-off build is therefore a *proposed stricter posture* for reproducible release builds (§5.3), not a today-broken requirement. **[fact/inference]**
 
 ### 2.4 Gaps in the existing tree hasher
 
@@ -249,7 +249,7 @@ Scored 0–5 against mvm's requirements, weighted by how much mvm actually needs
 
 **Hybrid (recommended).** Wins because ~70% of it is already built and hardened in this repository. The remaining work is a typed action digest, a proper output manifest, and rewiring one cache. It preserves both existing backends, preserves the security posture, and leaves a clean seam for `mvmd`.
 
-**REAPI.** Technically the closest external fit and genuinely excellent at remote execution and action caching. Two disqualifiers as an *internal* boundary: (a) REAPI's `Directory`/`FileNode` model carries `is_executable` and nothing else — no mode bits beyond that, no uid/gid, no xattrs, no device nodes — so a bootable, verity-sealed rootfs is not expressible; (b) it brings a gRPC + protobuf runtime into a workspace that has fought hard to keep `mvm-core` async-free (`xtask check-core-runtime-free`) and `mvm-protocol` `no_std`. Correct as an *export* format at the `mvmd` boundary later.
+**REAPI.** Technically the closest external fit and genuinely excellent at remote execution and action caching. Two disqualifiers as an *internal* boundary: (a) REAPI's `Directory`/`FileNode` model carries `is_executable` and nothing else — no mode bits beyond that, no uid/gid, no xattrs, no device nodes — so a bootable, verity-sealed rootfs is not expressible; (b) it brings a gRPC + protobuf runtime into a workspace that has fought hard to keep `mvm-core` async-free (`xtask check-core-runtime-free`) and `mvm-contract` `no_std`. Correct as an *export* format at the `mvmd` boundary later.
 
 **BuildKit/LLB.** Excellent caching and first-class SLSA provenance, but it is an OCI-native system with a privileged daemon. Making containers the core abstraction contradicts ADR-001's "no Docker/containers on the runtime path". mvm already extracts what it needs from the OCI ecosystem (`mvm_fs::oci`) without adopting its execution model.
 
@@ -435,11 +435,11 @@ Making it a **Merkle tree** rather than the current flat manifest buys increment
 
 ### 6.4 Rust seams
 
-Placement follows the existing dependency direction (`mvm-cli` → `mvm-runtime` → `{mvm-fs, mvm-net, mvm-build}` → `mvm-core` → `mvm-protocol`).
+Placement follows the existing dependency direction (`mvm-cli` → `mvm-runtime` → `{mvm-fs, mvm-net, mvm-build}` → `mvm-core` → `mvm-contract`).
 
 | Proposed | Home | Relationship to existing code |
 |---|---|---|
-| `BuildPlan`, `Material`, `ExecutionPolicy` | `mvm-protocol::build` | New DTOs, `no_std`+alloc, `deny_unknown_fields`. Siblings of `plan::` types. |
+| `BuildPlan`, `Material`, `ExecutionPolicy` | `mvm-contract::build` | New DTOs, `no_std`+alloc, `deny_unknown_fields`. Siblings of `plan::` types. |
 | `ActionDigest`, `ArtifactDigest` | `mvm-core::action` | New newtypes joining the taxonomy in `semantic_address.rs:28-41`. **No `From`/`Into` to `SemanticAddress`, `CheckpointDigest`, `OciDigest`, `Sha256Hex`, or `KeyId`.** |
 | `ArtifactManifest`, `TreeNode` | `mvm-fs::manifest` | Extends `hash.rs`. Shares the walk with `rootfs::collect_nodes` — **one walk implementation**, per the repo's reuse rule. |
 | `ContentStore` (trait) | `mvm-core::pack_cache` | Generalizes the existing promote/resolve pair. |
@@ -665,7 +665,7 @@ Everything below is **assumed**, not proved:
 - The OS/hypervisor actually enforces the sandbox (guest isolation, read-only mounts, absent NIC).
 - Signing-key confidentiality (`~/.mvm/keys/host-signer.ed25519`, mode 0600) — and note that on a developer laptop this is protected by filesystem permissions alone.
 - Lean's kernel, compiler, and runtime (for the oracle path, only the *generated vectors* need be trusted, which is a much weaker assumption than trusting a Lean-compiled verifier).
-- Rust `unsafe` at the boundaries — `mvm-protocol` is `forbid(unsafe_code)`, and `mvm-net`/`mvm-client` have been converted, but the FFI layers (`libkrun-sys`, `mvm-host-services-ffi`) are not.
+- Rust `unsafe` at the boundaries — `mvm-contract` is `forbid(unsafe_code)`, and `mvm-net`/`mvm-client` have been converted, but the FFI layers (`libkrun-sys`, `mvm-host-services-ffi`) are not.
 - The compiler compiles correctly (unaddressed by anything here — this is a diverse-double-compilation problem).
 
 ### 9.5 What Lean cannot prove

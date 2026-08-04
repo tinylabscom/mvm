@@ -372,9 +372,9 @@ mod tests {
         assert_eq!(entries[4].event, "event-4");
     }
 
-    // Pin the wasm-clean `mvm_protocol::verify` re-implementation to the
+    // Pin the wasm-clean `mvm_contract::verify` re-implementation to the
     // bytes this crate actually writes. If `AuditEntry`'s serde shape
-    // drifts from `mvm_protocol::verify::MirrorEntry`, a genuine line
+    // drifts from `mvm_contract::verify::MirrorEntry`, a genuine line
     // stops verifying and this fails here (loudly, in CI) rather than
     // only in the browser tool.
     /// A signed audit chain frozen on disk, so both verifiers can be checked
@@ -543,8 +543,8 @@ mod tests {
             .unwrap();
 
         let content = std::fs::read_to_string(signer.tenant_path("tenant-a")).unwrap();
-        let verified = mvm_protocol::verify::verify_audit_chain_bytes(&content, &vk)
-            .expect("mvm-protocol's verifier must accept a chain mvm-supervisor wrote");
+        let verified = mvm_contract::verify::verify_audit_chain_bytes(&content, &vk)
+            .expect("mvm-contract's verifier must accept a chain mvm-supervisor wrote");
         assert_eq!(verified.count, 3);
         assert_eq!(verified.entries[0].event, "plan.launched");
         assert_eq!(verified.entries[0].tenant, "tenant-a");
@@ -555,7 +555,7 @@ mod tests {
         // forked line through the mirror's own SignedEnvelope and assert the
         // labels round-trip.
         let forked_line = content.lines().nth(1).expect("second entry present");
-        let mirrored: mvm_protocol::verify::SignedEnvelope =
+        let mirrored: mvm_contract::verify::SignedEnvelope =
             serde_json::from_str(forked_line).expect("mirror parses the forked entry");
         assert_eq!(
             mirrored
@@ -576,10 +576,10 @@ mod tests {
 
         // And it must reject a tampered stream just like the native path.
         let tampered = content.replacen("plan.launched", "plan.hijacked", 1);
-        let err = mvm_protocol::verify::verify_audit_chain_bytes(&tampered, &vk).unwrap_err();
+        let err = mvm_contract::verify::verify_audit_chain_bytes(&tampered, &vk).unwrap_err();
         assert_eq!(
             err,
-            mvm_protocol::verify::AuditVerifyError::SignatureInvalid { line: 0 }
+            mvm_contract::verify::AuditVerifyError::SignatureInvalid { line: 0 }
         );
     }
 

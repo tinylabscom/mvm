@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
+use mvm_contract::l3::proto;
 use mvm_core::policy::projection::Proto;
-use mvm_protocol::l3::proto;
 
 /// Most mappings one machine may declare.
 pub const DEFAULT_MAX_MAPPINGS: usize = 64;

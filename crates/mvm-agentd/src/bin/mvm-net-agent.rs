@@ -42,7 +42,7 @@ mod linux {
     use anyhow::{Context, Result};
     use mvm_agentd::l3::{KernelConfigurator, LinuxTun, NetAgent};
     use mvm_agentd::vsock::connect_host_vsock;
-    use mvm_protocol::l3::{GUEST_INTERFACE, GUEST_READY_FILE, L3_CONTROL_PORT, data_port, limits};
+    use mvm_contract::l3::{GUEST_INTERFACE, GUEST_READY_FILE, L3_CONTROL_PORT, data_port, limits};
 
     /// How long to wait for the host gateway's listeners at boot. The
     /// supervisor binds them before it starts the VM, so this only absorbs

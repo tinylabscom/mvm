@@ -21,13 +21,13 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
+use mvm_contract::l3::{MessageType, frame, ip, limits, proto};
 use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
 use mvm_hostd::netd::{LoopbackDatapath, packet::build_udp_v4};
 use mvm_net::l3::{
     AddressAllocator, DnsBindingStore, FlowTable, IngressTable, L3Admitter, L3PolicyConfig,
     OutboundVerdict,
 };
-use mvm_protocol::l3::{MessageType, frame, ip, limits, proto};
 
 const REMOTE: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
 /// Enough iterations to swamp timer granularity, small enough that the

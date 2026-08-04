@@ -36,7 +36,7 @@ const MANIFEST_COVERED_FILES: [&str; 2] = [SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_V
 
 /// In-image absolute paths the sidecar payload must carry. Kept in sync with
 /// the guest lookup path the language SDKs default to
-/// (`mvm_protocol::plan::sdk_sidecar::SDK_SIDECAR_LIB_PATH`, mounted under
+/// (`mvm_contract::plan::sdk_sidecar::SDK_SIDECAR_LIB_PATH`, mounted under
 /// `SDK_SIDECAR_GUEST_PATH`); the unit test below pins them together.
 const REQUIRED_SIDECAR_IMAGE_PATHS: &[&str] = &["/lib/libmvm_host_services.so"];
 
@@ -609,7 +609,7 @@ mod tests {
     fn required_image_paths_match_the_protocol_guest_contract() {
         assert!(
             REQUIRED_SIDECAR_IMAGE_PATHS
-                .contains(&mvm_protocol::plan::sdk_sidecar::SDK_SIDECAR_LIB_PATH),
+                .contains(&mvm_contract::plan::sdk_sidecar::SDK_SIDECAR_LIB_PATH),
             "the resolver must prove the exact path the SDKs load"
         );
     }

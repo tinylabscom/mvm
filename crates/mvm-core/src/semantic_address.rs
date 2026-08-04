@@ -2,13 +2,13 @@
 //!
 //! A [`SemanticAddress`] is `sha256(JCS(NFC(workload_ir)))` rendered as
 //! `sha256:<64-hex>` — the UOR-ADDR JSON realization (RFC 8785 JSON
-//! Canonicalization Scheme + Unicode NFC + SHA-256). Two [`mvm_protocol::ir::Workload`]
+//! Canonicalization Scheme + Unicode NFC + SHA-256). Two [`mvm_contract::ir::Workload`]
 //! documents that mean the same thing get the same address regardless of
 //! JSON key order, whitespace, or which SDK language emitted them.
 //!
 //! This module reuses `serde_jcs` (already a `mvm-core` dependency — the same
 //! canonicalizer that signs [`crate::protocol::broker_control::ControlRequest`])
-//! rather than `mvm_protocol::ir::ir_hash`. `ir_hash` canonicalizes with an
+//! rather than `mvm_contract::ir::ir_hash`. `ir_hash` canonicalizes with an
 //! in-crate, `no_std`-only JSON writer documented to sidestep full JCS number
 //! handling; it exists to fingerprint IR for launch plans and audit records,
 //! an internal use that has never needed cross-implementation conformance.
@@ -33,8 +33,8 @@
 //! archive-entry SHA-256, kernel/rootfs/initrd/verity bytes, dm-verity
 //! roothash — see [`crate::packs::Sha256Hex`] / [`crate::packs::OciDigest`]),
 //! a trust/authorization artifact (signatures, plan admission, key ids — see
-//! `mvm_protocol::plan::bundle::KeyId`), or an ephemeral/replay identifier
-//! (VM/op/session ids, plan nonces — see `mvm_protocol::plan::types::Nonce`).
+//! `mvm_contract::plan::bundle::KeyId`), or an ephemeral/replay identifier
+//! (VM/op/session ids, plan nonces — see `mvm_contract::plan::types::Nonce`).
 //! `SemanticAddress` is a distinct type with no `From`/`Into`/`Deref` to or
 //! from any of those — passing one where an exact-byte digest, key id, or
 //! nonce is expected does not compile.
@@ -46,7 +46,7 @@
 //! layer is `tar+gzip`, so the verified layer digest is κ while `diff_id` is σ,
 //! and a sealed transcript records the digest of its ciphertext.
 
-use mvm_protocol::ir::{VersionError, Workload, validate_schema_version};
+use mvm_contract::ir::{VersionError, Workload, validate_schema_version};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -189,7 +189,7 @@ fn normalize_json(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::ir::{App, Entrypoint, Image, Resources, Source};
+    use mvm_contract::ir::{App, Entrypoint, Image, Resources, Source};
 
     fn sample_workload() -> Workload {
         Workload {

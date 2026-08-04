@@ -11,7 +11,7 @@
 //! the feature resolver keeps build-dependency features (some transitive
 //! build-deps do pull it in) separate from the normal-dependency unit. This gate
 //! pins that invariant: the **non-build** `serde_json` unit reachable from
-//! `mvm-core` and `mvm-protocol` must not carry `preserve_order`. It reads the
+//! `mvm-core` and `mvm-contract` must not carry `preserve_order`. It reads the
 //! resolved feature set from `cargo tree` rather than the lockfile, because
 //! whether a feature is on is a resolution fact, not a lockfile-name fact — the
 //! same posture as `check-core-runtime-free`.
@@ -21,7 +21,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// Crates whose runtime `serde_json` unit derives content-addresses.
-const CRATES: &[&str] = &["mvm-core", "mvm-protocol"];
+const CRATES: &[&str] = &["mvm-core", "mvm-contract"];
 
 /// The feature whose presence on `serde_json` would break key-order determinism.
 const FORBIDDEN_FEATURE: &str = "preserve_order";
@@ -39,7 +39,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     if !offenders.is_empty() {
         bail!(
             "check-content-address-determinism: a non-build serde_json unit reachable from \
-             mvm-core/mvm-protocol carries the `{FORBIDDEN_FEATURE}` feature. That makes \
+             mvm-core/mvm-contract carries the `{FORBIDDEN_FEATURE}` feature. That makes \
              serde_json emit object keys in insertion order instead of sorted order, so the \
              plan_id and checkpoint content-addresses would hash non-deterministically across \
              builds. A workspace member likely enabled it on a normal (non-build) serde_json \
@@ -50,7 +50,7 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     eprintln!(
         "check-content-address-determinism: clean (serde_json reachable from \
-         mvm-core/mvm-protocol has no `{FORBIDDEN_FEATURE}`)"
+         mvm-core/mvm-contract has no `{FORBIDDEN_FEATURE}`)"
     );
     Ok(())
 }

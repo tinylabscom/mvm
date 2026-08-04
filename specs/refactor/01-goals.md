@@ -24,7 +24,7 @@ The bar: a codebase an **expert human can read and navigate**, fully tested, fol
 Two capabilities the restructure treats as **core goals**, not by-products of simplification:
 
 1. **One auditable host egress seam for every backend** — every workload backend mediates all ingress/egress through a single default-deny, audited host boundary (see [02-architecture.md](02-architecture.md) §Backend & egress model and [03-networking.md](03-networking.md)).
-2. **The same architecture produces wasm containers** — a `WasmBackend` runs a workload as a WASI wasm module, so mvm supports **more backends from one model** and reaches environments without KVM/HVF (CI, edge, the browser). This is enabled by a **`no_std` core** (`mvm-protocol`) that compiles to `wasm32`/the browser. Detail: [02-architecture.md](02-architecture.md) §Wasm-container backend & `no_std` core.
+2. **The same architecture produces wasm containers** — a `WasmBackend` runs a workload as a WASI wasm module, so mvm supports **more backends from one model** and reaches environments without KVM/HVF (CI, edge, the browser). This is enabled by a **`no_std` core** (`mvm-contract`) that compiles to `wasm32`/the browser. Detail: [02-architecture.md](02-architecture.md) §Wasm-container backend & `no_std` core.
 
 ## Reference models (studied, not copied)
 
@@ -38,7 +38,7 @@ Two capabilities the restructure treats as **core goals**, not by-products of si
 - Both surfaces build; `cargo nextest run --workspace` + `cargo test --workspace --doc` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all --check` green.
 - ~11 crates, 2 features, 1 host + 1 guest + 1 CLI binary, 1 base dir, 0 non-test files > 1500 lines, no `Command` outside the allow-list, no hardcoded IPs/ports, vsock-only egress on every workload backend with the data-governance witness passing.
 - All security claims still witnessed; live egress + boot smoke on Mac (HVF) and Linux (libkrun + FC); **sub-second launch** proven by the timed e2e; guest RAM demand-faulted for density.
-- **Wasm-container capable (core goal):** `mvm-protocol` builds and passes its tests on `wasm32-unknown-unknown` in CI, with a CI-enforced `no_std` boundary (`unsafe_code = "forbid"`); a `WasmBackend` runs a workload end-to-end through the same `VmBackend` + egress/audit/secret-substitution seam (POC-gated — the v1 bar is the seam proven, not full production parity across every wasm workload).
+- **Wasm-container capable (core goal):** `mvm-contract` builds and passes its tests on `wasm32-unknown-unknown` in CI, with a CI-enforced `no_std` boundary (`unsafe_code = "forbid"`); a `WasmBackend` runs a workload end-to-end through the same `VmBackend` + egress/audit/secret-substitution seam (POC-gated — the v1 bar is the seam proven, not full production parity across every wasm workload).
 - Workload stdout/stderr + exit code flow over vsock; the builder VM runs the same single guest binary.
 - `just bdd` green; every security claim and top-level CLI verb has a passing Gherkin scenario; `just ci` runs the BDD suite.
 - Root is ~8 dirs (see [02-architecture.md](02-architecture.md) §Top-level layout), SDKs live under `crates/`.

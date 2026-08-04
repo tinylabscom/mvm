@@ -387,14 +387,14 @@ jobs:
           mv "$tmpdir/${base}/wasmtime" "$HOME/.wasmtime/bin/wasmtime"
           echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
 
-      - name: mvm-protocol builds no_std + alloc on wasm and bare metal
+      - name: mvm-contract builds no_std + alloc on wasm and bare metal
         run: |
-          cargo +1.96.0 build -p mvm-protocol --target wasm32-unknown-unknown
-          cargo +1.96.0 build -p mvm-protocol --lib \
+          cargo +1.96.0 build -p mvm-contract --target wasm32-unknown-unknown
+          cargo +1.96.0 build -p mvm-contract --lib \
             --target riscv32imac-unknown-none-elf
 
-      - name: mvm-protocol tests run under wasm
-        run: cargo +1.96.0 test -p mvm-protocol --target wasm32-wasip1
+      - name: mvm-contract tests run under wasm
+        run: cargo +1.96.0 test -p mvm-contract --target wasm32-wasip1
 
       - name: Write a sample ext4 image
         run: cargo run -p mvm-fs --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out

@@ -6,7 +6,7 @@
 
 **Architecture:** Three layers — the `WorkloadRunner` owns authority + guards (new `spawn_standby`/`claim_standby`, a shared `ClaimGuards` sequence, and a never-promote rule); the FC driver owns VMM spawn/fork (clean-parent boot + `FcForkRestorer`); `SupervisorStandbyPool` owns bookkeeping. The Phase-1 `materialize_child_from_parent` is the CoW substrate. The parent seam is tier-agnostic (checkpoint-backed now; Plan 265 upgrades restore to live-memory).
 
-**Tech Stack:** Rust workspace; `mvm-runtime` (`workload_runner`, `standby_pool`, `firecracker`, `warm_snapshot`); `mvm-core` (`plan`, `crypto::vmgenid`); `mvm-protocol` (`protocol::vm_backend` standby types); cucumber-rs BDD (`crates/mvm-conformance`).
+**Tech Stack:** Rust workspace; `mvm-runtime` (`workload_runner`, `standby_pool`, `firecracker`, `warm_snapshot`); `mvm-core` (`plan`, `crypto::vmgenid`); `mvm-contract` (`protocol::vm_backend` standby types); cucumber-rs BDD (`crates/mvm-conformance`).
 
 Design note: `specs/notes/2026-07-27-plan-255-phase2-warm-pool-substrate-design.md` (the source of truth for the claim data-flow and the security surfaces — read it before starting).
 
@@ -293,7 +293,7 @@ git commit -m "refactor(runtime): factor runner-side endpoint spawn + overlay-co
 - Test: unit tests in `runner.rs` with the mock backend.
 
 **Interfaces:**
-- Consumes: `StandbySpec` (`crates/mvm-protocol/src/protocol/vm_backend.rs`), `SupervisorStandbyPool::record` (`crates/mvm-runtime/src/standby_pool.rs`).
+- Consumes: `StandbySpec` (`crates/mvm-contract/src/protocol/vm_backend.rs`), `SupervisorStandbyPool::record` (`crates/mvm-runtime/src/standby_pool.rs`).
 - Produces: `impl WorkloadRunner { fn spawn_standby(&self, spec: &StandbySpec) -> Result<StandbyHandle, StandbyError> }` overriding the fail-closed trait default; records an `Idle` parent carrying no workload plan and no substitution endpoint.
 
 - [ ] **Step 1: Write the failing test**

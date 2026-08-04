@@ -201,7 +201,7 @@ pub struct CliWorld {
     /// so the download path runs against local bytes and never the network.
     pub sdk_sidecar_release: Option<tempfile::TempDir>,
     /// Host-service bindings the scenario's plan carries.
-    pub sdk_sidecar_services: Vec<mvm_protocol::protocol::broker::ServiceId>,
+    pub sdk_sidecar_services: Vec<mvm_contract::protocol::broker::ServiceId>,
     /// The signed-plan fixture the sidecar scenarios gate against.
     pub sdk_sidecar_plan: Option<mvm_core::plan::ExecutionPlan>,
     /// Outcome of the most recent sidecar resolution: `Ok(None)` for "not

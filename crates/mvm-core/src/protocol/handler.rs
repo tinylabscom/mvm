@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::policy::security::AgentProfile;
 use crate::protocol::broker::{AuditDurability, CorrelationId, Idempotency, ServiceId};
 
-pub use mvm_protocol::protocol::handler::{ServiceDispatchResult, ServiceError, ServiceErrorCode};
+pub use mvm_contract::protocol::handler::{ServiceDispatchResult, ServiceError, ServiceErrorCode};
 
 /// Per-call context the supervisor hands to the handler.
 ///
@@ -167,7 +167,7 @@ mod tests {
     }
 
     // `ServiceError::not_implemented` is covered by
-    // `mvm_protocol::protocol::handler` — this module only owns the
+    // `mvm_contract::protocol::handler` — this module only owns the
     // trait + call-context shape.
 
     // `dispatch` is exercised end-to-end by the supervisor proxy crate;

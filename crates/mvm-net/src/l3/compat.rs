@@ -26,7 +26,7 @@
 //! defence-in-depth layer becomes a defence-in-name, so this module makes
 //! the combination an admission failure instead.
 
-use mvm_protocol::plan::NetworkMode;
+use mvm_contract::plan::NetworkMode;
 
 /// What a plan asks for that bears on mode compatibility.
 ///

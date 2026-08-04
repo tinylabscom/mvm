@@ -371,7 +371,7 @@ mod tests {
             guest_port: 80,
         }];
         let table = cfg.to_ingress_table().unwrap();
-        assert!(table.admits(mvm_protocol::l3::proto::TCP, 80));
+        assert!(table.admits(mvm_contract::l3::proto::TCP, 80));
     }
 
     #[test]

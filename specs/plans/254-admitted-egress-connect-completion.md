@@ -14,7 +14,7 @@
 - No spec/PR references in code comments (CI-gated): none of `Plan N`, `ADR-\d+`, `#\d+`, `W\d.` — reword to the concept.
 - Traits/enums over stringly-typed flags; exhaustive matches (no `_ =>` on our own enums).
 - No backwards-compat shims or aliases; hard-change the wire and the enum. Guest and host ship together from this one repo in the same `mvmctl`, so both sides change atomically — no protocol version bump, no capability flag.
-- `mvm-protocol` stays `#![no_std]` + `forbid(unsafe_code)` **if touched** — this plan does **not** touch it (the shared type lands in `mvm-core`, which is std).
+- `mvm-contract` stays `#![no_std]` + `forbid(unsafe_code)` **if touched** — this plan does **not** touch it (the shared type lands in `mvm-core`, which is std).
 - Before every commit: `cargo nextest run` for the touched crates **and** `cargo clippy --workspace -- -D warnings` (or at minimum `-p <touched crate>`), plus `cargo fmt --all -- --check`.
 
 ---

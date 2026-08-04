@@ -1,11 +1,11 @@
-# Increment 3 — the `mvm-core` → `mvm-protocol` wire/policy split (DESIGN)
+# Increment 3 — the `mvm-core` → `mvm-contract` wire/policy split (DESIGN)
 
 > **Status: COMPLETE.** Executed in 13 subagent-driven batches on branch
 > `plan/mvm-simplification` (Tier 0 `6577d06ba` → final `51471dd7`). Every
 > `plan/`+`policy/`+`protocol/` wire/policy DTO — leaves, the two biggest
 > single-file splits (`bundle.rs` 2360, `vm_backend.rs` 2693), and the
 > claim-8 signed `ExecutionPlan` itself — now lives in `#![no_std]+alloc`
-> `mvm-protocol`, which builds on `wasm32`; all signing/verify/synthesis/
+> `mvm-contract`, which builds on `wasm32`; all signing/verify/synthesis/
 > resolution/fs/net/tar logic stays in `mvm-core` on top. Each batch was
 > byte-identity `git show`-verified and left the workspace green (nextest
 > ~6596/0, clippy `-D`, wasm build, xtask gates). Per-batch detail is in the
@@ -14,26 +14,26 @@
 
 This is the design of record for the long pole of Phase 1a: pulling the pure
 wire/policy **DTOs** out of `mvm-core`'s `plan/` + `policy/` + `protocol/`
-down into the `#![no_std] + alloc` `mvm-protocol` crate, and leaving every
+down into the `#![no_std] + alloc` `mvm-contract` crate, and leaving every
 piece of **logic** (signing, verification, hashing, resolution, fs/net/io,
 synthesis) in `mvm-core` on top of it. It exists so the eventual execution is
 mechanical and de-risked — it does not touch code.
 
-Increments 1–2 already landed (`mvm-protocol` = audit verifier + Workload IR
+Increments 1–2 already landed (`mvm-contract` = audit verifier + Workload IR
 + entrypoint, wasm-clean). Increment 3 is the third and largest: it inverts a
 meaningful fraction of `mvm-core`'s foundation. Read
 [07-progress-and-decisions.md](07-progress-and-decisions.md) for why 1a-protocol
 and 1b are one designed pass, and [02-architecture.md](02-architecture.md)
-§Crate map for the target dependency direction (`mvm-protocol` sits *under*
+§Crate map for the target dependency direction (`mvm-contract` sits *under*
 `mvm-core`).
 
 ## The one principle
 
 **A DTO describes what a thing *is*; logic operates *on* it.** If a type is a
 serde struct/enum that names the fields of a plan / policy / frame /
-host-service message, it moves to `mvm-protocol`. If a function signs, verifies,
+host-service message, it moves to `mvm-contract`. If a function signs, verifies,
 hashes, resolves, reads the clock, touches the filesystem, opens a socket, or
-generates a script, it stays in `mvm-core`. `mvm-core` gains a `mvm-protocol`
+generates a script, it stays in `mvm-core`. `mvm-core` gains a `mvm-contract`
 dependency and its logic now operates on the relocated types.
 
 Corollary — the execution rule that makes this safe:
@@ -67,10 +67,10 @@ consequences the analysis surfaced, both resolved in favour of no churn:
 `DateTime<Utc>`'s `Serialize`/`Deserialize` emit/parse an RFC-3339 string and
 are identical under `std` and `no_std` — chrono's `clock` feature only gates
 `Utc::now()` (wall-clock reads), never serialization. So a moved type keeps its
-`DateTime<Utc>` fields and `mvm-protocol` gets a scoped, no_std chrono:
+`DateTime<Utc>` fields and `mvm-contract` gets a scoped, no_std chrono:
 
 ```toml
-# mvm-protocol/Cargo.toml — pinned directly (workspace entry carries std+clock)
+# mvm-contract/Cargo.toml — pinned directly (workspace entry carries std+clock)
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
 ```
 
@@ -89,14 +89,14 @@ regardless.
 workspace MSRV is 1.85. Every `std::net` IP type in a moving DTO
 (`network_tunnel.rs`'s handshake fields, `policy::dns_pin::DnsPin.ips:
 Vec<IpAddr>`) becomes a `core::net::` path swap — byte-identical serde, no new
-dependency. `ipnet::IpNet` is *not* pulled into `mvm-protocol`: it appears only
+dependency. `ipnet::IpNet` is *not* pulled into `mvm-contract`: it appears only
 in `policy::projection.rs` logic (`std::net`/`ipnet` free functions taking a
 caller-supplied address), which stays in `mvm-core`.
 
 ### thiserror — scoped no_std, or hand-roll
 
 `thiserror = "2"` supports `#![no_std]` via `core::error::Error` (stable since
-1.81) behind its default `std` feature. `mvm-protocol` pins it directly:
+1.81) behind its default `std` feature. `mvm-contract` pins it directly:
 
 ```toml
 thiserror = { version = "2", default-features = false }
@@ -108,7 +108,7 @@ fallback if any derive resists.
 
 ### The orphan-rule rewrite (the recurring mechanical shape)
 
-When a type moves to `mvm-protocol` but one of its inherent methods needs
+When a type moves to `mvm-contract` but one of its inherent methods needs
 crypto/std (`.verify()`, `.sign()`, `.content_hash()`, `.key_id_for()`,
 `.resolve_value()`, `.checked()`), that method **cannot** stay an inherent
 `impl` — `mvm-core` may not add inherent methods to a foreign type. It becomes
@@ -118,7 +118,7 @@ a free function in `mvm-core`:
 // before (in mvm-core, type + method together)
 impl VerbGrant { pub fn verify(&self, key: &VerifyingKey, ...) -> Result<...> }
 
-// after — type in mvm-protocol, verify() a free fn in mvm-core
+// after — type in mvm-contract, verify() a free fn in mvm-core
 mvm_core::plan::verb_grant::verify(&grant, &key, ...) -> Result<...>
 ```
 
@@ -134,7 +134,7 @@ but wide; grep each converted method before moving on.
 
 ## What moves / what stays
 
-Condensed from the three per-folder analyses. "→P" = moves to `mvm-protocol`;
+Condensed from the three per-folder analyses. "→P" = moves to `mvm-contract`;
 "core" = stays in `mvm-core`; "split" = file physically divides into a DTO half
 (→P) and a logic half (core).
 
@@ -208,7 +208,7 @@ Move as companions (all already pure/no_std-clean, cheap):
 
 Stay as core composites (the aggregate references one heavy out-of-scope type):
 
-- **`VmStartConfig` / `StandbyClaim`** — embed `policy::network_policy::NetworkPolicy`. Correct outcome: a `mvm-core` struct composed of `mvm-protocol` sub-DTOs + the policy type. Not every aggregate must move.
+- **`VmStartConfig` / `StandbyClaim`** — embed `policy::network_policy::NetworkPolicy`. Correct outcome: a `mvm-core` struct composed of `mvm-contract` sub-DTOs + the policy type. Not every aggregate must move.
 - **`VerbGrantEnvelope`** — embeds `plan::VerbGrant`; moves once `VerbGrant` (Tier 2) has landed, so sequence it after.
 - **`protocol::HostdRequest/HostdResponse`** — deferred with `protocol.rs` (domain deps), OR pulled in with a `VolumeAttach`+`VolumeMode`+`TenantNet` adjunct if we choose to widen scope; default is defer.
 
@@ -217,7 +217,7 @@ Stay as core composites (the aggregate references one heavy out-of-scope type):
 Two unrelated types named `NetworkPolicy` exist, disambiguated today only by
 module depth: `policy::policies::NetworkPolicy` (bundle/L4-rule shape) and
 `policy::network_policy::NetworkPolicy` (preset/allow-list, CLI-facing). Both
-move to `mvm-protocol`. Rename the `policies.rs` one to **`BundleNetworkPolicy`**
+move to `mvm-contract`. Rename the `policies.rs` one to **`BundleNetworkPolicy`**
 (hard rename, no alias — consistent with the no-back-compat norm) before or
 during the move so a flatter DTO namespace doesn't collide.
 
@@ -238,23 +238,23 @@ not merely postponed:
   framing (`read_frame`/`write_frame`/…). Nothing here runs in a guest or the
   browser, so it belongs with the host-side std/tokio logic, not in the
   no_std/edge crate. This draws the clean line for the whole increment:
-  **`mvm-protocol` holds the DTOs a no_std/edge/guest/browser consumer needs
+  **`mvm-contract` holds the DTOs a no_std/edge/guest/browser consumer needs
   (signed plans, audit, guest wire protocol, policy); the host-only mvmd↔hostd
   IPC and orchestration domain types stay in `mvm-core`.**
 
 The composites the draft listed as staying (`vm_backend::VmStartConfig`/
 `StandbyClaim`/`VerbGrantEnvelope`) did stay — as `mvm-core` composites over
-`mvm-protocol` sub-DTOs, alongside the `VmBackend` trait (Batch K). And all
+`mvm-contract` sub-DTOs, alongside the `VmBackend` trait (Batch K). And all
 signing/verification/synthesis/resolution/projection **logic** stays in
 `mvm-core` by design — this increment was DTO-only.
 
 ## Global extraction order (leaf-first; green after every step)
 
 Each step ends green (`cargo check --workspace --all-targets` + the wasm32
-build of `mvm-protocol`). Steps within a tier are independent.
+build of `mvm-contract`). Steps within a tier are independent.
 
 **Tier 0 — prove the config.** Add the scoped `chrono`/`thiserror` deps to
-`mvm-protocol` and spike-move `plan::verb_trust.rs` (zero cross-refs) end to
+`mvm-contract` and spike-move `plan::verb_trust.rs` (zero cross-refs) end to
 end. Confirms the no_std chrono + thiserror + wasm build before committing to
 the big files. Abort/rethink here if `DateTime<Utc>` doesn't serialize
 byte-identically under the scoped chrono.
@@ -276,7 +276,7 @@ split; `policy::{resolver, audit}` splits; then `plan::execution_plan.rs` +
 `test_support.rs` **last**, after `SnapshotAt` + the two policy types are in P.
 
 **Tier 4 — logic rewire.** Update `signing.rs`/`toml_loader.rs`/`projection*`/
-the logic halves to import from `mvm-protocol`; convert every orphaned method to
+the logic halves to import from `mvm-contract`; convert every orphaned method to
 a free fn and fix call sites; rewrite each `mod.rs` as a re-export shim so
 downstream `crate::{plan,policy,protocol}::X` paths never churn.
 
@@ -284,7 +284,7 @@ downstream `crate::{plan,policy,protocol}::X` paths never churn.
 
 Per step and at close:
 
-1. `PATH="$HOME/.cargo/bin:$PATH" cargo build -p mvm-protocol --target wasm32-unknown-unknown` → 0 (the no_std proof).
+1. `PATH="$HOME/.cargo/bin:$PATH" cargo build -p mvm-contract --target wasm32-unknown-unknown` → 0 (the no_std proof).
 2. `cargo check --workspace --all-targets` → 0.
 3. `cargo clippy --workspace --all-targets -- -D warnings` → 0, **no new `#[allow]`**.
 4. `cargo nextest run --workspace --no-fail-fast -E 'not package(mvm-runtime) and not package(mvm-conformance)'` + `-p mvm-runtime` separately (codesign SIGKILL) → 0 failed. The signed-plan / bundle / audit / substitution rejection ladders must stay green — they *are* the byte-identity regression net.
