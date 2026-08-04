@@ -49,11 +49,10 @@ tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
 # Verified audit reader surface: ed25519 for the trusted verifying key in
-# the reader's constructor and thiserror for typed refusals; the shared
-# chrono/serde/serde_json entries below serve its filters and DTOs too.
-# Already in the mvmctl closure via mvm-core/mvm-hostd.
+# the reader's constructor; the shared chrono/serde/serde_json/thiserror
+# entries below serve its filters, DTOs, and typed refusals too. Already
+# in the mvmctl closure via mvm-core/mvm-hostd.
 ed25519-dalek = { workspace = true }
-thiserror = { workspace = true }
 # Non-fatal diagnostics on the pause path (fc.paused marker best-effort write).
 # Already in the mvmctl closure via mvm-runtime, so this adds no crates.
 tracing = { workspace = true }
