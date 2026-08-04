@@ -478,10 +478,12 @@ is not a failure: retention is a ring, so a chatty workload loses its oldest
 records rather than being throttled or killed, and the loss is announced as a
 gap or truncation notice on stderr.
 
-Recording is on by default and the opt-out is `ExecutionPlan.stream_retention`
-(`persist` / `ephemeral`) — a signed plan field, deliberately not a CLI flag,
-recorded on the `plan.admitted` audit entry so an absent transcript is
-attributable rather than ambiguous.
+Recording is on by default. `ExecutionPlan.stream_retention` (`persist` /
+`ephemeral`) is a signed plan field, deliberately not a CLI flag, recorded on
+the `plan.admitted` audit entry so an absent transcript is attributable rather
+than ambiguous. Nothing selects `ephemeral` today — every production caller
+takes the default — so treat the field as the place a future opt-out will live
+rather than one you can reach now.
 
 Three limits are worth knowing before you rely on this:
 

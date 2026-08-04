@@ -145,15 +145,21 @@ the part that still holds by absence — no shell, no `do_exec`, no PTY —
 and that is all this row now claims, because that is all its three
 witnesses check.
 
-The input plane's own properties are *not* folded in here. Bytes that
-reach a running workload's stdin cannot select a program, alter argv or
-environment, or spawn anything, because the entrypoint is fixed at
-admission and the plane writes to a pipe rather than to a launcher; and
-input is refused outright without a grant in the signed plan. Every one
-of those is a *policy* decision made by host code, not a consequence of
-there being nothing to refuse, and the code that makes it has no
-production caller yet. It is stated and witnessed as Preview 17, with
-its limits, rather than asserted as part of a shipped claim.
+The input plane's own properties are *not* folded in here, and they are
+not all of one kind. Bytes that reach a running workload's stdin cannot
+select a program, alter argv or environment, or spawn anything — that
+holds by *construction*, because the entrypoint is fixed at admission
+and the plane writes to a pipe rather than to a launcher, so there is no
+mechanism to subvert rather than a rule against subverting it. What is a
+*policy* decision made by host code is narrower: whether a workload
+receives stdin at all, which is refused outright without a grant in the
+signed plan.
+
+Neither is claimed here, for different reasons. The construction half is
+excluded because this row's three witnesses do not check it. The policy
+half is excluded because the code enforcing it has no production caller
+yet. Both are stated and witnessed as Preview 17, with their limits,
+rather than asserted as part of a shipped claim.
 
 **Preview 17 — workload stdin is grant-gated, single-writer, secret-scanned
 and audited.** The host→guest input plane refuses every write unless the

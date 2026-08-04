@@ -313,6 +313,47 @@ identity, and neither gains a NIC.
 composition needs — a plan-bound output subscription and a plan-bound input
 grant — and never needs to know what a fleet is.
 
+**Four decisions settled during Phase 2, to be carried into the slice-2 spec as
+design rather than open questions.**
+
+*Redaction is a property of the edge, defaulting to redacted.* Neither global
+answer works: always-redact corrupts a pipeline where the second stage needs
+what the first computed, and never-redact makes every edge a leak path around
+the single seam. The edge declaration in the signed plan carries the posture,
+the default is redacted, and fidelity requires an explicit signed opt-out that
+is audited — the same shape as default-deny egress with an explicit grant. On an
+opt-out edge the consumer receives raw bytes while the durable transcript still
+stores the redacted copy and the divergence is audited, mirroring how `invoke`
+returns its caller's own bytes without weakening the artifact that outlives the
+run.
+
+*The single-writer lease stays; fan-in is a merge node.* Two producers
+interleaving into one stdin produce corrupted records, and stdin carries no
+framing to recover them. The lease is the honest shape of a byte stream, not a
+limitation to remove. A workflow needing fan-in expresses a merge stage, which
+is itself a workload the fleet can already declare. Because an edge consumes the
+consumer's single input slot, a consumer cannot simultaneously take operator
+stdin — that must be a diagnosable admission error, not a runtime surprise.
+
+*Backpressure: never stall, never silently lose.* With finite memory a producer
+that outruns its consumer forces a choice, and this plan already chose never to
+stall a workload. Edges therefore declare a mode. `lossy` is the default and
+behaves exactly as the reader queues do — ring, evict oldest, mark the gap,
+audit it. `reliable` keeps the producer unstalled but fails the edge loudly when
+its buffer fills, so overflow surfaces as a visible workflow error rather than
+silent record loss. A mode named `reliable` must never quietly drop records.
+
+*The topology is a DAG, enforced at admission.* A cycle breaks termination,
+because EOF propagates downstream and a workload whose input is downstream of
+itself never closes. Combined with lossy eviction a cycle does not even deadlock
+— it degrades into a silently churning loop. It also makes provenance
+unanswerable: every edge hash-chains, so a cycle leaves no order in which to ask
+what a workload actually saw. The fleet topology is declared, so the graph is
+static: validate once at admission and refuse a cyclic declaration before
+anything boots. Iteration, where genuinely needed, belongs to an external
+orchestrator re-invoking the DAG, which keeps termination and provenance
+intact.
+
 ## Error handling
 
 Failures degrade the stream, never the workload. A workload that dies because
@@ -2244,3 +2285,71 @@ production admission passes an empty `entrypoint_argv`. ADR-001 carries this as
 claim 17 at `Preview` with those limits. Closing them is a follow-on plan, and
 it must land the operator surface and a live entrypoint resolver in the same
 change — otherwise the refusal ships as a label rather than as a control.
+
+---
+
+### Task 17: make stdin reachable
+
+Added during execution. Phase 2 built every layer of the input plane and left it
+unreachable. This task closes that, and it is the task the plan's own closing
+paragraph says must land the operator surface and a live entrypoint resolver
+**together**.
+
+**The surface already exists.** `mvmctl invoke` has a `--stdin` flag that reads a
+file or `-` (mvmctl's own stdin) and sends it as a one-shot payload at call time
+(`invoke.rs:48-51`, `:266`). This task upgrades that flag from one-shot to
+streaming rather than inventing a second verb — a caller who pipes into
+`mvmctl invoke --stdin -` should have their bytes reach the workload as they
+arrive, and EOF on their end should close the workload's stdin.
+
+**Files:**
+- Modify: `crates/mvm-cli/src/commands/vm/invoke.rs` (`:221` services, `:631`
+  `stream_input`, the stdin read path)
+- Modify: `crates/mvm-runtime/src/vm/exec_builder.rs:319` (`stream_input`)
+- Modify: `crates/mvm-cli/src/commands/vm/up/admission.rs` (live entrypoint
+  resolution, replacing the empty `entrypoint_argv`)
+
+**Interfaces already in place — wire to these, do not rebuild:**
+`StreamPlane::{open_input, write_input, refresh_input, close_input}`
+(`plane.rs:263-330`); `InputGate::open(vm, &AdmittedPlan)`; `InputFrame`,
+`CloseInput`; `INPUT_GRANT_SERVICE` (`host.stream.v1`).
+
+- [ ] **Step 1: Write the failing test** — `mvmctl invoke --stdin -` against a
+  workload that echoes its stdin returns those bytes, with the input arriving
+  while the workload runs rather than as a pre-call payload. Must fail today.
+
+- [ ] **Step 2: Run to verify it fails.**
+
+- [ ] **Step 3: Grant the service.** `invoke.rs:221` passes `services:
+  Vec::new()`. Add `host.stream.v1` **only when the caller actually requested
+  streaming stdin** — a plan that did not ask for input must keep granting
+  nothing, because default-deny is the property the whole gate rests on.
+
+- [ ] **Step 4: Flip `stream_input`** at both sites, driven by the same request
+  rather than unconditionally.
+
+- [ ] **Step 5: Resolve a live entrypoint.** Every admission call site passes an
+  empty `entrypoint_argv`, so the `--prod` shell refusal cannot fire. Resolve the
+  real entrypoint at admission. **This must land in this change**, not after: a
+  grant that goes live while the refusal is still dormant ships a control that
+  cannot fire.
+
+- [ ] **Step 6: Pump, refresh, close.** Stream from the caller's stdin through
+  `write_input` in arrival order, `refresh_input` before the 30s lease expires,
+  and `close_input` on EOF so a read-to-EOF workload terminates.
+
+- [ ] **Step 7: Prove the refusals still bite.** An ungranted caller is refused
+  and audited; a shell entrypoint with the grant is refused under `--prod`; a
+  second concurrent writer is refused by the lease.
+
+- [ ] **Step 8: Update the docs and the claim.** The guide, `cli-commands.md`,
+  and ADR-001's Preview-17 limits all currently state that no operator surface
+  exists. Correct them to what ships, and reassess whether claim 17 still belongs
+  at `Preview` — the secret scan stays inert until `InputGate::bind` has a
+  production caller, so say plainly which limits closed and which did not.
+
+- [ ] **Step 9: Commit**
+
+```sh
+git commit -am "feat(cli): stream stdin into a running workload"
+```
