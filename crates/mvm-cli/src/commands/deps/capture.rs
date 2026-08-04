@@ -69,6 +69,13 @@ pub(super) fn run(args: Args) -> Result<()> {
         &args.fetch_log,
         &args.cve,
     )?;
+    mvm_core::audit_emit!(
+        DepsAudit,
+        "prior={},new={},lockfile_hash={}",
+        outcome.prior_volume_hash,
+        outcome.volume_hash,
+        outcome.lockfile_hash,
+    );
     if args.json {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
     } else {

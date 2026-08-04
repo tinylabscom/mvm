@@ -421,6 +421,7 @@ const TRUST_SUB: &[(&str, AuditPosture)] = &[
 const DEPS_SUB: &[(&str, AuditPosture)] = &[
     ("inspect", AuditPosture::ReadOnly),
     ("audit", AuditPosture::Emits("DepsAudit")),
+    ("capture", AuditPosture::Emits("DepsAudit")),
 ];
 
 /// Every top-level `mvmctl` subcommand keyed by its clap name.
