@@ -10,43 +10,37 @@
 
 ## Current issue delivery
 
-- [~] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
+- [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
       refuses tampered or unpinned source volumes, and can emit the canonical
       `Dependencies` declaration after verifying the matching lockfile pin;
-      implementation is present. Focused mvm-cli dependency tests (33) and
-      mvm-build app-dependency tests (21) pass; workspace and Linux-builder
-      gates remain.
+      implementation is merged. PR #2132 passed branch and merge-group Test,
+      Lint, and Nix gates.
 
-- [~] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
+- [x] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
       polls local source inputs, recompiles only when the semantic IR address
       or source fingerprint changes, and reports rebuild/no-op iterations.
       Long-running mode now waits for the next change after transient input or
-      compile errors, while `--once` remains fail-fast for automation.
+      compile errors, while `--once` remains fail-fast for automation. PR
+      #2109 is merged and its required queue gates passed.
 - [~] Develop → build → deploy an attested workload image — **plan 291**.
-      The agent-verb grant now derives from the admitted run shape: baked
-      entrypoints on non-dev profiles receive the attenuated ProdSafe grant,
-      while PTY and ad-hoc argv runs remain DevOnly. This prerequisite no
-      longer keys interactive reachability on an image sidecar bit. Deploy
-      attestation, the remaining tier binding, and conformance witnesses stay
-      open in WS1–WS4. A ProdSafe-grant conformance test now proves both
-      Exec and ConsoleOpen are refused; the interactive feature fork and
-      guest-image validation remain open.
-- [~] `mvmctl watch` — **plan 291 WS2**. A file-backed Workload IR watcher
-      polls local source inputs, recompiles only when the semantic IR address
-      or source fingerprint changes, and reports rebuild/no-op iterations.
-- [~] `mvmctl deploy` — **plan 291 WS1**. Local deployment now has a durable
+      WS1–WS3 are merged with their queue-gate evidence. WS4 remains open:
+      the run tier must bind to the deploy record, the universal-agent design
+      needs its security decision, and guest-image conformance must replace
+      symbol-only witnesses.
+- [x] `mvmctl deploy` — **plan 291 WS1**. Local deployment now has a durable
       sealed archive and deploy record path, with BLAKE3 as the native artifact
       identity, SHA-256 retained for interoperability, optional environment
       pinning, and fail-closed verification of an explicitly supplied sealed
       dependency volume. A configured remote now ships the record and bundle
-      through mvmd’s authenticated upload contract. Host compilation and the
-      remaining workspace gates remain pending.
-- [~] `mvmctl deps install` runs the lockfile-pinned development install in the
+      through mvmd’s authenticated upload contract. PR #2131 passed branch and
+      merge-group Test, Lint, and Nix gates and merged into main.
+- [x] `mvmctl deps install` runs the lockfile-pinned development install in the
       builder boundary and publishes its sealed volume. `mvmctl deps
       capture-live` exports bounded guest content and sidecars before handing
       them to the atomic reseal path, and requires a running development VM;
-      implementation is present, with full workspace validation pending.
+      implementation is merged through PR #2132, whose branch and merge-group
+      Test, Lint, and Nix gates passed.
 
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
