@@ -45,6 +45,8 @@ fn deploy_flags_parse_and_keep_local_output_controls() {
         "workload.json",
         "--out",
         "./sealed",
+        "--boot-artifact",
+        "./rootfs.ext4",
         "--dep-volume",
         "./deps/sha256-volume",
         "--kernel-sha256",
@@ -58,6 +60,7 @@ fn deploy_flags_parse_and_keep_local_output_controls() {
         Commands::Deploy(args)
             if args.from_ir == Some("workload.json".into())
                 && args.out == Some("./sealed".into())
+                && args.boot_artifact == Path::new("./rootfs.ext4")
                 && args.dependency_volume == Some("./deps/sha256-volume".into())
                 && args.mvmd_url == Some("https://mvmd.example".into())
     ));

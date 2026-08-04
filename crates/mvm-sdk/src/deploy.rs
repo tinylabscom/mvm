@@ -466,7 +466,11 @@ fn validate_boot_artifact_identity(
         });
     }
     for (label, value) in [("BLAKE3", &identity.blake3), ("SHA-256", &identity.sha256)] {
-        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err(DeployError::BootArtifact {
                 path: path.to_path_buf(),
                 reason: format!("{label} must be 64 hexadecimal characters"),
