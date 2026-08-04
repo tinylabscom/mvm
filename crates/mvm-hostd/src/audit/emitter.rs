@@ -830,6 +830,24 @@ impl AuditEmitter {
     }
 
     fn emit_entry(&self, entry: &AuditEntry) -> Result<()> {
+        // Callers may be synchronous (the CLI) or already inside an async
+        // runtime (an in-process `MvmClient` consumer). Building + blocking
+        // on a runtime from an async worker thread panics, so when a runtime
+        // context is present the emit runs on a short-lived scoped thread —
+        // emission is rare (a handful of entries per boot), so the thread
+        // cost is negligible.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.emit_entry_blocking(entry))
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("audit emit thread panicked"))?
+            });
+        }
+        self.emit_entry_blocking(entry)
+    }
+
+    fn emit_entry_blocking(&self, entry: &AuditEntry) -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

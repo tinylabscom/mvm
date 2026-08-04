@@ -657,6 +657,12 @@ pub struct AdmitAndStartParams<'a> {
     pub host_signer_keys_dir: Option<&'a std::path::Path>,
     pub bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
     pub policy_bundle: Option<&'a PolicyBundle>,
+    /// Optional chain-signed emitter: `plan.admitted` fires after admission
+    /// succeeds, then `plan.launched` on a successful backend start or
+    /// `plan.failed` on a start failure — the same event ordering the CLI's
+    /// up path wires by hand. Emission failures warn and never block a boot
+    /// (the chain is tamper-evidence, not part of the admission decision).
+    pub emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
 }
 
 /// Refuse a boot whose kernel is not the one the plan pinned.
@@ -729,6 +735,11 @@ pub fn admit_and_start(
         params.host_signer_keys_dir,
         params.bundle_ctx,
     )?;
+    if let Some(emitter) = params.emitter
+        && let Err(e) = emitter.emit_admitted(&admitted.plan, &admitted.signer_id)
+    {
+        tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal)");
+    }
 
     let mut config = params.config;
     populate_audit_substrate(&mut config, &admitted, params.policy_bundle)?;
@@ -736,10 +747,29 @@ pub fn admit_and_start(
     enforce_admitted_environment(&config, admitted.plan())?;
     enforce_sdk_sidecar_attachment(&config.volumes, admitted.plan())?;
 
-    let vm_id = backend
+    let backend_name = backend.name().to_string();
+    match backend
         .start(&config)
-        .context("backend start after signed-plan admission")?;
-    Ok(StartedMachine { vm_id, admitted })
+        .context("backend start after signed-plan admission")
+    {
+        Ok(vm_id) => {
+            if let Some(emitter) = params.emitter
+                && let Err(e) = emitter.emit_launched(&admitted.plan, &backend_name)
+            {
+                tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
+            }
+            Ok(StartedMachine { vm_id, admitted })
+        }
+        Err(err) => {
+            if let Some(emitter) = params.emitter
+                && let Err(e) =
+                    emitter.emit_failed(&admitted.plan, "backend-start", &format!("{err:#}"))
+            {
+                tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+            }
+            Err(err)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1977,6 +2007,7 @@ mod tests {
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
                 policy_bundle: None,
+                emitter: None,
             },
         )
         .expect("admit + boot");
@@ -2022,6 +2053,7 @@ mod tests {
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
                 policy_bundle: None,
+                emitter: None,
             },
         )
         .expect_err("unadmitted volume must refuse");

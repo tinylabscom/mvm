@@ -19,9 +19,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
-use mvm_core::vm_backend::VmStartConfig;
+use mvm_core::vm_backend::{VmStartConfig, VmVolume};
 use mvm_runtime::AnyBackend;
 
+use crate::audit::emitter::AuditEmitter;
 use crate::plan_admission::{
     AdmitAndStartParams, Clock, InMemoryNonceLedger, StartedMachine, admit_and_start,
 };
@@ -55,6 +56,15 @@ pub struct LocalRunRequest {
     /// Backend name recorded in the signed plan (`firecracker`, `libkrun`,
     /// `mock`, …) — must match the backend the caller starts.
     pub backend_name: String,
+    /// Volumes to attach. Every entry is baked into the signed plan's
+    /// `shares` (same order, `uvol{idx}` tags) and onto the launch config, so
+    /// the claim-1 admitted-shares gate passes exactly when the two agree —
+    /// no host-fs grant reaches the guest outside the signed plan.
+    pub volumes: Vec<VmVolume>,
+    /// Recorded plan intent: `true` for a transient run-to-completion
+    /// workload, `false` for a persistent machine that outlives the
+    /// admitting call.
+    pub destroy_on_exit: bool,
 }
 
 /// Admission substrate for a local run: the clock and replay ledger that drive
@@ -64,6 +74,32 @@ pub struct LocalRunContext<'a> {
     pub clock: &'a dyn Clock,
     pub ledger: &'a InMemoryNonceLedger,
     pub host_signer_keys_dir: Option<&'a Path>,
+    /// Chain-signed audit emitter for `plan.admitted` / `plan.launched` /
+    /// `plan.failed` entries around this admission. `None` skips emission
+    /// (the caller owns its own audit wiring, e.g. the CLI's up path).
+    pub emitter: Option<&'a AuditEmitter>,
+}
+
+/// Build the signed-plan host-fs grant list from the launch volume set. The
+/// `uvol{idx}` tag matches the id the backend assigns when it attaches each
+/// volume (same `VmStartConfig.volumes` order), so the admitted grants line
+/// up 1:1 with what actually gets attached — the claim-1 check compares them.
+pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostShareGrant> {
+    volumes
+        .iter()
+        .enumerate()
+        .map(|(idx, v)| mvm_core::plan::HostShareGrant {
+            tag: format!("uvol{idx}"),
+            host_path: v.host.clone(),
+            guest_path: v.guest.clone(),
+            kind: match v.kind {
+                mvm_core::vm_backend::VmVolumeKind::Disk => mvm_core::plan::ShareKind::Disk,
+                mvm_core::vm_backend::VmVolumeKind::DirShare => mvm_core::plan::ShareKind::DirShare,
+            },
+            read_only: v.read_only,
+            encrypted: v.encrypted,
+        })
+        .collect()
 }
 
 /// Admit `req` through the signed-plan gate and boot it on `backend`.
@@ -115,12 +151,12 @@ pub fn admit_and_boot_local(
         disk_mib: 0,
         boot_timeout_secs: 60,
         exec_timeout_secs: 0,
-        // A persistent local machine outlives the admitting call, so it must
-        // not be torn down when this function returns.
-        destroy_on_exit: false,
+        // A persistent local machine outlives the admitting call; a transient
+        // run-to-completion workload records the teardown intent.
+        destroy_on_exit: req.destroy_on_exit,
         bundle_pin: None,
         deps_volume: None,
-        shares: Vec::new(),
+        shares: shares_from_vm_volumes(&req.volumes),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
         audit_labels: Default::default(),
@@ -138,6 +174,7 @@ pub fn admit_and_boot_local(
         roothash: req.roothash.clone(),
         cpus: req.cpus,
         memory_mib: req.mem_mib,
+        volumes: req.volumes.clone(),
         tenant_id: Some(LOCAL_TENANT.to_string()),
         runtime_source_policy: mvm_core::vm_backend::select_runtime_source_policy(
             mvm_core::vm_backend::RuntimeSourcePolicySelection {
@@ -161,6 +198,7 @@ pub fn admit_and_boot_local(
             host_signer_keys_dir: ctx.host_signer_keys_dir,
             bundle_ctx: None,
             policy_bundle: None,
+            emitter: ctx.emitter,
         },
     )
 }
@@ -195,6 +233,8 @@ mod tests {
             cpus: 1,
             mem_mib: 128,
             backend_name: "mock".into(),
+            volumes: Vec::new(),
+            destroy_on_exit: false,
         };
 
         let started = admit_and_boot_local(
@@ -204,6 +244,7 @@ mod tests {
                 clock: &clock,
                 ledger: &ledger,
                 host_signer_keys_dir: Some(keys.path()),
+                emitter: None,
             },
         )
         .expect("admit + boot over mock");
@@ -216,6 +257,104 @@ mod tests {
         assert!(!started.admitted.signer_id().is_empty());
         assert_eq!(started.admitted.plan().image.sha256.len(), 64);
         assert_eq!(started.admitted.plan().runtime_profile.0, "mock");
+    }
+
+    /// The launch volume set is baked into the signed plan's shares in the
+    /// same order and with matching tags/kinds, so the claim-1 gate passes
+    /// exactly when the attached volumes are the admitted ones.
+    #[test]
+    fn shares_mirror_the_launch_volume_set() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let volumes = vec![
+            VmVolume {
+                host: "/h/work.ext4".into(),
+                guest: "/data/work".into(),
+                size: "16M".into(),
+                read_only: true,
+                kind: VmVolumeKind::Disk,
+                encrypted: false,
+            },
+            VmVolume {
+                host: "/h/src".into(),
+                guest: "/data/src".into(),
+                size: String::new(),
+                read_only: false,
+                kind: VmVolumeKind::DirShare,
+                encrypted: false,
+            },
+        ];
+        let shares = shares_from_vm_volumes(&volumes);
+        assert_eq!(shares.len(), 2);
+        assert_eq!(shares[0].tag, "uvol0");
+        assert_eq!(shares[0].kind, mvm_core::plan::ShareKind::Disk);
+        assert!(shares[0].read_only);
+        assert_eq!(shares[1].tag, "uvol1");
+        assert_eq!(shares[1].kind, mvm_core::plan::ShareKind::DirShare);
+        assert_eq!(shares[1].guest_path, "/data/src");
+        assert!(shares_from_vm_volumes(&[]).is_empty());
+    }
+
+    /// A boot with a volume passes the claim-1 admitted-shares gate (the
+    /// plan's shares and the config's volumes come from one source), and the
+    /// wired emitter records the admitted → launched pair.
+    #[test]
+    fn admit_and_boot_local_admits_volumes_and_emits_chain_entries() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let data = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", data.path());
+        let keys = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable\n").unwrap();
+        let volume = data.path().join("work.ext4");
+        std::fs::write(&volume, b"volume-bytes\n").unwrap();
+
+        let signer = crate::audit::host_keypair::load_or_init_at(keys.path()).unwrap();
+        let emitter =
+            crate::audit::emitter::AuditEmitter::with_dir(signer.signing, audit.path()).unwrap();
+
+        let backend = AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let clock = SystemClock;
+        let req = LocalRunRequest {
+            name: "local-run-volumes".into(),
+            rootfs_path: rootfs,
+            kernel_path: None,
+            verity_path: None,
+            roothash: None,
+            cpus: 1,
+            mem_mib: 128,
+            backend_name: "mock".into(),
+            volumes: vec![VmVolume {
+                host: volume.to_string_lossy().into_owned(),
+                guest: "/data/work".into(),
+                size: String::new(),
+                read_only: true,
+                kind: VmVolumeKind::Disk,
+                encrypted: false,
+            }],
+            destroy_on_exit: true,
+        };
+        let started = admit_and_boot_local(
+            &backend,
+            &req,
+            LocalRunContext {
+                clock: &clock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(keys.path()),
+                emitter: Some(&emitter),
+            },
+        )
+        .expect("admitted boot with a volume");
+        assert_eq!(started.admitted.plan.shares.len(), 1);
+        assert_eq!(started.admitted.plan.shares[0].guest_path, "/data/work");
+        assert!(started.admitted.plan.post_run.destroy_on_exit);
+
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert!(chain.contains("plan.admitted"), "got: {chain}");
+        assert!(chain.contains("plan.launched"), "got: {chain}");
     }
 
     /// A missing rootfs fails at the hash step, before any admission or boot.
@@ -234,6 +373,8 @@ mod tests {
             cpus: 1,
             mem_mib: 128,
             backend_name: "mock".into(),
+            volumes: Vec::new(),
+            destroy_on_exit: false,
         };
         let err = admit_and_boot_local(
             &backend,
@@ -242,6 +383,7 @@ mod tests {
                 clock: &clock,
                 ledger: &ledger,
                 host_signer_keys_dir: Some(keys.path()),
+                emitter: None,
             },
         )
         .unwrap_err();
