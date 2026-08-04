@@ -24,6 +24,16 @@ pub struct GatewayMetrics {
     pub stale_session_frames: u64,
     pub queue_drops_ingress: u64,
     pub queue_drops_egress: u64,
+    /// Resets the datapath could not put in front of the guest.
+    ///
+    /// Its own counter rather than a share of `queue_drops_egress`, because
+    /// the two mean opposite things to whoever reads them: a dropped data
+    /// segment costs a retransmission and recovers on its own, while a
+    /// dropped reset is a guest that waits on a dead connection until its
+    /// own timeout — the exact failure the reset exists to prevent. A
+    /// number that mixes a recoverable symptom with an unrecoverable one
+    /// tells an operator nothing.
+    pub resets_undelivered: u64,
     /// Guest TCP segments for a connection the datapath has no state for.
     ///
     /// Its own counter rather than a deny or a datapath error, because the

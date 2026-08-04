@@ -129,6 +129,29 @@ impl GuestDevice {
         PushOutcome::Queued
     }
 
+    /// Guarantee room for one more guest-bound packet, evicting the oldest
+    /// queued one if that is what it takes. Reports whether it evicted.
+    ///
+    /// The one place the drop-the-newcomer rule is inverted, and only for a
+    /// reset. A reset that does not reach the guest is a connection the
+    /// guest waits on until its own timeout — minutes of a wedged
+    /// application — while the segment evicted to make room belongs to a
+    /// stack that is being aborted in the same breath and will never
+    /// retransmit it. Losing the reset costs strictly more than losing the
+    /// data, so on a flow that is ending the reset wins.
+    ///
+    /// Counted as a drop like any other, because that is what it is.
+    pub fn reserve_for_reset(&mut self) -> bool {
+        if self.to_guest.len() < self.depths.to_guest {
+            return false;
+        }
+        let evicted = self.to_guest.pop_front().is_some();
+        if evicted {
+            self.dropped_to_guest = self.dropped_to_guest.saturating_add(1);
+        }
+        evicted
+    }
+
     /// Drain one packet the stack produced for the guest, oldest first.
     pub fn pop_for_guest(&mut self) -> Option<Vec<u8>> {
         self.to_guest.pop_front()
@@ -372,6 +395,27 @@ mod tests {
         );
         assert_eq!(dev.pop_for_guest(), Some(ipv4_stub()));
         assert_eq!(dev.pending_to_guest(), 1);
+    }
+
+    /// A full queue must not be able to swallow a reset: that is a guest
+    /// hanging to its own timeout, against a data segment the aborted stack
+    /// was never going to retransmit.
+    #[test]
+    fn room_is_made_for_a_reset_rather_than_losing_it() {
+        let mut dev = GuestDevice::new(1500, QueueDepths::symmetric(2));
+        assert!(!dev.reserve_for_reset(), "a queue with room evicts nothing");
+        dev.push_to_guest(ipv4_stub());
+        let mut second = ipv4_stub();
+        second[19] = 0x09;
+        dev.push_to_guest(second.clone());
+        assert!(dev.reserve_for_reset(), "a full queue must make room");
+        assert_eq!(dev.pending_to_guest(), 1);
+        assert_eq!(
+            dev.pop_for_guest(),
+            Some(second),
+            "the oldest goes; what was queued behind it stays"
+        );
+        assert_eq!(dev.dropped_to_guest(), 1, "and the eviction is counted");
     }
 
     /// The two depths are not interchangeable, so a device built with

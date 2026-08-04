@@ -615,7 +615,10 @@ fn fold_throughput(metrics: &mut GatewayMetrics, stats: &tcp::PumpStats) {
 
 #[cfg(test)]
 mod tests {
-    use super::limits::RESET_DELIVERY_TIMEOUT_MILLIS;
+    use super::limits::{
+        HALF_CLOSED_TIMEOUT_MILLIS, HANDSHAKE_COMPLETION_TIMEOUT_MILLIS,
+        RESET_DELIVERY_TIMEOUT_MILLIS,
+    };
     use super::*;
     use crate::netd::test_packets::v4_packet;
     use mvm_net::l3::flow::DEFAULT_TCP_IDLE_MILLIS;
@@ -1113,6 +1116,72 @@ mod tests {
         let ip = smoltcp::wire::Ipv4Packet::new_checked(&buf[..n]).expect("ipv4");
         let seg = smoltcp::wire::TcpPacket::new_checked(ip.payload()).expect("tcp");
         assert!(seg.rst(), "the packet held back must be the reset itself");
+    }
+
+    /// **Scenario A at the handle.** The descriptor was never the whole
+    /// cost: a flow entry holds ~176 KB of buffers and a slot in the socket
+    /// budget. A guest that opens its budget in handshakes it never
+    /// completes would take the datapath out of service permanently, and
+    /// every one of those flows is in a state where no host error can ever
+    /// arrive to end it.
+    ///
+    /// The fixture's flows are exactly that state: `handle_with_open_flows`
+    /// replays each SYN but never answers the SYN-ACK.
+    #[test]
+    fn handshakes_the_guest_never_completes_do_not_pin_the_budget() {
+        let (mut handle, _held) = handle_with_open_flows(3);
+        assert_eq!(handle.open_socket_count(), 3);
+
+        // Past the bound by the fixture's own drive window, since which
+        // pass a loopback connect resolves on is the kernel's business.
+        let past = HANDSHAKE_COMPLETION_TIMEOUT_MILLIS + SERVICE_ATTEMPTS as u64;
+        handle.service(past).expect("past the handshake bound");
+
+        let mut buf = [0u8; MTU_V1 as usize];
+        assert!(
+            drain_carries_a_reset(&mut handle, &mut buf),
+            "each guest is told, not left waiting on a handshake nobody will finish"
+        );
+        handle.service(past + 1).expect("service");
+        assert_eq!(
+            handle.open_socket_count(),
+            0,
+            "the budget slots must come back, not just the descriptors"
+        );
+        assert!(handle.flows.is_empty());
+    }
+
+    /// **Scenario B at the handle.** Once the peer stops sending, the flow
+    /// stops reading that socket, so the keepalive can never fire on it.
+    #[test]
+    fn a_half_closed_flow_the_guest_never_finishes_does_not_pin_the_budget() {
+        let (mut handle, _dst, peer, _ack) = handle_with_an_established_conversation();
+        peer.shutdown(std::net::Shutdown::Write)
+            .expect("the peer closes its sending half");
+        assert!(
+            drive_until(&mut handle, |h| h
+                .flows
+                .values()
+                .all(EstablishedFlow::peer_finished_sending)),
+            "the fixture must reach the half-closed state it is testing"
+        );
+        assert_eq!(handle.open_socket_count(), 1);
+
+        let past = HALF_CLOSED_TIMEOUT_MILLIS + SERVICE_ATTEMPTS as u64;
+        handle.service(past).expect("past the half-closed bound");
+        let mut buf = [0u8; MTU_V1 as usize];
+        for _ in 0..SERVICE_ATTEMPTS {
+            if handle.recv_from_network(&mut buf).is_err() {
+                break;
+            }
+        }
+        handle.service(past + 1).expect("service");
+        assert_eq!(
+            handle.open_socket_count(),
+            0,
+            "a half-closed flow the guest never finishes must not be permanent"
+        );
+        assert!(handle.flows.is_empty());
     }
 
     /// **The streaming case.** A Server-Sent Events stream between events,

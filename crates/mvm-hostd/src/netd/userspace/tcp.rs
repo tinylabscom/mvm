@@ -48,7 +48,7 @@ use mvm_net::l3::admit::DenyCode;
 use mvm_net::l3::flow::FlowKey;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::socket::tcp::{RecvError, Socket as TcpSocket, SocketBuffer};
+use smoltcp::socket::tcp::{RecvError, Socket as TcpSocket, SocketBuffer, State};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpListenEndpoint, IpProtocol, Ipv4Packet, Ipv4Repr,
@@ -62,9 +62,9 @@ use crate::netd::metrics::GatewayMetrics;
 use super::accept_mtu;
 use super::device::{GuestDevice, PushOutcome, QueueDepths};
 use super::limits::{
-    FLOW_RX_QUEUE_DEPTH, FLOW_TX_QUEUE_DEPTH, HALF_OPEN_TIMEOUT_MILLIS, KEEPALIVE_IDLE_SECS,
-    KEEPALIVE_PROBE_INTERVAL_SECS, KEEPALIVE_PROBE_RETRIES, RESET_DELIVERY_TIMEOUT_MILLIS,
-    SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
+    FLOW_RX_QUEUE_DEPTH, FLOW_TX_QUEUE_DEPTH, HALF_CLOSED_TIMEOUT_MILLIS, HALF_OPEN_TIMEOUT_MILLIS,
+    HANDSHAKE_COMPLETION_TIMEOUT_MILLIS, KEEPALIVE_IDLE_SECS, KEEPALIVE_PROBE_INTERVAL_SECS,
+    KEEPALIVE_PROBE_RETRIES, RESET_DELIVERY_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
 };
 
 /// A guest SYN held back from the stack while its host connect runs.
@@ -459,6 +459,19 @@ pub struct EstablishedFlow {
     /// clock at which it goes out regardless. `Some` means owed.
     /// See [`Self::deliver_then_reset`].
     reset_deadline: Option<u64>,
+    /// The clock by which this flow must have made a piece of progress only
+    /// the *guest* can make: completing the handshake the host side already
+    /// finished, or finishing up after the peer stopped sending.
+    ///
+    /// `None` for a flow that is established and two-way — the ordinary
+    /// case, which is deliberately ageless, because a quiet connection is
+    /// not a faulty one. It is armed only in the two states where no host
+    /// error can ever arrive to end the flow, and where nothing else would.
+    /// See [`Self::retune_progress_deadline`].
+    progress_deadline: Option<u64>,
+    /// A reset was emitted into a queue that could not take it. Folded into
+    /// the machine's counters by [`Self::pump`].
+    reset_undelivered: bool,
 }
 
 impl EstablishedFlow {
@@ -569,6 +582,10 @@ impl EstablishedFlow {
             host_error: None,
             last_polled_millis: now_millis,
             reset_deadline: None,
+            // Armed from the start: the guest has been sent a SYN-ACK and
+            // owes an answer. Disarmed the moment it gives one.
+            progress_deadline: Some(now_millis.saturating_add(HANDSHAKE_COMPLETION_TIMEOUT_MILLIS)),
+            reset_undelivered: false,
         })
     }
 
@@ -631,7 +648,9 @@ impl EstablishedFlow {
             self.guest_fin_seen = true;
         }
         self.forward_guest_fin();
+        let peer_was_finished = self.host_read_eof;
         self.host_to_guest(&mut stats);
+        let peer_just_finished = self.host_read_eof && !peer_was_finished;
         // A host socket that failed is a conversation that cannot continue,
         // in either direction. Told here rather than left for a caller to
         // notice, because the caller that does not notice leaves the guest
@@ -641,9 +660,14 @@ impl EstablishedFlow {
         if let Some(kind) = self.host_error {
             self.on_host_error(kind);
         }
+        self.retune_progress_deadline(now_millis, peer_just_finished);
+        self.expire_if_overdue(now_millis);
         // Emit what the two directions produced, so the guest's ACKs and
         // the peer's bytes leave in the pass they arrived in.
         self.poll(now_millis);
+        if std::mem::take(&mut self.reset_undelivered) {
+            metrics.resets_undelivered = metrics.resets_undelivered.saturating_add(1);
+        }
         // A delta rather than an assignment: the flow's own counter is
         // cumulative and several flows share one metrics record.
         metrics.queue_drops_egress = metrics
@@ -767,11 +791,88 @@ impl EstablishedFlow {
         if self.socket().send_queue() > 0 && !overdue {
             return;
         }
+        self.emit_reset();
+        self.reset_deadline = None;
+    }
+
+    /// Put the reset in front of the guest.
+    ///
+    /// smoltcp emits one reset for an aborted connection and then forgets
+    /// the endpoint, so a reset that lands in a full queue is not
+    /// regenerated on the next pass — it is simply gone, and the guest
+    /// waits on a dead connection until its own timeout. That is the
+    /// failure this whole path exists to prevent, so room is made for it
+    /// rather than hoped for, and a reset that still does not make it is
+    /// counted under its own name instead of blending into the ordinary
+    /// queue drops.
+    fn emit_reset(&mut self) {
+        self.device.reserve_for_reset();
+        let queued_before = self.device.pending_to_guest();
         self.sockets.get_mut::<TcpSocket>(self.handle).abort();
         // Aborting only moves the socket's state; the reset itself leaves
         // on the next poll.
         self.poll(self.last_polled_millis);
-        self.reset_deadline = None;
+        if self.device.pending_to_guest() <= queued_before {
+            self.reset_undelivered = true;
+        }
+    }
+
+    /// Whether the guest has answered the handshake the host side
+    /// completed.
+    ///
+    /// Matched exhaustively rather than by excluding the three
+    /// pre-established states: if smoltcp ever grows another, this must
+    /// fail to compile so somebody classifies it, instead of silently
+    /// treating an unknown state as a finished handshake and disarming the
+    /// only bound the flow has.
+    fn handshake_complete(&self) -> bool {
+        match self.socket().state() {
+            State::Listen | State::SynSent | State::SynReceived => false,
+            State::Established
+            | State::FinWait1
+            | State::FinWait2
+            | State::CloseWait
+            | State::Closing
+            | State::LastAck
+            | State::TimeWait
+            | State::Closed => true,
+        }
+    }
+
+    /// Arm or disarm the bound on progress only the guest can make.
+    ///
+    /// Every deadline here is absolute and taken once, never extended by
+    /// anything the guest does. A bound a guest can postpone by looking
+    /// busy is not a bound — the same argument that chose an absolute
+    /// deadline over smoltcp's `set_timeout` for the reset path.
+    fn retune_progress_deadline(&mut self, now_millis: u64, peer_just_finished: bool) {
+        if peer_just_finished {
+            // The peer will send nothing more, so nothing on this socket
+            // can fail again: the keepalive that would have caught a dead
+            // peer is now unreachable, because this flow never reads that
+            // socket again.
+            self.progress_deadline = Some(now_millis.saturating_add(HALF_CLOSED_TIMEOUT_MILLIS));
+        } else if !self.host_read_eof && self.handshake_complete() {
+            // An established, two-way conversation. Ageless on purpose:
+            // this datapath carries streams that are quiet by design.
+            self.progress_deadline = None;
+        }
+    }
+
+    /// End a flow that has run out of the time it was given.
+    fn expire_if_overdue(&mut self, now_millis: u64) {
+        let Some(deadline) = self.progress_deadline else {
+            return;
+        };
+        if now_millis < deadline {
+            return;
+        }
+        self.progress_deadline = None;
+        // Recorded as the reason this flow ended, so a flow that timed out
+        // is not indistinguishable from one that simply closed.
+        self.host_error.get_or_insert(io::ErrorKind::TimedOut);
+        self.emit_reset();
+        self.close_host();
     }
 
     /// Release the host descriptor now rather than at drop.
@@ -801,6 +902,15 @@ impl EstablishedFlow {
     /// Whether the host descriptor has been released.
     pub fn host_socket_closed(&self) -> bool {
         self.host.is_none()
+    }
+
+    /// Whether the peer has closed its sending half.
+    ///
+    /// The state in which this flow stops reading its host socket, so
+    /// nothing on that socket can fail again — which is why a flow in it
+    /// carries a deadline.
+    pub fn peer_finished_sending(&self) -> bool {
+        self.host_read_eof
     }
 
     /// Stack-produced packets this flow discarded because the guest-bound
@@ -3064,6 +3174,10 @@ mod tests {
     #[test]
     fn the_reset_is_in_window_after_the_flow_has_carried_data() {
         let (mut flow, mut peer, mut g) = established_flow_with_peer();
+        // The stack's own sequence at the end of the handshake. The guest's
+        // ISN is a *different sequence space* and comparing against it
+        // would make the anti-degeneracy check below vacuous.
+        let handshake_seq = g.ack;
         let body = b"a-response-that-advances-the-sequence";
         buffer_a_peer_response(&mut flow, &mut peer, body);
 
@@ -3079,8 +3193,9 @@ mod tests {
             "the reset must carry the sequence after the data, not the handshake's"
         );
         assert_ne!(
-            seq, GUEST_ISN,
-            "a fixture where the two coincide could not tell a live number from a stale one"
+            seq, handshake_seq,
+            "the sequence must have moved: a fixture where it has not could not tell \
+             a live number from a stale one"
         );
         assert_eq!(ack, g.seq, "and acknowledge everything the guest sent");
     }
@@ -3121,6 +3236,123 @@ mod tests {
         assert!(
             !flow.is_active(),
             "and it becomes reapable, so its buffers and budget slot come back"
+        );
+    }
+
+    /// **Scenario A.** The host connect succeeded and the guest was sent a
+    /// SYN-ACK it never answers. No host error can occur in SYN-RECEIVED —
+    /// there is nothing to read or write yet — so neither the keepalive nor
+    /// the reset deadline can reach this flow, and nothing else ages it.
+    /// Its descriptor, its buffers and its budget slot would be held for
+    /// the machine's life.
+    #[test]
+    fn a_handshake_the_guest_never_completes_does_not_pin_the_flow() {
+        let (host, _peer) = host_pair();
+        let g = FakeGuest::new(flow_key());
+        let entry = half_open_over(host, flow_key(), g.syn());
+        let mut flow = EstablishedFlow::from_half_open(entry, guest(), MTU_V1 as usize, 0)
+            .expect("a completed connect becomes a flow");
+        let _ = flow.take_guest_packets();
+        assert!(
+            flow.is_active(),
+            "the fixture must start as a live, un-acknowledged handshake"
+        );
+
+        flow.pump_ignoring_metrics(HANDSHAKE_COMPLETION_TIMEOUT_MILLIS - 1);
+        assert!(
+            flow.is_active(),
+            "inside the bound the guest still gets its chance to answer"
+        );
+        assert!(!flow.host_socket_closed());
+
+        flow.pump_ignoring_metrics(HANDSHAKE_COMPLETION_TIMEOUT_MILLIS);
+
+        assert!(
+            !flow.is_active(),
+            "past it the flow must become reapable rather than waiting forever"
+        );
+        assert!(flow.host_socket_closed(), "and give the descriptor back");
+        assert!(
+            rst_in(&flow.take_guest_packets()).is_some(),
+            "the guest is told, not left waiting on a handshake nobody will finish"
+        );
+    }
+
+    /// A flow whose handshake completes must lose that deadline outright —
+    /// otherwise every established connection dies ten seconds in.
+    #[test]
+    fn completing_the_handshake_removes_the_deadline_for_good() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        flow.pump_ignoring_metrics(HANDSHAKE_COMPLETION_TIMEOUT_MILLIS * 100);
+        assert!(
+            flow.is_active(),
+            "an established conversation is ageless, however long it is quiet"
+        );
+        assert!(!flow.host_socket_closed());
+    }
+
+    /// **Scenario B.** Once the peer closes its sending half this flow stops
+    /// reading that socket, so no host error can ever surface on it again
+    /// — the keepalive is unreachable — and a guest that simply never
+    /// finishes would hold the flow for the machine's life.
+    #[test]
+    fn a_half_closed_flow_the_guest_never_finishes_does_not_pin_the_flow() {
+        let (mut flow, peer, _g) = established_flow_with_peer();
+        peer.shutdown(Shutdown::Write)
+            .expect("the peer closes its sending half");
+        for _ in 0..PUMP_ATTEMPTS {
+            flow.pump_ignoring_metrics(0);
+            if flow.peer_finished_sending() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            flow.peer_finished_sending(),
+            "the fixture must reach the half-closed state it is testing"
+        );
+        let _ = flow.take_guest_packets();
+
+        flow.pump_ignoring_metrics(HALF_CLOSED_TIMEOUT_MILLIS - 1);
+        assert!(
+            flow.is_active(),
+            "inside the bound the guest may still finish what it was doing"
+        );
+
+        flow.pump_ignoring_metrics(HALF_CLOSED_TIMEOUT_MILLIS);
+
+        assert!(
+            !flow.is_active(),
+            "past it the flow must be reapable rather than held forever"
+        );
+        assert!(flow.host_socket_closed(), "and give the descriptor back");
+    }
+
+    /// A reset that lands in a full queue is gone for good — smoltcp
+    /// forgets the endpoint after one emit — and the guest waits on a dead
+    /// connection until its own timeout. Room is made for it.
+    #[test]
+    fn a_full_guest_queue_cannot_swallow_the_reset() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        // Filled directly: *how* the queue came to be full is not what is
+        // under test, only what happens to the reset when it is. Driving it
+        // full through the stack would depend on smoltcp's delayed-ACK
+        // timing, which would make the fixture a coin toss.
+        while flow.pending_to_guest() < FLOW_TX_QUEUE_DEPTH {
+            assert_eq!(
+                flow.device.push_to_guest(vec![0u8; 64]),
+                PushOutcome::Queued,
+                "the fixture fills the queue without help from the stack"
+            );
+        }
+        assert_eq!(flow.pending_to_guest(), FLOW_TX_QUEUE_DEPTH);
+
+        flow.on_host_error(io::ErrorKind::ConnectionReset);
+
+        assert!(
+            rst_in(&flow.take_guest_packets()).is_some(),
+            "a full queue must not be able to swallow the one packet that \
+             stops the guest hanging"
         );
     }
 

@@ -69,6 +69,36 @@ pub const KEEPALIVE_IDLE_SECS: u64 = 60;
 /// not taken its last bytes in that long is not going to.
 pub const RESET_DELIVERY_TIMEOUT_MILLIS: u64 = 10_000;
 
+/// How long a flow waits for the guest to finish the handshake the host
+/// side has already completed.
+///
+/// The host connect succeeded, so the guest was sent a SYN-ACK; a guest
+/// that never answers it leaves the flow in SYN-RECEIVED, where **no host
+/// error can ever occur** — there is nothing to read or write yet — so
+/// neither the keepalive nor the reset deadline can reach it. Without this
+/// the flow's descriptor, its buffers, and its slot in the socket budget
+/// are held for the machine's whole life, and a guest that opens its budget
+/// in flows it never completes takes the datapath out of service for good.
+///
+/// The guest is one in-memory hop away, so a handshake it has not finished
+/// in ten seconds is one it is not going to.
+pub const HANDSHAKE_COMPLETION_TIMEOUT_MILLIS: u64 = 10_000;
+
+/// How long a flow lives after its peer has stopped sending.
+///
+/// Once the peer's half is closed the datapath stops reading that socket,
+/// so — as with the handshake above — no host error can surface on it
+/// again and nothing else would ever end the flow. Linux bounds the
+/// equivalent state with `tcp_fin_timeout`, 60 seconds by default, and this
+/// follows it rather than inventing a figure.
+///
+/// The trade-off is stated rather than hidden: a guest still uploading a
+/// minute after its peer stopped sending is cut off. An absolute bound that
+/// occasionally ends a slow conversation early is the cost of not offering
+/// a guest a resource it can pin permanently, and a refreshable one would
+/// be no bound at all.
+pub const HALF_CLOSED_TIMEOUT_MILLIS: u64 = 60_000;
+
 /// Gap between probes once the peer has stopped answering.
 pub const KEEPALIVE_PROBE_INTERVAL_SECS: u64 = 10;
 
