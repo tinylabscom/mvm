@@ -22,26 +22,42 @@ user or an auditor.
 
 ## Workstreams
 
-- [ ] **WS1 — bind the secret set, and close claim 17's last reachability limit.**
+- [ ] **WS1 — give the scan fingerprints, not plaintext, and close claim 17's
+      last reachability limit.**
 
   `InputGate::bind` has no production caller, so the cross-frame secret scan
-  matches against an empty set on every real VM. The scan is correct and tested;
-  it has nothing to scan for.
+  matches against an empty set on every real VM. The scan is correct and
+  tested; it has nothing to scan for.
 
-  Source the workload's known secrets at plane construction and bind them, so
-  the scan is operative on a real launch. This is wiring, not new machinery.
+  **The obvious fix is wrong.** `KnownSecret` holds its value in the clear, and
+  the stream plane is registered in `mvm-cli` — the CLI process — while the
+  substitution endpoint that holds raw secrets runs as a separate process.
+  Keeping that separation is the point. Binding plaintext into the gate would
+  create a new plaintext location in a process that has none today, in order to
+  close a limit on a different claim. That trade is not worth making.
+
+  **Bind fingerprints instead.** The scan must find a secret split across frames
+  at an arbitrary offset, which rules out comparing whole-buffer digests — but
+  not a rolling hash. Bind `(length, rolling-hash)` pairs, roll the same hash
+  over the window the scan already maintains, and confirm a candidate before
+  refusing. The CLI never holds a secret value.
+
+  Two consequences to state rather than discover. A hash collision is a false
+  positive that refuses a legitimate frame — acceptable, because it fails
+  closed, but the refusal reason must not imply a certainty it does not have.
+  And the CLI learns secret *lengths*, a real if small disclosure that belongs
+  in the ADR rather than in a comment.
 
   Two things not to lose. The scan is a backstop against a confused caller, not
   a defence against a determined one — encoding, derivation, and splitting
-  inside a window boundary all defeat it, and the docs say so. Do not let
-  binding a real set turn that honest framing into an overclaim. And the sliding
-  window must still span frame boundaries: a secret split across two writes is
-  the case the scan exists for.
+  inside a window boundary all defeat it, and the docs say so. A populated set
+  must not turn that honest framing into an overclaim. And the window must still
+  span frame boundaries: a secret split across two writes is the case the scan
+  exists for.
 
   Then reassess claim 17. Two of its four limits closed when the channel gained
-  an operator surface. This closes a third. State plainly what remains rather
-  than promoting on momentum.
-
+  an operator surface. This closes a third. State what remains rather than
+  promoting on momentum.
 - [ ] **WS2 — redact the console fallback.**
 
   The transcript is redacted; the console fallback is not. The fallback is what
