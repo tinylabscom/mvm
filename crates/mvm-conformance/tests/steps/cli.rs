@@ -407,3 +407,50 @@ fn help_options_fit_within(world: &mut CliWorld, width: i64) {
         );
     }
 }
+
+#[then(expr = "every mvmctl subcommand help fits within {int} columns")]
+fn every_subcommand_help_fits_within(_world: &mut CliWorld, width: i64) {
+    let mut command_paths = Vec::new();
+    collect_command_paths(&mvm_cli::commands::cli_command(), &[], &mut command_paths);
+
+    for path in command_paths {
+        let mut args = path.clone();
+        args.push("--help".to_string());
+        let output = mvmctl_command()
+            .args(&args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run `mvmctl {}`: {e}", args.join(" ")));
+        assert!(
+            output.status.success(),
+            "`mvmctl {}` failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let help = String::from_utf8_lossy(&output.stdout);
+        for (line_number, line) in help.lines().enumerate() {
+            let line_width = i64::try_from(line.chars().count()).expect("line width fits in i64");
+            assert!(
+                line_width <= width,
+                "`mvmctl {}` line {} exceeds {width} columns ({}):\n{}",
+                args.join(" "),
+                line_number + 1,
+                line_width,
+                help
+            );
+        }
+    }
+}
+
+fn collect_command_paths(
+    command: &clap::Command,
+    prefix: &[String],
+    command_paths: &mut Vec<Vec<String>>,
+) {
+    for subcommand in command.get_subcommands() {
+        let mut child = prefix.to_vec();
+        child.push(subcommand.get_name().to_string());
+        command_paths.push(child.clone());
+        collect_command_paths(subcommand, &child, command_paths);
+    }
+}

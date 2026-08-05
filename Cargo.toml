@@ -233,7 +233,12 @@ thiserror = "2"
 toml = "0.8"
 
 # CLI
-clap = { version = "4", default-features = false, features = ["derive", "help", "std", "usage"] }
+clap = { version = "4", default-features = false, features = [
+    "derive",
+    "help",
+    "std",
+    "usage",
+] }
 clap_mangen = "0.2"
 
 # HTTP client (for CLI upgrade)
