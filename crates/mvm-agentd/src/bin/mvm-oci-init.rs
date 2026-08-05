@@ -26,6 +26,10 @@ mod linux {
     const L3_READY_TIMEOUT: Duration = Duration::from_secs(15);
     pub fn main() {
         mount_pseudofs();
+        if let Err(error) = resync_clock_from_host() {
+            eprintln!("mvm-oci-init: guest clock synchronization failed: {error}");
+            std::process::exit(1);
+        }
         ensure_runtime_dirs();
         if let Err(error) = mount_user_volumes() {
             eprintln!("mvm-oci-init: user-volume activation failed: {error}");
@@ -60,6 +64,19 @@ mod linux {
             mvm_agentd::guest_mount::WORKLOAD_GID,
         );
         idle_forever();
+    }
+
+    /// Seed the wall clock on RTC-less workload VMs before any guest process
+    /// performs certificate validation. The host omits the token only for
+    /// initramfs-only boots that do not carry a workload rootfs.
+    fn resync_clock_from_host() -> Result<(), String> {
+        let Some(raw_epoch) = cmdline_value("mvm.hostepoch") else {
+            return Ok(());
+        };
+        let epoch_secs = raw_epoch
+            .parse::<u64>()
+            .map_err(|_| "mvm.hostepoch is not a valid Unix timestamp".to_string())?;
+        mvm_agentd::restore_clock::resync(epoch_secs).map_err(|error| error.to_string())
     }
 
     fn mount_pseudofs() {

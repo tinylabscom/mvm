@@ -347,6 +347,7 @@ fn synthesis_input_for_app<'a>(
     let leaked: &'static str = Box::leak(placeholder.into_boxed_str());
 
     Ok(SynthesisInput {
+        stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode,
         l3_network: None,

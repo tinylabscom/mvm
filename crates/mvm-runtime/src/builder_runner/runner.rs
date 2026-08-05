@@ -220,10 +220,13 @@ mod tests {
             std::fs::write(f, b"x").unwrap();
         }
 
+        // A well-formed ready handshake: the spawner parses this line and
+        // fails closed on anything else, so a stub that printed prose would be
+        // testing a shape production never produces.
         let stub = tmp.path().join("stub-endpoint.sh");
         std::fs::write(
             &stub,
-            "#!/bin/sh\ncat >/dev/null\necho 'builder ready'\nsleep 30\n",
+            "#!/bin/sh\ncat >/dev/null\necho '{\"env\":[],\"input_fingerprints\":[]}'\nsleep 30\n",
         )
         .unwrap();
         {
@@ -273,10 +276,9 @@ mod tests {
             .expect("build orchestrates against the mock driver");
 
         assert!(outcome.stopped);
-        // A single builder spec was booted: 4 disks, trusted, builder cmdline.
+        // A single builder spec was booted: 4 disks and the builder cmdline.
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
-        assert!(specs[0].trusted_builder);
         assert_eq!(specs[0].blocks.len(), 4);
         assert!(specs[0].cmdline.contains("init=/sbin/mvm-host-vm-init"));
         // The input disk was packed and the output extracted (empty tar from the

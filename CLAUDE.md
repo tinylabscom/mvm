@@ -440,21 +440,26 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     still holds by absence, which is what its three witnesses check. The
     input plane's own properties (stdin only, no program selection, no
     argv or env change, refused without a plan grant) are policy enforced
-    by host code with no production caller, and are claimed separately as
-    `Preview` claim 17 with their limits.
+    by host code, and are claimed separately as `Preview` claim 17 with
+    their limits.
 
 `Preview` claim 17 — **workload stdin is grant-gated, single-writer,
 secret-scanned across frames, and every refusal audited**
-(`crates/mvm-hostd/src/stream/input_gate.rs`). The channel is reachable:
-`mvmctl machine run --entrypoint --stdin -` opens the route under the plan
-that boot was admitted under, and the sealed-tier shell-entrypoint refusal
-now classifies an entrypoint resolved from the image's own `mvm-meta.json`
-sidecar, failing closed when it cannot resolve one. It stays a preview and
-not a numbered claim because one leg still has no production caller: the
-known-secret set is empty on every real VM (`InputGate::bind` is never
-called outside tests), so the secret scan's refusal has never fired in
-production. ADR-001's ledger carries the full limits note, marked closed or
-open individually; do not paraphrase this row as enforced without it.
+(`crates/mvm-hostd/src/stream/input_gate.rs`). Every leg has a production
+caller: `mvmctl machine run --entrypoint --stdin -` opens the route under the
+plan that boot was admitted under, the sealed-tier shell-entrypoint refusal
+classifies an entrypoint resolved from the image's own `mvm-meta.json`
+sidecar and fails closed when it cannot resolve one, and the secret scan is
+populated — the per-VM substitution endpoint (the one process holding a
+workload's credentials in the clear) fingerprints each secret it resolves
+and `StreamPlane::open_input` installs that set. Only the fingerprint — a
+length, a rolling hash and a category — crosses into the scanning process;
+never a value. It stays a preview and not a numbered claim because of what
+the enforcement is rather than whether it runs: a fingerprint match is a
+length-and-hash match, not an identity, and encoding, derivation and a
+window-straddling split defeat the scan permanently. ADR-001's ledger
+carries the full limits note, marked closed or open individually; do not
+paraphrase this row as enforced without it.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port

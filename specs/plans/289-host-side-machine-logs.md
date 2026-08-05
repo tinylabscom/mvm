@@ -1,6 +1,6 @@
 # Host-side machine logs
 
-**Status:** COMPLETE, mechanism superseded by plan 283
+**Status:** COMPLETE, mechanism superseded by plan 295
 
 The goal below — read the console capture host-side, never through a VM — was
 met here and is still met. The `mvm_runtime::microvm::logs` implementation that

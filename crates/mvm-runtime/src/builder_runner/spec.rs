@@ -5,9 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
-
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
+use mvm_net::channel::GuestService;
 
 /// Kernel cmdline for the disk-transport builder on the HVF VMM. Mirrors
 /// the console args the workload default uses (PL011 earlycon + `ttyAMA0`), but
@@ -67,13 +66,13 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
     let mut vsock = Vec::new();
     if let Some(sock) = &inputs.agent_socket {
         vsock.push(VsockPort {
-            guest_port: GUEST_AGENT_PORT,
+            service: GuestService::MachineControl,
             host_uds: sock.clone(),
             direction: VsockDirection::HostDials,
         });
     }
     vsock.push(VsockPort {
-        guest_port: EGRESS_PORT,
+        service: GuestService::Substitution,
         host_uds: inputs.egress_socket.clone(),
         direction: VsockDirection::HostDials,
     });
@@ -116,7 +115,6 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         console: ConsoleCapture {
             log_path: inputs.console_log.clone(),
         },
-        trusted_builder: true,
     }
 }
 
@@ -164,10 +162,13 @@ mod tests {
     }
 
     #[test]
-    fn builder_spec_is_trusted_with_no_egress_port_and_the_builder_cmdline() {
+    fn builder_spec_carries_the_substitution_channel_and_the_builder_cmdline() {
         let spec = builder_spec(&inputs());
-        assert!(spec.trusted_builder);
-        assert!(spec.vsock.iter().any(|p| p.guest_port == EGRESS_PORT));
+        assert!(
+            spec.vsock
+                .iter()
+                .any(|p| p.service == GuestService::Substitution)
+        );
         // Boots the builder PID 1 over the disk transport, rootfs read-only.
         assert!(spec.cmdline.contains("init=/sbin/mvm-host-vm-init"));
         assert!(spec.cmdline.contains("mvm.builder_transport=disk"));
@@ -183,7 +184,7 @@ mod tests {
         i.agent_socket = None;
         let spec = builder_spec(&i);
         assert_eq!(spec.vsock.len(), 1);
-        assert_eq!(spec.vsock[0].guest_port, EGRESS_PORT);
+        assert_eq!(spec.vsock[0].service, GuestService::Substitution);
     }
 
     #[test]

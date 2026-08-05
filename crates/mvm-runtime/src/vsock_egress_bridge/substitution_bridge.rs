@@ -96,15 +96,7 @@ impl EgressBudget {
 
     fn try_consume_at(&self, bytes: usize, now: Instant) -> bool {
         let mut state = self.state.lock().expect("egress budget mutex poisoned");
-        let elapsed_nanos = now.saturating_duration_since(state.last_refill).as_nanos();
-        let refill =
-            elapsed_nanos.saturating_mul(u128::from(EGRESS_BYTES_PER_SECOND)) / 1_000_000_000;
-        let refill = u64::try_from(refill).unwrap_or(u64::MAX);
-        state.byte_tokens = state
-            .byte_tokens
-            .saturating_add(refill)
-            .min(EGRESS_BURST_BYTES);
-        state.last_refill = now;
+        refill_tokens(&mut state, now);
 
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
         if bytes > state.byte_tokens {
@@ -113,6 +105,37 @@ impl EgressBudget {
         state.byte_tokens -= bytes;
         true
     }
+
+    /// Reserve up to `max` bytes for a non-blocking read. The caller must
+    /// refund bytes it reserved but did not receive from the socket.
+    fn reserve_read(&self, max: usize, now: Instant) -> usize {
+        let mut state = self.state.lock().expect("egress budget mutex poisoned");
+        refill_tokens(&mut state, now);
+        let max = u64::try_from(max).unwrap_or(u64::MAX);
+        let reserved = state.byte_tokens.min(max);
+        state.byte_tokens -= reserved;
+        usize::try_from(reserved).unwrap_or(usize::MAX)
+    }
+
+    fn refund_read(&self, bytes: usize) {
+        let mut state = self.state.lock().expect("egress budget mutex poisoned");
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        state.byte_tokens = state
+            .byte_tokens
+            .saturating_add(bytes)
+            .min(EGRESS_BURST_BYTES);
+    }
+}
+
+fn refill_tokens(state: &mut EgressBudgetState, now: Instant) {
+    let elapsed_nanos = now.saturating_duration_since(state.last_refill).as_nanos();
+    let refill = elapsed_nanos.saturating_mul(u128::from(EGRESS_BYTES_PER_SECOND)) / 1_000_000_000;
+    let refill = u64::try_from(refill).unwrap_or(u64::MAX);
+    state.byte_tokens = state
+        .byte_tokens
+        .saturating_add(refill)
+        .min(EGRESS_BURST_BYTES);
+    state.last_refill = now;
 }
 
 /// Backend-side byte relay between a guest connection id and a per-VM endpoint.
@@ -269,20 +292,33 @@ impl GuestEndpointRelay for SubstitutionBridge {
         let mut ready = Vec::new();
         let mut closed = self.evict_idle_at(Instant::now());
         for (conn_id, conn) in self.conns.iter_mut() {
-            let mut buf = vec![0u8; READ_CHUNK];
+            let allowance = self.budget.reserve_read(READ_CHUNK, Instant::now());
+            if allowance == 0 {
+                // The endpoint remains readable while the token bucket refills.
+                // Avoid a hot loop in the host-I/O poller without tearing down a
+                // valid TLS stream that is merely being rate-limited.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            let mut buf = vec![0u8; allowance];
             match conn.stream.read(&mut buf) {
-                Ok(0) => closed.push(*conn_id),
-                Ok(n) => {
-                    buf.truncate(n);
-                    if self.budget.try_consume(n) {
-                        conn.last_activity = Instant::now();
-                        ready.push((*conn_id, buf));
-                    } else {
-                        closed.push(*conn_id);
-                    }
+                Ok(0) => {
+                    self.budget.refund_read(allowance);
+                    closed.push(*conn_id);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => closed.push(*conn_id),
+                Ok(n) => {
+                    self.budget.refund_read(allowance.saturating_sub(n));
+                    buf.truncate(n);
+                    conn.last_activity = Instant::now();
+                    ready.push((*conn_id, buf));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.budget.refund_read(allowance);
+                }
+                Err(_) => {
+                    self.budget.refund_read(allowance);
+                    closed.push(*conn_id);
+                }
             }
         }
         for conn_id in &closed {
@@ -407,6 +443,30 @@ mod tests {
         let reply = reply.expect("endpoint reply drained back");
         assert!(reply.starts_with(b"OK:"));
         assert!(reply.ends_with(raw));
+    }
+
+    #[test]
+    fn exhausted_download_budget_backpressures_without_closing_stream() {
+        let mut bridge = SubstitutionBridge::new();
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        bridge.conns.insert(
+            9,
+            EndpointConn {
+                stream,
+                last_activity: Instant::now(),
+            },
+        );
+        peer.write_all(&vec![b'x'; 1024]).unwrap();
+        {
+            let mut state = bridge.budget.state.lock().unwrap();
+            state.byte_tokens = 0;
+            state.last_refill = Instant::now() + Duration::from_secs(1);
+        }
+
+        let drained = bridge.drain_endpoint_bytes();
+
+        assert!(drained.closed.is_empty());
+        assert!(bridge.is_active());
     }
 
     /// A later frame on an already-open stream relays directly — no new endpoint

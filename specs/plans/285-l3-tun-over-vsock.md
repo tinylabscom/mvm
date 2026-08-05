@@ -203,9 +203,19 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       any backend that does not advertise both `l3_vsock` and
       `no_routable_guest_nic`
 - [x] launch-path audit recorded in ADR-036 §"Launch-path convergence"
-- [x] macOS: a capability declaration plus a refusal until implemented.
-      (The `MacosUserspaceGateway` type that carried it is now deleted —
-      see the deferred set below.)
+- [x] workload launch mapping carries `GuestService::NetworkControl` and
+      `GuestService::NetworkData { queue: 0 }` into the backend-neutral
+      `VmmSpec`; `mvm-netd` selects the matching Firecracker/libkrun or HVF
+      socket-directory layout from the selected backend
+- [x] `VmmSpec::vsock` identifies every standing channel by `GuestService`;
+      numeric vsock ports are derived only at the VMM transport boundary,
+      including the dynamic dev-console data channels
+- [x] `VmmSpec` no longer carries builder-role policy; every boot, including
+      builder boots, requires the typed `GuestService::Substitution` channel,
+      while the builder endpoint remains owned by the builder runner above the
+      VMM driver seam
+- [x] macOS: `MacosUserspaceGateway` declares its intended capabilities and
+      refuses until implemented
 - [x] platform matrix (Linux / macOS / WSL2 / native Windows) documented
       without overclaiming
 - [~] node-to-node transport for cross-host VM traffic — **designed in

@@ -5,10 +5,11 @@ description: "Build or download the slim builder/workload kernels mvm boots, wit
 
 mvm boots slim, custom-configured Linux kernels for the builder VM and for
 workload microVMs. Because the config is custom, the public Nix cache has no
-substitute for them. Normal runtime paths prefer the published, hash-verified
-workload kernel on a cold cache; local compilation is reserved for explicit
-kernel-build commands and builder/dev image work.
-`mvmctl build kernel build` makes that step explicit and one-time.
+substitute for them. Installed binaries use the published, hash-verified
+workload kernel on a cold cache. A source checkout builds the dedicated kernel
+automatically on the first image-backed run through Stage 0, then reuses it.
+`mvmctl build kernel build` or `just kernel-workload` remains available when you
+want to prewarm the cache explicitly.
 
 ## Build a kernel
 
@@ -27,7 +28,8 @@ Flags:
 
 - `--which {builder,workload,workload-sizeopt}` — which kernel (default `builder`).
 - `--all` — build both variants.
-- `--source {compile,download,auto}` — where the kernel comes from (default `compile`).
+- `--source {compile,download,auto}` — where the kernel comes from (default
+  `compile`, unless `--kernel-source` or `MVM_KERNEL_SOURCE` is set).
 - `--arch {aarch64,x86_64}` — target arch (default: host arch).
 - `--boot-check` — after building the default workload kernel, boot a throwaway
   VM on it and confirm the in-guest agent answers over vsock.
@@ -81,6 +83,22 @@ The legacy `metrics` output remains an alias of `workload-metrics`.
   in-tree kernel-config edit. Use `--source compile` when you need to exercise
   local kernel changes. This is the only way to obtain the **other**
   architecture's kernel.
+
+The global kernel policy also applies when acquiring a kernel directly. This
+also applies to `machine run --image`:
+
+```bash
+# Prefer the matching hash-verified release kernel, even from a source checkout.
+MVM_KERNEL_SOURCE=download just kernel-workload
+
+# The same policy applies to the first image-backed run.
+MVM_KERNEL_SOURCE=download mvmctl machine run --image python:3.12 -- python -V
+```
+
+`MVM_KERNEL_SOURCE=auto` downloads when the matching release asset exists and
+otherwise falls back to the local compile path. Unset defaults to local compile
+from a source checkout and download for an installed binary. An explicit
+`--source` always wins over the environment policy.
 
 ## Integrity
 

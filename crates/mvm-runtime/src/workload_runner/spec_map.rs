@@ -5,11 +5,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use mvm_agentd::vsock::{
-    BROKER_PORT, EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports,
-};
+use mvm_agentd::vsock::dev_console_data_ports;
 use mvm_core::config::vm_hvf_vsock_port_socket_at;
 use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
+use mvm_net::channel::GuestService;
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 
@@ -85,6 +84,35 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
     blocks
 }
 
+/// Resolve the guest block device for each configured volume.
+///
+/// The returned entries preserve `config.volumes` order. Directory shares have
+/// no block device and therefore produce `None`; disk volumes resolve to the
+/// exact `/dev/vd*` node present in [`workload_blocks`]. Keeping this mapping
+/// here makes callers use the same slot calculation as the VMM and the guest
+/// activation path.
+pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
+    let blocks = workload_blocks(config);
+    let disk_count = config
+        .volumes
+        .iter()
+        .filter(|volume| matches!(volume.kind, VmVolumeKind::Disk))
+        .count();
+    let first_user_block = blocks.len().saturating_sub(disk_count);
+    let mut block_devices = blocks[first_user_block..]
+        .iter()
+        .map(crate::driver::BlockDev::device_node);
+
+    config
+        .volumes
+        .iter()
+        .map(|volume| match volume.kind {
+            VmVolumeKind::DirShare => None,
+            VmVolumeKind::Disk => block_devices.next(),
+        })
+        .collect()
+}
+
 /// The guest device node the SDK sidecar lands on for this launch config, or
 /// `None` when no sidecar is attached.
 ///
@@ -94,18 +122,13 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
 /// boot carries a verity sidecar, a runtime overlay, and how many user volumes
 /// precede it.
 pub fn sdk_sidecar_block_device(config: &VmStartConfig) -> Option<String> {
-    let sidecar_host = config
-        .volumes
-        .iter()
-        .find(|v| {
-            v.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH
-                && matches!(v.kind, VmVolumeKind::Disk)
-        })
-        .map(|v| v.host.as_str())?;
-    workload_blocks(config)
-        .iter()
-        .find(|b| b.source.as_os_str() == std::ffi::OsStr::new(sidecar_host))
-        .map(crate::driver::BlockDev::device_node)
+    let sidecar_index = config.volumes.iter().position(|v| {
+        v.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH && matches!(v.kind, VmVolumeKind::Disk)
+    })?;
+    workload_volume_devices(config)
+        .get(sidecar_index)
+        .cloned()
+        .flatten()
 }
 
 /// Refuse a `DirShare` volume before a `VmmSpec` is assembled: the runner's
@@ -148,6 +171,12 @@ pub struct WorkloadSockets<'a> {
     /// unadmitted VM carries no broker port, so a stray guest dial stays
     /// `ECONNREFUSED` (fail-closed).
     pub broker: Option<&'a Path>,
+    /// L3 tunnel control: the guest dials `NetworkControl` when the admitted
+    /// plan selects `l3-vsock`; absent for every other network mode.
+    pub network_control: Option<&'a Path>,
+    /// L3 tunnel packet queue zero: the guest dials `NetworkData` when the
+    /// admitted plan selects `l3-vsock`; absent for every other network mode.
+    pub network_data: Option<&'a Path>,
     /// Dev-only interactive console data ports: one host UDS per port in
     /// `dev_console_data_ports()`, pre-opened so a PTY can attach. Empty for
     /// sealed prod boots (`dev_console = false` in `VmStartConfig`).
@@ -161,17 +190,17 @@ pub struct WorkloadSockets<'a> {
 pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
     let mut ports = vec![
         VsockPort {
-            guest_port: GUEST_AGENT_PORT,
+            service: GuestService::MachineControl,
             host_uds: socks.agent.into(),
             direction: VsockDirection::HostDials,
         },
         VsockPort {
-            guest_port: EGRESS_PORT,
+            service: GuestService::Substitution,
             host_uds: socks.egress_gateway.into(),
             direction: VsockDirection::GuestDials,
         },
         VsockPort {
-            guest_port: WORKLOAD_EXIT_PORT,
+            service: GuestService::WorkloadExit,
             host_uds: socks.exit.into(),
             direction: VsockDirection::GuestDials,
         },
@@ -180,8 +209,22 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
     // gets none, so a stray guest dial to BROKER_PORT stays ECONNREFUSED.
     if let Some(broker) = socks.broker {
         ports.push(VsockPort {
-            guest_port: BROKER_PORT,
+            service: GuestService::Broker,
             host_uds: broker.into(),
+            direction: VsockDirection::GuestDials,
+        });
+    }
+    if let Some(network_control) = socks.network_control {
+        ports.push(VsockPort {
+            service: GuestService::NetworkControl,
+            host_uds: network_control.into(),
+            direction: VsockDirection::GuestDials,
+        });
+    }
+    if let Some(network_data) = socks.network_data {
+        ports.push(VsockPort {
+            service: GuestService::NetworkData { queue: 0 },
+            host_uds: network_data.into(),
             direction: VsockDirection::GuestDials,
         });
     }
@@ -190,7 +233,7 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
     // when `dev_console` is true — a sealed prod boot carries none (claim 15).
     for (port, path) in &socks.console_data {
         ports.push(VsockPort {
-            guest_port: *port,
+            service: GuestService::ConsoleData { port: *port },
             host_uds: path.clone(),
             direction: VsockDirection::HostDials,
         });
@@ -257,8 +300,6 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
         console: ConsoleCapture {
             log_path: console_log.to_path_buf(),
         },
-        // A workload is untrusted: it must route egress through the gated endpoint.
-        trusted_builder: false,
     }
 }
 
@@ -277,6 +318,7 @@ pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT};
     use std::path::PathBuf;
 
     fn base() -> VmStartConfig {
@@ -393,6 +435,26 @@ mod tests {
         assert_eq!(vol_block.source, PathBuf::from("/vol/data.img"));
         assert!(vol_block.read_only);
         assert!(!vol_block.ephemeral);
+    }
+
+    #[test]
+    fn volume_devices_follow_the_attached_block_slots() {
+        let cfg = VmStartConfig {
+            verity_path: Some("/img/rootfs.verity".into()),
+            runtime_overlay_path: Some("/img/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
+            runtime_overlay_roothash: Some("ab".repeat(32)),
+            volumes: vec![
+                disk_volume("/vol/first.img", "/first", true),
+                dir_share_volume("/host/share", "/share"),
+                disk_volume("/vol/second.img", "/second", false),
+            ],
+            ..base()
+        };
+        assert_eq!(
+            workload_volume_devices(&cfg),
+            vec![Some("/dev/vde".into()), None, Some("/dev/vdf".into())]
+        );
     }
 
     fn sdk_sidecar_volume(host: &str) -> mvm_core::vm_backend::VmVolume {
@@ -566,13 +628,15 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            network_control: None,
+            network_data: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
 
         // Agent: host dials the guest; egress + exit: the guest dials the host.
         let by_port: std::collections::HashMap<u32, &VsockPort> =
-            ports.iter().map(|p| (p.guest_port, p)).collect();
+            ports.iter().map(|p| (p.port(), p)).collect();
 
         let agent = by_port[&GUEST_AGENT_PORT];
         assert_eq!(agent.direction, VsockDirection::HostDials);
@@ -587,12 +651,42 @@ mod tests {
         assert_eq!(exit.host_uds, PathBuf::from("/run/workload.exit"));
     }
 
+    #[test]
+    fn workload_vsock_ports_wire_l3_control_and_data_channels_when_present() {
+        let socks = WorkloadSockets {
+            agent: Path::new("/run/agent.sock"),
+            egress_gateway: Path::new("/run/egress.sock"),
+            exit: Path::new("/run/workload.exit"),
+            broker: None,
+            network_control: Some(Path::new("/run/network-control.sock")),
+            network_data: Some(Path::new("/run/network-data-0.sock")),
+            console_data: Vec::new(),
+        };
+        let ports = workload_vsock_ports(&socks);
+
+        let control = ports
+            .iter()
+            .find(|port| port.service == GuestService::NetworkControl)
+            .expect("l3 control channel is present");
+        assert_eq!(control.direction, VsockDirection::GuestDials);
+        assert_eq!(control.host_uds, PathBuf::from("/run/network-control.sock"));
+
+        let data = ports
+            .iter()
+            .find(|port| port.service == (GuestService::NetworkData { queue: 0 }))
+            .expect("l3 data channel is present");
+        assert_eq!(data.direction, VsockDirection::GuestDials);
+        assert_eq!(data.host_uds, PathBuf::from("/run/network-data-0.sock"));
+    }
+
     fn sample_sockets() -> WorkloadSockets<'static> {
         WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            network_control: None,
+            network_data: None,
             console_data: Vec::new(),
         }
     }
@@ -605,11 +699,13 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: Some(Path::new("/run/broker.sock")),
+            network_control: None,
+            network_data: None,
             console_data: Vec::new(),
         };
         let broker = workload_vsock_ports(&admitted)
             .into_iter()
-            .find(|p| p.guest_port == BROKER_PORT)
+            .find(|p| p.service == GuestService::Broker)
             .expect("admitted VM carries the broker channel");
         assert_eq!(broker.direction, VsockDirection::GuestDials);
         assert_eq!(broker.host_uds, PathBuf::from("/run/broker.sock"));
@@ -623,7 +719,7 @@ mod tests {
         assert!(
             workload_vsock_ports(&unadmitted)
                 .iter()
-                .all(|p| p.guest_port != BROKER_PORT),
+                .all(|p| p.service != GuestService::Broker),
             "unadmitted VM must carry no broker port"
         );
     }
@@ -736,7 +832,6 @@ mod tests {
 
     #[test]
     fn workload_vsock_ports_with_dev_console_carries_128_console_ports() {
-        use mvm_agentd::vsock::CONSOLE_PORT_BASE;
         let state_dir = Path::new("/state/w");
         let console_data = console_data_sockets(state_dir, true);
         let socks = WorkloadSockets {
@@ -744,6 +839,8 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            network_control: None,
+            network_data: None,
             console_data,
         };
         let ports = workload_vsock_ports(&socks);
@@ -754,7 +851,7 @@ mod tests {
         // All console ports are HostDials and land in the expected range.
         let console_ports: Vec<_> = ports
             .iter()
-            .filter(|p| p.guest_port > CONSOLE_PORT_BASE)
+            .filter(|p| matches!(p.service, GuestService::ConsoleData { .. }))
             .collect();
         assert_eq!(console_ports.len(), 128);
         assert!(
@@ -772,6 +869,8 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: None,
+            network_control: None,
+            network_data: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -793,6 +892,8 @@ mod tests {
                 egress_gateway: Path::new("/run/egress.sock"),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
+                network_control: None,
+                network_data: None,
                 console_data,
             },
             cmdline: String::new(),

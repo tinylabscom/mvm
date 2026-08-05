@@ -16,7 +16,12 @@
 //! **Read-only, always.** The console has no host input fd by design — a
 //! sealed production guest must never gain one — and nothing here adds one.
 //!
-//! Two honest limitations, both surfaced rather than papered over:
+//! **Redacted on read.** Every chunk crosses the same detector the transcript
+//! uses before it reaches a consumer. Read-side, so the file the VMM owns is
+//! untouched. This is what stops the console being the rawer copy that a
+//! detached run — the common shape — resolves to.
+//!
+//! Three honest limitations, all surfaced rather than papered over:
 //!
 //! - **No channel separation.** The guest writes stdout and stderr to one
 //!   console, so every record is reported as [`StreamKind::Stdout`] under
@@ -25,14 +30,22 @@
 //! - **No record boundaries.** Chunking is by read, so a record is "whatever
 //!   had arrived at that tick", not a line and not a write.
 //!
-//! Neither is papered over by guessing. A request this source cannot answer
+//! - **Redaction is per read.** A value split across a 64 KiB boundary is two
+//!   partial matches and neither fires. Carrying a tail would close it and
+//!   withhold the newest bytes from a follower until more arrived, which is a
+//!   worse defect on the path operators reach for when nothing else works.
+//!
+//! None is papered over by guessing. A request this source cannot answer
 //! is named through [`ConsoleUnsupported`] and refused by the resolver, rather
 //! than answered with everything under a flag that says it was narrowed.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+use crate::pii::PiiRedactor;
 
 use mvm_contract::stream::StreamKind;
 
@@ -97,18 +110,42 @@ pub struct ConsoleTail {
     offset: u64,
     seq: u64,
     follow: bool,
+    /// Applied to every chunk before it leaves this reader. Not optional:
+    /// a `ConsoleTail` that shows raw bytes is the gap this closes, so it
+    /// should not be constructible.
+    redactor: Arc<PiiRedactor>,
+}
+
+/// The default detector, compiled once.
+///
+/// Shared because compiling the rule set costs milliseconds and a reader is
+/// opened per command. Default rules rather than the workload's resolved
+/// policy: this path answers `mvmctl logs` on a VM whose plan may be long
+/// gone, so it cannot depend on one being loadable.
+fn default_redactor() -> Arc<PiiRedactor> {
+    static SHARED: OnceLock<Arc<PiiRedactor>> = OnceLock::new();
+    Arc::clone(SHARED.get_or_init(|| Arc::new(PiiRedactor::with_default_rules())))
 }
 
 impl ConsoleTail {
     /// Read `path` from its start. `follow` keeps polling for appended bytes
     /// once the end is reached, instead of finishing.
     pub fn open(path: &Path, follow: bool) -> Self {
+        Self::open_with_redactor(path, follow, default_redactor())
+    }
+
+    /// As [`open`](Self::open), with an explicit detector.
+    ///
+    /// Exists so a test can pin behaviour to a known rule set rather than to
+    /// whatever the defaults happen to be that week.
+    pub fn open_with_redactor(path: &Path, follow: bool, redactor: Arc<PiiRedactor>) -> Self {
         Self {
             path: path.to_path_buf(),
             file: None,
             offset: 0,
             seq: 0,
             follow,
+            redactor,
         }
     }
 
@@ -127,8 +164,8 @@ impl ConsoleTail {
     /// `--lines` is a line-oriented request, and a byte estimate answers it
     /// only approximately — a short line count under-trims and returns more
     /// than was asked for. The console is the one source where honouring it
-    /// exactly is safe: it is the unchained, unredacted fallback, so moving
-    /// the start to a line boundary re-frames nothing the chain covers.
+    /// exactly is safe: it is the unchained fallback, so moving the start to a
+    /// line boundary re-frames nothing the chain covers.
     pub fn seek_to_last_lines(&mut self, lines: usize) -> io::Result<()> {
         let contents = std::fs::read(&self.path)?;
         if lines == 0 {
@@ -200,7 +237,10 @@ impl ConsoleTail {
         }
         buf.truncate(read);
         self.offset = self.offset.saturating_add(read as u64);
-        Ok(Some(buf))
+        // Read-side, so the file the VMM owns keeps the bytes it was given
+        // and nothing here needs write access to it.
+        let (redacted, _fired) = self.redactor.redact(&buf);
+        Ok(Some(redacted))
     }
 }
 
@@ -363,5 +403,70 @@ mod tests {
         let _ = tail.next_record().expect("read");
         let rendered = format!("{tail:?}");
         assert!(!rendered.contains("secret-console-bytes"), "{rendered}");
+    }
+
+    /// The gap this closes: the transcript was redacted and the console —
+    /// which is what a detached run resolves to, and the only source that
+    /// covers shutdown — was not.
+    #[test]
+    fn console_reads_are_redacted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        write(&path, b"contact ada@example.com about the outage\n");
+
+        let mut tail = ConsoleTail::open(&path, false);
+        let record = tail.next_record().expect("read").expect("a record");
+        let shown = String::from_utf8_lossy(&record.payload).to_string();
+
+        assert!(
+            !shown.contains("ada@example.com"),
+            "the console must not hand a consumer raw PII: {shown}"
+        );
+        assert!(
+            shown.contains("contact ") && shown.contains(" about the outage"),
+            "only the match is replaced, the rest of the line survives: {shown}"
+        );
+    }
+
+    /// A clean line must arrive byte-for-byte. A redactor that mangled
+    /// ordinary output would be worse than the gap it closes, and the
+    /// console is the source operators fall back to when nothing else works.
+    #[test]
+    fn console_passes_clean_bytes_through_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let clean = b"[    0.000000] Linux version 6.6.0 booting\n";
+        write(&path, clean);
+
+        let mut tail = ConsoleTail::open(&path, false);
+        let record = tail.next_record().expect("read").expect("a record");
+        assert_eq!(record.payload, clean, "clean console bytes are verbatim");
+    }
+
+    /// The limit, pinned so it is a decision rather than a surprise: chunking
+    /// is by read, so a value split across a 64 KiB boundary is two partial
+    /// matches and neither fires. Carrying a tail would close it, at the cost
+    /// of withholding the newest bytes from `logs -f` until more arrived —
+    /// a worse and far more visible defect on the path operators reach for
+    /// when everything else has failed.
+    #[test]
+    fn a_match_split_across_a_read_boundary_is_not_caught() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let mut bytes = vec![b'x'; READ_CHUNK_BYTES - 5];
+        bytes.extend_from_slice(b"ada@example.com\n");
+        write(&path, &bytes);
+
+        let mut tail = ConsoleTail::open(&path, false);
+        let mut seen = String::new();
+        while let Some(record) = tail.next_record().expect("read") {
+            seen.push_str(&String::from_utf8_lossy(&record.payload));
+        }
+        assert!(
+            seen.contains("ada@example.com"),
+            "documented limit: a straddling match survives, so if this ever \
+             starts passing the boundary handling changed and the module docs \
+             and ADR-035 both need updating"
+        );
     }
 }

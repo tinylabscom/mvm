@@ -1,4 +1,5 @@
 use mvm_sdk::ir::{Workload, canonicalize};
+use mvm_sdk::runtime::{RuntimeFsEntry, RuntimeFsStat, RuntimeProcessEvent, RuntimeProcessResult};
 use schemars::schema_for;
 use serde_json::Value;
 
@@ -48,5 +49,17 @@ fn schema_defines_all_top_level_types() {
         "SecretMount",
     ] {
         assert!(defs.contains_key(ty), "schema missing definition for {ty}");
+    }
+}
+
+#[test]
+fn runtime_contract_types_are_closed_and_schemaable() {
+    for schema in [
+        serde_json::to_value(schema_for!(RuntimeFsEntry)).unwrap(),
+        serde_json::to_value(schema_for!(RuntimeFsStat)).unwrap(),
+        serde_json::to_value(schema_for!(RuntimeProcessEvent)).unwrap(),
+        serde_json::to_value(schema_for!(RuntimeProcessResult)).unwrap(),
+    ] {
+        assert_eq!(schema["additionalProperties"], Value::Bool(false));
     }
 }

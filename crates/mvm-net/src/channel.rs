@@ -39,6 +39,12 @@ pub enum GuestService {
     Broker,
     /// The egress substitution endpoint.
     Substitution,
+    /// One dev-only interactive console data stream.
+    ///
+    /// The guest allocates these ports from its console session range. The
+    /// numeric value remains transport detail; callers still select the
+    /// service by its semantic role.
+    ConsoleData { port: u32 },
 }
 
 impl GuestService {
@@ -55,6 +61,7 @@ impl GuestService {
             Self::NetworkControl => mvm_contract::l3::L3_CONTROL_PORT,
             Self::NetworkData { queue } => mvm_contract::l3::data_port(queue),
             Self::Broker => 5300,
+            Self::ConsoleData { port } => port,
         }
     }
 
@@ -67,6 +74,7 @@ impl GuestService {
             Self::WorkloadExit => "workload-exit",
             Self::Broker => "broker",
             Self::Substitution => "substitution",
+            Self::ConsoleData { .. } => "console-data",
         }
     }
 
@@ -80,6 +88,7 @@ impl fmt::Display for GuestService {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NetworkData { queue } => write!(f, "network-data[{queue}]"),
+            Self::ConsoleData { port } => write!(f, "console-data[{port}]"),
             other => write!(f, "{}", other.as_str()),
         }
     }

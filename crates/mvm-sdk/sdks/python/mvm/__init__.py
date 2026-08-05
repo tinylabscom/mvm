@@ -80,6 +80,11 @@ from mvm._sandbox import (
     DEFAULT_TTL_SECONDS,
     MVM_CLI_BIN_ENV,
     ExecResult,
+    FsEntry,
+    FsStat,
+    ProcessHandle,
+    ProcessResult,
+    ProcessStreamEvent,
     RecordingNotActiveError,
     Sandbox,
     SandboxDevOnly,
@@ -91,6 +96,13 @@ from mvm._sandbox import (
     reset_recording,
 )
 from mvm._session import current_session_id
+from mvm._runtime.runtime import (
+    Runtime,
+    RuntimeFsEntry,
+    RuntimeFsStat,
+    RuntimeProcessEvent,
+    RuntimeProcessResult,
+)
 
 # In-guest host-services runtime surface (`mvm.audit.emit`, `mvm.host.time()`).
 # Submodules, so `import mvm; mvm.audit.emit(...)` works inside a booted
@@ -111,6 +123,8 @@ __all__ = [
     "CodeSandbox",
     "EmittingContextError",
     "ExecResult",
+    "FsEntry",
+    "FsStat",
     "Machine",
     "MachineError",
     "MachineResult",
@@ -118,9 +132,17 @@ __all__ = [
     "MvmTransportError",
     "NoVmIntrospectionError",
     "PayloadTooLarge",
+    "ProcessHandle",
+    "ProcessResult",
+    "ProcessStreamEvent",
     "RecordingNotActiveError",
     "RemoteError",
     "RemoteFunction",
+    "Runtime",
+    "RuntimeFsEntry",
+    "RuntimeFsStat",
+    "RuntimeProcessEvent",
+    "RuntimeProcessResult",
     "Sandbox",
     "SandboxDevOnly",
     "SandboxInfo",

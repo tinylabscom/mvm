@@ -20,8 +20,12 @@ interface FixtureOptions {
   upExit?: number;
   procExit?: number;
   procWaitStdout?: string;
+  procWaitStderr?: string;
   procWaitExit?: number;
   fsExit?: number;
+  fsReadStdout?: string;
+  fsLsJson?: string;
+  fsStatJson?: string;
   cpExit?: number;
   forwardSleep?: number;
   downExit?: number;
@@ -38,8 +42,12 @@ function writeFixtureMvmctl(opts: FixtureOptions): string {
   const upExit = opts.upExit ?? 0;
   const procExit = opts.procExit ?? 0;
   const procWaitStdout = opts.procWaitStdout ?? "";
+  const procWaitStderr = opts.procWaitStderr ?? "";
   const procWaitExit = opts.procWaitExit ?? 0;
   const fsExit = opts.fsExit ?? 0;
+  const fsReadStdout = opts.fsReadStdout ?? "";
+  const fsLsJson = opts.fsLsJson ?? "[]";
+  const fsStatJson = opts.fsStatJson ?? "{}";
   const cpExit = opts.cpExit ?? 0;
   const forwardSleep = opts.forwardSleep ?? 0;
   const downExit = opts.downExit ?? 0;
@@ -74,6 +82,7 @@ case "$verb" in
       exit ${procExit}
     elif [ "$sub" = "wait" ]; then
       printf '%s' ${JSON.stringify(procWaitStdout)}
+      printf '%s' ${JSON.stringify(procWaitStderr)} >&2
       exit ${procWaitExit}
     fi
     exit ${procExit}
@@ -82,6 +91,12 @@ case "$verb" in
     sub=$1
     if [ "$sub" = "write" ]; then
       cat > ${JSON.stringify(path.join(stdinDir, "fs-write-stdin.bin"))}
+    elif [ "$sub" = "read" ]; then
+      printf '%s' ${JSON.stringify(fsReadStdout)}
+    elif [ "$sub" = "ls" ]; then
+      printf '%s' ${JSON.stringify(fsLsJson)}
+    elif [ "$sub" = "stat" ]; then
+      printf '%s' ${JSON.stringify(fsStatJson)}
     fi
     exit ${fsExit}
     ;;
@@ -401,6 +416,96 @@ describe("Sandbox.files.write (live mode)", () => {
     expect(calls.some((c) => c.startsWith("machine fs write sb-fs-vm /app/config.json"))).toBe(true);
     const stdinPath = path.join(tmpDir, "fixture-stdin", "fs-write-stdin.bin");
     expect(fs.readFileSync(stdinPath, "utf-8")).toBe('{"x":1}');
+  });
+});
+
+describe("runtime process and filesystem surface", () => {
+  it("returns a process handle with streamed output and controls", async () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-proc-vm", build_mode: "dev" },
+      procWaitStdout: "out",
+      procWaitStderr: "err",
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const sb = mvm.Sandbox.create("python-dev");
+    const handle = sb.commands.start(["python", "run.py"]);
+    expect(handle).toBeDefined();
+    const events: mvm.ProcessStreamEvent[] = [];
+    const result = await handle!.wait({ onEvent: (event) => events.push(event) });
+    expect(new TextDecoder().decode(result.stdout)).toBe("out");
+    expect(new TextDecoder().decode(result.stderr)).toBe("err");
+    expect(events.map((event) => [event.stream, new TextDecoder().decode(event.data)]).sort()).toEqual([
+      ["stderr", "err"],
+      ["stdout", "out"],
+    ]);
+    handle!.sendStdin("input");
+    handle!.signal(15);
+    handle!.kill();
+    const calls = readFixtureLog();
+    expect(calls.some((c) => c.includes("machine proc stdin sb-proc-vm"))).toBe(true);
+    expect(calls.some((c) => c.includes("machine proc signal sb-proc-vm"))).toBe(true);
+    expect(calls.some((c) => c.includes("machine proc kill sb-proc-vm"))).toBe(true);
+    sb.kill();
+  });
+
+  it("reads, lists, stats, and mutates guest files", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-fs-vm", build_mode: "dev" },
+      fsReadStdout: "hello",
+      fsLsJson: '[{"name":"note.txt","kind":"file","size":5}]',
+      fsStatJson: '{"canonical_path":"/app/note.txt","kind":"file","mode":420,"size":5,"mtime":null}',
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const sb = mvm.Sandbox.create("python-dev");
+    expect(new TextDecoder().decode(sb.files.read("/app/note.txt"))).toBe("hello");
+    expect(sb.files.list("/app")[0]?.name).toBe("note.txt");
+    expect(sb.files.stat("/app/note.txt").size).toBe(5);
+    sb.files.mkdir("/app/new", true);
+    sb.files.remove("/app/old", true);
+    sb.files.move("/app/a", "/app/b");
+    const calls = readFixtureLog();
+    expect(calls.some((c) => c.includes("machine fs read sb-fs-vm /app/note.txt"))).toBe(true);
+    expect(calls.some((c) => c.includes("machine fs ls sb-fs-vm /app --json"))).toBe(true);
+    expect(calls.some((c) => c.includes("machine fs stat sb-fs-vm /app/note.txt --json"))).toBe(true);
+    expect(calls.some((c) => c.includes("machine fs mkdir sb-fs-vm /app/new"))).toBe(true);
+    expect(calls.some((c) => c.includes("machine fs rm sb-fs-vm /app/old"))).toBe(true);
+    expect(calls.some((c) => c.includes("machine fs mv sb-fs-vm /app/a /app/b"))).toBe(true);
+    sb.kill();
+  });
+
+  it("fails closed for every development-only live verb on prod", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-prod-vm", build_mode: "prod" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const sb = mvm.Sandbox.create("python-prod");
+    const operations = [
+      () => sb.commands.start(["python"]),
+      () => sb.exec(["python"]),
+      () => sb.files.write("/app/x", "x"),
+      () => sb.files.read("/app/x"),
+      () => sb.files.list("/app"),
+      () => sb.files.stat("/app/x"),
+      () => sb.files.mkdir("/app/x"),
+      () => sb.files.remove("/app/x"),
+      () => sb.files.move("/app/x", "/app/y"),
+      () => sb.copyIn("/tmp/x", "/app/x"),
+      () => sb.copyOut("/app/x", "/tmp/x"),
+      () => sb.forward(8080, 80),
+    ];
+    for (const operation of operations) {
+      expect(operation).toThrow(mvm.SandboxDevOnly);
+    }
+    expect(readFixtureLog().slice(1).some((call) =>
+      call.startsWith("machine proc") ||
+      call.startsWith("machine fs") ||
+      call.startsWith("machine cp") ||
+      call.startsWith("forward"),
+    )).toBe(false);
+    sb.kill();
   });
 });
 

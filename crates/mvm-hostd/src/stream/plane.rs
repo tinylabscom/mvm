@@ -260,12 +260,21 @@ impl StreamPlane {
     /// displaced route is wound up explicitly, what it can no longer deliver
     /// is reported, and the VM's delivery counter carries across it so the
     /// successor is not refused by the guest for its predecessor's sequence.
+    ///
+    /// This is also where the gate learns what to scan for. The substitution
+    /// endpoint fingerprinted every secret it resolved for this VM at spawn,
+    /// and binding here rather than at boot is what makes the two orders
+    /// independent: a session snapshots the fingerprint set when it opens, so
+    /// the set has to be installed immediately before, not at some earlier
+    /// point a backend might reorder.
     pub fn open_input(
         &self,
         vm: &str,
         admitted: &crate::plan_admission::AdmittedPlan,
         transport: Box<dyn InputTransport>,
     ) -> Result<(), InputRefusal> {
+        bind_known_secrets(vm);
+
         // Cloned out from under the registry lock, which is not held across
         // anything below: winding up an incumbent waits on that VM's route
         // lock, and a wedged guest holding it must not stall every other VM.
@@ -296,13 +305,17 @@ impl StreamPlane {
         self.inputs().contains_key(vm)
     }
 
-    /// Extend `vm`'s input lease without writing anything.
+    /// Tell `vm`'s gate that its writer is idle but alive.
     ///
-    /// The lease exists to free a stdin whose writer died, not to punish one
-    /// that is thinking: without this, an interactive writer that paused past
-    /// the TTL would find its next write refused *and* its close refused,
-    /// which drops the tail the gate withheld. Keeping the lease alive is the
-    /// holder's job, and this is the only way to do it without sending bytes.
+    /// Two things ride on the same call. The lease exists to free a stdin
+    /// whose writer died, not to punish one that is thinking: without this, an
+    /// interactive writer that paused past the TTL would find its next write
+    /// refused *and* its close refused, which drops the tail the gate
+    /// withheld. And on a secret-bearing VM the gate releases that withheld
+    /// tail once the silence is long enough, which is what lets a workload
+    /// reading one request line at a time ever receive one. Both are the
+    /// holder's job, and this is the only way to do either without sending
+    /// bytes.
     pub fn refresh_input(&self, vm: &str) -> Result<(), InputRouteError> {
         let shared = self.route(vm)?;
         let mut held = shared.lock().unwrap_or_else(PoisonError::into_inner);
@@ -414,6 +427,30 @@ impl ConsoleStreamer for StreamPlane {
     fn stop(&self, vm_name: &str) {
         self.release(vm_name);
     }
+}
+
+/// Install the fingerprint set the input gate scans `vm`'s stdin against.
+///
+/// The values behind these fingerprints live in the per-VM substitution
+/// endpoint, a separate process, and stay there: what reaches this process is
+/// a length, a rolling hash and a category each, computed by the endpoint at
+/// spawn. That separation is the reason the gate matches fingerprints instead
+/// of bytes — copying credentials in here to populate a scan would create a
+/// plaintext location where there is none.
+///
+/// An empty set is the honest outcome for a VM whose plan carried no secrets,
+/// and for one this process did not boot: in the second case no writer can
+/// open a session anyway, because it holds no admitted plan to write under.
+/// Binding unconditionally rather than skipping the empty case keeps a stale
+/// set from a previous VM of the same name out of the gate.
+fn bind_known_secrets(vm: &str) {
+    let fingerprints = mvm_runtime::recorded_secret_fingerprints(vm);
+    tracing::debug!(
+        vm = %vm,
+        fingerprints = fingerprints.len(),
+        "installing the input gate's known-secret fingerprints"
+    );
+    crate::stream::input_gate::InputGate::bind_fingerprints(vm, fingerprints);
 }
 
 /// End the stream a shared route holds, taking it out under the route's own

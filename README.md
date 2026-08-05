@@ -38,6 +38,23 @@ Linux + /dev/kvm           →  Firecracker
   agent-verb grants, sealed prod images that refuse interactive access, secret
   substitution over vsock)
 
+## Local. A real microVM in milliseconds.
+
+The steady state is deliberately simple: give mvm an image and a command, and
+it gives the workload its own Linux kernel, memory boundary, writable root, and
+host-brokered I/O. The warm path uses cached VM and image artifacts, so the
+microVM starts in milliseconds. Cold mode may download or build those
+artifacts; mvm explains that work and caches it for the next run.
+
+```bash
+mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
+```
+
+Network access is off by default. Filesystem sharing, egress, and secrets are
+explicit launch decisions recorded in the signed execution plan — there is no
+SSH session, daemon to operate, or container fallback hiding behind this
+command.
+
 ## Install
 
 ```bash
@@ -74,6 +91,19 @@ mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -
 
 # Multiple args after `--` are the argv; the VM lives only for this command.
 mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
+
+# Run a Python file from the host checkout (the mount is read-only).
+# Repeat --mount for additional host directories.
+mvmctl machine run --image python:3.12 \
+  --mount "$PWD:/work:ro" -- python /work/app.py
+
+# Install pandas and run the file in the same transient VM.
+# The install disappears when this VM is torn down.
+mvmctl machine run --image python:3.12 \
+  --allow-host pypi.org:443 \
+  --allow-host files.pythonhosted.org:443 \
+  --mount "$PWD:/work:ro" \
+  -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && PYTHONPATH=/tmp/python-deps python /work/app.py'
 
 # Interactive dev shell (dev-tier images) — still transient
 mvmctl machine run --image alpine -it -- /bin/sh
@@ -159,10 +189,10 @@ mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
 Provenance (registry, repo, resolved digest, layer list, cosign verdict) is
 recorded in the chain-signed audit log; `--prod` refuses mutable tags before any
-network fetch. In a source checkout, OCI boots also need a cached
-dm-verity-capable workload kernel; build it once with
-`mvmctl kernel build --which workload` (or `just kernel-workload`) before the
-first `machine run --image ...`.
+network fetch. In a source checkout, the first OCI boot automatically builds
+the dedicated dm-verity-capable workload kernel through Stage 0 and caches it.
+Use `MVM_KERNEL_SOURCE=download` to prefer the matching hash-verified release
+kernel, or `mvmctl kernel build --which workload` when you want to prewarm it.
 
 ### 2. From a Nix flake (`mkGuest`)
 

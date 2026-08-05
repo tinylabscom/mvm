@@ -232,6 +232,17 @@ pub struct ExecutionPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceId>,
 
+    /// Inbound stream edges: other workloads whose output feeds this one's
+    /// stdin. Each names a *binding* the host resolves, never a VM — see
+    /// [`crate::stream::edge`] for why a guest never addresses another guest.
+    ///
+    /// Skip-serialized when empty so a plan that declares no edge stays
+    /// byte-identical to one written before the field existed: the field is
+    /// inside the signed payload and inside the content address, so emitting
+    /// `[]` would move every existing plan's identity for nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stream_edges: Vec<crate::stream::StreamEdge>,
+
     /// Whether this workload's captured output is kept after the run.
     ///
     /// Always serialized, unlike the optional pins above: the point of
@@ -321,6 +332,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         deps_volume: None,
         shares: Vec::new(),
         services: Vec::new(),
+        stream_edges: Vec::new(),
         stream_retention: StreamRetention::Persist,
     }
 }

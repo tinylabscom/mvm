@@ -86,13 +86,30 @@ Addons contribute their own hooks, merged at compile time:
 | `mv.python_deps(...)`, `mv.node_deps(...)` | dependencies, installed into a sealed, audited volume |
 | `mv.secret("name")`, `mv.literal("v")` | env values — secrets resolve on the host, never baked into the image |
 
-## Dev-only runtime
+## Runtime SDK
 
-`f.remote(...)` / `mv.session(...)` call into a running function-VM, and
-`mv.Sandbox` wraps local sandbox primitives. These are **development**
-conveniences for build-time emission and introspection. Production microVMs are
-observed through `mvmctl` output streams — there are no host-side `.remote()`
-calls on the prod path.
+`Sandbox` has explicit `record` and `live` modes. Record mode is the portable
+authoring path; live mode attaches to or boots a development machine through
+`mvmctl` and exposes the generated process/filesystem contract:
+
+```python
+import mvm
+
+with mvm.Sandbox.create("python-3.12") as sb:
+    process = sb.commands.start(["python", "-c", "print('ready')"])
+    result = process.wait(on_event=lambda event: print(event.stream, event.data))
+    sb.files.write("/app/config.json", '{"ready": true}')
+    print(sb.files.read("/app/config.json"))
+```
+
+Live process handles support `wait`, streamed stdout/stderr callbacks,
+`send_stdin`, `signal`, and `kill`. The filesystem surface supports read,
+write, list, stat, mkdir, remove, and move. `sb.shell(...)` is a convenience
+for `/bin/sh -lc` in development only.
+
+Arbitrary process execution, shell, process control, filesystem RPC, and port
+forwarding fail closed before CLI traffic for production templates. SSH is not
+part of the SDK or runtime contract.
 
 ## Machine lifecycle wrappers
 

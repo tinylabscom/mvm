@@ -288,14 +288,17 @@ for detailed scope and acceptance criteria.
         gates and merged into main
   - [~] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
-    - [~] Bind the tier to an attested artifact and replace the interactive
-          feature/symbol witnesses with conformance scenarios. Local
+    - [x] Bind the tier to an attested artifact. Local
           `machine run --deployment` verifies and persists the signed record
-          plus exact rootfs binding; remote extraction/boot are merged, and
-          persistent-OCI console listeners now pre-open only for dev profiles
-          (PR #2157). Feature-fork removal, guest-image validation, and the
-          final cross-path acceptance matrix remain. Grant enforcement now
-          proves a complete ProdSafe grant refuses Exec and ConsoleOpen.
+          plus exact rootfs binding; remote extraction/boot are merged, the
+          cross-path acceptance matrix is green, and child issues #2144 and
+          mvmd #208 are closed. Persistent-OCI console listeners now pre-open
+          only for dev profiles (PR #2157). Grant enforcement proves a
+          complete ProdSafe grant refuses both Exec and ConsoleOpen.
+    - [~] Replace the interactive feature/symbol witnesses with conformance
+          scenarios. Mainline workspace tests, Clippy, doctests, and policy
+          xtasks are green; feature-fork removal and full guest-image witness
+          replacement remain open pending the explicit security decision.
 
 - [~] Plan 290 — Sensitive egress redaction
       (`specs/plans/290-sensitive-egress-redaction.md`)
@@ -312,7 +315,7 @@ for detailed scope and acceptance criteria.
       (`specs/plans/289-host-side-machine-logs.md`)
   - [x] Read backend-captured logs from the isolated host VM state directory
   - [x] Preserve log flags without shell interpolation; follow mode honors the
-        requested line count. Superseded by plan 283, which replaced the reader:
+        requested line count. Superseded by plan 295, which replaced the reader:
         `--lines`/`--follow`/`--hypervisor` and the explicit missing-log error
         survive, the pre-split `firecracker.log` substitution does not
   - [x] Cover host-only CLI behavior and log resolution with regression tests
@@ -369,8 +372,8 @@ for detailed scope and acceptance criteria.
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
   - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 
-- [~] Plan 283 — Workload stream plane
-      (`specs/plans/283-workload-stream-plane.md`)
+- [~] Plan 295 — Workload stream plane
+      (`specs/plans/295-workload-stream-plane.md`)
   - [x] T1–T3 — stream record DTOs + chain verify; transcript stream
         directions and per-chunk linkage; ring retention
   - [x] T4–T5b — guest pump emits as produced; fd-3 control records; the
@@ -413,7 +416,7 @@ for detailed scope and acceptance criteria.
         and fan-out, creates no capture directory, and seals to no manifest
         rather than to an empty one that would assert the workload printed
         nothing. ADR-035 records the posture including the three limits found
-        during execution (the console fallback is unredacted, the follow half
+        during execution (the console fallback is redacted on read, the follow half
         is open for detached workloads, a spliced read repeats its adopted
         prefix). Website guide `guides/workload-output-streaming.md` plus the
         stream surfaces in the CLI reference. `CLAUDE.md` corrected on the
@@ -425,9 +428,10 @@ for detailed scope and acceptance criteria.
         grant for a shell-shaped entrypoint; and the claims ledger — claim 15
         reworded (it used to hold by *absence*, there being no host→guest byte
         path at all, and now holds by *policy*) and claim 17 added at status
-        `Preview` with a four-item limits note (T17 below closed two of the
-        four; the known-secret set being empty on every real VM is what keeps
-        the row at `Preview`)
+        `Preview` with a limits note (T17 below closed two; plan 293 WS1 closed
+        the third by giving the scan fingerprints, and its follow-on closed the
+        blanket carry's stall with a content-independent idle release; the two
+        that remain are permanent properties of hashing and of scanning)
   - [x] T16 — the input plane's documentation: a sibling guide
         `guides/workload-input.md` (grant, single-writer lease, secret scan,
         explicit EOF, the `--prod` shell refusal stated as the heuristic it is,
@@ -453,9 +457,7 @@ for detailed scope and acceptance criteria.
         `mvm-meta.json` sidecar — a new `entrypointArgv` field written by both
         the `mkGuest` and OCI build paths, because the host cannot read inside a
         materialized ext4 — and admission **fails closed** when it cannot
-        resolve one, so the shell refusal cannot go dormant again. Claim 17
-        stays `Preview` on limit 1 alone: `InputGate::bind` still has no
-        production caller, so the secret scan is inert on every real VM
+        resolve one, so the shell refusal cannot go dormant again
   - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
         transcript is now sealed by whatever stops the VM. The *follow* half
         remains: the console follower still dies with the starting process, so
@@ -540,6 +542,13 @@ for detailed scope and acceptance criteria.
   - [x] Keep the removed MCP server and smoke lane out of CI
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
+
+- [x] Plan 297 — Parallel pull-request CI lanes
+      (`specs/plans/297-ci-parallel-lanes.md`)
+  - [x] Split independent lint and Linux-only test coverage into concurrent
+        jobs without changing required check names
+  - [x] Keep targeted feature coverage and Linux conformance coverage intact
+  - [x] Complete workflow and repository verification
 - [~] Plan 276 — Content-addressing conformance and defense
       (`specs/plans/276-content-addressing-conformance-and-defense.md`)
   - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
@@ -599,6 +608,12 @@ for detailed scope and acceptance criteria.
   - [x] Privileged Linux lane executed on a Linux/KVM host: real host TUN,
         real nftables, live forwarding witness, verified-clean teardown
   - [x] BDD suite `s25_l3_vsock` (23 hermetic scenarios)
+  - [x] Workload `VmmSpec` mapping carries the typed L3 control/data channels;
+        netd socket layout follows the selected backend
+  - [x] `VmmSpec::vsock` uses `GuestService` identities for standing channels;
+        numeric ports are derived only at the VMM boundary
+  - [x] Removed builder-role policy from `VmmSpec`; all boots require the
+        typed substitution channel and HVF fails closed when it is absent
   - [ ] macOS forwarding backend — capability-declared and refusing; the
         userspace socket gateway is not implemented
   - [ ] WSL2 validation on a real runner; node-to-node transport; mvmd

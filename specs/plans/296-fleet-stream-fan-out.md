@@ -1,6 +1,11 @@
-# Plan 292 — fleet stream fan-out
+# Plan 296 — fleet stream fan-out
 
-**Status:** Proposed.
+**Status:** WS1 + WS2 landed. WS3–WS6 outstanding.
+
+`mvm` ships the mechanism; `mvmd` declares the edges and resolves the bindings.
+That split is why the landed half has **no production caller in this
+repository** — see "Declared dormancy" below. It is a declaration, not an
+oversight.
 
 Connect one workload's output stream to another's input stream, so a fleet can
 run a workflow. `mvmd` declares the edges; `mvm` exposes the primitives and
@@ -46,6 +51,8 @@ reference on a workload path.
 | E3 | The single-writer lease stays; fan-in is a merge node | Two producers interleaving into one stdin produce corrupted records and stdin carries no framing to recover them. A workflow needing fan-in declares a merge stage, which is itself a workload the fleet can express. |
 | E4 | Backpressure never stalls a producer and never silently loses | `lossy` (default) rings, evicts oldest, marks the gap and audits it. `reliable` keeps the producer unstalled but fails the edge loudly when its buffer fills. A mode named `reliable` must never quietly drop records. |
 | E5 | The topology is a DAG, rejected at admission | A cycle breaks EOF propagation, so nothing downstream of itself ever closes. With lossy eviction it does not even deadlock — it degrades into a silently churning loop. And every edge hash-chains, so a cycle leaves no order in which to ask what a workload saw. The topology is declared, so validate the static graph once and refuse before anything boots. |
+| E6 | A broken edge fails the workflow. It does not silently reconnect across a consumer restart | Reconnection is not free: the gate builds a fresh `SecretScanner` per session, so a secret split across the restart boundary would be scanned by two scanners with neither seeing the whole — the same hole this project refused to open at route displacement. Surviving a restart also means buffering on the producer for an unbounded interval, which breaks the bounded-memory invariant. Workflows already have a supervisor; re-running the DAG is the correct recovery, at the correct layer. The edge records its last delivered sequence in the chain-signed log so a re-run is reasoned about rather than guessed. |
+| E7 | The redaction opt-out (E1) requires an explicit operator acknowledgement, distinct from the plan signature | A plan is signed on behalf of whoever launched the workload, so letting a workload's own plan opt its edge out of redaction lets a careless or compromised workload definition export raw PII to another workload with no human in the loop. Between two workloads these are different trust domains. This repository already has the right shape for it: unrestricted egress requires `MVM_ACK_UNRESTRICTED_NETWORK=1`, an operator acknowledgement never set in CI. The redaction opt-out takes the same form and is audited. |
 
 Two consequences worth stating plainly, because they will surprise someone:
 
@@ -57,16 +64,26 @@ Two consequences worth stating plainly, because they will surprise someone:
 
 ## Work
 
-- [ ] **WS1 — the edge binding.** A signed-plan shape by which a consumer names
-  a *binding*, not a VM. The host resolves it. A consumer that names a source it
-  was not granted is refused and the refusal reaches the chain-signed log.
-  Includes the redaction posture (E1) and the backpressure mode (E4) as
-  properties of the binding.
+- [x] **WS1 — the edge binding.** Landed. `mvm_contract::stream::edge` defines
+  `StreamEdge` (binding name, `EdgeRedaction`, `EdgeBackpressure`), the plan
+  carries `ExecutionPlan.stream_edges`, and `check_plan_edges` refuses a
+  duplicate binding, a raw edge without `MVM_ACK_RAW_STREAM_EDGE`, and an edge
+  contending with operator stdin. Both postures default to the safe side and
+  are `#[serde(default)]`, so a plan written before the field existed cannot
+  acquire a raw edge by omission. `stream_edges` is `skip_serializing_if`
+  empty, so no existing plan's content address moved.
 
-- [ ] **WS2 — DAG validation at admission.** Build the declared graph, reject a
-  cycle before any boot, and name the offending edge. Cheap, static, fail-closed.
-  Test the self-edge, the two-node cycle, and a long cycle — a validator that
-  only catches `A→A` is the usual defect.
+- [x] **WS2 — DAG validation at admission.** Landed.
+  `mvm_contract::stream::topology::validate` takes resolved edges and refuses
+  fan-in and cycles, returning flow order on success. Iterative DFS, because a
+  fleet can trivially declare a chain deep enough to blow a recursive one.
+
+  One consequence fell out and is worth keeping: with fan-in refused first
+  (E3), every consumer has at most one in-edge, so a cycle can only ever be an
+  **isolated loop** — entering one from outside necessarily gives the entry
+  node two writers and is refused as fan-in instead. The tests cover the
+  self-edge, the two-node cycle, a five-node cycle, a cycle in a second
+  disjoint component, and a diamond that must *not* be mistaken for one.
 
 - [ ] **WS3 — the connector.** Pump A's `ReaderHandle` into B's `InputSession`
   in acceptance order, honouring the lease and refreshing it. This is where
@@ -89,8 +106,22 @@ Two consequences worth stating plainly, because they will surprise someone:
   flight, why fan-in is a merge node, and what happens when a consumer falls
   behind under each mode.
 
-| E6 | A broken edge fails the workflow. It does not silently reconnect across a consumer restart | Reconnection is not free: the gate builds a fresh `SecretScanner` per session, so a secret split across the restart boundary would be scanned by two scanners with neither seeing the whole — the same hole this project refused to open at route displacement. Surviving a restart also means buffering on the producer for an unbounded interval, which breaks the bounded-memory invariant. Workflows already have a supervisor; re-running the DAG is the correct recovery, at the correct layer. The edge records its last delivered sequence in the chain-signed log so a re-run is reasoned about rather than guessed. |
-| E7 | The redaction opt-out (E1) requires an explicit operator acknowledgement, distinct from the plan signature | A plan is signed on behalf of whoever launched the workload, so letting a workload's own plan opt its edge out of redaction lets a careless or compromised workload definition export raw PII to another workload with no human in the loop. Between two workloads these are different trust domains. This repository already has the right shape for it: unrestricted egress requires `MVM_ACK_UNRESTRICTED_NETWORK=1`, an operator acknowledgement never set in CI. The redaction opt-out takes the same form and is audited. |
+## Declared dormancy
+
+`validate_topology` and `check_plan_edges` have **no caller inside `mvm`**, and
+will not get one: a single-VM `mvmctl` run has no graph to validate, and this
+repository has no fleet. `mvmd` is the caller.
+
+That is the shape plan 293's WS4 exists to catch, so it is written down here
+rather than discovered later. The distinction WS4 draws is between a control
+that is dormant *by declaration* and one that is dormant *by accident* — this
+is the former, and when WS4 lands these two belong in its allowlist with this
+paragraph as the justification.
+
+What keeps it honest meanwhile: both are pure functions with no side effects,
+both are covered by their own tests, and neither claims a guarantee that
+anything in `mvm` relies on. The refusals they implement are real only once
+`mvmd` calls them, and no claim in ADR-001 asserts otherwise.
 
 ## Open questions
 

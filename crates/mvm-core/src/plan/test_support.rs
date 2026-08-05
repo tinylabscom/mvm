@@ -33,6 +33,7 @@ pub struct PlanFixture {
     valid_from: Option<DateTime<Utc>>,
     valid_until: Option<DateTime<Utc>>,
     services: Vec<ServiceId>,
+    stream_edges: Vec<mvm_contract::stream::StreamEdge>,
     stream_retention: StreamRetention,
     audit_labels: BTreeMap<String, String>,
 }
@@ -49,6 +50,7 @@ impl Default for PlanFixture {
             valid_from: None,
             valid_until: None,
             services: Vec::new(),
+            stream_edges: Vec::new(),
             stream_retention: StreamRetention::default(),
             audit_labels: BTreeMap::new(),
         }
@@ -185,6 +187,7 @@ impl PlanFixture {
             deps_volume: None,
             shares: Vec::new(),
             services: self.services,
+            stream_edges: self.stream_edges.clone(),
             stream_retention: self.stream_retention,
         }
     }

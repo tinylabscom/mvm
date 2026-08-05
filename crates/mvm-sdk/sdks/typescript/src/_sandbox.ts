@@ -30,6 +30,10 @@
  */
 
 import type { EnvValue, Network, Resources } from "./ir/workload.js";
+import type {
+  RuntimeFsEntry,
+  RuntimeFsStat,
+} from "./runtime/runtime.js";
 import { cliResolutionHint, resolveCliBin } from "./_cli.js";
 export { MVM_CLI_BIN_ENV } from "./_cli.js";
 
@@ -103,13 +107,9 @@ export class SandboxLiveError extends Error {
 /** Raised when the SDK refuses a live-mode `commands.start` call
  *  because the resolved template is a *prod* template.
  *
- *  Per ADR-001 §W4.3 (security claim 4 in `CLAUDE.md`) the guest
- *  agent strips the `do_exec` handler in production builds. The
- *  agent itself fails closed, but the SDK refuses *before* any
- *  vsock traffic so a typo doesn't make a spurious round-trip.
- *  `commands.start` is the only Sandbox surface that hits
- *  `proc start`; `files.write` / `kill` route to verbs that are
- *  available in prod builds too. */
+ *  The guest agent strips development-only handlers from production
+ *  builds. The agent itself fails closed, but the SDK refuses before
+ *  any CLI traffic so a typo cannot make a spurious round-trip. */
 export class SandboxDevOnly extends SandboxLiveError {
   constructor(
     message: string,
@@ -117,6 +117,50 @@ export class SandboxDevOnly extends SandboxLiveError {
   ) {
     super(message, opts);
     this.name = "SandboxDevOnly";
+  }
+}
+
+export type FsEntry = RuntimeFsEntry;
+export type FsStat = RuntimeFsStat;
+
+export interface ProcessStreamEvent {
+  stream: string;
+  data: Uint8Array;
+}
+
+export interface ProcessResult {
+  exitCode: number;
+  stdout: Uint8Array;
+  stderr: Uint8Array;
+}
+
+export class ProcessHandle {
+  readonly token: string;
+  private readonly transport: LiveTransport;
+
+  constructor(transport: LiveTransport, token: string) {
+    this.transport = transport;
+    this.token = token;
+  }
+
+  wait(options: {
+    timeout?: number;
+    onEvent?: (event: ProcessStreamEvent) => void;
+  } = {}): Promise<ProcessResult> {
+    return this.transport.processWait(this.token, options);
+  }
+
+  sendStdin(data: Uint8Array | string): void {
+    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+    this.transport.processStdin(this.token, bytes);
+  }
+
+  signal(signum: number): void {
+    this.transport.processSignal(this.token, signum);
+  }
+
+  kill(): void {
+    this.transport.processKill(this.token);
   }
 }
 
@@ -505,21 +549,108 @@ export class LiveTransport {
     return new LiveTransport({ mvmCliBin, vmId, buildMode });
   }
 
-  commandsStart(argv: string[], env: Record<string, EnvValue | string> | undefined): void {
-    if (this.buildMode !== "dev") {
-      throw new SandboxDevOnly(
-        `\`commands.start\` requires a dev-mode template; resolved template ` +
-          `build_mode=${JSON.stringify(this.buildMode)}. ADR-001 §W4.3 (security ` +
-          `claim 4) strips the agent's \`do_exec\` handler in prod builds — ` +
-          `re-build the template with \`mvmctl template build --dev <name>\`, ` +
-          `or use \`files.write\` to stage inputs into the running VM instead.`,
-        { argv: ["machine", "proc", "start", this.vmId, ...argv] },
-      );
-    }
+  commandsStart(argv: string[], env: Record<string, EnvValue | string> | undefined): ProcessHandle {
+    this.requireDev("commands.start", ["machine", "proc", "start", this.vmId, ...argv]);
     const shell = [this.mvmCliBin, "machine", "proc", "start", this.vmId];
     shell.push(...this.encodeEnvFlags(env, shell));
     shell.push("--", ...argv);
-    this.runShell(shell);
+    return this.startProcess(shell);
+  }
+
+  private requireDev(operation: string, argv: string[]): void {
+    if (this.buildMode !== "dev") {
+      throw new SandboxDevOnly(
+        `\`${operation}\` requires a dev-mode template; resolved template ` +
+          `build_mode=${JSON.stringify(this.buildMode)}. The guest policy refuses ` +
+          "this runtime operation on production templates.",
+        { argv },
+      );
+    }
+  }
+
+  private startProcess(shell: string[]): ProcessHandle {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const child = require("node:child_process") as typeof import("node:child_process");
+    let result;
+    try {
+      result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
+    } catch (err) {
+      throw new SandboxLiveError(
+        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
+        { argv: shell },
+      );
+    }
+    if (result.error) throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
+    if (result.status !== 0) {
+      throw new SandboxLiveError(
+        `\`mvmctl machine proc start\` failed with exit code ${result.status}`,
+        { argv: shell, exitCode: result.status, stderr: result.stderr ?? "" },
+      );
+    }
+    const token = (result.stdout ?? "").trim();
+    if (!token) {
+      throw new SandboxLiveError("`mvmctl machine proc start` produced no pid_token on stdout", {
+        argv: shell,
+        stderr: result.stderr ?? "",
+      });
+    }
+    return new ProcessHandle(this, token);
+  }
+
+  processWait(
+    token: string,
+    options: { timeout?: number; onEvent?: (event: ProcessStreamEvent) => void } = {},
+  ): Promise<ProcessResult> {
+    this.requireDev("process wait", ["machine", "proc", "wait", this.vmId, token]);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const child = require("node:child_process") as typeof import("node:child_process");
+    const shell = [this.mvmCliBin, "machine", "proc", "wait", this.vmId, token];
+    if (options.timeout !== undefined) shell.push("--timeout", String(Math.trunc(options.timeout)));
+    return new Promise((resolve, reject) => {
+      let proc: import("node:child_process").ChildProcessByStdio<
+        null,
+        import("node:stream").Readable,
+        import("node:stream").Readable
+      >;
+      try {
+        proc = child.spawn(shell[0], shell.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
+      } catch (err) {
+        reject(new SandboxLiveError(`failed to spawn: ${String(err)}`, { argv: shell }));
+        return;
+      }
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      proc.stdout.on("data", (chunk: Buffer) => {
+        stdout.push(chunk);
+        options.onEvent?.({ stream: "stdout", data: new Uint8Array(chunk) });
+      });
+      proc.stderr.on("data", (chunk: Buffer) => {
+        stderr.push(chunk);
+        options.onEvent?.({ stream: "stderr", data: new Uint8Array(chunk) });
+      });
+      proc.on("error", (error) => reject(new SandboxLiveError(`process wait failed: ${error.message}`, { argv: shell })));
+      proc.on("close", (code) => resolve({
+        exitCode: code ?? -1,
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr),
+      }));
+    });
+  }
+
+  processStdin(token: string, data: Uint8Array): void {
+    this.requireDev("process stdin", ["machine", "proc", "stdin", this.vmId, token]);
+    this.runBytes([this.mvmCliBin, "machine", "proc", "stdin", this.vmId, token], data);
+  }
+
+  processSignal(token: string, signum: number): void {
+    if (!Number.isInteger(signum) || signum <= 0) throw new RangeError("signum must be a positive integer");
+    this.requireDev("process signal", ["machine", "proc", "signal", this.vmId, token]);
+    this.runShell([this.mvmCliBin, "machine", "proc", "signal", this.vmId, token, String(signum)]);
+  }
+
+  processKill(token: string): void {
+    this.requireDev("process kill", ["machine", "proc", "kill", this.vmId, token]);
+    this.runShell([this.mvmCliBin, "machine", "proc", "kill", this.vmId, token]);
   }
 
   /** Encode `env` into `-e KEY=VALUE` flags for `mvmctl machine proc start`,
@@ -642,40 +773,58 @@ export class LiveTransport {
     };
   }
 
-  filesWrite(path: string, data: Uint8Array): void {
-    const shell = [this.mvmCliBin, "machine", "fs", "write", this.vmId, path];
+  private runBytes(shell: string[], data: Uint8Array): void {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
-    let result;
-    try {
-      result = child.spawnSync(shell[0], shell.slice(1), {
-        input: Buffer.from(data),
-      });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: shell },
-      );
-    }
-    if (result.error) {
-      throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, {
-        argv: shell,
-      });
-    }
+    const result = child.spawnSync(shell[0], shell.slice(1), { input: Buffer.from(data) });
+    if (result.error) throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
     if (result.status !== 0) {
-      throw new SandboxLiveError(
-        `\`mvmctl machine fs write\` failed with exit code ${result.status}`,
-        {
-          argv: shell,
-          exitCode: result.status,
-          stderr: result.stderr ? result.stderr.toString("utf-8") : "",
-        },
-      );
+      throw new SandboxLiveError(`\`${shell.join(" ")}\` failed with exit code ${result.status}`, {
+        argv: shell,
+        exitCode: result.status,
+        stderr: result.stderr ? result.stderr.toString("utf-8") : "",
+      });
     }
   }
 
-  cp(source: string, destination: string): void {
-    const shell = [this.mvmCliBin, "machine", "cp", source, destination];
+  private runJson(shell: string[]): unknown {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const child = require("node:child_process") as typeof import("node:child_process");
+    const result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
+    if (result.error) throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
+    if (result.status !== 0) {
+      throw new SandboxLiveError(`\`${shell.join(" ")}\` failed with exit code ${result.status}`, {
+        argv: shell,
+        exitCode: result.status,
+        stderr: result.stderr ?? "",
+      });
+    }
+    try {
+      return JSON.parse(result.stdout ?? "");
+    } catch (err) {
+      throw new SandboxLiveError(`\`${shell.join(" ")}\` returned invalid JSON`, {
+        argv: shell,
+        stderr: String(err),
+      });
+    }
+  }
+
+  filesWrite(
+    path: string,
+    data: Uint8Array,
+    options: { mode?: number; createParents?: boolean; followSymlinks?: boolean } = {},
+  ): void {
+    this.requireDev("files.write", ["machine", "fs", "write", this.vmId, path]);
+    const shell = [this.mvmCliBin, "machine", "fs", "write", this.vmId, path, "--mode", String(options.mode ?? 0o644)];
+    if (options.createParents) shell.push("--create-parents");
+    if (options.followSymlinks) shell.push("--follow-symlinks");
+    this.runBytes(shell, data);
+  }
+
+  filesRead(path: string, offset = 0, length = 16 * 1024 * 1024): Uint8Array {
+    if (offset < 0 || length < 0) throw new RangeError("offset and length must be non-negative");
+    this.requireDev("files.read", ["machine", "fs", "read", this.vmId, path]);
+    const shell = [this.mvmCliBin, "machine", "fs", "read", this.vmId, path, "--offset", String(offset), "--length", String(length)];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
     let result;
@@ -694,6 +843,71 @@ export class LiveTransport {
     }
     if (result.status !== 0) {
       throw new SandboxLiveError(
+        `\`mvmctl machine fs read\` failed with exit code ${result.status}`,
+        {
+          argv: shell,
+          exitCode: result.status,
+          stderr: result.stderr ? result.stderr.toString("utf-8") : "",
+        },
+      );
+    }
+    return new Uint8Array(result.stdout ?? Buffer.alloc(0));
+  }
+
+  filesList(path: string): FsEntry[] {
+    this.requireDev("files.list", ["machine", "fs", "ls", this.vmId, path]);
+    const parsed = this.runJson([this.mvmCliBin, "machine", "fs", "ls", this.vmId, path, "--json"]);
+    if (!Array.isArray(parsed)) throw new SandboxLiveError("filesystem listing must be an array");
+    return parsed as FsEntry[];
+  }
+
+  filesStat(path: string, followSymlinks = true): FsStat {
+    this.requireDev("files.stat", ["machine", "fs", "stat", this.vmId, path]);
+    const shell = [this.mvmCliBin, "machine", "fs", "stat", this.vmId, path, "--json"];
+    if (!followSymlinks) shell.push("--no-follow");
+    const parsed = this.runJson(shell);
+    if (typeof parsed !== "object" || parsed === null) throw new SandboxLiveError("filesystem stat must be an object");
+    return parsed as FsStat;
+  }
+
+  filesMkdir(path: string, parents = false, mode = 0o755): void {
+    this.requireDev("files.mkdir", ["machine", "fs", "mkdir", this.vmId, path]);
+    const shell = [this.mvmCliBin, "machine", "fs", "mkdir", this.vmId, path, "--mode", String(mode)];
+    if (parents) shell.push("--parents");
+    this.runShell(shell);
+  }
+
+  filesRemove(path: string, recursive = false): void {
+    this.requireDev("files.remove", ["machine", "fs", "rm", this.vmId, path]);
+    const shell = [this.mvmCliBin, "machine", "fs", "rm", this.vmId, path];
+    if (recursive) shell.push("--recursive");
+    this.runShell(shell);
+  }
+
+  filesMove(source: string, destination: string): void {
+    this.requireDev("files.move", ["machine", "fs", "mv", this.vmId, source, destination]);
+    this.runShell([this.mvmCliBin, "machine", "fs", "mv", this.vmId, source, destination]);
+  }
+
+  cp(source: string, destination: string): void {
+    this.requireDev("copy", ["machine", "cp", source, destination]);
+    const shell = [this.mvmCliBin, "machine", "cp", source, destination];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const child = require("node:child_process") as typeof import("node:child_process");
+    let result;
+    try {
+      result = child.spawnSync(shell[0], shell.slice(1));
+    } catch (err) {
+      throw new SandboxLiveError(
+        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
+        { argv: shell },
+      );
+    }
+    if (result.error) {
+      throw new SandboxLiveError(`failed to spawn: ${result.error.message}`, { argv: shell });
+    }
+    if (result.status !== 0) {
+      throw new SandboxLiveError(
         `\`mvmctl machine cp\` failed with exit code ${result.status}`,
         {
           argv: shell,
@@ -706,6 +920,7 @@ export class LiveTransport {
 
   forward(hostPort: number, guestPort: number): void {
     const spec = `${hostPort}:${guestPort}`;
+    this.requireDev("forward", ["machine", "forward", this.vmId, "--port", spec]);
     const shell = [this.mvmCliBin, "machine", "forward", this.vmId, "--port", spec];
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const child = require("node:child_process") as typeof import("node:child_process");
@@ -1046,6 +1261,14 @@ export class Sandbox {
     return this._live.commandsExec(argv, options);
   }
 
+  /** Run shell syntax in a live development sandbox. */
+  shell(command: string, options: SandboxExecOptions = {}): ExecResult {
+    if (typeof command !== "string" || command.length === 0) {
+      throw new TypeError("shell command must be a non-empty string");
+    }
+    return this.exec(["/bin/sh", "-lc", command], options);
+  }
+
   /** Copy a host file into the running sandbox at `guestPath`.
    *
    *  Shells `mvmctl machine cp <hostPath> <vm>:<guestPath>` — the host file
@@ -1150,7 +1373,7 @@ export class SandboxCommands {
     this.sandbox = sandbox;
   }
 
-  start(argv: string[], options: SandboxCommandsStartOptions = {}): void {
+  start(argv: string[], options: SandboxCommandsStartOptions = {}): ProcessHandle | undefined {
     if (!Array.isArray(argv) || !argv.every((a) => typeof a === "string")) {
       throw new TypeError("argv must be a string[]");
     }
@@ -1158,8 +1381,7 @@ export class SandboxCommands {
       throw new RangeError("argv must be non-empty");
     }
     if (this.sandbox._live !== null) {
-      this.sandbox._live.commandsStart([...argv], options.env);
-      return;
+      return this.sandbox._live.commandsStart([...argv], options.env);
     }
     requireRecording().ops.push({
       kind: "command_start",
@@ -1176,7 +1398,11 @@ export class SandboxFiles {
     this.sandbox = sandbox;
   }
 
-  write(path: string, content: Uint8Array | string): void {
+  write(
+    path: string,
+    content: Uint8Array | string,
+    options: { mode?: number; createParents?: boolean; followSymlinks?: boolean } = {},
+  ): void {
     if (typeof path !== "string" || path.length === 0) {
       throw new TypeError("path must be a non-empty string");
     }
@@ -1189,7 +1415,7 @@ export class SandboxFiles {
       throw new TypeError("files.write content must be Uint8Array or string");
     }
     if (this.sandbox._live !== null) {
-      this.sandbox._live.filesWrite(path, bytes);
+      this.sandbox._live.filesWrite(path, bytes, options);
       return;
     }
     requireRecording().ops.push({
@@ -1197,5 +1423,47 @@ export class SandboxFiles {
       path,
       bytes_b64: bytesToBase64(bytes),
     });
+  }
+
+  read(path: string, offset = 0, length = 16 * 1024 * 1024): Uint8Array {
+    if (this.sandbox._live === null) {
+      throw new SandboxModeError("`files.read` is a live-mode operation; record mode cannot resolve guest state.");
+    }
+    return this.sandbox._live.filesRead(path, offset, length);
+  }
+
+  list(path: string): FsEntry[] {
+    if (this.sandbox._live === null) {
+      throw new SandboxModeError("`files.list` is a live-mode operation; record mode cannot resolve guest state.");
+    }
+    return this.sandbox._live.filesList(path);
+  }
+
+  stat(path: string, followSymlinks = true): FsStat {
+    if (this.sandbox._live === null) {
+      throw new SandboxModeError("`files.stat` is a live-mode operation; record mode cannot resolve guest state.");
+    }
+    return this.sandbox._live.filesStat(path, followSymlinks);
+  }
+
+  mkdir(path: string, parents = false, mode = 0o755): void {
+    if (this.sandbox._live === null) {
+      throw new SandboxModeError("`files.mkdir` is a live-mode operation; record mode cannot mutate guest state.");
+    }
+    this.sandbox._live.filesMkdir(path, parents, mode);
+  }
+
+  remove(path: string, recursive = false): void {
+    if (this.sandbox._live === null) {
+      throw new SandboxModeError("`files.remove` is a live-mode operation; record mode cannot mutate guest state.");
+    }
+    this.sandbox._live.filesRemove(path, recursive);
+  }
+
+  move(source: string, destination: string): void {
+    if (this.sandbox._live === null) {
+      throw new SandboxModeError("`files.move` is a live-mode operation; record mode cannot mutate guest state.");
+    }
+    this.sandbox._live.filesMove(source, destination);
   }
 }

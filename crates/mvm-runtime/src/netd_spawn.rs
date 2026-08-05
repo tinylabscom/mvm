@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use mvm_core::vm_backend::BackendKind;
 
 /// Per-VM pid file, under the VM state directory.
 pub const NETD_PID_FILE: &str = "netd.pid";
@@ -220,20 +221,17 @@ impl Drop for NetdGuard {
 /// A launch that is not on the tunnel is a no-op, so backends call this
 /// unconditionally rather than each re-deriving the condition.
 ///
-/// `layout` is the socket convention the caller's own supervisor serves.
-/// It is a parameter rather than a constant because the two conventions
-/// differ by a directory level, and a gateway that binds the other one
-/// listens where nothing dials: the guest gets no network, with both
-/// halves individually correct and nothing comparing them.
+/// The backend kind selects the socket convention at the physical boundary;
+/// the gateway itself remains backend-neutral.
 pub fn spawn_netd_if_needed(
     config: &mvm_core::vm_backend::VmStartConfig,
     state_dir: &Path,
-    layout: mvm_net::l3::config::NetdUdsLayout,
+    backend_kind: BackendKind,
 ) -> Result<()> {
     if crate::egress_shared::l3_cmdline_token(config).is_none() {
         return Ok(());
     }
-    let netd_config = build_netd_config(config, layout)?;
+    let netd_config = build_netd_config(config, backend_kind)?;
     spawn_netd(NetdSpawnParams {
         state_dir,
         config_json: &netd_config,
@@ -248,10 +246,10 @@ pub fn spawn_netd_if_needed(
 /// was signed rather than one assembled at launch time.
 fn build_netd_config(
     config: &mvm_core::vm_backend::VmStartConfig,
-    layout: mvm_net::l3::config::NetdUdsLayout,
+    backend_kind: BackendKind,
 ) -> Result<String> {
     use mvm_net::l3::config::{
-        DEFAULT_DNS_QPS, DEFAULT_QUEUE_DEPTH, NetdConfig, NetdEgress, NetdRule,
+        DEFAULT_DNS_QPS, DEFAULT_QUEUE_DEPTH, NetdConfig, NetdEgress, NetdRule, NetdUdsLayout,
     };
 
     let plan_json = config
@@ -324,7 +322,10 @@ fn build_netd_config(
         // The gateway's refusals belong on the same chain as the admission
         // that authorized the workload they refuse on behalf of.
         tenant: plan.tenant.0.clone(),
-        uds_layout: layout,
+        uds_layout: match backend_kind {
+            BackendKind::Hvf => NetdUdsLayout::HvfVsockDir,
+            _ => NetdUdsLayout::PerVmDir,
+        },
         gateway_ipv4: lease.gateway,
         guest_ipv4: lease.guest,
         // Present exactly when the plan asked for IPv6. One lease, read
@@ -405,7 +406,6 @@ mod wiring_tests {
     use super::*;
     use mvm_core::plan::{L3NetworkSpec, NetworkMode};
     use mvm_core::vm_backend::VmStartConfig;
-    use mvm_net::l3::config::NetdUdsLayout;
 
     fn config_for(mode: NetworkMode) -> VmStartConfig {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
@@ -426,7 +426,7 @@ mod wiring_tests {
         // no `mvm-netd` on a test host, so a spawn attempt would error.
         let dir = tempfile::tempdir().expect("temp dir");
         for mode in [NetworkMode::None, NetworkMode::HostVsockProxy] {
-            spawn_netd_if_needed(&config_for(mode), dir.path(), NetdUdsLayout::PerVmDir)
+            spawn_netd_if_needed(&config_for(mode), dir.path(), BackendKind::Firecracker)
                 .unwrap_or_else(|e| panic!("{mode:?} must be a no-op, got {e}"));
         }
         spawn_netd_if_needed(
@@ -435,7 +435,7 @@ mod wiring_tests {
                 ..VmStartConfig::default()
             },
             dir.path(),
-            NetdUdsLayout::PerVmDir,
+            BackendKind::Firecracker,
         )
         .expect("a launch with no admitted plan is not on the tunnel");
         assert!(!dir.path().join(NETD_PID_FILE).exists());
@@ -444,10 +444,11 @@ mod wiring_tests {
     #[test]
     fn the_gateway_config_comes_from_the_admitted_plan() {
         let config = config_for(NetworkMode::L3Vsock);
-        let json = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect("an l3 plan lowers");
+        let json = build_netd_config(&config, BackendKind::Firecracker).expect("an l3 plan lowers");
         let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         let spec = L3NetworkSpec::v1();
         assert_eq!(lowered["vm_id"], "wiring");
+        assert_eq!(lowered["uds_layout"], "per_vm_dir");
         assert_eq!(lowered["mtu"], spec.mtu);
         assert_eq!(lowered["policy_epoch"], spec.policy_epoch);
         assert_eq!(lowered["max_flows"], spec.max_flows);
@@ -465,6 +466,10 @@ mod wiring_tests {
             .parse()
             .expect("parses");
         assert_ne!(guest, gateway);
+
+        let hvf_json = build_netd_config(&config, BackendKind::Hvf).expect("an l3 plan lowers");
+        let hvf_lowered: serde_json::Value = serde_json::from_str(&hvf_json).expect("valid json");
+        assert_eq!(hvf_lowered["uds_layout"], "hvf_vsock_dir");
     }
 
     #[test]
@@ -478,7 +483,7 @@ mod wiring_tests {
             plan_json: Some(serde_json::to_string(&plan).expect("serializes")),
             ..VmStartConfig::default()
         };
-        let err = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect_err("must refuse");
+        let err = build_netd_config(&config, BackendKind::Firecracker).expect_err("must refuse");
         assert!(err.to_string().contains("no l3 network spec"), "{err}");
     }
 
@@ -488,7 +493,7 @@ mod wiring_tests {
         // everything, `Unrestricted` allows everything.
         let mut config = config_for(NetworkMode::L3Vsock);
         config.network_policy = mvm_core::network_policy::NetworkPolicy::deny_all();
-        let json = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect("lowers");
+        let json = build_netd_config(&config, BackendKind::Firecracker).expect("lowers");
         let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert!(
             lowered["egress"]
@@ -511,7 +516,7 @@ mod wiring_tests {
             plan_json: Some(serde_json::to_string(&plan).expect("serializes")),
             ..VmStartConfig::default()
         };
-        let json = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect("an l3 plan lowers");
+        let json = build_netd_config(&config, BackendKind::Firecracker).expect("an l3 plan lowers");
         let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         let gateway: std::net::Ipv6Addr = lowered["gateway_ipv6"]
             .as_str()
@@ -536,7 +541,7 @@ mod wiring_tests {
     #[test]
     fn a_plan_that_does_not_request_ipv6_is_lowered_without_one() {
         let config = config_for(NetworkMode::L3Vsock);
-        let json = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect("lowers");
+        let json = build_netd_config(&config, BackendKind::Firecracker).expect("lowers");
         let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert!(lowered.get("gateway_ipv6").is_none(), "{lowered}");
         assert!(lowered.get("guest_ipv6").is_none(), "{lowered}");
@@ -557,11 +562,11 @@ mod wiring_tests {
             plan_json: Some(serde_json::to_string(&plan).expect("serializes")),
             ..VmStartConfig::default()
         };
-        let err = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect_err("must refuse");
+        let err = build_netd_config(&config, BackendKind::Firecracker).expect_err("must refuse");
         assert!(err.to_string().contains("feature"), "{err}");
     }
 
-    /// The gateway binds where the guest's own supervisor listens.
+    /// The gateway binds where the selected backend's supervisor listens.
     ///
     /// The two conventions differ by a `vsock/` directory level, and both
     /// halves are individually correct — nothing compared them, which is
@@ -569,21 +574,21 @@ mod wiring_tests {
     /// not serve. On that tier the guest reached no network at all, with
     /// every component behaving as written.
     ///
-    /// Asserting the lowering per layout is what makes the pairing a fact
+    /// Asserting the lowering per backend is what makes the pairing a fact
     /// rather than a convention two call sites happen to share.
     #[test]
     fn each_layout_lowers_to_the_socket_convention_its_supervisor_serves() {
         let config = config_for(NetworkMode::L3Vsock);
 
-        for (layout, expected) in [
-            (NetdUdsLayout::PerVmDir, "per_vm_dir"),
-            (NetdUdsLayout::HvfVsockDir, "hvf_vsock_dir"),
+        for (backend, expected) in [
+            (BackendKind::Firecracker, "per_vm_dir"),
+            (BackendKind::Hvf, "hvf_vsock_dir"),
         ] {
-            let json = build_netd_config(&config, layout).expect("an l3 plan lowers");
+            let json = build_netd_config(&config, backend).expect("an l3 plan lowers");
             let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
             assert_eq!(
                 lowered["uds_layout"], expected,
-                "the layout the caller chose has to survive into the config the \
+                "the backend's layout has to survive into the config the \
                  gateway reads, or it binds somewhere nothing dials"
             );
         }

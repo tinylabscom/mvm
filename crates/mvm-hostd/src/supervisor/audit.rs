@@ -408,6 +408,7 @@ mod tests {
             shares: Vec::new(),
             agent_verbs: None,
             services: Vec::new(),
+            stream_edges: Vec::new(),
         }
     }
 

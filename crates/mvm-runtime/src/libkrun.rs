@@ -896,7 +896,7 @@ impl VmBackend for LibkrunBackend {
         crate::netd_spawn::spawn_netd_if_needed(
             config,
             &state_dir,
-            mvm_net::l3::config::NetdUdsLayout::PerVmDir,
+            mvm_core::vm_backend::BackendKind::Libkrun,
         )?;
         let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(
             &config.name,

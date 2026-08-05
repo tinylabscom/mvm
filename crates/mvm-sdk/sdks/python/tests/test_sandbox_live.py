@@ -52,8 +52,12 @@ def _write_fixture_mvmctl(
     up_exit: int = 0,
     proc_exit: int = 0,
     proc_wait_stdout: str = "",
+    proc_wait_stderr: str = "",
     proc_wait_exit: int = 0,
     fs_exit: int = 0,
+    fs_read_stdout: bytes = b"",
+    fs_ls_json: str = "[]",
+    fs_stat_json: str = "{}",
     cp_exit: int = 0,
     forward_sleep: int = 0,
     down_exit: int = 0,
@@ -99,6 +103,7 @@ case "$verb" in
       exit {proc_exit}
     elif [ "$sub" = "wait" ]; then
       printf '%s' '{proc_wait_stdout}'
+      printf '%s' '{proc_wait_stderr}' >&2
       exit {proc_wait_exit}
     fi
     exit {proc_exit}
@@ -107,6 +112,12 @@ case "$verb" in
     sub=$1
     if [ "$sub" = "write" ]; then
       cat > {stdin_dir!s}/fs-write-stdin.bin
+    elif [ "$sub" = "read" ]; then
+      printf '%s' '{fs_read_stdout.decode("latin1")}'
+    elif [ "$sub" = "ls" ]; then
+      printf '%s' '{fs_ls_json}'
+    elif [ "$sub" = "stat" ]; then
+      printf '%s' '{fs_stat_json}'
     fi
     exit {fs_exit}
     ;;
@@ -310,6 +321,92 @@ def test_files_write_shells_with_stdin_bytes(tmp_path: Path) -> None:
     assert any(c.startswith("machine fs write sb-fs-vm /app/config.json") for c in calls)
     stdin_path = tmp_path / "fixture-stdin" / "fs-write-stdin.bin"
     assert stdin_path.read_bytes() == b'{"x":1}'
+
+
+def test_process_handle_waits_streams_and_controls_process(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-proc-vm", "build_mode": "dev"},
+        proc_wait_stdout="out",
+        proc_wait_stderr="err",
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    sb = mvm.Sandbox.create("python-3.12")
+    handle = sb.commands.start(["python", "run.py"])
+    assert handle is not None
+    events: list[mvm.ProcessStreamEvent] = []
+    result = handle.wait(on_event=events.append)
+    assert result.stdout == b"out"
+    assert result.stderr == b"err"
+    assert {(event.stream, event.data) for event in events} == {
+        ("stdout", b"out"),
+        ("stderr", b"err"),
+    }
+    handle.send_stdin("input")
+    handle.signal(15)
+    handle.kill()
+    calls = _read_fixture_log(tmp_path)
+    assert any("machine proc stdin sb-proc-vm" in call for call in calls)
+    assert any("machine proc signal sb-proc-vm" in call for call in calls)
+    assert any("machine proc kill sb-proc-vm" in call for call in calls)
+    sb.kill()
+
+
+def test_files_runtime_surface_reads_lists_stats_and_mutates(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-fs-vm", "build_mode": "dev"},
+        fs_read_stdout=b"hello",
+        fs_ls_json='[{"name":"note.txt","kind":"file","size":5}]',
+        fs_stat_json='{"canonical_path":"/app/note.txt","kind":"file","mode":420,"size":5,"mtime":null}',
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    sb = mvm.Sandbox.create("python-3.12")
+    assert sb.files.read("/app/note.txt") == b"hello"
+    assert sb.files.list("/app")[0].name == "note.txt"
+    assert sb.files.stat("/app/note.txt").size == 5
+    sb.files.mkdir("/app/new", parents=True)
+    sb.files.remove("/app/old", recursive=True)
+    sb.files.move("/app/a", "/app/b")
+    calls = _read_fixture_log(tmp_path)
+    assert any("machine fs read sb-fs-vm /app/note.txt" in call for call in calls)
+    assert any("machine fs ls sb-fs-vm /app --json" in call for call in calls)
+    assert any("machine fs stat sb-fs-vm /app/note.txt --json" in call for call in calls)
+    assert any("machine fs mkdir sb-fs-vm /app/new" in call for call in calls)
+    assert any("machine fs rm sb-fs-vm /app/old" in call for call in calls)
+    assert any("machine fs mv sb-fs-vm /app/a /app/b" in call for call in calls)
+    sb.kill()
+
+
+def test_all_dev_only_live_verbs_fail_closed_on_prod(tmp_path: Path) -> None:
+    script = _write_fixture_mvmctl(
+        tmp_path,
+        up_envelope={"schema_version": 1, "vm_id": "sb-prod-vm", "build_mode": "prod"},
+    )
+    os.environ["MVM_SDK_MODE"] = "live"
+    os.environ["MVM_CLI_BIN"] = str(script)
+    sb = mvm.Sandbox.create("python-3.12")
+    operations = [
+        lambda: sb.commands.start(["python"]),
+        lambda: sb.exec("python"),
+        lambda: sb.files.write("/app/x", b"x"),
+        lambda: sb.files.read("/app/x"),
+        lambda: sb.files.list("/app"),
+        lambda: sb.files.stat("/app/x"),
+        lambda: sb.files.mkdir("/app/x"),
+        lambda: sb.files.remove("/app/x"),
+        lambda: sb.files.move("/app/x", "/app/y"),
+        lambda: sb.copy_in("/tmp/x", "/app/x"),
+        lambda: sb.copy_out("/app/x", "/tmp/x"),
+        lambda: sb.forward(8080, 80),
+    ]
+    for operation in operations:
+        with pytest.raises(mvm.SandboxDevOnly):
+            operation()
+    assert not any("proc start" in call or "fs " in call or "machine cp" in call for call in _read_fixture_log(tmp_path)[1:])
+    sb.kill()
 
 
 # ── kill / context manager ───────────────────────────────────────────

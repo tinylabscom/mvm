@@ -58,6 +58,7 @@ pub mod input_route;
 mod journal;
 pub mod plane;
 pub mod redact;
+pub(crate) mod secret_scan;
 pub mod serve;
 
 use std::sync::{Arc, OnceLock};
@@ -70,8 +71,8 @@ pub use fanout::{
     ReaderHandle, ReaderStart,
 };
 pub use input_gate::{
-    CATEGORY_HOST_SECRET, DEFAULT_LEASE_TTL, InputAudit, InputAuditSink, InputBinding, InputGate,
-    InputRefusal, InputSession, KnownSecret,
+    CATEGORY_HOST_SECRET, DEFAULT_IDLE_FLUSH_AFTER, DEFAULT_LEASE_TTL, InputAudit, InputAuditSink,
+    InputBinding, InputGate, InputRefusal, InputSession,
 };
 pub use input_route::{
     DisplacedRoute, InputRoute, InputRouteError, InputTransport, MAX_UNDELIVERED_INPUT_BYTES,
