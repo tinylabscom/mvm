@@ -49,6 +49,29 @@ fn interface_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the device is gone, allowing for the kernel taking its time.
+///
+/// Closing the last descriptor is what removes a TUN interface, but the
+/// removal is the kernel's to schedule and it is not synchronous with the
+/// `close(2)` that triggered it. On an unloaded host it is quick enough
+/// that an immediate check passes; under the parallelism of a full test
+/// binary it is not, and the same assertion fails for a teardown that is
+/// working correctly.
+///
+/// So the property asserted is the real one — the device does not survive
+/// teardown — rather than the stricter one nothing promises, that it is
+/// gone by the time the next statement runs.
+fn interface_gone(name: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !interface_exists(name) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    !interface_exists(name)
+}
+
 fn nft_table_exists(table: &str) -> bool {
     std::process::Command::new("nft")
         .args(["list", "table", "inet", table])
@@ -108,7 +131,7 @@ fn opening_a_datapath_creates_a_host_tun_device_and_its_rules() {
     // Teardown is deterministic: device, rules, everything.
     handle.close().expect("close");
     assert!(
-        !interface_exists(&iface),
+        interface_gone(&iface),
         "closing must remove the host tun device {iface}"
     );
     assert!(
@@ -136,7 +159,7 @@ fn a_failed_open_leaves_nothing_behind() {
     drop(second);
     first.close().expect("close");
     assert!(
-        !interface_exists(&iface),
+        interface_gone(&iface),
         "no device may survive teardown, however the collision resolved"
     );
 }
