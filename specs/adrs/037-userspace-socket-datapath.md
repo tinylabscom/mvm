@@ -470,35 +470,27 @@ or fully use.
   bound. Until stream ingress lands here, `declared_ingress: true` remains
   an over-claim for TCP on this backend, and saying so is the point of this
   entry.
-- **`ipv6_flows: true` is honest about this backend and unreachable from
-  either end.** The declaration says the backend carries TCP and UDP over
-  IPv6, which it does — the datapath is family-generic, and admission
-  judges a v6 destination under rules that mirror v4. What is missing is
-  everything on both sides of it.
+- ~~**`ipv6_flows: true` is honest about this backend and unreachable from
+  either end.**~~ **Closed 2026-08-04.** The declaration is now
+  load-bearing on both sides.
 
-  **Nothing can require it.** `required_capabilities` is populated in
-  exactly one place, from a constant literal that names `tcp`, `udp`,
-  `controlled_dns`, and `declared_ingress` and leaves the rest at `NONE`.
-  No plan field, no network policy, and no `NetdConfig` key maps into a
-  `ForwardingCapabilities`, so `ipv6_flows` cannot appear in a shortfall
-  and no admission decision can turn on it. `shortfall` checks it; nothing
-  ever asks.
+  **Demand.** `L3NetworkSpec.features` is the request. A plan setting the
+  `IPV6` bit is what makes the host lease a v6 pair, and `GatewayConfig`
+  derives `required_capabilities.ipv6_flows` from that lease — one place,
+  from the lease rather than from a constant. A backend without the
+  capability now produces a `CapabilityShortfall` naming `ipv6_flows`
+  before the VM boots, which is what the Linux TUN datapath (`ipv6_flows:
+  false` until its v6 half lands) does today for such a plan.
 
-  **Nothing can use it.** The guest agent now configures a v6 address when
-  it is assigned one (ADR-038), but no host assigns one: the allocator has
-  no v6 pool, `assign_config` sends `v6: None` while forwarding the same
-  lease's v6 pair to the datapath, and `features::GRANTED_V1` is `0`. So a
-  guest never holds a v6 address, and `admit_outbound` refuses the family
-  for want of one before any capability is consulted.
+  **Supply.** The allocator carves a unique-local `/126` at the same index
+  as the `/30`, `assign_config` sends it, and the granted feature bits say
+  so. The guest holds a v6 address, so `admit_outbound` has something to
+  check a v6 source against and the family is no longer refused for want
+  of one.
 
-  This is not the `declared_ingress` failure mode — nothing is advertised
-  here that the backend would fail to serve if asked. It is a capability
-  with no demand-side expression and no supply of addresses, which makes
-  the declaration true and inert. It is recorded because "true and inert"
-  and "true and load-bearing" are indistinguishable from the constant
-  alone, and the next person to read `ipv6_flows: true` should not have to
-  re-derive which one it is. Closing it is ADR-038's allocation gap plus a
-  decision about whether a plan should be able to demand v6 at all.
+  A plan that does not ask for IPv6 is unchanged in every byte, which is
+  the other half of the decision: the capability is honest *and* the
+  default is still one address family.
 - ~~**`Gateway::poll_inbound` drains without a per-pass budget.**~~
   **Closed.** The drain is bounded by `MAX_INBOUND_PACKETS_PER_PASS` and
   reports `InboundDrain::Backlogged` when the budget is what stopped it, so

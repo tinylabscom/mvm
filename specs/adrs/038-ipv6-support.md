@@ -1,8 +1,8 @@
 # ADR-038 — IPv6 as a first-class address family
 
-**Status: Accepted — host admission, guest kernel, and in-guest address
-configuration landed 2026-08-04; host-side v6 address *allocation*
-outstanding**
+**Status: Accepted — implemented end to end 2026-08-04. Host admission,
+guest kernel, in-guest configuration, and host-side v6 address allocation
+have all landed. IPv6 is opt-in per plan; it is not on by default.**
 **Date: 2026-08-02**
 
 **What shipped.** The admission guard admits IPv6; `embedded_v4` extracts
@@ -24,12 +24,12 @@ up beside the v4 one — address, on-link peer, default route, resolver —
 over rtnetlink, in the same privileged setup phase, before the drop. See
 §"In-guest configuration: rtnetlink, not ioctl".
 
-**What has not.** Host-side v6 *allocation*. Every layer from the guest
-kernel up through admission is dual-stack, but nothing hands a guest a v6
-address to configure: the allocator carves IPv4 leases from an IPv4 pool,
-and `assign_config` sends `v6: None`. Until that changes, the guest code
-this ADR describes is exercised only by its tests. See §"The allocation gap
-this leaves".
+**And the host allocation.** A plan setting `features::IPV6` in its `l3`
+network spec is leased a unique-local `/126` at the same index as its
+`/30`; `assign_config` sends it; the granted feature bits say so; and the
+gateway requires `ipv6_flows` of whichever forwarding backend was selected.
+A plan that does not ask for IPv6 is unchanged in every byte. See §"Host
+allocation: a unique-local /126 per machine, on request".
 **Complements ADR-036 (L3 TUN-over-vsock) and ADR-037 (the userspace
 socket datapath). Supersedes nothing; it removes IPv6 from ADR-036's
 deferred set and gives it a design.**
@@ -242,29 +242,104 @@ handed a v6-only assignment would come up looking configured with no route
 off its link. The allocator assigns a v4 pair with every lease, so this is
 a contradiction to name rather than a case to serve. IPv6 is additive here.
 
-## The allocation gap this leaves
+## Host allocation: a unique-local /126 per machine, on request
 
-Nothing in production hands a guest a v6 address, so the guest code above
-is unreachable outside its tests. Four facts, each independently
-sufficient:
+Three questions had to be answered together: which addresses, how big a
+slice, and who asks.
 
-- `AddressAllocator` carves fixed subnets out of an IPv4-only pool. There
-  is no v6 pool and no v6 arm.
-- The one lease constructor that can carry a v6 pair is fed by a config
-  whose only production producer hardcodes no v6 pair. Its comment still
-  says the workload kernel is built without IPv6, which this ADR
-  superseded.
-- `assign_config` reads the lease and sends `v6: None` regardless,
-  discarding `guest_v6` / `gateway_v6` even when the lease carries them —
-  though it does forward the same pair to the datapath, so the two
-  consumers of one lease already disagree.
-- `features::GRANTED_V1` is `0`, so the `IPV6` feature bit is never
-  granted, and the guest's `HELLO` never offers it.
+### The pool is unique-local, which is a security decision as much as an addressing one
 
-Closing this is a host-side decision about where v6 addresses come from —
-a pool to carve, or a pair supplied per machine — not a further guest
-change. Its capability-honesty consequence is recorded in ADR-037
-§"Known defects in what shipped".
+Guest addresses come from `fd00::/8` — RFC 4193 unique-local — never from
+global space and never from documentation space. Global space would hand a
+workload a routable identity nobody asked for, that outlives the machine in
+any log it touches, and that the host cannot revoke. Documentation space
+(`2001:db8::/32`) is reserved for prose and would collide with the first
+example an operator pastes into a rule.
+
+The global ID is fixed (`fd6d:766d:1::/64`) rather than randomised per
+host. RFC 4193 asks for randomness to make two ULA networks unlikely to
+collide; here the two risks that buys off are already covered — an overlap
+with a route the host already has is what `AddressAllocator::exclude` is
+for, and the pool is configurable when that is not enough — while a
+deterministic prefix is the difference between a packet capture an operator
+can read and one they cannot. An allocator configured with a pool outside
+`fc00::/7` is refused rather than accepted.
+
+**The consequence that matters.** `fc00::/7` is deny-unless-admitted in the
+v6 class rules, and the pool sits inside it. So every guest's own address
+is now in the range the class check closes. That is the correct shape and
+must stay: holding an address in `fc00::/7` is an identity on the
+point-to-point link, **not** a permission to reach the range. A machine
+cannot reach its neighbour's leased address, its neighbour's gateway, or
+unrelated ULA space, under any egress policy including `unrestricted`,
+unless a rule explicitly admits the destination — the same machinery, and
+the same refusal code, as RFC1918 in v4. This is the property most likely
+to be broken silently by adding the pool, so it is witnessed at the
+admitter and again end to end through the real guest agent, and both
+witnesses are mutation-proven against removing the ULA arm of the class
+check.
+
+### A /126, at the same index as the /30
+
+The `/126` is the direct analogue of the v4 `/30`: four addresses, of which
+`.1` is the gateway (peer, default route, and synthetic resolver, all the
+same address) and `.2` is the guest. Nothing else is on-link.
+
+The v6 subnet is carved at the *same index* as the v4 one, out of one index
+space. That is what makes the two families share a single free-list: one
+`release` frees both, no second table can fall out of step with the first,
+and the "no two live machines share an address" property is identical in
+each family rather than merely similar. A machine that asked for v6 and one
+that did not can never be handed the same `/30` either.
+
+### Opt-in, not always
+
+`L3NetworkSpec.features` — already part of the signed plan — is the
+request. Setting `features::IPV6` is what causes the host to allocate a v6
+pair; leaving it off produces a lease, a `CONFIG`, and a guest
+configuration identical in every byte to the v4-only ones.
+
+The argument for always-on is parity: a workload that gets v4 should be
+able to get v6. It *can* — the request is one bit in a spec every `l3` plan
+already carries, and nothing about the path is conditional or unfinished.
+The argument against handing it to everyone is that an address family the
+workload does not use is still reachable surface: a second stack for a
+compromised guest to originate from, a second family for anti-spoofing and
+the class check to be right about, and a second address in every audit
+line. mvm's posture everywhere else is that capability is declared, not
+inherited. IPv6 follows it.
+
+The bit is also what makes the capability honest. A leased v6 pair sets
+`required_capabilities.ipv6_flows`, so a backend that cannot carry v6 flows
+refuses the session at open with a shortfall naming `ipv6_flows`, before
+the VM boots — rather than letting the guest configure an address whose
+packets die somewhere it cannot see. The Linux TUN datapath declares
+`ipv6_flows: false` today, so it refuses exactly such a plan.
+
+### The handshake grants what both sides can support
+
+`features::granted(offered, assigning_v6)` is the intersection: the host
+grants `IPV6` only when the guest offered it in `HELLO` **and** the host
+leased a pair. `Hello::v1()` offers it, because this guest can apply one.
+A guest that does not offer it and a host that leased a pair is a refusal
+(`FeatureUnsupported`), not a silent downgrade to v4 — the plan asked for a
+family, and a workload quietly given less than it was admitted for is the
+failure this whole seam exists to prevent. `Config::decode` enforces the
+same agreement on the wire: the `IPV6` bit is set exactly when a v6
+assignment is present.
+
+### What remains unwired above the plan
+
+The request is expressible and enforced in the signed plan, and the launch
+path acts on it. What no `mvmctl` surface does yet is *populate* an
+`L3NetworkSpec` — not for IPv6 and not for any other field of it. Every
+`SynthesisInput` construction site passes `l3_network: None`, and the boot
+path's site additionally hardcodes `network_mode: Default`, so today an
+`l3-vsock` plan with a spec is produced only by the plan-mode admission
+path and by callers that build one directly. Giving IPv6 a CLI flag or a
+workload-IR field in isolation would add a knob that is inert on the path
+that actually boots a VM, which is the same defect in mirror image. The two
+belong together and are not attempted here.
 
 ## What this does not do
 

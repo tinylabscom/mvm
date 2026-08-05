@@ -164,7 +164,10 @@ substitution that caused the refusal. It is never partially served.
 
 Carrying a v6 *flow* and emitting an arbitrary v6 *packet* are separate
 capabilities, and the socket backend declares them separately: it carries
-TCP and UDP over IPv6, and it still cannot emit a raw v6 packet.
+TCP and UDP over IPv6, and it still cannot emit a raw v6 packet. That
+declaration is now load-bearing rather than decorative — a plan that asks
+for IPv6 requires `ipv6_flows` of whichever backend was selected, and a
+backend without it refuses the session.
 
 On macOS this is permanent rather than pending — the privileged helper it
 would take was considered and turned down, because mvm adds no root-capable
@@ -223,22 +226,31 @@ address is empty, because a point-to-point IP interface has none.
 
 ## Limits in this version
 
-- **IPv6 is complete except for the address assignment, which is host-side.**
-  The workload kernel speaks IPv6; admission judges a v6 destination under
-  rules that mirror v4; and the guest agent configures a v6 address, its
-  point-to-point peer, a default route through that peer, and the assigned
-  resolver whenever the host's `CONFIG` carries a v6 half. It does that
-  over rtnetlink, in the same setup phase as the v4 bring-up and before
+- **IPv6 is opt-in, and off unless the plan asks for it.** The workload
+  kernel speaks IPv6; admission judges a v6 destination under rules that
+  mirror v4; the host allocates a point-to-point `/126` beside the `/30`;
+  and the guest agent configures the address, its peer, a default route
+  through that peer, and the assigned resolver. The guest does that over
+  rtnetlink, in the same setup phase as the v4 bring-up and before
   privileges are dropped, so a dual-stack assignment costs the guest no
   extra privilege and no extra process.
 
-  What no host does yet is *assign* one. The address allocator carves IPv4
-  leases out of an IPv4 pool, and the assignment the gateway sends is
-  v4-only, so every guest today receives a v4-only `CONFIG` and comes up
-  exactly as it did before. An IPv6 destination therefore remains
-  unreachable from a guest — but the missing piece is now a host-side
-  allocation, not a guest that could not use the result. A `CONFIG`
-  carrying a v6 half and no v4 half is refused rather than half-applied.
+  A plan that does not set the `IPV6` feature bit in its `l3` network spec
+  gets no v6 address at all, and its `CONFIG` is byte-for-byte the v4-only
+  one. That is deliberate: an address family a workload does not need is
+  reachable surface it did not ask for. A `CONFIG` carrying a v6 half and
+  no v4 half is refused rather than half-applied.
+
+  The v6 pool is unique-local (`fd00::/8`), never global and never
+  documentation space. Holding an address in `fc00::/7` is an identity on
+  the point-to-point link and **not** a permission to reach that range:
+  another machine's leased address, its gateway, and unrelated ULA space
+  are all refused by the address-class check unless a rule explicitly
+  admits them, exactly as RFC1918 is in v4.
+
+  A backend that cannot carry v6 flows refuses the session before the VM
+  boots, naming `ipv6_flows` in the shortfall, rather than handing the
+  guest an address whose packets go nowhere.
 - Embedded-v4 addresses do not bypass the v4 rules. A v4-mapped,
   v4-compatible, NAT64, or 6to4 address is collapsed to the v4 address it
   carries and then judged by the whole v4 policy, so link-local metadata and

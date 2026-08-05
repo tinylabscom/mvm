@@ -911,15 +911,21 @@ updates only its own entry below.
       `admit_inbound` rather than by the datapath. Declared **TCP** ingress
       on this backend stays unserved and is recorded as an open over-claim
       rather than smoothed over.
-      IPv6 (ADR-038) is now complete from the guest kernel up through
-      admission: the workload kernel carries `CONFIG_IPV6` without pulling
-      XFRM in, and the guest agent brings a v6 address, on-link peer,
-      default route and resolver up over rtnetlink whenever a `CONFIG`
-      carries a v6 half, in the same privileged phase as the v4 sequence.
-      **No host assigns one yet** — the allocator has no v6 pool and
-      `assign_config` sends `v6: None` — so `ipv6_flows: true` joins
-      declared TCP ingress in ADR-037's known defects as a capability that
-      is true of the backend and unreachable from either end. Remaining
+      IPv6 (ADR-038) is complete end to end and **opt-in per plan**: the
+      workload kernel carries `CONFIG_IPV6` without pulling XFRM in; a plan
+      setting `features::IPV6` in its `l3` spec is leased a unique-local
+      `/126` at the same index as its `/30`; the gateway assigns it; and
+      the guest agent brings the address, on-link peer, default route and
+      resolver up over rtnetlink in the same privileged phase as the v4
+      sequence. A leased pair now sets `required_capabilities.ipv6_flows`,
+      so a backend that cannot carry v6 flows refuses at open rather than
+      dropping the guest's packets — which closes ADR-037's `ipv6_flows`
+      known defect and leaves declared TCP ingress as the one remaining
+      over-claim there. Adding a unique-local pool did not turn a guest's
+      own address into permission to reach ULA space: a neighbour's leased
+      address stays refused under `unrestricted`, witnessed end to end and
+      mutation-proven. What no `mvmctl` surface does yet is populate an
+      `L3NetworkSpec` — for IPv6 or any other field of it. Remaining
       plan-287 workstreams (benchmarking, zero-copy, node-to-node
       transport, the node-control API, WSL2) are untouched; the `utun` + PF
       backend is closed by ADR-039's rejection rather than queued.

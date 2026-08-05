@@ -799,6 +799,23 @@ mod l3_spec_tests {
         assert_eq!(carried.max_flows, 17);
     }
 
+    /// The IPv6 request travels in the signed plan, so what the host
+    /// allocates for is what was admitted rather than something the launch
+    /// path decided on its own.
+    #[test]
+    fn an_ipv6_request_survives_synthesis_into_the_signed_plan() {
+        let supplied = L3NetworkSpec::v1().requesting_ipv6();
+        let carried = l3_spec_for(NetworkMode::L3Vsock, Some(&supplied)).expect("present");
+        assert!(carried.requests_ipv6());
+        // And the default is still v4-only, so nothing gets a second
+        // address family by not mentioning one.
+        assert!(
+            !l3_spec_for(NetworkMode::L3Vsock, None)
+                .unwrap()
+                .requests_ipv6()
+        );
+    }
+
     #[test]
     fn an_absent_spec_becomes_the_version_one_defaults() {
         let carried = l3_spec_for(NetworkMode::L3Vsock, None).expect("present");

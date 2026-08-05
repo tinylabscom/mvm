@@ -1525,6 +1525,97 @@ mod tests {
         }
     }
 
+    /// The property most at risk from giving guests unique-local addresses:
+    /// the pool is itself inside `fc00::/7`, so every machine's own link
+    /// address now sits in the range the class check closes. That address
+    /// is an identity, not a permission — a neighbouring machine's leased
+    /// address, its gateway, and unrelated ULA space all stay refused.
+    #[test]
+    fn holding_a_unique_local_address_does_not_open_unique_local_space() {
+        let mut allocator = AddressAllocator::with_defaults();
+        let mine = allocator.allocate_dual().expect("pool has room");
+        let neighbour = allocator.allocate_dual().expect("pool has room");
+        let mut a = L3Admitter::new(
+            mine,
+            L3PolicyConfig {
+                egress: CanonicalEgress::Unrestricted,
+                ..L3PolicyConfig::default()
+            },
+            FlowTable::with_defaults(),
+            DnsBindingStore::with_defaults(),
+            IngressTable::with_defaults(),
+        );
+        a.set_ready(true);
+        let guest = mine
+            .guest_v6
+            .expect("a dual lease assigns a v6 guest address");
+        assert!(
+            guest.segments()[0] & 0xfe00 == 0xfc00,
+            "the pool must be unique-local for this test to mean anything, got {guest}"
+        );
+
+        let mut port = 50000u16;
+        for dst in [
+            neighbour.guest_v6.expect("neighbour v6"),
+            neighbour.gateway_v6.expect("neighbour gateway v6"),
+            "fd00:1234::5".parse().unwrap(),
+        ] {
+            port += 1;
+            let pkt = v6_packet(proto::TCP, guest, dst, &tcp(port, 443, ip::TCP_SYN));
+            assert_eq!(
+                out(&mut a, &pkt),
+                Err(DenyCode::PrivateRangeDenied),
+                "{dst} is unique-local and no rule admitted it"
+            );
+        }
+
+        // Control. Same admitter, same source, an unrestricted policy: a
+        // global destination is forwarded. Without this the refusals above
+        // would also pass on a check that denied every IPv6 destination.
+        let global = v6_packet(proto::TCP, guest, REMOTE_V6, &tcp(50100, 443, ip::TCP_SYN));
+        assert_eq!(out(&mut a, &global), Ok(()));
+    }
+
+    /// Opening one unique-local range does not open the pool the guests
+    /// themselves live in.
+    #[test]
+    fn an_admitted_private_range_does_not_reach_a_neighbours_leased_address() {
+        let mut allocator = AddressAllocator::with_defaults();
+        let mine = allocator.allocate_dual().expect("pool has room");
+        let neighbour = allocator.allocate_dual().expect("pool has room");
+        let mut a = L3Admitter::new(
+            mine,
+            L3PolicyConfig {
+                egress: CanonicalEgress::Unrestricted,
+                admitted_private: vec!["fd00:1234::/32".parse().unwrap()],
+                ..L3PolicyConfig::default()
+            },
+            FlowTable::with_defaults(),
+            DnsBindingStore::with_defaults(),
+            IngressTable::with_defaults(),
+        );
+        a.set_ready(true);
+        let guest = mine
+            .guest_v6
+            .expect("a dual lease assigns a v6 guest address");
+        let pkt = v6_packet(
+            proto::TCP,
+            guest,
+            neighbour.guest_v6.expect("neighbour v6"),
+            &tcp(50000, 443, ip::TCP_SYN),
+        );
+        assert_eq!(out(&mut a, &pkt), Err(DenyCode::PrivateRangeDenied));
+        // The range that *was* admitted still works, so the refusal above
+        // is about the address, not about the rule being ignored.
+        let opened = v6_packet(
+            proto::TCP,
+            guest,
+            "fd00:1234::5".parse().unwrap(),
+            &tcp(50001, 443, ip::TCP_SYN),
+        );
+        assert_eq!(out(&mut a, &opened), Ok(()));
+    }
+
     #[test]
     fn v6_dns_to_the_synthetic_resolver_is_terminated_at_the_gateway() {
         let mut a = open_443_v6();

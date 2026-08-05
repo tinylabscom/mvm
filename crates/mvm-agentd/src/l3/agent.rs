@@ -529,7 +529,7 @@ mod tests {
             v6: None,
             mtu: limits::MTU_V1,
             queue_count: 1,
-            features: features::GRANTED_V1,
+            features: 0,
             policy_epoch: 7,
         }
     }

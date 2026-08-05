@@ -104,9 +104,9 @@ for detailed scope and acceptance criteria.
         46,673,216 bytes (44.51 MiB). `declared_ingress: true` is honest for
         datagrams; declared **TCP** ingress binds nothing here and stays
         recorded as an over-claim
-  - [~] WS3 (#2116) — IPv6 as a first-class family (ADR-038). **Admission,
-        the guest kernel, and in-guest configuration have all landed;
-        host-side v6 *allocation* is what is left.** The fuzz
+  - [x] WS3 (#2116) — IPv6 as a first-class family (ADR-038). **Complete:
+        admission, the guest kernel, in-guest configuration, and host-side
+        v6 allocation have all landed. IPv6 is opt-in per plan.** The fuzz
         gate that blocked the admission change is closed, so the guard now
         admits v6. One `embedded_v4` extraction runs ahead of every other
         rule and hands its result to the entire existing v4 class check —
@@ -134,12 +134,29 @@ for detailed scope and acceptance criteria.
         distinct test. It runs in the same privileged phase as the v4
         sequence, so `CAP_NET_ADMIN` is held no longer than before, and a
         v6-only CONFIG is refused rather than half-applied.
-        **Remaining: host-side v6 allocation.** No production path assigns
-        a v6 address — the allocator has no v6 pool, `assign_config` sends
-        `v6: None` while forwarding the same lease's v6 pair to the
-        datapath, and `GRANTED_V1` is `0` — so no guest can originate v6
-        yet, and `ipv6_flows: true` is recorded in ADR-037's known defects
-        as true but unreachable from either end
+        **Host allocation closed.** `L3NetworkSpec.features` is the
+        request: a plan setting `IPV6` is leased a unique-local `/126` at
+        the same index as its `/30`, out of one index space so a single
+        `release` frees both families. The pool is `fd00::/8`, never global
+        and never documentation space, and an allocator configured outside
+        `fc00::/7` is refused. The consequence that mattered — every
+        guest's own address now sits in the range the class check closes —
+        holds the right way round: a machine still cannot reach its
+        neighbour's leased address, its neighbour's gateway, or unrelated
+        ULA space under any policy including `unrestricted`, witnessed at
+        the admitter and again end to end through the real guest agent, and
+        mutation-proven against removing the ULA arm. `assign_config` sends
+        the pair, `features::granted` is the intersection of what the guest
+        offered and what the host leased, and `Config::decode` refuses a
+        frame where the bit and the assignment disagree. A leased pair sets
+        `required_capabilities.ipv6_flows`, so a backend without it refuses
+        at open with a shortfall naming it — closing ADR-037's fourth known
+        defect. A plan that does not ask is unchanged in every byte.
+        **Still unwired above the plan:** no `mvmctl` surface populates an
+        `L3NetworkSpec` at all — every `SynthesisInput` site passes
+        `l3_network: None`, and the boot path also hardcodes
+        `network_mode: Default` — so a CLI/IR knob for IPv6 alone would be
+        inert on the path that boots a VM; the two belong together
   - [x] WS4 (#2117) — benchmarked 2026-08-04; **multi-queue rejected, no
         implementation code**, which is the intended outcome when the
         numbers do not support the work. Six `#[ignore]`d benchmarks extend

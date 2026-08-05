@@ -19,8 +19,8 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 
 use mvm_contract::l3::{
-    Config, ErrorCode, ErrorMessage, Hello, Ipv4Config, MessageType, ParsedIpPacket, Ready,
-    Shutdown, ShutdownReason, frame, ip, limits, message,
+    Config, ErrorCode, ErrorMessage, Hello, Ipv4Config, Ipv6Config, MessageType, ParsedIpPacket,
+    Ready, Shutdown, ShutdownReason, frame, ip, limits, message,
 };
 use mvm_contract::protocol::dns::{DnsRcode, DnsRecordType, decode_query, encode_response};
 use mvm_net::channel::VmInstanceIdentity;
@@ -112,6 +112,11 @@ impl GatewayConfig {
                 udp: true,
                 controlled_dns: true,
                 declared_ingress: true,
+                // The lease is the request. A machine holding an IPv6 pair
+                // was admitted for the family, so a backend that cannot
+                // carry it must refuse the session rather than let the
+                // guest configure an address whose packets go nowhere.
+                ipv6_flows: lease.gateway_v6.is_some(),
                 ..ForwardingCapabilities::NONE
             },
             machine_id,
@@ -433,7 +438,23 @@ impl Gateway {
                         events,
                     ));
                 }
-                let config = self.assign_config();
+                // A machine leased an IPv6 pair was admitted for the
+                // family. A guest that cannot apply one leaves the host
+                // enforcing anti-spoofing against an address nothing
+                // configured, so the session is refused rather than
+                // quietly downgraded to what the plan did not ask for.
+                if self.admitter.lease().gateway_v6.is_some()
+                    && hello.features & message::features::IPV6 == 0
+                {
+                    return Ok((
+                        self.error_frame(
+                            ErrorCode::FeatureUnsupported,
+                            "machine was leased an ipv6 pair the guest did not offer to apply",
+                        ),
+                        events,
+                    ));
+                }
+                let config = self.assign_config(hello.features);
                 self.state = GatewayState::AwaitingReady;
                 Ok((self.encode(MessageType::Config, &config.encode()), events))
             }
@@ -694,8 +715,26 @@ impl Gateway {
     }
 
     /// The configuration this gateway assigns. Every value is host-chosen.
-    fn assign_config(&self) -> Config {
+    ///
+    /// `offered` is what the guest proposed in `HELLO`; the IPv6 half is
+    /// assigned only where the lease and the offer agree, so the guest is
+    /// never handed an assignment it said it cannot apply.
+    fn assign_config(&self, offered: u32) -> Config {
         let lease = self.admitter.lease();
+        let v6 = lease
+            .gateway_v6
+            .zip(lease.guest_v6)
+            .map(|(gateway, guest)| {
+                Ipv6Config {
+                    address: guest.octets(),
+                    prefix_len: lease.prefix_len_v6(),
+                    peer: gateway.octets(),
+                    // The resolver is the gateway in this family too, so a
+                    // guest that prefers IPv6 still resolves through the
+                    // host-terminated resolver rather than around it.
+                    dns: gateway.octets(),
+                }
+            });
         Config {
             v4: Some(Ipv4Config {
                 address: lease.guest.octets(),
@@ -706,10 +745,10 @@ impl Gateway {
                 // terminates, which is what makes domain rules enforceable.
                 dns: lease.gateway.octets(),
             }),
-            v6: None,
+            v6,
             mtu: self.admitter.config().mtu,
             queue_count: limits::QUEUE_COUNT_V1,
-            features: message::features::GRANTED_V1,
+            features: message::features::granted(offered, v6.is_some()),
             policy_epoch: self.admitter.config().policy_epoch,
         }
     }
@@ -996,6 +1035,31 @@ mod tests {
         p[24..40].copy_from_slice(&dst.octets());
         p.extend_from_slice(payload);
         p
+    }
+
+    /// A backend that carries everything except IPv6 flows — the shape the
+    /// Linux TUN datapath reports until its v6 half lands.
+    struct V4OnlyDatapath;
+
+    impl L3Datapath for V4OnlyDatapath {
+        fn open(
+            &self,
+            _req: &DatapathRequest,
+        ) -> Result<Box<dyn crate::netd::datapath::DatapathHandle>, DatapathError> {
+            LoopbackDatapath::sink().open(_req)
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities {
+                arbitrary_ipv6: false,
+                ipv6_flows: false,
+                ..ForwardingCapabilities::FULL_L3
+            }
+        }
     }
 
     fn rule(net: &str, port: u16) -> CanonicalRule {
@@ -1842,6 +1906,153 @@ mod tests {
         };
         let wire = frame::encode(MessageType::Ready, SESSION.0, 0, &ready.encode()).unwrap();
         assert!(gw.handle_control_frame(&wire, 1).is_err());
+    }
+
+    /// The lease is the request. A machine issued a v6 pair has one
+    /// because something admitted it, so the backend that carries its
+    /// traffic has to be able to carry that family — otherwise the guest
+    /// gets an address whose packets die somewhere it cannot see.
+    #[test]
+    fn a_lease_with_a_v6_pair_requires_ipv6_flows_of_the_backend() {
+        let dual = GatewayConfig::new(
+            "vm-a",
+            "sha256:plan",
+            lease().with_v6(GATEWAY_V6, GUEST_V6),
+            L3PolicyConfig::default(),
+        );
+        assert!(
+            dual.required_capabilities.ipv6_flows,
+            "a v6 lease must require ipv6_flows of the forwarding backend"
+        );
+        let v4_only = GatewayConfig::new("vm-a", "sha256:plan", lease(), L3PolicyConfig::default());
+        assert!(
+            !v4_only.required_capabilities.ipv6_flows,
+            "a v4-only lease must require exactly what it required before v6 existed"
+        );
+    }
+
+    /// A backend that cannot carry v6 flows must refuse the session before
+    /// the VM boots, rather than drop the guest's v6 packets afterwards.
+    #[test]
+    fn a_backend_without_ipv6_flows_refuses_a_dual_stack_lease() {
+        let dp = V4OnlyDatapath;
+        let resolver = Arc::new(StaticResolver::new());
+        let err = Gateway::open(
+            GatewayConfig::new(
+                "vm-a",
+                "sha256:plan",
+                lease().with_v6(GATEWAY_V6, GUEST_V6),
+                L3PolicyConfig::default(),
+            ),
+            SESSION,
+            &dp,
+            resolver.clone(),
+        )
+        .expect_err("a v4-only backend cannot serve a dual-stack lease");
+        assert!(
+            matches!(
+                &err,
+                GatewayError::Datapath(DatapathError::CapabilityShortfall { missing, .. })
+                    if missing.contains(&"ipv6_flows")
+            ),
+            "{err:?}"
+        );
+        // The same backend still serves a v4-only lease: the refusal is
+        // about what was leased, not about the backend as such.
+        Gateway::open(
+            GatewayConfig::new("vm-a", "sha256:plan", lease(), L3PolicyConfig::default()),
+            SESSION,
+            &dp,
+            resolver,
+        )
+        .expect("a v4-only lease is within a v4-only backend's capabilities");
+    }
+
+    /// The end of the host-side half: what the allocator leased has to be
+    /// what the guest is told to configure, verbatim and in both families.
+    #[test]
+    fn the_assigned_config_carries_the_leases_v6_pair() {
+        let dp = LoopbackDatapath::sink();
+        let mut gw = Gateway::open(
+            GatewayConfig::new(
+                "vm-a",
+                "sha256:plan",
+                lease().with_v6(GATEWAY_V6, GUEST_V6),
+                L3PolicyConfig::default(),
+            ),
+            SESSION,
+            &dp,
+            Arc::new(StaticResolver::new()),
+        )
+        .unwrap();
+        let guest_v4 = gw.admitter().lease().guest;
+        let hello = frame::encode(MessageType::Hello, 0, 0, &Hello::v1().encode()).unwrap();
+        let (config_frame, _) = gw.handle_control_frame(&hello, 0).unwrap();
+        let parsed = frame::decode(&config_frame).unwrap();
+        let cfg = Config::decode(parsed.payload).unwrap();
+
+        let v6 = cfg
+            .v6
+            .expect("a dual-stack lease assigns a v6 configuration");
+        assert_eq!(Ipv6Addr::from(v6.address), GUEST_V6);
+        assert_eq!(Ipv6Addr::from(v6.peer), GATEWAY_V6);
+        // The resolver is the gateway in both families, so a guest that
+        // prefers v6 still reaches the host-terminated resolver — the one
+        // thing that makes domain rules enforceable.
+        assert_eq!(Ipv6Addr::from(v6.dns), GATEWAY_V6);
+        assert_ne!(
+            cfg.features & message::features::IPV6,
+            0,
+            "the granted feature bits must say the v6 half is live"
+        );
+        // The v4 half is untouched.
+        let v4 = cfg.v4.expect("a dual-stack assignment is additive");
+        assert_eq!(Ipv4Addr::from(v4.address), guest_v4);
+    }
+
+    /// A v4-only machine must see exactly the bytes it saw before any of
+    /// this existed.
+    #[test]
+    fn a_v4_only_lease_assigns_no_v6_and_grants_no_feature_bit() {
+        let dp = LoopbackDatapath::sink();
+        let mut gw = open_gateway(L3PolicyConfig::default(), &dp);
+        let hello = frame::encode(MessageType::Hello, 0, 0, &Hello::v1().encode()).unwrap();
+        let (config_frame, _) = gw.handle_control_frame(&hello, 0).unwrap();
+        let cfg = Config::decode(frame::decode(&config_frame).unwrap().payload).unwrap();
+        assert_eq!(cfg.v6, None);
+        assert_eq!(cfg.features, 0);
+    }
+
+    /// Silently degrading to v4 would leave an operator believing the
+    /// workload got the family its plan asked for.
+    #[test]
+    fn a_guest_that_does_not_offer_ipv6_is_refused_a_v6_lease() {
+        let dp = LoopbackDatapath::sink();
+        let mut gw = Gateway::open(
+            GatewayConfig::new(
+                "vm-a",
+                "sha256:plan",
+                lease().with_v6(GATEWAY_V6, GUEST_V6),
+                L3PolicyConfig::default(),
+            ),
+            SESSION,
+            &dp,
+            Arc::new(StaticResolver::new()),
+        )
+        .unwrap();
+        let silent_guest = Hello {
+            version: limits::PROTOCOL_VERSION,
+            features: 0,
+            max_queues: 1,
+        };
+        let hello = frame::encode(MessageType::Hello, 0, 0, &silent_guest.encode()).unwrap();
+        let (reply, _) = gw.handle_control_frame(&hello, 0).unwrap();
+        let parsed = frame::decode(&reply).unwrap();
+        assert_eq!(
+            parsed.header.msg_type,
+            MessageType::Error,
+            "a guest that cannot apply the assignment must be told, not quietly downgraded"
+        );
     }
 
     #[test]

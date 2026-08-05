@@ -9,7 +9,7 @@
 //! why they are worth having: everything between the guest's TUN fd and the
 //! host's forwarding call is exercised exactly as it ships.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use mvm_agentd::l3::{
@@ -827,4 +827,159 @@ fn the_guest_agent_never_asserts_its_own_identity() {
     let hello = mvm_contract::l3::Hello::v1().encode();
     assert_eq!(hello.len(), mvm_contract::l3::message::HELLO_LEN);
     assert_eq!(hello.len(), 7);
+}
+
+// ---------------------------------------------------------------------
+// 10. IPv6, end to end
+// ---------------------------------------------------------------------
+
+/// A minimal well-formed IPv6 packet, no extension headers.
+fn v6(protocol: u8, src: Ipv6Addr, dst: Ipv6Addr, payload: &[u8]) -> Vec<u8> {
+    let mut p = vec![0u8; 40];
+    p[0] = 0x60;
+    p[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+    p[6] = protocol;
+    p[7] = 64;
+    p[8..24].copy_from_slice(&src.octets());
+    p[24..40].copy_from_slice(&dst.octets());
+    p.extend_from_slice(payload);
+    p
+}
+
+/// A policy with no rules to satisfy, so the address-class check is the
+/// only thing that can refuse a destination.
+fn unrestricted() -> L3PolicyConfig {
+    L3PolicyConfig {
+        egress: CanonicalEgress::Unrestricted,
+        ..L3PolicyConfig::default()
+    }
+}
+
+/// The whole point of the change: what the host allocator leased has to
+/// arrive at the real guest agent and be applied to the real interface
+/// plan, in both families, without the guest choosing anything.
+#[test]
+fn a_leased_v6_pair_reaches_the_guest_and_is_configured() {
+    let dp = echoing_datapath();
+    let mut allocator = AddressAllocator::with_defaults();
+    let lease = allocator.allocate_dual().expect("pool has room");
+    let mut t = Tunnel::up(
+        "vm-a",
+        "boot-1",
+        SessionId(0x6000_0000_0000_0001),
+        lease,
+        unrestricted(),
+        &dp,
+        None,
+    );
+
+    let applied = t
+        .agent
+        .configurator()
+        .applied
+        .last()
+        .expect("the agent configured its interface");
+    let v6_plan = applied
+        .v6
+        .as_ref()
+        .expect("the guest applied the host's v6 assignment");
+    assert_eq!(v6_plan.address, lease.guest_v6.expect("leased guest v6"));
+    assert_eq!(v6_plan.peer, lease.gateway_v6.expect("leased gateway v6"));
+    assert_eq!(v6_plan.dns, lease.gateway_v6.expect("leased gateway v6"));
+    assert_eq!(v6_plan.prefix_len, lease.prefix_len_v6());
+    // The v4 half is exactly what it was before any of this existed.
+    assert_eq!(applied.address, lease.guest);
+    assert_eq!(applied.peer, lease.gateway);
+
+    // And the address is live: a v6 flow from the leased source crosses
+    // the whole stack. Without this the assertions above would hold for a
+    // configuration nothing could use.
+    let events = t.guest_sends(v6(
+        proto::TCP,
+        lease.guest_v6.unwrap(),
+        "2606:4700:4700::1111".parse().unwrap(),
+        &tcp(50000, 443, ip::TCP_SYN),
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GatewayEvent::FlowAdmitted { .. })),
+        "{events:?}"
+    );
+}
+
+/// A machine that asked for no IPv6 must see byte-for-byte what it saw
+/// before the host could assign one.
+#[test]
+fn a_v4_only_machine_is_still_configured_with_no_v6_half() {
+    let dp = echoing_datapath();
+    let t = single_tunnel(allow_443(), &dp);
+    let applied = t
+        .agent
+        .configurator()
+        .applied
+        .last()
+        .expect("the agent configured its interface");
+    assert_eq!(applied.v6, None);
+}
+
+/// The security property that adding a unique-local pool puts at risk.
+/// Every guest's own address now sits inside `fc00::/7`, the range the
+/// class check closes — so a neighbouring machine's leased address must
+/// stay unreachable even under an unrestricted egress policy.
+#[test]
+fn a_guest_holding_a_ula_address_still_cannot_reach_ula_space() {
+    let dp = echoing_datapath();
+    let mut allocator = AddressAllocator::with_defaults();
+    let mine = allocator.allocate_dual().expect("pool has room");
+    let neighbour = allocator.allocate_dual().expect("pool has room");
+    let mut t = Tunnel::up(
+        "vm-a",
+        "boot-1",
+        SessionId(0x6000_0000_0000_0002),
+        mine,
+        unrestricted(),
+        &dp,
+        None,
+    );
+    let guest = mine.guest_v6.expect("leased guest v6");
+
+    let mut port = 50000u16;
+    for dst in [
+        neighbour.guest_v6.expect("neighbour guest v6"),
+        neighbour.gateway_v6.expect("neighbour gateway v6"),
+        "fd00:1234::5".parse().unwrap(),
+    ] {
+        port += 1;
+        let events = t.guest_sends(v6(proto::TCP, guest, dst, &tcp(port, 443, ip::TCP_SYN)));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GatewayEvent::FlowDenied {
+                    reason: DenyCode::PrivateRangeDenied,
+                    ..
+                }
+            )),
+            "reaching {dst} must be refused: {events:?}"
+        );
+        assert!(
+            t.guest_received().is_empty(),
+            "nothing may come back from {dst}"
+        );
+    }
+
+    // Control: the same guest, the same policy, a global destination. The
+    // refusals above are the unique-local class check, not a v6 deny-all.
+    let events = t.guest_sends(v6(
+        proto::TCP,
+        guest,
+        "2606:4700:4700::1111".parse().unwrap(),
+        &tcp(50100, 443, ip::TCP_SYN),
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GatewayEvent::FlowAdmitted { .. })),
+        "{events:?}"
+    );
 }

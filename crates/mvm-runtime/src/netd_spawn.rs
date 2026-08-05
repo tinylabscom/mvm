@@ -265,13 +265,28 @@ fn build_netd_config(
         .as_ref()
         .ok_or_else(|| anyhow!("an l3-vsock plan carries no l3 network spec"))?;
 
-    // One /30 per machine, from the host allocator. The lease is recorded
-    // in the gateway's config so the guest's assigned address and the
+    // A plan asking for something this build does not understand is
+    // refused here, before an address is leased for a family that would
+    // then have no forwarding path behind it.
+    let unknown = spec.unknown_features();
+    if unknown != 0 {
+        return Err(anyhow!(
+            "the admitted plan requests l3 wire feature bits this build does not \
+             understand: {unknown:#x}"
+        ));
+    }
+
+    // One /30 per machine, from the host allocator, plus the /126 at the
+    // same index when the plan asked for IPv6. The lease is recorded in
+    // the gateway's config so the guest's assigned address and the
     // anti-spoofing check come from the same place.
     let mut allocator = mvm_net::l3::AddressAllocator::with_defaults();
-    let lease = allocator
-        .allocate()
-        .map_err(|e| anyhow!("allocating an address for {}: {e}", config.name))?;
+    let lease = if spec.requests_ipv6() {
+        allocator.allocate_dual()
+    } else {
+        allocator.allocate()
+    }
+    .map_err(|e| anyhow!("allocating an address for {}: {e}", config.name))?;
 
     // The same allow-list the rest of the stack enforces, lowered into the
     // gateway's wire shape. `resolve_rules` returning `None` means the
@@ -312,12 +327,11 @@ fn build_netd_config(
         uds_layout: layout,
         gateway_ipv4: lease.gateway,
         guest_ipv4: lease.guest,
-        // No IPv6 pair: the address allocator carves IPv4 leases out of an
-        // IPv4 pool, so there is none to pass on. The workload kernel and
-        // the guest agent both handle v6 now — the allocator is what is
-        // left.
-        gateway_ipv6: None,
-        guest_ipv6: None,
+        // Present exactly when the plan asked for IPv6. One lease, read
+        // once: the gateway derives both the guest's assignment and its
+        // own anti-spoofing check from these.
+        gateway_ipv6: lease.gateway_v6,
+        guest_ipv6: lease.guest_v6,
         mtu: spec.mtu,
         egress,
         admitted_private_cidrs: spec.admitted_private_cidrs.clone(),
@@ -483,6 +497,68 @@ mod wiring_tests {
             "deny-all must lower to an empty rule set, got {}",
             lowered["egress"]
         );
+    }
+
+    /// A plan that asked for IPv6 has to reach the gateway with an actual
+    /// pair, or the family it was admitted for is one it can never use.
+    #[test]
+    fn a_plan_that_requests_ipv6_is_lowered_with_a_leased_pair() {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.network_mode = NetworkMode::L3Vsock;
+        plan.l3_network = Some(L3NetworkSpec::v1().requesting_ipv6());
+        let config = VmStartConfig {
+            name: "wiring".to_string(),
+            plan_json: Some(serde_json::to_string(&plan).expect("serializes")),
+            ..VmStartConfig::default()
+        };
+        let json = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect("an l3 plan lowers");
+        let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let gateway: std::net::Ipv6Addr = lowered["gateway_ipv6"]
+            .as_str()
+            .expect("a requesting plan is leased a v6 gateway")
+            .parse()
+            .expect("parses");
+        let guest: std::net::Ipv6Addr = lowered["guest_ipv6"]
+            .as_str()
+            .expect("a requesting plan is leased a v6 guest address")
+            .parse()
+            .expect("parses");
+        assert_ne!(gateway, guest);
+        assert_eq!(
+            gateway.segments()[0] & 0xfe00,
+            0xfc00,
+            "{gateway} must be unique-local"
+        );
+    }
+
+    /// The default stays v4-only: a workload that did not ask for IPv6
+    /// gets exactly the config it got before the host could assign one.
+    #[test]
+    fn a_plan_that_does_not_request_ipv6_is_lowered_without_one() {
+        let config = config_for(NetworkMode::L3Vsock);
+        let json = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect("lowers");
+        let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert!(lowered.get("gateway_ipv6").is_none(), "{lowered}");
+        assert!(lowered.get("guest_ipv6").is_none(), "{lowered}");
+    }
+
+    /// A feature bit this build does not understand is refused rather than
+    /// masked off — the plan asked for something, and silently granting
+    /// less than it asked for is the failure mode the capability check
+    /// exists to prevent.
+    #[test]
+    fn an_unknown_requested_feature_bit_refuses_the_launch() {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.network_mode = NetworkMode::L3Vsock;
+        let mut spec = L3NetworkSpec::v1();
+        spec.features = 1 << 30;
+        plan.l3_network = Some(spec);
+        let config = VmStartConfig {
+            plan_json: Some(serde_json::to_string(&plan).expect("serializes")),
+            ..VmStartConfig::default()
+        };
+        let err = build_netd_config(&config, NetdUdsLayout::PerVmDir).expect_err("must refuse");
+        assert!(err.to_string().contains("feature"), "{err}");
     }
 
     /// The gateway binds where the guest's own supervisor listens.
