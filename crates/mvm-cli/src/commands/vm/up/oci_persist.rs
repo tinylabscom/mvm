@@ -28,6 +28,10 @@ use super::runtime_source::{
     emit_runtime_source_status,
 };
 
+fn preopen_console_for_profile(profile: &str) -> bool {
+    profile == "dev"
+}
+
 /// Whether the admitted plan must be persisted to `<state_dir>/plan.json`
 /// *before* `backend.start()`. Every backend whose `start()` reads that file
 /// off disk to decide whether to stand up its egress endpoint needs the pre-start
@@ -278,14 +282,11 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     }
     .into_start_config();
     start_config.runtime_source_policy = runtime_source_policy;
-    // A persistent named/detached machine is dev-accessible for its lifetime:
-    // `machine run -t` boots through here, and `machine shell` / `machine
-    // console` attach to it later. Pre-open the interactive-console data range
-    // so those attaches reach the agent's dynamic data port on the
-    // per-port-UDS backends (libkrun, HVF). Claim 15 still bars a sealed prod
-    // guest at the agent + `enforce_accessible_gate`, leaving the listeners
-    // inert there.
-    start_config.dev_console = true;
+    // Only dev-profile machines can be attached to later with `machine shell`
+    // or `machine console`. Keep the host-side console listeners absent for
+    // sealed production boots; the guest profile and verb grant remain the
+    // authoritative RPC gates as well.
+    start_config.dev_console = preopen_console_for_profile(profile);
     attach_runtime_overlay_if_cached(&mut start_config, backend_name)?;
     attach_universal_initramfs_if_cached(&mut start_config)?;
     emit_runtime_source_status(&start_config);
@@ -319,6 +320,13 @@ mod runtime_source_policy_for_workload_boot_tests {
 
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::RuntimeSourcePolicy;
+
+    #[test]
+    fn persistent_oci_console_preopen_is_limited_to_dev_profile() {
+        assert!(super::preopen_console_for_profile("dev"));
+        assert!(!super::preopen_console_for_profile("prod"));
+        assert!(!super::preopen_console_for_profile("sealed-prod"));
+    }
 
     #[test]
     fn firecracker_sealed_boot_requires_overlay() {
