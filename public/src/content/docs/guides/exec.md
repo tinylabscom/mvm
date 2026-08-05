@@ -18,10 +18,11 @@ mvmctl machine run --manifest my-tpl -- /bin/true
 ```
 
 > Overriding the guest's argv (a trailing `-- <cmd>`) is a **dev-tier**
-> capability. A sealed production image refuses it (claim 15) — its entrypoint
-> is fixed and there is no interactive command surface. Use `--image`/`--flake`
-> dev builds for ad-hoc commands; production workloads run their baked
-> entrypoint (`machine run --entrypoint`) or go through `mvmd`.
+> capability. It requires DevOnly verbs regardless of the image's sealed bit;
+> sealed production images also refuse it because their entrypoint is fixed.
+> Use `--image`/`--flake` dev builds and a dev profile for ad-hoc commands;
+> production workloads run their baked entrypoint (`machine run --entrypoint`)
+> or go through `mvmd`.
 
 ## When to use it
 
@@ -204,10 +205,11 @@ highest):
 
 ## Limits
 
-- **Dev-mode only.** `mvmctl machine run` requires a guest agent built with the
-  `interactive` Cargo feature, which is the default for the dev images
-  `mvmctl` ships with. Production guest images omit the feature and the
-  Exec handler is physically absent from the binary.
+- **Ad-hoc execution is dev-mode only.** A baked-entrypoint
+  `mvmctl machine run` may use the restricted ProdSafe grant on a non-dev
+  profile. A trailing argv requires the guest agent's `interactive` Cargo
+  feature and DevOnly verbs; production guest images may omit that feature, in
+  which case the Exec handler is physically absent from the binary.
 - **Network access.** The guest gets the same network configuration
   any other transient VM gets -- if your `--manifest` exposes outbound
   internet, so does `mvmctl machine run` from that template.

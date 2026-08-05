@@ -29,10 +29,12 @@ mvmctl proc start devbox -- python /work/task.py
 
 ## Attach behavior
 
-Console behavior depends on the active backend and image mode:
+Console behavior depends on the active backend, image mode, and launch policy:
 
-- Development images may expose PTY-backed shell access.
+- Development images and development-profile runs may expose PTY-backed shell access.
 - Sealed images should refuse interactive console access.
+- A baked-entrypoint run on a non-dev profile can receive restricted ProdSafe
+  agent verbs, but requesting a PTY still requires DevOnly verbs.
 - Terminal resize, signal forwarding, and scrollback are backend-specific.
 - Console sessions end when the VM stops.
 

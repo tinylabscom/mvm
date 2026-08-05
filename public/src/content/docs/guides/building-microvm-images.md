@@ -80,7 +80,7 @@ That direct Nix command is only for users who intentionally manage their own Nix
 | `packages` | `[pkg]` (optional) | Extra Nix packages added to the rootfs closure. |
 | `hypervisor` | `string` (optional) | Override the default (`firecracker`). |
 | `vcpus`, `memory_mib` | `int` (optional) | Resource defaults; `mvm.toml` overrides at run time. |
-| `dev` | `bool` (optional) | Explicit accessible-vs-sealed override. Inferred from entrypoint by default. |
+| `dev` | `bool` (optional) | Explicit accessible-vs-sealed image default. Inferred from entrypoint by default; the launch profile and run shape still decide agent-verb grants. |
 | `uids` | `attrs` (optional) | `{ agent = 990; entrypoint = 0|1000; }` — privilege model override. See [Rootless workloads](#rootless-workloads) below. |
 | `extraFiles` | `attrs` (optional) | `{ "/abs/path" = { content; mode?; }; }` baked into the rootfs at build time. |
 
@@ -159,7 +159,13 @@ mkGuest { entrypoint.shell = "/bin/bash"; dev = false; ... }
 mkGuest { entrypoint.command = [ "..." ]; dev = true; ... }
 ```
 
-The same flake source is consumed in **both** dev and production builds — there's no separate "dev flake" the user has to maintain. The difference is purely in the resulting image's metadata + the host-side `console` gate.
+The same flake source is consumed in **both** dev and production builds —
+there's no separate "dev flake" the user has to maintain. The image metadata
+continues to describe the guest profile and the host-side console gate, but it
+is not the sole input to agent-verb authority. At launch, a baked-entrypoint
+run on a non-dev profile receives the restricted ProdSafe grant; PTY and
+ad-hoc argv runs require DevOnly verbs. This keeps an OCI image's artifact
+metadata separate from the shape of the run that consumes it.
 
 The `mkGuest` library produces a **busybox-as-PID-1** rootfs (no NixOS, no systemd) and emits an ext4 image directly. The boot path is: kernel → `/init` script → mounts `/proc` `/sys` `/dev` → execs your entrypoint. No service manager between the kernel and your code. mvm's security overlay (per-service uids, seccomp tier, dm-verity, read-only `/etc`) layers on top in Phase 6 without changing this base.
 
