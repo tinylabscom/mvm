@@ -1,7 +1,7 @@
 //! `xtask gen-stubs` and `xtask check-stubs`
 //!
 //! Codegen pipeline for the Python and TypeScript SDKs' generated
-//! types. Two Rust-owned JSON Schemas are the single source of truth,
+//! types. Rust-owned JSON Schemas are the single source of truth,
 //! each emitted by a `schemars`-backed bin and fed through the same
 //! per-language generators (see [`artifacts`]):
 //!
@@ -9,6 +9,8 @@
 //!   `schema/workload-ir-v0.json` → `crates/mvm-sdk/.../_ir`.
 //! * The **host↔guest protocol** — `mvm-agentd`'s `GuestRequest` /
 //!   `GuestResponse` → `schema/protocol-v0.json` → `crates/mvm-sdk/.../_protocol`.
+//! * The **live runtime contract** — `mvm-sdk`'s runtime result and
+//!   filesystem types → `schema/runtime-v0.json` → `crates/mvm-sdk/.../_runtime`.
 //!
 //! The xtask packages every step into one command so a dev who edits
 //! either the IR or the protocol types runs `cargo xtask gen-stubs`
@@ -122,6 +124,15 @@ fn artifacts() -> &'static [StubArtifact] {
             ts_path: "crates/mvm-sdk/sdks/typescript/src/broker/services.ts",
             class_name: "BrokerServices",
             stem: "broker-services-v0",
+        },
+        StubArtifact {
+            label: "live runtime contract",
+            emit_args: &["run", "-q", "-p", "mvm-sdk", "--bin", "emit_runtime_schema"],
+            schema_path: "schema/runtime-v0.json",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_runtime/runtime.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/runtime/runtime.ts",
+            class_name: "Runtime",
+            stem: "runtime-v0",
         },
     ]
 }
@@ -332,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn artifacts_cover_workload_ir_and_protocol() {
+    fn artifacts_cover_workload_ir_protocol_and_runtime() {
         let schemas: Vec<&str> = artifacts().iter().map(|a| a.schema_path).collect();
         assert!(
             schemas.contains(&"schema/workload-ir-v0.json"),
@@ -341,6 +352,10 @@ mod tests {
         assert!(
             schemas.contains(&"schema/protocol-v0.json"),
             "protocol artifact missing"
+        );
+        assert!(
+            schemas.contains(&"schema/runtime-v0.json"),
+            "runtime artifact missing"
         );
     }
 

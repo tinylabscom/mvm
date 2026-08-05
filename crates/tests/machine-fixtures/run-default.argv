@@ -1,0 +1,7 @@
+run
+--image
+alpine:latest
+--json
+--dry-run
+--
+true

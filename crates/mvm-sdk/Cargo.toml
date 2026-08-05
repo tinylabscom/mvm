@@ -63,6 +63,10 @@ path = "src/bin/emit_addon_schema.rs"
 name = "emit_workload_schema"
 path = "src/bin/emit_schema.rs"
 
+[[bin]]
+name = "emit_runtime_schema"
+path = "src/bin/emit_runtime_schema.rs"
+
 [dev-dependencies]
 # `TestEnv` lives behind mvm-core's `test-support`, and the compile
 # pipeline's tests use it. Without this line the feature only arrives via

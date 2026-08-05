@@ -171,12 +171,15 @@ test-ci:
 test-cargo:
     cargo test --workspace
 
-# BDD conformance suite (cucumber-rs): builds mvmctl, then runs every
-# Gherkin scenario under features/suites/ against it. Scenarios tagged
-# `@wip` describe not-yet-implemented coverage and are filtered out by the
-# runner, so this stays green as later suites land their steps.
+# BDD conformance suite (cucumber-rs): builds mvmctl and the TypeScript SDK,
+# checks generated SDK artifacts, then runs every Gherkin scenario under
+# features/suites/ against it. Scenarios tagged `@wip` describe
+# not-yet-implemented coverage and are filtered out by the runner.
 bdd:
     cargo build --bin mvmctl
+    cargo build -p xtask
+    just sdk-install-typescript
+    just sdk-build-typescript
     cargo test -p mvm-conformance --test conformance --features bdd
 
 # Build the per-VM host helper bins explicitly. mvmctl's build script already

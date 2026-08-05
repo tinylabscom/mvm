@@ -104,6 +104,11 @@ impl Drop for ScenarioEnvGuard {
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
+    /// Output from the SDK fixture or code-generation command used by the
+    /// cross-language SDK scenarios.
+    pub sdk_output: Option<Output>,
+    /// SDK fixture surface most recently exercised (`decorator` or `runtime`).
+    pub sdk_surface: Option<String>,
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,
@@ -322,6 +327,8 @@ impl fmt::Debug for CliWorld {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CliWorld")
             .field("last_run", &self.last_run)
+            .field("sdk_output", &self.sdk_output)
+            .field("sdk_surface", &self.sdk_surface)
             .field("addresses", &self.addresses)
             .field("ir_hashes", &self.ir_hashes)
             .field("workload_cmdline", &self.workload_cmdline)

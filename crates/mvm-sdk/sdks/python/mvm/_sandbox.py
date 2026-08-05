@@ -66,17 +66,27 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from mvm import _ir
 from mvm._cli import MVM_CLI_BIN_ENV, cli_resolution_hint, resolve_cli_bin
 from mvm._dsl import literal as _literal_value
+from mvm._runtime.runtime import (
+    RuntimeFsEntry,
+    RuntimeFsStat,
+)
 
 __all__ = [
     "DEFAULT_TTL_SECONDS",
     "MVM_CLI_BIN_ENV",
     "ExecResult",
+    "FsEntry",
+    "FsStat",
+    "ProcessHandle",
+    "ProcessResult",
+    "ProcessStreamEvent",
     "RecordingNotActiveError",
     "Sandbox",
     "SandboxDevOnly",
@@ -100,6 +110,53 @@ class ExecResult:
     exit_code: int
     stdout: str
     stderr: str
+
+
+FsEntry = RuntimeFsEntry
+FsStat = RuntimeFsStat
+
+
+@dataclass(frozen=True)
+class ProcessStreamEvent:
+    """Native Python view of a generated runtime stream event."""
+
+    stream: str
+    data: bytes
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """Native Python view of a generated runtime process result."""
+
+    exit_code: int
+    stdout: bytes
+    stderr: bytes
+
+
+class ProcessHandle:
+    """Opaque handle for a live development-sandbox process."""
+
+    def __init__(self, transport: "_LiveTransport", token: str) -> None:
+        self._transport = transport
+        self.token = token
+
+    def wait(
+        self,
+        *,
+        timeout: float | None = None,
+        on_event: Callable[[ProcessStreamEvent], None] | None = None,
+    ) -> ProcessResult:
+        return self._transport.process_wait(self.token, timeout=timeout, on_event=on_event)
+
+    def send_stdin(self, data: bytes | str) -> None:
+        payload = data.encode("utf-8") if isinstance(data, str) else data
+        self._transport.process_stdin(self.token, payload)
+
+    def signal(self, signum: int) -> None:
+        self._transport.process_signal(self.token, signum)
+
+    def kill(self) -> None:
+        self._transport.process_kill(self.token)
 
 
 @dataclass(frozen=True)
@@ -442,7 +499,7 @@ class _Commands:
 
     def start(
         self, argv: list[str], *, env: dict[str, Any] | None = None
-    ) -> None:
+    ) -> ProcessHandle | None:
         """Record or shell a ``commands.start(argv, env=...)`` op.
 
         In record mode the *last* ``commands.start`` in the recording
@@ -460,8 +517,7 @@ class _Commands:
         if not argv:
             raise ValueError("argv must be non-empty")
         if self._sandbox._live is not None:
-            self._sandbox._live.commands_start(argv, env)
-            return
+            return self._sandbox._live.commands_start(argv, env)
         _require_recording()
         _recording["ops"].append(
             {
@@ -478,7 +534,15 @@ class _Files:
     def __init__(self, sandbox: "Sandbox") -> None:
         self._sandbox = sandbox
 
-    def write(self, path: str, content: bytes | str) -> None:
+    def write(
+        self,
+        path: str,
+        content: bytes | str,
+        *,
+        mode: int = 0o644,
+        create_parents: bool = False,
+        follow_symlinks: bool = False,
+    ) -> None:
         """Record or shell a ``files.write(path, content)`` op.
 
         In record mode: ``content`` is bytes (passed through
@@ -502,7 +566,13 @@ class _Files:
                 f"{type(content).__name__}"
             )
         if self._sandbox._live is not None:
-            self._sandbox._live.files_write(path, data)
+            self._sandbox._live.files_write(
+                path,
+                data,
+                mode=mode,
+                create_parents=create_parents,
+                follow_symlinks=follow_symlinks,
+            )
             return
         _require_recording()
         _recording["ops"].append(
@@ -512,6 +582,43 @@ class _Files:
                 "bytes_b64": base64.standard_b64encode(data).decode("ascii"),
             }
         )
+
+    def read(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        length: int = 16 * 1024 * 1024,
+    ) -> bytes:
+        self._require_live("files.read")
+        return self._sandbox._live.files_read(path, offset=offset, length=length)
+
+    def list(self, path: str) -> list[FsEntry]:
+        self._require_live("files.list")
+        return self._sandbox._live.files_list(path)
+
+    def stat(self, path: str, *, follow_symlinks: bool = True) -> FsStat:
+        self._require_live("files.stat")
+        return self._sandbox._live.files_stat(path, follow_symlinks=follow_symlinks)
+
+    def mkdir(self, path: str, *, parents: bool = False, mode: int = 0o755) -> None:
+        self._require_live("files.mkdir")
+        self._sandbox._live.files_mkdir(path, parents=parents, mode=mode)
+
+    def remove(self, path: str, *, recursive: bool = False) -> None:
+        self._require_live("files.remove")
+        self._sandbox._live.files_remove(path, recursive=recursive)
+
+    def move(self, source: str, destination: str) -> None:
+        self._require_live("files.move")
+        self._sandbox._live.files_move(source, destination)
+
+    def _require_live(self, operation: str) -> None:
+        if self._sandbox._live is None:
+            raise SandboxModeError(
+                f"`{operation}` is a live-mode operation; record mode cannot "
+                "resolve guest filesystem state."
+            )
 
 
 class _LiveTransport:
@@ -650,7 +757,7 @@ class _LiveTransport:
 
     def commands_start(
         self, argv: list[str], env: dict[str, Any] | None
-    ) -> None:
+    ) -> ProcessHandle:
         """Shell ``mvmctl proc start <vm> -e ... -- <argv>``.
 
         Refuses with :class:`SandboxDevOnly` when the resolved
@@ -686,7 +793,40 @@ class _LiveTransport:
                         argv=shell,
                     )
         shell += ["--", *argv]
-        self._run_shell(shell)
+        return self._start_process(shell)
+
+    def _require_dev(self, operation: str, argv: list[str]) -> None:
+        if self.build_mode != "dev":
+            raise SandboxDevOnly(
+                f"`{operation}` requires a dev-mode template; resolved template "
+                f"build_mode={self.build_mode!r}. The guest policy refuses this "
+                "runtime operation on production templates.",
+                argv=argv,
+            )
+
+    def _start_process(self, shell: list[str]) -> ProcessHandle:
+        try:
+            result = subprocess.run(shell, check=False, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
+                argv=shell,
+            ) from exc
+        if result.returncode != 0:
+            raise SandboxLiveError(
+                f"`mvmctl machine proc start` failed with exit code {result.returncode}",
+                argv=shell,
+                exit_code=result.returncode,
+                stderr=result.stderr,
+            )
+        token = result.stdout.strip()
+        if not token:
+            raise SandboxLiveError(
+                "`mvmctl machine proc start` produced no pid_token on stdout",
+                argv=shell,
+                stderr=result.stderr,
+            )
+        return ProcessHandle(self, token)
 
     def commands_exec(
         self,
@@ -702,15 +842,7 @@ class _LiveTransport:
         :class:`SandboxDevOnly` when the resolved template is prod
         (matches ``commands_start``'s policy — ADR-001 §W4.3, claim
         4)."""
-        if self.build_mode != "dev":
-            raise SandboxDevOnly(
-                f"`exec` requires a dev-mode template; resolved template "
-                f"build_mode={self.build_mode!r}. ADR-001 §W4.3 (security claim 4) "
-                f"strips the agent's `do_exec` handler in prod builds — re-build the "
-                f"template with `mvmctl template build --dev <name>`, or use "
-                f"`files.write` to stage inputs into the running VM instead.",
-                argv=["machine", "proc", "start", self.vm_id, *argv],
-            )
+        self._require_dev("exec", ["machine", "proc", "start", self.vm_id, *argv])
 
         # 1) `proc start` → pid_token on stdout.
         start_shell: list[str] = [self.mvm_cli_bin, "machine", "proc", "start", self.vm_id]
@@ -730,86 +862,75 @@ class _LiveTransport:
         if cwd is not None:
             start_shell += ["--cwd", cwd]
         start_shell += ["--", *argv]
-        try:
-            start_result = subprocess.run(
-                start_shell,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=start_shell,
-            ) from exc
-        if start_result.returncode != 0:
-            raise SandboxLiveError(
-                f"`mvmctl machine proc start` failed with exit code {start_result.returncode}",
-                argv=start_shell,
-                exit_code=start_result.returncode,
-                stderr=start_result.stderr,
-            )
-        pid_token = start_result.stdout.strip()
-        if not pid_token:
-            raise SandboxLiveError(
-                "`mvmctl machine proc start` produced no pid_token on stdout",
-                argv=start_shell,
-                stderr=start_result.stderr,
-            )
-
-        # 2) `machine proc wait <token>` → captured stdout/stderr/exit.
-        wait_shell: list[str] = [
-            self.mvm_cli_bin,
-            "machine",
-            "proc",
-            "wait",
-            self.vm_id,
-            pid_token,
-        ]
-        if timeout is not None:
-            wait_shell += ["--timeout", str(int(timeout))]
-        try:
-            # The +5s slack on subprocess.run's timeout is so the
-            # agent's pgroup-kill (on `--timeout` overrun) has time
-            # to land before subprocess.run gives up. Should never
-            # actually trip — agent enforces first.
-            wait_result = subprocess.run(
-                wait_shell,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout + 5 if timeout is not None else None,
-            )
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=wait_shell,
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise SandboxLiveError(
-                f"`mvmctl proc wait` did not return within "
-                f"{timeout + 5 if timeout is not None else 'no'} seconds",
-                argv=wait_shell,
-            ) from exc
-
+        result = self._start_process(start_shell).wait(timeout=timeout)
         return ExecResult(
-            exit_code=wait_result.returncode,
-            stdout=wait_result.stdout,
-            stderr=wait_result.stderr,
+            exit_code=result.exit_code,
+            stdout=result.stdout.decode("utf-8", errors="replace"),
+            stderr=result.stderr.decode("utf-8", errors="replace"),
         )
 
-    def files_write(self, path: str, data: bytes) -> None:
-        """Shell ``mvmctl fs write <vm> <path>`` with the file
-        bytes piped through stdin. The mvmctl verb accepts stdin
-        when ``--content`` is omitted."""
-        shell = [self.mvm_cli_bin, "machine", "fs", "write", self.vm_id, path]
+    def process_wait(
+        self,
+        token: str,
+        *,
+        timeout: float | None = None,
+        on_event: Callable[[ProcessStreamEvent], None] | None = None,
+    ) -> ProcessResult:
+        self._require_dev("process wait", ["machine", "proc", "wait", self.vm_id, token])
+        shell = [self.mvm_cli_bin, "machine", "proc", "wait", self.vm_id, token]
+        if timeout is not None:
+            shell += ["--timeout", str(int(timeout))]
         try:
-            result = subprocess.run(
-                shell,
-                input=data,
-                check=False,
-                capture_output=True,
-            )
+            proc = subprocess.Popen(shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
+                argv=shell,
+            ) from exc
+        chunks: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+
+        def drain(stream: str, source: Any) -> None:
+            while chunk := source.read(65536):
+                chunks[stream].extend(chunk)
+                if on_event is not None:
+                    on_event(ProcessStreamEvent(stream, chunk))
+
+        readers = [
+            threading.Thread(target=drain, args=(name, source), daemon=True)
+            for name, source in (("stdout", proc.stdout), ("stderr", proc.stderr))
+            if source is not None
+        ]
+        for reader in readers:
+            reader.start()
+        try:
+            proc.wait(timeout=timeout + 5 if timeout is not None else None)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            raise SandboxLiveError(
+                "`mvmctl machine proc wait` did not return before its timeout",
+                argv=shell,
+            ) from exc
+        for reader in readers:
+            reader.join()
+        return ProcessResult(proc.returncode, bytes(chunks["stdout"]), bytes(chunks["stderr"]))
+
+    def process_stdin(self, token: str, data: bytes) -> None:
+        self._require_dev("process stdin", ["machine", "proc", "stdin", self.vm_id, token])
+        self._run_bytes([self.mvm_cli_bin, "machine", "proc", "stdin", self.vm_id, token], data)
+
+    def process_signal(self, token: str, signum: int) -> None:
+        if not isinstance(signum, int) or isinstance(signum, bool) or signum <= 0:
+            raise ValueError("signum must be a positive integer")
+        self._require_dev("process signal", ["machine", "proc", "signal", self.vm_id, token])
+        self._run_shell([self.mvm_cli_bin, "machine", "proc", "signal", self.vm_id, token, str(signum)])
+
+    def process_kill(self, token: str) -> None:
+        self._require_dev("process kill", ["machine", "proc", "kill", self.vm_id, token])
+        self._run_shell([self.mvm_cli_bin, "machine", "proc", "kill", self.vm_id, token])
+
+    def _run_bytes(self, shell: list[str], data: bytes) -> None:
+        try:
+            result = subprocess.run(shell, input=data, check=False, capture_output=True)
         except FileNotFoundError as exc:
             raise SandboxLiveError(
                 f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
@@ -817,16 +938,131 @@ class _LiveTransport:
             ) from exc
         if result.returncode != 0:
             raise SandboxLiveError(
-                f"`mvmctl fs write` failed with exit code {result.returncode}",
+                f"`{' '.join(shell)}` failed with exit code {result.returncode}",
                 argv=shell,
                 exit_code=result.returncode,
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
+    def _run_json(self, shell: list[str]) -> Any:
+        try:
+            result = subprocess.run(shell, check=False, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
+                argv=shell,
+            ) from exc
+        if result.returncode != 0:
+            raise SandboxLiveError(
+                f"`{' '.join(shell)}` failed with exit code {result.returncode}",
+                argv=shell,
+                exit_code=result.returncode,
+                stderr=result.stderr,
+            )
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise SandboxLiveError(
+                f"`{' '.join(shell)}` returned invalid JSON: {exc.msg}",
+                argv=shell,
+                stderr=result.stdout,
+            ) from exc
+
+    def files_write(
+        self,
+        path: str,
+        data: bytes,
+        *,
+        mode: int = 0o644,
+        create_parents: bool = False,
+        follow_symlinks: bool = False,
+    ) -> None:
+        """Shell ``mvmctl fs write <vm> <path>`` with the file
+        bytes piped through stdin. The mvmctl verb accepts stdin
+        when ``--content`` is omitted."""
+        self._require_dev("files.write", ["machine", "fs", "write", self.vm_id, path])
+        shell = [self.mvm_cli_bin, "machine", "fs", "write", self.vm_id, path, "--mode", str(mode)]
+        if create_parents:
+            shell.append("--create-parents")
+        if follow_symlinks:
+            shell.append("--follow-symlinks")
+        self._run_bytes(shell, data)
+
+    def files_read(self, path: str, *, offset: int, length: int) -> bytes:
+        if offset < 0 or length < 0:
+            raise ValueError("offset and length must be non-negative")
+        self._require_dev("files.read", ["machine", "fs", "read", self.vm_id, path])
+        shell = [
+            self.mvm_cli_bin, "machine", "fs", "read", self.vm_id, path,
+            "--offset", str(offset), "--length", str(length),
+        ]
+        try:
+            result = subprocess.run(shell, check=False, capture_output=True)
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}", argv=shell
+            ) from exc
+        if result.returncode != 0:
+            raise SandboxLiveError(
+                f"`{' '.join(shell)}` failed with exit code {result.returncode}",
+                argv=shell,
+                exit_code=result.returncode,
+                stderr=result.stderr.decode("utf-8", errors="replace"),
+            )
+        return result.stdout
+
+    def files_list(self, path: str) -> list[FsEntry]:
+        self._require_dev("files.list", ["machine", "fs", "ls", self.vm_id, path])
+        parsed = self._run_json([self.mvm_cli_bin, "machine", "fs", "ls", self.vm_id, path, "--json"])
+        if not isinstance(parsed, list):
+            raise SandboxLiveError("filesystem listing must be a JSON array")
+        try:
+            return [FsEntry(name=item["name"], kind=item["kind"], size=int(item["size"])) for item in parsed]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SandboxLiveError("filesystem listing returned an invalid payload") from exc
+
+    def files_stat(self, path: str, *, follow_symlinks: bool) -> FsStat:
+        self._require_dev("files.stat", ["machine", "fs", "stat", self.vm_id, path])
+        shell = [self.mvm_cli_bin, "machine", "fs", "stat", self.vm_id, path, "--json"]
+        if not follow_symlinks:
+            shell.append("--no-follow")
+        parsed = self._run_json(shell)
+        if not isinstance(parsed, dict):
+            raise SandboxLiveError("filesystem stat must be a JSON object")
+        try:
+            return FsStat(
+                canonical_path=parsed["canonical_path"],
+                kind=parsed["kind"],
+                mode=int(parsed["mode"]),
+                size=int(parsed["size"]),
+                mtime=parsed.get("mtime"),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SandboxLiveError("filesystem stat returned an invalid payload") from exc
+
+    def files_mkdir(self, path: str, *, parents: bool, mode: int) -> None:
+        self._require_dev("files.mkdir", ["machine", "fs", "mkdir", self.vm_id, path])
+        shell = [self.mvm_cli_bin, "machine", "fs", "mkdir", self.vm_id, path, "--mode", str(mode)]
+        if parents:
+            shell.append("--parents")
+        self._run_shell(shell)
+
+    def files_remove(self, path: str, *, recursive: bool) -> None:
+        self._require_dev("files.remove", ["machine", "fs", "rm", self.vm_id, path])
+        shell = [self.mvm_cli_bin, "machine", "fs", "rm", self.vm_id, path]
+        if recursive:
+            shell.append("--recursive")
+        self._run_shell(shell)
+
+    def files_move(self, source: str, destination: str) -> None:
+        self._require_dev("files.move", ["machine", "fs", "mv", self.vm_id, source, destination])
+        self._run_shell([self.mvm_cli_bin, "machine", "fs", "mv", self.vm_id, source, destination])
+
     def cp(self, source: str, destination: str) -> None:
         """Shell ``mvmctl cp <source> <destination>``. Endpoints use
         ``VM:/absolute/path`` for the guest side; `mvmctl machine cp` reads the
         host file and streams it over the agent fs RPC (and back)."""
+        self._require_dev("copy", ["machine", "cp", source, destination])
         shell = [self.mvm_cli_bin, "machine", "cp", source, destination]
         try:
             result = subprocess.run(shell, check=False, capture_output=True)
@@ -849,6 +1085,7 @@ class _LiveTransport:
         signalled), so it is launched detached and tracked; `kill()`
         terminates every forwarder so none outlives the sandbox."""
         spec = f"{host_port}:{guest_port}"
+        self._require_dev("forward", ["machine", "forward", self.vm_id, "--port", spec])
         shell = [self.mvm_cli_bin, "machine", "forward", self.vm_id, "--port", spec]
         try:
             proc = subprocess.Popen(
@@ -1249,6 +1486,19 @@ class Sandbox:
         return await asyncio.to_thread(
             self.exec, *argv, timeout=timeout, cwd=cwd, env=env
         )
+
+    def shell(
+        self,
+        command: str,
+        *,
+        timeout: float | None = None,
+        cwd: str | None = None,
+        env: dict[str, Any] | None = None,
+    ) -> ExecResult:
+        """Run shell syntax in a live development sandbox."""
+        if not isinstance(command, str) or not command:
+            raise ValueError("shell command must be a non-empty str")
+        return self.exec("/bin/sh", "-lc", command, timeout=timeout, cwd=cwd, env=env)
 
     def copy_in(self, host_path: str, guest_path: str) -> None:
         """Copy a host file into the running sandbox at ``guest_path``.
