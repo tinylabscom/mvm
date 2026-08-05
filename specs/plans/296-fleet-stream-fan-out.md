@@ -1,4 +1,4 @@
-# Plan 292 — fleet stream fan-out
+# Plan 296 — fleet stream fan-out
 
 **Status:** Proposed.
 

@@ -71,7 +71,7 @@
       explicit-root config helper (`vms_dir_at` / `vm_state_dir_at`), and the
       CLI subprocess receives an isolated home. Workspace tests, check,
       all-target clippy, formatting, and both home policy gates are green.
-      The reader itself was then replaced by plan 283's stream plane, which
+      The reader itself was then replaced by plan 295's stream plane, which
       keeps the host-side property and reads the files in-process rather than
       spawning `tail`; see that plan doc for which of 289's constraints the
       replacement holds.
@@ -442,7 +442,7 @@ updates only its own entry below.
       and refuses; native Windows is not claimed.
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
-      dormant**. Tracked in `specs/plans/283-workload-stream-plane.md` and
+      dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and
       `specs/adrs/035-workload-stream-plane.md`.
       Phase 1 (output, T1–T10 plus T5b/T6b/T9b–T9d) ships: the guest pump emits
       as produced instead of buffering to exit, the 1 MiB cap that *killed* a

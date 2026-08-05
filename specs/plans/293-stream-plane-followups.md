@@ -5,7 +5,7 @@
 Close the two reachability gaps plan 283 shipped knowingly, and add the two
 gates that would have caught the classes of defect that cost it the most.
 
-Predecessor: `specs/plans/283-workload-stream-plane.md` — note that `main`
+Predecessor: `specs/plans/295-workload-stream-plane.md` — note that `main`
 carries a *different* plan 283, so refer to these by filename, not number.
 Claim status: `specs/adrs/001-microvm-security-posture.md`, the Preview 17
 limits note.
@@ -261,6 +261,6 @@ hypothetical.
 
 ## Out of scope
 
-VM-to-VM fan-out (`specs/plans/292-fleet-stream-fan-out.md`). The deferred
+VM-to-VM fan-out (`specs/plans/296-fleet-stream-fan-out.md`). The deferred
 minors in plan 283's ledger — they are individually small and want triage, not a
 workstream.

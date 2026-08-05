@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted for the output half. Implemented by plan 283 phase 1: the guest pump
+Accepted for the output half. Implemented by plan 295 phase 1: the guest pump
 (`mvm-agentd`), the stream store (`mvm-core::transcript`), the host broker
 (`mvm-hostd::stream`), and the consumers (`mvmctl machine logs`, `machine run`
 attach, `mvm-client`/SDK readers).
 
 Accepted for the input half, with its cost recorded in §"Claim 15 becomes a
-policy, and what that bought". Implemented by plan 283 phase 2: the input frame
+policy, and what that bought". Implemented by plan 295 phase 2: the input frame
 DTOs and the plan grant (`mvm-protocol::stream::input`), the gate
 (`mvm-hostd::stream::input_gate`), the route to the guest sink, agent-side
 delivery with explicit EOF (`mvm-agentd::stream_input`), and the sealed-tier
@@ -510,7 +510,7 @@ token, so two processes can never interleave one transcript.
 
 ## References
 
-- `specs/plans/283-workload-stream-plane.md` — the design and its
+- `specs/plans/295-workload-stream-plane.md` — the design and its
   implementation sequence.
 - ADR-001 — threat model, per-backend tier matrix, and the claims ledger table
   this ADR's security section refers to.

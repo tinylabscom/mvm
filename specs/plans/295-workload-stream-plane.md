@@ -1,4 +1,4 @@
-# Plan 283 — Workload stream plane
+# Plan 295 — Workload stream plane
 
 **Status:** Proposed.
 

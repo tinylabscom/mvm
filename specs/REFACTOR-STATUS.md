@@ -49,7 +49,7 @@ for detailed scope and acceptance criteria.
       (`specs/plans/289-host-side-machine-logs.md`)
   - [x] Read backend-captured logs from the isolated host VM state directory
   - [x] Preserve log flags without shell interpolation; follow mode honors the
-        requested line count. Superseded by plan 283, which replaced the reader:
+        requested line count. Superseded by plan 295, which replaced the reader:
         `--lines`/`--follow`/`--hypervisor` and the explicit missing-log error
         survive, the pre-split `firecracker.log` substitution does not
   - [x] Cover host-only CLI behavior and log resolution with regression tests
@@ -106,8 +106,8 @@ for detailed scope and acceptance criteria.
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
   - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 
-- [~] Plan 283 — Workload stream plane
-      (`specs/plans/283-workload-stream-plane.md`)
+- [~] Plan 295 — Workload stream plane
+      (`specs/plans/295-workload-stream-plane.md`)
   - [x] T1–T3 — stream record DTOs + chain verify; transcript stream
         directions and per-chunk linkage; ring retention
   - [x] T4–T5b — guest pump emits as produced; fd-3 control records; the

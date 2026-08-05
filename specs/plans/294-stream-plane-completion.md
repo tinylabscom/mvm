@@ -8,31 +8,24 @@ What remains is WS-B plus the renumbering and the fleet slice.
 Tracking issue: tinylabscom/mvm#2152 (closed). PR: tinylabscom/mvm#2139 (merged).
 
 This is the state-of-the-world doc for the workload stream plane. The design
-lives in `specs/plans/283-workload-stream-plane.md`, the follow-ups in
+lives in `specs/plans/295-workload-stream-plane.md`, the follow-ups in
 `specs/plans/293-stream-plane-followups.md`, and the fleet slice in
-`specs/plans/292-fleet-stream-fan-out.md`. This doc says what is done, what is
+`specs/plans/296-fleet-stream-fan-out.md`. This doc says what is done, what is
 left, and the two traps that will otherwise cost a session.
 
-## Read this first: two plan numbers are ambiguous
+## Plan numbers: resolved
 
-`main` and the stream-plane branches independently claimed the same numbers:
+`main` and this effort had independently claimed 283 and 292. Renumbered:
 
-| Number | On `main` | On the stream-plane branches |
-| --- | --- | --- |
-| 283 | `283-production-object-store-volumes.md` | `283-workload-stream-plane.md` |
-| 292 | `292-tiered-artifact-storage-and-warm-start.md` | `292-fleet-stream-fan-out.md` |
+| Was | Now |
+| --- | --- |
+| `283-workload-stream-plane.md` | `295-workload-stream-plane.md` |
+| `292-fleet-stream-fan-out.md` | `296-fleet-stream-fan-out.md` |
 
-`main` already carries two 284s and two 285s, so the convention had slipped
-before this. **Refer to these documents by filename, never by number.**
-
-Renumbering to 295/296 is deferred until after #2139's merge lands — renaming a
-file inside an unresolved 42-file merge produces rename/modify conflicts, which
-resolve worse than content conflicts. Do it as a follow-up commit, not as part
-of the merge.
-
-- [ ] After #2139 merges: renumber `283-workload-stream-plane.md` and
-      `292-fleet-stream-fan-out.md` to free numbers, updating cross-references
-      in ADR-035, ADR-001, `specs/REFACTOR-STATUS.md`, and this doc.
+`main` keeps 283 (production object-store volumes) and 292 (tiered artifact
+storage). Prose references were repointed selectively, not by blanket
+substitution — several "plan 283" mentions in `SPRINT.md` are about the
+object-store plan's `storage-s3` removal and had to stay.
 
 ## Branch inventory
 
@@ -217,7 +210,7 @@ they are the most deferrable items here. WS2 is not — it is an open gap.
 
 ## Also queued
 
-- [ ] **`specs/plans/292-fleet-stream-fan-out.md`** — VM-to-VM fan-out,
+- [ ] **`specs/plans/296-fleet-stream-fan-out.md`** — VM-to-VM fan-out,
       unstarted. All seven design decisions (E1–E7) are settled in that
       document: redaction is a property of the edge, defaulting to redacted; an
       opt-out edge gives the consumer raw bytes while the transcript stays
