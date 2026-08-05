@@ -156,22 +156,27 @@ This was posed as a size-and-boot-time question. It is not. Enabling
 ERROR: required kernel disables were reverted by olddefconfig: XFRM_ALGO XFRM
 ```
 
-IPv6 selects the XFRM transform framework — the kernel's IPsec machinery —
-and `XFRM`, `XFRM_ALGO` and `XFRM_USER` are all in the *required* disable
-set. So the real question is not how many kilobytes IPv6 costs but whether
-a sealed workload guest may carry IPsec and its netlink surface at all.
+**Corrected the same day, after reading the Kconfig rather than inferring
+from the failure.** Core IPv6 selects only `CRYPTO_LIB_SHA1`. What pulls
+XFRM in is two *optional* sub-features that `olddefconfig` enabled
+alongside it — `IPV6_MIP6` (IPv6 Mobility, RFC 3775) and `IPV6_VTI`
+(virtual tunneling), both defaulting off and neither part of IPv6.
+
+So IPv6 costs no IPsec. Disabling those two beside enabling `IPV6` keeps
+`XFRM`, `XFRM_ALGO` and `XFRM_USER` out, and the guard stays the proof of
+it: if a later option drags XFRM back, the build fails exactly as it did
+here. The guard caught a real expansion — just not the one first
+attributed to it.
 
 A size measurement alone would have missed this: the kernel builds, it is
 a few hundred kilobytes larger exactly as predicted, and it quietly carries
 the XFRM stack into every guest. The guard is what caught it.
 
-The options are therefore: accept XFRM into the workload kernel (a
-deliberate attack-surface expansion needing its own justification), find
-whether v6 can be built without it, make IPv6 a guest-image variant, or
-leave guests v4-only. The recommendation is the last until a workload asks,
-then the image variant — accepting IPsec for a capability nothing has
-requested is the trade ADR-039 rejected for the macOS root helper, and it
-should be rejected here for the same reason.
+The decision is therefore the straightforward one this ADR originally
+posed: enable `IPV6` in the workload kernel, disable `IPV6_MIP6` and
+`IPV6_VTI` beside it, and record the size and boot deltas as a known
+accepted cost. No security property changes, and the required-disable set
+is untouched.
 
 The host side is unaffected: it admits and carries v6 regardless. A guest
 simply cannot originate it, which is a gap in reach rather than in safety.
