@@ -7,6 +7,7 @@ mod kernel_pin;
 mod l3_vsock;
 mod oci_unpack;
 mod readme_contract;
+mod sdk;
 mod sdk_sidecar;
 mod snapshot;
 mod transcript;
