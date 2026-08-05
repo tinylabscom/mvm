@@ -114,6 +114,11 @@
       while `MVM_KERNEL_SOURCE=download|auto` remains explicit. The landing
       page and security docs now state the warm-millisecond promise alongside
       first-run behavior and the default-deny trust model.
+- [x] Egress download integrity. Host-mediated workload downloads now
+      backpressure at the byte budget instead of reading and discarding an
+      over-budget chunk, preserving large HTTPS payloads and their hashes;
+      short reads, EOF, and nonblocking errors refund unused reservations.
+      Regression coverage proves an exhausted budget keeps the stream alive.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
