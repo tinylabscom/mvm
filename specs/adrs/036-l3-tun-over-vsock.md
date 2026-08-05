@@ -898,6 +898,25 @@ only against measurements like these, not against intuition.
   **Closed, not pending:** [ADR-039](039-macos-network-helper.md) proposed
   that helper and is Rejected. ICMP, raw IP protocols and arbitrary
   IPv4/IPv6 stay refused at admission on macOS.
-- IPv6 datapath, designed in [ADR-038](038-ipv6-support.md) and unlanded;
-  admission refuses any non-v4 packet today.
+- IPv6 datapath, designed in [ADR-038](038-ipv6-support.md). **Landed**:
+  the host assigns the gateway's `/126` on the TUN and the `inet` ruleset
+  pins the guest's v6 source beside its v4 one, so the backend declares
+  the whole `FULL_L3` set.
 - Zero-copy or batched packet transfer, if measurement justifies it.
+- **Known defect: one machine's forward chain drops another machine's
+  traffic.** Each machine's table anchors a `filter`-priority forward base
+  chain with `policy drop`, and a base chain's policy applies to every
+  packet that reaches it, not only to the machine that installed it. Two
+  chains at the same priority both run, so with two machines open each
+  one's policy refuses the other's admitted traffic. Measured on Linux
+  with nftables 1.0.9: a probe chain at `filter + 10` counts one machine's
+  admitted packet with a single table loaded and stops counting it the
+  moment a second machine's table is added. The shape is family-agnostic
+  and predates IPv6 — it is not what the v6 rules introduced. The fix is
+  for the chain to refuse only what it owns (`policy accept` with an
+  explicit `iifname`/`oifname` drop pair) rather than to default-drop the
+  host's whole forward path, which changes a security-sensitive ruleset
+  and belongs in its own change with its own witness. Until then a host
+  serves one L3 machine at a time, and the privileged lane's forward-hook
+  witness measures only in a window where no other machine's table is
+  loaded.
