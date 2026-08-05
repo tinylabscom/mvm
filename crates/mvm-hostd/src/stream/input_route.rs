@@ -496,7 +496,7 @@ mod tests {
     use mvm_core::plan::test_support::PlanFixture;
 
     use super::*;
-    use mvm_protocol::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
+    use mvm_contract::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
 
     use crate::stream::input_gate::InputBinding;
 

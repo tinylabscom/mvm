@@ -785,9 +785,9 @@ mod tests {
         // Asserted on the surface, not on a comment: the fingerprint type has
         // no accessor that returns bytes, and this crate names neither it nor
         // the gate binding that takes it.
-        let fingerprint = mvm_protocol::stream::secret_fingerprint::SecretFingerprint::of(
+        let fingerprint = mvm_contract::stream::secret_fingerprint::SecretFingerprint::of(
             b"AKIAIOSFODNN7EXAMPLE",
-            mvm_protocol::stream::secret_fingerprint::SecretCategory::HostSecret,
+            mvm_contract::stream::secret_fingerprint::SecretCategory::HostSecret,
         )
         .expect("a non-empty secret fingerprints");
         assert!(!format!("{fingerprint:?}").contains("AKIA"));

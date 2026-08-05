@@ -21,9 +21,9 @@ use anyhow::Context;
 
 use serde::{Deserialize, Serialize};
 
+use mvm_contract::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore, default_secrets_dir};
 use mvm_core::plan::SecretBinding;
-use mvm_protocol::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
 
 use crate::keyholder::{FileBindingStore, HandedPlaceholders};
 use crate::supervisor::substitution_proxy::SubstitutionService;
@@ -328,7 +328,6 @@ pub fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_rec
 mod tests {
     use super::*;
     use crate::keyholder::{BindingStore, SecretBindingMeta};
-    use mvm_contract::ir::AuthType;
     use mvm_contract::ir::AuthType;
     use mvm_contract::stream::secret_fingerprint::SecretCategory;
     use mvm_core::plan::SecretSource;

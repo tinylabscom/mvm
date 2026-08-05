@@ -254,9 +254,9 @@ impl Fixture {
     /// fingerprint set is `StreamPlane::open_input`, and a test that reached
     /// past it would pass whether or not that call existed.
     fn endpoint_reports(vm: &str, secret: &[u8]) {
-        let fingerprint = mvm_protocol::stream::secret_fingerprint::SecretFingerprint::of(
+        let fingerprint = mvm_contract::stream::secret_fingerprint::SecretFingerprint::of(
             secret,
-            mvm_protocol::stream::secret_fingerprint::SecretCategory::HostSecret,
+            mvm_contract::stream::secret_fingerprint::SecretCategory::HostSecret,
         )
         .expect("a non-empty secret fingerprints");
         mvm_runtime::record_secret_fingerprints(vm, vec![fingerprint]);

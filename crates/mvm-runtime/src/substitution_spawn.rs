@@ -10,9 +10,9 @@
 
 use crate::microvm::DriveFile;
 use anyhow::{Result, anyhow, bail};
+use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::crypto::egress_ca::EgressCa;
 use mvm_core::plan::SecretBinding;
-use mvm_protocol::stream::secret_fingerprint::SecretFingerprint;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -48,7 +48,7 @@ pub enum EndpointTransport {
 ///
 /// The fingerprints are computed inside the endpoint because that is the one
 /// process that legitimately holds the plaintext. Nothing on this line is a
-/// secret value — see `mvm_protocol::stream::secret_fingerprint` for what a
+/// secret value — see `mvm_contract::stream::secret_fingerprint` for what a
 /// fingerprint does and does not disclose.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -519,8 +519,8 @@ fn kill(pid: libc::pid_t, sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::stream::secret_fingerprint::SecretCategory;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_protocol::stream::secret_fingerprint::SecretCategory;
 
     /// What a stub endpoint prints as its ready line: a well-formed handshake
     /// with one placeholder and one fingerprint, so the spawn path exercises

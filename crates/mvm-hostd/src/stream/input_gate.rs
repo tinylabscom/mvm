@@ -88,7 +88,6 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use mvm_contract::stream::input::{CloseInput, InputFrame, grants_input};
-use mvm_contract::stream::input::{CloseInput, InputFrame, grants_input};
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::plan::ExecutionPlan;
 use zeroize::Zeroize;
@@ -98,7 +97,7 @@ use crate::plan_admission::AdmittedPlan;
 use crate::stream::secret_scan::SecretScanner;
 
 /// Category recorded for a secret value the host itself holds for a workload.
-pub use mvm_protocol::stream::secret_fingerprint::CATEGORY_HOST_SECRET;
+pub use mvm_contract::stream::secret_fingerprint::CATEGORY_HOST_SECRET;
 
 /// How long a writer keeps the input lease without touching it.
 ///
@@ -996,7 +995,7 @@ mod tests {
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, sign_plan};
     use tempfile::TempDir;
 
-    use mvm_protocol::stream::secret_fingerprint::SecretCategory;
+    use mvm_contract::stream::secret_fingerprint::SecretCategory;
 
     use super::*;
     use crate::audit::emitter::stream_audit;

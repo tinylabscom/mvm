@@ -19,7 +19,7 @@
 //! still a live prefix of some secret; everything else provably cannot become
 //! one and ships at once. Against fingerprints that question is unanswerable —
 //! deliberately, because the prefix hashes that would answer it disclose the
-//! secret outright (see [`mvm_protocol::stream::secret_fingerprint`]). So the
+//! secret outright (see [`mvm_contract::stream::secret_fingerprint`]). So the
 //! scanner withholds a fixed tail of `longest_secret - 1` bytes instead.
 //!
 //! ## Why the blanket carry is the safe one
@@ -73,7 +73,7 @@
 
 use std::sync::Arc;
 
-use mvm_protocol::stream::secret_fingerprint::{
+use mvm_contract::stream::secret_fingerprint::{
     SecretCategory, SecretFingerprint, leading_weight, roll, window_hash, window_sizes,
 };
 use zeroize::Zeroize;
