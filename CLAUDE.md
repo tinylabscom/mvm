@@ -342,10 +342,12 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `unbound_service_returns_not_bound` and
     `service_call_rejects_unknown_envelope_fields`.
 
-    Earlier revisions of this bullet named
-    `service_call_denied_when_unbound`,
-    `service_call_denied_outside_profile`,
-    `audit_chain_contains_service_call_entries`,
+    Earlier revisions of this bullet named — in quotes rather than
+    backticks, because backticks assert a real identifier and these are
+    names nobody ever wrote —
+    "service_call_denied_when_unbound",
+    "service_call_denied_outside_profile",
+    "audit_chain_contains_service_call_entries",
     `audit_chain_carries_no_payload_bytes`, a `fuzz_service_call.rs`
     target, and three `xtask check-handler-*` gates. **None of them
     exist**, and none ever did on this branch. The ADR-001 row was
@@ -361,12 +363,12 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     ADR-001 row:
     `encode_secret_env_cmdline_round_trips_pairs_as_single_token` and
     `substitute`. The six test names this bullet used to list
-    (`host_secrets_v1_denied_outside_allowed_destinations`,
-    `zeroize_drop_zeros_secret_bytes`,
-    `handler_inter_call_memory_hygiene`,
-    `host_secrets_v1_signed_payload_jcs_roundtrip`,
-    `secrets_subprocess_cannot_reach_supervisor_memory`,
-    `placeholder_in_outbound_request_dropped_and_audited`) do not exist
+    ("host_secrets_v1_denied_outside_allowed_destinations",
+    "zeroize_drop_zeros_secret_bytes",
+    "handler_inter_call_memory_hygiene",
+    "host_secrets_v1_signed_payload_jcs_roundtrip",
+    "secrets_subprocess_cannot_reach_supervisor_memory",
+    "placeholder_in_outbound_request_dropped_and_audited") do not exist
     in the tree — same failure as claim 12's.
 14. **Every `mvmctl run --image <oci-ref>` admission records the OCI
     image provenance in the chain-signed audit log.** Row 14 of the

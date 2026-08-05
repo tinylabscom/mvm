@@ -83,7 +83,14 @@ user or an auditor.
   Then reassess claim 17. Two of its four limits closed when the channel gained
   an operator surface. This closes a third. State what remains rather than
   promoting on momentum.
-- [ ] **WS2 — redact the console fallback.**
+- [x] **WS2 — redact the console fallback.** Landed. The detector moved down
+  to `mvm_core::pii` (the readers are in `mvm-core` and `mvm-client`, both
+  below `mvm-hostd`, so the `Inspector`-bound `PiiRedactor` could not be
+  called from there); `mvm-hostd` keeps the `Inspector` impl wrapping it.
+  `ConsoleTail` holds the redactor non-optionally, applied read-side so the
+  VMM's file is untouched. One limit pinned by its own test: redaction is per
+  64 KiB read, so a value straddling a boundary escapes — carrying a tail
+  would withhold the newest bytes from a follower, which is worse. Why it existed:
 
   The transcript is redacted; the console fallback is not. The fallback is what
   a detached run resolves to, which is the common shape rather than the corner.
@@ -125,7 +132,17 @@ user or an auditor.
   merges streams, is unchained, and is unredacted. When the third stops being
   true, the notice must stop saying it.
 
-- [ ] **WS3 — gate prose against the ledger.**
+- [x] **WS3 — gate prose against the ledger.** Landed, deliberately smaller
+  than specified. `check-witness-citations` requires every backticked
+  test-shaped name in claim-bearing prose to exist in the sources, and every
+  job-shaped name cited *as a job* to exist in a workflow. It resolves 43
+  citations and found nine fabricated witness names still backticked in
+  `CLAUDE.md` — the ones that file already documents as non-existent.
+
+  The specified version scanned for claim-shaped assertions and required each
+  to cite a ledger row. That is the brittle, noisy part, and a gate that cries
+  wolf gets disabled. This catches the drift that actually happened twice — a
+  name nobody ever wrote — at a tenth of the scope. Why it existed:
 
   `check-claim-catalog` reads the claims table in ADR-001. Nothing reads the
   prose around it, which is why nine drifts survived: `CLAUDE.md` cited a
@@ -143,7 +160,16 @@ user or an auditor.
   and confirm the gate fires. A gate nobody has seen fail is the defect it is
   meant to prevent.
 
-- [ ] **WS4 — gate dormant controls.**
+- [x] **WS4 — gate dormant controls.** Landed. `check-dormant-controls` reads
+  `xtask/dormant-controls.toml`, and fails both ways: a control declared live
+  that lost its last production caller, and one declared dormant that gained
+  one. The dormant list may only shrink.
+
+  Seeded with the two stream-edge primitives, which are dormant by design
+  because `mvmd` is their caller. The gate's first act was to reject its own
+  manifest: a bare `validate` matched a third of the workspace, so it now
+  refuses a symbol that matches implausibly widely rather than reporting
+  reachable no matter what. Why it existed:
 
   Six times plan 283 shipped a security-relevant symbol with no production
   caller, each found by review rather than by CI. The failure mode is a control
