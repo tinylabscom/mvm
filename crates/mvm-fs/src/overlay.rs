@@ -60,7 +60,6 @@ pub const LOCAL_BUILD_EPOCH_FILE: &str = "BUILD_EPOCH";
 /// boot that silently strands the agent — fail at resolve time instead.
 const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/agent",
-    "/agent-interactive",
     "/netinit",
     "/seccomp-apply",
     "/runner",
@@ -613,12 +612,6 @@ mod tests {
                 path: "/agent".into(),
                 mode: 0o555,
                 data: b"agent".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/agent-interactive".into(),
-                mode: 0o555,
-                data: b"agent-dev".to_vec(),
                 xattrs: Vec::new(),
             },
             Node::File {

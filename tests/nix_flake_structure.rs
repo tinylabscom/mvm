@@ -1093,14 +1093,7 @@ fn closure_gates_pin_glibc_out_of_the_base_and_into_the_sidecar() {
 
     // The negative direction must close over the executables actually staged
     // into the overlay; an empty root-path set would make it vacuously green.
-    for staged in [
-        "guest",
-        "guestDev",
-        "runner",
-        "egressClient",
-        "addonDns",
-        "exitReport",
-    ] {
+    for staged in ["guest", "runner", "egressClient", "addonDns", "exitReport"] {
         assert!(
             ci.contains(staged),
             "the overlay no-glibc closure must include the staged {staged} binary"

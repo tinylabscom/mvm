@@ -163,7 +163,6 @@ test = false
 doctest = false
 
 [features]
-interactive = []
 # Derive `schemars::JsonSchema` on the host↔guest wire types
 # (`GuestRequest`/`GuestResponse` + their tree) so the `emit_protocol_schema`
 # bin can emit the protocol schema (the SDK-codegen SSOT). Off by default:

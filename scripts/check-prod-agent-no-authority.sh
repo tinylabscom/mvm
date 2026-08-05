@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Production guest-agent authority contract.
 #
-# On the `mvm-guest-agent` binary built in its PRODUCTION configuration (no
-# `interactive` feature), assert the workload agent links NONE of the host-only
+# On the standard `mvm-guest-agent` build, assert the workload agent links NONE
+# of the host-only
 # authority symbols. The workload microVM is the untrusted edge: it must not
 # carry signing-key loading or plan-admission code, which live host-side.
 #
@@ -15,9 +15,9 @@ set -euo pipefail
 PKG=mvm-agentd
 BIN=mvm-guest-agent
 
-echo "::group::Build production agent (release, no interactive)"
+echo "::group::Build guest agent (release)"
 CARGO_PROFILE_RELEASE_STRIP=false \
-  cargo build --release --locked -p "$PKG" --bin "$BIN" --no-default-features
+  cargo build --release --locked -p "$PKG" --bin "$BIN"
 echo "::endgroup::"
 prod_syms=$(nm "target/release/$BIN")
 

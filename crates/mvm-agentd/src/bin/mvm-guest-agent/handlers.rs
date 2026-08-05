@@ -1,8 +1,8 @@
 //! The always-compiled per-verb request handlers, plus the `RunEntrypoint`
 //! execution machinery (validated-entrypoint dispatch, warm-pool routing,
-//! and the per-call TMPDIR). Dev-only verbs (`Exec`, `RunCode`,
-//! `RunDetached`, the console) get a production stub here; their real
-//! implementation lives in `interactive` behind the `interactive` feature.
+//! and the per-call TMPDIR). DevOnly handlers live in the sibling
+//! `interactive` module and are admitted by the request dispatcher only after
+//! runtime profile and signed-grant checks.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -131,14 +131,6 @@ fn emit_captured_output(file: &mut dyn Write, output: CapturedOutput) {
 /// `write_response` and returns the terminal event for the dispatcher to
 /// send through the existing `match` arm pattern.
 ///
-/// `#[inline(never)]` is load-bearing for the symbol-contract gate.
-/// LTO inlines functions called from a single site, which would erase
-/// the `mvm_guest_agent::handle_run_entrypoint` symbol from `nm`
-/// output even though the handler is logically compiled in. The gate
-/// (`scripts/check-prod-agent-no-exec.sh`) requires the symbol to be
-/// present as positive evidence that the handler is wired up. Without
-/// `inline(never)` the gate fails on every prod build. Cost: one
-/// extra call boundary in a slow-path RPC handler — imperceptible.
 #[inline(never)]
 fn handle_run_entrypoint(
     file: &mut dyn Write,
@@ -253,13 +245,6 @@ fn emit_controls(file: &mut dyn Write, records: Vec<mvm_agentd::entrypoint::Cont
 /// stream — same wire shape as the cold path so `mvmctl invoke` is
 /// unaffected.
 ///
-/// `#[inline(never)]` is load-bearing for the symbol-contract gate
-/// (mirrors the `handle_run_entrypoint` symbol invariant). The CI
-/// gate at `scripts/check-prod-agent-no-exec.sh`
-/// requires this symbol to be present on the same binary that
-/// ships, as positive evidence the warm-process substrate is
-/// wired in. Without `inline(never)` LTO would erase it from the
-/// `nm` output.
 #[inline(never)]
 fn dispatch_via_warm_pool(
     file: &mut dyn Write,
@@ -542,45 +527,6 @@ pub(crate) fn handle_post_restore(
     }
 }
 
-#[cfg(not(feature = "interactive"))]
-pub(crate) fn handle_exec(
-    ctx: &mut HandlerCtx,
-    command: String,
-    stdin: Option<String>,
-    timeout_secs: Option<u64>,
-) -> GuestResponse {
-    let _ = (ctx, command, stdin, timeout_secs);
-    GuestResponse::Error {
-        message: "exec not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access".to_string(),
-    }
-}
-
-#[cfg(not(feature = "interactive"))]
-pub(crate) fn handle_exec_batch(
-    stages: Vec<mvm_agentd::vsock::StageFile>,
-    commands: Vec<Vec<String>>,
-    timeout_secs: Option<u64>,
-) -> GuestResponse {
-    let _ = (stages, commands, timeout_secs);
-    GuestResponse::Error {
-        message: "exec-batch not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-            .to_string(),
-    }
-}
-
-#[cfg(not(feature = "interactive"))]
-pub(crate) fn handle_run_code(
-    ctx: &mut HandlerCtx,
-    code: String,
-    timeout_secs: Option<u64>,
-) -> GuestResponse {
-    let _ = (ctx, code, timeout_secs);
-    GuestResponse::Error {
-        message: "run-code not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-            .to_string(),
-    }
-}
-
 /// `RunEntrypoint` arm: distinguish "validation hasn't completed yet"
 /// (Starting → NotReady, transient) from "validation failed"
 /// (Failed → EntrypointInvalid, terminal) before delegating to the
@@ -623,15 +569,6 @@ pub(crate) fn handle_close_stream_input(close: CloseInput) -> GuestResponse {
     GuestResponse::StreamInputResult(InputDesk::close(close))
 }
 
-#[cfg(not(feature = "interactive"))]
-pub(crate) fn handle_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
-    let _ = (argv, env);
-    GuestResponse::Error {
-        message: "run-detached not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-            .to_string(),
-    }
-}
-
 pub(crate) fn handle_fs_diff() -> GuestResponse {
     // Walk the overlay upper dir to find changes since boot.
     // The overlay upper dir is typically at /overlay/upper when
@@ -665,38 +602,6 @@ pub(crate) fn handle_start_unix_socket_forward(
         Err(err) => GuestResponse::Error {
             message: format!("unix socket forward failed: {err}"),
         },
-    }
-}
-
-#[cfg(not(feature = "interactive"))]
-pub(crate) fn handle_console_open(
-    cols: u16,
-    rows: u16,
-    env: Vec<(String, String)>,
-    argv: Vec<String>,
-) -> GuestResponse {
-    let _ = (cols, rows, env, argv);
-    GuestResponse::Error {
-        message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-            .to_string(),
-    }
-}
-
-#[cfg(not(feature = "interactive"))]
-pub(crate) fn handle_console_close(session_id: u32) -> GuestResponse {
-    let _ = session_id;
-    GuestResponse::Error {
-        message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-            .to_string(),
-    }
-}
-
-#[cfg(not(feature = "interactive"))]
-pub(crate) fn handle_console_resize(session_id: u32, cols: u16, rows: u16) -> GuestResponse {
-    let _ = (session_id, cols, rows);
-    GuestResponse::Error {
-        message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-            .to_string(),
     }
 }
 
@@ -805,110 +710,46 @@ pub(crate) fn handle_proc_start(
     cwd: Option<String>,
     stdin: Vec<u8>,
 ) -> GuestResponse {
-    #[cfg(feature = "interactive")]
-    {
-        let caps = mvm_agentd::process_rpc::Caps::production();
-        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_start(
-            crate::interactive::proc_registry(),
-            &caps,
-            &argv,
-            &env,
-            cwd.as_deref(),
-            &stdin,
-        ))
-    }
-    #[cfg(not(feature = "interactive"))]
-    {
-        let _ = (argv, env, cwd, stdin);
-        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-            message:
-                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                    .to_string(),
-        })
-    }
+    let caps = mvm_agentd::process_rpc::Caps::production();
+    GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_start(
+        crate::interactive::proc_registry(),
+        &caps,
+        &argv,
+        &env,
+        cwd.as_deref(),
+        &stdin,
+    ))
 }
 
 pub(crate) fn handle_proc_list() -> GuestResponse {
-    #[cfg(feature = "interactive")]
-    {
-        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_list(
-            crate::interactive::proc_registry(),
-        ))
-    }
-    #[cfg(not(feature = "interactive"))]
-    {
-        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-            message:
-                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                    .to_string(),
-        })
-    }
+    GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_list(
+        crate::interactive::proc_registry(),
+    ))
 }
 
 pub(crate) fn handle_proc_signal(pid_token: String, signum: i32) -> GuestResponse {
-    #[cfg(feature = "interactive")]
-    {
-        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_signal(
-            crate::interactive::proc_registry(),
-            &pid_token,
-            signum,
-        ))
-    }
-    #[cfg(not(feature = "interactive"))]
-    {
-        let _ = (pid_token, signum);
-        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-            message:
-                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                    .to_string(),
-        })
-    }
+    GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_signal(
+        crate::interactive::proc_registry(),
+        &pid_token,
+        signum,
+    ))
 }
 
 pub(crate) fn handle_proc_send_input(pid_token: String, bytes: Vec<u8>) -> GuestResponse {
-    #[cfg(feature = "interactive")]
-    {
-        let caps = mvm_agentd::process_rpc::Caps::production();
-        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_send_input(
-            crate::interactive::proc_registry(),
-            &caps,
-            &pid_token,
-            &bytes,
-        ))
-    }
-    #[cfg(not(feature = "interactive"))]
-    {
-        let _ = (pid_token, bytes);
-        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-            message:
-                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                    .to_string(),
-        })
-    }
+    let caps = mvm_agentd::process_rpc::Caps::production();
+    GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_send_input(
+        crate::interactive::proc_registry(),
+        &caps,
+        &pid_token,
+        &bytes,
+    ))
 }
 
 pub(crate) fn handle_proc_kill(pid_token: String) -> GuestResponse {
-    #[cfg(feature = "interactive")]
-    {
-        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_kill(
-            crate::interactive::proc_registry(),
-            &pid_token,
-        ))
-    }
-    #[cfg(not(feature = "interactive"))]
-    {
-        let _ = pid_token;
-        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-            message:
-                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                    .to_string(),
-        })
-    }
+    GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_kill(
+        crate::interactive::proc_registry(),
+        &pid_token,
+    ))
 }
 
 pub(crate) fn handle_proc_wait(
@@ -916,22 +757,9 @@ pub(crate) fn handle_proc_wait(
     pid_token: String,
     timeout_secs: Option<u64>,
 ) -> GuestResponse {
-    #[cfg(feature = "interactive")]
-    {
-        let terminal =
-            crate::interactive::handle_proc_wait_streaming(ctx.file, &pid_token, timeout_secs);
-        GuestResponse::ProcWaitEvent(terminal)
-    }
-    #[cfg(not(feature = "interactive"))]
-    {
-        let _ = (ctx, pid_token, timeout_secs);
-        GuestResponse::ProcWaitEvent(mvm_agentd::vsock::ProcWaitEvent::Error {
-            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-            message:
-                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                    .to_string(),
-        })
-    }
+    let terminal =
+        crate::interactive::handle_proc_wait_streaming(ctx.file, &pid_token, timeout_secs);
+    GuestResponse::ProcWaitEvent(terminal)
 }
 
 pub(crate) fn handle_mount_volume(

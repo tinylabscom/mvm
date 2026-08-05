@@ -107,9 +107,13 @@ export class SandboxLiveError extends Error {
 /** Raised when the SDK refuses a live-mode `commands.start` call
  *  because the resolved template is a *prod* template.
  *
- *  The guest agent strips development-only handlers from production
- *  builds. The agent itself fails closed, but the SDK refuses before
- *  any CLI traffic so a typo cannot make a spurious round-trip. */
+ *  The guest agent's runtime profile and signed grant refuse DevOnly
+ *  process-control requests in production. The agent itself fails closed,
+ *  but the SDK refuses *before* any
+ *  vsock traffic so a typo doesn't make a spurious round-trip.
+ *  `commands.start` is the only Sandbox surface that hits
+ *  `proc start`; `files.write` / `kill` route to verbs that are
+ *  available in prod builds too. */
 export class SandboxDevOnly extends SandboxLiveError {
   constructor(
     message: string,
@@ -690,8 +694,8 @@ export class LiveTransport {
     if (this.buildMode !== "dev") {
       throw new SandboxDevOnly(
         `\`exec\` requires a dev-mode template; resolved template ` +
-          `build_mode=${JSON.stringify(this.buildMode)}. ADR-001 §W4.3 (security ` +
-          `claim 4) strips the agent's \`do_exec\` handler in prod builds — ` +
+          `build_mode=${JSON.stringify(this.buildMode)}. The guest runtime ` +
+          `profile and signed grant refuse DevOnly process control in prod — ` +
           `re-build the template with \`mvmctl template build --dev <name>\`, ` +
           `or use \`files.write\` to stage inputs into the running VM instead.`,
         { argv: ["machine", "proc", "start", this.vmId, ...argv] },

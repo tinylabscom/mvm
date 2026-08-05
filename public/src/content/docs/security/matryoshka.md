@@ -83,7 +83,7 @@ mvm makes seven CI-enforced security claims. Each one is backed by a continuous-
 | 1 | No host-fs access from a guest beyond explicit shares | L2 / L5 | Per-service uid + seccomp `standard` default + setpriv bounding-set drop |
 | 2 | No guest binary can elevate to uid 0 | L2 / L4 | `setpriv --no-new-privs` in launch path; `/etc/{passwd,group}` are read-only bind-mounts |
 | 3 | A tampered rootfs ext4 fails to boot | L3 | dm-verity sidecar + roothash on cmdline + `mvm-verity-init` initramfs |
-| 4 | The guest agent does not contain `do_exec` in production builds | L4 | CI symbol-grep on the prod binary; absence is enforced |
+| 4 | A production-safe run cannot invoke DevOnly guest-agent verbs | L4 | Runtime profile + signed `VerbGrant` intersection; grant and conformance tests enforce the full DevOnly set |
 | 5 | Vsock framing is fuzzed | L2 / L4 | `cargo-fuzz` targets cover every host↔guest message; `deny_unknown_fields` on every type |
 | 6 | Pre-built dev image is hash-verified | supply chain | SHA-256 manifest streamed through the download |
 | 7 | Cargo deps are audited on every PR | supply chain | `cargo-deny` + `cargo-audit` jobs; reproducibility double-build |

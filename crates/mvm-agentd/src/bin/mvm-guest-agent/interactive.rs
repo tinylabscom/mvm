@@ -1,9 +1,7 @@
-//! Dev-only interactive surface: exec, run-code, run-detached, and the
-//! PTY-over-vsock console relay. Every item here is gated behind the
-//! `interactive` feature so none of it links into a production agent build
-//! (claim 4 / claim 15) — the module itself is declared
-//! `#[cfg(feature = "interactive")]` in the bin root, and each item repeats
-//! the same gate so the boundary is legible from inside the file too.
+//! Runtime-gated DevOnly surface: exec, run-code, run-detached, process
+//! control, and the PTY-over-vsock console relay. The request dispatcher
+//! enforces the active profile and signed verb grant before calling these
+//! handlers, so the same agent artifact can serve every run tier.
 
 use mvm_agentd::vsock::GuestResponse;
 use std::io::Write;
@@ -12,10 +10,9 @@ use crate::HandlerCtx;
 use crate::socket::write_response;
 
 /// Process registry singleton — shared across all `ProcStart` /
-/// `ProcWait` / etc. dispatches inside one agent process. Dev-only
-/// (gated alongside `process_rpc`); the symbol is absent from prod
-/// builds.
-#[cfg(feature = "interactive")]
+/// `ProcWait` / etc. dispatches inside one agent process. Requests reach it
+/// only after the runtime profile and signed-grant gates authorize DevOnly
+/// process control.
 pub(crate) fn proc_registry() -> &'static mvm_agentd::process_rpc::Registry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<mvm_agentd::process_rpc::Registry> = OnceLock::new();
@@ -25,7 +22,6 @@ pub(crate) fn proc_registry() -> &'static mvm_agentd::process_rpc::Registry {
 /// `ProcWait` streaming arm — writes intermediate Stdout/Stderr
 /// frames to the connection and returns the terminal event for the
 /// dispatch loop to write last. Mirrors `handle_run_entrypoint`.
-#[cfg(feature = "interactive")]
 pub(crate) fn handle_proc_wait_streaming(
     file: &mut dyn Write,
     pid_token: &str,
@@ -41,8 +37,7 @@ pub(crate) fn handle_proc_wait_streaming(
 /// `Exec` streaming arm — writes intermediate `ExecEvent` Stdout/Stderr
 /// frames to the connection and returns the terminal `Exit` or `TimedOut`
 /// for the dispatch loop to write last. Mirrors `handle_run_entrypoint` /
-/// `handle_proc_wait_streaming`. (interactive only)
-#[cfg(feature = "interactive")]
+/// `handle_proc_wait_streaming`. (DevOnly)
 fn do_exec_streaming(
     file: &mut dyn Write,
     command: &str,
@@ -55,7 +50,7 @@ fn do_exec_streaming(
     GuestResponse::ExecEvent(terminal)
 }
 
-/// Spawn `argv` as a detached workload and return its ack (interactive only).
+/// Spawn `argv` as a detached workload and return its ack (DevOnly).
 ///
 /// Models the image `/init` entrypoint launch, but agent-driven and
 /// non-blocking: the child gets its own session (`setsid`), stdin from
@@ -65,7 +60,6 @@ fn do_exec_streaming(
 /// and reports its exit code to the host's workload-exit port via
 /// `mvm-exit-report`, so the VM powers off when the workload finishes
 /// (docker `-d` semantics). The reaper never blocks the agent request loop.
-#[cfg(feature = "interactive")]
 fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
     do_run_detached_with(
         argv,
@@ -81,7 +75,6 @@ fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestRespon
 /// workload's exit code (production: `/usr/local/bin/mvm-exit-report`). A test
 /// points both at a tempdir to observe the spawn, the console redirect, and the
 /// reported exit code without a live guest.
-#[cfg(feature = "interactive")]
 fn do_run_detached_with(
     argv: Vec<String>,
     env: Vec<(String, String)>,
@@ -187,8 +180,7 @@ fn do_run_detached_with(
 }
 
 /// Write one staged file to disk (creating parents, applying mode) before an
-/// `ExecBatch` runs its commands. (interactive only)
-#[cfg(feature = "interactive")]
+/// `ExecBatch` runs its commands. (DevOnly)
 fn stage_file_to_disk(s: &mvm_agentd::vsock::StageFile) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     if let Some(parent) = std::path::Path::new(&s.path).parent() {
@@ -200,8 +192,7 @@ fn stage_file_to_disk(s: &mvm_agentd::vsock::StageFile) -> std::io::Result<()> {
 
 /// `getrusage(RUSAGE_CHILDREN).ru_maxrss` (KiB on Linux): the high-water RSS
 /// across reaped children — a cumulative peak proxy for the batch. `None` when
-/// the call fails or reports nothing. (interactive only)
-#[cfg(feature = "interactive")]
+/// the call fails or reports nothing.
 fn read_peak_rss_kib() -> Option<u64> {
     // SAFETY: getrusage only writes the provided rusage struct.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
@@ -209,10 +200,9 @@ fn read_peak_rss_kib() -> Option<u64> {
     (rc == 0 && usage.ru_maxrss > 0).then_some(usage.ru_maxrss as u64)
 }
 
-/// `ExecBatch` arm (interactive only): stage every file, then run each argv
+/// `ExecBatch` arm (DevOnly): stage every file, then run each argv
 /// command buffered (stop at the first non-zero exit), returning one
 /// `ExecOutcomeWire` per command run. One round-trip, no streaming.
-#[cfg(feature = "interactive")]
 fn do_exec_batch(
     stages: &[mvm_agentd::vsock::StageFile],
     commands: &[Vec<String>],
@@ -265,7 +255,6 @@ fn do_exec_batch(
 /// `None` if the file is missing, unparseable, or the field is
 /// absent — caller treats that as "language unknown, refuse the
 /// `RunCode` call rather than guess".
-#[cfg(feature = "interactive")]
 fn read_wrapper_language() -> Option<String> {
     let raw = std::fs::read_to_string("/etc/mvm/wrapper.json").ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -280,7 +269,6 @@ fn read_wrapper_language() -> Option<String> {
 /// A future v2 will route through the warm-process pool instead,
 /// providing stateful eval across calls. Wire shape stays identical —
 /// the dispatch flips inside this function.
-#[cfg(feature = "interactive")]
 fn do_run_code(file: &mut dyn Write, code: &str, timeout_secs: Option<u64>) -> GuestResponse {
     let lang = match read_wrapper_language() {
         Some(l) => l,
@@ -332,7 +320,6 @@ fn do_run_code(file: &mut dyn Write, code: &str, timeout_secs: Option<u64>) -> G
 /// `mvm_cli::commands::vm::session::shell_quote` — duplicated here
 /// rather than depending on mvm-cli to keep the agent's dependency
 /// surface lean.
-#[cfg(feature = "interactive")]
 fn shell_quote_for_sh(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
@@ -347,7 +334,6 @@ fn shell_quote_for_sh(s: &str) -> String {
     out
 }
 
-#[cfg(feature = "interactive")]
 pub(crate) fn handle_exec(
     ctx: &mut HandlerCtx,
     command: String,
@@ -358,7 +344,6 @@ pub(crate) fn handle_exec(
     do_exec_streaming(ctx.file, &command, stdin.as_deref(), timeout_secs)
 }
 
-#[cfg(feature = "interactive")]
 pub(crate) fn handle_exec_batch(
     stages: Vec<mvm_agentd::vsock::StageFile>,
     commands: Vec<Vec<String>>,
@@ -372,7 +357,6 @@ pub(crate) fn handle_exec_batch(
     do_exec_batch(&stages, &commands, timeout_secs)
 }
 
-#[cfg(feature = "interactive")]
 pub(crate) fn handle_run_code(
     ctx: &mut HandlerCtx,
     code: String,
@@ -391,7 +375,6 @@ pub(crate) fn handle_run_code(
     do_run_code(ctx.file, &code, timeout_secs)
 }
 
-#[cfg(feature = "interactive")]
 pub(crate) fn handle_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
     // Argv is NOT logged: it can carry user-typed secrets, mirroring
     // the run-code audit posture.
@@ -399,7 +382,6 @@ pub(crate) fn handle_run_detached(argv: Vec<String>, env: Vec<(String, String)>)
     do_run_detached(argv, env)
 }
 
-#[cfg(feature = "interactive")]
 pub(crate) fn handle_console_open(
     cols: u16,
     rows: u16,
@@ -441,7 +423,6 @@ pub(crate) fn handle_console_open(
     }
 }
 
-#[cfg(feature = "interactive")]
 pub(crate) fn handle_console_close(session_id: u32) -> GuestResponse {
     // Console sessions end when the shell exits or the host disconnects.
     // Explicit close is a no-op if already closed.
@@ -462,7 +443,6 @@ pub(crate) fn handle_console_close(session_id: u32) -> GuestResponse {
     }
 }
 
-#[cfg(feature = "interactive")]
 pub(crate) fn handle_console_resize(session_id: u32, cols: u16, rows: u16) -> GuestResponse {
     if mvm_agentd::console::resize_active_session(cols, rows) {
         eprintln!("console: resized to {cols}x{rows}");
@@ -483,7 +463,6 @@ mod tests {
     /// end-to-end behaviour behind `machine run -d -- <cmd>`, exercised on the
     /// host without a live guest. This is the regression guard for a guest agent
     /// that links the `RunDetached` handler but doesn't actually run the workload.
-    #[cfg(feature = "interactive")]
     #[test]
     fn run_detached_spawns_redirects_console_and_reports_exit() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -538,7 +517,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "interactive")]
     #[test]
     fn run_detached_refuses_empty_argv() {
         match do_run_detached_with(

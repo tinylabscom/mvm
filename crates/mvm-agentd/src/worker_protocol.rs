@@ -11,7 +11,7 @@
 //! truth, no risk of independent drift between agent and wrapper.
 //!
 //! `serde(deny_unknown_fields)` on every type makes unexpected fields
-//! fail closed — the `prod-agent-no-exec` companion contract.
+//! fail closed at the protocol boundary.
 
 use std::io::{self, Read, Write};
 

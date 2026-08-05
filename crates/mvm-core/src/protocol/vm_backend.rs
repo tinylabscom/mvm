@@ -230,7 +230,7 @@ pub struct VmStartConfig {
     /// `CONSOLE_PORT_BASE + session_id` data port; Firecracker multiplexes
     /// every port over one UDS and ignores this. Off by default — set only
     /// for dev-accessible managed machines and `--console`. Claim 15's
-    /// interactive-gated agent + the host `enforce_accessible_gate` still bar
+    /// runtime profile + signed grant + the host `enforce_accessible_gate` still bar
     /// interactive access to a sealed prod guest regardless of this flag, so
     /// the extra listeners are inert there.
     pub dev_console: bool,

@@ -6,10 +6,9 @@
 //! template entrypoint) can be added without churning the inline-command
 //! surface.
 //!
-//! Dev-mode only: the guest agent's Exec handler is gated at compile time
-//! by the `interactive` Cargo feature. Production guest binaries are built
-//! without `interactive`, so the handler is not present and `exec` returns
-//! "exec not available" regardless of any runtime configuration.
+//! Dev-mode only: the guest agent admits the Exec handler only when the
+//! runtime profile and signed verb grant authorize DevOnly access. The same
+//! universal guest-agent artifact is used for every image tier.
 
 use anyhow::{Context, Result, anyhow};
 use mvm_core::vm_backend::{

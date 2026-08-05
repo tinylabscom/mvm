@@ -232,7 +232,7 @@ for two different reasons — and the reason decides the treatment:
 
 | Claim | Why unreachable | How to falsify it |
 | --- | --- | --- |
-| 4 (no `do_exec` in prod) | no `fn:` witness — a symbol grep | build the agent *with* `interactive`, confirm the job fails |
+| 4 (no DevOnly verbs in a production-safe run) | runtime grant/conformance witness | remove the runtime profile or signed-grant check and confirm the boundary tests fail |
 | 5 (fuzz targets) | no `fn:` witness — a fuzz lane | break the `GuestRequest` framing, confirm a short local run finds it |
 | 7 (dependency audit) | no `fn:` witness — a `cargo deny` job | add a crate with a disallowed licence, confirm `cargo deny` fails |
 | 16 (egress substitution) | **has** `fn:` witnesses, but all three live in `crates/mvm-hostd/tests/`, which cargo-mutants does not mutate | plant a defect in the *enforcement* code and confirm the integration test fires |

@@ -134,21 +134,6 @@
           pkgs = pkgs.pkgsStatic;
           lib = pkgs.lib;
           mvmSrc = workspace;
-          # No interactive — the overlay ships the production agent.
-          # The `prod-agent-no-exec` CI gate asserts
-          # `mvm_guest_agent::do_exec` is absent from this binary.
-          withInteractive = false;
-        };
-
-      mvmGuestDevFor = system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspace + "/nix/packages/mvm-guest-agent.nix") {
-          pkgs = pkgs.pkgsStatic;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-          withInteractive = true;
         };
 
       # mvm-runner — the function-workload entrypoint runner.
@@ -384,7 +369,6 @@
         let
           pkgs = import nixpkgs { inherit system; };
           guest = mvmGuestFor system;
-          guestDev = mvmGuestDevFor system;
           runner = mvmRunnerFor system;
           egressClient = mvmEgressClientFor system;
           netAgent = mvmNetAgentFor system;
@@ -399,7 +383,7 @@
               pkgs.coreutils
             ];
             passthru = {
-              inherit guest guestDev runner egressClient addonDns exitReport;
+              inherit guest runner egressClient addonDns exitReport;
               sdkSidecar = mkSdkSidecar system;
               sdkSidecarImage = mkSdkSidecarImage system;
               version = overlayVersion;
@@ -420,7 +404,6 @@
             mkdir -p "$staging"
 
             cp ${guest}/bin/mvm-guest-agent "$staging/agent"
-            cp ${guestDev}/bin/mvm-guest-agent "$staging/agent-interactive"
             cp ${guest}/bin/mvm-seccomp-apply "$staging/seccomp-apply"
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
             cp ${runner}/bin/mvm-runner "$staging/runner"

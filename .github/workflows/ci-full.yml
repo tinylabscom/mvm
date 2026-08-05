@@ -306,7 +306,8 @@ jobs:
     with:
       dry_run: true
 
-  # Note: cargo-audit, cargo-deny, reproducibility, and prod-agent-no-exec
+  # Note: cargo-audit, cargo-deny, reproducibility, and the guest-agent
+  # runtime-boundary gate
   # were duplicated here AND in security.yml. They now live only in
   # security.yml, which runs nightly and before release publication.
 
@@ -319,8 +320,8 @@ jobs:
   # verb as `ProdSafe`). Promoting the relevant tests to their own
   # named lane gives reviewers a single discoverable signal that
   # "the prod surface didn't change" — same intent as
-  # `prod-agent-runentry-contract` in security.yml for the symbol
-  # contract (ADR-001 §W4.3), one step earlier in the gate stack.
+  # `guest-agent-runtime-boundary` in security.yml for the runtime
+  # contract, one step earlier in the gate stack.
   #
   # The actual assertions live in mvm-guest and mvm-core tests; this
   # lane is a thin filter so a PR that widens the prod allowlist

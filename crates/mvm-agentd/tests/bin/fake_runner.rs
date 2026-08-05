@@ -24,7 +24,7 @@
 //!
 //! Lives under `tests/bin/` and is declared as `[[bin]] test = false`
 //! so it never ships in the production guest closure. The
-//! `prod-agent-no-exec` symbol gate operates on
+//! the guest-agent runtime-boundary gate operates on
 //! `mvm-guest-agent` only and is unaffected.
 
 use std::env;

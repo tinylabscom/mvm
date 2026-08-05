@@ -55,7 +55,7 @@ All notable changes to mvm are documented in this file.
 - **stage0-init**: QEMU builder backend support (Plan 165 Phase 1, guest side)
 - **qemu**: Host-side QEMU builder backend + Stage-0 selector wiring (Plan 165)
 - **admission**: Wire the tenant PolicyBundle into the bridge (plan 123 Slice 3b)
-- **guest**: Gate PTY-over-vsock console behind dev-shell + prod-agent-no-console CI lane (Plan 165 WS-C)
+- **guest**: Gate PTY-over-vsock console behind the runtime profile and signed grant boundary (Plan 165 WS-C)
 - **sdk**: No-entrypoint policy — has_declared_entrypoint + compile fail-closed (Plan 165 WS-B B1/B3)
 - **hostd**: Admission fail-closed on sealed image with no entrypoint (Plan 165 WS-B B4)
 - **plan-124 A1**: Runtime-free gate for the guest agent closure

@@ -10,7 +10,6 @@
 { pkgs
 , lib
 , mvmSrc
-, withInteractive ? false
 }:
 
 let
@@ -32,8 +31,6 @@ staticPkgs.rustPlatform.buildRustPackage {
   cargoBuildFlags = [
     "--package" "mvm-agentd"
     "--bin" "mvm-guest-agent"
-  ] ++ lib.optionals withInteractive [
-    "--features" "mvm-agentd/interactive"
   ];
 
   cargoTestFlags = [

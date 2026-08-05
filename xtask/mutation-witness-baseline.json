@@ -22,6 +22,13 @@
       ]
     },
     {
+      "path": "crates/mvm-agentd/src/vsock/verb_grant.rs",
+      "package": "mvm-agentd",
+      "claims": [
+        4
+      ]
+    },
+    {
       "path": "crates/mvm-build/src/app_deps_gate.rs",
       "package": "mvm-build",
       "claims": [
@@ -236,16 +243,12 @@
   ],
   "uncovered_claims": [
     {
-      "number": 4,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
-    },
-    {
       "number": 5,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -666,7 +669,7 @@
     {
       "file": "crates/mvm-contract/src/policy/network_policy.rs",
       "mutant": "replace NetworkPolicy::trusted_build_egress -> Self with Default::default()",
-      "reason": "Observed 2026-07-29. No mvm-contract test asserts the shape of the trusted-build egress policy. The mutant substitutes the deny-all default, so it makes the policy stricter, not weaker \u2014 a functional coverage gap rather than a security hole. Untriaged."
+      "reason": "Observed 2026-07-29. No mvm-contract test asserts the shape of the trusted-build egress policy. The mutant substitutes the deny-all default, so it makes the policy stricter, not weaker — a functional coverage gap rather than a security hole. Untriaged."
     }
   ]
 }

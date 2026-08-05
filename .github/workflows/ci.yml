@@ -385,14 +385,10 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
 
-      - name: Run interactive agent handler tests
-        # The default workspace run builds the guest agent without `interactive`,
-        # so the dev-tier handlers (exec, run-code, run-detached) and their
-        # tests are compiled out. Run mvm-agentd with the feature on so the
-        # detached-workload handler is actually exercised on every PR — a fresh
-        # agent that links the handler but can't run the workload would slip an
-        # all-default run.
-        run: cargo nextest run -p mvm-agentd --features interactive
+      - name: Run universal agent handler tests
+        # DevOnly handlers are runtime-gated, so the default build now
+        # compiles and exercises them for every artifact tier.
+        run: cargo nextest run -p mvm-agentd --all-targets
 
       - name: Run addon/egress helper tests
         # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
@@ -508,7 +504,7 @@ jobs:
           glibc_re='/nix/store/[a-z0-9]+-glibc(-|$)'
 
           staged_closure=$(mktemp)
-          for binary in guest guestDev runner egressClient addonDns exitReport; do
+          for binary in guest runner egressClient addonDns exitReport; do
             path=$(nix eval --raw "$overlay#packages.x86_64-linux.default.passthru.$binary")
             nix path-info -r "$path" >> "$staged_closure"
           done

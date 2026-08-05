@@ -25,9 +25,8 @@
 # has the kinds of evidence it is supposed to have. Declaring them makes
 # giving one up an explicit, reviewable edit rather than a silent deletion.
 #
-# The kinds are not uniform, deliberately. MVM-SEC-04 ("no `do_exec` in a
-# production build") is a property of a shipped binary, so its evidence is a
-# CI symbol-grep and an `fn:` witness would have to be invented. Others are
+# The kinds are not uniform, deliberately. Some claims are properties of a
+# shipped image and need a CI artifact or conformance witness; others are
 # properties of code logic with no useful CI counterpart. Requiring both
 # everywhere would buy fabricated witnesses, not assurance.
 #
@@ -79,11 +78,12 @@ witnesses = [
 [[claim]]
 id = "MVM-SEC-04"
 level = "build"
-witness_kinds = ["ci"]
+statement = "A production-safe run cannot invoke DevOnly guest-agent verbs"
+witness_kinds = ["fn", "ci"]
 suite = "agent_surface"
-statement = "The guest agent has no do_exec in production builds"
 witnesses = [
-    "ci:prod-agent-runentry-contract",
+    "fn:prod_safe_grant_refuses_all_dev_only_requests",
+    "ci:guest-agent-runtime-boundary",
 ]
 
 [[claim]]
@@ -234,7 +234,8 @@ statement = "A sealed production microVM has no shell, no do_exec, and no PTY"
 witnesses = [
     "fn:console_refused_on_sealed_image",
     "fn:prod_console_attachment_has_no_input",
-    "ci:prod-agent-no-console",
+    "fn:prod_safe_grant_refuses_all_dev_only_requests",
+    "ci:guest-agent-runtime-boundary",
 ]
 
 [[claim]]

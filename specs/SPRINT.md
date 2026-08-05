@@ -44,15 +44,13 @@
       Long-running mode now waits for the next change after transient input or
       compile errors, while `--once` remains fail-fast for automation. PR
       #2109 is merged and its required queue gates passed.
-- [~] Develop → build → deploy an attested workload image — **plan 291**.
-      WS1–WS3 are merged with their queue-gate evidence. WS4 exact-artifact
-      authority, local/remote deployment boot, and the acceptance matrix are
-      complete; mvm #2144 and mvmd #208 are closed. Current-main validation
-      passed workspace tests (with the rustup-sensitive host test rerun using
-      the normal rustup home), workspace all-target Clippy with warnings
-      denied, doctests, and the conformance, honesty, deferral, overclaim, and
-      no-spec-reference xtask gates. The universal-agent security decision and
-      the dependent full guest-image witness replacement remain open.
+- [x] Develop → build → deploy an attested workload image — **plan 291**.
+      WS1–WS3 are merged with their queue-gate evidence. WS4 completes the
+      path: local `machine run --deployment` verifies and persists an exact
+      deploy record/rootfs binding, remote record extraction and boot are
+      merged, and persistent-OCI console pre-open is limited to dev profiles
+      (PR #2157). The guest agent is one universal artifact; runtime profile
+      and signed VerbGrant checks reject the complete DevOnly request set.
 - [x] `mvmctl deploy` — **plan 291 WS1**. Local deployment now has a durable
       sealed archive and deploy record path, with BLAKE3 as the native artifact
       identity, SHA-256 retained for interoperability, optional environment

@@ -1,10 +1,7 @@
 //! Process control RPC handler.
 //!
-//! **Dev-only.** The whole module is gated behind
-//! `#[cfg(feature = "interactive")]` in `lib.rs`, so its symbols are
-//! absent from the production guest agent (the combined
-//! `prod-agent-runentry-contract` CI gate enforces the symbol
-//! contract).
+//! Requests reach this module only after the guest agent has checked the
+//! runtime profile and signed verb grant.
 //!
 //! See doc comments on individual handlers for the security
 //! envelope (process_group(0), RLIMIT_CORE=0, env_clear,

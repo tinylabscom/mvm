@@ -68,7 +68,7 @@ it changes no types, so nothing but an offset assertion sees it.
 
 ### CI-lane witnesses
 
-Three claims are witnessed only by a CI lane — a symbol grep, a fuzz run,
+Two claims are witnessed in part by a CI lane — a runtime boundary test, a fuzz run,
 a dependency audit. Mutation testing cannot reach them: there is no Rust
 function body whose mutation exercises a workflow job. They were planted
 against by hand instead.
@@ -77,7 +77,7 @@ against by hand instead.
 | --- | --- | --- | --- |
 | MVM-SEC-05 | `ci:fuzz` | Unchecked `s[..8]` slice behind a `deserialize_with` on `GuestRequest::FsRead::path` | yes — libFuzzer `deadly signal` inside a 90s budget |
 | MVM-SEC-07 | `ci:cargo-deny` | Remove `MIT` from `deny.toml`'s licence allow-list | yes — `rejected: license is not explicitly allowed` |
-| MVM-SEC-04 | `ci:prod-agent-runentry-contract` | Ungate `do_exec_streaming` so it compiles into a production build | no — see below |
+| MVM-SEC-04 | `ci:guest-agent-runtime-boundary` | Remove the runtime profile or grant check before dispatching a DevOnly request | yes — the grant and handler conformance tests fail |
 
 **MVM-SEC-05.** The lane could not have fired at all until its
 `working-directory` values were corrected — they pointed at crates the
@@ -92,21 +92,12 @@ rejection path without depending on a particular crate's licensing. Note
 the lane also fired on a *real* defect during this work — duplicate
 `curve25519-dalek` — which is stronger evidence than any plant.
 
-**MVM-SEC-04 — the plant did not fire, and that is the correct
-behaviour.** Ungating `do_exec_streaming` leaves it with no caller in a
-production build, so it is dead-code-eliminated and no symbol appears.
-The check measures *reachability*, not source presence. An unreachable
-function is not a leak, so this is the property worth having; a faithful
-plant needs a production-reachable call site.
-
-What makes this witness trustworthy is not a hand-planted defect at all:
-`scripts/check-prod-agent-no-exec.sh` carries **its own positive
-control** — it builds a second time with `interactive` enabled and fails
-if `do_exec` is *not* detectable there. That proves the detector works,
-so the absence assertion cannot rot into a no-op against a renamed
-symbol. It also carries a canary (`handle_run_entrypoint` must be
-present) so a stripped symbol table cannot make the absence check
-vacuously true. Both pass today.
+**MVM-SEC-04 — the runtime boundary is the witness.** The universal agent
+contains the DevOnly handlers in every build, but a production-safe run still
+cannot reach them: request classification, the runtime profile, and the
+launch-provisioned signed grant must all authorize the call. The unit suite
+enumerates the DevOnly request set, and the CI lane runs those tests against
+the same artifact shape used by both tiers.
 
 ### Mutation-tested witnesses: what the first full run found
 

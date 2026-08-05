@@ -763,12 +763,6 @@ mod runtime_overlay_attach_tests {
                 xattrs: Vec::new(),
             },
             Node::File {
-                path: "/agent-interactive".into(),
-                mode: 0o555,
-                data: b"agent-dev".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
                 path: "/netinit".into(),
                 mode: 0o555,
                 data: b"netinit".to_vec(),

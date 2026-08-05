@@ -23,12 +23,8 @@ pub mod builder_transfer;
 /// what it collects, so PID-1 reaping cannot destroy an owned child's exit
 /// status.
 pub mod child_wait;
-/// PTY-over-vsock interactive console — the single dev-only interactive path
-/// into a guest. Gated behind `interactive` so the relay symbols are absent from
-/// a sealed production agent (claim 15: no interactive access to a sealed prod
-/// microVM), mirroring `do_exec`. The host-side console client talks to it over
-/// vsock and is unaffected by this gate.
-#[cfg(feature = "interactive")]
+/// PTY-over-vsock console support. Access is enforced by the guest agent's
+/// runtime profile and signed verb grant before a request reaches this module.
 pub mod console;
 /// Loopback SOCKS5 → host-vsock egress proxy (`mvm-egress-client`).
 #[cfg(feature = "addons")]
@@ -109,11 +105,10 @@ pub mod vsock;
 pub mod worker_pool;
 pub mod worker_protocol;
 
-/// Process control RPC handler. Dev-only: gated behind `interactive` so
-/// symbols are stripped from production guest agents.
-#[cfg(feature = "interactive")]
+/// Process control RPC handler. Requests are admitted only after the guest
+/// agent's runtime profile and signed verb grant checks succeed.
 pub mod process_rpc;
 
 /// Streaming exec core — runs `sh -c <cmd>` and emits `ExecEvent` chunks
-/// via a closure. Dev-only (claim 4: no `do_exec` in production agents).
+/// via a closure. The guest agent admits calls at runtime.
 pub mod exec_stream;
