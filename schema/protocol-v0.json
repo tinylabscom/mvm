@@ -227,6 +227,34 @@
       },
       "additionalProperties": false
     },
+    "CloseInput": {
+      "description": "Explicit end-of-input marker, and the last bytes that go with it.\n\nContinuous input has no natural end the way one-shot `stdin_data` does (`entrypoint.rs` writes it once and closes the pipe immediately). Without this frame, a read-to-EOF program — `cat`-shaped workloads chief among them — hangs forever waiting on a stdin that never closes.\n\nIt is not a pure signal, because the admitting gate withholds the tail of the stream that is still a live prefix of a known secret rather than shipping it and refusing afterwards. Closing is what proves that tail was only ever a prefix, so the tail rides on the close: [`trailing`] is delivered *before* EOF, and dropping it would silently swallow the writer's last bytes. [`after_seq`] fixes where EOF sits in the sequence, so a receiver can refuse a close that overtook a frame still in flight.\n\nOne type, not two: this is both what the gate returns when a session ends and what travels the wire, so the host's idea of \"where the stream ended\" cannot drift from the guest's.\n\n[`trailing`]: Self::trailing [`after_seq`]: Self::after_seq",
+      "type": "object",
+      "required": [
+        "trailing"
+      ],
+      "properties": {
+        "after_seq": {
+          "description": "Highest [`InputFrame::seq`] the writer's session admitted, or `None` when it admitted nothing. EOF is ordered immediately after it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "trailing": {
+          "description": "Bytes the gate cleared but held back, released here because closing proves they were a proper prefix of a secret and not a secret.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "ComponentState": {
       "description": "State of a single guest subsystem during boot.\n\n`Disabled` is distinct from `Ready` — a missing optional subsystem (no integrations declared, no warm pool configured, no probes registered) reports `Disabled`, while a present-and-warmed subsystem reports `Ready`. This lets the host UX distinguish \"the workload doesn't use X\" from \"X is still warming\".\n\n`Default` is `Disabled` — the most-conservative semantically correct value (= \"this subsystem isn't configured\"). Lets constructors of `ReadinessReport` use `..Default::default()` to elide subsystems they don't care about in tests / fixtures.",
       "oneOf": [
@@ -334,7 +362,7 @@
           "additionalProperties": false
         },
         {
-          "description": "One control-channel record from the wrapper's fd-3.\n\nfd-3 is a separate stream the wrapper writes structured records to — error envelopes, captured logs when capture is on, etc. — that user code cannot spoof by writing to stderr. stdout / stderr keep streaming user-visible bytes verbatim.\n\nThe on-the-fd-3-wire frame format is:\n\n```text header_len:  u32 LE   (4 bytes; max 64 KiB) header_json: bytes    (header_len bytes; UTF-8 JSON object) payload_len: u32 LE   (4 bytes; max bounded by call caps) payload:     bytes    (payload_len bytes; opaque) ```\n\n`header_json` is a JSON object with at minimum `{\"kind\": \"<str>\"}`. The agent re-emits the header as `header_json: String` and the payload bytes as `payload: Vec<u8>` — no agent-side parsing beyond the framing. The host (`mvmctl invoke` and downstream SDKs) decides what to do with each record kind.\n\n**Wiring status:** the variant ships ahead of any emitter. Agents at this version do not yet open fd-3 in the child or emit `Control` events; later work lands fd-3 wiring in the cold path (`execute()`), then the warm-process pool, and the wrapper templates flip from stderr-envelope to fd-3-envelope at the same time. Hosts that see a `Control` event must already know how to consume it, so this variant is added eagerly to keep host/guest deserializers in lockstep.",
+          "description": "One control-channel record from the wrapper's fd-3.\n\nfd-3 is a separate stream the wrapper writes structured records to — error envelopes, captured logs when capture is on, etc. — that user code cannot spoof by writing to stderr. stdout / stderr keep streaming user-visible bytes verbatim.\n\nThe on-the-fd-3-wire frame format is:\n\n```text header_len:  u32 LE   (4 bytes; max 64 KiB) header_json: bytes    (header_len bytes; UTF-8 JSON object) payload_len: u32 LE   (4 bytes; max bounded by call caps) payload:     bytes    (payload_len bytes; opaque) ```\n\n`header_json` is a JSON object with at minimum `{\"kind\": \"<str>\"}`. The agent re-emits the header as `header_json: String` and the payload bytes as `payload: Vec<u8>` — no agent-side parsing beyond the framing. The host (`mvmctl invoke` and downstream SDKs) decides what to do with each record kind.\n\n**Wiring status:** the cold path opens fd 3 in the child and frames each record onto the response as it arrives; the warm-process pool forwards the ones its worker returns. Both drop a record claiming the agent's reserved `mvm.` namespace, so a `Control` a host receives is either agent-authored or plainly the workload's — never a workload pretending to be the agent. The in-tree wrapper templates have not yet flipped from the stderr-envelope convention to emitting here, so most real calls still carry none.",
           "type": "object",
           "required": [
             "Control"
@@ -1221,6 +1249,11 @@
                     "minimum": 0.0
                   }
                 },
+                "stream_input": {
+                  "description": "Keep the workload's stdin open after `stdin` is written, so `StreamInput` frames can keep feeding it until `CloseStreamInput`.\n\nOff by default, and the host only turns it on for a plan that carries the input grant. It has to be a per-call decision rather than the agent's default: an entrypoint whose stdin stays open never sees EOF, so a `cat`-shaped workload under a host that forgot to close would run to its timeout instead of exiting.",
+                  "default": false,
+                  "type": "boolean"
+                },
                 "timeout_secs": {
                   "description": "Wall-clock timeout for the call, in seconds. The agent kills the wrapper on overrun and emits `EntrypointEvent::Error { kind: Timeout }`.",
                   "type": "integer",
@@ -2072,6 +2105,32 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "description": "Deliver one host-admitted chunk of bytes to the running workload's stdin.\n\nProduction-safe, and default-deny at the *host* end: these bytes have already passed the host's input gate, which refuses unless the signed `ExecutionPlan` carries the input grant, arbitrates a single-writer lease, and scans for the host's own secret material across frame boundaries. The guest cannot re-derive any of that, so it checks the one thing it can see locally — that `seq` advances past the last frame it delivered — and otherwise queues the bytes without waiting for the workload to read them.\n\nOnly a call that opted into streamed input (`RunEntrypoint`'s `stream_input`) keeps its child's stdin open; anything else answers `StreamInputResult::Refused { kind: NoWorkload }`.",
+          "type": "object",
+          "required": [
+            "StreamInput"
+          ],
+          "properties": {
+            "StreamInput": {
+              "$ref": "#/definitions/InputFrame"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "End the workload's input stream: deliver the tail the host's gate withheld, then close the stdin fd.\n\nClosing the fd *is* the EOF — a flag or a sentinel byte would leave a read-to-EOF workload blocked on a `read` that never returns. The trailing bytes go first, because they are the writer's last ones and the close is what proved they were only ever a prefix of a secret.",
+          "type": "object",
+          "required": [
+            "CloseStreamInput"
+          ],
+          "properties": {
+            "CloseStreamInput": {
+              "$ref": "#/definitions/CloseInput"
+            }
+          },
+          "additionalProperties": false
         }
       ]
     },
@@ -2919,8 +2978,47 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "description": "Outcome of one `StreamInput` frame or one `CloseStreamInput`.",
+          "type": "object",
+          "required": [
+            "StreamInputResult"
+          ],
+          "properties": {
+            "StreamInputResult": {
+              "$ref": "#/definitions/StreamInputResult"
+            }
+          },
+          "additionalProperties": false
         }
       ]
+    },
+    "InputFrame": {
+      "description": "One host→guest byte chunk on the input plane.\n\n`seq` numbers frames within one writer's session so the receiving gate can detect a gap or a reorder; unlike [`crate::stream::StreamRecord`] there is no `prev_hash` here — a single leased writer needs ordering, not a tamper-evident chain, and the gate that admits these frames (a later piece) owns replay/lease bookkeeping.",
+      "type": "object",
+      "required": [
+        "payload",
+        "seq"
+      ],
+      "properties": {
+        "payload": {
+          "description": "Raw bytes to deliver to the entrypoint's stdin, verbatim.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "seq": {
+          "description": "0-based position of this frame in the writer's session.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
     },
     "IntegrationHealthResult": {
       "description": "Result of a single health check execution.",
@@ -3734,6 +3832,101 @@
         }
       },
       "additionalProperties": false
+    },
+    "StreamInputRefusal": {
+      "description": "Why the agent would not deliver an input frame.",
+      "oneOf": [
+        {
+          "description": "No workload in this guest is accepting streamed input: none is running, the call did not ask for an open stdin, or the stream is already closed.",
+          "type": "string",
+          "enum": [
+            "no_workload"
+          ]
+        },
+        {
+          "description": "`seq` did not advance past the last frame delivered, or a close claimed to sit before one. The host's gate refuses the same shape; checking it again here means a transport that reordered is caught at the end that would suffer from it, not only at the end that promised not to cause it.",
+          "type": "string",
+          "enum": [
+            "out_of_order"
+          ]
+        },
+        {
+          "description": "The undelivered queue is at its budget. Retryable: offer the frame again once the workload has read some of what is already queued.",
+          "type": "string",
+          "enum": [
+            "queue_full"
+          ]
+        },
+        {
+          "description": "The workload's stdin is gone — it exited or closed the fd. Retrying will not help.",
+          "type": "string",
+          "enum": [
+            "workload_gone"
+          ]
+        }
+      ]
+    },
+    "StreamInputResult": {
+      "description": "Outcome of one `StreamInput` frame or one `CloseStreamInput`.\n\nEvery arm is a fact about *queuing*, never about the workload having read the bytes: the agent hands input to a writer thread and answers straight away, because waiting on a child that stopped reading its stdin would hold the control connection open for as long as the workload runs.",
+      "oneOf": [
+        {
+          "description": "Queued for the workload. `queued_bytes` is what has not reached its stdin yet — back-pressure a writer can pace itself against before it hits [`StreamInputRefusal::QueueFull`].",
+          "type": "object",
+          "required": [
+            "Accepted"
+          ],
+          "properties": {
+            "Accepted": {
+              "type": "object",
+              "required": [
+                "queued_bytes"
+              ],
+              "properties": {
+                "queued_bytes": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "The trailing bytes were queued and the stdin fd is closed. The stream is over; a later frame answers [`StreamInputRefusal::NoWorkload`].",
+          "type": "string",
+          "enum": [
+            "Closed"
+          ]
+        },
+        {
+          "description": "Nothing was delivered, and why.",
+          "type": "object",
+          "required": [
+            "Refused"
+          ],
+          "properties": {
+            "Refused": {
+              "type": "object",
+              "required": [
+                "kind",
+                "message"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/definitions/StreamInputRefusal"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "VerbGrant": {
       "description": "Host-signer-signed, session- and time-bound capability granting a workload a subset of agent control verbs. Signed by the admission authority, verified by the guest — deliberately a different key from the per-session frame-signing key.",
