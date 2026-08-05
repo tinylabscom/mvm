@@ -185,6 +185,7 @@ fn unique_vm(prefix: &str) -> String {
 fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     SynthesisInput {
+        stream_edges: Vec::new(),
         kernel_sha256: None,
         vm_name,
         tenant: None,

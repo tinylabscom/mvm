@@ -420,6 +420,7 @@ pub(in crate::commands) fn build_event_plan(
     image_sha256: &str,
 ) -> Result<ExecutionPlan> {
     let input = SynthesisInput {
+        stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: Default::default(),
         l3_network: None,

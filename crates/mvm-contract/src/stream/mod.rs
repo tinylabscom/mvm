@@ -15,11 +15,18 @@
 //! recognise the host's own secrets without holding any of them.
 
 pub mod chain;
+pub mod edge;
 pub mod input;
 pub mod record;
 pub mod secret_fingerprint;
+pub mod topology;
 
 pub use chain::{ChainError, verify_chain, verify_chain_from};
+pub use edge::{
+    ACK_RAW_EDGE_ENV, EdgeBackpressure, EdgeRedaction, StreamEdge, any_raw_edge, binding_names,
+    duplicate_binding,
+};
 pub use input::{CloseInput, INPUT_GRANT_SERVICE, InputFrame, grants_input, grants_input_for};
 pub use record::{StreamKind, StreamRecord, StreamSource};
 pub use secret_fingerprint::{CATEGORY_HOST_SECRET, SecretCategory, SecretFingerprint};
+pub use topology::{ResolvedEdge, TopologyError, validate as validate_topology};

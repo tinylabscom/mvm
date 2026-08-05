@@ -186,6 +186,9 @@ pub struct SynthesisInput<'a> {
     /// grant (`mvm_contract::stream::INPUT_GRANT_SERVICE`) — no dedicated field
     /// was needed, since `mvm_contract::stream::grants_input` reads this list.
     pub services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    /// Inbound stream edges this workload is fed by. Empty (the default) means
+    /// no other workload writes its stdin.
+    pub stream_edges: Vec<mvm_contract::stream::StreamEdge>,
     /// Whether this workload's captured output is kept after the run.
     /// [`StreamRetention::Persist`] (the default) writes an encrypted,
     /// hash-chained transcript sealed at exit; `Ephemeral` fans the output out
@@ -345,6 +348,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
         services: input.services.clone(),
+        stream_edges: input.stream_edges.clone(),
         stream_retention: input.stream_retention,
     };
 
@@ -460,6 +464,7 @@ mod tests {
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),
+            stream_edges: Vec::new(),
             stream_retention: Default::default(),
         }
     }

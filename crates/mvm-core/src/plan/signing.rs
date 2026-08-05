@@ -279,6 +279,7 @@ pub mod test_support {
             deps_volume: None,
             shares: Vec::new(),
             services: Vec::new(),
+            stream_edges: Vec::new(),
         }
     }
 }
