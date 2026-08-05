@@ -21,6 +21,11 @@
       host-toolchain probe under isolated `CARGO_HOME`, and that test passed
       when rerun with the normal Cargo home.
 
+- [x] OCI homepage claim audit — **issue #2177**. Reconciled the OCI
+      homepage language with the launch-authority and production-boundary
+      ADRs, recorded the fleet-claim evidence brief, and kept the generated
+      machine-create path on its existing `standard` security default.
+
 - [x] Claim-witness CI documentation — **issue #2104**. Corrected the
       `security.yml` trigger and merge-blocking claims, removed three
       unreachable pull-request guards, and aligned the claim descriptions with

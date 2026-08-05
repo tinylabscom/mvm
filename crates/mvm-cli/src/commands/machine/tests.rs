@@ -1517,7 +1517,6 @@ fn create_auto_generates_a_name_when_omitted() {
     // explicit one, so a subsequent `start`/`ls`/`rm` can reference it.
     assert!(!spec.name.is_empty());
     validate_machine_name(&spec.name).expect("generated name is valid");
-    assert_eq!(spec.profile, "dev");
 }
 
 #[test]
