@@ -102,6 +102,46 @@ pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostS
         .collect()
 }
 
+/// Attach the verity-sealed runtime overlay (the guest-binary disk carrying
+/// the agent) from the version-keyed cache, through the same resolver the
+/// CLI's boot paths consume (`RuntimeOverlayResolver` +
+/// `resolve_or_seed_from_default_cache` — a pure cache probe: no build, no
+/// download, no nix). Without the overlay a runtime-lean OCI rootfs has no
+/// guest agent to exec and panics init, so this runs on every in-process
+/// boot exactly as it does on the CLI path. Non-fatal on a cold cache under
+/// `PreferOverlay` (the guest falls back to a baked agent when it has one);
+/// fails closed when the policy is `RequiredOverlay`.
+fn attach_runtime_overlay_from_cache(config: &mut VmStartConfig, backend_name: &str) -> Result<()> {
+    use mvm_build::runtime_overlay::{RuntimeOverlayResolver, resolve_or_seed_from_default_cache};
+    if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
+        return Ok(());
+    }
+    let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let resolver = RuntimeOverlayResolver::new(cache_root, env!("CARGO_PKG_VERSION").to_string());
+    match resolve_or_seed_from_default_cache(&resolver, mvm_core::arch::GuestArch::host()) {
+        Ok(artifact) => {
+            config.runtime_overlay_path = Some(artifact.overlay_ext4.display().to_string());
+            config.runtime_overlay_verity_path = Some(artifact.sidecar.display().to_string());
+            config.runtime_overlay_roothash = Some(artifact.roothash);
+            config.runtime_overlay_version = Some(artifact.version);
+            Ok(())
+        }
+        Err(e)
+            if config.runtime_source_policy
+                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay =>
+        {
+            Err(anyhow::anyhow!(
+                "runtime overlay required for {backend_name} boot but unavailable: {e}"
+            ))
+        }
+        Err(e) => {
+            // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
+            tracing::debug!(backend = backend_name, error = %e, "runtime overlay not attached");
+            Ok(())
+        }
+    }
+}
+
 /// Admit `req` through the signed-plan gate and boot it on `backend`.
 ///
 /// On success the plan was signed under the host key, verified, inside its
@@ -166,7 +206,7 @@ pub fn admit_and_boot_local(
     };
 
     let path_string = |p: &Path| p.to_string_lossy().into_owned();
-    let config = VmStartConfig {
+    let mut config = VmStartConfig {
         name: req.name.clone(),
         rootfs_path: path_string(&req.rootfs_path),
         kernel_path: req.kernel_path.as_deref().map(path_string),
@@ -187,6 +227,7 @@ pub fn admit_and_boot_local(
         // network_policy defaults to deny-all via VmStartConfig's Default.
         ..Default::default()
     };
+    attach_runtime_overlay_from_cache(&mut config, &req.backend_name)?;
 
     admit_and_start(
         backend,
@@ -215,7 +256,7 @@ mod tests {
     fn admit_and_boot_local_over_mock_boots_admitted_plan() {
         let data = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_HOME", data.path());
+        env.isolate_mvm_home(data.path());
         let keys = tempfile::tempdir().unwrap();
 
         let rootfs = data.path().join("rootfs.ext4");
@@ -302,7 +343,7 @@ mod tests {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let data = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_HOME", data.path());
+        env.isolate_mvm_home(data.path());
         let keys = tempfile::tempdir().unwrap();
         let audit = tempfile::tempdir().unwrap();
 
@@ -366,7 +407,7 @@ mod tests {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let data = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_HOME", data.path());
+        env.isolate_mvm_home(data.path());
         let keys = tempfile::tempdir().unwrap();
         let audit = tempfile::tempdir().unwrap();
 
@@ -424,6 +465,44 @@ mod tests {
         assert!(
             !chain.contains("plan.launched"),
             "a refused launch must not read as launched: {chain}"
+        );
+    }
+
+    /// The overlay attachment mirrors the CLI's matrix: workload VMM
+    /// backends probe the version-keyed cache (cold cache falls back to a
+    /// legacy boot under `PreferOverlay`, fails closed under
+    /// `RequiredOverlay`); non-VMM backends (the mock) skip entirely.
+    #[test]
+    fn runtime_overlay_attachment_matches_the_cli_matrix() {
+        let data = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(data.path());
+
+        // Mock backend: never probed, fields untouched.
+        let mut config = VmStartConfig::default();
+        attach_runtime_overlay_from_cache(&mut config, "mock").expect("mock skips");
+        assert!(config.runtime_overlay_path.is_none());
+
+        // Firecracker + cold cache + PreferOverlay: legacy boot, no fields.
+        let mut config = VmStartConfig {
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        attach_runtime_overlay_from_cache(&mut config, "firecracker")
+            .expect("cold cache under PreferOverlay boots legacy");
+        assert!(config.runtime_overlay_path.is_none());
+        assert!(config.runtime_overlay_roothash.is_none());
+
+        // Firecracker + cold cache + RequiredOverlay: fail closed.
+        let mut config = VmStartConfig {
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let err = attach_runtime_overlay_from_cache(&mut config, "firecracker")
+            .expect_err("required overlay + cold cache must refuse");
+        assert!(
+            err.to_string().contains("runtime overlay required"),
+            "got: {err:#}"
         );
     }
 

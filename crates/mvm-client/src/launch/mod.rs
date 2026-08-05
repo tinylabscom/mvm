@@ -190,20 +190,44 @@ impl LocalBackend {
     /// backend carries its own.
     pub(crate) fn resolve_workload_kernel(backend: &AnyBackend) -> Result<Option<PathBuf>> {
         use mvm_core::protocol::vm_backend::BackendKind;
-        if backend.kind() != BackendKind::Hvf {
-            return Ok(None);
-        }
         let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
         let arch = mvm_core::arch::GuestArch::host().to_string();
-        match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
-            mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-                Ok(Some(verified.path().to_path_buf()))
+        match backend.kind() {
+            // Bundled-kernel backends: libkrun boots the libkrunfw kernel and
+            // the hermetic mock boots nothing — no host kernel path needed.
+            BackendKind::Mock | BackendKind::Libkrun => Ok(None),
+            BackendKind::Hvf => {
+                match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
+                    mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+                        Ok(Some(verified.path().to_path_buf()))
+                    }
+                    _ => Err(crate::local::backend_err(format!(
+                        "hvf needs a verified workload kernel at {} — run a `mvmctl machine run` \
+                         once (or `mvmctl build kernel build`) to populate the cache",
+                        mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload")
+                            .display()
+                    ))),
+                }
             }
-            _ => Err(crate::local::backend_err(format!(
-                "hvf needs a verified workload kernel at {} — run a `mvmctl machine run` \
-                 once (or `mvmctl build kernel build`) to populate the cache",
-                mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload").display()
-            ))),
+            // Firecracker (and every other explicit-kernel backend, e.g. the
+            // qemu dev tier) hard-refuses a bundled-kernel spec, so resolve the
+            // same cached workload kernel the CLI's machine-run boot path
+            // supplies: `<cache>/builder-vm/<arch>/kernels/workload/vmlinux`
+            // by presence (the driver derives its own FC-loadable sibling from
+            // it). Cache-hit-or-error; populating the cache is a CLI concern.
+            _ => {
+                let path = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
+                if path.is_file() {
+                    Ok(Some(path))
+                } else {
+                    Err(crate::local::backend_err(format!(
+                        "{} needs the cached workload kernel at {} — create it once with \
+                         `mvmctl kernel build --which workload`, then retry",
+                        backend.name(),
+                        path.display()
+                    )))
+                }
+            }
         }
     }
 

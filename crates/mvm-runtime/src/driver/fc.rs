@@ -84,7 +84,12 @@ fn fc_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     if virtiofs_root {
         format!("{console} rootfstype=virtiofs root=mvmroot rw init=/init")
     } else if has_disk {
-        format!("{console} root=/dev/vda rw rootwait init=/init")
+        // No `root=` declaration here: Firecracker itself appends the
+        // authoritative `root=/dev/vda ro|rw` to the boot args from the root
+        // drive's `is_root_device`/`is_read_only` flags, so emitting our own
+        // would put two contradictory root declarations on the cmdline and
+        // leave the winner to kernel parsing order.
+        format!("{console} rootwait init=/init")
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
         // so only the serial-console base is emitted here.
@@ -1136,7 +1141,12 @@ mod tests {
         let d = FcDriver::new();
         let disk = d.workload_base_bootargs(false, true);
         assert!(disk.contains("console=ttyS0"), "got: {disk}");
-        assert!(disk.contains("root=/dev/vda"), "got: {disk}");
+        // The disk base carries rootwait+init but NO `root=` declaration:
+        // Firecracker appends the authoritative `root=/dev/vda ro|rw` from the
+        // root drive's flags, and a second declaration here would contradict
+        // it (exactly one root declaration reaches the guest).
+        assert!(disk.contains("rootwait init=/init"), "got: {disk}");
+        assert!(!disk.contains("root="), "got: {disk}");
         // No NIC tokens, and not another VMM's console.
         assert!(!disk.contains("mvm.ip="), "got: {disk}");
         assert!(!disk.contains("mvm.gw="), "got: {disk}");

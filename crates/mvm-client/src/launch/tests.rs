@@ -681,6 +681,48 @@ async fn launch_over_a_deployment_backed_spec_refuses_a_silent_image_boot() {
     );
 }
 
+// ── Per-backend workload-kernel resolution ──────────────────────────
+
+#[test]
+fn firecracker_admitted_boot_receives_a_concrete_kernel_path() {
+    let home = Isolated::new();
+    let fc = mvm_runtime::AnyBackend::from_hypervisor("firecracker");
+
+    // Cold cache: the Firecracker arm fails with the CLI's build hint —
+    // never `Ok(None)`, which the FC driver would hard-refuse as a
+    // bundled-kernel spec at boot time.
+    let err = LocalBackend::resolve_workload_kernel(&fc).unwrap_err();
+    assert!(
+        err.to_string().contains("mvmctl kernel build"),
+        "got: {err}"
+    );
+
+    // Seed the exact cache location the CLI's machine-run boot path reads:
+    // `<cache>/builder-vm/<arch>/kernels/workload/vmlinux`.
+    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = mvm_core::arch::GuestArch::host().to_string();
+    let cached = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::write(&cached, b"kernel-bytes").unwrap();
+
+    let resolved = LocalBackend::resolve_workload_kernel(&fc)
+        .expect("cached kernel resolves")
+        .expect("firecracker must receive a concrete kernel path");
+    assert_eq!(resolved, cached);
+
+    // Bundled-kernel backends need no host kernel path: libkrun boots the
+    // libkrunfw kernel, the hermetic mock boots nothing.
+    let libkrun = mvm_runtime::AnyBackend::from_hypervisor("libkrun");
+    assert_eq!(
+        LocalBackend::resolve_workload_kernel(&libkrun).unwrap(),
+        None
+    );
+    let mock = mvm_runtime::AnyBackend::from_hypervisor("mock");
+    assert_eq!(LocalBackend::resolve_workload_kernel(&mock).unwrap(), None);
+
+    drop(home);
+}
+
 // ── Typed volume attachments ────────────────────────────────────────
 
 #[tokio::test]

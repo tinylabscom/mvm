@@ -28,12 +28,30 @@ fn live_env() -> Option<(String, String)> {
     Some((kernel, rootfs))
 }
 
+/// Make the lane self-contained: seed the supplied workload kernel into the
+/// exact cache location the launch path resolves
+/// (`<cache>/builder-vm/<arch>/kernels/workload/vmlinux`) when the cache is
+/// cold. An already-populated cache is left untouched — the operator's own
+/// verified kernel wins.
+fn seed_workload_kernel_cache(kernel: &str) {
+    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = mvm_core::arch::GuestArch::host().to_string();
+    let dest = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
+    if dest.is_file() {
+        return;
+    }
+    std::fs::create_dir_all(dest.parent().expect("kernel cache dir has a parent"))
+        .expect("create workload kernel cache dir");
+    std::fs::copy(kernel, &dest).expect("seed MVM_E2E_KERNEL into the workload kernel cache");
+}
+
 #[tokio::test]
 #[ignore = "live KVM E2E: needs /dev/kvm + firecracker + MVM_E2E_KERNEL/MVM_E2E_ROOTFS; run with -- --ignored"]
 async fn transient_and_persistent_lifecycle_over_firecracker() {
-    let Some((_kernel, rootfs)) = live_env() else {
+    let Some((kernel, rootfs)) = live_env() else {
         return;
     };
+    seed_workload_kernel_cache(&kernel);
     let client = LocalBackend::with_hypervisor("firecracker");
 
     // Transient: boots through the signed admission path, then cleans up.
