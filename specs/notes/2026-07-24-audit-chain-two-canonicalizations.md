@@ -32,7 +32,7 @@ verifier accepts its valid chain and rejects a tampered one.
   `BTreeMap`, so its key order is already canonical. The byte stream is therefore
   deterministic and — critically — **reproducible from the struct definition
   alone**, with no sorting pass.
-- **Browser mirror:** `mvm-protocol/src/verify.rs`
+- **Browser mirror:** `mvm-contract/src/verify.rs`
   (`verify_audit_chain_bytes`, `MirrorEntry`) re-implements the exact same
   verification in `#![no_std]` + `alloc`, so anyone can audit a downloaded log in
   a browser tab (`web/audit-verify/`) with no host and no trusted server. The
@@ -76,7 +76,7 @@ The shapes force the choice:
 And the mirror constraint blocks moving A onto JCS even if we wanted uniformity:
 `serde_jcs` 0.1 is **std-only** — it writes through `std::io::Write`, uses
 `std::collections`, forces `serde_json/std`, and contains `unsafe`. It cannot
-compile to `wasm32-unknown-unknown` and therefore cannot enter `mvm-protocol`
+compile to `wasm32-unknown-unknown` and therefore cannot enter `mvm-contract`
 (which is `#![no_std]` + `forbid(unsafe_code)`, the wasm/browser foundation).
 So:
 
@@ -85,7 +85,7 @@ So:
   to keep in lockstep.
 
 Each scheme is correct for its payload. This is a deliberate split, not an
-inconsistency, and `mvm-protocol` must **not** take a `serde_jcs` dependency.
+inconsistency, and `mvm-contract` must **not** take a `serde_jcs` dependency.
 
 ## Astral-plane object-key ordering (Chain B caveat)
 
@@ -123,7 +123,7 @@ input restriction) applied uniformly across the workspace, tracked with the
 
 If Chain B ever needs a browser verifier like Chain A's, migrate its
 canonicalization onto the existing `no_std` writer
-`mvm-protocol::ir::canonicalize` instead of adding `serde_jcs` to `mvm-protocol`.
+`mvm-contract::ir::canonicalize` instead of adding `serde_jcs` to `mvm-contract`.
 `mvm-core::canonicalizer_equivalence` already proves that
 `ir::canonicalize` and `serde_jcs` emit **byte-identical** output over a
 divergence-prone corpus (astral-plane keys, escaped values, large integers,

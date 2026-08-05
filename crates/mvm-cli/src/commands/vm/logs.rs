@@ -24,6 +24,7 @@ use std::io::Write;
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, ValueEnum};
 
+use mvm_contract::stream::StreamKind;
 use mvm_core::config;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::stream_client::{
@@ -32,7 +33,6 @@ use mvm_core::stream_client::{
 };
 use mvm_core::transcript::GapMarker;
 use mvm_core::user_config::MvmConfig;
-use mvm_protocol::stream::StreamKind;
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -1023,6 +1023,7 @@ mod tests {
         //! say.
 
         use super::*;
+        use mvm_contract::stream::{StreamRecord, StreamSource};
         use mvm_core::crypto::aead;
         use mvm_core::stream_client::{
             OutputLocator, SpliceGap, StreamBatch, open_vm_output_at, write_batch,
@@ -1031,7 +1032,6 @@ mod tests {
             self, CaptureBinding, CaptureBounds, Direction, MANIFEST_FILENAME, RetentionPolicy,
             TranscriptWriter, TranscriptWriterConfig,
         };
-        use mvm_protocol::stream::{StreamRecord, StreamSource};
         use std::path::Path;
 
         /// A real sealed transcript, written the way the broker will: chunks

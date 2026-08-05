@@ -4,7 +4,7 @@
 //! The DTO half — `KeyId`, `ArtifactRole`, `BundleArtifact`,
 //! `BundleResources`, `VerityInfo`, `BundleManifest`, `PlanArtifact`, the
 //! schema/filename consts, and the base64 signature helpers — lives in
-//! `mvm_protocol::plan::bundle` and is re-exported below so every existing
+//! `mvm_contract::plan::bundle` and is re-exported below so every existing
 //! `crate::plan::bundle::X` / `mvm_core::plan::bundle::X` path keeps
 //! resolving unchanged. This module carries the rest: signing, hashing,
 //! tar archive I/O, the on-disk resolver/registry/trust-store, and
@@ -69,7 +69,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub use mvm_protocol::plan::bundle::{
+pub use mvm_contract::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
     BundleResources, KeyId, MANIFEST_FILENAME, PlanArtifact, SIGNATURE_FILENAME, VerityInfo,
     signature_from_base64, signature_to_base64,
@@ -78,7 +78,7 @@ pub use mvm_protocol::plan::bundle::{
 /// Derive the key_id from a verifying-key's bytes.
 ///
 /// A free function rather than an inherent method on [`KeyId`]: that type
-/// now lives in `mvm-protocol`, and the orphan rule forbids `mvm-core`
+/// now lives in `mvm-contract`, and the orphan rule forbids `mvm-core`
 /// from adding inherent `impl`s to a foreign type.
 pub fn key_id_from_pubkey(pk: &VerifyingKey) -> KeyId {
     let bytes = pk.to_bytes();
@@ -99,7 +99,7 @@ pub fn key_id_from_identity(identity: &str) -> KeyId {
 /// the same bytes round-trip from sign → verify.
 ///
 /// A free function rather than an inherent method on [`BundleManifest`]:
-/// that type now lives in `mvm-protocol`, and the orphan rule forbids
+/// that type now lives in `mvm-contract`, and the orphan rule forbids
 /// `mvm-core` from adding inherent `impl`s to a foreign type.
 pub fn canonical_manifest_bytes(manifest: &BundleManifest) -> Result<Vec<u8>> {
     serde_json::to_vec(manifest).context("serialise BundleManifest to canonical JSON")

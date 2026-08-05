@@ -10,7 +10,7 @@ pointer work inherent to being a from-scratch VMM plus a headless-guest init plu
 a process-moat supervisor. There is a small, targeted hygiene slice worth doing;
 a blanket minimization pass is not.
 
-Crate-level `#![forbid(unsafe_code)]`: **`mvm-protocol`**, **`mvm-fs`**.
+Crate-level `#![forbid(unsafe_code)]`: **`mvm-contract`**, **`mvm-fs`**.
 Zero-unsafe crates (not yet forbidding): **`mvm-net`**, **`mvm-client`**,
 **`mvm-conformance`**, **`mvm-vz-supervisor`** (stale post-Vz-removal stub).
 
@@ -91,7 +91,7 @@ Zero-unsafe crates (not yet forbidding): **`mvm-net`**, **`mvm-client`**,
    Zero behavior change; shrinks the raw-unsafe count and localizes it.
 3. **Lock in the zero-unsafe crates.** Add `#![forbid(unsafe_code)]` to
    `mvm-net` and `mvm-client` (both already unsafe-free). Cheap, prevents
-   regression, extends the property that `mvm-protocol`/`mvm-fs` already hold.
+   regression, extends the property that `mvm-contract`/`mvm-fs` already hold.
 
 **Leave as-is:** all FFI (`libkrun-sys`, `mvm-host-services-ffi`, HVF), all
 `libc` liveness/signal/ioctl/spawn wrappers, the bindgen file, `mvm-vz-supervisor`
@@ -103,8 +103,8 @@ Zero-unsafe crates (not yet forbidding): **`mvm-net`**, **`mvm-client`**,
 
 ### Where the boundary is today
 
-`mvm-protocol` is `#![no_std]` + `alloc` + `#![forbid(unsafe_code)]`
-(`crates/mvm-protocol/src/lib.rs:13-14`), and it is **CI-gated for real**: the
+`mvm-contract` is `#![no_std]` + `alloc` + `#![forbid(unsafe_code)]`
+(`crates/mvm-contract/src/lib.rs:13-14`), and it is **CI-gated for real**: the
 `wasm-no-std-boundary` job in `.github/workflows/ci.yml` builds it on
 `wasm32-unknown-unknown` and *runs its tests* on `wasm32-wasip1` via wasmtime.
 The `schema` feature (schemars codegen) and `--test` builds drop `no_std`
@@ -113,7 +113,7 @@ deliberately; the shipped wasm library surface stays no_std.
 The heavy lifting is **already done**. Increment 3 of the protocol/core split
 (`specs/refactor/07-progress-and-decisions.md`, `10-increment3-...`) is COMPLETE:
 the entire claim-8 signed `ExecutionPlan` (46/46 fields byte-identical), the
-wire/policy/audit DTOs, and the `Workload` IR now live in `mvm-protocol` and
+wire/policy/audit DTOs, and the `Workload` IR now live in `mvm-contract` and
 compile on wasm32. This is the documented WS11 "wasm-container capable" core goal
 (`specs/refactor/01-goals.md`).
 
@@ -121,8 +121,8 @@ compile on wasm32. This is the documented WS11 "wasm-container capable" core goa
 
 - **`mvm-net` — plausible but low-value.** Pure trait/registry/policy seam, zero
   unsafe, no async, no I/O in the seam itself; depends only on `mvm-core` +
-  `mvm-protocol`. It is std *only transitively*, through `mvm-core`. To go
-  no_std it would need to drop its `mvm-core` dep to `mvm-protocol`-only. Feasible
+  `mvm-contract`. It is std *only transitively*, through `mvm-core`. To go
+  no_std it would need to drop its `mvm-core` dep to `mvm-contract`-only. Feasible
   — but the trait's implementors (TAP/bridge/gateway/passt in `mvm-runtime`,
   mesh in mvmd) are all host-side std, so a wasm consumer gains almost nothing
   from a no_std `NetworkProvider` trait. Not worth it absent a concrete wasm
@@ -133,7 +133,7 @@ compile on wasm32. This is the documented WS11 "wasm-container capable" core goa
   `crypto/{keystore,secret_store,snapshot_*,egress_ca,volume}` (file-backed key
   and secret stores), `util/atomic_io.rs`, `platform/linux_env.rs`,
   `plan/bundle.rs` (tar/fs). It is deliberately the std layer *on top of*
-  `mvm-protocol`; the wasm-relevant pure DTOs were already extracted downward.
+  `mvm-contract`; the wasm-relevant pure DTOs were already extracted downward.
   Leave it.
 
 - **Everything above `mvm-core` — no.** `mvm-runtime`/`-hostd`/`-agentd`/`-cli`/
@@ -146,30 +146,30 @@ compile on wasm32. This is the documented WS11 "wasm-container capable" core goa
 
 - **`mvm-sdk` — no.** Its build-time `compile/`/IR-emission path is std
   (file I/O, Nix template emission). Its IR types already delegate to
-  `mvm-protocol`.
+  `mvm-contract`.
 
 ### Is it worth it? Against concrete goals
 
 - **Browser SDK surface — already satisfied.** The realistic browser/wasm target
-  is exactly what `mvm-protocol` delivers today: audit-log *verification*,
+  is exactly what `mvm-contract` delivers today: audit-log *verification*,
   plan/bundle DTO parsing, IR validation, all runnable with no host. A browser
-  SDK depends on `mvm-protocol` alone. **No further no_std migration is a
+  SDK depends on `mvm-contract` alone. **No further no_std migration is a
   prerequisite** — the CI gate proves it builds and its tests pass under wasm.
 
 - **`WasmBackend` (WS11) — a runtime seam, not a no_std task.** Running a workload
   through the shared `VmBackend` + egress/audit/secret-substitution seam needs a
   wasm *runtime* on the host (e.g. wasmtime — itself std). It does not require
   making any additional crate no_std; the no_std *core* it consumes already
-  landed with `mvm-protocol`.
+  landed with `mvm-contract`.
 
 ### Recommendation — Part B
 
-**Leave the no_std boundary exactly where it is — at `mvm-protocol`.** The split
+**Leave the no_std boundary exactly where it is — at `mvm-contract`.** The split
 was done deliberately, is complete for the signed-plan/IR/DTO surface, and is
 CI-gated on `wasm32-unknown-unknown` + `wasm32-wasip1`. Do **not** chase no_std
 for `mvm-core` (std by design) or anything above it (tokio/OS floor is
 architectural and load-bearing). The one incrementally-feasible move —
 `mvm-net` to no_std — is low-value because its implementors are host-side; skip
 it until a real wasm consumer needs the trait. For a browser SDK, build on
-`mvm-protocol` as-is. The next wasm milestone (`WasmBackend`) is a host-side
+`mvm-contract` as-is. The next wasm milestone (`WasmBackend`) is a host-side
 runtime feature, not a crate-flattening exercise.

@@ -14,7 +14,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mvm_protocol::stream::input::{CloseInput, InputFrame};
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 
 fuzz_target!(|data: &[u8]| {
     let _ = serde_json::from_slice::<InputFrame>(data);

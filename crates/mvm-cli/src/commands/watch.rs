@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use blake3::Hasher;
 use clap::Args as ClapArgs;
+use mvm_contract::ir::{Source, Workload, ir_hash};
 use mvm_core::user_config::MvmConfig;
-use mvm_protocol::ir::{Source, Workload, ir_hash};
 use mvm_sdk::compile::compile;
 
 use super::Cli;
@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use crate::commands::Commands;
     use clap::Parser;
-    use mvm_protocol::ir::{App, Entrypoint, Image, Resources};
+    use mvm_contract::ir::{App, Entrypoint, Image, Resources};
 
     fn sample_workload() -> Workload {
         Workload {

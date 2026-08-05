@@ -44,7 +44,7 @@
 
 use std::sync::{Arc, Mutex, Weak};
 
-use mvm_protocol::stream::{StreamKind, StreamSource};
+use mvm_contract::stream::{StreamKind, StreamSource};
 
 use crate::stream::broker::StreamBroker;
 use crate::stream::console_source::{SharedBroker, lock_broker};
@@ -191,10 +191,10 @@ mod tests {
     use super::*;
     use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
     use crate::stream::redact::{Redacted, RedactionFailed, StreamRedaction, StreamRedactor};
+    use mvm_contract::stream::verify_chain;
     use mvm_core::crypto::aead;
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::transcript::{CaptureBinding, TranscriptWriter};
-    use mvm_protocol::stream::verify_chain;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 

@@ -20,7 +20,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
+use mvm_contract::stream::{StreamKind, StreamRecord, StreamSource};
 use tracing::Level;
 
 use crate::stream::{StreamError, StreamReader};

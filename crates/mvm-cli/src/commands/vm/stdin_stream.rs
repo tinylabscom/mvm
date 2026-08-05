@@ -40,8 +40,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use mvm_contract::stream::input::InputFrame;
 use mvm_hostd::stream::{DEFAULT_LEASE_TTL, InputRouteError, StreamPlane};
-use mvm_protocol::stream::input::InputFrame;
 
 /// How much of the caller's stdin travels in one frame.
 ///

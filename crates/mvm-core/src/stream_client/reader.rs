@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
-use mvm_protocol::stream::{ChainError, StreamRecord, verify_chain_from};
+use mvm_contract::stream::{ChainError, StreamRecord, verify_chain_from};
 
 use crate::config;
 use crate::transcript::{Direction, GapMarker, TranscriptError};
@@ -298,7 +298,7 @@ mod tests {
     use super::super::opts::KindFilter;
     use super::super::wire::write_batch;
     use super::*;
-    use mvm_protocol::stream::{StreamKind, StreamSource};
+    use mvm_contract::stream::{StreamKind, StreamSource};
 
     /// A real chain: each record's `prev_hash` is its predecessor's hash, so
     /// verification is evidence rather than a restatement of the bytes.

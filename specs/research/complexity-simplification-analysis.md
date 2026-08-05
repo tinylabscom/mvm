@@ -118,7 +118,7 @@ predicate rather than a second enum.
 
 5. **Introduce `io_err`/`.ctx()` and convert `libkrun_builder.rs`'s 80 wrappers.** Single file, mechanical, ~150-line reduction; promotes the existing `qemu_builder.rs:556` helper.
 
-6. **Fix stale plan-of-record facts.** `specs/refactor/07-progress-and-decisions.md:31` lists `mvm-verify` in "Current crate set (14)", but it was absorbed into `mvm_protocol::verify` and is **not** a workspace member (`Cargo.toml`). The same doc's `egress_server.rs` "parked/dead" bullet (`:39`) is also stale — the module no longer exists in the tree. Two one-line corrections keep the SoT honest.
+6. **Fix stale plan-of-record facts.** `specs/refactor/07-progress-and-decisions.md:31` lists `mvm-verify` in "Current crate set (14)", but it was absorbed into `mvm_contract::verify` and is **not** a workspace member (`Cargo.toml`). The same doc's `egress_server.rs` "parked/dead" bullet (`:39`) is also stale — the module no longer exists in the tree. Two one-line corrections keep the SoT honest.
 
 7. **Make `OutputFormat::from_str_arg` fail loudly.** `crates/mvm-cli/src/output.rs:19` maps any unrecognised `--output` value to `Self::Table` via `_ => Self::Table`, so `--output jsonn` silently prints a table instead of erroring. Convert to `FromStr` with an explicit error (and let clap validate). Small correctness win, removes a silent stringly fallthrough.
 

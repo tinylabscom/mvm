@@ -30,8 +30,8 @@ a hardware isolation boundary.
 
 ## Foundation — already done (Increment 3)
 
-The enabling discipline landed with the `mvm-protocol` extraction:
-`mvm-protocol` is `#![no_std] + alloc + forbid(unsafe_code)`, holds the Workload
+The enabling discipline landed with the `mvm-contract` extraction:
+`mvm-contract` is `#![no_std] + alloc + forbid(unsafe_code)`, holds the Workload
 IR + wire protocol + policy/audit DTOs + the audit-log verifier, and builds on
 `wasm32-unknown-unknown` in CI. mvm's core contract already compiles into the
 wasm sandbox and the browser.
@@ -113,10 +113,10 @@ it drives the real governance in-process with no dependency inversion. See
 ## Phased plan
 
 - **P1 — close the foundation bullet.** Wire a `wasm32` **test** pass for
-  `mvm-protocol` (a `wasm-bindgen-test` / `wasmtime`-runner CI lane so the IR +
+  `mvm-contract` (a `wasm-bindgen-test` / `wasmtime`-runner CI lane so the IR +
   verifier tests run *under* wasm, not just build), and add the explicit
   `no_std`-boundary lint (a gate asserting nothing workload-execution-relevant in
-  `mvm-protocol` reaches `std`/OS beyond the sanctioned `schema` feature). Bounded,
+  `mvm-contract` reaches `std`/OS beyond the sanctioned `schema` feature). Bounded,
   no new backend — the right first step. Gate: wasm test lane green.
 - **P2 — the skeleton.** `BackendKind::Wasm` + `WasmBackend` impl with the honest
   capability matrix + fail-closed typed errors, `wasmtime` behind the opt-in
@@ -147,7 +147,7 @@ it drives the real governance in-process with no dependency inversion. See
   trusts) is heavier than a byte relay; a first P3 cut can prove
   default-deny/allow + audit + `${NAME}` substitution through the seam and defer
   full TLS termination to P3b if it complicates.
-- **P4 — the browser slice.** `mvm-protocol` + the `no_std` OCI decoders running
+- **P4 — the browser slice.** `mvm-contract` + the `no_std` OCI decoders running
   in the browser (image inspect/verify), per the holospaces path.
 
 ## P3 implementation design (recon'd — do this before building)

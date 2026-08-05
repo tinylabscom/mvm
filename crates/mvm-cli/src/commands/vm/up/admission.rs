@@ -101,7 +101,7 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// anything absent from this set, and the launch path reads the same set to
     /// decide whether the optional glibc SDK sidecar must be attached. Empty
     /// (the common case) means the workload calls no host service.
-    pub services: Vec<mvm_protocol::protocol::broker::ServiceId>,
+    pub services: Vec<mvm_contract::protocol::broker::ServiceId>,
     /// True iff this run should receive an attenuated (ProdSafe-only) agent-verb
     /// grant. Set this with `grant_eligible(pty, has_ad_hoc_argv, is_dev_profile)`.
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs
@@ -122,7 +122,7 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
 }
 
 /// Shell basenames [`entrypoint_is_shell_shaped`] refuses on direct match.
-/// A superset of `mvm_protocol::entrypoint`'s own shell set: that helper
+/// A superset of `mvm_contract::entrypoint`'s own shell set: that helper
 /// treats a bare `busybox` invocation (no applet argument) as safe, because
 /// for the SDK-declaration gate it validates an applet name is what matters.
 /// Here a bare `busybox` is itself the risk — invoked with no arguments it
@@ -140,12 +140,12 @@ fn program_basename(program: &str) -> &str {
 }
 
 /// Whether `argv`'s own program name is a direct shell match, reusing
-/// `mvm_protocol::entrypoint`'s argv/env/busybox-applet resolution for
+/// `mvm_contract::entrypoint`'s argv/env/busybox-applet resolution for
 /// everything except the bare-`busybox` case it deliberately excludes.
 fn argv_is_shell(argv: &[String]) -> bool {
     argv.first()
         .is_some_and(|prog| DIRECT_SHELL_BASENAMES.contains(&program_basename(prog)))
-        || mvm_protocol::entrypoint::detect_shell_entrypoint_argv(argv).is_some()
+        || mvm_contract::entrypoint::detect_shell_entrypoint_argv(argv).is_some()
 }
 
 /// Whether a resolved entrypoint is shell-shaped, per the design's rule for
@@ -167,7 +167,7 @@ pub(in crate::commands::vm) fn entrypoint_is_shell_shaped(
     argv_is_shell(argv)
         || argv.iter().skip(1).any(|arg| arg == "-c")
         || shebang
-            .is_some_and(|bytes| mvm_protocol::entrypoint::detect_shell_shebang(bytes).is_some())
+            .is_some_and(|bytes| mvm_contract::entrypoint::detect_shell_shebang(bytes).is_some())
 }
 
 /// Bundle of artifacts produced by a successful admission: the
@@ -244,7 +244,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     // interactive, or ad-hoc-argv run already carries a DevOnly Exec grant, so
     // refining its input grant would not close anything the Exec grant hasn't
     // already opened.
-    if p.restrict_agent_verbs && mvm_protocol::stream::input::grants_input_for(&p.services) {
+    if p.restrict_agent_verbs && mvm_contract::stream::input::grants_input_for(&p.services) {
         match &p.entrypoint {
             ResolvedEntrypoint::Known { argv, shebang } => {
                 if entrypoint_is_shell_shaped(argv, shebang.as_deref()) {
@@ -360,7 +360,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             crate::commands::vm::agent_verbs::default_agent_verbs(
                 p.restrict_agent_verbs,
                 !p.shares.is_empty(),
-                mvm_protocol::stream::input::grants_input_for(&p.services),
+                mvm_contract::stream::input::grants_input_for(&p.services),
             )
         }),
         services: p.services.clone(),
@@ -1450,9 +1450,9 @@ mod admit_plan_tests {
     // it input in the first place, and only the intersection refuses.
     // ──────────────────────────────────────────────────────────────
 
-    fn stream_grant_service() -> mvm_protocol::protocol::broker::ServiceId {
-        mvm_protocol::protocol::broker::ServiceId::parse(
-            mvm_protocol::stream::input::INPUT_GRANT_SERVICE,
+    fn stream_grant_service() -> mvm_contract::protocol::broker::ServiceId {
+        mvm_contract::protocol::broker::ServiceId::parse(
+            mvm_contract::stream::input::INPUT_GRANT_SERVICE,
         )
         .expect("the input grant token is a valid service id")
     }
@@ -1776,7 +1776,7 @@ mod entrypoint_shape_tests {
 
     #[test]
     fn a_bare_busybox_invocation_is_shell_shaped_even_with_a_non_shell_applet() {
-        // Unlike mvm_protocol::entrypoint's SDK-declaration check (which lets
+        // Unlike mvm_contract::entrypoint's SDK-declaration check (which lets
         // "busybox true" through because the named applet isn't a shell), the
         // admission gate treats busybox itself as the risk: invoked bare it
         // drops into an interactive shell, so any invocation is refused on
@@ -1790,7 +1790,7 @@ mod entrypoint_shape_tests {
 
     #[test]
     fn an_env_wrapped_shell_is_shell_shaped() {
-        // Reused from mvm_protocol::entrypoint::detect_shell_entrypoint_argv
+        // Reused from mvm_contract::entrypoint::detect_shell_entrypoint_argv
         // rather than reimplemented: env indirection, -S/--split-string, and
         // env-assignment skipping all apply here for free.
         assert!(entrypoint_is_shell_shaped(

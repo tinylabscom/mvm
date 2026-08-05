@@ -86,7 +86,7 @@ pub(in crate::commands) struct Args {
     /// Internal (not a CLI flag): the resolved healthcheck declaration,
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
-    pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
+    pub healthcheck: Option<mvm_contract::ir::HealthCheck>,
     /// Internal (not a CLI flag): requested workload hypervisor, forwarded from
     /// `RunArgs::hypervisor` via `into_exec_args`.
     #[arg(skip)]
@@ -99,7 +99,7 @@ pub(in crate::commands) struct Args {
     /// plan records the mode the workload actually got. Not a flag: the
     /// derivation is the only thing that sets it.
     #[arg(skip)]
-    pub network_mode: mvm_protocol::plan::NetworkMode,
+    pub network_mode: mvm_contract::plan::NetworkMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -121,7 +121,7 @@ pub(in crate::commands) struct RunArgs {
     /// Not a flag of its own and not operator-selectable: the machine
     /// surface derives it from what the workload declares it needs.
     #[arg(skip)]
-    pub network_mode: mvm_protocol::plan::NetworkMode,
+    pub network_mode: mvm_contract::plan::NetworkMode,
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
     /// legacy slot name). If omitted, the bundled default microVM image is used.
     #[arg(short = 'm', long, conflicts_with = "image")]
@@ -255,7 +255,7 @@ pub(in crate::commands) struct RunArgs {
     /// Internal (not a CLI flag): the resolved healthcheck declaration,
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
-    pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
+    pub healthcheck: Option<mvm_contract::ir::HealthCheck>,
     /// Requested workload hypervisor from `machine run --hypervisor <x>`. Set
     /// programmatically by `MachineRunArgs::into_run_args`; the transient backend
     /// selection reads it (taking precedence over the `MVM_HYPERVISOR` env var).
@@ -929,7 +929,7 @@ fn emit_oci_run_admission(
     cpus: u32,
     mem_mib: u64,
     timeout_secs: u64,
-    network_mode: mvm_protocol::plan::NetworkMode,
+    network_mode: mvm_contract::plan::NetworkMode,
 ) -> Result<()> {
     let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
         .with_context(|| {

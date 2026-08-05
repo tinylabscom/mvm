@@ -27,10 +27,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use mvm_contract::stream::StreamRecord;
 use mvm_core::stream_client::{
     MAX_BATCH_PAYLOAD_BYTES, MAX_BATCH_RECORDS, StreamBatch, write_batch,
 };
-use mvm_protocol::stream::StreamRecord;
 use tracing::warn;
 
 use super::console_source::SharedBroker;
@@ -372,13 +372,13 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
+    use mvm_contract::stream::{StreamKind, StreamRecord, StreamSource};
     use mvm_core::crypto::aead;
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::stream_client::{
         FramedStreamReader, KindFilter, StreamOpts, StreamReader, connect_stream_at,
     };
     use mvm_core::transcript::{CaptureBinding, CaptureBounds, TranscriptWriter};
-    use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
 
     use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
     use crate::stream::fanout::DEFAULT_READER_BOUNDS;

@@ -382,7 +382,7 @@ pub struct ExecRequest {
     pub stdin: Vec<u8>,
     /// Recorded liveness declaration (phase A: presence only). Persisted with a
     /// persistent machine so it survives + is inspectable; not yet probed.
-    pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
+    pub healthcheck: Option<mvm_contract::ir::HealthCheck>,
     /// Resolved SDK-sidecar attachment for this run, or `None` when the
     /// workload binds no SDK-served host service. Resolved (and verified)
     /// before admission so the signed plan's grant and the launch config's
@@ -549,9 +549,9 @@ pub fn build_healthcheck(
     timeout_secs: u32,
     retries: u32,
     start_period_secs: u32,
-) -> Option<mvm_protocol::ir::HealthCheck> {
+) -> Option<mvm_contract::ir::HealthCheck> {
     let cmd = cmd?;
-    Some(mvm_protocol::ir::HealthCheck {
+    Some(mvm_contract::ir::HealthCheck {
         command: vec!["/bin/sh".into(), "-lc".into(), cmd.to_string()],
         interval_secs,
         timeout_secs,

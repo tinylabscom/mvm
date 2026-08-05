@@ -70,7 +70,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
+use mvm_contract::stream::{StreamKind, StreamRecord, StreamSource};
 
 use crate::config;
 use crate::crypto::aead;

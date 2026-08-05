@@ -77,16 +77,16 @@ is adopted, which preserves mvm's hard dependency-aversion (ADR-002).
 Interop with the UOR ecosystem becomes a **conformance-vector test** (assert our
 label equals UOR-ADDR's published vectors for the same input), not a dep.
 
-The Workload IR itself lives in `mvm-protocol` (`#![no_std]`, wasm-clean). The
+The Workload IR itself lives in `mvm-contract` (`#![no_std]`, wasm-clean). The
 *host-side* address computation reads that IR from `mvm-core` — fine, that is the
-normal direction. Do **not** put the address computation in `mvm-protocol` for
+normal direction. Do **not** put the address computation in `mvm-contract` for
 the pilot: `serde_jcs`'s `no_std` status is unverified, and there is no host need
 for it in the no_std layer yet.
 
 ## The dependency question (deferred to the browser slice, WS11 P4)
 
 The reason to ever take the `uor-addr` crate is **not** host-side — it is the
-browser. WS11 P4 wants `mvm-protocol` running in the browser, and if a workload
+browser. WS11 P4 wants `mvm-contract` running in the browser, and if a workload
 address is computed there (or in the TS/Python SDKs), you want a **guaranteed
 identical label** across Rust-host / browser-wasm / SDK. `uor-addr` is built for
 exactly that: `no_std`, `forbid(unsafe)`, a WASM Component Model distribution

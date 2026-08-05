@@ -3,7 +3,7 @@
 //! audit projection. Profile classification lives in `request_policy`.
 
 use super::*;
-use mvm_protocol::stream::input::{CloseInput, InputFrame};
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 use serde::{Deserialize, Serialize};
 
 /// Request sent from host to guest vsock agent.

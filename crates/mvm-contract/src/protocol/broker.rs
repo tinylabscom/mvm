@@ -3,7 +3,7 @@
 //!
 //! The types here cross every process boundary in the broker subprocess set
 //! (`mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`) plus the
-//! supervisor's UDS proxies. They live in the no_std `mvm-protocol` crate so
+//! supervisor's UDS proxies. They live in the no_std `mvm-contract` crate so
 //! all four processes — and any lighter-weight consumer — can import them
 //! without pulling in a runtime. An algorithm-identifier byte pairs with
 //! these envelopes on the vsock side.

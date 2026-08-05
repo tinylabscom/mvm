@@ -267,9 +267,9 @@ pub fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_rec
 mod tests {
     use super::*;
     use crate::keyholder::{BindingStore, SecretBindingMeta};
+    use mvm_contract::ir::AuthType;
     use mvm_core::plan::SecretSource;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_protocol::ir::AuthType;
     use secrecy::SecretBox;
     use tempfile::tempdir;
 

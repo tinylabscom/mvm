@@ -103,7 +103,7 @@ pub fn l3_cmdline_token(config: &VmStartConfig) -> Option<String> {
     let plan = mvm_core::plan::plan_from_admitted_json(plan_json).ok()?;
     plan.network_mode
         .is_l3_vsock()
-        .then(|| mvm_protocol::l3::GUEST_CMDLINE_FLAG.to_string())
+        .then(|| mvm_contract::l3::GUEST_CMDLINE_FLAG.to_string())
 }
 
 /// True when the workload's persisted plan carries at least one bound secret
@@ -355,7 +355,7 @@ mod l3_token_tests {
         let config = config_with(Some(plan_json(NetworkMode::L3Vsock)));
         assert_eq!(
             l3_cmdline_token(&config).as_deref(),
-            Some(mvm_protocol::l3::GUEST_CMDLINE_FLAG)
+            Some(mvm_contract::l3::GUEST_CMDLINE_FLAG)
         );
     }
 

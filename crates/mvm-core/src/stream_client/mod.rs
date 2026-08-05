@@ -20,7 +20,7 @@
 //!   for. Filtering can never weaken the check.
 //! - **The anchored check, not the genesis one.** A broker prunes, and a
 //!   follower that attached mid-stream or fell behind holds a *window*, not a
-//!   chain from genesis. [`mvm_protocol::stream::verify_chain`] rejects that
+//!   chain from genesis. [`mvm_contract::stream::verify_chain`] rejects that
 //!   by design, so the reader uses `verify_chain_from` against the anchor the
 //!   broker sampled with the window. A consumer never has to know an anchor
 //!   exists.

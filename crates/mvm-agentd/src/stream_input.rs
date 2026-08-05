@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use mvm_protocol::stream::input::{CloseInput, InputFrame};
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 use zeroize::Zeroize;
 
 use crate::vsock::{StreamInputRefusal, StreamInputResult};

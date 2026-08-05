@@ -30,8 +30,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use mvm_contract::stream::{StreamKind, StreamRecord};
 use mvm_core::transcript::{Direction, TranscriptManifest, TranscriptWriter, sealed_root_hex};
-use mvm_protocol::stream::{StreamKind, StreamRecord};
 
 use crate::stream::journal::{CaptureJournal, JournalShortfall};
 
@@ -529,11 +529,11 @@ fn lock_writer(writer: &Mutex<TranscriptWriter>) -> MutexGuard<'_, TranscriptWri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::stream::StreamSource;
     use mvm_core::crypto::aead;
     use mvm_core::transcript::{
         CaptureBinding, CaptureBounds, RetentionPolicy, TranscriptWriterConfig, verify_sealed_root,
     };
-    use mvm_protocol::stream::StreamSource;
     use std::path::Path;
     use std::time::Duration;
 

@@ -35,7 +35,7 @@ mod linux {
         if provision_guest_environment().is_err() {
             std::process::exit(1);
         }
-        if cmdline_has_flag(mvm_protocol::l3::GUEST_CMDLINE_FLAG) {
+        if cmdline_has_flag(mvm_contract::l3::GUEST_CMDLINE_FLAG) {
             start_l3_tunnel();
         }
         // The guest agent is the mvm vsock control plane — the whole reason this
@@ -296,12 +296,12 @@ mod linux {
     }
 
     fn start_l3_tunnel() {
-        let ready = Path::new(mvm_protocol::l3::GUEST_READY_FILE);
+        let ready = Path::new(mvm_contract::l3::GUEST_READY_FILE);
         let _ = fs::remove_file(ready);
         let Some(agent) = resolve_exec([NET_AGENT_OVERLAY, NET_AGENT_FALLBACK]) else {
             eprintln!(
                 "mvm-oci-init: {} was set but no l3 net agent resolved — refusing to boot",
-                mvm_protocol::l3::GUEST_CMDLINE_FLAG
+                mvm_contract::l3::GUEST_CMDLINE_FLAG
             );
             std::process::exit(1);
         };

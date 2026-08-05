@@ -91,7 +91,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result, bail};
 use mvm_agentd::stream_input::MAX_PENDING_INPUT_BYTES;
 use mvm_agentd::vsock::{StreamInputRefusal, StreamInputResult};
-use mvm_protocol::stream::input::{CloseInput, InputFrame};
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 use zeroize::Zeroize;
 
 use crate::plan_admission::AdmittedPlan;
@@ -463,10 +463,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ed25519_dalek::SigningKey;
+    use mvm_contract::protocol::broker::ServiceId;
+    use mvm_contract::stream::input::INPUT_GRANT_SERVICE;
     use mvm_core::plan::sign_plan;
     use mvm_core::plan::test_support::PlanFixture;
-    use mvm_protocol::protocol::broker::ServiceId;
-    use mvm_protocol::stream::input::INPUT_GRANT_SERVICE;
 
     use super::*;
     use crate::stream::input_gate::{InputBinding, KnownSecret};

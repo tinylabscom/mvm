@@ -143,7 +143,7 @@ Snapshot graph (chain-anchored checkpoint lineage; content-addressed):
 
 - The uniform vsock endpoint seam and typed connectors remain unchanged; the
   former generic L3 tunnel was deleted as a dead second egress model.
-- The typed-connector policy DTOs in `mvm-protocol` gain:
+- The typed-connector policy DTOs in `mvm-contract` gain:
   - `scheme`: `http` | `https`;
   - `host` / `sni`: exact or `*.example.com` subdomain;
   - `method`: list of HTTP methods;
@@ -322,7 +322,7 @@ plan is refused; `check-claim-catalog` green; clippy/test green.
 
 ### Phase 3 — Egress policy enrichment (vsock seam only)
 
-- [ ] Extend typed-connector policy DTOs in `mvm-protocol` with scheme, host,
+- [ ] Extend typed-connector policy DTOs in `mvm-contract` with scheme, host,
       sni, method, path, audit_level, and inject fields. Keep the DTO
       `#![no_std]`-clean.
 - [ ] Implement rule matching in `mvm-net`/`mvm-hostd`: first-match-wins,
@@ -335,7 +335,7 @@ plan is refused; `check-claim-catalog` green; clippy/test green.
       and for secret absence from both log sinks.
 
 **Acceptance gate:** all new egress-policy BDD scenarios pass; secrets are
-absent from logs and from guest memory; `mvm-protocol` stays `no_std` and
+absent from logs and from guest memory; `mvm-contract` stays `no_std` and
 wasm-clean; clippy/test green.
 
 ### Phase 4 — OCI-image template build path
@@ -394,7 +394,7 @@ No phase closes without:
 - `check-cli-runtime-surface` green (CLI does not bypass `mvm-client`)
 - `check-core-runtime-free` green (no async runtime leaks into the default
   build)
-- `mvm-protocol` `wasm32-unknown-unknown` build green if policy DTOs changed
+- `mvm-contract` `wasm32-unknown-unknown` build green if policy DTOs changed
 
 ## Risks
 

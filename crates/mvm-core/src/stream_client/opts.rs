@@ -1,7 +1,7 @@
 //! What a consumer asks for: which kinds, from which sequence, and whether
 //! to keep reading after the producer goes quiet.
 
-use mvm_protocol::stream::{StreamKind, StreamRecord};
+use mvm_contract::stream::{StreamKind, StreamRecord};
 use serde::{Deserialize, Serialize};
 
 /// Which [`StreamKind`]s a consumer wants delivered.
@@ -153,7 +153,7 @@ impl StreamOptsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::stream::StreamSource;
+    use mvm_contract::stream::StreamSource;
 
     fn record(seq: u64, kind: StreamKind) -> StreamRecord {
         StreamRecord {

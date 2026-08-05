@@ -53,7 +53,7 @@ check:
 check-linux TARGET="x86_64-unknown-linux-gnu":
     cargo zigbuild --target {{TARGET}} --workspace --lib --all-features
 
-# Bare-metal no_std proof for the embeddable foundation crate (mvm-protocol).
+# Bare-metal no_std proof for the embeddable foundation crate (mvm-contract).
 # A `-none-elf` target exposes only core + alloc with no std to leak into, so
 # this is a stricter no_std check than the wasm32 gate. riscv32imac is the
 # mainline stand-in for the RISC-V microcontrollers the on-device verifier
@@ -62,7 +62,7 @@ check-linux TARGET="x86_64-unknown-linux-gnu":
 # shims/toolchains — see specs/notes for the embedding track.
 check-embedded TARGET="riscv32imac-unknown-none-elf":
     rustup target add {{TARGET}}
-    cargo build -p mvm-protocol --lib --target {{TARGET}}
+    cargo build -p mvm-contract --lib --target {{TARGET}}
 
 # Run mvmctl with arguments
 run *ARGS:

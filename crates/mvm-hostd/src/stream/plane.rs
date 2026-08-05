@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use mvm_protocol::stream::input::InputFrame;
+use mvm_contract::stream::input::InputFrame;
 
 use mvm_core::config;
 use mvm_core::crypto::aead;
@@ -764,12 +764,12 @@ fn now_unix_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::stream::StreamKind;
     use mvm_core::plan::StreamRetention;
     use mvm_core::stream_client::{
         OutputRecord, OutputRequest, RecordOrigin, StreamAvailability, StreamOpts, open_vm_output,
     };
     use mvm_core::util::test_env::TestEnv;
-    use mvm_protocol::stream::StreamKind;
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
 

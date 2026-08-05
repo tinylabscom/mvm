@@ -34,12 +34,12 @@
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use mvm_contract::stream::{StreamKind, StreamRecord, StreamSource};
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::transcript::{
     CaptureBinding, CaptureBounds, RetentionPolicy, TranscriptManifest, TranscriptWriter,
     TranscriptWriterConfig,
 };
-use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
 
 use crate::audit::emitter::AuditEmitter;
 use crate::stream::durable::DurableSink;
@@ -498,12 +498,12 @@ mod tests {
     use crate::stream::redact::{Redacted, RedactionFailed, StreamRedactor};
     use crate::supervisor::verify_audit_chain;
     use ed25519_dalek::SigningKey;
+    use mvm_contract::stream::{verify_chain, verify_chain_from};
     use mvm_core::crypto::aead;
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::transcript::{
         Direction, SEGMENT_MAX_CHUNKS, export, verify_chunks, verify_sealed_root,
     };
-    use mvm_protocol::stream::{verify_chain, verify_chain_from};
     use std::ops::{Deref, DerefMut};
     use std::path::Path;
     use std::time::{Duration, Instant};

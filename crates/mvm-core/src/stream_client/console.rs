@@ -34,7 +34,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use mvm_protocol::stream::StreamKind;
+use mvm_contract::stream::StreamKind;
 
 use super::opts::{KindFilter, StreamOpts};
 use super::output::{OutputRecord, RecordOrigin};

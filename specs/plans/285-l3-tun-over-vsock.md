@@ -13,7 +13,7 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 
 ## W1 — Canonical mode + plan representation
 
-- [x] `NetworkMode::L3Vsock` in `mvm-protocol::plan::types`
+- [x] `NetworkMode::L3Vsock` in `mvm-contract::plan::types`
 - [x] `L3NetworkSpec` on `ExecutionPlan` (`#[serde(default)]`, absent =
       not an L3 workload): protocol version/features, MTU, limits,
       DNS policy, private-network policy, ICMP policy, ingress
@@ -32,7 +32,7 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       compatibility gate never sees a half-formed L3 plan
 - [x] machine inspect / receipt output names the admitted mode
 
-## W2 — Shared protocol (`mvm-protocol::l3`)
+## W2 — Shared protocol (`mvm-contract::l3`)
 
 - [x] `limits.rs` — MTU, frame/payload caps, queue caps, table caps
 - [x] `frame.rs` — `u32` length prefix + 24-byte fixed header;

@@ -10,27 +10,49 @@
 // needs `std` to link, so a `no_std` lib can't host the harness. The
 // wasm32-unknown-unknown *library* build (the wasm-clean gate) is never
 // built `--test`, so it stays `no_std` regardless of this clause.
-#![cfg_attr(all(not(feature = "schema"), not(test)), no_std)]
+#![cfg_attr(
+    all(not(feature = "schema"), not(feature = "volume"), not(test)),
+    no_std
+)]
 #![forbid(unsafe_code)]
-//! no_std + alloc core for mvm: the chain-signed audit-log verifier and
-//! the canonical Workload IR; the wire protocol and policy DTOs land
-//! here incrementally. Builds on wasm32 so the same logic runs in a
-//! browser.
+//! Shared mvm contracts. The default `protocol` feature is a no_std + alloc
+//! surface for the Workload IR, wire protocol, and policy DTOs. The optional
+//! `volume` and `local` features add the storage backend contract and the
+//! host-directory implementation without changing the protocol-only closure.
 
 extern crate alloc;
 
+#[cfg(feature = "protocol")]
 pub mod entrypoint;
+#[cfg(feature = "protocol")]
 pub mod ir;
 /// The L3-over-vsock tunnel protocol: framing, control messages, and
 /// bounded IP validation. Shared by the in-guest agent and the host
 /// gateway.
+#[cfg(feature = "protocol")]
 pub mod l3;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
+#[cfg(feature = "protocol")]
 pub mod lifecycle;
 /// RFC 6962 Merkle transparency-log inclusion proofs over the audit log.
+#[cfg(feature = "protocol")]
 pub mod merkle;
+#[cfg(feature = "protocol")]
 pub mod plan;
+#[cfg(feature = "protocol")]
 pub mod policy;
+#[cfg(feature = "protocol")]
 pub mod protocol;
+#[cfg(feature = "protocol")]
 pub mod stream;
+#[cfg(feature = "protocol")]
 pub mod verify;
+
+#[cfg(feature = "volume")]
+pub mod volume;
+#[cfg(feature = "local")]
+pub use volume::LocalBackend;
+#[cfg(feature = "volume")]
+pub use volume::contract;
+#[cfg(feature = "volume")]
+pub use volume::{VolumeBackend, VolumeEntry, VolumeError, VolumeFuture, VolumePath};

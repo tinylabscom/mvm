@@ -76,7 +76,7 @@ pub const SDK_SIDECAR_SHARE_TAG: &str = "sdk-sidecar";
 /// the cache. There is no degraded attach — a workload admitted to call a host
 /// service must not boot into a `dlopen` failure it cannot act on.
 pub fn resolve_sdk_sidecar_attachment(
-    services: &[mvm_protocol::protocol::broker::ServiceId],
+    services: &[mvm_contract::protocol::broker::ServiceId],
     resolver: &mvm_fs::sdk_sidecar::SdkSidecarResolver,
     arch: mvm_core::arch::GuestArch,
 ) -> Result<Option<SdkSidecarAttachment>> {
@@ -111,11 +111,11 @@ pub fn resolve_sdk_sidecar_attachment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::protocol::broker::ServiceId;
     use mvm_core::arch::GuestArch;
     use mvm_fs::sdk_sidecar::{
         SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
     };
-    use mvm_protocol::protocol::broker::ServiceId;
     use sha2::{Digest, Sha256};
 
     fn svc(raw: &str) -> ServiceId {

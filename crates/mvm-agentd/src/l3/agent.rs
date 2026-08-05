@@ -10,7 +10,7 @@
 
 use std::io::{Read, Write};
 
-use mvm_protocol::l3::{
+use mvm_contract::l3::{
     Config, ErrorCode, ErrorMessage, Heartbeat, Hello, MessageType, Ready, Shutdown,
     ShutdownReason, frame, limits, message,
 };
@@ -490,7 +490,7 @@ mod tests {
     use super::*;
     use crate::l3::netcfg::RecordingConfigurator;
     use crate::l3::tun::MemoryTun;
-    use mvm_protocol::l3::{Ipv4Config, features};
+    use mvm_contract::l3::{Ipv4Config, features};
     use std::io::Cursor;
 
     const SESSION: u64 = 0xABCD_EF01_2345_6789;
@@ -745,7 +745,7 @@ mod tests {
         // the refusal must come from the agent knowing it carries v4 only.
         let cfg = Config {
             v4: None,
-            v6: Some(mvm_protocol::l3::Ipv6Config {
+            v6: Some(mvm_contract::l3::Ipv6Config {
                 address: [0x20; 16],
                 prefix_len: 127,
                 peer: [0x21; 16],

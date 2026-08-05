@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 
+use mvm_contract::ir::{Entrypoint, Workload};
 use mvm_core::user_config::MvmConfig;
-use mvm_protocol::ir::{Entrypoint, Workload};
 use mvm_sdk::compile::{compile, compile_archive, is_archive_output};
 use mvm_sdk::decorator::{ParseError, parse_python, parse_typescript};
 

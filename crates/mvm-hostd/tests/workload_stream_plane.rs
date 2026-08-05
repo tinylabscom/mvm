@@ -19,6 +19,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use anyhow::Result;
+use mvm_contract::stream::{StreamKind, StreamSource};
 use mvm_core::config;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
@@ -29,7 +30,6 @@ use mvm_core::stream_client::{
 use mvm_core::util::test_env::TestEnv;
 use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig};
 use mvm_hostd::stream::StreamPlane;
-use mvm_protocol::stream::{StreamKind, StreamSource};
 use mvm_runtime::driver::MockDriver;
 use mvm_runtime::workload_runner::{
     ConsoleStreamer, EndpointSpawnRequest, EndpointSpawner, RealBrokerRegistrar,

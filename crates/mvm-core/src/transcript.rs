@@ -324,7 +324,7 @@ pub fn sealed_root_hex(manifest: &TranscriptManifest) -> Result<String, Transcri
             .map_err(|e| TranscriptError::SealedRootSerialization(e.to_string()))?,
         );
     }
-    Ok(hex::encode(mvm_protocol::merkle::merkle_root(&leaves)))
+    Ok(hex::encode(mvm_contract::merkle::merkle_root(&leaves)))
 }
 
 /// Verify the manifest-stored root against a fresh recomputation. This checks
@@ -951,7 +951,7 @@ mod tests {
         // `sealed_root_hex`: computing the expectation from the code under
         // test would compare the production path against itself and assert
         // nothing at all.
-        let from_preimage = hex::encode(mvm_protocol::merkle::merkle_root(&PINNED_ROOT_PREIMAGE));
+        let from_preimage = hex::encode(mvm_contract::merkle::merkle_root(&PINNED_ROOT_PREIMAGE));
         assert_eq!(
             m.sealed_root_hex, from_preimage,
             "the sealed root no longer commits to PINNED_ROOT_PREIMAGE; diff the leaf \

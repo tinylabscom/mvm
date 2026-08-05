@@ -3,7 +3,7 @@
 //!
 //! ```no_run
 //! use mvm_client::stream::{KindFilter, StreamOpts, connect_stream};
-//! use mvm_protocol::stream::StreamKind;
+//! use mvm_contract::stream::StreamKind;
 //!
 //! let opts = StreamOpts::builder()
 //!     .follow(true)
@@ -44,7 +44,7 @@ pub use mvm_core::stream_client::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::stream::StreamKind;
+    use mvm_contract::stream::StreamKind;
 
     #[test]
     fn the_facade_builds_the_same_opts_the_core_does() {

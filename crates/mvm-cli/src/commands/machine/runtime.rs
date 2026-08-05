@@ -588,9 +588,9 @@ mod raw_ip_stack_tests {
     /// JSON, so it cannot drift from the schema it is meant to exercise.
     fn write_ir(
         dir: &std::path::Path,
-        network: Option<mvm_protocol::ir::Network>,
+        network: Option<mvm_contract::ir::Network>,
     ) -> std::path::PathBuf {
-        use mvm_protocol::ir::*;
+        use mvm_contract::ir::*;
         let workload = Workload {
             schema_version: "0.1".into(),
             id: "l3-witness".into(),
@@ -628,9 +628,9 @@ mod raw_ip_stack_tests {
         path
     }
 
-    fn net(raw_ip_stack: bool) -> mvm_protocol::ir::Network {
-        mvm_protocol::ir::Network {
-            mode: mvm_protocol::ir::NetworkMode::Bridge,
+    fn net(raw_ip_stack: bool) -> mvm_contract::ir::Network {
+        mvm_contract::ir::Network {
+            mode: mvm_contract::ir::NetworkMode::Bridge,
             ports: vec![],
             egress: None,
             peers: vec![],

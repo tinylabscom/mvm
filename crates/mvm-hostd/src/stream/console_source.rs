@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use mvm_protocol::stream::{StreamKind, StreamSource};
+use mvm_contract::stream::{StreamKind, StreamSource};
 
 use crate::stream::broker::StreamBroker;
 

@@ -18,7 +18,7 @@ use mvm_agentd::vsock::{
 };
 use mvm_agentd::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_agentd::worker_protocol::WorkerOutcome;
-use mvm_protocol::stream::input::{CloseInput, InputFrame};
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 
 use crate::HandlerCtx;
 use crate::globals::{

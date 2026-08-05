@@ -3,7 +3,7 @@
 //!
 //! The DTO half — every backend-agnostic launch/status/capability/
 //! standby-pool wire type, plus the pure cmdline codec functions —
-//! lives in `mvm_protocol::protocol::vm_backend` and is re-exported below so
+//! lives in `mvm_contract::protocol::vm_backend` and is re-exported below so
 //! every existing `crate::protocol::vm_backend::X` / `mvm_core::vm_backend::X`
 //! path keeps resolving unchanged. The `VmBackend` trait and its
 //! trait-coupled composite configs stay here: `VmStartConfig` is the
@@ -11,14 +11,14 @@
 //! `StandbyClaim` embeds `Option<VmStartConfig>` and so can't move without
 //! it; `VerbGrantEnvelope` stays paired with its `anyhow`-based cmdline
 //! codec (`encode_verb_grant_cmdline`/`decode_verb_grant_cmdline`), the same
-//! itself lives in `mvm-protocol`.
+//! itself lives in `mvm-contract`.
 
 use anyhow::Result;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
-pub use mvm_protocol::protocol::vm_backend::{
+pub use mvm_contract::protocol::vm_backend::{
     BackendKind, BackendSecurityProfile, BalloonState, ClaimStatus, GuestChannelInfo,
     LayerCoverage, RequiredCapabilities, ReseedStatus, RuntimeSourceLaunchKind,
     RuntimeSourcePolicy, RuntimeSourceRootStrategy, SnapshotCapability, StandbyCompat,

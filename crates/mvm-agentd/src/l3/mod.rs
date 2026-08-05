@@ -28,7 +28,7 @@ pub use tun::LinuxTun;
 
 #[cfg(test)]
 mod contract_tests {
-    use mvm_protocol::l3::{GUEST_CMDLINE_FLAG, GUEST_READY_FILE};
+    use mvm_contract::l3::{GUEST_CMDLINE_FLAG, GUEST_READY_FILE};
 
     /// The guest init keys off this exact token, and the host emits it from
     /// the admitted plan. A rename on one side without the other is a guest

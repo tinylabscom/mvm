@@ -1,6 +1,6 @@
 # WS11 P3b.2 — Governed WASI Egress POC + Data-Governance Witness — Implementation Plan
 
-> **STATUS: COMPLETE** (`e669bcc5d` Task 1 gate-relax · `4d709d196` allow-path witness · `8c270214d` deny-path witness · this doc-closeout). All five tasks landed; the POC acceptance gate is met and every closeout gate is green (workspace clippy, runtime+hostd wasm-backend clippy, 27 `wasm_backend` units + 2 witnesses, 0 wasmtime in the non-dev graph, 4 xtask gates, wasm32 `mvm-protocol` build, fmt).
+> **STATUS: COMPLETE** (`e669bcc5d` Task 1 gate-relax · `4d709d196` allow-path witness · `8c270214d` deny-path witness · this doc-closeout). All five tasks landed; the POC acceptance gate is met and every closeout gate is green (workspace clippy, runtime+hostd wasm-backend clippy, 27 `wasm_backend` units + 2 witnesses, 0 wasmtime in the non-dev graph, 4 xtask gates, wasm32 `mvm-contract` build, fmt).
 >
 > **One deviation from this plan, for the better:** the witness homes in **mvm-hostd** (`crates/mvm-hostd/tests/wasm_egress_witness.rs`), not mvm-runtime. mvm-hostd already deps mvm-runtime (`WasmBackend`) *and* owns `SubstitutionService`/`Recorder`/`verify_audit_chain`, so it drives the REAL governance types **in-process** with no dependency inversion and no subprocess — cleaner than this plan's subprocess design, which the SSRF-guarded forward leg would have blocked on the allow path anyway (it refuses loopback, so a hermetic real-destination allow-path test is impossible through the real forwarder; the witness swaps only the outbound dial for a `Forwarder` test double, the crate's own test seam). A mvm-hostd `wasm-backend` feature forwards to mvm-runtime's. See SPRINT.md §WS11 P3b.2 and `specs/refactor/11-wasm-backend.md` §"POC acceptance gate — MET".
 
@@ -21,7 +21,7 @@
 - `WasmBackend` stays the **claim-free** portability tier: `security_profile()` keeps every numbered claim `DoesNotHold`; the egress seam adds NO claim-catalog witness (the data-governance witness is a *governance* witness, not an isolation claim).
 - Fail closed with typed errors — no `unwrap`/`panic`/`todo!`/`unimplemented!` on any guest-controlled or start path.
 - **NO `ADR-\d+` / `Plan N` / `#NNNN` / `W\d.` in code comments** — `xtask check-no-spec-refs-in-comments` is enforced; reword to the concept.
-- No new `#[allow]`; `///` on public items; exhaustive matches (no wildcard on owned enums); `mvm-protocol` stays `#![no_std]` + wasm-clean (do not touch it).
+- No new `#[allow]`; `///` on public items; exhaustive matches (no wildcard on owned enums); `mvm-contract` stays `#![no_std]` + wasm-clean (do not touch it).
 - Because `mvm-runtime` is excluded from the macOS workspace `nextest` (codesign SIGKILL), run new `mvm-runtime` tests with `cargo test -p mvm-runtime --features wasm-backend <name>` locally; they run under Linux CI.
 
 ## File Structure
@@ -241,7 +241,7 @@ cargo run -q -p xtask -- check-no-spec-refs-in-comments
 cargo run -q -p xtask -- check-no-string-backend-dispatch
 cargo run -q -p xtask -- check-claim-catalog
 cargo run -q -p xtask -- check-core-runtime-free
-PATH="$HOME/.cargo/bin:$PATH" cargo build -p mvm-protocol --target wasm32-unknown-unknown
+PATH="$HOME/.cargo/bin:$PATH" cargo build -p mvm-contract --target wasm32-unknown-unknown
 cargo fmt -p mvm-runtime && rustup run nightly cargo fmt --all
 ```
 
@@ -262,4 +262,4 @@ Expected: all clean. `check-claim-catalog` must still be green — the witness a
 ## Subsequent plans (out of scope here — each its own design→plan)
 
 - **P3c — HTTPS termination for wasm egress:** give the wasm run a per-VM egress-CA intermediate (`build_egress_tls_delivery`) so the endpoint terminates TLS for `https://` `WireRequest.url`s. Needs a design pass (how the wasm module trusts the intermediate — it has no rootfs trust bundle; likely the module is handed the cert via a WASI preopen / the `WireRequest` stays plaintext-to-endpoint and the endpoint originates TLS). Blocks nothing; the POC is HTTP-only.
-- **P4 — browser POC:** `mvm-protocol` + the `no_std` OCI decoders + the semantic-address (`mvm-core`, doc 12) running in the browser (image inspect/verify + workload fingerprint). Needs its own design (wasm-bindgen/component-model packaging; the `uor-addr`-crate-vs-native decision from doc 12). Independent of P3b.2/P3c.
+- **P4 — browser POC:** `mvm-contract` + the `no_std` OCI decoders + the semantic-address (`mvm-core`, doc 12) running in the browser (image inspect/verify + workload fingerprint). Needs its own design (wasm-bindgen/component-model packaging; the `uor-addr`-crate-vs-native decision from doc 12). Independent of P3b.2/P3c.

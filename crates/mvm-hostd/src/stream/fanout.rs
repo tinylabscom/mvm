@@ -17,8 +17,8 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
+use mvm_contract::stream::StreamRecord;
 use mvm_core::transcript::{CaptureBounds, GapMarker, RingState};
-use mvm_protocol::stream::StreamRecord;
 
 /// Payload bytes one follower may fall behind by before its oldest records
 /// are dropped.
@@ -314,7 +314,7 @@ pub(in crate::stream) fn lock_queue(queue: &Mutex<ReaderQueue>) -> MutexGuard<'_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::stream::{StreamKind, StreamSource};
+    use mvm_contract::stream::{StreamKind, StreamSource};
 
     fn bounds(max_bytes: u64, max_chunks: u64) -> CaptureBounds {
         CaptureBounds {
@@ -446,7 +446,7 @@ mod tests {
             "the anchor is the hash of the last record this reader lost"
         );
         assert_ne!(anchor, handle.attach_anchor(), "the anchor moved on loss");
-        mvm_protocol::stream::verify_chain_from(&survivors, anchor)
+        mvm_contract::stream::verify_chain_from(&survivors, anchor)
             .expect("the surviving window is unbroken from the anchor the queue kept");
     }
 
@@ -499,7 +499,7 @@ mod tests {
             records[gap.after_seq as usize].hash(),
             "the anchor is the hash of the last record this reader lost"
         );
-        mvm_protocol::stream::verify_chain_from(&window.records, window.anchor)
+        mvm_contract::stream::verify_chain_from(&window.records, window.anchor)
             .expect("the triple must verify as a set");
     }
 
@@ -531,7 +531,7 @@ mod tests {
         let gap = second.gap.expect("the second window lost records");
         assert_ne!(second.anchor, first.anchor, "loss moved the anchor");
         assert_eq!(second.records[0].seq, gap.after_seq + 1);
-        mvm_protocol::stream::verify_chain_from(&second.records, second.anchor)
+        mvm_contract::stream::verify_chain_from(&second.records, second.anchor)
             .expect("the second window verifies against the anchor it came with");
     }
 

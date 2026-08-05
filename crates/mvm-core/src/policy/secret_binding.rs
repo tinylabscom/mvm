@@ -1,11 +1,11 @@
 //! Host-side secret resolution. The [`SecretBinding`] DTO, its builders,
 //! and its `FromStr`/`Display` CLI syntax live in
-//! `mvm_protocol::policy::secret_binding`, re-exported here so every
+//! `mvm_contract::policy::secret_binding`, re-exported here so every
 //! existing `crate::policy::secret_binding::{SecretBinding,
 //! PLACEHOLDER_PREFIX, SecretBindingParseError}` path keeps resolving
 //! unchanged.
 
-pub use mvm_protocol::policy::secret_binding::{
+pub use mvm_contract::policy::secret_binding::{
     PLACEHOLDER_PREFIX, SecretBinding, SecretBindingParseError,
 };
 
@@ -13,10 +13,10 @@ pub use mvm_protocol::policy::secret_binding::{
 /// otherwise read from the host environment.
 ///
 /// A free function rather than an inherent method on [`SecretBinding`]:
-/// that type now lives in `mvm-protocol`, and the orphan rule forbids
+/// that type now lives in `mvm-contract`, and the orphan rule forbids
 /// `mvm-core` from adding inherent `impl`s to a foreign type.
 /// `std::env::var` also needs `std`, unavailable in the no_std
-/// `mvm-protocol` crate.
+/// `mvm-contract` crate.
 pub fn resolve_value(binding: &SecretBinding) -> anyhow::Result<String> {
     if let Some(ref v) = binding.value {
         Ok(v.clone())

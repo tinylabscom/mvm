@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Result;
 use mvm_agentd::stream_input::{InputDesk, InputSink};
 use mvm_agentd::vsock::StreamInputResult;
+use mvm_contract::protocol::broker::ServiceId;
+use mvm_contract::stream::input::{CloseInput, INPUT_GRANT_SERVICE, InputFrame};
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 use mvm_core::util::test_env::TestEnv;
 use mvm_hostd::audit::emitter::{AuditEmitter, stream_audit};
@@ -32,8 +34,6 @@ use mvm_hostd::stream::{
     InputTransport, KnownSecret, StreamPlane,
 };
 use mvm_hostd::supervisor::verify_audit_chain;
-use mvm_protocol::protocol::broker::ServiceId;
-use mvm_protocol::stream::input::{CloseInput, INPUT_GRANT_SERVICE, InputFrame};
 
 /// The guest half, standing in for the vsock hop: every frame the route hands
 /// over goes straight into a real workload's stdin, in the order it arrives.
@@ -217,7 +217,7 @@ fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
         services: Vec::new(),
         stream_retention: Default::default(),
         // Closed transport: this fixture's workload reaches nothing.
-        network_mode: mvm_protocol::plan::NetworkMode::None,
+        network_mode: mvm_contract::plan::NetworkMode::None,
         l3_network: None,
     }
 }

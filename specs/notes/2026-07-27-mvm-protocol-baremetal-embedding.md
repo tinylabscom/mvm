@@ -1,4 +1,4 @@
-# mvm-protocol on bare-metal embedded targets — verifier-at-the-edge track
+# mvm-contract on bare-metal embedded targets — verifier-at-the-edge track
 
 Date: 2026-07-27
 Status: slice 1 landed (bare-metal build proven + CI-gated); follow-ups open
@@ -23,13 +23,13 @@ without moving any workload execution there. Two device tiers:
   `ExecutionPlan`s, content-addressed signed bundles, the no_std/wasm protocol
   crate, the Merkle transparency log).
 
-`mvm-protocol` is the crate that runs on Tier 2. It is already `#![no_std]` +
+`mvm-contract` is the crate that runs on Tier 2. It is already `#![no_std]` +
 `alloc`, `forbid(unsafe_code)`, and hosts the audit-log verifier, the Workload
 IR, the wire/policy DTOs, and the RFC 6962 Merkle inclusion-proof module.
 
 ## Result (slice 1)
 
-`mvm-protocol` compiles for `riscv32imac-unknown-none-elf` — a true bare-metal
+`mvm-contract` compiles for `riscv32imac-unknown-none-elf` — a true bare-metal
 `*-none-*` target with no operating system and no `std` — with **zero code
 changes**. The full dependency graph is already bare-metal-clean:
 `ed25519-dalek` (verify path), `curve25519-dalek`, `sha2`, `serde` /

@@ -6,13 +6,13 @@
 //! populated cache can never make a scenario pass for the wrong reason.
 
 use cucumber::{given, then, when};
+use mvm_contract::protocol::broker::ServiceId;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
 use mvm_fs::sdk_sidecar::{
     SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
 };
-use mvm_protocol::protocol::broker::ServiceId;
 use mvm_runtime::driver::{HvfDriver, VmmDriver};
 
 use crate::world::CliWorld;

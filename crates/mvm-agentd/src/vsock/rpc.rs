@@ -5,8 +5,8 @@
 use std::os::unix::net::UnixStream;
 
 use anyhow::{Result, bail};
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 use mvm_core::security::AgentProfile;
-use mvm_protocol::stream::input::{CloseInput, InputFrame};
 
 use super::*;
 

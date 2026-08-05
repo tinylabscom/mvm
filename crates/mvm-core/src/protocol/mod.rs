@@ -10,11 +10,11 @@ pub mod volume_bridge;
 
 // `audit_signer`, `broker`, `host_audit`, `host_cost`, `host_signer`,
 // `host_time`, `routing`, `signing` are pure-DTO leaves
-// that now live in `mvm-protocol`; re-exported here as module aliases so
+// that now live in `mvm-contract`; re-exported here as module aliases so
 // every existing `crate::protocol::{audit_signer,broker,host_audit,
 // host_cost,host_signer,host_time,routing,signing}::X`
 // path keeps resolving unchanged.
-pub use mvm_protocol::protocol::{
+pub use mvm_contract::protocol::{
     audit_signer, broker, dns, host_audit, host_cost, host_signer, host_time, routing, signing,
 };
 

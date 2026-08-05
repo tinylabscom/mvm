@@ -578,7 +578,7 @@ jobs:
           - mvm-cli
           - mvm-core
           - mvm-hostd
-          - mvm-protocol
+          - mvm-contract
           - mvm-runtime
           - mvm-sdk
     steps:

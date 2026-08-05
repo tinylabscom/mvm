@@ -13,8 +13,8 @@
 //! signature the broker's fail-closed path is written and tested now, rather
 //! than bolted on the day such a detector lands.
 
+use mvm_contract::stream::{StreamKind, StreamSource};
 use mvm_core::policy::RedactionPolicy;
-use mvm_protocol::stream::{StreamKind, StreamSource};
 use serde::Serialize;
 
 use crate::supervisor::pii_redactor::PiiRedactor;

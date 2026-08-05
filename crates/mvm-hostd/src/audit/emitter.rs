@@ -43,8 +43,8 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
+use mvm_contract::merkle::{SignedAuditRoot, root_signing_bytes};
 use mvm_core::plan::ExecutionPlan;
-use mvm_protocol::merkle::{SignedAuditRoot, root_signing_bytes};
 
 /// Wire-stable event names and label keys for the checkpoint audit entries.
 /// Shared so the emitter (writer) and the lineage chain-anchor (reader) can't
@@ -795,7 +795,7 @@ impl AuditEmitter {
     /// [`crate::audit::merkle::build_root_in`]); a corrupt log refuses here.
     /// The signature covers `root_signing_bytes(tenant, tree_size,
     /// hex(root), timestamp)` under the host signer's Ed25519 key — the
-    /// exact bytes `mvm_protocol::merkle::verify_signed_root` re-checks. The
+    /// exact bytes `mvm_contract::merkle::verify_signed_root` re-checks. The
     /// sidecar is written temp-then-fsync-then-rename to
     /// `<audit_dir>/<tenant>.root.json` so a reader never observes a partial
     /// file.
@@ -1676,7 +1676,7 @@ mod tests {
 
     #[test]
     fn publish_root_writes_a_verifiable_signed_root() {
-        use mvm_protocol::merkle::{verify_inclusion, verify_signed_root};
+        use mvm_contract::merkle::{verify_inclusion, verify_signed_root};
 
         let dir = tempfile::tempdir().unwrap();
         let key = {

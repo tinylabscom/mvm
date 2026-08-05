@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-use mvm_protocol::stream::StreamRecord;
+use mvm_contract::stream::StreamRecord;
 use serde::{Deserialize, Serialize};
 
 use crate::transcript::GapMarker;
@@ -149,7 +149,7 @@ pub fn read_batch<R: Read>(reader: &mut R, max_bytes: usize) -> io::Result<Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::stream::{StreamKind, StreamSource};
+    use mvm_contract::stream::{StreamKind, StreamSource};
 
     fn record(seq: u64, payload: &[u8]) -> StreamRecord {
         StreamRecord {

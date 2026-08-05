@@ -19,7 +19,7 @@ use crate::plan::types::{
     RuntimeProfileRef, SecretBinding, SignedImageRef, StreamRetention, TenantId, TimeoutSpec,
     WorkloadId,
 };
-use mvm_protocol::protocol::broker::ServiceId;
+use mvm_contract::protocol::broker::ServiceId;
 
 /// Builder for a minimal, valid local [`ExecutionPlan`]. Defaults match the
 /// shape the audit/admission tests need; override only what a test pins.

@@ -1524,9 +1524,9 @@ mod tests {
 
     #[test]
     fn parent_agent_verb_override_inherits_parent_verbs() {
+        use mvm_contract::plan::VerbId;
         use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
         use mvm_core::plan::test_support::PlanFixture;
-        use mvm_protocol::plan::VerbId;
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();

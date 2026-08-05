@@ -33,11 +33,11 @@ pub mod test_support;
 pub mod validity;
 
 // `execution_plan`, `types`, `verb`, `verb_grant`, `verb_trust` are
-// pure-DTO leaves that now live in `mvm-protocol`; re-exported here as
+// pure-DTO leaves that now live in `mvm-contract`; re-exported here as
 // module aliases so every existing
 // `crate::plan::{execution_plan,types,verb,verb_grant,verb_trust}::X` path
 // keeps resolving unchanged.
-pub use mvm_protocol::plan::{execution_plan, sdk_sidecar, types, verb, verb_grant, verb_trust};
+pub use mvm_contract::plan::{execution_plan, sdk_sidecar, types, verb, verb_grant, verb_trust};
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,

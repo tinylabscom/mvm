@@ -7,7 +7,7 @@
 
 use std::net::Ipv4Addr;
 
-use mvm_protocol::l3::proto;
+use mvm_contract::l3::proto;
 
 /// Sizes of the headers this module writes.
 const IPV4_HEADER_LEN: usize = 20;
@@ -122,7 +122,7 @@ fn udp_v4_checksum(src: Ipv4Addr, dst: Ipv4Addr, udp: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::l3::ip;
+    use mvm_contract::l3::ip;
 
     const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 201, 0, 5);
     const GUEST: Ipv4Addr = Ipv4Addr::new(10, 201, 0, 6);

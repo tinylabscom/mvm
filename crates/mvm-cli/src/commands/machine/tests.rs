@@ -2525,7 +2525,7 @@ fn machine_run_exposes_no_network_mode_selector() {
 /// a default.
 #[test]
 fn an_ordinary_workload_derives_the_socket_aware_transport() {
-    use mvm_protocol::plan::NetworkMode;
+    use mvm_contract::plan::NetworkMode;
     assert_eq!(
         super::derive_network_mode(false),
         NetworkMode::HostVsockProxy
@@ -2537,7 +2537,7 @@ fn an_ordinary_workload_derives_the_socket_aware_transport() {
 /// and resolves identically everywhere.
 #[test]
 fn a_workload_declaring_a_raw_ip_stack_derives_the_tunnel() {
-    use mvm_protocol::plan::NetworkMode;
+    use mvm_contract::plan::NetworkMode;
     assert_eq!(super::derive_network_mode(true), NetworkMode::L3Vsock);
 }
 
@@ -2549,16 +2549,16 @@ fn the_derivation_does_not_depend_on_the_host() {
     // No host input exists to vary — the signature admits only the
     // workload's declared need. This test pins that shape: if host
     // capability is ever threaded back in, it fails to compile.
-    let f: fn(bool) -> mvm_protocol::plan::NetworkMode = super::derive_network_mode;
-    assert_eq!(f(false), mvm_protocol::plan::NetworkMode::HostVsockProxy);
-    assert_eq!(f(true), mvm_protocol::plan::NetworkMode::L3Vsock);
+    let f: fn(bool) -> mvm_contract::plan::NetworkMode = super::derive_network_mode;
+    assert_eq!(f(false), mvm_contract::plan::NetworkMode::HostVsockProxy);
+    assert_eq!(f(true), mvm_contract::plan::NetworkMode::L3Vsock);
 }
 
 /// A host that cannot serve the tunnel refuses the workloads that need it,
 /// and only those. Everything else runs normally.
 #[test]
 fn the_host_check_refuses_only_what_it_cannot_serve() {
-    use mvm_protocol::plan::NetworkMode;
+    use mvm_contract::plan::NetworkMode;
     assert!(
         super::check_host_can_serve(NetworkMode::HostVsockProxy).is_ok(),
         "the socket-aware transport must be serviceable on every host"
@@ -2608,6 +2608,6 @@ fn an_allow_host_rule_does_not_influence_the_transport() {
     assert_eq!(args.allow_host, vec!["api.example.com:443"]);
     assert_eq!(
         super::derive_network_mode(false),
-        mvm_protocol::plan::NetworkMode::HostVsockProxy
+        mvm_contract::plan::NetworkMode::HostVsockProxy
     );
 }

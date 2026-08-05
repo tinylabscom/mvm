@@ -247,9 +247,9 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
 /// The signed-plan token that says this workload's stdin may be driven from
 /// the host. One spelling, parsed from the protocol constant, so a typo here
 /// could not quietly mint a grant the gate does not recognise.
-fn input_grant_service() -> mvm_protocol::protocol::broker::ServiceId {
-    mvm_protocol::protocol::broker::ServiceId::parse(
-        mvm_protocol::stream::input::INPUT_GRANT_SERVICE,
+fn input_grant_service() -> mvm_contract::protocol::broker::ServiceId {
+    mvm_contract::protocol::broker::ServiceId::parse(
+        mvm_contract::stream::input::INPUT_GRANT_SERVICE,
     )
     .expect("the input-plane grant token is a valid service id")
 }
@@ -1070,7 +1070,7 @@ fn write_entrypoint_event(
     capture: &mut mvm_hostd::stream::EntrypointSink,
     out: &mut CallOutput<'_>,
 ) {
-    use mvm_protocol::stream::StreamKind;
+    use mvm_contract::stream::StreamKind;
     match event {
         mvm_agentd::vsock::EntrypointEvent::Stdout { chunk } => {
             show(capture.ingest(StreamKind::Stdout, chunk), out);
@@ -1121,7 +1121,7 @@ fn write_entrypoint_event(
 /// bytes the caller asked for, and moving the caller's stdout onto stderr over
 /// it would break the very parser this exists to keep whole.
 fn show(chunk: mvm_hostd::stream::ShownChunk, out: &mut CallOutput<'_>) {
-    use mvm_protocol::stream::StreamKind;
+    use mvm_contract::stream::StreamKind;
     out.divergence.note(&chunk.recorded);
     let sink = match chunk.kind {
         StreamKind::Stdout => &mut out.sinks.out,
@@ -1630,7 +1630,7 @@ mod stdin_grant_tests {
 
         let services = &admitted.context.admitted.plan().services;
         assert!(
-            mvm_protocol::stream::input::grants_input_for(services),
+            mvm_contract::stream::input::grants_input_for(services),
             "the admitted plan must carry the input grant: {services:?}"
         );
     }
@@ -1647,13 +1647,13 @@ mod captured_tests {
 
     use super::{CallOutput, EventSinks, RecordedDivergence, write_entrypoint_event};
     use mvm_agentd::vsock::EntrypointEvent;
+    use mvm_contract::stream::StreamKind;
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::stream_client::{
         KindFilter, OutputRequest, StreamAvailability, StreamOpts, open_vm_output,
     };
     use mvm_core::util::test_env::TestEnv;
     use mvm_hostd::stream::StreamPlane;
-    use mvm_protocol::stream::StreamKind;
     use mvm_runtime::workload_runner::ConsoleCapture;
 
     /// A plane holding one VM whose console never appears, so every record in

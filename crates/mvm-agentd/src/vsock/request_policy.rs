@@ -215,7 +215,7 @@ impl GuestRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::stream::input::{CloseInput, InputFrame};
+    use mvm_contract::stream::input::{CloseInput, InputFrame};
 
     #[test]
     fn run_detached_classifies_dev_only() {

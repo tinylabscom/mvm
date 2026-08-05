@@ -205,11 +205,11 @@ impl MachineAction {
 /// transport would make one plan mean different things in different places.
 pub(in crate::commands) fn derive_network_mode(
     needs_raw_ip_stack: bool,
-) -> mvm_protocol::plan::NetworkMode {
+) -> mvm_contract::plan::NetworkMode {
     if needs_raw_ip_stack {
-        mvm_protocol::plan::NetworkMode::L3Vsock
+        mvm_contract::plan::NetworkMode::L3Vsock
     } else {
-        mvm_protocol::plan::NetworkMode::HostVsockProxy
+        mvm_contract::plan::NetworkMode::HostVsockProxy
     }
 }
 
@@ -220,7 +220,7 @@ pub(in crate::commands) fn derive_network_mode(
 /// host. Conflating them is how a plan starts meaning different things in
 /// different places.
 pub(in crate::commands) fn check_host_can_serve(
-    mode: mvm_protocol::plan::NetworkMode,
+    mode: mvm_contract::plan::NetworkMode,
 ) -> anyhow::Result<()> {
     if !mode.is_l3_vsock() {
         return Ok(());
@@ -238,7 +238,7 @@ pub(in crate::commands) fn check_host_can_serve(
 /// Settle and validate the networking configuration before anything boots.
 pub(in crate::commands) fn preflight_network(
     needs_raw_ip_stack: bool,
-) -> anyhow::Result<mvm_protocol::plan::NetworkMode> {
+) -> anyhow::Result<mvm_contract::plan::NetworkMode> {
     let mode = derive_network_mode(needs_raw_ip_stack);
     check_host_can_serve(mode)?;
     Ok(mode)

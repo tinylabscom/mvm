@@ -77,8 +77,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use mvm_contract::stream::input::{CloseInput, InputFrame, grants_input};
 use mvm_core::plan::ExecutionPlan;
-use mvm_protocol::stream::input::{CloseInput, InputFrame, grants_input};
 use zeroize::Zeroize;
 
 use crate::audit::emitter::AuditEmitter;
@@ -944,10 +944,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use ed25519_dalek::SigningKey;
+    use mvm_contract::protocol::broker::ServiceId;
+    use mvm_contract::stream::input::INPUT_GRANT_SERVICE;
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, sign_plan};
-    use mvm_protocol::protocol::broker::ServiceId;
-    use mvm_protocol::stream::input::INPUT_GRANT_SERVICE;
     use tempfile::TempDir;
 
     use super::*;
@@ -1036,7 +1036,7 @@ mod tests {
             services: Vec::new(),
             stream_retention: Default::default(),
             // Closed transport: this fixture's workload reaches nothing.
-            network_mode: mvm_protocol::plan::NetworkMode::None,
+            network_mode: mvm_contract::plan::NetworkMode::None,
             l3_network: None,
         }
     }

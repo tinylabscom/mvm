@@ -10,6 +10,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use cucumber::{given, then, when};
+use mvm_contract::l3::{ip, proto};
 use mvm_core::plan::NetworkMode;
 use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
 use mvm_core::vm_backend::{VmCapabilities, VmStartConfig};
@@ -21,7 +22,6 @@ use mvm_net::l3::{
 use mvm_net::lease::{
     ControlPlaneLossPolicy, LeaseContext, LeaseRequest, LocalLeaseAuthority, verify_lease,
 };
-use mvm_protocol::l3::{ip, proto};
 use mvm_runtime::machine::nic_guard::{NicGuardError, enforce_no_guest_nic};
 use mvm_runtime::machine::{Machine, NetworkMode as MachineNetworkMode};
 
