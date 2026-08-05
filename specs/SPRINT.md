@@ -552,6 +552,13 @@ updates only its own entry below.
       execution did not beat the 36-minute cold-run baseline because the
       remaining `mvm-cli` and live audit tests dominate the lane.
 
+- [x] Plan 297 parallel pull-request CI lanes: run compiler lint, policy,
+      feature-gated coverage, workspace tests, and Linux/no-std/filesystem/
+      conformance coverage concurrently while keeping the existing `Lint` and
+      `Test` required check names as fail-closed aggregates. The moved Linux
+      coverage has one reusable script and the PR workflow still has no
+      branch-scoped Cargo target cache.
+
 - [x] #1840 faithful flake-image revert: boot the recorded slot revision,
       reconcile signed artifact hashes, and preserve the admitted restore path.
       Implementation, focused tests, workspace tests, check, and clippy pass;

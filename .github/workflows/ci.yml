@@ -2,7 +2,8 @@ name: CI
 
 on:
   # Keep pull-request validation cheap and predictable. On a pull request this
-  # workflow runs two jobs: lint and test. The merge queue also runs Nix eval.
+  # workflow runs parallel lint/test lanes plus the stable aggregate checks
+  # required by branch protection. The merge queue also runs Nix eval.
   # Expensive platform, live-VM, OCI ratification, security, Windows, and
   # release artifact jobs live in release/manual workflows.
   pull_request:
@@ -27,9 +28,10 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  lint:
-    name: Lint (fmt + clippy + policy)
+  lint-core:
+    name: Lint core (fmt + clippy)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
@@ -40,18 +42,6 @@ jobs:
 
       - name: Install system build deps
         run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
-
-      # SDK stub codegen (check-stubs) shells out to `uvx datamodel-codegen`
-      # (Python) + `npx json-schema-to-typescript` (TS). The pinned generator
-      # versions live in xtask, so the host node/python versions don't change
-      # the output (verified byte-identical macOS node22/py3.12 vs Linux
-      # node18/py3.11) — these just provide the runners.
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v8.2.0
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -80,6 +70,31 @@ jobs:
       # suite unnoticed and only surface in a release run. Compile it here.
       - name: Clippy (BDD conformance target)
         run: cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings
+
+  lint-policy:
+    name: Lint policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      # Policy checks invoke xtask, and the stub/parity checks invoke the
+      # pinned Python and TypeScript generators. They are independent of the
+      # compiler lint lane, so start them on their own runner.
+      - name: Install system build deps
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld shellcheck
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - uses: ./.github/actions/install-zigbuild
 
       - name: ADR coverage (informational)
         continue-on-error: true
@@ -139,10 +154,6 @@ jobs:
       - name: Conformance claim catalog
         run: cargo run -p xtask -- check-claim-catalog
 
-      # Surface pin only — milliseconds, no cargo-mutants needed. Fails when a
-      # claim's witnesses stop resolving to a mutable file, i.e. when a claim
-      # drops out of the nightly mutation lane's scope. The mutation run itself
-      # lives in security.yml because it costs hours.
       - name: Claim mutation surface is pinned
         run: cargo run -p xtask -- check-mutation-witnesses
 
@@ -188,23 +199,9 @@ jobs:
       - name: no new duplicate-major dependencies
         run: cargo run -p xtask -- check-duplicate-majors
 
-      # security.yml runs on tags + cron, so a step pointing at a renamed
-      # crate is invisible on a PR and dead until someone reads a nightly.
-      # This resolves those paths here, where the rename happens.
       - name: workflow paths and fuzz targets still exist
         run: cargo run -p xtask -- check-workflow-paths
 
-      # The cargo-fuzz crates are workspace-excluded (libfuzzer-sys needs
-      # cargo-fuzz's linker flags), so clippy and every other lane skip them.
-      # Nothing compiles these files until the nightly runs them, and that
-      # lane aborts on its first failure — one broken target hides every
-      # target after it, which is how a syntactically invalid harness
-      # survived eleven days.
-      #
-      # Only PRs that touch a fuzz crate pay for this: the per-crate dep
-      # trees do not share artifacts with the workspace build above, and
-      # this lane is deliberately capped. A crate rename — the change that
-      # actually broke them — touches these paths, so it is still covered.
       - name: Detect fuzz-crate changes
         id: fuzz_changed
         env:
@@ -212,7 +209,6 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${BASE_SHA:-}" ]; then
-            # merge_group / dispatch: no PR base to diff against, so check.
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA" >/dev/null 2>&1 || true
@@ -265,17 +261,24 @@ jobs:
       - name: Python and TypeScript IR fixtures match the Rust semantic address
         run: cargo run -p xtask -- check-ir-parity
 
-      # Feature-gated test runs that the default `Test` workspace pass skips.
-      # They live here, not in `Test`, so they run in parallel off the merge
-      # queue's critical path (this job has headroom; `Test` is the long pole).
-      # Clippy above already compiled the workspace `--all-targets`, so the
-      # crate graph is warm for these feature-specific recompiles.
+  lint-features:
+    name: Lint feature coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Install system build deps
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
       - name: Clippy (mvm-client tracing-bridge)
-        # `--all-targets` selects targets, not features: the workspace clippy
-        # above never enables `tracing-bridge`, and nothing else in the tree
-        # does either, so `stream_tracing.rs` and its tests compile in no lane.
-        # A rename in `mvm-core::stream_client` would break it with the merge
-        # queue green.
         run: cargo clippy -p mvm-client --all-targets --features tracing-bridge -- -D warnings
 
       - name: Install cargo-nextest
@@ -284,15 +287,9 @@ jobs:
           tool: nextest
 
       - name: hostd-transport feature tests (mvm-core)
-        # `hostd-transport` is off by default (plan 126 B5), so the default
-        # workspace run skips the protocol transport tests. Cover them here.
         run: cargo nextest run -p mvm-core --features hostd-transport
 
       - name: client facade tests (mvm-core)
-        # The `client` module (MvmClient trait + DTOs + MockBackend + remote
-        # GatewayBackend) is off by default so the runtime-free closure pulls no
-        # async-trait. `client-remote` implies `client`, so this one lane covers
-        # every moved unit test.
         run: cargo nextest run -p mvm-core --features client-remote
 
       - name: Assert auto-detect still picks libkrun off Linux/HVF
@@ -301,15 +298,9 @@ jobs:
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
       - name: In-process pure-mkfs materialize tests
-        # `pure-mkfs` is off by default (keeps mvm-ext4 out of the mvmctl default
-        # closure), so the default workspace run skips these. Cover them here.
         run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
 
       - name: test-support feature tests (mock backend)
-        # Only these packages own code gated by `test-support`. Re-running the
-        # whole workspace here repeated more than eight thousand tests from the
-        # Test job to reach a handful of mock-backend cases. Keep the feature's
-        # unit, integration, and required-example surfaces explicit instead.
         run: |
           cargo nextest run -p mvm-runtime --features test-support --lib
           cargo nextest run -p mvm-client --features test-support --lib
@@ -317,22 +308,53 @@ jobs:
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
           cargo check -p mvm-cli --features test-support --example verification_loop
 
+  lint:
+    name: Lint (fmt + clippy + policy)
+    if: ${{ always() }}
+    needs: [lint-core, lint-policy, lint-features]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every lint lane to pass
+        env:
+          CORE_RESULT: ${{ needs.lint-core.result }}
+          POLICY_RESULT: ${{ needs.lint-policy.result }}
+          FEATURES_RESULT: ${{ needs.lint-features.result }}
+        run: |
+          set -euo pipefail
+          for result in "$CORE_RESULT" "$POLICY_RESULT" "$FEATURES_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "A lint lane did not pass: $result"
+              exit 1
+            fi
+          done
+
   test:
     name: Test
+    if: ${{ always() }}
+    needs: [test-workspace, test-linux]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every test lane to pass
+        env:
+          WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
+          LINUX_RESULT: ${{ needs.test-linux.result }}
+        run: |
+          set -euo pipefail
+          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "A test lane did not pass: $result"
+              exit 1
+            fi
+          done
+
+  test-workspace:
+    name: Test workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-
-      # `just bdd` exercises the generated Python/TypeScript SDK contracts;
-      # keep its generators available in this job as well as the standalone
-      # reusable BDD workflow.
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v8.2.0
-
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
 
       - uses: ./.github/actions/free-disk
 
@@ -346,20 +368,10 @@ jobs:
 
       - uses: ./.github/actions/install-zigbuild
 
-      - name: Install pinned no_std toolchain and targets
-        run: |
-          rustup toolchain install 1.96.0 --profile minimal \
-            --target wasm32-unknown-unknown,wasm32-wasip1,riscv32imac-unknown-none-elf
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
 
       - name: Build
         run: cargo build --all-targets
@@ -394,104 +406,45 @@ jobs:
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
 
-      - name: Install wasmtime (wasm32-wasip1 test runner)
-        env:
-          # Pinned to match the wasmtime crate version in Cargo.lock.
-          WASMTIME_VERSION: "46.0.1"
+  test-linux:
+    name: Test Linux and conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
         run: |
-          set -euo pipefail
-          tmpdir="$(mktemp -d)"
-          trap 'rm -rf "$tmpdir"' EXIT
-          base="wasmtime-v${WASMTIME_VERSION}-x86_64-linux"
-          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/${base}.tar.xz" \
-            | tar -xJf - -C "$tmpdir"
-          mkdir -p "$HOME/.wasmtime/bin"
-          mv "$tmpdir/${base}/wasmtime" "$HOME/.wasmtime/bin/wasmtime"
-          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
+          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
 
-      - name: mvm-contract builds no_std + alloc on wasm and bare metal
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install pinned no_std toolchain and targets
         run: |
-          cargo +1.96.0 build -p mvm-contract --target wasm32-unknown-unknown
-          cargo +1.96.0 build -p mvm-contract --lib \
-            --target riscv32imac-unknown-none-elf
+          rustup toolchain install 1.96.0 --profile minimal \
+            --target wasm32-unknown-unknown,wasm32-wasip1,riscv32imac-unknown-none-elf
 
-      - name: mvm-contract tests run under wasm
-        run: cargo +1.96.0 test -p mvm-contract --target wasm32-wasip1
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
-      - name: Write a sample ext4 image
-        run: cargo run -p mvm-fs --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
-
-      - name: Loop-mount read-only and verify the ext4 tree
-        run: |
-          set -euo pipefail
-          mnt=$(mktemp -d)
-          sudo mount -o ro,loop /tmp/sample.ext4 "$mnt"
-          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
-          [ "$(cat "$mnt/etc/hosts")" = "127.0.0.1 localhost" ]
-          diff <(printf 'hi from pure-rust ext4\n') "$mnt/hello"
-          [ "$(readlink "$mnt/etc/localhost")" = "hosts" ]
-          [ -d "$mnt/bin" ] && [ -d "$mnt/etc" ]
-          [ "$(stat -c '%a' "$mnt/hello")" = "755" ]
-          [ "$(stat -c '%a' "$mnt/etc/hosts")" = "644" ]
-          [ "$(stat -c '%s' "$mnt/big")" = "716800" ]
-          cap=$(sudo getfattr --absolute-names -n security.capability -e hex "$mnt/bin/ping" \
-            | grep '^security.capability=' | cut -d= -f2)
-          echo "security.capability=$cap"
-          [ "$cap" = "0x0000000200300000000000000000000000000000" ]
-
-      - name: Match dm-verity output against veritysetup
-        run: |
-          set -euo pipefail
-          ours=$(grep '^ROOTHASH ' /tmp/sample.out | awk '{print $2}')
-          theirs=$(veritysetup format --no-superblock \
-              --data-block-size=4096 --hash-block-size=4096 \
-              --salt=0000000000000000000000000000000000000000000000000000000000000000 \
-              /tmp/sample.ext4 /tmp/vs.verity \
-            | awk '/^Root hash:/ {print $3}')
-          echo "ours=$ours theirs=$theirs"
-          [ -n "$ours" ] && [ "$ours" = "$theirs" ]
-          if ! cmp -s /tmp/sample.ext4.verity /tmp/vs.verity; then
-            echo "::error::hash tree differs from veritysetup"
-            ls -l /tmp/sample.ext4.verity /tmp/vs.verity
-            cmp -l /tmp/sample.ext4.verity /tmp/vs.verity | head -20 || true
-            exit 1
-          fi
-
-      - name: Loop-mount a multi-block-group ext4 image
-        run: |
-          set -euo pipefail
-          cargo run -p mvm-fs --example write_multigroup -- /tmp/multigroup.ext4
-          [ "$(stat -c '%s' /tmp/multigroup.ext4)" -gt 134217728 ]
-          mnt=$(mktemp -d)
-          sudo mount -o ro,loop /tmp/multigroup.ext4 "$mnt"
-          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
-          [ "$(cat "$mnt/etc/marker")" = "multi-group marker" ]
-          [ "$(stat -c '%s' "$mnt/big")" = "136314880" ]
-          off=134000000
-          got=$(dd if="$mnt/big" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
-          [ "$got" = "$((off % 251))" ]
-
-      - name: Loop-mount a depth-1 extent-tree ext4 image
-        run: |
-          set -euo pipefail
-          cargo run -p mvm-fs --example write_extent_tree -- /tmp/extent_tree.ext4
-          [ "$(stat -c '%s' /tmp/extent_tree.ext4)" -gt 536870912 ]
-          mnt=$(mktemp -d)
-          sudo mount -o ro,loop /tmp/extent_tree.ext4 "$mnt"
-          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
-          [ "$(cat "$mnt/etc/marker")" = "extent-tree marker" ]
-          [ "$(stat -c '%s' "$mnt/huge")" = "545259520" ]
-          off=537000000
-          got=$(dd if="$mnt/huge" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
-          [ "$got" = "$((off % 251))" ]
-
-      # Hermetic BDD: live microVM and bundle scenarios remain opt-in. The
-      # meta-gate validates the claim register against scenarios and witnesses.
-      - name: Conformance meta-gate
-        run: cargo test -p mvm-conformance --test meta
-
-      - name: Hermetic BDD scenarios
-        run: just bdd
+      - name: Run Linux, no_std, filesystem, and conformance coverage
+        run: bash scripts/ci-linux-coverage.sh
 
   nix-flake-check:
     name: Nix flake check (Linux eval)
