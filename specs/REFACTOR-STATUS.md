@@ -275,6 +275,13 @@ for detailed scope and acceptance criteria.
   - [x] Keep the removed MCP server and smoke lane out of CI
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
+
+- [x] Plan 297 — Parallel pull-request CI lanes
+      (`specs/plans/297-ci-parallel-lanes.md`)
+  - [x] Split independent lint and Linux-only test coverage into concurrent
+        jobs without changing required check names
+  - [x] Keep targeted feature coverage and Linux conformance coverage intact
+  - [x] Complete workflow and repository verification
 - [~] Plan 276 — Content-addressing conformance and defense
       (`specs/plans/276-content-addressing-conformance-and-defense.md`)
   - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
