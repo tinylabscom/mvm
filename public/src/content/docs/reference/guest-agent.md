@@ -173,6 +173,17 @@ gate keeps the handler symbols *absent* from production binaries; the
 profile gate keeps the dispatcher *reachable but refusing* for dev
 verbs in sealed-prod. Both checks run on every request.
 
+### Run-shaped agent grants
+
+The image profile remains an artifact property, but the host's attenuated
+ProdSafe grant is a property of the launch. A baked-entrypoint run on a
+non-dev profile is eligible for that restricted grant; a PTY (`ConsoleOpen`) or
+an ad-hoc argv (`Exec`) run is not, because those paths require DevOnly verbs.
+The decision does not depend on an OCI rootfs being marked sealed. Console
+attachment is a separate host-side gate and remains unavailable for sealed
+production images; a restricted grant never widens the guest profile or adds
+interactive handlers.
+
 ## Readiness model
 
 Plan 76 Phase 2 binds the vsock control port **before** entrypoint

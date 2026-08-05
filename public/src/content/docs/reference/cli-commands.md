@@ -63,7 +63,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
 | `mvmctl machine run --flake <ref> --flake-profile <variant>` | Flake package variant (e.g. worker, gateway) |
 | `mvmctl machine run --host-service <service>` | Bind a host service the workload may call over the broker channel (repeatable, e.g. `host.audit.v1`). Baked into the signed execution plan: the broker refuses any service absent from the set. Binding an SDK-served service (`host.audit.v1`, `host.cost.v1`, `host.secrets.v1`, `host.time.v1`) also attaches the optional SDK sidecar read-only at `/mvm/sdk`. On an installed `mvmctl` a cold cache downloads the published sidecar for the running version and arch, hash-verifies it, and boots; the launch is refused if the download fails or the artifact is version-mismatched, tampered, or incomplete. From a source checkout the refusal names `nix build ./nix/images/runtime-overlay#sdk-sidecar-image` instead of downloading, because building it needs the builder VM |
-| `mvmctl machine session start <template> --agent-verb <verb>` | Boot a prod session with an explicit ProdSafe agent-verb allow-list instead of the computed sealed-image default. Repeatable; refused with `--dev` |
+| `mvmctl machine session start <template> --agent-verb <verb>` | Boot a prod session with an explicit ProdSafe agent-verb allow-list instead of the computed baked-entrypoint/non-dev default. Repeatable; refused with `--dev` |
 | `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
 | `mvmctl machine stop [name...]` | Stop one or more VMs by name, or `--all` |
 | `mvmctl machine ls` | List every microVM: persistent machines and running transients (alias: `ps`) |
@@ -298,7 +298,10 @@ with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
 security `--profile`, OCI `--image`, signed `--receipt`, `--json`/`--dry-run`,
 and the SDK `--mode`/`--dev`/`--prod` transport. Arbitrary command dispatch
 requires a dev-feature guest agent (the `do_exec` handler is `interactive`-gated,
-claim 4); production guests run their baked entrypoint via `mvmctl machine run --entrypoint` (no shell).
+claim 4). A baked-entrypoint run on a non-dev profile receives the restricted
+ProdSafe grant; PTY and ad-hoc argv runs require DevOnly verbs. Production
+guests run their baked entrypoint via `mvmctl machine run --entrypoint` (no
+shell).
 
 | Command | Description |
 |---------|-------------|
@@ -351,7 +354,8 @@ flag:
 - **Foreground interactive** (`-t`/`--tty`, with `-i` accepted so `-it`
   parses): boot a fresh transient VM, run the requested argv attached to a PTY,
   return that command's exit code, then tear the VM down. **Dev-only** —
-  refused for a sealed image (claim 15) and when stdin is not a terminal.
+  requires DevOnly verbs, is refused for a sealed image (claim 15), and is
+  refused when stdin is not a terminal.
 - **Persistent** (`machine create` + `machine start`, or `machine run -d`):
   boot a machine that survives after the command returns and is reconnectable by
   name through `machine shell`/`exec`/`stop`. Bare `-d` auto-generates a name and
@@ -562,8 +566,9 @@ mvmctl machine stop  blue-fox-3f2a --yes      # tear it down when done
 `-d --name <N>` does the same with a name you choose.
 
 **Interactive is dev-only.** `-t`/`--tty` attaches the foreground command to a
-PTY and is refused for a sealed/production image (claim 15 — no interactive
-access to a sealed microVM) and when stdin is not a terminal. `machine run -it`
+PTY and requires DevOnly verbs; it is refused for a sealed/production image
+(claim 15 — no interactive access to a sealed microVM) and when stdin is not a
+terminal. `machine run -it`
 requires an argv after `--`; use `machine shell <name>` (or `machine exec
 <name>` with no argv) for the default shell on an already-running machine.
 
