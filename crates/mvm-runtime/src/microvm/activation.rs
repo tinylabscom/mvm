@@ -257,37 +257,21 @@ fn probe_roothash_sidecar(rootfs_path: &str) -> Option<String> {
 
 /// Translate configured volumes into the exact devices the runner attached.
 fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
-    let disk_count = config
-        .volumes
-        .iter()
-        .filter(|volume| matches!(volume.kind, VmVolumeKind::Disk))
-        .count();
-    let blocks = crate::workload_runner::workload_blocks(config);
-    if blocks.len() < disk_count {
-        bail!(
-            "volume activation expected {disk_count} user block devices, but the VMM spec has {}",
-            blocks.len()
-        );
-    }
-    let first_user_block = blocks.len() - disk_count;
-    let mut block_devices = blocks[first_user_block..]
-        .iter()
-        .map(crate::driver::BlockDev::device_node);
+    let block_devices = crate::workload_runner::workload_volume_devices(config);
 
     config
         .volumes
         .iter()
+        .zip(block_devices)
         .enumerate()
-        .map(|(idx, volume)| {
+        .map(|(idx, (volume, device))| {
             let (kind, device) = match volume.kind {
                 VmVolumeKind::DirShare => (VolumeConfigKind::VirtioFs, None),
-                VmVolumeKind::Disk => (
-                    VolumeConfigKind::Block,
-                    Some(block_devices.next().with_context(|| {
-                        format!("missing VMM block device for user volume uvol{idx}")
-                    })?),
-                ),
+                VmVolumeKind::Disk => (VolumeConfigKind::Block, device),
             };
+            if matches!(volume.kind, VmVolumeKind::Disk) && device.is_none() {
+                bail!("missing VMM block device for user volume uvol{idx}");
+            }
             Ok(VolumeConfig {
                 tag: format!("uvol{idx}"),
                 mountpoint: volume.guest.clone(),

@@ -190,6 +190,12 @@ pub(crate) fn runner_cmdline(
 ) -> String {
     let base = workload_cmdline(config, state_dir, &base_bootargs);
     let mut tokens: Vec<String> = Vec::new();
+    if !config.rootfs_path.is_empty() || config.virtiofs_root.is_some() {
+        // HVF/libkrun workload guests have no RTC. Seed their wall clock before
+        // image processes perform TLS validation (for example, pip contacting
+        // PyPI), using the same host epoch captured at boot time as the builder.
+        tokens.push(mvm_build::builder_vm::builder_hostepoch_cmdline_token());
+    }
     if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
         tokens.push(uvols);
     }
@@ -575,5 +581,21 @@ mod tests {
             runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs),
             String::new()
         );
+    }
+
+    #[test]
+    fn runner_cmdline_seeds_the_clock_for_a_rootfs_workload() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        let epoch = cmdline
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix("mvm.hostepoch="))
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("rootfs workload must carry a positive host epoch");
+        assert!(epoch > 0);
     }
 }

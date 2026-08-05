@@ -733,26 +733,41 @@ pub fn shell_quote(arg: &str) -> String {
 }
 
 /// Build the wrapper script that runs inside the guest:
-///   1. mounts each `--add-dir` ext4 image read-only by label
+///   1. mounts each `--add-dir` ext4 image at the exact VMM-assigned block device
 ///   2. exports launch-plan-derived env vars (when target is LaunchPlan)
 ///   3. exports CLI `--env` vars (CLI overrides launch-plan)
 ///   4. cds into `working_dir` (when target is LaunchPlan and it's set)
 ///   5. execs the resolved command
 ///
-/// `add_dir_labels` is the parallel list of ext4 labels assigned to each
-/// `AddDir` (in the same order as `req.add_dirs`).
+/// `add_dir_devices` is the parallel list of guest block devices assigned to
+/// each `AddDir` (in the same order as `req.add_dirs`). The devices come from
+/// the runner's block-layout mapper; label lookup is unavailable in some
+/// minimal OCI guests.
 ///
 /// Env precedence (lowest → highest): launch-plan app.env → launch-plan
 /// entrypoint.env → CLI `--env`. The first two are merged in
 /// `parse_launch_plan`; CLI wins by being emitted last.
-pub fn build_guest_wrapper(req: &ExecRequest, add_dir_labels: &[String]) -> String {
+pub fn build_guest_wrapper(req: &ExecRequest, add_dir_devices: &[String]) -> String {
     let mut script = String::from("set -e\n");
-    for (dir, label) in req.add_dirs.iter().zip(add_dir_labels.iter()) {
+    for (dir, device) in req.add_dirs.iter().zip(add_dir_devices.iter()) {
         let mount_point = shell_quote(&dir.guest_path);
-        let label_q = shell_quote(label);
+        let device_q = shell_quote(device);
+        let mount_probe = shell_quote(&format!(" {} ", dir.guest_path));
         let mount_opts = if dir.read_only { " -o ro" } else { "" };
+        // The OCI init may have mounted this volume already. Keep the
+        // wrapper idempotent while retaining a fallback for images whose init
+        // does not perform user-volume activation.
         script.push_str(&format!(
-            "mkdir -p {mount_point}\nmount LABEL={label_q} {mount_point}{mount_opts}\n",
+            concat!(
+                "mkdir -p {mount_point}\n",
+                "if ! grep -Fq {mount_probe} /proc/mounts 2>/dev/null; then\n",
+                "mount {device_q} {mount_point}{mount_opts}\n",
+                "fi\n",
+            ),
+            mount_point = mount_point,
+            mount_probe = mount_probe,
+            device_q = device_q,
+            mount_opts = mount_opts,
         ));
     }
     if let ExecTarget::LaunchPlan { entrypoint } = &req.target {
@@ -995,7 +1010,6 @@ fn run_inner(
         vm_name,
         staging_dir,
         volumes,
-        add_dir_labels,
     } = stage_add_dir_volumes(&req)?;
 
     // Snapshot eligibility, the dm-verity sidecar probe, the virtiofs-root
@@ -1041,6 +1055,7 @@ fn run_inner(
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
     crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
+    let add_dir_devices = add_dir_block_devices(&start_config, req.add_dirs.len())?;
     let t_admitted = timing.then(std::time::Instant::now);
 
     // Reap stale standbys, try a warm-pool claim, then fall back to
@@ -1058,7 +1073,7 @@ fn run_inner(
     let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
 
     // Run the command + always tear down.
-    let run_outcome = run_in_guest(&vm_name, &req, &add_dir_labels, capture, timing);
+    let run_outcome = run_in_guest(&vm_name, &req, &add_dir_devices, capture, timing);
     let t_command_done = timing.then(std::time::Instant::now);
     let (result, t_vsock_ready) = match run_outcome {
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
@@ -1201,7 +1216,6 @@ struct AddDirStaging {
     vm_name: String,
     staging_dir: String,
     volumes: Vec<mvm_runtime::image::RuntimeVolume>,
-    add_dir_labels: Vec<String>,
 }
 
 /// Build read-only ext4 images for each `--add-dir`, staged in a transient
@@ -1213,7 +1227,6 @@ fn stage_add_dir_volumes(req: &ExecRequest) -> Result<AddDirStaging> {
         .display()
         .to_string();
     let mut volumes: Vec<mvm_runtime::image::RuntimeVolume> = Vec::new();
-    let mut add_dir_labels: Vec<String> = Vec::new();
     for (idx, dir) in req.add_dirs.iter().enumerate() {
         let label = format!("mvm-extra-{idx}");
         let image_path = format!("{staging_dir}/extra-{idx}.ext4");
@@ -1233,13 +1246,11 @@ fn stage_add_dir_volumes(req: &ExecRequest) -> Result<AddDirStaging> {
             // `--add-dir` builds an RO ext4 image, so this is a disk.
             ..Default::default()
         });
-        add_dir_labels.push(label);
     }
     Ok(AddDirStaging {
         vm_name,
         staging_dir,
         volumes,
-        add_dir_labels,
     })
 }
 
@@ -1489,6 +1500,37 @@ fn install_ctrlc_teardown(
     interrupted
 }
 
+/// Resolve the guest block devices for the transient command's `--add-dir`
+/// volumes. `build_start_config` places those volumes before any SDK sidecar,
+/// while the runtime mapper resolves their actual slots after rootfs, verity,
+/// and runtime-overlay devices have been accounted for.
+fn add_dir_block_devices(config: &VmStartConfig, count: usize) -> Result<Vec<String>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let devices = mvm_runtime::workload_runner::workload_volume_devices(config);
+    if devices.len() < count {
+        anyhow::bail!(
+            "expected {count} --add-dir volumes, but the start config carries only {}",
+            devices.len()
+        );
+    }
+
+    devices
+        .into_iter()
+        .take(count)
+        .enumerate()
+        .map(|(idx, device)| {
+            device.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--add-dir volume {idx} has no attached block device on the workload runner"
+                )
+            })
+        })
+        .collect()
+}
+
 /// Tear down the transient VM after the guest command finishes (or fails to
 /// dispatch): stop the backend VM, top up the warm pool toward its target,
 /// sync back any writable `--add-dir` mounts, and remove the host VM state
@@ -1621,7 +1663,7 @@ fn restore_via_snapshot(
 fn run_in_guest(
     vm_name: &str,
     req: &ExecRequest,
-    labels: &[String],
+    devices: &[String],
     capture: bool,
     timing: bool,
 ) -> Result<(Either<i32, ExecOutput>, Option<std::time::Instant>)> {
@@ -1631,10 +1673,10 @@ fn run_in_guest(
     }
     // Agent reachable over vsock: the command is about to be dispatched.
     let vsock_ready = timing.then(std::time::Instant::now);
-    let wrapper = build_guest_wrapper(req, labels);
+    let wrapper = build_guest_wrapper(req, devices);
 
     if req.pty {
-        let pty = pty_console_request(req, labels, wrapper);
+        let pty = pty_console_request(req, devices, wrapper);
         let exit_code =
             crate::commands::vm::console::run_pty_argv_for_exit(vm_name, pty.argv, pty.env)?;
         return Ok((Either::Left(exit_code), vsock_ready));
@@ -2036,6 +2078,17 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn disk_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: host.into(),
+            guest: guest.into(),
+            size: String::new(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            encrypted: false,
+        }
+    }
     use mvm_core::util::test_env::TestEnv;
 
     #[test]
@@ -2265,6 +2318,36 @@ mod tests {
     }
 
     #[test]
+    fn add_dir_block_devices_follow_the_runtime_volume_layout() {
+        let config = VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            verity_path: Some("/img/rootfs.verity".into()),
+            runtime_overlay_path: Some("/img/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
+            runtime_overlay_roothash: Some("ab".repeat(32)),
+            volumes: vec![
+                disk_volume("/vol/app.ext4", "/work"),
+                disk_volume("/vol/data.ext4", "/data"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            add_dir_block_devices(&config, 2).expect("disk volumes resolve"),
+            vec!["/dev/vde", "/dev/vdf"]
+        );
+    }
+
+    #[test]
+    fn add_dir_block_devices_rejects_a_missing_volume() {
+        let config = VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let error = add_dir_block_devices(&config, 1).expect_err("missing volume must fail");
+        assert!(error.to_string().contains("expected 1 --add-dir volumes"));
+    }
+
+    #[test]
     fn build_guest_wrapper_no_extras() {
         let req = ExecRequest {
             name: None,
@@ -2359,9 +2442,10 @@ mod tests {
             hypervisor: None,
             sdk_sidecar: None,
         };
-        let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
+        let script = build_guest_wrapper(&req, &["/dev/vde".to_string()]);
         assert!(script.contains("mkdir -p '/g'"));
-        assert!(script.contains("mount LABEL='mvm-extra-0' '/g' -o ro"));
+        assert!(script.contains("if ! grep -Fq ' /g ' /proc/mounts 2>/dev/null; then"));
+        assert!(script.contains("mount '/dev/vde' '/g' -o ro"));
         assert!(script.contains("export FOO='bar baz'"));
         assert!(script.contains("exec 'echo' '$FOO'"));
     }
@@ -2392,13 +2476,51 @@ mod tests {
             hypervisor: None,
             sdk_sidecar: None,
         };
-        let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
+        let script = build_guest_wrapper(&req, &["/dev/vde".to_string()]);
         // RW mount is unqualified — no `-o ro`.
         assert!(
-            script.contains("mount LABEL='mvm-extra-0' '/g'\n"),
+            script.contains("mount '/dev/vde' '/g'\n"),
             "expected unqualified mount line, got: {script}"
         );
         assert!(!script.contains("-o ro"), "RW mount must not include -o ro");
+    }
+
+    #[test]
+    fn build_guest_wrapper_emits_every_configured_mount() {
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            add_dirs: vec![
+                AddDir {
+                    host_path: "/app".into(),
+                    guest_path: "/work".into(),
+                    read_only: true,
+                },
+                AddDir {
+                    host_path: "/data".into(),
+                    guest_path: "/data".into(),
+                    read_only: false,
+                },
+            ],
+            env: Vec::new(),
+            target: ExecTarget::Inline {
+                argv: vec!["true".into()],
+            },
+            timeout_secs: Some(30),
+            pty: false,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+            hypervisor: None,
+            sdk_sidecar: None,
+        };
+        let script = build_guest_wrapper(&req, &["/dev/vde".to_string(), "/dev/vdf".to_string()]);
+        assert!(script.contains("mount '/dev/vde' '/work' -o ro\n"));
+        assert!(script.contains("mount '/dev/vdf' '/data'\n"));
     }
 
     #[test]
@@ -2456,9 +2578,9 @@ mod tests {
             hypervisor: None,
             sdk_sidecar: None,
         };
-        let wrapper = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
+        let wrapper = build_guest_wrapper(&req, &["/dev/vde".to_string()]);
 
-        let pty = pty_console_request(&req, &["mvm-extra-0".to_string()], wrapper.clone());
+        let pty = pty_console_request(&req, &["/dev/vde".to_string()], wrapper.clone());
 
         assert_eq!(pty.argv, vec!["/bin/sh", "-lc", wrapper.as_str()]);
         assert!(pty.env.is_empty());
