@@ -113,7 +113,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-17` | `build` | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | `fn:input_is_refused_without_a_plan_grant`, `fn:a_second_writer_is_refused_while_the_lease_is_held`, `fn:secret_material_split_across_frames_is_still_refused`, `fn:every_refusal_is_audited`, `fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason` |
+| `MVM-SEC-17` | `build` | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | `fn:input_is_refused_without_a_plan_grant`, `fn:a_second_writer_is_refused_while_the_lease_is_held`, `fn:secret_material_split_across_frames_is_still_refused`, `fn:every_refusal_is_audited`, `fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason`, `fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value`, `fn:the_handshakes_two_halves_go_to_two_different_places`, `fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload`, `fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret`, `fn:a_secret_split_across_two_writes_inside_the_threshold_is_still_refused`, `fn:the_idle_release_does_not_depend_on_what_the_withheld_bytes_are`, `fn:what_is_withheld_is_a_length_and_never_a_verdict_about_the_bytes` |
 
 ## Cited authorities
 

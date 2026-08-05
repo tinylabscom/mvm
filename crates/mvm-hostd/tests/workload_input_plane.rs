@@ -31,7 +31,7 @@ use mvm_hostd::audit::emitter::{AuditEmitter, stream_audit};
 use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run};
 use mvm_hostd::stream::{
     CATEGORY_HOST_SECRET, InputAudit, InputBinding, InputGate, InputRefusal, InputRouteError,
-    InputTransport, KnownSecret, StreamPlane,
+    InputTransport, StreamPlane,
 };
 use mvm_hostd::supervisor::verify_audit_chain;
 
@@ -246,6 +246,22 @@ impl Fixture {
         Self::bound(prefix, secret, None)
     }
 
+    /// Stand in for the substitution endpoint: fingerprint `secret` and record
+    /// it exactly where the spawn path records what the endpoint reported.
+    ///
+    /// This is the whole point of routing it through the registry rather than
+    /// binding the gate directly — the production path that installs a
+    /// fingerprint set is `StreamPlane::open_input`, and a test that reached
+    /// past it would pass whether or not that call existed.
+    fn endpoint_reports(vm: &str, secret: &[u8]) {
+        let fingerprint = mvm_contract::stream::secret_fingerprint::SecretFingerprint::of(
+            secret,
+            mvm_contract::stream::secret_fingerprint::SecretCategory::HostSecret,
+        )
+        .expect("a non-empty secret fingerprints");
+        mvm_runtime::record_secret_fingerprints(vm, vec![fingerprint]);
+    }
+
     /// The same, on a lease short enough for a test to outwait.
     fn with_lease_ttl(prefix: &str, lease_ttl: std::time::Duration) -> Self {
         Self::bound(prefix, None, Some(lease_ttl))
@@ -260,13 +276,13 @@ impl Fixture {
         let mut binding = InputBinding::new().with_audit(InputAudit::new(
             AuditEmitter::with_dir(chain_key.clone(), chain_dir.path()).expect("open the chain"),
         ));
-        if let Some(secret) = secret {
-            binding = binding.with_secret(KnownSecret::host_material(secret));
-        }
         if let Some(ttl) = lease_ttl {
             binding = binding.with_lease_ttl(ttl);
         }
         InputGate::bind(&vm, binding);
+        if let Some(secret) = secret {
+            Self::endpoint_reports(&vm, secret);
+        }
 
         Self {
             vm,
@@ -449,8 +465,8 @@ fn a_secret_split_across_two_frames_does_not_reassemble_in_the_workload() {
     fx.plane.release(&fx.vm);
     let seen = workload_output(child);
     assert_eq!(
-        seen, b"echo ",
-        "only the bytes that were never part of the secret may arrive"
+        seen, b"",
+        "nothing may arrive: the whole first frame sat inside the carried window"
     );
     assert!(
         !seen.windows(SECRET.len()).any(|w| w == SECRET),

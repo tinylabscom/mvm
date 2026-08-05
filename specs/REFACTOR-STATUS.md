@@ -1,6 +1,10 @@
 # Refactor status
 
+<<<<<<< HEAD
 Last updated: 2026-08-05
+=======
+Last updated: 2026-08-04
+>>>>>>> b1153c154 (fix(hostd): release the withheld tail on writer silence)
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -45,7 +49,7 @@ for detailed scope and acceptance criteria.
       (`specs/plans/289-host-side-machine-logs.md`)
   - [x] Read backend-captured logs from the isolated host VM state directory
   - [x] Preserve log flags without shell interpolation; follow mode honors the
-        requested line count. Superseded by plan 283, which replaced the reader:
+        requested line count. Superseded by plan 295, which replaced the reader:
         `--lines`/`--follow`/`--hypervisor` and the explicit missing-log error
         survive, the pre-split `firecracker.log` substitution does not
   - [x] Cover host-only CLI behavior and log resolution with regression tests
@@ -102,8 +106,8 @@ for detailed scope and acceptance criteria.
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
   - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 
-- [~] Plan 283 — Workload stream plane
-      (`specs/plans/283-workload-stream-plane.md`)
+- [~] Plan 295 — Workload stream plane
+      (`specs/plans/295-workload-stream-plane.md`)
   - [x] T1–T3 — stream record DTOs + chain verify; transcript stream
         directions and per-chunk linkage; ring retention
   - [x] T4–T5b — guest pump emits as produced; fd-3 control records; the
@@ -158,9 +162,10 @@ for detailed scope and acceptance criteria.
         grant for a shell-shaped entrypoint; and the claims ledger — claim 15
         reworded (it used to hold by *absence*, there being no host→guest byte
         path at all, and now holds by *policy*) and claim 17 added at status
-        `Preview` with a four-item limits note (T17 below closed two of the
-        four; the known-secret set being empty on every real VM is what keeps
-        the row at `Preview`)
+        `Preview` with a limits note (T17 below closed two; plan 293 WS1 closed
+        the third by giving the scan fingerprints, and its follow-on closed the
+        blanket carry's stall with a content-independent idle release; the two
+        that remain are permanent properties of hashing and of scanning)
   - [x] T16 — the input plane's documentation: a sibling guide
         `guides/workload-input.md` (grant, single-writer lease, secret scan,
         explicit EOF, the `--prod` shell refusal stated as the heuristic it is,
@@ -186,9 +191,7 @@ for detailed scope and acceptance criteria.
         `mvm-meta.json` sidecar — a new `entrypointArgv` field written by both
         the `mkGuest` and OCI build paths, because the host cannot read inside a
         materialized ext4 — and admission **fails closed** when it cannot
-        resolve one, so the shell refusal cannot go dormant again. Claim 17
-        stays `Preview` on limit 1 alone: `InputGate::bind` still has no
-        production caller, so the secret scan is inert on every real VM
+        resolve one, so the shell refusal cannot go dormant again
   - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
         transcript is now sealed by whatever stops the VM. The *follow* half
         remains: the console follower still dies with the starting process, so

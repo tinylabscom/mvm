@@ -169,7 +169,9 @@ pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 /// pushed onto the drive, the key is persisted host-side for the terminator
 /// endpoint. See [`substitution_spawn::build_egress_tls_delivery`].
 pub use substitution_spawn::{
-    EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, EndpointTransport, build_egress_tls_delivery,
+    EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, EndpointHandshake, EndpointTransport,
+    build_egress_tls_delivery, forget_secret_fingerprints, record_secret_fingerprints,
+    recorded_secret_fingerprints,
 };
 
 /// Per-VM broker-services spawn/reap, called from the workload backends' launch

@@ -71,7 +71,7 @@
       explicit-root config helper (`vms_dir_at` / `vm_state_dir_at`), and the
       CLI subprocess receives an isolated home. Workspace tests, check,
       all-target clippy, formatting, and both home policy gates are green.
-      The reader itself was then replaced by plan 283's stream plane, which
+      The reader itself was then replaced by plan 295's stream plane, which
       keeps the host-side property and reads the files in-process rather than
       spawning `tail`; see that plan doc for which of 289's constraints the
       replacement holds.
@@ -442,7 +442,7 @@ updates only its own entry below.
       and refuses; native Windows is not claimed.
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
-      dormant**. Tracked in `specs/plans/283-workload-stream-plane.md` and
+      dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and
       `specs/adrs/035-workload-stream-plane.md`.
       Phase 1 (output, T1–T10 plus T5b/T6b/T9b–T9d) ships: the guest pump emits
       as produced instead of buffering to exit, the 1 MiB cap that *killed* a
@@ -472,9 +472,21 @@ updates only its own entry below.
       because the host cannot read inside a materialized ext4), and admission
       **fails closed** when it cannot resolve one — so the shell refusal cannot
       go dormant again by a caller forgetting to resolve.
-      Claim 17 stays `Preview` on one limit: `InputGate::bind` has no
-      production caller, so the secret scan's known set is empty on every real
-      VM and its refusal has never fired outside tests.
+      Plan 293 WS1 then closed the last dormant leg: the per-VM substitution
+      endpoint — the one process holding a workload's credentials in the clear
+      — fingerprints each secret it resolves and reports `(length, rolling
+      hash, category)` on its ready handshake, and `StreamPlane::open_input`
+      installs that set on the gate. No plaintext crosses into `mvmctl`.
+      Holding fingerprints instead of values costs the scan its live-prefix
+      precision, so it withholds a blanket `longest_secret - 1` tail — a
+      *precise* carry would make withhold-or-deliver depend on content, which
+      is a prefix oracle — and the gate releases that tail after 50ms of writer
+      silence, on elapsed time alone, which is what lets a workload reading one
+      request line at a time ever receive one.
+      Claim 17 stays `Preview`, now for what the enforcement *is* rather than
+      whether it runs: a fingerprint match is a length-and-hash match, not an
+      identity, and encoding, derivation, a window-straddling split and a split
+      the sender separated by a deliberate pause defeat the scan permanently.
 
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added

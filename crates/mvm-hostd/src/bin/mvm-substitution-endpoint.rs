@@ -31,8 +31,8 @@ use tracing::info;
 
 use mvm_hostd::keyholder::secret_placeholder_env;
 use mvm_hostd::supervisor::substitution_endpoint::{
-    EgressMode, EndpointConfig, EndpointTransport, assemble, build_audit_recorder,
-    build_egress_gate, parse,
+    EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, assemble,
+    build_audit_recorder, build_egress_gate, fingerprint_bound_secrets, parse,
 };
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
@@ -91,21 +91,39 @@ fn main() -> Result<()> {
     // Ready handshake: report the minted (guest var → placeholder) pairs on
     // stdout so the backend can set them in the guest launch env, then boot.
     // Values are never reported — only opaque placeholders.
+    //
+    // The same line carries the input-gate fingerprints. This is the one
+    // process that holds these secrets in the clear, so it is the only place
+    // their recognisable shape can be computed without moving plaintext
+    // anywhere; what crosses is a length, a rolling hash and a category each.
+    // A VM serving raw egress assembled nothing and has no secrets to
+    // fingerprint.
     let handed_len = assembled
         .as_ref()
         .map(|(_, handed)| handed.len())
         .unwrap_or_default();
-    let env = assembled
-        .as_ref()
-        .map(|(_, handed)| secret_placeholder_env(handed))
-        .unwrap_or_default();
-    let line = serde_json::to_string(&env).context("serializing handed placeholders")?;
+    let handshake = EndpointHandshake {
+        env: assembled
+            .as_ref()
+            .map(|(_, handed)| secret_placeholder_env(handed))
+            .unwrap_or_default(),
+        input_fingerprints: if raw_only {
+            Vec::new()
+        } else {
+            fingerprint_bound_secrets(&cfg).context("fingerprinting the endpoint\'s secrets")?
+        },
+    };
+    let fingerprinted = handshake.input_fingerprints.len();
+    let line = serde_json::to_string(&handshake).context("serializing the ready handshake")?;
     {
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "{line}").context("writing handshake line")?;
         stdout.flush().context("flushing handshake line")?;
     }
-    info!(handed = handed_len, "placeholders handed; serving");
+    info!(
+        handed = handed_len,
+        fingerprinted, "placeholders handed; serving"
+    );
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

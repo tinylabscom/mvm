@@ -27,15 +27,26 @@
 //!   path that moves bytes out of a session is gated on it, extraction
 //!   included: a writer that stalled past its TTL must not deliver into a
 //!   stdin its successor now owns.
-//! - **The secret scan spans frame boundaries.** A scanner that inspects one
-//!   frame at a time is defeated by splitting a secret across two writes, so
-//!   [`SecretScanner`] carries a sliding window and, more than that, *withholds*
-//!   the tail of the stream that is still a live prefix of a known secret. A
-//!   refusal that arrives after the first half already reached the guest would
-//!   be theatre. See [`SecretScanner`] for what this cannot catch; it is a
-//!   backstop against a confused caller, not a defence against a determined
-//!   one. The real guarantee is upstream: the host has no reason to send a
-//!   secret into a guest, because secrets are substituted on egress instead.
+//! - **The secret scan spans frame boundaries, and holds no secret.** A
+//!   scanner that inspects one frame at a time is defeated by splitting a
+//!   secret across two writes, so `stream::secret_scan`
+//!   carries a sliding window and, more than that, *withholds* the tail of the
+//!   stream it must still be able to see. A refusal that arrives after the
+//!   first half already reached the guest would be theatre. What it slides
+//!   that window against is a set of [`SecretFingerprint`]s — a length and a
+//!   rolling hash each, computed by the process that legitimately holds the
+//!   plaintext — because this gate runs in a process that must not hold one.
+//!   A fingerprint match is a hash match and nothing stronger, which is why
+//!   [`InputRefusal::SecretMaterial`] says so. Holding fingerprints rather than
+//!   values also means the withheld tail is a blanket
+//!   `longest_secret - 1` bytes rather than the exact live prefix, which is
+//!   wider than a request line — so [`InputSession::refresh`] releases it after
+//!   [`DEFAULT_IDLE_FLUSH_AFTER`] of writer silence, on elapsed time alone. See
+//!   `stream::secret_scan` for what this cannot catch;
+//!   it is a backstop against a confused caller, not a defence against a
+//!   determined one. The real guarantee is upstream: the host has no reason to
+//!   send a secret into a guest, because secrets are substituted on egress
+//!   instead.
 //! - **Every refusal is audited, payload-free.** Each refusal, and each grant,
 //!   emits a chain-signed entry naming the binding and the reason. Never the
 //!   frame bytes, and never the matched secret — writing the secret into the
@@ -73,26 +84,63 @@
 //! different opinions about where the stream ended.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use mvm_contract::stream::input::{CloseInput, InputFrame, grants_input};
+use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::plan::ExecutionPlan;
 use zeroize::Zeroize;
 
 use crate::audit::emitter::AuditEmitter;
 use crate::plan_admission::AdmittedPlan;
+use crate::stream::secret_scan::SecretScanner;
+
+/// Category recorded for a secret value the host itself holds for a workload.
+pub use mvm_contract::stream::secret_fingerprint::CATEGORY_HOST_SECRET;
 
 /// How long a writer keeps the input lease without touching it.
 ///
 /// Long enough that an interactive human pausing to think does not lose their
-/// place; short enough that a consumer which crashed mid-session frees the
-/// VM's stdin inside a coffee break rather than at VM teardown.
+/// place, and that a writer waiting between chunks — a pipe blocked on its
+/// upstream, a keepalive tick that slipped — does not lose it to a timer;
+/// short enough that a consumer which crashed mid-session frees the VM's stdin
+/// inside a coffee break rather than at VM teardown.
+///
+/// The pause this describes is a real workflow again only because of
+/// [`DEFAULT_IDLE_FLUSH_AFTER`]: a lease that outlives a pause is worth
+/// nothing if the bytes the writer already typed are still sitting in the
+/// scanner waiting for a write that the workload's silence guarantees will
+/// never come.
 pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 
-/// Category recorded for a secret value the host itself holds for a workload.
-pub const CATEGORY_HOST_SECRET: &str = "host-secret";
+/// How quiet a writer must go before the gate hands over the tail its secret
+/// scan is withholding.
+///
+/// On a VM with bound fingerprints the scanner withholds a blanket
+/// `longest_secret - 1` bytes of every write, so a request line shorter than
+/// that clears nothing at all. Without a release on silence that is a
+/// deadlock, not latency: the workload never receives a line, so it never
+/// answers, so the operator never sends the write that would push the first
+/// one out. The release is what makes the request/response shape work.
+///
+/// 50ms, because the threshold has to sit between two gaps that differ by
+/// orders of magnitude. Below it is the gap *inside* one writer's burst —
+/// consecutive frames of a paste or of a chunked pipe are separated by a
+/// buffer copy and one vsock round trip, microseconds to low milliseconds —
+/// and the scan must stay exact across those, since that is the split a
+/// confused caller actually produces. Above it is the gap a human or a
+/// request/response peer leaves, which is at minimum the workload's own
+/// think time. 50ms is roughly fifty times the first and half of the ~100ms
+/// at which a person starts to perceive delay, so it neither fires inside a
+/// burst nor is felt outside one.
+///
+/// **The decision is elapsed time and nothing else.** It never consults the
+/// withheld bytes, and it must not: a release that depended on content would
+/// be a prefix oracle — feed a byte, watch whether it was withheld, and walk
+/// a secret out one byte at a time. The blanket carry is what denies an
+/// observer that signal, and a content-blind release preserves it.
+pub const DEFAULT_IDLE_FLUSH_AFTER: Duration = Duration::from_millis(50);
 
 /// Why the gate would not let bytes through.
 ///
@@ -119,8 +167,19 @@ pub enum InputRefusal {
         /// The lease holder that was there first.
         holder: String,
     },
-    /// The bytes carry material the host recognises as one of its own secrets.
-    #[error("input carries recognised secret material ({category})")]
+    /// The bytes match the fingerprint of one of the host's own secrets.
+    ///
+    /// Deliberately *not* "carries a secret". The gate holds fingerprints, not
+    /// values, so a match says the bytes have the same length and the same
+    /// rolling hash as a bound secret — which a collision also does. It
+    /// refuses either way, because failing closed is the right direction; but
+    /// an operator handed "this contained a secret" when it did not would lose
+    /// hours proving the negative, so the sentence has to say what was
+    /// actually checked.
+    #[error(
+        "input matches the fingerprint of known secret material ({category}); \
+         a fingerprint match is a length and hash match, not proof these bytes are that secret"
+    )]
     SecretMaterial {
         /// Which category matched. The category, never the value.
         category: &'static str,
@@ -156,52 +215,6 @@ impl InputRefusal {
             Self::LeaseExpired => "lease-expired",
             Self::OutOfOrder { .. } => "out-of-order",
         }
-    }
-}
-
-/// One secret value the gate should recognise on its way *into* a guest.
-///
-/// Held in the clear because recognising a byte sequence requires having it;
-/// the type earns that by rendering as its category and length only, and by
-/// zeroing itself on drop. There is deliberately no accessor for the bytes.
-pub struct KnownSecret {
-    value: Vec<u8>,
-    category: &'static str,
-}
-
-impl KnownSecret {
-    /// A secret the host holds on the workload's behalf.
-    #[must_use]
-    pub fn host_material(value: impl Into<Vec<u8>>) -> Self {
-        Self::categorized(value, CATEGORY_HOST_SECRET)
-    }
-
-    /// The same, under a caller-chosen category name. `&'static str` because a
-    /// category is a fixed vocabulary word that reaches the audit chain, not a
-    /// value derived from the secret.
-    #[must_use]
-    pub fn categorized(value: impl Into<Vec<u8>>, category: &'static str) -> Self {
-        Self {
-            value: value.into(),
-            category,
-        }
-    }
-}
-
-impl fmt::Debug for KnownSecret {
-    /// Shape only. A derived `Debug` would put the secret in every log line
-    /// that ever formats a binding.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KnownSecret")
-            .field("category", &self.category)
-            .field("len", &self.value.len())
-            .finish()
-    }
-}
-
-impl Drop for KnownSecret {
-    fn drop(&mut self) {
-        self.value.zeroize();
     }
 }
 
@@ -300,30 +313,48 @@ fn audit_refused(
 /// stdin.
 ///
 /// Optional in the sense that an unbound VM still gets default-deny, a lease,
-/// and the process audit chain — what a binding adds is the secret set to
+/// and the process audit chain — what a binding adds is the fingerprint set to
 /// recognise, a VM-specific chain, and a lease lifetime.
 pub struct InputBinding {
-    secrets: Vec<KnownSecret>,
+    fingerprints: Vec<SecretFingerprint>,
     audit: Option<Arc<dyn InputAuditSink>>,
     lease_ttl: Duration,
+    idle_flush_after: Duration,
 }
 
 impl InputBinding {
-    /// An empty binding: no known secrets, the process audit chain, the
-    /// default lease lifetime.
+    /// An empty binding: no fingerprints, the process audit chain, the
+    /// default lease lifetime and the default idle release.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            secrets: Vec::new(),
+            fingerprints: Vec::new(),
             audit: None,
             lease_ttl: DEFAULT_LEASE_TTL,
+            idle_flush_after: DEFAULT_IDLE_FLUSH_AFTER,
         }
     }
 
-    /// Recognise one more secret value on the way into this VM.
+    /// Recognise one more secret on the way into this VM.
+    ///
+    /// A [`SecretFingerprint`] and not a value: the process that binds this is
+    /// not the process that holds the plaintext, and keeping it that way is
+    /// the reason the parameter has this type. There is no overload taking
+    /// bytes.
     #[must_use]
-    pub fn with_secret(mut self, secret: KnownSecret) -> Self {
-        self.secrets.push(secret);
+    pub fn with_fingerprint(mut self, fingerprint: SecretFingerprint) -> Self {
+        self.fingerprints.push(fingerprint);
+        self
+    }
+
+    /// The same for a whole set, which is how one arrives: the substitution
+    /// endpoint fingerprints every secret it resolved for this VM at once.
+    #[must_use]
+    pub fn with_fingerprints(
+        mut self,
+        fingerprints: impl IntoIterator<Item = SecretFingerprint>,
+    ) -> Self {
+        self.fingerprints.extend(fingerprints);
         self
     }
 
@@ -361,6 +392,19 @@ impl InputBinding {
         self.lease_ttl = lease_ttl;
         self
     }
+
+    /// How quiet this VM's writer must go before the withheld tail is released.
+    ///
+    /// A knob rather than a constant so the boundary can be exercised from
+    /// both sides without sleeping on a wall clock: zero releases on the first
+    /// idle check, an hour releases on none of them, and both are decided by
+    /// the same elapsed-time comparison production uses. See
+    /// [`DEFAULT_IDLE_FLUSH_AFTER`] for what the value has to sit between.
+    #[must_use]
+    pub fn with_idle_flush_after(mut self, idle_flush_after: Duration) -> Self {
+        self.idle_flush_after = idle_flush_after;
+        self
+    }
 }
 
 impl Default for InputBinding {
@@ -369,12 +413,13 @@ impl Default for InputBinding {
     }
 }
 
-/// A binding as the gate stores it: the secret set shared rather than copied
-/// into every session that opens.
+/// A binding as the gate stores it: the fingerprint set shared rather than
+/// copied into every session that opens.
 struct Bound {
-    secrets: Arc<Vec<KnownSecret>>,
+    fingerprints: Arc<Vec<SecretFingerprint>>,
     audit: Option<Arc<dyn InputAuditSink>>,
     lease_ttl: Duration,
+    idle_flush_after: Duration,
 }
 
 /// The single-writer claim on one VM's stdin.
@@ -412,8 +457,9 @@ fn gate() -> MutexGuard<'static, GateState> {
 /// What one VM's binding supplies, resolved once per open.
 struct Resolved {
     audit: Option<Arc<dyn InputAuditSink>>,
-    secrets: Arc<Vec<KnownSecret>>,
+    fingerprints: Arc<Vec<SecretFingerprint>>,
     lease_ttl: Duration,
+    idle_flush_after: Duration,
 }
 
 /// The gate: process-wide, and reached by name rather than by handle so there
@@ -424,23 +470,54 @@ impl InputGate {
     /// Install what the gate needs to police `vm`'s stdin. Replaces any
     /// previous binding; call it before the workload is reachable.
     ///
-    /// A session snapshots the secret set at [`open`](Self::open) and holds it
-    /// for its lifetime, so re-binding does not change what a *live* session
-    /// recognises — a secret registered mid-session is recognised by the next
-    /// writer, not the current one. Deliberate: the alternative is a scanner
-    /// whose window can change under a partially-scanned stream.
+    /// A session snapshots the fingerprint set at [`open`](Self::open) and
+    /// holds it for its lifetime, so re-binding does not change what a *live*
+    /// session recognises — a secret registered mid-session is recognised by
+    /// the next writer, not the current one. Deliberate: the alternative is a
+    /// scanner whose window can change under a partially-scanned stream.
     pub fn bind(vm: &str, binding: InputBinding) {
         let bound = Bound {
-            secrets: Arc::new(binding.secrets),
+            fingerprints: Arc::new(binding.fingerprints),
             audit: binding.audit,
             lease_ttl: binding.lease_ttl,
+            idle_flush_after: binding.idle_flush_after,
         };
         gate().bindings.insert(vm.to_string(), bound);
     }
 
+    /// Replace just the fingerprint set for `vm`, leaving its chain and its
+    /// lease and idle timings alone.
+    ///
+    /// Two different owners, so two different calls. The fingerprints come
+    /// from the substitution endpoint and change whenever a VM's secrets do;
+    /// the audit chain and the timings are installed once by whoever stood the
+    /// VM up. A caller refreshing one must not silently reset the other — most
+    /// sharply for the chain, where reverting to the process default would
+    /// move a VM's input decisions into a different log without saying so.
+    ///
+    /// Replaces rather than merges: a set that could only grow would let a
+    /// previous boot's fingerprints outlive the secrets they stood for.
+    pub fn bind_fingerprints(vm: &str, fingerprints: Vec<SecretFingerprint>) {
+        let mut state = gate();
+        match state.bindings.get_mut(vm) {
+            Some(bound) => bound.fingerprints = Arc::new(fingerprints),
+            None => {
+                state.bindings.insert(
+                    vm.to_string(),
+                    Bound {
+                        fingerprints: Arc::new(fingerprints),
+                        audit: None,
+                        lease_ttl: DEFAULT_LEASE_TTL,
+                        idle_flush_after: DEFAULT_IDLE_FLUSH_AFTER,
+                    },
+                );
+            }
+        }
+    }
+
     /// Drop `vm`'s binding and any lease on it — the teardown half of
     /// [`bind`](Self::bind). Leaving the binding behind would keep a dead VM's
-    /// secrets resident.
+    /// fingerprints resident.
     pub fn unbind(vm: &str) {
         let mut state = gate();
         state.bindings.remove(vm);
@@ -503,7 +580,12 @@ impl InputGate {
             holder,
             audit,
             lease_ttl: resolved.lease_ttl,
-            scanner: SecretScanner::new(resolved.secrets),
+            idle_flush_after: resolved.idle_flush_after,
+            // The session opens "just written to", so a writer that opens and
+            // sits there has nothing withheld to release and nothing to
+            // measure against.
+            last_admitted_at: Instant::now(),
+            scanner: SecretScanner::new(resolved.fingerprints),
             outbox: Vec::new(),
             highest_accepted_seq: None,
             refused: None,
@@ -533,6 +615,12 @@ pub struct InputSession {
     holder: String,
     audit: Arc<dyn InputAuditSink>,
     lease_ttl: Duration,
+    /// How long this session's writer must be silent before the withheld tail
+    /// is released. See [`DEFAULT_IDLE_FLUSH_AFTER`].
+    idle_flush_after: Duration,
+    /// When the scanner last took bytes. The one input to the idle release,
+    /// and deliberately the only one — see [`Self::release_if_idle`].
+    last_admitted_at: Instant,
     scanner: SecretScanner,
     outbox: Vec<u8>,
     highest_accepted_seq: Option<u64>,
@@ -576,9 +664,15 @@ impl InputSession {
             Ok(cleared) => {
                 self.outbox.extend_from_slice(&cleared);
                 self.highest_accepted_seq = Some(frame.seq);
+                // Any accepted frame is activity, including one that cleared
+                // nothing: the writer is mid-burst and the scan must stay
+                // exact across the boundary it just created.
+                self.last_admitted_at = Instant::now();
                 Ok(())
             }
-            Err(category) => Err(self.latch(InputRefusal::SecretMaterial { category })),
+            Err(category) => Err(self.latch(InputRefusal::SecretMaterial {
+                category: category.as_str(),
+            })),
         }
     }
 
@@ -607,9 +701,25 @@ impl InputSession {
         Ok(std::mem::take(&mut self.outbox))
     }
 
-    /// Extend the lease without writing, for a holder that is idle but alive.
+    /// Say "I am idle but alive": extend the lease, and release the tail the
+    /// secret scan has been withholding if the writer has been quiet for
+    /// [`DEFAULT_IDLE_FLUSH_AFTER`].
+    ///
+    /// Both halves answer the same fact, which is why they are one call. A
+    /// lease that survives a pause is worth nothing on a secret-bearing VM if
+    /// the bytes the writer already sent are still held: the scan withholds a
+    /// blanket `longest_secret - 1` bytes, which is wider than a request line,
+    /// so the workload receives nothing, answers nothing, and the writer never
+    /// produces the next write that would push the first one out. Releasing on
+    /// silence is what breaks that circle.
+    ///
+    /// Anything released lands in the outbox, so a caller drains with
+    /// [`take_admitted`](Self::take_admitted) exactly as it would after a
+    /// write.
     pub fn refresh(&mut self) -> Result<(), InputRefusal> {
-        self.check_live()
+        self.check_live()?;
+        self.release_if_idle(Instant::now());
+        Ok(())
     }
 
     /// How many bytes this session is holding that it can no longer hand over:
@@ -648,6 +758,40 @@ impl InputSession {
             after_seq: self.highest_accepted_seq,
             trailing,
         })
+    }
+
+    /// Hand the withheld tail to the outbox once the writer has been quiet for
+    /// [`Self::idle_flush_after`].
+    ///
+    /// **Content-independent, and that is the whole design.** The two inputs
+    /// are how long it has been since the scanner last took bytes and how many
+    /// bytes it is holding. Neither is derived from what those bytes *are*, so
+    /// an observer who watches whether a write came out learns only when it
+    /// wrote — never anything about the secret. The alternative, releasing
+    /// only the tails that cannot still become a secret, is what the plaintext
+    /// scanner did and is a prefix oracle here: hold the input grant, feed one
+    /// byte, see whether it was withheld, and a 40-byte credential falls in
+    /// about 40·256 probes instead of 256^40. A blanket carry leaks nothing
+    /// because it is blanket; a blanket release keeps it that way.
+    ///
+    /// Releasing cannot hand over a secret. The tail is what survived
+    /// [`SecretScanner::admit`], which already refused the whole buffer if any
+    /// window in it matched — so what is released is bytes already proven not
+    /// to contain a bound fingerprint. What is lost is *context*: a secret
+    /// split across the silence is no longer contiguous in the scanner and is
+    /// missed. That needs the sender to pause mid-credential, which a confused
+    /// caller does not do and a determined one does not need, since encoding
+    /// the value defeats the scan outright.
+    fn release_if_idle(&mut self, now: Instant) {
+        if self.scanner.withheld_len() == 0 {
+            return;
+        }
+        if now.duration_since(self.last_admitted_at) < self.idle_flush_after {
+            return;
+        }
+        let mut released = self.scanner.flush();
+        self.outbox.extend_from_slice(&released);
+        released.zeroize();
     }
 
     /// The two runtime conditions every byte-moving call shares: a session
@@ -716,21 +860,28 @@ impl Drop for InputSession {
 /// is filesystem work, and holding the one gate lock across it would stall
 /// every other VM's writer behind this VM's disk.
 fn resolve(vm: &str) -> Resolved {
-    let (audit, secrets, lease_ttl) = {
+    let (audit, fingerprints, lease_ttl, idle_flush_after) = {
         let state = gate();
         match state.bindings.get(vm) {
             Some(bound) => (
                 bound.audit.clone(),
-                Arc::clone(&bound.secrets),
+                Arc::clone(&bound.fingerprints),
                 bound.lease_ttl,
+                bound.idle_flush_after,
             ),
-            None => (None, Arc::new(Vec::new()), DEFAULT_LEASE_TTL),
+            None => (
+                None,
+                Arc::new(Vec::new()),
+                DEFAULT_LEASE_TTL,
+                DEFAULT_IDLE_FLUSH_AFTER,
+            ),
         }
     };
     Resolved {
         audit: audit.or_else(process_audit),
-        secrets,
+        fingerprints,
         lease_ttl,
+        idle_flush_after,
     }
 }
 
@@ -831,112 +982,6 @@ fn build_process_audit() -> anyhow::Result<InputAudit> {
     )?))
 }
 
-/// Recognises known secret material in a byte stream that arrives in
-/// arbitrarily chopped frames.
-///
-/// Two things make it work across frames. It scans the concatenation of the
-/// carried tail and the new payload, so a secret split down the middle is
-/// still a contiguous match; and it *withholds* the longest suffix of the
-/// stream that is still a proper prefix of some known secret, so the first
-/// half of a split secret never reaches the guest ahead of the refusal. A
-/// suffix that is not a prefix of anything ships immediately, which is what
-/// keeps ordinary interactive input from being delayed.
-///
-/// **What it cannot catch**, and this is not a gap that more rules would
-/// close: any encoding of the secret (base64, hex, URL-escaping), any
-/// derivation of it (a hash, a signature, a substring used as a lookup key),
-/// and any secret the host never registered. It is a backstop against a
-/// caller that pasted the wrong thing, not a defence against a caller that
-/// wants the secret in there. The property that actually holds is upstream —
-/// the host substitutes secrets on egress and so has no reason to send one
-/// into a guest at all.
-struct SecretScanner {
-    secrets: Arc<Vec<KnownSecret>>,
-    /// Length of the longest registered secret; the window is one byte short
-    /// of it, because a full-length suffix would be a match, not a prefix.
-    longest: usize,
-    /// The withheld tail: a proper prefix of at least one known secret.
-    pending: Vec<u8>,
-}
-
-impl SecretScanner {
-    fn new(secrets: Arc<Vec<KnownSecret>>) -> Self {
-        // A zero-length "secret" matches everywhere and means nothing, so it
-        // is not allowed to set the window.
-        let longest = secrets.iter().map(|s| s.value.len()).max().unwrap_or(0);
-        Self {
-            secrets,
-            longest,
-            pending: Vec::new(),
-        }
-    }
-
-    /// Clear `payload` for delivery, or name the category it matched.
-    fn admit(&mut self, payload: &[u8]) -> Result<Vec<u8>, &'static str> {
-        if self.longest == 0 {
-            return Ok(payload.to_vec());
-        }
-        let mut buf = std::mem::take(&mut self.pending);
-        buf.extend_from_slice(payload);
-
-        if let Some(category) = self.first_match(&buf) {
-            // The buffer straddles a secret; it is not going anywhere, and it
-            // does not linger in this process either.
-            buf.zeroize();
-            return Err(category);
-        }
-
-        let hold = self.unresolved_tail(&buf);
-        self.pending = buf.split_off(buf.len() - hold);
-        Ok(buf)
-    }
-
-    /// Release the withheld tail. Safe by construction: it is a proper prefix
-    /// of a secret, which is not a secret.
-    fn flush(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending)
-    }
-
-    /// How much is being withheld. A length, not the bytes.
-    fn withheld_len(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// The category of the first known secret contained in `buf`.
-    fn first_match(&self, buf: &[u8]) -> Option<&'static str> {
-        self.secrets
-            .iter()
-            .filter(|secret| !secret.value.is_empty() && secret.value.len() <= buf.len())
-            .find(|secret| {
-                buf.windows(secret.value.len())
-                    .any(|window| window == secret.value.as_slice())
-            })
-            .map(|secret| secret.category)
-    }
-
-    /// How many trailing bytes of `buf` must be held back: the longest suffix
-    /// that is still a proper prefix of some known secret, and zero when the
-    /// stream ends in nothing interesting.
-    fn unresolved_tail(&self, buf: &[u8]) -> usize {
-        let ceiling = self.longest.saturating_sub(1).min(buf.len());
-        (1..=ceiling)
-            .rev()
-            .find(|&k| {
-                let tail = &buf[buf.len() - k..];
-                self.secrets
-                    .iter()
-                    .any(|secret| secret.value.len() > k && secret.value.starts_with(tail))
-            })
-            .unwrap_or(0)
-    }
-}
-
-impl Drop for SecretScanner {
-    fn drop(&mut self) {
-        self.pending.zeroize();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -949,6 +994,8 @@ mod tests {
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, sign_plan};
     use tempfile::TempDir;
+
+    use mvm_contract::stream::secret_fingerprint::SecretCategory;
 
     use super::*;
     use crate::audit::emitter::stream_audit;
@@ -1093,16 +1140,46 @@ mod tests {
             .collect()
     }
 
-    /// A session on a VM bound to recognise exactly one secret.
+    /// The fingerprint of `secret`, as the substitution endpoint computes it.
+    ///
+    /// A test may hold a literal; the point of the type is that the *gate*
+    /// never does, and this helper is where that transition happens.
+    fn fingerprint(secret: &str) -> SecretFingerprint {
+        SecretFingerprint::of(secret.as_bytes(), SecretCategory::HostSecret)
+            .expect("a non-empty secret fingerprints")
+    }
+
+    /// A session on a VM bound to recognise exactly one secret's fingerprint.
     fn granted_session_with_known_secret(secret: &str) -> InputSession {
+        session_bound_to(secret, DEFAULT_IDLE_FLUSH_AFTER)
+    }
+
+    /// The same, with the idle release set where the test needs it.
+    ///
+    /// The threshold is the seam these tests drive, not the clock: zero
+    /// releases on the first idle check and an hour releases on none of them,
+    /// so both sides of the boundary are decided by the same elapsed-time
+    /// comparison production uses, with nothing sleeping and nothing to go
+    /// flaky under a loaded machine.
+    fn session_bound_to(secret: &str, idle_flush_after: Duration) -> InputSession {
         let vm = unique_vm("vm-secret");
         InputGate::bind(
             &vm,
-            InputBinding::new().with_secret(KnownSecret::host_material(secret.as_bytes())),
+            InputBinding::new()
+                .with_fingerprint(fingerprint(secret))
+                .with_idle_flush_after(idle_flush_after),
         );
         let plan = admitted_with(vec![stream_service()]);
         InputGate::open(&vm, &plan).expect("the plan grants input")
     }
+
+    /// A 40-byte secret, so the carry is 39 — wider than any request line a
+    /// person types, which is the shape the idle release exists for.
+    const LONG_SECRET: &str = "AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI0K7MDE";
+
+    /// Never elapses within a test process's lifetime, so the idle release is
+    /// off and only a write or a close can move the withheld tail.
+    const NEVER_IDLE: Duration = Duration::from_secs(3600);
 
     // --- the four required properties -------------------------------------
 
@@ -1176,7 +1253,7 @@ mod tests {
         let vm = unique_vm("vm-audit");
         InputGate::bind(
             &vm,
-            InputBinding::new().with_secret(KnownSecret::host_material(secret.as_bytes())),
+            InputBinding::new().with_fingerprint(fingerprint(secret)),
         );
         let plan = admitted_from(
             PlanFixture::new()
@@ -1409,7 +1486,7 @@ mod tests {
     fn a_live_secret_prefix_is_withheld_rather_than_delivered_early() {
         // The half of the split-secret defence that a refusal alone does not
         // give you: refusing the second frame is worthless if the first frame
-        // already handed the guest the first twelve bytes.
+        // already handed the guest the first twelve bytes of the key.
         let mut session = granted_session_with_known_secret("AKIAIOSFODNN7EXAMPLE");
         session
             .write(InputFrame {
@@ -1417,53 +1494,71 @@ mod tests {
                 payload: b"echo AKIAIOSFODNN".to_vec(),
             })
             .expect("a prefix is not a match");
+        let cleared = session.take_admitted().expect("the lease is live");
+        assert!(
+            !cleared.ends_with(b"AKIAIOSFODNN"),
+            "the live prefix must not reach the guest ahead of the refusal: {:?}",
+            String::from_utf8_lossy(&cleared)
+        );
         assert_eq!(
-            session.take_admitted().expect("the lease is live"),
-            b"echo ",
-            "the live prefix stays on the host until it is resolved"
+            cleared, b"",
+            "the whole 17-byte frame sits inside the 19-byte carry"
         );
     }
 
     #[test]
-    fn a_tail_that_resolves_to_nothing_ships_on_the_next_frame() {
+    fn the_withheld_tail_is_bounded_and_ships_on_the_next_frame() {
+        // The cost of matching fingerprints rather than values: the scanner
+        // cannot tell a live prefix from an innocent tail, so it holds a fixed
+        // `longest - 1` bytes. Bounded, and never lost — the previous tail
+        // ships the moment the next frame proves nothing straddles.
         let mut session = granted_session_with_known_secret("AKIAIOSFODNN7EXAMPLE");
+        let first = b"the quick brown fox jumps over the lazy dog\n";
         session
             .write(InputFrame {
                 seq: 0,
-                payload: b"AKIA".to_vec(),
+                payload: first.to_vec(),
             })
-            .expect("a prefix is not a match");
-        assert!(
-            session
-                .take_admitted()
-                .expect("the lease is live")
-                .is_empty()
+            .expect("nothing to match");
+        let cleared = session.take_admitted().expect("the lease is live");
+        assert_eq!(
+            cleared.len(),
+            first.len() - 19,
+            "exactly one byte short of the longest secret stays behind"
         );
+        assert_eq!(cleared, &first[..first.len() - 19]);
+
         session
             .write(InputFrame {
                 seq: 1,
-                payload: b"DEMO\n".to_vec(),
+                payload: b"and again\n".to_vec(),
             })
-            .expect("it was never a secret");
+            .expect("still nothing to match");
         assert_eq!(
-            session.take_admitted().expect("the lease is live"),
-            b"AKIADEMO\n"
+            [cleared, session.take_admitted().expect("the lease is live")].concat(),
+            [first.as_slice(), b"and again\n"].concat()[..first.len() + 10 - 19],
+            "every earlier byte came out, in order"
         );
     }
 
     #[test]
-    fn ordinary_input_is_not_delayed_by_the_scanner() {
-        let mut session = granted_session_with_known_secret("AKIAIOSFODNN7EXAMPLE");
+    fn a_vm_that_bound_no_fingerprints_is_not_delayed_at_all() {
+        // The carry is the price of scanning, so it must be charged only to
+        // workloads that actually have a secret to leak.
+        let vm = unique_vm("vm-undelayed");
+        InputGate::bind(&vm, InputBinding::new());
+        let plan = admitted_with(vec![stream_service()]);
+        let mut session = InputGate::open(&vm, &plan).expect("the plan grants input");
         session
             .write(InputFrame {
                 seq: 0,
                 payload: b"ls -la\n".to_vec(),
             })
-            .expect("nothing to match");
+            .expect("nothing bound");
         assert_eq!(
             session.take_admitted().expect("the lease is live"),
             b"ls -la\n",
-            "a suffix that is not a prefix of any secret ships immediately"
+            "with no fingerprints there is nothing to slide a window against"
         );
     }
 
@@ -1549,10 +1644,274 @@ mod tests {
     }
 
     #[test]
-    fn a_known_secret_never_renders_its_value() {
-        let rendered = format!("{:?}", KnownSecret::host_material(b"AKIAIOSFODNN7EXAMPLE"));
+    fn the_gate_holds_no_secret_value_anywhere_a_binding_can_put_one() {
+        // The type surface is the guarantee, not a comment: the only way a
+        // secret enters this gate is `with_fingerprint`, whose parameter is a
+        // length, a hash and a vocabulary word. There is no byte-taking
+        // overload to reach for, so a caller that has no plaintext cannot be
+        // tempted into acquiring some, and one that does cannot hand it over.
+        let binding = InputBinding::new().with_fingerprint(fingerprint("AKIAIOSFODNN7EXAMPLE"));
+        let rendered = format!("{:?}", binding.fingerprints);
         assert!(!rendered.contains("AKIA"), "got {rendered}");
-        assert!(rendered.contains(CATEGORY_HOST_SECRET), "got {rendered}");
+        assert!(rendered.contains("len: 20"), "got {rendered}");
+        assert_eq!(
+            std::mem::size_of::<SecretFingerprint>(),
+            std::mem::size_of::<u64>() * 2,
+            "a fingerprint is fixed-width and inline: two words hold a length, a \
+             hash and a category, and there is no room for a pointer to a value"
+        );
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<SecretFingerprint>();
+
+        // And the source says the same thing: no constructor on the binding
+        // takes bytes.
+        let src = include_str!("input_gate.rs");
+        let (production, _tests) = src
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("this module keeps its tests at the end");
+        assert!(
+            !production.contains("KnownSecret"),
+            "the plaintext-carrying binding type must stay deleted, not deprecated"
+        );
+        assert!(
+            production
+                .contains("pub fn with_fingerprint(mut self, fingerprint: SecretFingerprint)"),
+            "the one secret-facing setter must take a fingerprint"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret() {
+        // A fingerprint match is a length-and-hash match; a collision produces
+        // the same refusal from bytes that are nobody's secret. Refusing is
+        // right — it fails closed — but an operator told "this contained a
+        // secret" when it did not would spend hours proving the negative, so
+        // the sentence has to say what was actually checked.
+        let refusal = InputRefusal::SecretMaterial {
+            category: CATEGORY_HOST_SECRET,
+        };
+        let said = refusal.to_string();
+        assert!(
+            said.contains("matches the fingerprint"),
+            "the refusal must name what it compared: {said}"
+        );
+        assert!(
+            said.contains("not proof"),
+            "and must disclaim the certainty it does not have: {said}"
+        );
+        assert!(
+            !said.contains("carries recognised secret material"),
+            "the old wording asserted identity from a hash: {said}"
+        );
+        assert_eq!(
+            refusal.reason(),
+            "secret-material",
+            "the wire-stable reason word an operator greps for does not move"
+        );
+    }
+
+    // --- the idle release --------------------------------------------------
+
+    #[test]
+    fn an_idle_writer_gets_the_line_the_carry_swallowed() {
+        // The deadlock, and its end. A 40-byte bound secret makes the carry
+        // 39, so an 11-byte request line clears nothing: the workload receives
+        // no line, answers nothing, and the operator has no reason to send the
+        // write that would push the first one out. Releasing on silence is the
+        // only thing that breaks the circle — before this, the line arrived at
+        // EOF or never.
+        let mut session = session_bound_to(LONG_SECRET, Duration::ZERO);
+        let line = b"{\"q\":\"hi\"}\n";
+        session
+            .write(InputFrame {
+                seq: 0,
+                payload: line.to_vec(),
+            })
+            .expect("a JSON line is not a secret");
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            b"",
+            "the whole 11-byte line sits inside the 39-byte carry"
+        );
+
+        session.refresh().expect("the lease is live");
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            line,
+            "going quiet must hand the line over, not wait for a write that \
+             the workload's own silence guarantees will never come"
+        );
+        session.refresh().expect("the lease is live");
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            b"",
+            "and there is nothing left to release twice"
+        );
+        assert_eq!(session.stranded_len(), 0);
+    }
+
+    #[test]
+    fn the_idle_release_does_not_depend_on_what_the_withheld_bytes_are() {
+        // The property the whole design rests on. A release that fired only
+        // for tails which could not still become a secret would be a prefix
+        // oracle: hold the grant, feed a byte, watch whether it came out, and
+        // walk a 40-byte credential out in about 40x256 probes. So two
+        // payloads of the same length must be indistinguishable from outside —
+        // and one of these is a genuine live prefix of the bound secret while
+        // the other is nobody's.
+        let live_prefix = &LONG_SECRET.as_bytes()[..11];
+        let innocent = b"hello world";
+        assert_eq!(
+            live_prefix.len(),
+            innocent.len(),
+            "same length, or nothing \
+                    below compares anything"
+        );
+
+        let observe = |payload: &[u8]| -> (Vec<u8>, usize, Vec<u8>) {
+            let mut session = session_bound_to(LONG_SECRET, Duration::ZERO);
+            session
+                .write(InputFrame {
+                    seq: 0,
+                    payload: payload.to_vec(),
+                })
+                .expect("neither payload completes the secret");
+            let before = session.take_admitted().expect("the lease is live");
+            let withheld = session.stranded_len();
+            session.refresh().expect("the lease is live");
+            let after = session.take_admitted().expect("the lease is live");
+            (before, withheld, after)
+        };
+
+        let (prefix_before, prefix_withheld, prefix_after) = observe(live_prefix);
+        let (innocent_before, innocent_withheld, innocent_after) = observe(innocent);
+
+        assert_eq!(
+            (prefix_before, prefix_withheld),
+            (innocent_before, innocent_withheld),
+            "what is withheld must be a length, never a verdict about the bytes"
+        );
+        assert_eq!(
+            prefix_after.len(),
+            innocent_after.len(),
+            "and so must what the idle release hands back"
+        );
+        assert_eq!(prefix_after, live_prefix);
+        assert_eq!(innocent_after, innocent);
+    }
+
+    #[test]
+    fn a_secret_split_across_two_writes_inside_the_threshold_is_still_refused() {
+        // The coverage the release must not cost. Inside the threshold the
+        // writer is mid-burst — consecutive frames of a paste, or of a chunked
+        // pipe — and that is exactly the split a confused caller produces, so
+        // the scan has to stay exact across it. A release that fired here
+        // would hand the guest the first half and refuse the second, which is
+        // the theatre the carry exists to prevent.
+        let mut session = session_bound_to("AKIAIOSFODNN7EXAMPLE", NEVER_IDLE);
+        session
+            .write(InputFrame {
+                seq: 0,
+                payload: b"AKIAIOSFODNN".to_vec(),
+            })
+            .expect("a prefix alone is not a match");
+        session.refresh().expect("the lease is live");
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            b"",
+            "a writer that has not been quiet long enough gets nothing back"
+        );
+        assert!(matches!(
+            session.write(InputFrame {
+                seq: 1,
+                payload: b"7EXAMPLE".to_vec()
+            }),
+            Err(InputRefusal::SecretMaterial { .. })
+        ));
+    }
+
+    #[test]
+    fn a_secret_split_across_the_idle_gap_is_missed_and_that_is_the_price() {
+        // The weakening, pinned rather than left in prose. Once the tail is
+        // released the scanner has no context to straddle, so a secret split
+        // across the silence goes through. It needs the *sender* to pause
+        // mid-credential, which a confused caller does not do and a determined
+        // one does not need — base64 already defeats the scan outright. This
+        // sits inside "backstop, not a defence"; it does not move that line.
+        let mut session = session_bound_to("AKIAIOSFODNN7EXAMPLE", Duration::ZERO);
+        session
+            .write(InputFrame {
+                seq: 0,
+                payload: b"AKIAIOSFODNN".to_vec(),
+            })
+            .expect("a prefix alone is not a match");
+        session.refresh().expect("the lease is live");
+        session
+            .write(InputFrame {
+                seq: 1,
+                payload: b"7EXAMPLE".to_vec(),
+            })
+            .expect("the halves are no longer contiguous in the scanner");
+        session.refresh().expect("the lease is live");
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            b"AKIAIOSFODNN7EXAMPLE",
+            "the patient caller wins, and the ledger says so"
+        );
+    }
+
+    #[test]
+    fn an_idle_release_cannot_hand_over_a_bound_secret() {
+        // What the release can never do, whatever the threshold. Anything the
+        // scanner is holding already survived a scan of the whole buffer it
+        // came from, so no window inside it matches — and a session that did
+        // hit a match latches, so a caller cannot go quiet to collect what was
+        // refused.
+        let mut session = session_bound_to("AKIAIOSFODNN7EXAMPLE", Duration::ZERO);
+        session
+            .write(InputFrame {
+                seq: 0,
+                payload: b"AKIAIOSFODNN7EXAMPLE".to_vec(),
+            })
+            .expect_err("the whole secret in one frame is refused");
+        assert!(matches!(
+            session.refresh(),
+            Err(InputRefusal::SecretMaterial { .. })
+        ));
+        assert!(matches!(
+            session.take_admitted(),
+            Err(InputRefusal::SecretMaterial { .. })
+        ));
+    }
+
+    #[test]
+    fn a_writer_that_lost_its_lease_gets_no_idle_release_either() {
+        // Every path that moves bytes out of a session is lease-gated, and the
+        // idle release is a new one. A stalled writer collecting its tail
+        // after a successor took the stdin would deliver into somebody else's.
+        let vm = unique_vm("vm-idle-lease");
+        InputGate::bind(
+            &vm,
+            InputBinding::new()
+                .with_fingerprint(fingerprint(LONG_SECRET))
+                .with_idle_flush_after(Duration::ZERO)
+                .with_lease_ttl(Duration::from_millis(20)),
+        );
+        let plan = admitted_with(vec![stream_service()]);
+        let mut stalled = InputGate::open(&vm, &plan).expect("the plan grants input");
+        stalled
+            .write(InputFrame {
+                seq: 0,
+                payload: b"hello\n".to_vec(),
+            })
+            .expect("cleared while the lease was live");
+        std::thread::sleep(Duration::from_millis(40));
+
+        assert!(matches!(stalled.refresh(), Err(InputRefusal::LeaseExpired)));
+        assert!(matches!(
+            stalled.take_admitted(),
+            Err(InputRefusal::LeaseExpired)
+        ));
     }
 
     // --- close ordering ----------------------------------------------------
@@ -1651,10 +2010,18 @@ mod tests {
             ),
             "a repeat is not an advance"
         );
+        assert!(
+            session
+                .take_admitted()
+                .expect("the lease is live")
+                .is_empty(),
+            "eight bytes sit inside the carried window"
+        );
         assert_eq!(
-            session.take_admitted().expect("the lease is live"),
+            session.close().expect("the lease is live").trailing,
             b"7EXAMPLE",
-            "the reordered half never entered the stream"
+            "the accepted half comes out at close; the reordered one never \
+             entered the stream at all"
         );
     }
 

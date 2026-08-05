@@ -220,10 +220,13 @@ mod tests {
             std::fs::write(f, b"x").unwrap();
         }
 
+        // A well-formed ready handshake: the spawner parses this line and
+        // fails closed on anything else, so a stub that printed prose would be
+        // testing a shape production never produces.
         let stub = tmp.path().join("stub-endpoint.sh");
         std::fs::write(
             &stub,
-            "#!/bin/sh\ncat >/dev/null\necho 'builder ready'\nsleep 30\n",
+            "#!/bin/sh\ncat >/dev/null\necho '{\"env\":[],\"input_fingerprints\":[]}'\nsleep 30\n",
         )
         .unwrap();
         {

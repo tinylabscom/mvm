@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted for the output half. Implemented by plan 283 phase 1: the guest pump
+Accepted for the output half. Implemented by plan 295 phase 1: the guest pump
 (`mvm-agentd`), the stream store (`mvm-core::transcript`), the host broker
 (`mvm-hostd::stream`), and the consumers (`mvmctl machine logs`, `machine run`
 attach, `mvm-client`/SDK readers).
 
 Accepted for the input half, with its cost recorded in §"Claim 15 becomes a
-policy, and what that bought". Implemented by plan 283 phase 2: the input frame
+policy, and what that bought". Implemented by plan 295 phase 2: the input frame
 DTOs and the plan grant (`mvm-protocol::stream::input`), the gate
 (`mvm-hostd::stream::input_gate`), the route to the guest sink, agent-side
 delivery with explicit EOF (`mvm-agentd::stream_input`), and the sealed-tier
@@ -19,9 +19,13 @@ opens the route through `StreamPlane::open_input` under the plan that boot was
 admitted under, pumps the caller's stdin through the gate in acceptance order,
 and closes the workload's stdin on the caller's EOF. Only the invocation that
 admits and boots a workload can stream into it — `--attach` and `session
-attach` hold no admitted plan and refuse. ADR-001's claim 17 stays at status
-`Preview`, now for one reason rather than three: the secret scan has no
-production caller, so its refusal has never fired on a real VM.
+attach` hold no admitted plan and refuse. The gate's secret scan is populated
+too: the per-VM substitution endpoint fingerprints each secret it resolves and
+`StreamPlane::open_input` installs that set — see §"What binding a fingerprint
+discloses". ADR-001's claim 17 stays at status `Preview`, now not because a leg
+is dormant but because of what the enforcement is: a fingerprint match is a
+length-and-hash match, and encoding, derivation and a window-straddling split
+defeat the scan permanently.
 
 Three limits below (§"What this does not do") are stated as limits, not as
 future work. They are true of the shipped code.
@@ -260,8 +264,127 @@ between the bytes and a launcher.
 So the trade is a strong claim over a narrow surface exchanged for a weaker
 claim over the surface the product actually has. The mitigation is that every
 weakening is written down: the grant is in the signed plan, both outcomes are in
-the chain, and ADR-001 carries the claim at `Preview` with four limits rather
+the chain, and ADR-001 carries the claim at `Preview` with five limits rather
 than promoting it on the strength of the tests alone.
+
+### What binding a fingerprint discloses
+
+The gate refuses stdin that carries one of the host's own secrets, and
+recognising a byte sequence means having it. But the gate runs in the CLI
+process while the substitution endpoint that resolves raw credentials runs as a
+separate process, and that separation is load-bearing — it is what claims 12 and
+13 rest on. Copying plaintext into the CLI to populate a scan would create a new
+plaintext location in a process that has none, in order to close a gap on a
+different claim. That trade is not worth making.
+
+So the endpoint computes a **fingerprint** — a length, a 64-bit rolling hash and
+a category — for each secret it resolves, and reports the fingerprints on its
+ready handshake. Only the fingerprints cross. The rolling hash is what makes the
+scan affordable: it slides over the stream at one multiply-add per byte and
+tests every offset, which is how a secret split across two writes is still found.
+
+**What it discloses, stated rather than buried.** Whoever holds a fingerprint
+learns the secret's **length** and holds a 64-bit hash of it. For a high-entropy
+credential that is not a recovery path; for a short low-entropy one, a hash and a
+length are guessable offline. The set lives in the memory of the process that
+booted the VM, is never written to disk, and is dropped when the endpoint is
+reaped. Two disclosures that would be worse were rejected outright: persisting
+the set to the per-VM state dir (which would widen it to every reader of
+`~/.mvm` to buy reachability nothing uses — only the booting invocation can
+stream), and binding fingerprints of each secret's *prefixes*.
+
+**What the memory-only choice rests on, and what breaking it looks like.** It
+rests on limit 3: only the invocation that admitted and booted a workload may
+stream into it, so the process that spawned the endpoint is the process that
+later opens the gate. Should that stop being true — the resident per-tenant
+daemon this project is heading toward would do it, with boot in one process and
+`stream` in another — the registry read returns an empty set, the gate binds an
+empty set, and the scan silently reverts to matching nothing. That is limit 1
+re-opening, and **nothing goes red when it does**: an empty read is
+indistinguishable from a plan that carried no secrets, and both are legitimate.
+The failure is therefore invisible by construction, not merely untested, and
+splitting boot from stream must come with a registry that spans the split or
+with a gate that refuses when it cannot tell the two cases apart.
+
+**Why the carry is blanket, and why that is the safe choice.** Without prefix
+fingerprints the scanner cannot ask "could this tail still become a secret", so
+it withholds a fixed `longest_secret - 1` bytes of every write rather than the
+exact live prefix. That reads as the lazy option and is the load-bearing one.
+
+Precision here would be a **prefix oracle**. The withhold-or-deliver decision is
+observable — anyone holding the input grant writes a byte and sees whether
+anything came out — so a scanner that withheld only what could still complete a
+secret would be answering, for each byte offered, "is this a live prefix?". Walk
+that: 256 tries recover byte 0, 256 more recover byte 1, and a 40-byte
+credential falls in about 40·256 probes instead of 256^40. That is a
+secret-extraction path against precisely what row 13 protects, and it is
+strictly worse than any amount of withholding. A blanket carry leaks nothing
+*because* it is blanket: the decision carries no information about the content.
+The imprecision is the mechanism, not a shortcut.
+
+Binding prefix fingerprints — the tempting repair, and what the plaintext
+scanner effectively had — is the same mistake with an extra disclosure on top.
+Under this polynomial hash the prefix chain *is* the plaintext: `h(k) =
+h(k-1)·BASE + s[k-1] (mod 2^64)`, so `s[k-1] = h(k) − h(k-1)·BASE` recovers each
+byte by subtraction, and `h(1)` is literally the first byte. Changing the hash
+does not save it: any function a scanner can evaluate, code in that same process
+can evaluate, so an *exact* prefix-membership test over a byte alphabet is a
+decoder in 256·L tries whatever the hash. Precision about short tails and
+non-disclosure of short prefixes are the same quantity; you cannot buy one
+without selling the other.
+
+**What the blanket carry cost, and how that cost is paid.** Left alone it is a
+deadlock rather than latency. With a 40-byte bound secret the carry is 39, so an
+operator running a line-oriented workload under `machine run --entrypoint
+--stdin -` and typing an 11-byte request line delivers **zero** bytes: the
+workload never sees a line, never answers, so the operator never writes again,
+and the tail ships only at EOF. "A program that reads a request off stdin and
+writes a response" is a shape this plane exists for, so that was not a tolerable
+resting place.
+
+The gate therefore **releases the withheld tail after 50ms of writer silence**
+(`DEFAULT_IDLE_FLUSH_AFTER`). Two properties make this the right shape rather
+than a quiet weakening of the paragraph above, and both have witnesses:
+
+- **The release is content-independent.** It fires on elapsed time since the
+  scanner last took bytes and on nothing else — never on what the withheld bytes
+  are. So it opens no oracle: an observer learns when they stopped writing,
+  which they already knew. Witnessed by
+  `fn:the_idle_release_does_not_depend_on_what_the_withheld_bytes_are` and
+  `fn:what_is_withheld_is_a_length_and_never_a_verdict_about_the_bytes`, which
+  drive a genuine live prefix of a bound secret and an innocent payload of the
+  same length through the whole path and require the two to be
+  indistinguishable.
+- **The release can never hand over a secret.** What the scanner holds already
+  survived a scan of the buffer it came from, so no window inside it matches.
+  What is lost is *context*: a secret split across the silence is no longer
+  contiguous and is missed. That needs the sender to pause mid-credential — a
+  confused caller does not, and a determined one has no reason to, since base64
+  defeats the scan outright. It therefore falls inside the existing "backstop,
+  not a defence" limit and does not widen it. Witnessed from both sides by
+  `fn:a_secret_split_across_two_writes_inside_the_threshold_is_still_refused`
+  and `fn:a_secret_split_across_the_idle_gap_is_missed_and_that_is_the_price`.
+
+50ms sits between two gaps that differ by orders of magnitude: the gap inside
+one writer's burst (a buffer copy and one vsock round trip — microseconds to low
+milliseconds, and the split a confused caller actually produces, which must stay
+covered) and the gap a human or a request/response peer leaves, which is at
+minimum the workload's own think time. It is roughly fifty times the first and
+half the ~100ms at which delay becomes perceptible. The CLI's idle attendant
+visits every half-threshold, so a released line reaches the guest within about
+one and a half thresholds of the last keystroke.
+
+Exact live-prefix precision *within* a burst is still available without the
+oracle — anchoring the carry to a delimiter no bound secret contains, or moving
+the scan into the process that holds the plaintext. Both are costed in
+`specs/plans/293-stream-plane-followups.md`; neither is needed for the shapes
+the plane serves today.
+
+**And a match is not an identity.** Two byte sequences of the same length can
+hash alike. The gate refuses on a match anyway, because failing closed is the
+right direction, but its refusal says a fingerprint matched rather than that the
+bytes are the secret. An operator told the stronger thing when it was not true
+would spend hours proving a negative.
 
 **What is explicitly not claimed.** The sealed-tier refusal of the grant for a
 shell-shaped entrypoint is a *heuristic* and is documented as one. A wrapper
@@ -343,6 +466,13 @@ the trade; ADR-001 carries the reworded row and the new claim 17 at `Preview`.
 **Extended.** Claim 8's admitted plan gains two more decisions it binds — the
 retention mode and the input grant — and matching labels in the chain.
 
+**Unweakened, and worth saying why.** Claims 12 and 13 keep raw secrets inside
+the substitution endpoint's address space. Populating the input gate's scan does
+not move any of that: what leaves the endpoint is a length and a hash, the CLI
+gains no API that could hold a value, and the endpoint's own store reads are
+unchanged. §"What binding a fingerprint discloses" states what the length and
+the hash are worth to a reader of them.
+
 **Not strengthened, despite appearances.** The reader-side anchoring rule
 defeats a *buggy* broker, not a hostile one: nothing cross-checks a claimed
 loss point against the delivered records, so a broker sending monotonically
@@ -380,7 +510,7 @@ token, so two processes can never interleave one transcript.
 
 ## References
 
-- `specs/plans/283-workload-stream-plane.md` — the design and its
+- `specs/plans/295-workload-stream-plane.md` — the design and its
   implementation sequence.
 - ADR-001 — threat model, per-backend tier matrix, and the claims ledger table
   this ADR's security section refers to.

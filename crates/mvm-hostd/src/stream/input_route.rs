@@ -44,13 +44,17 @@
 //!   unbounded one. Refusing ahead of the gate is what leaves the frame
 //!   re-offerable: the gate never saw its `seq`, so the writer may try again.
 //!
-//! - **The withheld tail is handed over.** The gate holds back the tail of the
-//!   stream that is still a live prefix of a known secret rather than shipping
-//!   it and refusing afterwards, and releases it when closing proves it was
-//!   only ever a prefix. [`InputRoute::close`] is what carries those bytes to
-//!   the guest, ahead of EOF. Dropping them would lose the writer's last bytes
-//!   with no error anywhere — the guest's own types force `deliver_tail`
-//!   before `close`, but nothing forces this end to send a tail at all.
+//! - **The withheld tail is handed over, at close and on silence.** The gate
+//!   holds back the tail of the stream that could still complete a known
+//!   secret rather than shipping it and refusing afterwards. Two things
+//!   release it: closing, which proves the stream ended without one, and the
+//!   writer going quiet, which the gate answers by handing the tail over on
+//!   elapsed time alone. [`InputRoute::close`] and [`InputRoute::refresh`] are
+//!   what carry those bytes to the guest. Both have to, and for the same
+//!   reason: dropping them would lose the writer's bytes with no error
+//!   anywhere — the guest's own types force `deliver_tail` before `close`, but
+//!   nothing forces this end to send a tail at all, and nothing at all forces
+//!   it to notice the idle release.
 //!
 //! Everything else the route does is pass-through, and that is deliberate: a
 //! second place that decided whether bytes may move would be a second place to
@@ -288,9 +292,32 @@ impl InputRoute {
         flush_into(&mut *self.transport, &mut self.pending)
     }
 
-    /// Extend the lease without writing, for a writer that is idle but alive.
+    /// Tell the gate this writer is idle but alive, and carry whatever that
+    /// releases.
+    ///
+    /// Not just a lease touch. On a secret-bearing VM the gate withholds a
+    /// blanket tail of every write, and once the writer goes quiet it releases
+    /// that tail — so this call can produce bytes, and a route that only
+    /// renewed the lease would leave them sitting in the session with no
+    /// second chance to notice. Delivering them here is what makes a workload
+    /// that answers per line answer at all.
+    ///
+    /// One wire frame at most, and only when there is something to put in it:
+    /// an empty frame per idle tick would be a vsock round trip per tick for
+    /// the whole life of a quiet stream.
     pub fn refresh(&mut self) -> Result<(), InputRouteError> {
-        self.session.refresh().map_err(InputRouteError::Refused)
+        self.session.refresh()?;
+        let released = self.session.take_admitted()?;
+        if !released.is_empty() {
+            self.pending.push(InputFrame {
+                seq: self.wire_seq.mint(),
+                payload: released,
+            });
+        }
+        if self.pending.frames.is_empty() {
+            return Ok(());
+        }
+        flush_into(&mut *self.transport, &mut self.pending)
     }
 
     /// End the stream: hand the withheld tail to the guest, then EOF.
@@ -469,7 +496,15 @@ mod tests {
     use mvm_core::plan::test_support::PlanFixture;
 
     use super::*;
-    use crate::stream::input_gate::{InputBinding, KnownSecret};
+    use mvm_contract::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
+
+    use crate::stream::input_gate::InputBinding;
+
+    /// The fingerprint of `secret`, as the substitution endpoint computes it.
+    fn fingerprint(secret: &str) -> SecretFingerprint {
+        SecretFingerprint::of(secret.as_bytes(), SecretCategory::HostSecret)
+            .expect("a non-empty secret fingerprints")
+    }
 
     /// What a transport was asked to carry, in the order it was asked.
     ///
@@ -568,7 +603,7 @@ mod tests {
     fn route_on(vm: &str, secret: Option<&str>) -> (InputRoute, Recorder) {
         let mut binding = InputBinding::new();
         if let Some(secret) = secret {
-            binding = binding.with_secret(KnownSecret::host_material(secret.as_bytes()));
+            binding = binding.with_fingerprint(fingerprint(secret));
         }
         InputGate::bind(vm, binding);
         let recorder = Recorder::default();
@@ -619,8 +654,8 @@ mod tests {
 
     #[test]
     fn delivery_order_is_acceptance_order_even_when_a_frame_clears_nothing() {
-        // The guarantee this module exists for. The gate withholds
-        // "AKIAIOSFODNN" as a live prefix, so frame 0 clears only "echo " —
+        // The guarantee this module exists for. The gate carries a tail one
+        // byte short of the longest bound secret, so frame 0 clears nothing —
         // and the wire still carries a frame at seq 0, so the sequence the
         // guest sees is the sequence the gate accepted, gaps and all.
         let vm = unique_vm("route-order");
@@ -636,13 +671,19 @@ mod tests {
         assert_eq!(carried.seqs(), [0, 1], "one wire frame per accepted frame");
         assert_eq!(
             carried.carried().frames[0].payload,
-            b"echo ",
-            "the live prefix stays on the host until it is resolved"
+            b"",
+            "the whole 17-byte frame sits inside the carried window"
         );
         assert_eq!(
             carried.stdin_bytes(),
+            b"ech",
+            "and the earliest bytes arrive, in order, once later ones push them out"
+        );
+        route.close().expect("the lease is live");
+        assert_eq!(
+            carried.stdin_bytes(),
             b"echo AKIAIOSFODNNDEMO\n",
-            "and arrives, in order, once it resolves to nothing"
+            "close releases the rest: every byte the writer sent, in order"
         );
     }
 
@@ -685,13 +726,13 @@ mod tests {
             .expect("a prefix is not a match");
         assert_eq!(
             carried.carried().frames[0].payload,
-            b"echo ",
+            b"",
             "the tail is withheld while the stream is open"
         );
 
         route.close().expect("the lease is live");
         let closed = carried.carried().closed.clone().expect("the stream ended");
-        assert_eq!(closed.trailing, b"AKIAIOSFODNN");
+        assert_eq!(closed.trailing, b"echo AKIAIOSFODNN");
         assert_eq!(
             carried.stdin_bytes(),
             b"echo AKIAIOSFODNN",
@@ -914,7 +955,7 @@ mod tests {
         let vm = unique_vm("route-displaced");
         InputGate::bind(
             &vm,
-            InputBinding::new().with_secret(KnownSecret::host_material(b"AKIAIOSFODNN7EXAMPLE")),
+            InputBinding::new().with_fingerprint(fingerprint("AKIAIOSFODNN7EXAMPLE")),
         );
         let mut route = InputRoute::open(
             &vm,
@@ -999,6 +1040,59 @@ mod tests {
         assert_eq!(
             InputGate::lease_holder(&vm).as_deref(),
             Some(route.holder())
+        );
+    }
+
+    #[test]
+    fn a_line_the_carry_swallowed_reaches_the_guest_once_the_writer_goes_quiet() {
+        // The deadlock, driven all the way to the transport. A 40-byte bound
+        // secret makes the gate's carry 39, so an 11-byte request line clears
+        // nothing and the workload never receives the line it is waiting on.
+        // The gate releases that tail on silence — but only this end can carry
+        // it, and a route that merely renewed the lease would leave the bytes
+        // sitting in the session with nothing to notice them again.
+        let vm = unique_vm("route-idle-release");
+        InputGate::bind(
+            &vm,
+            InputBinding::new()
+                .with_fingerprint(fingerprint("AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI0K7MDE"))
+                .with_idle_flush_after(std::time::Duration::ZERO),
+        );
+        let carried = Recorder::default();
+        let mut route = InputRoute::open(
+            &vm,
+            &admitted(vec![stream_service()]),
+            Box::new(carried.clone()),
+            WireSequence::default(),
+        )
+        .expect("the plan grants input");
+
+        route
+            .write(frame(0, b"{\"q\":\"hi\"}\n"))
+            .expect("a JSON line is not a secret");
+        assert_eq!(
+            carried.stdin_bytes(),
+            b"",
+            "the whole line sits inside the carry"
+        );
+
+        route.refresh().expect("an idle holder keeps its lease");
+        assert_eq!(
+            carried.stdin_bytes(),
+            b"{\"q\":\"hi\"}\n",
+            "going quiet must put the line on the wire"
+        );
+        assert_eq!(
+            carried.seqs(),
+            [0, 1],
+            "the release travels as a wire frame of its own, in delivery order"
+        );
+
+        route.refresh().expect("an idle holder keeps its lease");
+        assert_eq!(
+            carried.seqs(),
+            [0, 1],
+            "and an idle tick with nothing to release costs no round trip"
         );
     }
 }
