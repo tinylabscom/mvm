@@ -112,7 +112,10 @@
       instead of failing with an opaque source-fetch error. `MVM_KERNEL_SOURCE`
       provides a persistent compile/download/auto choice, with explicit CLI
       flags taking precedence. Covered by manifest, policy, and end-to-end
-      builder-kernel validation.
+      builder-kernel validation. Builder libkrun now routes every Stage 0 vsock
+      path through the short-socket resolver, including builderd readiness probes,
+      so the same command also works from deep worktree paths on macOS; the
+      isolated-worktree kernel build was verified end to end on aarch64.
 - [x] One-command local microVM UX. A cold source checkout now builds the
       dedicated dm-verity workload kernel automatically during the first
       `machine run --image`, reports the first-run cost, and caches the result;

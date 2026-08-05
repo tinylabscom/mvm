@@ -626,9 +626,10 @@ fn read_next_response(
 /// `libkrun_sys::KrunContext` uses when
 /// `add_vsock_port(BUILDER_DISPATCH_PORT)` is configured.
 pub fn dispatch_socket_path(vm_state_dir: &Path) -> PathBuf {
-    vm_state_dir.join(mvm_core::config::vsock_socket_filename(
+    mvm_core::config::vm_vsock_port_socket_at(
+        vm_state_dir,
         mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
-    ))
+    )
 }
 
 // ============================================================

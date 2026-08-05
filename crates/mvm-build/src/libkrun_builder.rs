@@ -339,7 +339,8 @@ pub(crate) struct BuilderVsockEgressEndpoint {
 
 impl BuilderVsockEgressEndpoint {
     fn spawn(state_dir: &Path) -> Result<Self, BuilderVmError> {
-        let transport_path = state_dir.join(mvm_core::config::vsock_socket_filename(
+        let socket_dir = builder_vsock_socket_dir(state_dir)?;
+        let transport_path = socket_dir.join(mvm_core::config::vsock_socket_filename(
             mvm_agentd::vsock::EGRESS_PORT,
         ));
         Self::spawn_with_transport(
@@ -439,6 +440,17 @@ impl BuilderVsockEgressEndpoint {
     fn reap(&self) {
         reap_builder_vsock_egress_endpoint(&self.state_dir);
     }
+}
+
+fn builder_vsock_socket_dir(state_dir: &Path) -> Result<PathBuf, BuilderVmError> {
+    let socket_dir = mvm_core::config::vm_socket_dir_at(state_dir);
+    std::fs::create_dir_all(&socket_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "creating builder vsock socket dir {}: {e}",
+            socket_dir.display()
+        ))
+    })?;
+    Ok(socket_dir)
 }
 
 impl Drop for BuilderVsockEgressEndpoint {
@@ -940,6 +952,7 @@ impl LibkrunBuilderVm {
             ))
         })?;
         let console_log = vm_state_dir.join("console.log");
+        let socket_dir = builder_vsock_socket_dir(&vm_state_dir)?;
         // The in-guest nix build streams its `--print-build-logs` to this
         // console as it runs (stage0-init echoes each line live). In verbose
         // mode the host forwards that console to stderr, so the build log is
@@ -964,7 +977,7 @@ impl LibkrunBuilderVm {
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
-            .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
+            .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
             // Persistent /nix store disk — the first block device attached
             // to a RootDir guest, so it enumerates as /dev/vda. `stage0-init`
             // mounts and reuses it when it is ext4, formats it when the seed
@@ -1095,6 +1108,7 @@ impl LibkrunBuilderVm {
             ))
         })?;
         let console_log = vm_state_dir.join("console.log");
+        let socket_dir = builder_vsock_socket_dir(&vm_state_dir)?;
         let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
@@ -1120,7 +1134,7 @@ impl LibkrunBuilderVm {
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
-            .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
+            .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
             .add_disk(
                 "nix-store",
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,
@@ -1463,10 +1477,11 @@ struct BuilderShellKrunContextParams<'a> {
 fn builder_shell_krun_context(
     params: &BuilderShellKrunContextParams<'_>,
 ) -> Result<KrunContext, BuilderVmError> {
+    let socket_dir = mvm_core::config::vm_socket_dir_at(params.vm_state_dir);
     let mut krun = krun_context_for_image(params.vm_name, params.image)?
         .with_resources(params.vcpus, params.memory_mib)
         .with_console_output(path_to_str(params.console_log, "console_log")?)
-        .with_vsock_socket_dir(path_to_str(params.vm_state_dir, "vm_state_dir")?)
+        .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
         .add_disk(
             "nix-store",
             path_to_str(params.nix_store_img, "nix_store_img")?,
@@ -1604,6 +1619,7 @@ impl BuilderVm for LibkrunBuilderVm {
         // hvc0 output silently and "supervisor running, then exits 1"
         // is the only observable signal.
         let console_log = vm_state_dir.join("console.log");
+        let socket_dir = builder_vsock_socket_dir(&vm_state_dir)?;
         let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
@@ -1634,7 +1650,7 @@ impl BuilderVm for LibkrunBuilderVm {
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
-            .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
+            .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
             .add_disk(
                 "nix-store",
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,
@@ -1877,6 +1893,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         })?;
 
         let console_log = self.console_log_path(&config.vm_state_dir);
+        let socket_dir = builder_vsock_socket_dir(&config.vm_state_dir)?;
 
         // KrunContext construction — same shape as run_build's
         // step 7, but parameterised on the trait's hypervisor-
@@ -1886,7 +1903,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         let mut krun = krun_context_for_image(&config.name, &self.image)?
             .with_resources(config.vcpus, config.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
-            .with_vsock_socket_dir(path_to_str(&config.vm_state_dir, "vm_state_dir")?);
+            .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?);
         for disk in extra_disks {
             krun = krun.add_disk(
                 disk.id.clone(),
@@ -3507,7 +3524,7 @@ fn wait_for_vsock_socket(
     timeout: Duration,
     label: &str,
 ) -> Result<(), BuilderVmError> {
-    let socket_path = vm_state_dir.join(mvm_core::config::vsock_socket_filename(port));
+    let socket_path = mvm_core::config::vm_vsock_port_socket_at(vm_state_dir, port);
     wait_for_path(child, &socket_path, timeout, label)
 }
 
@@ -3692,9 +3709,10 @@ pub fn spawn_vsock_response_listener(
     use crate::builder_protocol::{HostVmResponseRead, read_host_vm_response};
 
     let (tx, rx) = mpsc::channel();
-    let socket_path = vm_state_dir.join(mvm_core::config::vsock_socket_filename(
+    let socket_path = mvm_core::config::vm_vsock_port_socket_at(
+        vm_state_dir,
         mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
-    ));
+    );
 
     std::thread::Builder::new()
         .name("vsock-builder-response".to_string())
@@ -3741,7 +3759,7 @@ fn spawn_vsock_socket_observer(
     use std::sync::mpsc;
 
     let (tx, rx) = mpsc::channel();
-    let socket_path = vm_state_dir.join(mvm_core::config::vsock_socket_filename(port));
+    let socket_path = mvm_core::config::vm_vsock_port_socket_at(vm_state_dir, port);
     std::thread::Builder::new()
         .name(format!("vsock-socket-observer-{port}"))
         .spawn(move || {
@@ -4392,6 +4410,7 @@ impl LibkrunPersistentHostVm {
             ))
         })?;
         let console_log = vm_state_dir.join("console.log");
+        let socket_dir = builder_vsock_socket_dir(&vm_state_dir)?;
         let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
@@ -4410,7 +4429,7 @@ impl LibkrunPersistentHostVm {
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
-            .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
+            .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
             .add_disk(
                 "nix-store",
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,
@@ -4579,10 +4598,10 @@ impl PersistentVmHandle {
     /// inside the guest. `PersistentBuilderSupervisor::new` takes
     /// this directly.
     pub fn dispatch_socket_path(&self) -> PathBuf {
-        self.vm_state_dir
-            .join(mvm_core::config::vsock_socket_filename(
-                mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
-            ))
+        mvm_core::config::vm_vsock_port_socket_at(
+            &self.vm_state_dir,
+            mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
+        )
     }
 
     /// Per-VM job directory bound at `/job` inside the guest.
@@ -4811,6 +4830,23 @@ mod tests {
             "Stage 0 builder boots must use the explicit vsock device, not TSI"
         );
         assert_eq!(ctx.host_listen_ports, vec![mvm_agentd::vsock::EGRESS_PORT]);
+    }
+
+    #[test]
+    fn builder_vsock_socket_dir_handles_deep_worktree_paths() {
+        let root = TempDir::new().unwrap();
+        let state_dir = root.path().join("x".repeat(120));
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let socket_dir = builder_vsock_socket_dir(&state_dir).unwrap();
+        assert_ne!(socket_dir, state_dir);
+        assert_eq!(socket_dir, mvm_core::config::vm_socket_dir_at(&state_dir));
+        assert!(socket_dir.exists());
+        let socket_path =
+            mvm_core::config::vm_vsock_port_socket_at(&state_dir, mvm_agentd::vsock::EGRESS_PORT);
+        assert!(socket_path.to_string_lossy().len() <= 103);
+
+        std::fs::remove_dir_all(socket_dir).unwrap();
     }
 
     fn ok_mounts(scratch: &TempDir) -> BuilderMounts {
