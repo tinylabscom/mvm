@@ -628,8 +628,10 @@ pub fn dispatch_with_executor(
 // ============================================================================
 
 /// The **libkrun**-shape control socket for a builder VM rooted at
-/// `vm_state_dir`: `<vm_state_dir>/vsock-<port>.sock`. libkrun binds one
-/// socket per forwarded port directly in the state dir (matching
+/// `vm_state_dir`: normally `<vm_state_dir>/vsock-<port>.sock`. libkrun binds
+/// one socket per forwarded port directly in the resolved socket directory;
+/// deep state paths use the short namespace selected by
+/// `mvm_core::config::vm_socket_dir_at` (matching
 /// `persistent_builder::dispatch_socket_path`).
 ///
 /// HVF nests its per-port sockets one level deeper, under a `vsock/`
@@ -639,17 +641,21 @@ pub fn dispatch_with_executor(
 /// the libkrun-vs-HVF socket-path bug class that has bitten the broker
 /// path before.
 pub fn builderd_control_socket_path(vm_state_dir: &Path) -> PathBuf {
-    vm_state_dir.join(builderd_control_socket_filename())
+    mvm_core::config::vm_vsock_port_socket_at(
+        vm_state_dir,
+        mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT,
+    )
 }
 
 /// The **HVF**-shape control socket for a builder VM rooted at
-/// `vm_state_dir`: `<vm_state_dir>/vsock/vsock-<port>.sock`. The HVF
-/// supervisor nests per-port sockets under a `vsock/` subdir (see
-/// `mvm_core::config::vm_hvf_vsock_dir`).
+/// `vm_state_dir`: normally `<vm_state_dir>/vsock/vsock-<port>.sock`. The HVF
+/// supervisor nests per-port sockets under a `vsock/` subdir of the resolved
+/// socket directory (see `mvm_core::config::vm_hvf_vsock_dir_at`).
 pub fn builderd_hvf_control_socket_path(vm_state_dir: &Path) -> PathBuf {
-    vm_state_dir
-        .join("vsock")
-        .join(builderd_control_socket_filename())
+    mvm_core::config::vm_hvf_vsock_port_socket_at(
+        vm_state_dir,
+        mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT,
+    )
 }
 
 /// Both candidate control-socket paths (libkrun shape, then HVF shape)
@@ -662,12 +668,6 @@ pub fn builderd_control_socket_candidates(vm_state_dir: &Path) -> [PathBuf; 2] {
         builderd_control_socket_path(vm_state_dir),
         builderd_hvf_control_socket_path(vm_state_dir),
     ]
-}
-
-/// `vsock-<BUILDERD_CONTROL_PORT>.sock` — the per-port socket filename
-/// both backends use; they differ only in which directory it lives in.
-fn builderd_control_socket_filename() -> String {
-    mvm_core::config::vsock_socket_filename(mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT)
 }
 
 /// Outcome of a host-side readiness probe against a builder daemon's
@@ -1530,6 +1530,17 @@ mod tests {
                 builderd_hvf_control_socket_path(dir),
             ]
         );
+    }
+
+    #[test]
+    fn control_socket_path_shortens_deep_worktree_state_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("x".repeat(120));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let socket = builderd_control_socket_path(&dir);
+        assert_ne!(socket.parent(), Some(dir.as_path()));
+        assert!(socket.to_string_lossy().len() <= 103);
     }
 
     #[test]

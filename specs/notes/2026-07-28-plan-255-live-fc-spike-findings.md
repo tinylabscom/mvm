@@ -65,10 +65,10 @@ this result.
 
 The live test boots a generic rootfs with no mvm guest agent, so it says nothing
 about whether a factory parent — no workload, therefore no egress relay wired,
-`trusted_builder: false` — survives the guest's egress gate. That risk is
+the typed substitution channel — survives the guest's egress gate. That risk is
 unchanged and cannot be spiked cheaply, because booting a real mvm parent *is*
 Task 2. The mitigation stands: if the gate refuses, wire the parent a minimal
-vsock egress port; never flip `trusted_builder`, which would disable the egress
+vsock egress port; do not reintroduce a role flag that could disable the egress
 gate on workload-bearing content.
 
 ## 4. The CLI exposes no checkpoint / pool / trust verbs

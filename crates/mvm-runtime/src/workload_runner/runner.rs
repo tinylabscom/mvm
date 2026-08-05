@@ -10,9 +10,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use mvm_agentd::vsock::BROKER_PORT;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
-use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
+use mvm_core::config::{
+    vm_hvf_vsock_port_socket_at, vm_state_dir, vm_substitution_endpoint_socket,
+    vm_vsock_port_socket_at, vms_dir,
+};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
@@ -24,6 +26,7 @@ use mvm_core::vm_backend::{
     VmStartConfig, VmStatus,
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
+use mvm_net::channel::GuestService;
 
 use crate::checkpoint::{
     CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, capture_vm_full, verify_content,
@@ -282,6 +285,8 @@ struct StandingSockets {
     /// broker channel at all. The one path threaded into both the spec and the
     /// `BrokerRegistrar::register` call so the relay target and bind path match.
     broker: Option<PathBuf>,
+    network_control: Option<PathBuf>,
+    network_data: Option<PathBuf>,
     console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
@@ -304,12 +309,23 @@ impl StandingSockets {
             egress_gateway: egress_uds,
             exit: &self.exit,
             broker: self.broker.as_deref(),
+            network_control: self.network_control.as_deref(),
+            network_data: self.network_data.as_deref(),
             console_data: self.console_data.clone(),
         }
     }
 }
 
-fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets {
+fn standing_sockets(
+    state_dir: &Path,
+    config: &VmStartConfig,
+    backend_kind: BackendKind,
+) -> StandingSockets {
+    let l3_channels = crate::egress_shared::l3_cmdline_token(config).is_some();
+    let l3_socket = |service: GuestService| match backend_kind {
+        BackendKind::Hvf => vm_hvf_vsock_port_socket_at(state_dir, service.port()),
+        _ => vm_vsock_port_socket_at(state_dir, service.port()),
+    };
     StandingSockets {
         // Single source of truth shared with the host-side resolver so the
         // guest agent bridge can't drift out of the host's reach.
@@ -320,7 +336,9 @@ fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets
         broker: config
             .tenant_id
             .is_some()
-            .then(|| mvm_core::config::vm_vsock_port_socket_at(state_dir, BROKER_PORT)),
+            .then(|| vm_vsock_port_socket_at(state_dir, GuestService::Broker.port())),
+        network_control: l3_channels.then(|| l3_socket(GuestService::NetworkControl)),
+        network_data: l3_channels.then(|| l3_socket(GuestService::NetworkData { queue: 0 })),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, config.dev_console),
     }
@@ -433,7 +451,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             },
         )?;
 
-        let socks = standing_sockets(&state_dir, inputs.config);
+        let socks = standing_sockets(&state_dir, inputs.config, self.driver.kind());
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
             sockets: socks.with_egress(endpoint.egress_uds()),
@@ -582,7 +600,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // mapped through the one mapper a cold boot's set comes from. The fork
         // wires these before it resumes the child; a restored guest is already
         // booted, so it dials the instant its vCPUs run.
-        let socks = standing_sockets(&child_dir, &child_cfg);
+        let socks = standing_sockets(&child_dir, &child_cfg, self.driver.kind());
         let channels = workload_vsock_ports(&socks.with_egress(endpoint.egress_uds()));
 
         // Register the child's host-services broker (host.audit.v1 /
@@ -1093,7 +1111,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // it: there is no retry and no fallback, so a guest that finds no
         // listener has no network at all. A no-op for every plan that did
         // not select the tunnel.
-        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir)?;
+        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
 
         // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
         // below, so bind them here rather than inline.
@@ -1276,7 +1294,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
+    use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, GUEST_AGENT_PORT};
     use mvm_core::plan::{Nonce, SecretBinding, SecretSource, VerbGrant, VerbId};
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
     use mvm_core::util::test_env::TestEnv;
@@ -1432,7 +1450,7 @@ mod tests {
     fn egress_host_uds(spec: &crate::driver::VmmSpec) -> &Path {
         spec.vsock
             .iter()
-            .find(|p| p.guest_port == EGRESS_PORT)
+            .find(|p| p.service == GuestService::Substitution)
             .map(|p| p.host_uds.as_path())
             .expect("spec carries an EGRESS_PORT vsock channel")
     }
@@ -1739,7 +1757,7 @@ mod tests {
         let broker = specs[0]
             .vsock
             .iter()
-            .find(|p| p.guest_port == BROKER_PORT)
+            .find(|p| p.service == GuestService::Broker)
             .expect("admitted spec carries a BROKER_PORT channel");
         assert_eq!(broker.direction, crate::driver::VsockDirection::GuestDials);
         assert_eq!(broker.host_uds, expected_socket);
@@ -1778,7 +1796,10 @@ mod tests {
         // BROKER_PORT stays ECONNREFUSED (fail-closed).
         let specs = runner.driver.booted_specs();
         assert!(
-            specs[0].vsock.iter().all(|p| p.guest_port != BROKER_PORT),
+            specs[0]
+                .vsock
+                .iter()
+                .all(|p| p.service != GuestService::Broker),
             "unadmitted VM must carry no broker port"
         );
     }
@@ -2466,7 +2487,6 @@ mod tests {
 
     #[test]
     fn start_workload_with_dev_console_threads_128_console_ports_into_spec() {
-        use mvm_agentd::vsock::CONSOLE_PORT_BASE;
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
@@ -2500,7 +2520,7 @@ mod tests {
         let console: Vec<_> = spec
             .vsock
             .iter()
-            .filter(|p| p.guest_port > CONSOLE_PORT_BASE)
+            .filter(|p| matches!(p.service, GuestService::ConsoleData { .. }))
             .collect();
         assert_eq!(console.len(), 128);
         assert!(
@@ -2722,7 +2742,7 @@ mod tests {
             booted[0]
                 .vsock
                 .iter()
-                .map(|p| p.guest_port)
+                .map(crate::driver::VsockPort::port)
                 .collect::<Vec<_>>()
         );
 
@@ -3025,7 +3045,6 @@ mod tests {
             parent.vsock.is_empty(),
             "an egress-enabled parent still wires no egress channel to dial"
         );
-        assert!(!parent.trusted_builder);
     }
 
     // ── Warm claim: the guarded fork of a clean parent into a fresh child ──────
@@ -3450,7 +3469,7 @@ mod tests {
                             .map(|rest| format!("<vm>/{}", rest.display()))
                     })
                     .unwrap_or_else(|| p.host_uds.display().to_string());
-                (p.guest_port, p.direction, where_)
+                (p.port(), p.direction, where_)
             })
             .collect()
     }
@@ -3565,7 +3584,7 @@ mod tests {
         // Non-vacuity: the fixture must actually exercise all four standing
         // channels, or "the two match" would say nothing. These are the three
         // the fork used to drop, plus the agent RPC.
-        let ports: Vec<u32> = cold.iter().map(|p| p.guest_port).collect();
+        let ports: Vec<u32> = cold.iter().map(crate::driver::VsockPort::port).collect();
         for (port, what) in [
             (EGRESS_PORT, "the gated egress endpoint"),
             (BROKER_PORT, "host.audit.v1 / host.secrets.v1"),
@@ -3608,7 +3627,7 @@ mod tests {
         let wired = run.driver.forked_children()[0]
             .channels
             .iter()
-            .find(|p| p.guest_port == BROKER_PORT)
+            .find(|p| p.service == GuestService::Broker)
             .map(|p| p.host_uds.clone())
             .expect("the child carries a broker channel");
         assert_eq!(

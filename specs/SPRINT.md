@@ -112,7 +112,10 @@
       instead of failing with an opaque source-fetch error. `MVM_KERNEL_SOURCE`
       provides a persistent compile/download/auto choice, with explicit CLI
       flags taking precedence. Covered by manifest, policy, and end-to-end
-      builder-kernel validation.
+      builder-kernel validation. Builder libkrun now routes every Stage 0 vsock
+      path through the short-socket resolver, including builderd readiness probes,
+      so the same command also works from deep worktree paths on macOS; the
+      isolated-worktree kernel build was verified end to end on aarch64.
 - [x] One-command local microVM UX. A cold source checkout now builds the
       dedicated dm-verity workload kernel automatically during the first
       `machine run --image`, reports the first-run cost, and caches the result;
@@ -484,7 +487,13 @@ updates only its own entry below.
       the guest boots, and every stop path reaps it. Privileged Linux lane
       run on a KVM host (6/6, live forwarding witness, clean teardown); 23
       hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
-      and refuses; native Windows is not claimed.
+      and refuses; native Windows is not claimed. Follow-up issue #2186 now
+      closes the remaining launch-shape seam: every standing channel in
+      `VmmSpec` is identified by `GuestService`, the workload mapper emits the
+      typed L3 control/data channels, and `mvm-netd` receives the
+      backend-specific socket layout instead of assuming one convention.
+      The physical spec is also role-neutral: builder boots use the same typed
+      substitution channel and no longer carry a `trusted_builder` flag.
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
       dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and
@@ -557,6 +566,13 @@ updates only its own entry below.
       post-change run measured 19–21 minutes of runner wait; its 37m36s Lint
       execution did not beat the 36-minute cold-run baseline because the
       remaining `mvm-cli` and live audit tests dominate the lane.
+
+- [x] Plan 297 parallel pull-request CI lanes: run compiler lint, policy,
+      feature-gated coverage, workspace tests, and Linux/no-std/filesystem/
+      conformance coverage concurrently while keeping the existing `Lint` and
+      `Test` required check names as fail-closed aggregates. The moved Linux
+      coverage has one reusable script and the PR workflow still has no
+      branch-scoped Cargo target cache.
 
 - [x] #1840 faithful flake-image revert: boot the recorded slot revision,
       reconcile signed artifact hashes, and preserve the admitted restore path.

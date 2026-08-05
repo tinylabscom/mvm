@@ -2,9 +2,9 @@
 //!
 //! Prose that names a witness must name one that exists.
 //!
-//! `check-claim-catalog` already verifies the witnesses in ADR-001's table.
-//! Nothing verified the ones cited *around* it, and that is where the drift
-//! went: `CLAUDE.md` cited a claim-12 witness that exists nowhere in the tree
+//! `check-claim-catalog` already verifies the witnesses named in the claims
+//! ledger table. Nothing verified the ones cited *around* it, and that is where
+//! the drift went: `CLAUDE.md` cited a witness that exists nowhere in the tree
 //! and was believed for months, and a CI job was "corrected" to a name no
 //! workflow defines. Both read as evidence. Neither was.
 //!

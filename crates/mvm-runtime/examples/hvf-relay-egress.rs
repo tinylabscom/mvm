@@ -59,10 +59,10 @@ fn main() {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use mvm_agentd::vsock::EGRESS_PORT;
     use mvm_core::config::vm_state_dir;
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::vm_backend::VmStatus;
+    use mvm_net::channel::GuestService;
     use mvm_runtime::driver::{
         ConsoleCapture, HvfDriver, KernelImage, VmmDriver, VmmSpec, VsockDirection, VsockPort,
     };
@@ -171,14 +171,13 @@ fn main() {
             // The one channel off the box: the guest dials EGRESS_PORT, the host
             // relays it to the gating endpoint's UDS.
             vsock: vec![VsockPort {
-                guest_port: EGRESS_PORT,
+                service: GuestService::Substitution,
                 host_uds: uds.clone(),
                 direction: VsockDirection::GuestDials,
             }],
             console: ConsoleCapture {
                 log_path: state_dir.join("console.log"),
             },
-            trusted_builder: false,
         };
 
         let driver = HvfDriver::new();

@@ -275,6 +275,13 @@ for detailed scope and acceptance criteria.
   - [x] Keep the removed MCP server and smoke lane out of CI
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
+
+- [x] Plan 297 — Parallel pull-request CI lanes
+      (`specs/plans/297-ci-parallel-lanes.md`)
+  - [x] Split independent lint and Linux-only test coverage into concurrent
+        jobs without changing required check names
+  - [x] Keep targeted feature coverage and Linux conformance coverage intact
+  - [x] Complete workflow and repository verification
 - [~] Plan 276 — Content-addressing conformance and defense
       (`specs/plans/276-content-addressing-conformance-and-defense.md`)
   - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
@@ -334,6 +341,12 @@ for detailed scope and acceptance criteria.
   - [x] Privileged Linux lane executed on a Linux/KVM host: real host TUN,
         real nftables, live forwarding witness, verified-clean teardown
   - [x] BDD suite `s25_l3_vsock` (23 hermetic scenarios)
+  - [x] Workload `VmmSpec` mapping carries the typed L3 control/data channels;
+        netd socket layout follows the selected backend
+  - [x] `VmmSpec::vsock` uses `GuestService` identities for standing channels;
+        numeric ports are derived only at the VMM boundary
+  - [x] Removed builder-role policy from `VmmSpec`; all boots require the
+        typed substitution channel and HVF fails closed when it is absent
   - [ ] macOS forwarding backend — capability-declared and refusing; the
         userspace socket gateway is not implemented
   - [ ] WSL2 validation on a real runner; node-to-node transport; mvmd

@@ -297,11 +297,13 @@ mod tests {
     fn pull_request_ci_does_not_repeat_the_workspace_or_upload_target_caches() {
         let workflow = ci_workflow();
         let lint = job_block(&workflow, "lint");
+        assert!(lint.contains("name: Lint (fmt + clippy + policy)"));
+        assert!(lint.contains("needs: [lint-core, lint-policy, lint-features]"));
+
         for unexpected in [
             "cargo nextest run --workspace --features test-support",
             "cargo nextest run -p xtask --features man",
             "uses: actions/cache@v5",
-            "uses: ./.github/actions/free-disk",
         ] {
             assert!(
                 !lint.contains(unexpected),
@@ -309,6 +311,11 @@ mod tests {
             );
         }
 
+        let lint_core = job_block(&workflow, "lint-core");
+        assert!(lint_core.contains("cargo clippy --all-targets -- -D warnings"));
+        let lint_policy = job_block(&workflow, "lint-policy");
+        assert!(lint_policy.contains("cargo run -p xtask -- check-conformance"));
+        let lint_features = job_block(&workflow, "lint-features");
         for expected in [
             "cargo nextest run -p mvm-runtime --features test-support --lib",
             "cargo nextest run -p mvm-client --features test-support --lib",
@@ -317,14 +324,37 @@ mod tests {
             "cargo check -p mvm-cli --features test-support --example verification_loop",
         ] {
             assert!(
-                lint.contains(expected),
-                "CI lint job must contain {expected:?}"
+                lint_features.contains(expected),
+                "CI feature lane must contain {expected:?}"
             );
         }
 
         let test = job_block(&workflow, "test");
-        assert!(!test.contains("uses: actions/cache@v5"));
-        assert!(test.contains("cargo nextest run -p xtask --features man"));
+        assert!(test.contains("name: Test"));
+        assert!(test.contains("needs: [test-workspace, test-linux]"));
+        let test_workspace = job_block(&workflow, "test-workspace");
+        assert!(!test_workspace.contains("uses: actions/cache@v5"));
+        assert!(test_workspace.contains("cargo nextest run -p xtask --features man"));
+        let test_linux = job_block(&workflow, "test-linux");
+        assert!(test_linux.contains("bash scripts/ci-linux-coverage.sh"));
+        assert!(!test_workspace.contains("ci-linux-coverage.sh"));
+
+        let linux_coverage = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("scripts/ci-linux-coverage.sh"),
+        )
+        .expect("Linux coverage script must be readable");
+        for expected in [
+            "cargo +1.96.0 build -p mvm-contract --target wasm32-unknown-unknown",
+            "cargo test -p mvm-conformance --test meta",
+            "just bdd",
+        ] {
+            assert!(
+                linux_coverage.contains(expected),
+                "Linux coverage script must contain {expected:?}"
+            );
+        }
     }
 
     #[test]
