@@ -33,6 +33,7 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
                     download_workload_kernel(arch, &path)?;
                     ("downloaded", path)
                 }
+                #[cfg(feature = "builder-vm")]
                 KernelSource::Auto => match download_workload_kernel(arch, &path) {
                     Ok(()) => ("downloaded", path),
                     Err(download_error) => {
@@ -55,7 +56,12 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
                 }
                 ("built", build_local_workload_kernel()?)
             }
-            KernelSource::Download | KernelSource::Auto => {
+            KernelSource::Download => {
+                download_workload_kernel(arch, &dest)?;
+                ("downloaded", dest)
+            }
+            #[cfg(feature = "builder-vm")]
+            KernelSource::Auto => {
                 download_workload_kernel(arch, &dest)?;
                 ("downloaded", dest)
             }

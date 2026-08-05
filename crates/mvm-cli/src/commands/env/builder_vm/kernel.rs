@@ -52,6 +52,7 @@ impl KernelVariant {
 pub(crate) enum KernelSource {
     Compile,
     Download,
+    #[cfg(feature = "builder-vm")]
     Auto,
 }
 
