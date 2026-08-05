@@ -11,11 +11,13 @@ analogues; and the capability seam carries `ipv6_flows` separately from
 *before* relaxing the guard — was honoured: the fuzz target and its IPv6
 corpus landed first.
 
-**What has not.** `CONFIG_IPV6` in the workload kernel, and the in-guest
-address configuration beside it. This ADR requires that delta be measured
-rather than assumed, and no measurement has been taken. Until one is, the
-host admits v6 that no guest can yet originate — which is a gap in reach,
-not in safety, since every refusal above is enforced regardless.
+**What has not, and why it is not merely pending.** `CONFIG_IPV6` in the
+workload kernel. The delta was measured on 2026-08-04 and the build is
+**refused**: IPv6 selects the XFRM/IPsec framework, which sits in the
+required disable set. See §"`CONFIG_IPV6` in the workload kernel" — the
+question turns out to be a security-posture one, not a size one. The host
+admits and carries v6 regardless; a guest cannot originate it, which is a
+gap in reach rather than in safety.
 **Complements ADR-036 (L3 TUN-over-vsock) and ADR-037 (the userspace
 socket datapath). Supersedes nothing; it removes IPv6 from ADR-036's
 deferred set and gives it a design.**
@@ -145,6 +147,36 @@ to an attacker-controlled input path, which no amount of subsequent testing
 un-ships.
 
 ## `CONFIG_IPV6` in the workload kernel
+
+**Measured 2026-08-04 on a Linux 6.8 host, and the framing below is wrong.**
+This was posed as a size-and-boot-time question. It is not. Enabling
+`CONFIG_IPV6` is refused outright by the kernel-config guard:
+
+```
+ERROR: required kernel disables were reverted by olddefconfig: XFRM_ALGO XFRM
+```
+
+IPv6 selects the XFRM transform framework — the kernel's IPsec machinery —
+and `XFRM`, `XFRM_ALGO` and `XFRM_USER` are all in the *required* disable
+set. So the real question is not how many kilobytes IPv6 costs but whether
+a sealed workload guest may carry IPsec and its netlink surface at all.
+
+A size measurement alone would have missed this: the kernel builds, it is
+a few hundred kilobytes larger exactly as predicted, and it quietly carries
+the XFRM stack into every guest. The guard is what caught it.
+
+The options are therefore: accept XFRM into the workload kernel (a
+deliberate attack-surface expansion needing its own justification), find
+whether v6 can be built without it, make IPv6 a guest-image variant, or
+leave guests v4-only. The recommendation is the last until a workload asks,
+then the image variant — accepting IPsec for a capability nothing has
+requested is the trade ADR-039 rejected for the macOS root helper, and it
+should be rejected here for the same reason.
+
+The host side is unaffected: it admits and carries v6 regardless. A guest
+simply cannot originate it, which is a gap in reach rather than in safety.
+
+The original framing, retained for the record:
 
 The original blocker is real but small: the guest kernel needs the option
 compiled in, plus in-guest address configuration alongside the existing v4
