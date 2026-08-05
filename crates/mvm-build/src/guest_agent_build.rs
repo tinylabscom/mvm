@@ -6,7 +6,7 @@
 //! `run --image` path the host produces the binaries directly and bakes
 //! them in. This module builds the guest artifact with `cargo-zigbuild` to a
 //! static musl target and caches the result under
-//! `~/.mvm/cache/guest-agent/<version>/<arch>/interactive/`.
+//! `~/.mvm/cache/guest-agent/<version>/<arch>/`.
 //!
 //! `cargo-zigbuild` is the single portable cross path: the agent pulls
 //! `ring` (C), so a static musl build needs a musl C cross-compiler, and
@@ -216,11 +216,9 @@ impl GuestAgentBuildSpec {
         musl_target_triple(self.arch)
     }
 
-    /// `cargo zigbuild` argv. Builds the guest runtime bins with `interactive`
-    /// (the `run --image` exec path uses the interactive-gated handler,
-    /// matching `nix/packages/mvm-guest-agent.nix`) and `addons` (the
-    /// async loopback helper bins — `mvm-egress-client` here — require it
-    /// so the sealed agent's default build stays tokio-free).
+    /// `cargo zigbuild` argv. Builds the universal guest runtime bins with
+    /// `addons` (the async loopback helper bins — `mvm-egress-client` here —
+    /// require it).
     pub fn argv(&self) -> Vec<String> {
         let cargo = self
             .cargo
