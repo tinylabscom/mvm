@@ -30,6 +30,7 @@ use mvm_core::vm_backend::{RuntimeSourcePolicy, StandbyError, StandbySpec, VmSta
 use crate::driver::VmmSpec;
 use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::workload_device_spec;
+use crate::workload_runner::spec_map::{WorkloadSockets, workload_vsock_ports};
 
 /// Refuse a factory parent whose boot inputs describe a guest that cannot reach
 /// an agent, naming the missing piece.
@@ -196,13 +197,11 @@ pub fn factory_parent_config(
 /// boot uses, so a drive or cmdline token added to the workload's boot reaches
 /// the parent's too.
 ///
-/// One divergence is deliberate and covered by the tests below: the vsock
-/// channel list, which [`workload_device_spec`] leaves empty. A workload wires
-/// its agent, egress, exit and (when admitted) broker channels to host sockets;
-/// a parent wires none because it has no endpoint and no broker to wire them
-/// to. The guest's vsock *device* is identical either way — the driver
-/// configures it unconditionally — so this costs the parent no device-model
-/// divergence.
+/// Saved-state parents deliberately carry no host channels. The live-HVF
+/// variant below adds authority-free stable agent, egress, broker, and exit
+/// paths so a paused resident parent can be handed off without changing its
+/// device model; those paths are connected to child-owned endpoints only at
+/// claim time.
 ///
 /// A second divergence is **not** covered, and no test here can cover it: the
 /// per-VM grant tokens. [`cmdline::workload_cmdline`] appends whatever
@@ -228,8 +227,44 @@ pub fn factory_parent_spec(
     state_dir: &Path,
     base_bootargs: impl Fn(bool, bool) -> String,
 ) -> VmmSpec {
+    factory_parent_spec_inner(config, state_dir, base_bootargs, false)
+}
+
+/// Build the factory parent shape for the native HVF live handoff. The stable
+/// paths are inert until a claim links them to the child's own host channels.
+pub fn factory_parent_spec_live(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool, bool) -> String,
+) -> VmmSpec {
+    factory_parent_spec_inner(config, state_dir, base_bootargs, true)
+}
+
+fn factory_parent_spec_inner(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool, bool) -> String,
+    live_handoff: bool,
+) -> VmmSpec {
     let cmdline = cmdline::runner_cmdline(config, state_dir, base_bootargs);
-    workload_device_spec(config, &cmdline, &state_dir.join("console.log"))
+    if !live_handoff {
+        return workload_device_spec(config, &cmdline, &state_dir.join("console.log"));
+    }
+    let agent = mvm_core::config::vm_hvf_agent_socket_at(state_dir);
+    let egress = state_dir.join("standby-egress.sock");
+    let exit = state_dir.join("workload.exit");
+    let broker = state_dir.join("standby-broker.sock");
+    let sockets = WorkloadSockets {
+        agent: &agent,
+        egress_gateway: &egress,
+        exit: &exit,
+        broker: Some(&broker),
+        console_data: Vec::new(),
+    };
+    VmmSpec {
+        vsock: workload_vsock_ports(&sockets),
+        ..workload_device_spec(config, &cmdline, &state_dir.join("console.log"))
+    }
 }
 
 #[cfg(test)]
@@ -658,11 +693,15 @@ mod tests {
 
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
         // The enablement the guest boots with is all the parent takes from the
-        // launch's policy, and it buys the parent no reach: a parent wires no
-        // egress channel at all, so the guest's client has nothing to dial.
+        // launch's policy. Its channels are stable, authority-free handoff
+        // paths; no child endpoint or broker is attached until claim time.
         assert!(
-            parent.vsock.is_empty(),
-            "a factory parent wires no host channels: no egress, no broker"
+            parent.vsock.iter().all(|port| {
+                port.host_uds.to_string_lossy().contains("standby")
+                    || port.guest_port == mvm_agentd::vsock::GUEST_AGENT_PORT
+                    || port.guest_port == mvm_agentd::vsock::WORKLOAD_EXIT_PORT
+            }),
+            "a factory parent may only wire stable standby paths"
         );
         assert_eq!(
             parent.blocks.len(),
@@ -673,6 +712,42 @@ mod tests {
             !parent.cmdline.contains("mvm.uvols="),
             "parent cmdline leaked a user-volume manifest: {}",
             parent.cmdline
+        );
+    }
+
+    #[test]
+    fn live_parent_uses_stable_handoff_channels_without_workload_endpoints() {
+        let _home = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let launch = sealed_launch(tmp.path());
+        let spec = standby_spec_for(&launch, tmp.path());
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        let parent = factory_parent_spec_live(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+
+        let ports: std::collections::HashMap<_, _> = parent
+            .vsock
+            .iter()
+            .map(|port| (port.guest_port, port.host_uds.clone()))
+            .collect();
+        assert!(
+            ports[&mvm_agentd::vsock::GUEST_AGENT_PORT]
+                .to_string_lossy()
+                .contains("hvf-agent.sock")
+        );
+        assert!(
+            ports[&mvm_agentd::vsock::EGRESS_PORT]
+                .to_string_lossy()
+                .ends_with("standby-egress.sock")
+        );
+        assert!(
+            ports[&mvm_agentd::vsock::BROKER_PORT]
+                .to_string_lossy()
+                .ends_with("standby-broker.sock")
+        );
+        assert!(
+            ports[&mvm_agentd::vsock::WORKLOAD_EXIT_PORT]
+                .to_string_lossy()
+                .ends_with("workload.exit")
         );
     }
 

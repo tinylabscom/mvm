@@ -279,7 +279,7 @@ pub(in crate::commands) struct MachineRunArgs {
     #[arg(long, default_value = "512M")]
     pub memory: String,
     /// Select a security profile.
-    #[arg(long, value_enum, default_value = "standard")]
+    #[arg(long, value_enum, default_value = "dev")]
     pub profile: RunProfile,
     /// Allow a production-safe guest-agent verb (repeatable).
     #[arg(long = "agent-verb", value_name = "VERB")]
@@ -1081,7 +1081,10 @@ impl MachineCreateArgs {
             .mem_initial
             .or_else(|| workflow.and_then(|workflow| workflow.mem_initial.clone()));
         let _ = validate_machine_memory(&memory, mem_initial.as_deref())?;
-        let profile = self.profile.unwrap_or(RunProfile::Standard);
+        // CLI-created machines are development workloads unless the caller
+        // explicitly opts into a stricter profile. The daemon is the only
+        // producer that should supply a non-dev production profile by policy.
+        let profile = self.profile.unwrap_or(RunProfile::Dev);
         let profile_name = run_profile_name(profile).to_string();
         let init = workflow
             .map(|workflow| workflow.init.clone())
@@ -1500,7 +1503,7 @@ fn run_args_for_image_revert(
             allow_host: Vec::new(),
             cpus: 2,
             memory: "512M".to_string(),
-            profile: RunProfile::Standard,
+            profile: RunProfile::Dev,
             agent_verb: Vec::new(),
             volume: Vec::new(),
             env: Vec::new(),

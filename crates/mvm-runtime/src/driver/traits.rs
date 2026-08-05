@@ -20,6 +20,10 @@ use crate::vm::instance_snapshot::PostRestoreOutcome;
 /// What a driver needs to fork a materialized standby parent into a fresh child
 /// VMM. Grouped so the seam takes one value instead of a positional list.
 pub struct ChildForkRequest<'a> {
+    /// The verified standby parent that is being handed off to this child.
+    /// Saved-state drivers use the checkpoint in `child_dir`; live standby
+    /// drivers use this name to transfer their paused resident VM.
+    pub parent_vm_name: &'a str,
     /// The child's fresh, registry-unique name (its `~/.mvm/vms/<name>` key).
     pub child_vm_name: &'a str,
     /// The child's state dir, already holding the copy-on-write clone of the
@@ -188,6 +192,15 @@ pub trait VmmDriver: Send + Sync {
     fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
         let _ = vm_name;
         None
+    }
+
+    /// Whether a standby parent stays resident and is handed off in place.
+    ///
+    /// This is distinct from a saved-state snapshot: a live handoff must
+    /// rewire every host channel while the parent is paused and must never be
+    /// selected by a driver that has not implemented that protocol.
+    fn standby_parent_is_live(&self) -> bool {
+        false
     }
 
     /// The VMM-specific base kernel bootargs (console, earlycon, root/init

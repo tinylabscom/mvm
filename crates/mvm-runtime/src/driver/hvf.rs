@@ -17,15 +17,19 @@ use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_po
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, VmBackend, VmCapabilities, VmExitStatus,
-    VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyError, StandbyHandle,
+    StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
 use crate::driver::spec::KernelImage;
-use crate::driver::{DuplexStream, RunningVm, VmmDriver, VmmSpec};
+use crate::driver::{
+    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver, VmmSpec,
+    VsockDirection,
+};
 use crate::hvf_backend::{
-    self, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
+    self, HvfBackend, PID_FILE_NAME, PID_FILE_POLL_INTERVAL, PID_FILE_TIMEOUT,
+    resolve_supervisor_path,
 };
 
 /// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
@@ -176,11 +180,109 @@ impl VmmDriver for HvfDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        self.backend.capabilities()
+        let mut capabilities = self.backend.capabilities();
+        // HVF uses a paused resident-parent handoff rather than advertising a
+        // serialized fresh-VMM restore that the native API cannot provide.
+        capabilities.pause_resume = true;
+        capabilities.standby_pool = true;
+        capabilities
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
         self.backend.security_profile()
+    }
+
+    fn standby_parent_is_live(&self) -> bool {
+        true
+    }
+
+    fn spawn_standby_parent(
+        &self,
+        req: &StandbyParentSpawn<'_>,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let vm = self
+            .boot(req.boot)
+            .map_err(|e| StandbyError::SpawnFailed(format!("boot HVF standby parent: {e}")))?;
+        let state_dir = vm_state_dir(&req.spec.id);
+        let agent = hvf_agent_socket(&state_dir);
+        wait_for_socket(&agent).map_err(|e| {
+            let _ = vm.kill();
+            StandbyError::SpawnFailed(format!("wait for HVF standby agent: {e}"))
+        })?;
+        vm.pause().map_err(|e| {
+            let _ = vm.kill();
+            StandbyError::SpawnFailed(format!("pause HVF standby parent: {e}"))
+        })?;
+        let pid = hvf_backend::read_pid(&state_dir.join(PID_FILE_NAME)).ok_or_else(|| {
+            StandbyError::SpawnFailed("HVF standby parent lost its PID marker".to_string())
+        })?;
+        let pid = u32::try_from(pid).map_err(|_| {
+            StandbyError::SpawnFailed("HVF standby parent PID marker is invalid".to_string())
+        })?;
+        Ok(StandbyHandle {
+            id: req.spec.id.clone(),
+            template_id: req.spec.template_id.clone(),
+            control_socket: req.spec.control_socket.clone(),
+            pid,
+            kernel_sha256: req.spec.kernel_sha256.clone(),
+            vcpus: req.spec.vcpus,
+            mem_mib: req.spec.mem_mib,
+            binding_nonce: req.spec.binding_nonce.clone(),
+            spawned_unix_secs: crate::standby_pool::now_unix_secs(),
+            state: StandbyState::Idle,
+            image_sha256: req.spec.image_sha256.clone(),
+            vsock_egress: req.spec.vsock_egress,
+            parent_checkpoint: None,
+        })
+    }
+
+    fn fork_standby_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        let parent_dir = vm_state_dir(req.parent_vm_name);
+        let parent_pid = parent_dir.join(PID_FILE_NAME);
+        if hvf_backend::read_pid(&parent_pid).is_none() {
+            return Err(StandbyError::ClaimFailed(format!(
+                "live HVF standby parent '{}' is no longer running",
+                req.parent_vm_name
+            )));
+        }
+
+        let result = (|| {
+            link_path(
+                &hvf_agent_socket(&parent_dir),
+                &hvf_agent_socket(req.child_dir),
+            )?;
+            link_path(&parent_pid, &req.child_dir.join(PID_FILE_NAME))?;
+            link_path(
+                &parent_dir.join("workload.exit"),
+                &req.child_dir.join("workload.exit"),
+            )?;
+            link_path(
+                &parent_dir.join("console.log"),
+                &req.child_dir.join("console.log"),
+            )?;
+
+            let child_egress = channel_path(req, EGRESS_PORT)?;
+            link_path(&child_egress, &parent_dir.join("standby-egress.sock"))?;
+            if let Some(child_broker) = channel_path_optional(req, BROKER_PORT) {
+                link_path(&child_broker, &parent_dir.join("standby-broker.sock"))?;
+            }
+            std::fs::write(req.child_dir.join("hvf-live-parent"), req.parent_vm_name)
+                .map_err(|e| anyhow!("record live HVF parent: {e}"))?;
+
+            self.attach(&VmId(req.parent_vm_name.to_string()))?
+                .resume()
+                .map_err(|e| anyhow!("resume live HVF child handoff: {e}"))
+        })();
+
+        result.map_err(|e| {
+            let _ = self
+                .attach(&VmId(req.parent_vm_name.to_string()))
+                .and_then(|vm| vm.kill());
+            StandbyError::ClaimFailed(format!("wire live HVF standby child: {e}"))
+        })
     }
 
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
@@ -241,7 +343,7 @@ impl VmmDriver for HvfDriver {
                     paths.console_log.display()
                 );
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(PID_FILE_POLL_INTERVAL);
         }
 
         // Detach: dropping the `Child` does not kill it, so the supervisor
@@ -294,6 +396,60 @@ fn hvf_agent_socket(state_dir: &std::path::Path) -> PathBuf {
     mvm_core::config::vm_hvf_agent_socket_at(state_dir)
 }
 
+fn wait_for_socket(path: &std::path::Path) -> Result<()> {
+    let timeout = PID_FILE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            bail!(
+                "HVF supervisor did not bind {} within {timeout:?}",
+                path.display()
+            );
+        }
+        std::thread::sleep(PID_FILE_POLL_INTERVAL);
+    }
+    Ok(())
+}
+
+fn channel_path(req: &ChildForkRequest<'_>, guest_port: u32) -> Result<PathBuf> {
+    channel_path_optional(req, guest_port).ok_or_else(|| {
+        anyhow!("live HVF child is missing its required guest-dialed channel {guest_port}")
+    })
+}
+
+fn channel_path_optional(req: &ChildForkRequest<'_>, guest_port: u32) -> Option<PathBuf> {
+    req.channels
+        .iter()
+        .find(|channel| {
+            channel.guest_port == guest_port && channel.direction == VsockDirection::GuestDials
+        })
+        .map(|channel| channel.host_uds.clone())
+}
+
+fn link_path(target: &std::path::Path, link: &std::path::Path) -> Result<()> {
+    if link.exists() || std::fs::symlink_metadata(link).is_ok() {
+        bail!(
+            "refusing to replace existing live-HVF handoff path {}",
+            link.display()
+        );
+    }
+    std::os::unix::fs::symlink(target, link)
+        .with_context(|| format!("link {} -> {}", link.display(), target.display()))
+}
+
+fn signal_vm(pid_file: &std::path::Path, signal: libc::c_int) -> Result<()> {
+    let pid = hvf_backend::read_pid(pid_file)
+        .ok_or_else(|| anyhow!("HVF VM has no live PID marker at {}", pid_file.display()))?;
+    // SAFETY: the PID comes from the backend-owned marker created for this VM;
+    // the signal is limited to pause/resume/termination for that process.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("send signal {signal} to HVF supervisor pid {pid}"));
+    }
+    Ok(())
+}
+
 /// Resolve the host UDS for a console data port via the shared HVF-style socket
 /// helper. Returns `None` when the port is outside `dev_console_data_ports()`.
 fn console_socket_for_port(state_dir: &std::path::Path, guest_port: u32) -> Option<PathBuf> {
@@ -330,15 +486,22 @@ impl RunningVm for HvfRunningVm {
             hvf_backend::terminate_pid(pid);
         }
         let _ = std::fs::remove_file(&self.pid_file);
+        if let Ok(parent_name) = std::fs::read_to_string(self.state_dir.join("hvf-live-parent")) {
+            let parent_name = parent_name.trim();
+            if !parent_name.is_empty() {
+                let parent_state = vm_state_dir(parent_name);
+                let _ = std::fs::remove_dir_all(parent_state);
+            }
+        }
         Ok(())
     }
 
     fn pause(&self) -> Result<()> {
-        bail!("hvf pause/resume is not yet implemented")
+        signal_vm(&self.pid_file, libc::SIGUSR1)
     }
 
     fn resume(&self) -> Result<()> {
-        bail!("hvf pause/resume is not yet implemented")
+        signal_vm(&self.pid_file, libc::SIGUSR2)
     }
 
     fn status(&self) -> Result<VmStatus> {
@@ -427,11 +590,49 @@ mod tests {
         assert_eq!(d.name(), "hvf");
         assert_eq!(d.kind(), BackendKind::Hvf);
         assert!(d.capabilities().vsock);
+        assert!(d.capabilities().pause_resume);
+        assert!(d.capabilities().standby_pool);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         assert_eq!(
             d.security_profile().tier,
             HvfBackend.security_profile().tier
         );
+    }
+
+    #[test]
+    fn live_handoff_refuses_to_replace_an_existing_socket_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target.sock");
+        let link = tmp.path().join("link.sock");
+        std::fs::write(&target, b"target").unwrap();
+        std::fs::write(&link, b"existing").unwrap();
+
+        let err = link_path(&target, &link).unwrap_err();
+
+        assert!(err.to_string().contains("refusing to replace"));
+        assert_eq!(std::fs::read(&link).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn live_handoff_only_accepts_guest_dialed_channels() {
+        let channels = vec![VsockPort {
+            guest_port: EGRESS_PORT,
+            host_uds: "/run/egress.sock".into(),
+            direction: VsockDirection::HostDials,
+        }];
+        let child_dir = PathBuf::from("/tmp/child-vm");
+        let req = ChildForkRequest {
+            parent_vm_name: "parent-vm",
+            child_vm_name: "child-vm",
+            child_dir: &child_dir,
+            genid: mvm_core::crypto::vmgenid::GenerationToken {
+                token: [0; mvm_core::crypto::vmgenid::GENID_BYTES],
+                content_hash: "content".into(),
+            },
+            channels: &channels,
+        };
+
+        assert!(channel_path_optional(&req, EGRESS_PORT).is_none());
     }
 
     #[test]

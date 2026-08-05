@@ -1766,7 +1766,7 @@ fn test_run_command_is_recognized() {
     match cli.command {
         Commands::Machine(mg) => match mg.action {
             machine::MachineAction::Run(machine::MachineRunArgs { profile, argv, .. }) => {
-                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(profile, exec::RunProfile::Dev);
                 assert_eq!(argv, vec!["/bin/true".to_string()]);
             }
             _ => panic!("Expected machine run"),
@@ -3073,7 +3073,7 @@ fn run_default_profile_argv_only() {
                 assert!(allow_host.is_empty());
                 assert_eq!(cpus, 2);
                 assert_eq!(memory, "512M");
-                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(profile, exec::RunProfile::Dev);
                 assert!(volume.is_empty());
                 assert!(env.is_empty());
                 assert_eq!(timeout, None);
