@@ -233,7 +233,7 @@ the source gap analysis is at
    tamper regression confirms the kernel panics before userspace
    on a flipped data block.
 4. **The guest agent does not contain `do_exec` in production
-   builds.** `prod-agent-no-exec` job in `.github/workflows/ci.yml`
+   builds.** `prod-agent-no-exec` job in `.github/workflows/security.yml`
    builds the agent without `interactive` and asserts the
    `mvm_guest_agent::do_exec` symbol is absent (W4.3).
 5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
@@ -303,8 +303,9 @@ the source gap analysis is at
    closed on high/critical CVE findings or stub SBOM/CVE
    (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
    inspect` / `mvmctl deps audit` surface the sealed sidecars without
-   a VM spawn. The `app-deps-audit` job in `.github/workflows/ci.yml`
-   (Followup D) gates every PR: it exercises `mvmctl build compile` on
+   a VM spawn. The `app-deps-audit` job in `.github/workflows/ci-full.yml`
+   (Followup D) runs in the manually dispatched full-matrix workflow: it
+   exercises `mvmctl build compile` on
    `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
    fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
    asserts `mvmctl deps inspect --json` reports a well-formed report,

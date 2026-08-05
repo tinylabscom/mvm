@@ -2,12 +2,14 @@ name: Security
 
 # ADR-001 §W6.3 — single workflow that hosts every CI-side security
 # gate. Lanes correspond to the microVM hardening workstreams and the
-# seven claims in CLAUDE.md::Security model. Failure on any lane
-# blocks merge.
+# seven claims in CLAUDE.md::Security model. These lanes provide release,
+# nightly, and manually requested security evidence; they are not PR checks
+# and do not block merge directly.
 #
-# Triggers: PRs against main, release-tag pushes (final pre-publish
-# gate), plus a nightly cron so advisory-DB additions get caught even
-# on quiet branches. `push: branches: [main]` was dropped in the
+# Triggers: release-tag pushes (final pre-publish gate), a nightly cron,
+# and manual dispatch. There is no `pull_request` trigger here; day-to-day
+# PR checks live in ci.yml. The nightly cron catches advisory-DB additions
+# even on quiet branches. `push: branches: [main]` was dropped in the
 # ecosystem-wide CI cost reduction — the nightly cron covers the
 # post-merge "did a new advisory land overnight" case at zero
 # per-merge cost, so the duplicate post-merge run was pure waste.
@@ -857,7 +859,6 @@ jobs:
   # single-build hash on every PR for diff-grade visibility.
   builder-vm-image-reproducibility:
     name: Builder-VM image reproducibility (Plan 107 A2.5)
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -953,7 +954,6 @@ jobs:
   # discovery step, not interpolated from any PR-controlled value.
   pack-reproducibility-builder:
     name: Published builder-pack reproducibility (${{ matrix.arch }})
-    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -1126,7 +1126,6 @@ jobs:
   # step below always uses `--keyless` regardless.
   pack-reproducibility-runtime:
     name: Published runtime-pack reproducibility (${{ matrix.arch }})
-    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:

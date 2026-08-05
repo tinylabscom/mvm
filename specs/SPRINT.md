@@ -10,6 +10,11 @@
 
 ## Current issue delivery
 
+- [x] Claim-witness CI documentation — **issue #2104**. Corrected the
+      `security.yml` trigger and merge-blocking claims, removed three
+      unreachable pull-request guards, and aligned the claim descriptions with
+      the workflows that actually run them.
+
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
       refuses tampered or unpinned source volumes, and can emit the canonical
