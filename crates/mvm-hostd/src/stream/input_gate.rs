@@ -1051,6 +1051,7 @@ mod tests {
         const FIXTURE_SHA: &str =
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         SynthesisInput {
+            stream_edges: Vec::new(),
             kernel_sha256: None,
             vm_name,
             tenant: None,

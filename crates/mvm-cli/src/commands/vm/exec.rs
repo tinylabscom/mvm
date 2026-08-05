@@ -940,6 +940,7 @@ fn emit_oci_run_admission(
         })?;
     let exec_timeout_secs = u32::try_from(timeout_secs).unwrap_or(u32::MAX);
     let input = SynthesisInput {
+        stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode,
         l3_network: None,
