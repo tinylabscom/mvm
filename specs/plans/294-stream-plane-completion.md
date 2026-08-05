@@ -64,9 +64,17 @@ Resolving the conflicts starts CI on its own. Do not go hunting in `ci.yml`.
 
 ### The merge
 
-- [ ] `git merge origin/main` — **not** a rebase. 60 commits through 21 commits
-      of drift multiplies the conflicts and rewrites a published branch. The PR
-      squash-merges anyway, so a merge commit costs nothing.
+- [x] `git merge origin/main` — **done**, in two passes (`c5851cfb6`, then
+      `ad10db4c9` when main landed the crate rename mid-merge). CI dispatched
+      on the second push; the PR went `CONFLICTING` → `MERGEABLE` and
+      auto-merge is armed.
+
+`merge-tree`'s "changed in both" over-reported: of 42 such files only **8**
+actually conflicted, 10 hunks total. The second pass was larger — main
+renamed `mvm-protocol` to `mvm-contract` (#2154), which moved 72 references
+across 32 files and required moving this branch's `stream/` module into the
+renamed crate by hand, since git renames the crate's own files but cannot
+carry across a module the branch had added.
 
 **Disable `rerere` first** — `git config rerere.enabled false`, already set in
 that worktree. It has previously replayed a stale resolution and silently
