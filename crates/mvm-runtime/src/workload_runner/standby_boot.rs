@@ -332,6 +332,8 @@ mod tests {
                 egress_gateway: Path::new("/run/egress.sock"),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
+                network_control: None,
+                network_data: None,
                 console_data: Vec::new(),
             },
             cmdline: cmdline::runner_cmdline(launch, state_dir, fc_base),
@@ -373,7 +375,6 @@ mod tests {
         assert_eq!(parent.vcpus, workload.vcpus);
         assert_eq!(parent.memory_mib, workload.memory_mib);
         assert_eq!(parent.mem_initial_mib, workload.mem_initial_mib);
-        assert!(!parent.trusted_builder);
     }
 
     /// An egress-allowing launch: the parent must boot the *identical* cmdline

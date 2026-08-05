@@ -24,6 +24,7 @@ use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
     StandbyHandle, StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
+use mvm_net::channel::GuestService;
 
 use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
@@ -240,10 +241,10 @@ fn wire_guest_dial_bridges(
         // The workload-exit port has no runner-bound listener — its `host_uds`
         // is the captured-code output file, not a socket. The driver binds and
         // captures it directly (see `spawn_workload_exit_capture`).
-        if port.guest_port == WORKLOAD_EXIT_PORT {
+        if port.service == GuestService::WorkloadExit {
             continue;
         }
-        let link = fc_guest_dial_socket(runtime_dir, port.guest_port);
+        let link = fc_guest_dial_socket(runtime_dir, port.port());
         // Clear any stale link/socket from a prior run so the symlink lands.
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&port.host_uds, &link).with_context(|| {
@@ -963,17 +964,17 @@ mod tests {
     use crate::driver::ConsoleCapture;
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
 
-    fn host_dials(guest_port: u32, uds: &str) -> VsockPort {
+    fn host_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
-            guest_port,
+            service,
             host_uds: uds.into(),
             direction: VsockDirection::HostDials,
         }
     }
 
-    fn guest_dials(guest_port: u32, uds: &str) -> VsockPort {
+    fn guest_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
-            guest_port,
+            service,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -983,10 +984,10 @@ mod tests {
     /// dials, and the egress, broker and exit ports the guest dials.
     fn workload_channels() -> Vec<VsockPort> {
         vec![
-            host_dials(GUEST_AGENT_PORT, "/run/agent.sock"),
-            guest_dials(EGRESS_PORT, "/run/egress.sock"),
-            guest_dials(BROKER_PORT, "/run/broker.sock"),
-            guest_dials(WORKLOAD_EXIT_PORT, "/state/w/workload.exit"),
+            host_dials(GuestService::MachineControl, "/run/agent.sock"),
+            guest_dials(GuestService::Substitution, "/run/egress.sock"),
+            guest_dials(GuestService::Broker, "/run/broker.sock"),
+            guest_dials(GuestService::WorkloadExit, "/state/w/workload.exit"),
         ]
     }
 
@@ -1004,7 +1005,6 @@ mod tests {
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
-            trusted_builder: false,
         }
     }
 
@@ -1218,7 +1218,7 @@ mod tests {
     fn config_threads_cmdline_verbatim_and_configures_no_nic() {
         let mut spec = spec_with(
             KernelImage::Path("/img/vmlinux".into()),
-            vec![guest_dials(EGRESS_PORT, "/run/egress.sock")],
+            vec![guest_dials(GuestService::Substitution, "/run/egress.sock")],
             vec![ro_block("/img/rootfs.ext4", 0)],
         );
         spec.cmdline = "  console=ttyS0 root=/dev/vda mvm.roothash=abc mvm.vsock_egress=1  ".into();
