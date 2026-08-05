@@ -16,8 +16,10 @@
       handwritten contracts. Client-side production guards cover every
       development-only verb; SSH remains absent. Python (210 passed, 7 skipped)
       and TypeScript (133 passed) SDK suites, machine fixtures, schema drift,
-      workspace check, and workspace all-target Clippy are green; the full
-      workspace test rerun is pending the shared embedded-helper build lock.
+      workspace check, and workspace all-target Clippy are green. The workspace
+      test run reached 1,436 passing mvm-cli tests; its sole failure was the
+      host-toolchain probe under isolated `CARGO_HOME`, and that test passed
+      when rerun with the normal Cargo home.
 
 - [x] Claim-witness CI documentation — **issue #2104**. Corrected the
       `security.yml` trigger and merge-blocking claims, removed three
