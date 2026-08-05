@@ -2737,6 +2737,7 @@ dependencies = [
  "mvm-sdk",
  "nix 0.29.0",
  "rand 0.8.6",
+ "rayon",
  "reqwest",
  "serde",
  "serde_json",

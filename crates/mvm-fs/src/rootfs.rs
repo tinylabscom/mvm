@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use rayon::prelude::*;
+
 use crate::ext4::{BuildOptions, EmitImageError, Ext4Error, Node, Xattr};
 
 /// How [`collect_nodes`] handles a host inode kind the ext4 [`Node`] enum has
@@ -157,13 +159,26 @@ impl SizeHeuristic {
     }
 }
 
+/// A single entry discovered by the sequential directory walk, before its
+/// file contents or xattrs are read in parallel.
+struct WalkEntry {
+    path: PathBuf,
+    guest_path: String,
+    file_type: std::fs::FileType,
+}
+
 /// Walk `root` into a flat [`Node`] list (guest-absolute paths), symlink-aware
 /// (never follows). Directories and their descendants, regular files (contents
 /// read in), and symlinks are captured; other inode types (fifo/socket/device)
 /// are handled per `options.on_unsupported`, since the [`Node`] enum has no
 /// way to represent them. Extended-attribute capture follows `options.xattrs`.
+///
+/// The tree structure is walked sequentially so directory traversal stays
+/// predictable, but regular-file reads and xattr captures happen in parallel
+/// via rayon. The returned nodes are sorted by guest path so the output is
+/// deterministic regardless of filesystem read_dir order.
 pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, MaterializeError> {
-    let mut out = Vec::new();
+    let mut entries = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let read = std::fs::read_dir(&dir).map_err(|source| MaterializeError::Walk {
@@ -181,48 +196,68 @@ pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, Mat
                 path: path.clone(),
                 source,
             })?;
-            if ft.is_symlink() {
+            if ft.is_dir() {
+                stack.push(path.clone());
+            } else if !(ft.is_symlink() || ft.is_file()) {
+                match options.on_unsupported {
+                    UnsupportedNodePolicy::Skip => continue,
+                    UnsupportedNodePolicy::Reject => {
+                        return Err(MaterializeError::UnsupportedNodeType(path));
+                    }
+                }
+            }
+            entries.push(WalkEntry {
+                path,
+                guest_path,
+                file_type: ft,
+            });
+        }
+    }
+
+    let mut nodes: Vec<Node> = entries
+        .into_par_iter()
+        .map(|entry| -> Result<Node, MaterializeError> {
+            let WalkEntry {
+                path,
+                guest_path,
+                file_type,
+            } = entry;
+            if file_type.is_symlink() {
                 let target =
                     std::fs::read_link(&path).map_err(|source| MaterializeError::Walk {
                         path: path.clone(),
                         source,
                     })?;
-                out.push(Node::Symlink {
+                Ok(Node::Symlink {
                     path: guest_path,
                     target: target.to_string_lossy().into_owned(),
-                });
-            } else if ft.is_dir() {
+                })
+            } else if file_type.is_dir() {
                 let xattrs = node_xattrs(options.xattrs, &path);
-                out.push(Node::Dir {
+                Ok(Node::Dir {
                     path: guest_path,
                     mode: mode_of(&path, 0o755),
                     xattrs,
-                });
-                stack.push(path);
-            } else if ft.is_file() {
+                })
+            } else {
                 let data =
                     read_file_for_guest_image(&path).map_err(|source| MaterializeError::Walk {
                         path: path.clone(),
                         source,
                     })?;
                 let xattrs = node_xattrs(options.xattrs, &path);
-                out.push(Node::File {
+                Ok(Node::File {
                     path: guest_path,
                     mode: mode_of(&path, 0o644),
                     data,
                     xattrs,
-                });
-            } else {
-                match options.on_unsupported {
-                    UnsupportedNodePolicy::Skip => {}
-                    UnsupportedNodePolicy::Reject => {
-                        return Err(MaterializeError::UnsupportedNodeType(path));
-                    }
-                }
+                })
             }
-        }
-    }
-    Ok(out)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    nodes.sort_by(|a, b| a.path().cmp(b.path()));
+    Ok(nodes)
 }
 
 /// Descriptor returned by [`materialize_ext4_pure`].
