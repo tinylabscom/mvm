@@ -67,14 +67,14 @@
 - [x] Host-side machine logs — **plan 289**. `machine logs` now reads backend
       console captures directly from the isolated host VM state directory, so
       macOS no longer attempts to connect to or auto-start the retired
-      interactive dev VM. Host `tail` receives paths as process arguments,
-      `-f` honors the requested `--lines`/`-n` count through
-      `tail -n <lines> -f`, hypervisor and legacy fallback behavior is retained,
-      and unit plus real-CLI regression coverage proves the command works with
-      dev-VM auto-start disabled. Isolated test state also resolves through the
-      canonical explicit-root config helper, and the CLI subprocess receives an
-      isolated home. Workspace tests, check, all-target clippy, formatting, and
-      both home policy gates are green.
+      interactive dev VM. Isolated test state resolves through the canonical
+      explicit-root config helper (`vms_dir_at` / `vm_state_dir_at`), and the
+      CLI subprocess receives an isolated home. Workspace tests, check,
+      all-target clippy, formatting, and both home policy gates are green.
+      The reader itself was then replaced by plan 283's stream plane, which
+      keeps the host-side property and reads the files in-process rather than
+      spawning `tail`; see that plan doc for which of 289's constraints the
+      replacement holds.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
@@ -440,6 +440,41 @@ updates only its own entry below.
       run on a KVM host (6/6, live forwarding witness, clean teardown); 23
       hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
       and refuses; native Windows is not claimed.
+
+- [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
+      dormant**. Tracked in `specs/plans/283-workload-stream-plane.md` and
+      `specs/adrs/035-workload-stream-plane.md`.
+      Phase 1 (output, T1–T10 plus T5b/T6b/T9b–T9d) ships: the guest pump emits
+      as produced instead of buffering to exit, the 1 MiB cap that *killed* a
+      chatty workload is replaced by ring retention with recorded gap markers,
+      records are redacted at one seam then hash-chained and sealed to an
+      RFC-6962 root, and `mvmctl machine logs`/`machine run` attach/`mvm-client`
+      read the same verified stream from broker, transcript, or console. Three
+      limits are stated rather than deferred: the console fallback is
+      unredacted, a detached VM's later output reaches no recorder, and a
+      spliced read repeats its adopted prefix.
+      Phase 2 (input, T11–T16) builds the host→guest stdin channel — grant in
+      the signed plan (`host.stream.v1`), single-writer lease, cross-frame
+      secret scan, explicit EOF, chain-signed refusals, and a sealed-tier
+      refusal of the grant for a shell-shaped entrypoint. ADR-001 reworded
+      claim 15 from enforced-by-absence to enforced-by-policy and added claim
+      17 at `Preview`; ADR-035 records why the trade was worth making. T16
+      documented the channel (`guides/workload-input.md`) and reconciled the
+      user-facing prose that still asserted claim 15 in its absence form.
+      T17 made it reachable and did so with a live entrypoint resolver in the
+      same change, which the plan required: `machine run --entrypoint --stdin
+      -` opens the route under the plan that boot was admitted under, pumps the
+      caller's stdin through the gate in acceptance order on its own thread,
+      keeps the lease alive on a ticker, and closes the workload's stdin on the
+      caller's EOF; the grant is minted only for a call that asked. The
+      entrypoint now comes from the image's own `mvm-meta.json` sidecar (a new
+      `entrypointArgv` field, written by the `mkGuest` and OCI build paths,
+      because the host cannot read inside a materialized ext4), and admission
+      **fails closed** when it cannot resolve one — so the shell refusal cannot
+      go dormant again by a caller forgetting to resolve.
+      Claim 17 stays `Preview` on one limit: `InputGate::bind` has no
+      production caller, so the secret scan's known set is empty on every real
+      VM and its refusal has never fired outside tests.
 
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added

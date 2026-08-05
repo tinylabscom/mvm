@@ -95,6 +95,12 @@ pub mod deploy;
 /// shared.
 pub mod runtime;
 
+/// Runtime read surface — follow a live workload's stdout/stderr/trace from a
+/// program instead of shelling out to `mvmctl logs`. Records arrive
+/// hash-chain verified with their bytes verbatim. The same reader
+/// `mvm-client` exposes; both re-export `mvm-core`'s.
+pub mod stream;
+
 // Prelude — every previously-public item lives here so
 // `use mvm_sdk::*;` resolves identically across the split.
 pub use builder::{AppBuilder, WorkloadBuilder, app, workload};

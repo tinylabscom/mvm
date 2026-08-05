@@ -175,6 +175,7 @@ chain_signing = true
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                stream_retention: Default::default(),
             },
             &SystemClock,
             &ledger,
@@ -182,7 +183,8 @@ chain_signing = true
             None,
         )
         .expect("admit")
-        .plan;
+        .plan()
+        .clone();
         plan.network_policy = PolicyRef("acme:vm-live".to_string());
         plan.egress_policy = PolicyRef("acme:vm-live".to_string());
         plan.tool_policy = PolicyRef("acme:vm-live".to_string());
@@ -282,6 +284,7 @@ stream_destinations = ["file://{}"]
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                stream_retention: Default::default(),
             },
             &SystemClock,
             &ledger,
@@ -289,7 +292,8 @@ stream_destinations = ["file://{}"]
             None,
         )
         .expect("admit")
-        .plan;
+        .plan()
+        .clone();
         plan.network_policy = PolicyRef("acme:vm-stream".to_string());
         plan.egress_policy = PolicyRef("acme:vm-stream".to_string());
         plan.tool_policy = PolicyRef("acme:vm-stream".to_string());
@@ -388,6 +392,7 @@ chain_signing = false
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                stream_retention: Default::default(),
             },
             &SystemClock,
             &ledger,
@@ -395,7 +400,8 @@ chain_signing = false
             None,
         )
         .expect("admit")
-        .plan;
+        .plan()
+        .clone();
         plan.network_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
         plan.egress_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
         plan.tool_policy = PolicyRef("acme:vm-unsigned-audit".to_string());
@@ -469,6 +475,7 @@ chain_signing = false
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                stream_retention: Default::default(),
             },
             &SystemClock,
             &ledger,
@@ -476,7 +483,8 @@ chain_signing = false
             None,
         )
         .expect("admit")
-        .plan;
+        .plan()
+        .clone();
         plan.network_policy = PolicyRef("acme:nope".to_string());
         plan.egress_policy = PolicyRef("acme:nope".to_string());
         plan.tool_policy = PolicyRef("acme:nope".to_string());
@@ -570,6 +578,7 @@ disabled_inspectors = ["ssrf_guarrd"]
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                stream_retention: Default::default(),
             },
             &SystemClock,
             &ledger,
@@ -577,7 +586,8 @@ disabled_inspectors = ["ssrf_guarrd"]
             None,
         )
         .expect("admit")
-        .plan;
+        .plan()
+        .clone();
         plan.network_policy = PolicyRef("acme:vm-typo".to_string());
         plan.egress_policy = PolicyRef("acme:vm-typo".to_string());
         plan.tool_policy = PolicyRef("acme:vm-typo".to_string());
@@ -677,6 +687,7 @@ port_hi  = 443
                 audit_labels: Default::default(),
                 agent_verbs: None,
                 services: Vec::new(),
+                stream_retention: Default::default(),
             },
             &SystemClock,
             &ledger,
@@ -684,7 +695,8 @@ port_hi  = 443
             None,
         )
         .expect("admit")
-        .plan;
+        .plan()
+        .clone();
         plan.network_policy = PolicyRef("acme:vm-bad".to_string());
         plan.egress_policy = PolicyRef("acme:vm-bad".to_string());
         plan.tool_policy = PolicyRef("acme:vm-bad".to_string());

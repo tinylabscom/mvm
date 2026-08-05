@@ -39,6 +39,7 @@
 //! | `*_policy` / `fs_policy` | `"local-default"` (resolver maps to Noops) |
 //! | `valid_from`/`valid_until` | now + 10 min window |
 //! | `nonce` | fresh 128 bits from `OsRng` per invocation |
+//! | `stream_retention` | caller-supplied; `Persist` unless a driver opts the run out of a durable transcript |
 //! | everything else | conservative defaults (no attestation, destroy-on-exit, etc.) |
 
 use crate::plan::{
@@ -46,7 +47,7 @@ use crate::plan::{
     AuditTaxonomy, DepsVolumeBinding, EnvironmentRef, ExecutionPlan, FsPolicyRef, KeyRotationSpec,
     L3NetworkSpec, NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle,
     Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding, SecretReleasePolicy,
-    SignedImageRef, TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
+    SignedImageRef, StreamRetention, TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -181,8 +182,16 @@ pub struct SynthesisInput<'a> {
     /// Host services this workload is authorized to call over the broker
     /// channel, threaded verbatim into the plan. Empty (the common case) means
     /// the workload calls none: the broker answers `NotBound` and the launch
-    /// path attaches no SDK sidecar.
+    /// path attaches no SDK sidecar. The same list also carries the input-plane
+    /// grant (`mvm_contract::stream::INPUT_GRANT_SERVICE`) — no dedicated field
+    /// was needed, since `mvm_contract::stream::grants_input` reads this list.
     pub services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    /// Whether this workload's captured output is kept after the run.
+    /// [`StreamRetention::Persist`] (the default) writes an encrypted,
+    /// hash-chained transcript sealed at exit; `Ephemeral` fans the output out
+    /// live and keeps nothing. Admitted rather than flagged so an absent
+    /// transcript is attributable to a signed decision.
+    pub stream_retention: StreamRetention,
 }
 
 /// The L3 spec a plan carries, given its mode.
@@ -336,6 +345,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
         services: input.services.clone(),
+        stream_retention: input.stream_retention,
     };
 
     // Content-address the finished plan. The fresh nonce makes this unique per
@@ -450,6 +460,7 @@ mod tests {
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),
+            stream_retention: Default::default(),
         }
     }
 

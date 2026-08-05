@@ -34,6 +34,10 @@ pub mod console;
 #[cfg(feature = "addons")]
 pub mod egress_client;
 pub mod entrypoint;
+/// Runs one entrypoint call with its pump and its consumer on separate
+/// threads, so a consumer that blocks — a host that stopped reading — cannot
+/// defer the child's deadline or grow the pump's queue without bound.
+pub mod entrypoint_stream;
 /// In-guest forward-proxy front: parses a workload's proxied request into a
 /// `WireRequest` for the substitution client.
 pub mod forward_proxy;
@@ -85,6 +89,13 @@ pub mod restore_clock;
 /// these testable units. Folded in from the former `mvm-runner` crate.
 pub mod runner;
 pub mod runtime_config;
+/// Delivery of admitted input bytes into a running workload's stdin, plus the
+/// explicit EOF a read-to-EOF workload needs to ever terminate.
+pub mod stream_input;
+/// Streaming pump for a spawned workload's stdout / stderr / fd-3 control
+/// channel. Emits an `EntrypointEvent` per read while the child is still
+/// running, so a long-lived workload is observable long before it exits.
+pub mod stream_pump;
 /// In-guest substitution client: relays a secret-bearing request to the host
 /// substitution endpoint over vsock (the relay half of the guest-local forward
 /// proxy).

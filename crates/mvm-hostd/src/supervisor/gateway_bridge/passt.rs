@@ -560,6 +560,7 @@ mod tests {
                 max_bytes: 1 << 20,
                 max_chunks: 64,
             },
+            retention: mvm_core::transcript::RetentionPolicy::FailClosed,
             created_unix_secs: 1_700_000_000,
             recipient: "transcript-kek".into(),
             wrapped_data_key_b64: mvm_core::transcript::wrap_data_key(&kek, &data_key),

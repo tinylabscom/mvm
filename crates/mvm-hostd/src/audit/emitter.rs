@@ -124,6 +124,97 @@ pub mod image_audit {
     pub const GENESIS_PARENT: &str = "genesis";
 }
 
+/// Wire-stable event name and label keys for the workload output-stream audit
+/// entries. Shared so the emitter (writer) and any reader cannot drift on a
+/// string.
+///
+/// One entry per *attach*, never per record. Signing every chunk would cost a
+/// signature per write and — worse — turn the audit chain into a second copy
+/// of the workload's output. Who started reading, and from where in the
+/// chain, is the decision worth signing; the bytes stay in the transcript.
+pub mod stream_audit {
+    /// Emitted when a follower attaches to a VM's output stream.
+    pub const SUBSCRIBED_EVENT: &str = "stream.subscribed";
+    /// Label: the VM whose stream was attached to.
+    pub const LABEL_VM_NAME: &str = "vm_name";
+    /// Label: the broker-assigned reader id, unique within one broker.
+    pub const LABEL_READER_ID: &str = "stream_reader_id";
+    /// Label: the stream sequence number the reader starts at. Records
+    /// before it were produced before the attach and are not delivered.
+    pub const LABEL_FROM_SEQ: &str = "stream_from_seq";
+    /// Label on `plan.admitted`: the retention mode the plan was admitted
+    /// under, so a later reader can tell a run that kept no transcript from a
+    /// run whose transcript went missing.
+    pub const LABEL_RETENTION: &str = "stream_retention";
+
+    /// Emitted when a writer is admitted to a workload's stdin.
+    ///
+    /// Output capture needs no authorization and so audits only the attach;
+    /// input is the direction that changes what the workload does, so the
+    /// admission itself is the fact worth signing. Without it the chain would
+    /// record every writer that was turned away and nothing about the one that
+    /// got in.
+    pub const INPUT_GRANTED_EVENT: &str = "stream.input_granted";
+    /// Emitted whenever the input gate turns a writer away.
+    pub const INPUT_REFUSED_EVENT: &str = "stream.input_refused";
+    /// Label: which writer holds — or was refused because somebody else holds
+    /// — the single-writer input lease.
+    pub const LABEL_HOLDER: &str = "stream_input_holder";
+    /// Label: why the gate refused, as a wire-stable reason word.
+    pub const LABEL_REASON: &str = "stream_input_reason";
+    /// Label: which category of known secret was recognised in the refused
+    /// bytes. The category name, never the matched value — a refusal that
+    /// quoted the secret to explain itself would ship exactly what it stopped.
+    pub const LABEL_SECRET_CATEGORY: &str = "stream_input_secret_category";
+    /// Label: the `seq` an out-of-order frame carried. A position, not a
+    /// payload — it says which frame the writer sent out of turn and nothing
+    /// about what was in it.
+    pub const LABEL_SEQ: &str = "stream_input_seq";
+    /// Label: the highest `seq` the session had already accepted when the
+    /// out-of-order frame arrived.
+    pub const LABEL_AFTER_SEQ: &str = "stream_input_after_seq";
+}
+
+/// The label set for one input refusal: the binding, the reason word, and
+/// whatever that reason needs to be actionable.
+///
+/// Written as one exhaustive match so a refusal variant added later cannot
+/// reach the chain unlabelled — and so the compiler is the thing checking that
+/// no arm reaches for the bytes.
+fn input_refused_labels(
+    vm_name: &str,
+    refusal: &crate::stream::InputRefusal,
+) -> Vec<(String, String)> {
+    use crate::stream::InputRefusal as R;
+    use stream_audit as k;
+
+    let mut labels = vec![
+        (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+        (k::LABEL_REASON.to_string(), refusal.reason().to_string()),
+    ];
+    match refusal {
+        // `Unauditable` is here for completeness: by definition the chain it
+        // would be written to is the one that just failed, so this label set
+        // is what a *later* best-effort attempt carries if the failure was
+        // transient.
+        R::NotGranted | R::LeaseExpired | R::Unauditable => {}
+        R::LeaseHeld { holder } => {
+            labels.push((k::LABEL_HOLDER.to_string(), holder.clone()));
+        }
+        R::SecretMaterial { category } => {
+            labels.push((
+                k::LABEL_SECRET_CATEGORY.to_string(),
+                (*category).to_string(),
+            ));
+        }
+        R::OutOfOrder { seq, after } => {
+            labels.push((k::LABEL_SEQ.to_string(), seq.to_string()));
+            labels.push((k::LABEL_AFTER_SEQ.to_string(), after.to_string()));
+        }
+    }
+    labels
+}
+
 /// Extract the `image.created` label set from a node's provenance attributes.
 /// The parent hash-link is recorded as provenance; nothing here is a trust
 /// grant (lineage is provenance, never authorization).
@@ -303,11 +394,23 @@ impl AuditEmitter {
     /// Emit `plan.admitted` — fires immediately after `admit_for_run`
     /// succeeds. Binds the plan_id, signer (via `audit_labels` extras),
     /// and the workload context.
+    ///
+    /// Also carries the admitted output-retention mode. Without it, a workload
+    /// with no transcript is ambiguous — nobody can tell a run that was
+    /// admitted not to keep one from a run whose recording was lost or
+    /// removed. The mode is a word off the signed plan, so recording it costs
+    /// nothing and settles the question from the chain alone.
     pub fn emit_admitted(&self, plan: &ExecutionPlan, signer_id: &str) -> Result<()> {
         self.emit(
             plan,
             "plan.admitted",
-            [("signer_id".to_string(), signer_id.to_string())],
+            [
+                ("signer_id".to_string(), signer_id.to_string()),
+                (
+                    stream_audit::LABEL_RETENTION.to_string(),
+                    plan.stream_retention.as_str().to_string(),
+                ),
+            ],
         )
     }
 
@@ -406,6 +509,71 @@ impl AuditEmitter {
         labels: Vec<(String, String)>,
     ) -> Result<()> {
         self.emit(plan, "plan.oci_provenance", labels)
+    }
+
+    /// Emit `stream.subscribed` — a follower attached to `vm_name`'s output
+    /// stream at `from_seq`.
+    ///
+    /// Payload-free by construction: the labels are the VM name, the reader
+    /// id, and a sequence number, so no captured byte can reach the chain
+    /// through this path however chatty the workload is.
+    pub fn emit_stream_subscribed(
+        &self,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        reader_id: u64,
+        from_seq: u64,
+    ) -> Result<()> {
+        use stream_audit as k;
+        self.emit(
+            plan,
+            k::SUBSCRIBED_EVENT,
+            [
+                (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+                (k::LABEL_READER_ID.to_string(), reader_id.to_string()),
+                (k::LABEL_FROM_SEQ.to_string(), from_seq.to_string()),
+            ],
+        )
+    }
+
+    /// Emit `stream.input_granted` — a writer took `vm_name`'s single input
+    /// lease under `holder`.
+    ///
+    /// Payload-free by construction: a VM name and a lease holder id, decided
+    /// before any byte has been offered.
+    pub fn emit_stream_input_granted(
+        &self,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        holder: &str,
+    ) -> Result<()> {
+        use stream_audit as k;
+        self.emit(
+            plan,
+            k::INPUT_GRANTED_EVENT,
+            [
+                (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+                (k::LABEL_HOLDER.to_string(), holder.to_string()),
+            ],
+        )
+    }
+
+    /// Emit `stream.input_refused` — the gate turned a writer away.
+    ///
+    /// The label set is the binding and the reason. Not the frame, not its
+    /// length, and — for a refusal that fired on recognised secret material —
+    /// not the material: only the category name it matched.
+    pub fn emit_stream_input_refused(
+        &self,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        refusal: &crate::stream::InputRefusal,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            stream_audit::INPUT_REFUSED_EVENT,
+            input_refused_labels(vm_name, refusal),
+        )
     }
 
     /// Record that a VM's filesystem state was frozen into an fs_quick
@@ -750,6 +918,150 @@ mod tests {
         );
         assert!(lines[0].contains("plan.admitted"));
         assert!(lines[1].contains("plan.launched"));
+    }
+
+    /// The property that makes an absent transcript attributable rather than
+    /// ambiguous: the mode the plan was admitted under is in the chain, so
+    /// "was this run recorded?" is answerable without the recording.
+    #[test]
+    fn admission_records_the_retention_mode_in_the_chain() {
+        use mvm_core::plan::StreamRetention;
+
+        for (retention, expected) in [
+            (StreamRetention::Persist, "persist"),
+            (StreamRetention::Ephemeral, "ephemeral"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            let emitter =
+                AuditEmitter::with_dir(SigningKey::from_bytes(&seed), dir.path()).expect("emitter");
+            let plan = mvm_core::plan::test_support::PlanFixture::new()
+                .stream_retention(retention)
+                .build();
+            emitter.emit_admitted(&plan, "host:test").expect("emit");
+
+            let entry = only_entry(dir.path(), "local");
+            assert_eq!(entry["event"], "plan.admitted");
+            assert_eq!(
+                entry["labels"][stream_audit::LABEL_RETENTION],
+                expected,
+                "the admitted retention mode must be a label on the chain entry: {entry}"
+            );
+        }
+    }
+
+    /// A stream event names who attached and where in the sequence, and
+    /// carries none of what the workload printed.
+    ///
+    /// The exhaustive label-set assertion is the part that matters. A
+    /// substring check only refutes the payload a test happened to think of;
+    /// pinning the whole key set means a future label carrying captured bytes
+    /// fails here whatever it is called.
+    #[test]
+    fn stream_audit_entries_carry_the_binding_and_no_payload_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        let key = SigningKey::from_bytes(&seed);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).expect("emitter");
+        let plan = fixture_plan("local", "plan-stream");
+
+        emitter
+            .emit_stream_subscribed(&plan, "vm-under-watch", 7, 42)
+            .expect("emit");
+
+        let entry = only_entry(dir.path(), "local");
+        assert_eq!(entry["event"], stream_audit::SUBSCRIBED_EVENT);
+        assert_eq!(entry["plan_id"], "plan-stream");
+        assert_eq!(
+            entry["labels"][stream_audit::LABEL_VM_NAME],
+            "vm-under-watch"
+        );
+        assert_eq!(entry["labels"][stream_audit::LABEL_READER_ID], "7");
+        assert_eq!(entry["labels"][stream_audit::LABEL_FROM_SEQ], "42");
+
+        let labels = entry["labels"].as_object().expect("labels object");
+        let mut keys: Vec<&str> = labels.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                stream_audit::LABEL_FROM_SEQ,
+                stream_audit::LABEL_READER_ID,
+                stream_audit::LABEL_VM_NAME,
+            ],
+            "a stream event carries the binding and nothing else"
+        );
+
+        verify_audit_chain(&dir.path().join("local.jsonl"), &vk)
+            .expect("the entry is chain-signed like any other");
+    }
+
+    /// Every refusal variant reaches the chain under its own reason word, and
+    /// no variant's labels can grow a key that is not on the allow-list here.
+    ///
+    /// The label builder is one exhaustive match, so a variant added later
+    /// fails to compile there; this pins the other half — that what the match
+    /// emits stays a binding, a reason, and positional metadata, never bytes.
+    #[test]
+    fn every_input_refusal_variant_is_labelled_with_its_reason_and_nothing_more() {
+        use crate::stream::InputRefusal as R;
+        use stream_audit as k;
+
+        let allowed = [
+            k::LABEL_VM_NAME,
+            k::LABEL_REASON,
+            k::LABEL_HOLDER,
+            k::LABEL_SECRET_CATEGORY,
+            k::LABEL_SEQ,
+            k::LABEL_AFTER_SEQ,
+        ];
+        for refusal in [
+            R::NotGranted,
+            R::Unauditable,
+            R::LeaseExpired,
+            R::LeaseHeld {
+                holder: "plan-1#0".to_string(),
+            },
+            R::SecretMaterial {
+                category: "host-secret",
+            },
+            R::OutOfOrder { seq: 3, after: 9 },
+        ] {
+            let labels = input_refused_labels("vm-1", &refusal);
+            let by_key: std::collections::BTreeMap<&str, &str> = labels
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            assert_eq!(by_key.len(), labels.len(), "no duplicate keys: {labels:?}");
+            assert_eq!(by_key.get(k::LABEL_VM_NAME), Some(&"vm-1"));
+            assert_eq!(by_key.get(k::LABEL_REASON), Some(&refusal.reason()));
+            for key in by_key.keys() {
+                assert!(
+                    allowed.contains(key),
+                    "unexpected label {key} on {refusal:?}"
+                );
+            }
+        }
+
+        let ordered = input_refused_labels("vm-1", &R::OutOfOrder { seq: 3, after: 9 });
+        assert!(ordered.contains(&(k::LABEL_SEQ.to_string(), "3".to_string())));
+        assert!(ordered.contains(&(k::LABEL_AFTER_SEQ.to_string(), "9".to_string())));
+    }
+
+    /// The single entry in a tenant's chain, unwrapped from its signed
+    /// envelope. Panics rather than returning an error: a test that wrote one
+    /// entry and cannot read it back has already failed.
+    fn only_entry(audit_dir: &Path, tenant: &str) -> serde_json::Value {
+        let content = std::fs::read_to_string(audit_dir.join(format!("{tenant}.jsonl")))
+            .expect("read the chain");
+        let mut lines = content.lines();
+        let line = lines.next().expect("one entry");
+        assert!(lines.next().is_none(), "expected exactly one entry");
+        let envelope: serde_json::Value = serde_json::from_str(line).expect("envelope json");
+        envelope["entry"].clone()
     }
 
     #[test]

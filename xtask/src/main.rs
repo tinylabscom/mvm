@@ -48,6 +48,7 @@ mod check_no_vz;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
 mod check_single_home;
+mod check_stream_redaction_seam;
 mod check_test_home_isolation;
 mod check_trust_gradient;
 mod check_two_surfaces;
@@ -252,6 +253,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_uniform_vsock_egress::run(&workspace)
         }
+        Some("check-stream-redaction-seam") => {
+            let workspace = workspace_root();
+            check_stream_redaction_seam::run(&workspace)
+        }
         Some("check-require-grant-token-allowlist") => {
             let workspace = workspace_root();
             check_require_grant_token_allowlist::run(&workspace)
@@ -300,7 +305,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -404,6 +409,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-trust-gradient                   Verify trust-gradient ledger: monotonic tiers, workload forbidden authorities, witnesses"
+            );
+            eprintln!(
+                "  check-stream-redaction-seam            Assert StreamRedaction stays newtype-sealed over the curated ruleset and every StreamBroker is built through it"
             );
             eprintln!(
                 "  check-require-grant-token-allowlist     assert mvm.require_grant=1 appears only in the four backend builders + mvm-guest/vsock.rs"

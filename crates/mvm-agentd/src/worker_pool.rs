@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use crate::entrypoint::{self, ControlRecord, ValidatedEntrypoint};
 use crate::lifecycle_hooks::{self, ReadinessConfig, ReadinessError};
 use crate::runtime_config::WarmProcessConfig;
+use crate::stream_pump::claims_reserved_kind;
 use crate::worker_protocol::{
     WorkerCallRequest, WorkerCallResponse, WorkerOutcome, read_pipe_frame, write_pipe_frame,
 };
@@ -372,9 +373,17 @@ impl WorkerPool {
                 // the agent as `ControlRecord`s. The shape
                 // matches `entrypoint::ControlRecord` modulo base64
                 // encoding on the warm-worker JSON wire.
+                //
+                // A worker *is* the workload, so these carry exactly the
+                // authorship fd 3 does, and the same refusal applies: this is
+                // the boundary at which a worker's bytes stop being untrusted,
+                // so it is where a record claiming the agent's reserved
+                // namespace has to be dropped. A forged gap marker would make
+                // a verifier bless a chain skipping output it never saw.
                 controls: resp
                     .controls
                     .into_iter()
+                    .filter(|r| !claims_reserved_kind(&r.header_json))
                     .map(|r| ControlRecord {
                         header_json: r.header_json,
                         payload: r.payload,

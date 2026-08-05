@@ -1,6 +1,30 @@
 # Host-side machine logs
 
-**Status:** COMPLETE
+**Status:** COMPLETE, mechanism superseded by plan 283
+
+The goal below — read the console capture host-side, never through a VM — was
+met here and is still met. The `mvm_runtime::microvm::logs` implementation that
+met it no longer exists: plan 283's stream plane replaced the whole reader with
+`mvm_core::stream_client` (broker, then durable transcript, then the same
+host-side console capture), and `--hypervisor` became its own reader over
+`config::vm_hypervisor_log`. Two constraints below still hold in the
+replacement; one does not:
+
+- Host-side resolution through `mvm_core::config`: held. The explicit-root
+  `vms_dir_at` / `vm_state_dir_at` helpers this plan added are what the
+  replacement resolves through.
+- No shell interpolation of names or paths: held, and strengthened — the
+  replacement spawns no `tail` at all and reads the files in-process.
+- Missing logs as an explicit error: held. A VM with no broker, no transcript
+  and no console capture fails with `StreamError::NoCapture`, naming every
+  path it looked in.
+- `--lines` / `--follow` / `--hypervisor`: held.
+- The pre-split `firecracker.log` fallback: **not held**. Plan 283 treats the
+  hypervisor log as a separate artifact from workload output, so the workload
+  reader no longer substitutes it when `console.log` is absent; the same bytes
+  are reachable with `machine logs --hypervisor`, and the substitution is not
+  performed silently in its place — the reader errors and names what it looked
+  for. A pre-split VM state directory therefore needs the explicit flag.
 
 ## Goal
 

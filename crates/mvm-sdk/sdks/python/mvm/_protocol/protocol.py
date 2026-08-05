@@ -74,6 +74,12 @@ class BootTimingReport:
     warm_pool_ready_ms: Optional[int] = None
 
 
+@dataclass
+class CloseInput:
+    trailing: List[int]
+    after_seq: Optional[int] = None
+
+
 class ComponentState1(Enum):
     disabled = 'disabled'
 
@@ -401,6 +407,7 @@ class RunEntrypoint:
     stdin: List[int]
     timeout_secs: int
     env: Optional[List[List[str]]] = field(default_factory=lambda: [])
+    stream_input: Optional[bool] = False
 
 
 @dataclass
@@ -684,6 +691,11 @@ class GuestRequest41:
 
 
 @dataclass
+class GuestRequest43:
+    CloseStreamInput: CloseInput
+
+
+@dataclass
 class ProtocolHelloAck:
     agent_protocol_version: int
     agent_version: str
@@ -937,6 +949,12 @@ class UpdateIdleTimeoutAck:
 @dataclass
 class GuestResponse36:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
+
+
+@dataclass
+class InputFrame:
+    payload: List[int]
+    seq: int
 
 
 @dataclass
@@ -1238,6 +1256,55 @@ class StageFile:
     path: str
 
 
+class StreamInputRefusal1(Enum):
+    no_workload = 'no_workload'
+
+
+class StreamInputRefusal2(Enum):
+    out_of_order = 'out_of_order'
+
+
+class StreamInputRefusal3(Enum):
+    queue_full = 'queue_full'
+
+
+class StreamInputRefusal4(Enum):
+    workload_gone = 'workload_gone'
+
+
+StreamInputRefusal = Union[
+    StreamInputRefusal1, StreamInputRefusal2, StreamInputRefusal3, StreamInputRefusal4
+]
+
+
+@dataclass
+class Accepted:
+    queued_bytes: int
+
+
+@dataclass
+class StreamInputResult1:
+    Accepted: Accepted
+
+
+class StreamInputResult2(Enum):
+    Closed = 'Closed'
+
+
+@dataclass
+class Refused:
+    kind: StreamInputRefusal
+    message: str
+
+
+@dataclass
+class StreamInputResult3:
+    Refused: Refused
+
+
+StreamInputResult = Union[StreamInputResult1, StreamInputResult2, StreamInputResult3]
+
+
 VerbId = str
 
 
@@ -1394,6 +1461,11 @@ class GuestRequest13:
 
 
 @dataclass
+class GuestRequest42:
+    StreamInput: InputFrame
+
+
+@dataclass
 class ProtocolMismatch:
     agent_protocol_version: int
     host_protocol_version: int
@@ -1449,6 +1521,11 @@ class GuestResponse34:
 @dataclass
 class GuestResponse35:
     VolumeMountResult: VolumeMountResult
+
+
+@dataclass
+class GuestResponse37:
+    StreamInputResult: StreamInputResult
 
 
 @dataclass
@@ -1579,6 +1656,8 @@ GuestRequest = Union[
     GuestRequest39,
     GuestRequest40,
     GuestRequest41,
+    GuestRequest42,
+    GuestRequest43,
 ]
 
 
@@ -1634,6 +1713,7 @@ GuestResponse = Union[
     GuestResponse34,
     GuestResponse35,
     GuestResponse36,
+    GuestResponse37,
 ]
 
 

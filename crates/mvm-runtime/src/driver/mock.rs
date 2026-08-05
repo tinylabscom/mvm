@@ -95,6 +95,16 @@ pub struct MockDriver {
     /// test can prove a refused claim actually tore its child down instead of
     /// leaving it resumed.
     killed: Arc<Mutex<Vec<String>>>,
+    /// Bytes a killed VM appends to its own console capture before it goes,
+    /// modelling the guest's last words: a shutdown trace, a panic, whatever
+    /// the kernel prints on the way down. Empty by default, because most
+    /// tests have no use for it; a test asserting that teardown does not
+    /// throw those bytes away sets it.
+    dying_console_output: Vec<u8>,
+    /// Whether `attach` refuses. Models the ordinary teardown race — a VM
+    /// whose supervisor is already gone by the time a `stop` reaches it — so
+    /// a test can prove the teardown steps that must run regardless still do.
+    refuse_attach: bool,
 }
 
 impl Default for MockDriver {
@@ -117,7 +127,25 @@ impl MockDriver {
             child_identity: Some(rotated_child_identity()),
             delivered_identities: Arc::new(Mutex::new(Vec::new())),
             killed: Arc::new(Mutex::new(Vec::new())),
+            dying_console_output: Vec::new(),
+            refuse_attach: false,
         }
+    }
+
+    /// Make `attach` refuse, as it does for a VM that is no longer there.
+    #[must_use]
+    pub fn refusing_attach(mut self) -> Self {
+        self.refuse_attach = true;
+        self
+    }
+
+    /// Make this driver's VMs append `bytes` to their console capture when
+    /// they are killed, so a test can tell a teardown that keeps a dying
+    /// guest's output from one that drops it.
+    #[must_use]
+    pub fn printing_on_kill(mut self, bytes: &[u8]) -> Self {
+        self.dying_console_output = bytes.to_vec();
+        self
     }
 
     /// Set the `status()` the mock's VMs report — e.g. `Stopped` to model a
@@ -225,6 +253,7 @@ impl VmmDriver for MockDriver {
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
             killed: Arc::clone(&self.killed),
+            dying_console_output: self.dying_console_output.clone(),
         }))
     }
 
@@ -287,12 +316,16 @@ impl VmmDriver for MockDriver {
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
+        if self.refuse_attach {
+            bail!("no such vm {}", id.0);
+        }
         Ok(Box::new(MockRunningVm {
             id: id.clone(),
             exit: self.exit,
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
             killed: Arc::clone(&self.killed),
+            dying_console_output: self.dying_console_output.clone(),
         }))
     }
 
@@ -349,6 +382,30 @@ pub struct MockRunningVm {
     status: VmStatus,
     guest_ends: GuestEnds,
     killed: Arc<Mutex<Vec<String>>>,
+    dying_console_output: Vec<u8>,
+}
+
+impl MockRunningVm {
+    /// Append the scripted last words to this VM's console capture, at the
+    /// same path a real backend's write-only capture lives.
+    fn print_dying_words(&self) {
+        if self.dying_console_output.is_empty() {
+            return;
+        }
+        let path = mvm_core::config::vm_console_log(&self.id.0);
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, &self.dying_console_output));
+        if let Err(error) = appended {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "mock guest could not write its dying words"
+            );
+        }
+    }
 }
 
 impl RunningVm for MockRunningVm {
@@ -360,6 +417,7 @@ impl RunningVm for MockRunningVm {
     }
     fn kill(&self) -> Result<()> {
         self.killed.lock().unwrap().push(self.id.0.clone());
+        self.print_dying_words();
         Ok(())
     }
     fn pause(&self) -> Result<()> {

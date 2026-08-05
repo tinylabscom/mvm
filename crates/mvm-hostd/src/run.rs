@@ -126,6 +126,7 @@ pub fn admit_and_boot_local(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        stream_retention: Default::default(),
     };
 
     let path_string = |p: &Path| p.to_string_lossy().into_owned();
@@ -208,13 +209,13 @@ mod tests {
         .expect("admit + boot over mock");
 
         assert_eq!(started.vm_id.0, "local-run-seam-test");
-        assert_eq!(started.admitted.plan.tenant.0, LOCAL_TENANT);
+        assert_eq!(started.admitted.plan().tenant.0, LOCAL_TENANT);
         // The plan was actually signed under the host key (proves admission,
         // not a stub): a signer id is present and the plan bound the exact
         // rootfs bytes we handed it (64-hex sha256) on our backend.
-        assert!(!started.admitted.signer_id.is_empty());
-        assert_eq!(started.admitted.plan.image.sha256.len(), 64);
-        assert_eq!(started.admitted.plan.runtime_profile.0, "mock");
+        assert!(!started.admitted.signer_id().is_empty());
+        assert_eq!(started.admitted.plan().image.sha256.len(), 64);
+        assert_eq!(started.admitted.plan().runtime_profile.0, "mock");
     }
 
     /// A missing rootfs fails at the hash step, before any admission or boot.

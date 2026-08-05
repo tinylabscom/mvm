@@ -254,6 +254,9 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             profile == "dev",
         ),
         services: Vec::new(),
+        entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+            "the persistent OCI start path resolves no entrypoint",
+        ),
     })?;
     let mut start_config = VmStartParams {
         name: name.to_string(),

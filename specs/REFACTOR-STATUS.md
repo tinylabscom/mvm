@@ -44,8 +44,10 @@ for detailed scope and acceptance criteria.
 - [x] Plan 289 — Host-side machine logs
       (`specs/plans/289-host-side-machine-logs.md`)
   - [x] Read backend-captured logs from the isolated host VM state directory
-  - [x] Preserve log flags and legacy fallback without shell interpolation;
-        follow mode honors the requested line count
+  - [x] Preserve log flags without shell interpolation; follow mode honors the
+        requested line count. Superseded by plan 283, which replaced the reader:
+        `--lines`/`--follow`/`--hypervisor` and the explicit missing-log error
+        survive, the pre-split `firecracker.log` substitution does not
   - [x] Cover host-only CLI behavior and log resolution with regression tests
   - [x] Keep isolated test state behind the canonical config resolver and home
         isolation gates
@@ -100,6 +102,103 @@ for detailed scope and acceptance criteria.
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
   - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 
+- [~] Plan 283 — Workload stream plane
+      (`specs/plans/283-workload-stream-plane.md`)
+  - [x] T1–T3 — stream record DTOs + chain verify; transcript stream
+        directions and per-chunk linkage; ring retention
+  - [x] T4–T5b — guest pump emits as produced; fd-3 control records; the
+        entrypoint RPC response streams
+  - [x] T6–T6b — host broker ingest/redact/chain/fan-out; chunks batched into
+        segments
+  - [x] T7–T8 — console capture as a second broker source; the client reader
+        trait, tracing bridge, and SDK surface
+  - [x] T9 — `mvmctl logs` over the broker, the durable transcript, and the
+        console capture (history splice + exited-VM path), `machine run`
+        attaches unless `--detach`, and the builder-VM `tail -f` path is gone
+  - [x] T9 fix round 1 — a capture the filter emptied reports as present rather
+        than absent (`EmptyHistory`); a console-only read refuses a channel
+        selection or resume point it cannot supply instead of ignoring it under
+        a contradicting warning; and the hole between the sealed history and
+        the live head is reported (`SpliceGap`) rather than rendering a partial
+        log as a complete one
+  - [x] T9b — the plane is constructed in production: `StreamPlane` stands a
+        broker, its socket, its ring-retained transcript, and its console
+        follower up on VM start and seals them on stop; `mvmctl` registers it
+        at startup through the runtime's `ConsoleStreamer` hook, unconditional
+        and never admission-gated
+  - [x] T9c — the second source is wired: entrypoint `stdout`/`stderr`/fd-3
+        frames are ingested as `StreamSource::Entrypoint` with their true
+        channel, so `logs --stream stderr` returns what the workload wrote
+        there. `mvmctl invoke` prints what the broker cleared rather than the
+        raw frame, so it and `logs` show the same redacted, chained bytes and
+        neither is a path around the redaction seam
+  - [x] T9d — every workload shape seals: the durable writer mirrors each landed
+        chunk into an append-only journal beside the segments, so a `stop` in a
+        different process from the `start` rebuilds and seals that VM's
+        transcript instead of leaving a directory of ciphertext no reader can
+        open. A rebuilt seal is marked `adopted` (inside the sealed root) and
+        reports as incomplete, because nothing on disk records what the
+        departed process shed on its way out. Teardown also kills before
+        releasing the capture, so a dying guest's last words reach the chain
+  - [x] T10 — `ExecutionPlan.stream_retention` (`Persist` default / `Ephemeral`
+        opt-out) is admitted, labelled on `plan.admitted`, and honoured by the
+        plane: an ephemeral run gets the same broker, socket, redaction, chain
+        and fan-out, creates no capture directory, and seals to no manifest
+        rather than to an empty one that would assert the workload printed
+        nothing. ADR-035 records the posture including the three limits found
+        during execution (the console fallback is unredacted, the follow half
+        is open for detached workloads, a spliced read repeats its adopted
+        prefix). Website guide `guides/workload-output-streaming.md` plus the
+        stream surfaces in the CLI reference. `CLAUDE.md` corrected on the
+        claims-ledger location, the `mvm-client` facade, and the fabricated
+        claim-12/13 witness names
+  - [x] T11–T15 — the input plane (Phase 2): frame DTOs and the plan grant;
+        the grant/lease/secret-scan gate; agent-side delivery and EOF; the
+        route from gate to guest sink; the sealed-tier refusal of the input
+        grant for a shell-shaped entrypoint; and the claims ledger — claim 15
+        reworded (it used to hold by *absence*, there being no host→guest byte
+        path at all, and now holds by *policy*) and claim 17 added at status
+        `Preview` with a four-item limits note (T17 below closed two of the
+        four; the known-secret set being empty on every real VM is what keeps
+        the row at `Preview`)
+  - [x] T16 — the input plane's documentation: a sibling guide
+        `guides/workload-input.md` (grant, single-writer lease, secret scan,
+        explicit EOF, the `--prod` shell refusal stated as the heuristic it is,
+        and the four limits), the claim-15 trade recorded as a decision in
+        ADR-035, and the reconciliation of every user-facing site that still
+        asserted claim 15 in its old absence form — README ×3, the
+        isolation-tiers reference, `specs/01-project.md` ×3, plus ADR-035's own
+        security-posture section and the sealed-prod verb table in
+        `reference/guest-agent.md`, which had drifted from the `ProdSafe`
+        classification of `StreamInput`/`CloseStreamInput`. ADR-001's limit 3
+        sharpened: `StreamPlane::open_input` is the only route into the gate and
+        has no caller outside `tests/workload_input_plane.rs`, so *neither* half
+        of the input plane has run on a real VM — "proven end to end" described
+        test fidelity, not liveness
+  - [x] T17 — the operator surface, landed with a live entrypoint resolver in
+        the same change as the plan required. `machine run --entrypoint --stdin
+        -` opens the route under the plan that boot was admitted under, pumps
+        the caller's stdin through the gate in acceptance order on its own
+        thread, refreshes the lease on a ticker while the writer is idle, and
+        closes the workload's stdin on the caller's EOF. The grant is
+        conditional on the request, so a call that did not ask carries no
+        `host.stream.v1`. The entrypoint is resolved from the image's
+        `mvm-meta.json` sidecar — a new `entrypointArgv` field written by both
+        the `mkGuest` and OCI build paths, because the host cannot read inside a
+        materialized ext4 — and admission **fails closed** when it cannot
+        resolve one, so the shell refusal cannot go dormant again. Claim 17
+        stays `Preview` on limit 1 alone: `InputGate::bind` still has no
+        production caller, so the secret scan is inert on every real VM
+  - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
+        transcript is now sealed by whatever stops the VM. The *follow* half
+        remains: the console follower still dies with the starting process, so
+        output a detached VM produces after that point reaches no capture at
+        all until a resident host process owns the plane
+  - [ ] Deferred to the broker task: state a follower's start sequence in the
+        first batch, so the reader can close the accept-window gap between the
+        transcript snapshot and the live subscription
+  - [ ] Deferred to the broker task: re-seal the stream transcript periodically,
+        so durable history exists for a *running* VM and survives a kill
 - [x] Plan 282 — Merge queue auto-requeue
       (`specs/plans/282-merge-queue-auto-requeue.md`)
   - [x] Refuse conflicts and bound retry attempts per PR

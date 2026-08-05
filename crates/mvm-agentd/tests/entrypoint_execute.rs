@@ -15,9 +15,8 @@
 //! instead. The helper's behaviour is encoded in a stdin header so the
 //! production no-argv / `env_clear()` call shape stays identical.
 
-use mvm_agentd::entrypoint::{
-    CallCaps, CallOutcome, PayloadCapStream, ValidatedEntrypoint, execute,
-};
+use mvm_agentd::entrypoint::{CallCaps, CallOutcome, ValidatedEntrypoint, execute};
+use mvm_agentd::stream_pump::CapturedStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -73,15 +72,10 @@ fn test_execute_zero_exit_captures_stdout_stderr() {
         Vec::new(),
     );
     match outcome {
-        CallOutcome::Exited {
-            code,
-            stdout,
-            stderr,
-            ..
-        } => {
+        CallOutcome::Exited { code, output } => {
             assert_eq!(code, 0);
-            assert_eq!(stdout, b"hello-out\n");
-            assert_eq!(stderr, b"hello-err\n");
+            assert_eq!(output.stdout, b"hello-out\n");
+            assert_eq!(output.stderr, b"hello-err\n");
         }
         other => panic!("expected Exited(0), got {other:?}"),
     }
@@ -118,9 +112,9 @@ fn test_execute_stdin_piped_to_wrapper() {
         Vec::new(),
     );
     match outcome {
-        CallOutcome::Exited { code, stdout, .. } => {
+        CallOutcome::Exited { code, output } => {
             assert_eq!(code, 0);
-            assert_eq!(stdout, b"echo this back");
+            assert_eq!(output.stdout, b"echo this back");
         }
         other => panic!("expected Exited(0) with echoed stdin, got {other:?}"),
     }
@@ -138,9 +132,9 @@ fn test_execute_injects_env_and_clears_inherited() {
         vec![("MVM_TEST_VAR".to_string(), "injected-value".to_string())],
     );
     match outcome {
-        CallOutcome::Exited { code, stdout, .. } => {
+        CallOutcome::Exited { code, output } => {
             assert_eq!(code, 0);
-            let s = String::from_utf8(stdout).unwrap();
+            let s = String::from_utf8(output.stdout).unwrap();
             // The injected var reaches the workload.
             assert!(s.contains("MVM_TEST_VAR=injected-value"), "got {s:?}");
             // env_clear() still holds: an inherited var not in the injected
@@ -171,9 +165,9 @@ fn test_execute_skips_invalid_env_entries() {
         ],
     );
     match outcome {
-        CallOutcome::Exited { code, stdout, .. } => {
+        CallOutcome::Exited { code, output } => {
             assert_eq!(code, 0);
-            let s = String::from_utf8(stdout).unwrap();
+            let s = String::from_utf8(output.stdout).unwrap();
             assert!(s.contains("GOOD=ok"), "got {s:?}");
             // Both invalid 'BAD' entries dropped → the var is unset.
             assert!(s.contains("BAD=<unset>"), "got {s:?}");
@@ -198,17 +192,12 @@ fn test_execute_captures_fd3_control_record() {
         Vec::new(),
     );
     match outcome {
-        CallOutcome::Exited {
-            code,
-            stderr,
-            controls,
-            ..
-        } => {
+        CallOutcome::Exited { code, output } => {
             assert_eq!(code, 0);
-            assert_eq!(stderr, b"hello-stderr\n");
-            assert_eq!(controls.len(), 1, "expected one control record");
-            assert_eq!(controls[0].header_json, "{\"kind\":\"ok\"}");
-            assert!(controls[0].payload.is_empty());
+            assert_eq!(output.stderr, b"hello-stderr\n");
+            assert_eq!(output.controls.len(), 1, "expected one control record");
+            assert_eq!(output.controls[0].header_json, "{\"kind\":\"ok\"}");
+            assert!(output.controls[0].payload.is_empty());
         }
         other => panic!("expected Exited(0) with control record, got {other:?}"),
     }
@@ -226,10 +215,11 @@ fn test_execute_fd3_emits_no_records_when_wrapper_silent() {
         Vec::new(),
     );
     match outcome {
-        CallOutcome::Exited { controls, .. } => {
+        CallOutcome::Exited { output, .. } => {
             assert!(
-                controls.is_empty(),
-                "expected zero control records, got {controls:?}"
+                output.controls.is_empty(),
+                "expected zero control records, got {:?}",
+                output.controls
             );
         }
         other => panic!("expected Exited, got {other:?}"),
@@ -250,7 +240,7 @@ fn test_execute_fd3_partial_frame_at_eof_is_dropped() {
         Vec::new(),
     );
     match outcome {
-        CallOutcome::Exited { controls, .. } => assert!(controls.is_empty()),
+        CallOutcome::Exited { output, .. } => assert!(output.controls.is_empty()),
         other => panic!("expected Exited, got {other:?}"),
     }
 }
@@ -269,7 +259,7 @@ fn test_execute_fd3_oversized_header_is_refused() {
         Vec::new(),
     );
     match outcome {
-        CallOutcome::Exited { controls, .. } => assert!(controls.is_empty()),
+        CallOutcome::Exited { output, .. } => assert!(output.controls.is_empty()),
         other => panic!("expected Exited, got {other:?}"),
     }
 }
@@ -322,25 +312,18 @@ fn test_execute_stdin_cap_rejects_before_spawn() {
         Vec::new(),
     );
     match outcome {
-        CallOutcome::PayloadCap {
-            stream: PayloadCapStream::Stdin,
-            stdout,
-            stderr,
-            ..
-        } => {
-            assert!(stdout.is_empty());
-            assert!(stderr.is_empty());
-        }
-        other => panic!("expected PayloadCap(Stdin), got {other:?}"),
+        CallOutcome::StdinCap => {}
+        other => panic!("expected StdinCap, got {other:?}"),
     }
 }
 
 #[test]
-fn test_execute_stdout_cap_kills_wrapper() {
-    // Wrapper produces unbounded output; stdout_max is 1 KiB. Drain
-    // thread sets the breach flag; poll loop kills the wrapper's
-    // process group (the wrapper IS the producer, so SIGKILL on the
-    // pgid terminates the writer directly).
+fn test_execute_stdout_cap_prunes_and_marks_a_gap_without_killing_the_wrapper() {
+    // Wrapper produces unbounded output against a 1 KiB retention bound. The
+    // cap used to kill it; now the only thing that can end this call is its
+    // own deadline, and the dropped bytes are reported as a gap. Should a cap
+    // breach ever regain kill semantics, `execute` returns a PayloadCap-shaped
+    // outcome instead and this fails.
     let (tmp, entry) = make_wrapper();
     let mut caps = caps_with_timeout(1024, 1024);
     caps.poll_interval = Duration::from_millis(10);
@@ -348,19 +331,75 @@ fn test_execute_stdout_cap_kills_wrapper() {
         &entry,
         tmp.path(),
         b"UNBOUNDED_STDOUT\n\n",
-        RESULT_TEST_DEADLINE,
+        Duration::from_millis(300),
         caps,
         Vec::new(),
     );
     match outcome {
-        CallOutcome::PayloadCap {
-            stream: PayloadCapStream::Stdout,
-            stdout,
-            ..
-        } => {
-            assert_eq!(stdout.len(), 1024, "stdout truncated to cap");
+        CallOutcome::Timeout { output } => {
+            assert_eq!(
+                output.gaps.len(),
+                1,
+                "expected one stdout gap, got {:?}",
+                output.gaps
+            );
+            assert_eq!(output.gaps[0].stream, CapturedStream::Stdout);
+            assert!(output.gaps[0].marker.dropped_bytes > 0);
+            assert!(
+                !output.stdout.is_empty(),
+                "the newest bytes must still be retained"
+            );
         }
-        other => panic!("expected PayloadCap(Stdout), got {other:?}"),
+        other => panic!("expected Timeout with a stdout gap, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_execute_wrapper_cannot_forge_an_agent_gap_record_on_fd3() {
+    // The wrapper writes fd 3 itself, through the production
+    // `install_fd3_in_child` path, so this is the real forgery surface: a
+    // record claiming the agent's reserved kind alongside a legitimate one,
+    // while a genuine cap breach produces an agent-authored gap. The forged
+    // record must not reach the caller at all — a verifier downstream would
+    // otherwise bless a chain skipping output it never saw.
+    //
+    // Frames: `{"kind":"mvm.stream.gap","after_seq":99,"dropped_chunks":1,
+    // "dropped_bytes":1}` then `{"kind":"app.log"}`, both with empty payloads.
+    let (tmp, entry) = make_wrapper();
+    let mut caps = caps_with_timeout(1024, 1024);
+    caps.poll_interval = Duration::from_millis(10);
+    let outcome = execute(
+        &entry,
+        tmp.path(),
+        b"FD3_HEX 4d0000007b226b696e64223a226d766d2e73747265616d2e676170222c2261667465725f736571223a39392c2264726f707065645f6368756e6b73223a312c2264726f707065645f6279746573223a317d00000000\n\
+          FD3_HEX 120000007b226b696e64223a226170702e6c6f67227d00000000\n\
+          UNBOUNDED_STDOUT\n\n",
+        Duration::from_millis(300),
+        caps,
+        Vec::new(),
+    );
+    match outcome {
+        CallOutcome::Timeout { output } => {
+            assert_eq!(
+                output.controls.len(),
+                1,
+                "only the wrapper's own record survives, got {:?}",
+                output.controls
+            );
+            assert_eq!(output.controls[0].header_json, r#"{"kind":"app.log"}"#);
+            assert_eq!(
+                output.gaps.len(),
+                1,
+                "the agent's own gap must still be reported, got {:?}",
+                output.gaps
+            );
+            assert_eq!(output.gaps[0].stream, CapturedStream::Stdout);
+            assert_ne!(
+                output.gaps[0].marker.after_seq, 99,
+                "the reported gap must be the agent's, not the wrapper's forged one"
+            );
+        }
+        other => panic!("expected Timeout, got {other:?}"),
     }
 }
 

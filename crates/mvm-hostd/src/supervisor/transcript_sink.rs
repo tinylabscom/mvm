@@ -13,11 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use mvm_core::transcript::{
-    self, Direction, TranscriptError, TranscriptManifest, TranscriptWriter, TranscriptWriterConfig,
+    self, Direction, MANIFEST_FILENAME, TranscriptError, TranscriptManifest, TranscriptWriter,
+    TranscriptWriterConfig,
 };
-
-/// Manifest filename inside a capture dir — matches the operator CLI.
-const MANIFEST_FILE: &str = "manifest.json";
 
 /// An open capture for one VM. Holds the encrypting writer over the capture dir
 /// and re-seals the manifest on [`seal`](Self::seal).
@@ -66,6 +64,10 @@ impl TranscriptCaptureSink {
                 capture_id: manifest.capture_id.clone(),
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
+                // Carried from the armed manifest, not re-decided here: the
+                // operator's retention choice is what the sealed root commits
+                // to, and re-opening must not quietly change it.
+                retention: manifest.retention,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
@@ -109,14 +111,14 @@ impl TranscriptCaptureSink {
         let manifest = self.writer.seal();
         let json =
             serde_json::to_vec_pretty(&manifest).map_err(|e| io_err("serialize manifest", &e))?;
-        mvm_core::atomic_io::atomic_write(&self.dir.join(MANIFEST_FILE), &json)
-            .map_err(|e| io_err(MANIFEST_FILE, &e))?;
+        mvm_core::atomic_io::atomic_write(&self.dir.join(MANIFEST_FILENAME), &json)
+            .map_err(|e| io_err(MANIFEST_FILENAME, &e))?;
         Ok(manifest)
     }
 }
 
 fn read_manifest(dir: &Path) -> Option<TranscriptManifest> {
-    let bytes = std::fs::read(dir.join(MANIFEST_FILE)).ok()?;
+    let bytes = std::fs::read(dir.join(MANIFEST_FILENAME)).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -131,7 +133,7 @@ fn io_err(file: &str, e: &impl std::fmt::Display) -> TranscriptError {
 mod tests {
     use super::*;
     use mvm_core::crypto::aead;
-    use mvm_core::transcript::{CaptureBinding, CaptureBounds};
+    use mvm_core::transcript::{CaptureBinding, CaptureBounds, RetentionPolicy};
     use std::path::Path;
 
     /// Arrange an armed capture exactly the way `mvmctl audit transcript arm`
@@ -153,13 +155,14 @@ mod tests {
                 max_bytes: 1 << 20,
                 max_chunks: 64,
             },
+            retention: RetentionPolicy::FailClosed,
             created_unix_secs: 1_700_000_000,
             recipient: "transcript-kek".into(),
             wrapped_data_key_b64: transcript::wrap_data_key(&kek, &data_key),
         };
         let manifest = TranscriptWriter::new(&dir, data_key, cfg).seal();
         std::fs::write(
-            dir.join(MANIFEST_FILE),
+            dir.join(MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
@@ -245,7 +248,7 @@ mod tests {
         let keys = t.path().join("keys");
         arm(&transcripts, &keys, "t1", "vm1", "cap-1");
 
-        let path = transcripts.join("t1/cap-1").join(MANIFEST_FILE);
+        let path = transcripts.join("t1/cap-1").join(MANIFEST_FILENAME);
         let mut manifest: TranscriptManifest =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         manifest.bounds.max_bytes += 1;

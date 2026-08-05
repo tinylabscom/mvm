@@ -7,6 +7,11 @@
 //! The contract itself lives in `mvm-core` (behind its `client` feature) so this
 //! crate and `mvm-sdk` share one trait without a dependency cycle — but callers
 //! depend only on `mvm-client` and never name `mvm-core` directly.
+//!
+//! [`stream`] adds the read side of a workload's captured output on the same
+//! terms: the trait and transport live in `mvm-core`, this crate is the
+//! surface consumers import. [`stream_tracing`] republishes that stream into
+//! a consumer's `tracing` setup, behind the `tracing-bridge` feature.
 
 pub mod audit;
 pub mod boot;
@@ -16,6 +21,9 @@ pub mod local;
 pub mod readiness;
 pub mod registration;
 pub mod secret;
+pub mod stream;
+#[cfg(feature = "tracing-bridge")]
+pub mod stream_tracing;
 pub mod volume;
 
 pub use mvm_core::client::dto;

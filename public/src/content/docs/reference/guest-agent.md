@@ -152,7 +152,7 @@ sent to a sealed-prod agent are rejected before any handler runs:
 
 | Profile | Effective verb set | Used by |
 |---------|-------------------|---------|
-| `sealed-prod` (default) | Lifecycle, status, entrypoint, sleep/wake, volume mount/unmount, idle-timeout updates. The full ADR-001 production-safe surface. | Production images. The policy file lives on a dm-verity rootfs (ADR-001 §W3) so the profile cannot be widened at runtime. |
+| `sealed-prod` (default) | Lifecycle, status, entrypoint, sleep/wake, volume mount/unmount, idle-timeout updates, and the entrypoint stdin verbs `StreamInput` / `CloseStreamInput`. The full ADR-001 production-safe surface. The stdin verbs write to an entrypoint fixed at admission and select nothing; the host gates them on a grant in the signed plan, so a prod-safe verb is not an ungated one — see [Workload input](/guides/workload-input/). | Production images. The policy file lives on a dm-verity rootfs (ADR-001 §W3) so the profile cannot be widened at runtime. |
 | `dev` | `sealed-prod` plus shell `Exec`, process RPC, filesystem RPC, console PTY, port forwarding, and `RunCode`. | Dev-tier images built with the `interactive` feature — the ones `mvmctl machine console` or `mvmctl machine run -it` can attach to. |
 | `builder` | Reserved for builder-only verbs. The current builder agent speaks a separate `BuilderRequest` protocol, so this profile is wire-stable but unused for the tenant agent. | Future builder VM agent if/when its verbs land on the tenant wire. |
 

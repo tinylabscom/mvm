@@ -2804,6 +2804,7 @@ version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "ed25519-dalek",
  "ext4-view",
@@ -2826,6 +2827,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

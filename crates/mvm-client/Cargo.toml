@@ -17,6 +17,13 @@ default = []
 # The remote REST `GatewayBackend` + `connect(Target::Gateway)`. Off by default
 # so a pure-local consumer stays light; a fleet/studio build turns it on.
 remote = ["mvm-core/client-remote"]
+# Republish a workload's output stream into the consumer's own `tracing`
+# subscriber (`stream_tracing`). Off by default: `tracing` is already a
+# dependency here for diagnostics, but a consumer that only reads records
+# should not link the base64 encoder the bridge needs to carry payload bytes
+# through a field API that has no byte type. `serde_json` is no longer gated
+# here: the volume and secret lifecycle services need it unconditionally.
+tracing-bridge = ["dep:base64"]
 # Forwards to `mvm-runtime/test-support`: the hermetic in-memory mock backend
 # `LocalBackend::with_hypervisor("mock")` drives in `pause`/`resume`'s
 # canned-snapshot test path. Off by default so the mock never reaches a
@@ -56,11 +63,16 @@ ed25519-dalek = { workspace = true }
 # Non-fatal diagnostics on the pause path (fc.paused marker best-effort write).
 # Already in the mvmctl closure via mvm-runtime, so this adds no crates.
 tracing = { workspace = true }
+# `tracing-bridge` only: payload bytes are hash-chained and must reach an
+# event unaltered, and `tracing` has no byte-typed field to carry them in.
+base64 = { workspace = true, optional = true }
 # The local encrypted-volume lifecycle service (`volume` module). Every entry
 # below is already in the mvmctl closure via mvm-core / mvm-runtime / mvm-cli,
 # so none adds new crates to the default build.
 anyhow = { workspace = true }
 serde = { workspace = true }
+# Also `tracing-bridge`: a `Trace` record's payload is the JSON control object
+# the fd-3 convention defines, and its declared level drives the emitted event.
 serde_json = { workspace = true }
 # Canonical JSON for the immutable volume-snapshot manifest (byte-stable at
 # rest so a manifest re-serialization cannot drift its hash).
@@ -74,13 +86,17 @@ chrono = { workspace = true }
 ext4-view = { workspace = true }
 # The write-only secret lifecycle service (`secret` module): typed refusals
 # (thiserror) and the `host_matches` destination check (mvm-contract); the
-# shared serde/secrecy/chrono entries above serve it too.
+# shared serde/secrecy/chrono entries above serve it too. `StreamRecord` and
+# its tags are also in this crate's re-exported public surface.
 mvm-contract = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+# The tracing bridge's tests install a capturing subscriber to assert the
+# emitted event carries the payload bytes back out unaltered.
+tracing-subscriber = { workspace = true }
 # Inventory-record wire assertions (round-trips, no-host-path leak checks).
 serde_json = { workspace = true }
 # Seeded property-style loops + fresh Ed25519 test keys for the verified

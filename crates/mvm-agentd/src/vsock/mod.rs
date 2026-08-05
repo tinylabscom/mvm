@@ -59,11 +59,13 @@ pub use response::{
 pub use response_payloads::{
     EntrypointEvent, ExecEvent, ExecOutcomeWire, FsChange, FsChangeKind, FsEntry, FsEntryKind,
     FsErrorKind, FsResult, FsStat, ProcErrorKind, ProcInfo, ProcResult, ProcState, ProcWaitEvent,
+    StreamInputRefusal, StreamInputResult,
 };
 pub use rpc::{
-    ControlSession, RpcError, call_streaming, call_unary, check_response, negotiate_protocol,
-    probe_agent_ready, read_exec_stream, require_capabilities, send_exec_streaming,
-    send_run_code_streaming, send_run_detached, send_run_entrypoint,
+    ControlSession, RpcError, RunEntrypointCall, call_streaming, call_unary, check_response,
+    negotiate_protocol, probe_agent_ready, read_exec_stream, require_capabilities,
+    send_close_stream_input, send_exec_streaming, send_run_code_streaming, send_run_detached,
+    send_run_entrypoint, send_stream_input,
 };
 pub use verb_grant::{
     HOST_SIGNER_PUB_CMDLINE_KEY, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,

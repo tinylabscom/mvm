@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 
-use mvm_core::plan::SynthesisInput;
+use mvm_core::plan::{StreamRetention, SynthesisInput};
 use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
@@ -14,6 +14,7 @@ use mvm_hostd::plan_admission::{
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
 use crate::commands::vm::audit_chain::AuditEmitter;
+use crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint;
 use crate::commands::vm::host_signer::{PUBLIC_FILENAME, load_or_init_at};
 use crate::commands::vm::policy_resolver::{
     LOCAL_DEFAULT, resolve_policy_bundle, resolve_policy_bundle_with_dir,
@@ -106,6 +107,67 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs
     /// (ConsoleOpen, Exec) that a ProdSafe grant would refuse.
     pub restrict_agent_verbs: bool,
+    /// What the caller worked out this image will run.
+    ///
+    /// Feeds [`entrypoint_is_shell_shaped`], which refuses the workload input
+    /// grant under a sealed production posture (`restrict_agent_verbs`) when
+    /// the entrypoint looks like a shell.
+    /// [`Unresolved`](ResolvedEntrypoint::Unresolved) refuses that grant too:
+    /// a launch that cannot say what it runs has not established that what it
+    /// runs is not a shell, and admitting on that basis would leave a control
+    /// that reports present and never fires. Callers that never request the
+    /// input grant may pass `Unresolved` freely — the check is reached only
+    /// through the grant.
+    pub entrypoint: ResolvedEntrypoint,
+}
+
+/// Shell basenames [`entrypoint_is_shell_shaped`] refuses on direct match.
+/// A superset of `mvm_contract::entrypoint`'s own shell set: that helper
+/// treats a bare `busybox` invocation (no applet argument) as safe, because
+/// for the SDK-declaration gate it validates an applet name is what matters.
+/// Here a bare `busybox` is itself the risk — invoked with no arguments it
+/// drops into an interactive shell — so it is refused directly rather than
+/// only when a shell applet is named.
+const DIRECT_SHELL_BASENAMES: &[&str] =
+    &["sh", "bash", "dash", "ash", "busybox", "zsh", "ksh", "fish"];
+
+/// Last path segment of `program`. A local stand-in for
+/// `std::path::Path::file_name()`: an entrypoint argv element is wire/JSON
+/// data (a plain string), not a host filesystem path, and may use either
+/// separator.
+fn program_basename(program: &str) -> &str {
+    program.rsplit(['/', '\\']).next().unwrap_or(program)
+}
+
+/// Whether `argv`'s own program name is a direct shell match, reusing
+/// `mvm_contract::entrypoint`'s argv/env/busybox-applet resolution for
+/// everything except the bare-`busybox` case it deliberately excludes.
+fn argv_is_shell(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|prog| DIRECT_SHELL_BASENAMES.contains(&program_basename(prog)))
+        || mvm_contract::entrypoint::detect_shell_entrypoint_argv(argv).is_some()
+}
+
+/// Whether a resolved entrypoint is shell-shaped, per the design's rule for
+/// refusing the workload input grant under a sealed production posture: its
+/// own argv names a shell (directly, via `env`, or as a busybox applet, or
+/// busybox itself), its script shebang names one, or the argv carries an
+/// inline-command flag (`-c`) — the shape every "run this string"
+/// invocation takes, and one a renamed or wrapped interpreter still has to
+/// carry to accept an inline command.
+///
+/// This is a heuristic, not a proof. A wrapper script, a program that
+/// `exec`s a shell, or an interpreter invoked under an unusual name defeats
+/// it. What still holds is the signed grant itself: input only reaches a
+/// program the admitted plan chose, never one input bytes select.
+pub(in crate::commands::vm) fn entrypoint_is_shell_shaped(
+    argv: &[String],
+    shebang: Option<&[u8]>,
+) -> bool {
+    argv_is_shell(argv)
+        || argv.iter().skip(1).any(|arg| arg == "-c")
+        || shebang
+            .is_some_and(|bytes| mvm_contract::entrypoint::detect_shell_shebang(bytes).is_some())
 }
 
 /// Bundle of artifacts produced by a successful admission: the
@@ -133,8 +195,8 @@ pub(in crate::commands::vm) struct AdmissionContext {
 impl std::fmt::Debug for AdmissionContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AdmissionContext")
-            .field("plan_id", &self.admitted.plan_id)
-            .field("signer_id", &self.admitted.signer_id)
+            .field("plan_id", self.admitted.plan_id())
+            .field("signer_id", &self.admitted.signer_id())
             .field("emitter", &"<redacted: FileAuditSigner>")
             .finish()
     }
@@ -172,6 +234,39 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     if p.no_supervisor {
         return Ok(None);
     }
+
+    // Refuse before any hashing, bundle reads, or signing: a rejection here
+    // must not have already spent the boot work it exists to avoid. Gated on
+    // `restrict_agent_verbs` — the same "non-interactive, non-ad-hoc, non-dev,
+    // sealed image" posture the ProdSafe verb attenuation uses — because that
+    // is this codebase's existing "sealed production" signal, and the
+    // shell-entrypoint refusal is scoped to exactly that tier. A dev,
+    // interactive, or ad-hoc-argv run already carries a DevOnly Exec grant, so
+    // refining its input grant would not close anything the Exec grant hasn't
+    // already opened.
+    if p.restrict_agent_verbs && mvm_contract::stream::input::grants_input_for(&p.services) {
+        match &p.entrypoint {
+            ResolvedEntrypoint::Known { argv, shebang } => {
+                if entrypoint_is_shell_shaped(argv, shebang.as_deref()) {
+                    anyhow::bail!(
+                        "refusing the workload input grant: the resolved entrypoint {argv:?} is \
+                         shell-shaped, and under a sealed production posture streaming stdin \
+                         to a shell is interactive access wearing a different hat",
+                    );
+                }
+            }
+            // Fail closed. The alternative — admit and hope — is what leaves a
+            // refusal that reports present and can never fire, which is worse
+            // than no refusal at all because it is believed.
+            ResolvedEntrypoint::Unresolved { because } => anyhow::bail!(
+                "refusing the workload input grant: this launch cannot say what the \
+                 workload runs ({because}), so it cannot rule out a shell — and under \
+                 a sealed production posture streaming stdin to a shell is interactive \
+                 access wearing a different hat",
+            ),
+        }
+    }
+
     let sibling_identity = if p.boot_artifact_identity.is_none() {
         sibling_deploy_boot_artifact(p.rootfs_path)?
     } else {
@@ -265,9 +360,16 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             crate::commands::vm::agent_verbs::default_agent_verbs(
                 p.restrict_agent_verbs,
                 !p.shares.is_empty(),
+                mvm_contract::stream::input::grants_input_for(&p.services),
             )
         }),
         services: p.services.clone(),
+        // Recorded, always, and not reachable from a flag. A caller who could
+        // turn the transcript off from the command line would leave an absent
+        // recording indistinguishable from a suppressed one; opting out is a
+        // decision for whoever authors and signs the plan, and it lands in the
+        // chain as `plan.admitted`'s retention label either way.
+        stream_retention: StreamRetention::Persist,
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
@@ -284,8 +386,8 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         admission_ctx.as_ref(),
     )?;
     tracing::info!(
-        plan_id = %admitted.plan_id.0,
-        signer_id = %admitted.signer_id,
+        plan_id = %admitted.plan_id().0,
+        signer_id = %admitted.signer_id(),
         tenant = %p.tenant,
         workload = %p.vm_name,
         backend = %p.backend_name,
@@ -321,7 +423,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         {
             let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
                 .context("opening fallback audit chain emitter")?;
-            emit_policy_resolve_failure(&admitted.plan, &fallback, &err);
+            emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
             return Err(err);
         }
         PolicyAdmissionResolution {
@@ -329,12 +431,12 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             audit: Some(bundle.audit.clone()),
         }
     } else {
-        match resolve_policy_for_admission(&admitted.plan, p.policy_dir) {
+        match resolve_policy_for_admission(admitted.plan(), p.policy_dir) {
             Ok(resolved) => resolved,
             Err(err) => {
                 let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
                     .context("opening fallback audit chain emitter")?;
-                emit_policy_resolve_failure(&admitted.plan, &fallback, &err);
+                emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
                 return Err(err);
             }
         }
@@ -349,7 +451,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         Err(err) => {
             let err = err.context("opening audit chain emitter");
             match build_default_audit_emitter(signer.signing, p.audit_dir) {
-                Ok(fallback) => emit_policy_audit_invalid(&admitted.plan, &fallback, &err),
+                Ok(fallback) => emit_policy_audit_invalid(admitted.plan(), &fallback, &err),
                 Err(fallback_err) => tracing::warn!(
                     error = %fallback_err,
                     "audit emit_failed for policy-audit-invalid skipped; fallback emitter failed"
@@ -359,17 +461,17 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         }
     };
 
-    if let Err(e) = emitter.emit_admitted(&admitted.plan, &admitted.signer_id) {
+    if let Err(e) = emitter.emit_admitted(admitted.plan(), admitted.signer_id()) {
         tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal)");
     }
-    if let Some(verbs) = admitted.plan.agent_verbs.as_ref()
-        && let Err(e) = emitter.emit_grant_required(&admitted.plan, verbs)
+    if let Some(verbs) = admitted.plan().agent_verbs.as_ref()
+        && let Err(e) = emitter.emit_grant_required(admitted.plan(), verbs)
     {
         tracing::warn!(error = %e, "audit emit_grant_required failed (non-fatal)");
     }
     // Claim 1 / claim 8 — record the admitted host-fs grants in the
     // chain-signed log (no-op when there are none).
-    if let Err(e) = emitter.emit_shares_admitted(&admitted.plan) {
+    if let Err(e) = emitter.emit_shares_admitted(admitted.plan()) {
         tracing::warn!(error = %e, "audit emit_shares_admitted failed (non-fatal)");
     }
 
@@ -380,7 +482,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     // facing: it validates the policy refs against the on-disk
     // bundle so a missing file / typo / bad L4 CIDR fails the boot
     // loudly *now* instead of silently passing through with Noops.
-    emit_policy_resolved(&admitted.plan, &emitter, resolved.slots_mode);
+    emit_policy_resolved(admitted.plan(), &emitter, resolved.slots_mode);
 
     // Slice 3 (b) — load the resolved tenant PolicyBundle (None for a
     // local-default plan) so populate_audit_substrate can deliver it to the
@@ -390,8 +492,8 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     let policy_bundle = match generated_bundle {
         Some(bundle) => Some(bundle),
         None => match p.policy_dir {
-            Some(dir) => resolve_policy_bundle_with_dir(&admitted.plan, dir),
-            None => resolve_policy_bundle(&admitted.plan),
+            Some(dir) => resolve_policy_bundle_with_dir(admitted.plan(), dir),
+            None => resolve_policy_bundle(admitted.plan()),
         }
         .context("loading the tenant policy bundle for the bridge")?,
     };
@@ -526,7 +628,7 @@ pub(super) fn attach_guest_boot_config(
 ) -> Result<()> {
     attach_guest_boot_config_for_plan(
         start_config,
-        &admission.admitted.plan,
+        admission.admitted.plan(),
         &admission.host_signer_public_path,
         profile,
     )
@@ -636,13 +738,13 @@ pub(in crate::commands::vm) fn emit_launched_if(
     persist_plan: bool,
 ) {
     let Some(ctx) = ctx else { return };
-    if let Err(e) = ctx.emitter.emit_launched(&ctx.admitted.plan, backend) {
+    if let Err(e) = ctx.emitter.emit_launched(ctx.admitted.plan(), backend) {
         tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
     }
     if persist_plan
         && let Err(e) = crate::commands::vm::plan_persist::write_plan(
-            &ctx.admitted.plan.workload.0,
-            &ctx.admitted.plan,
+            &ctx.admitted.plan().workload.0,
+            ctx.admitted.plan(),
         )
     {
         tracing::warn!(
@@ -669,7 +771,7 @@ pub(in crate::commands::vm) fn emit_boot_posture_if(
         mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
     };
     if let Err(e) = ctx.emitter.emit_boot_posture(
-        &ctx.admitted.plan,
+        ctx.admitted.plan(),
         label,
         runtime_source_policy.audit_label(),
     ) {
@@ -687,7 +789,7 @@ pub(super) fn enforce_shares_if(
     volumes: &[mvm_core::vm_backend::VmVolume],
 ) -> Result<()> {
     if let Some(ctx) = ctx {
-        mvm_hostd::plan_admission::enforce_admitted_shares(volumes, &ctx.admitted.plan)
+        mvm_hostd::plan_admission::enforce_admitted_shares(volumes, ctx.admitted.plan())
             .context("admission share check")?;
     }
     Ok(())
@@ -704,7 +806,7 @@ pub(in crate::commands::vm) fn emit_failed_if(
 ) {
     let Some(ctx) = ctx else { return };
     let msg = format!("{err:#}");
-    if let Err(e) = ctx.emitter.emit_failed(&ctx.admitted.plan, class, &msg) {
+    if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
     }
 }
@@ -883,6 +985,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
@@ -921,21 +1024,22 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
-        assert!(!ctx.admitted.plan_id.0.is_empty());
-        assert_eq!(ctx.admitted.plan.workload.0, "vm-happy");
-        assert_eq!(ctx.admitted.plan.tenant.0, "local");
-        assert_eq!(ctx.admitted.plan.resources.cpus, 2);
-        assert_eq!(ctx.admitted.plan.resources.mem_mib, 512);
-        assert_eq!(ctx.admitted.plan.image.sha256, boot_artifact.sha256);
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+        assert_eq!(ctx.admitted.plan().workload.0, "vm-happy");
+        assert_eq!(ctx.admitted.plan().tenant.0, "local");
+        assert_eq!(ctx.admitted.plan().resources.cpus, 2);
+        assert_eq!(ctx.admitted.plan().resources.mem_mib, 512);
+        assert_eq!(ctx.admitted.plan().image.sha256, boot_artifact.sha256);
         assert_eq!(
-            ctx.admitted.plan.admission_profile.seccomp_tier,
+            ctx.admitted.plan().admission_profile.seccomp_tier,
             mvm_core::plan::PlanSeccompTier::Network
         );
         assert_eq!(
-            ctx.admitted.plan.admission_profile.secret_release,
+            ctx.admitted.plan().admission_profile.secret_release,
             mvm_core::plan::SecretReleasePolicy::PlanBound
         );
 
@@ -945,7 +1049,7 @@ mod admit_plan_tests {
         let audit_path = audit_dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
         assert!(content.contains("plan.admitted"));
-        assert!(content.contains(&ctx.admitted.plan_id.0));
+        assert!(content.contains(&ctx.admitted.plan_id().0));
     }
 
     #[test]
@@ -980,6 +1084,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -1024,6 +1129,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .unwrap()
         .unwrap();
@@ -1052,11 +1158,12 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .unwrap()
         .unwrap();
-        assert_ne!(a1.admitted.plan_id, a2.admitted.plan_id);
-        assert_ne!(a1.admitted.plan.nonce, a2.admitted.plan.nonce);
+        assert_ne!(a1.admitted.plan_id(), a2.admitted.plan_id());
+        assert_ne!(a1.admitted.plan().nonce, a2.admitted.plan().nonce);
     }
 
     #[test]
@@ -1105,6 +1212,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1180,6 +1288,7 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1196,7 +1305,7 @@ mod admit_plan_tests {
             "audit chain must record slots_mode=noop for local-default refs: {content}"
         );
         // Sanity: plan_id matches.
-        assert!(content.contains(&ctx.admitted.plan_id.0));
+        assert!(content.contains(&ctx.admitted.plan_id().0));
     }
 
     #[test]
@@ -1233,14 +1342,15 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
 
-        assert_ne!(ctx.admitted.plan.network_policy.0, LOCAL_DEFAULT);
+        assert_ne!(ctx.admitted.plan().network_policy.0, LOCAL_DEFAULT);
         assert_eq!(
-            ctx.admitted.plan.network_policy.0,
-            ctx.admitted.plan.egress_policy.0
+            ctx.admitted.plan().network_policy.0,
+            ctx.admitted.plan().egress_policy.0
         );
         let bundle = ctx.policy_bundle.expect("generated policy bundle");
         assert_eq!(bundle.network.l4.len(), 1);
@@ -1293,11 +1403,12 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
         .expect("Some when admission ran");
 
-        assert_ne!(ctx.admitted.plan.network_policy.0, LOCAL_DEFAULT);
+        assert_ne!(ctx.admitted.plan().network_policy.0, LOCAL_DEFAULT);
         let bundle = ctx.policy_bundle.expect("generated policy bundle");
         assert_eq!(bundle.egress.mode.as_deref(), Some("open"));
         assert!(bundle.network.l4.is_empty());
@@ -1309,14 +1420,14 @@ mod admit_plan_tests {
         // Default path: sealed-prod, no shares → run-entrypoint present, mount-volume absent.
         let d = parse_agent_verb_override(&[])
             .unwrap()
-            .or_else(|| default_agent_verbs(true, false))
+            .or_else(|| default_agent_verbs(true, false, false))
             .unwrap();
         assert!(d.iter().any(|v| v.as_str() == "run-entrypoint"));
         assert!(!d.iter().any(|v| v.as_str() == "mount-volume"));
         // Override path: explicit set replaces the default.
         let o = parse_agent_verb_override(&["run-entrypoint".into()])
             .unwrap()
-            .or_else(|| default_agent_verbs(true, false))
+            .or_else(|| default_agent_verbs(true, false, false))
             .unwrap();
         assert_eq!(
             o.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
@@ -1326,8 +1437,405 @@ mod admit_plan_tests {
         assert!(
             parse_agent_verb_override(&[])
                 .unwrap()
-                .or_else(|| default_agent_verbs(false, false))
+                .or_else(|| default_agent_verbs(false, false, false))
                 .is_none()
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // A sealed-production run refuses the input grant when the
+    // entrypoint is shell-shaped. These three are what make the rule a
+    // real gate rather than a blanket ban: a non-shell entrypoint keeps
+    // its grant, a shell entrypoint keeps booting when nothing granted
+    // it input in the first place, and only the intersection refuses.
+    // ──────────────────────────────────────────────────────────────
+
+    fn stream_grant_service() -> mvm_contract::protocol::broker::ServiceId {
+        mvm_contract::protocol::broker::ServiceId::parse(
+            mvm_contract::stream::input::INPUT_GRANT_SERVICE,
+        )
+        .expect("the input grant token is a valid service id")
+    }
+
+    #[test]
+    fn a_non_shell_entrypoint_with_the_grant_is_admitted_under_prod() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"non-shell-entrypoint-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            boot_artifact_identity: None,
+            tenant: "local",
+            vm_name: "vm-non-shell-granted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: vec![stream_grant_service()],
+            entrypoint: ResolvedEntrypoint::Known {
+                argv: vec!["python".to_string(), "-m".to_string(), "app".to_string()],
+                shebang: None,
+            },
+        })
+        .expect("a non-shell entrypoint must not be refused")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+
+    #[test]
+    fn a_shell_entrypoint_without_the_grant_is_admitted_output_streaming_is_unconditional() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"shell-entrypoint-no-grant-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            boot_artifact_identity: None,
+            tenant: "local",
+            vm_name: "vm-shell-ungranted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(), // no host.stream.v1 grant
+            entrypoint: ResolvedEntrypoint::Known {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "echo hi".to_string(),
+                ],
+                shebang: None,
+            },
+        })
+        .expect("a shell entrypoint must still boot when nothing granted it input")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+
+    #[test]
+    fn a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"shell-entrypoint-granted-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            boot_artifact_identity: None,
+            tenant: "local",
+            vm_name: "vm-shell-granted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: vec![stream_grant_service()],
+            entrypoint: ResolvedEntrypoint::Known {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "echo hi".to_string(),
+                ],
+                shebang: None,
+            },
+        })
+        .expect_err("a shell entrypoint carrying the grant must be refused");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("shell-shaped"),
+            "the refusal must name the reason: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_entrypoint_with_the_grant_is_refused() {
+        // The gate's fail-closed arm. Before it, every launch path passed an
+        // empty argv and the shell refusal could never fire — a control that
+        // reported present and was structurally dormant. An entrypoint nobody
+        // resolved is one nobody checked, and the grant is refused on that
+        // basis rather than on having found a shell.
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"unresolved-entrypoint-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            boot_artifact_identity: None,
+            tenant: "local",
+            vm_name: "vm-entrypoint-unknown",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: vec![stream_grant_service()],
+            entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
+        })
+        .expect_err("an unresolved entrypoint carrying the grant must be refused");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("cannot say what the workload runs"),
+            "the refusal must name what it could not establish: {rendered}"
+        );
+        assert!(
+            rendered.contains("this launch path resolves no entrypoint"),
+            "and must quote the resolver's own reason: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_entrypoint_without_the_grant_still_boots() {
+        // Every launch path that never asks for streamed stdin passes an
+        // unresolved entrypoint, so the fail-closed arm above must be
+        // reachable only through the grant — otherwise this would refuse to
+        // boot most of the CLI.
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"unresolved-no-grant-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            boot_artifact_identity: None,
+            tenant: "local",
+            vm_name: "vm-entrypoint-unknown-ungranted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
+        })
+        .expect("an unresolved entrypoint that asked for nothing must still boot")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+
+    #[test]
+    fn a_dev_profile_shell_entrypoint_with_the_grant_is_not_refused() {
+        // The refusal is scoped to the sealed-production tier
+        // (restrict_agent_verbs). A dev/interactive/ad-hoc run already carries
+        // a DevOnly Exec grant, so it must not fire there — it would be a
+        // no-op wearing a security label.
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"dev-shell-entrypoint-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            boot_artifact_identity: None,
+            tenant: "local",
+            vm_name: "vm-dev-shell",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: false,
+            services: vec![stream_grant_service()],
+            entrypoint: ResolvedEntrypoint::Known {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "echo hi".to_string(),
+                ],
+                shebang: None,
+            },
+        })
+        .expect("dev-tier runs are out of the shell-entrypoint refusal's scope")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod entrypoint_shape_tests {
+    use super::*;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn every_direct_shell_basename_is_shell_shaped() {
+        for name in DIRECT_SHELL_BASENAMES {
+            assert!(
+                entrypoint_is_shell_shaped(&argv(&[name]), None),
+                "{name} must be treated as a shell"
+            );
+            // A full path to the same program must match on basename alone.
+            assert!(
+                entrypoint_is_shell_shaped(&argv(&[&format!("/usr/local/bin/{name}")]), None),
+                "a full path to {name} must be treated as a shell"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_busybox_invocation_is_shell_shaped_even_with_a_non_shell_applet() {
+        // Unlike mvm_contract::entrypoint's SDK-declaration check (which lets
+        // "busybox true" through because the named applet isn't a shell), the
+        // admission gate treats busybox itself as the risk: invoked bare it
+        // drops into an interactive shell, so any invocation is refused on
+        // basename alone.
+        assert!(entrypoint_is_shell_shaped(&argv(&["busybox"]), None));
+        assert!(entrypoint_is_shell_shaped(
+            &argv(&["busybox", "true"]),
+            None
+        ));
+    }
+
+    #[test]
+    fn an_env_wrapped_shell_is_shell_shaped() {
+        // Reused from mvm_contract::entrypoint::detect_shell_entrypoint_argv
+        // rather than reimplemented: env indirection, -S/--split-string, and
+        // env-assignment skipping all apply here for free.
+        assert!(entrypoint_is_shell_shaped(
+            &argv(&["/usr/bin/env", "bash", "-lc", "echo no"]),
+            None
+        ));
+    }
+
+    #[test]
+    fn a_script_whose_shebang_names_a_shell_is_shell_shaped() {
+        assert!(entrypoint_is_shell_shaped(
+            &argv(&["./entrypoint.sh"]),
+            Some(b"#!/bin/bash\necho hi\n"),
+        ));
+    }
+
+    #[test]
+    fn a_script_whose_shebang_names_a_non_shell_interpreter_is_not_shell_shaped() {
+        assert!(!entrypoint_is_shell_shaped(
+            &argv(&["./entrypoint.py"]),
+            Some(b"#!/usr/bin/env python3\n"),
+        ));
+    }
+
+    #[test]
+    fn an_inline_command_flag_makes_any_interpreter_shell_shaped() {
+        // Deliberately not restricted to programs already named as shells:
+        // an inline-command flag is the shape every "run this string"
+        // invocation takes, including a renamed or wrapped interpreter.
+        assert!(entrypoint_is_shell_shaped(
+            &argv(&["python", "-c", "print(1)"]),
+            None
+        ));
+    }
+
+    #[test]
+    fn an_ordinary_argv_program_is_not_shell_shaped() {
+        assert!(!entrypoint_is_shell_shaped(
+            &argv(&["python", "-m", "app"]),
+            None
+        ));
+    }
+
+    #[test]
+    fn an_empty_argv_is_not_shell_shaped() {
+        assert!(!entrypoint_is_shell_shaped(&[], None));
     }
 }

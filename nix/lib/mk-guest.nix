@@ -13,7 +13,7 @@
 #        dev = false  # never enables console regardless of entrypoint
 #
 # Inferred default: `dev = (entrypoint ? shell)`. mvmctl reads the
-# `passthru.mvm.{accessible, sealed, entrypointKind}` metadata to
+# `passthru.mvm.{accessible, sealed, entrypointKind, entrypointArgv}` to
 # gate `mvmctl console <vm>` host-side; the `/etc/mvm/variant` file
 # baked into the rootfs is the in-guest cross-check.
 #
@@ -312,6 +312,20 @@ let
       "${setpriv} "
       + "--reuid=${toString uid} --regid=${toString uid} "
       + "--clear-groups --no-new-privs -- ${cmd}";
+
+  # The argv PID 1 ends up exec'ing, as a list rather than a rendered line.
+  # Exported through passthru so the host — which cannot open a materialized
+  # ext4 — can see what the image runs before it boots it. The services arm
+  # reports the recovery shell it genuinely falls through to: telling the host
+  # this image runs something gentler than it does would be worse than saying
+  # nothing.
+  entrypointArgv =
+    if entrypointKind == "shell" then
+      [ entrypoint.shell "-i" ]
+    else if entrypointKind == "command" then
+      entrypoint.command
+    else
+      [ "/bin/sh" "-i" ];
 
   rawEntrypointCmd =
     if entrypointKind == "shell" then
@@ -1423,6 +1437,11 @@ let
     accessible = isDev;
     sealed = isSealed;
     entrypointKind = entrypointKind;
+    # What PID 1 execs, as argv. The host cannot read inside a materialized
+    # ext4, so this is where admission learns what a workload runs — and the
+    # only reason it can refuse to hand a shell-shaped entrypoint a stdin
+    # writer.
+    inherit entrypointArgv;
     # True iff the agent is built with the `interactive`
     # Cargo feature — which gates BOTH `do_exec` AND the PTY-over-vsock
     # interactive console (claim 15). `withInteractive == true`

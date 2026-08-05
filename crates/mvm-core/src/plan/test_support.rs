@@ -16,7 +16,8 @@ use crate::plan::execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
     KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
-    RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
+    RuntimeProfileRef, SecretBinding, SignedImageRef, StreamRetention, TenantId, TimeoutSpec,
+    WorkloadId,
 };
 use mvm_contract::protocol::broker::ServiceId;
 
@@ -32,6 +33,8 @@ pub struct PlanFixture {
     valid_from: Option<DateTime<Utc>>,
     valid_until: Option<DateTime<Utc>>,
     services: Vec<ServiceId>,
+    stream_retention: StreamRetention,
+    audit_labels: BTreeMap<String, String>,
 }
 
 impl Default for PlanFixture {
@@ -46,6 +49,8 @@ impl Default for PlanFixture {
             valid_from: None,
             valid_until: None,
             services: Vec::new(),
+            stream_retention: StreamRetention::default(),
+            audit_labels: BTreeMap::new(),
         }
     }
 }
@@ -89,6 +94,23 @@ impl PlanFixture {
     /// broker's dispatch gate and the SDK-sidecar attachment decision.
     pub fn services(mut self, services: Vec<ServiceId>) -> Self {
         self.services = services;
+        self
+    }
+
+    /// Whether this plan's captured output is kept after the run. The default
+    /// is [`StreamRetention::Persist`]; a test pins `Ephemeral` to exercise the
+    /// signed opt-out.
+    pub fn stream_retention(mut self, retention: StreamRetention) -> Self {
+        self.stream_retention = retention;
+        self
+    }
+
+    /// Labels the plan carries onto every audit entry emitted under it.
+    /// Default empty, which is *not* what a production plan looks like — a
+    /// test asserting on an entry's exact key set needs one of these to prove
+    /// the assertion covers the merge rather than the fixture's silence.
+    pub fn audit_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.audit_labels = labels;
         self
     }
 
@@ -144,7 +166,7 @@ impl PlanFixture {
                 capture_paths: Vec::new(),
                 retention_days: 0,
             },
-            audit_labels: BTreeMap::new(),
+            audit_labels: self.audit_labels,
             key_rotation: KeyRotationSpec { interval_days: 0 },
             attestation: AttestationRequirement {
                 mode: AttestationMode::Noop,
@@ -163,6 +185,7 @@ impl PlanFixture {
             deps_volume: None,
             shares: Vec::new(),
             services: self.services,
+            stream_retention: self.stream_retention,
         }
     }
 }
@@ -195,7 +218,15 @@ mod tests {
             .runtime_profile("hvf")
             .nonce([7u8; 16])
             .validity(from, until)
+            .audit_labels(BTreeMap::from([(
+                "owner".to_string(),
+                "team-a".to_string(),
+            )]))
             .build();
+        assert_eq!(
+            plan.audit_labels.get("owner").map(String::as_str),
+            Some("team-a")
+        );
         assert_eq!(plan.tenant.0, "acme");
         assert_eq!(plan.plan_id.0, "p-1");
         assert_eq!(plan.workload.0, "w-1");
@@ -203,6 +234,21 @@ mod tests {
         assert_eq!(plan.nonce, Nonce::from_bytes([7u8; 16]));
         assert_eq!(plan.valid_from, from);
         assert_eq!(plan.valid_until, until);
+    }
+
+    #[test]
+    fn stream_retention_defaults_to_persist() {
+        assert_eq!(
+            PlanFixture::new().build().stream_retention,
+            StreamRetention::Persist
+        );
+        assert_eq!(
+            PlanFixture::new()
+                .stream_retention(StreamRetention::Ephemeral)
+                .build()
+                .stream_retention,
+            StreamRetention::Ephemeral
+        );
     }
 
     #[test]

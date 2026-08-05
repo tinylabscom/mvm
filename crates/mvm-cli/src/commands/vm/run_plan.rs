@@ -219,12 +219,12 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
                 println!(
                     "ADMITTED app={} plan_id={} signer={} cpus={} mem_mib={} workload={} tenant={}",
                     app.name,
-                    admitted.plan_id.0,
-                    admitted.signer_id,
-                    admitted.plan.resources.cpus,
-                    admitted.plan.resources.mem_mib,
-                    admitted.plan.workload.0,
-                    admitted.plan.tenant.0,
+                    admitted.plan_id().0,
+                    admitted.signer_id(),
+                    admitted.plan().resources.cpus,
+                    admitted.plan().resources.mem_mib,
+                    admitted.plan().workload.0,
+                    admitted.plan().tenant.0,
                 );
             }
             Err(e) => {
@@ -382,6 +382,7 @@ fn synthesis_input_for_app<'a>(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        stream_retention: Default::default(),
     })
 }
 

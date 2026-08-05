@@ -53,7 +53,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-05` | `build` | Vsock framing + supervisor-config JSON are fuzzed | `ci:fuzz_guest_request`, `ci:fuzz_authenticated_frame`, `ci:fuzz_supervisor_config` |
+| `MVM-SEC-05` | `build` | Vsock framing + supervisor-config JSON are fuzzed | `ci:fuzz_guest_request`, `ci:fuzz_authenticated_frame`, `ci:fuzz_supervisor_config`, `ci:fuzz_input_frame` |
 
 ## guest_privilege
 
@@ -83,7 +83,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-15` | `build` | No interactive access to a sealed production microVM | `fn:console_refused_on_sealed_image`, `fn:prod_console_attachment_has_no_input`, `ci:prod-agent-no-console` |
+| `MVM-SEC-15` | `build` | A sealed production microVM has no shell, no do_exec, and no PTY | `fn:console_refused_on_sealed_image`, `fn:prod_console_attachment_has_no_input`, `ci:prod-agent-no-console` |
 
 ## runtime_overlay
 
@@ -108,6 +108,12 @@ The three honesty levels (R2):
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
 | `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts`, `ci:check-abi-layout`, `fn:verify_and_resume_rejects_tampered_mem` |
+
+## workload_input
+
+| ID | Level | Statement | Witnesses |
+| --- | --- | --- | --- |
+| `MVM-SEC-17` | `build` | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | `fn:input_is_refused_without_a_plan_grant`, `fn:a_second_writer_is_refused_while_the_lease_is_held`, `fn:secret_material_split_across_frames_is_still_refused`, `fn:every_refusal_is_audited`, `fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason` |
 
 ## Cited authorities
 

@@ -3,11 +3,22 @@
 use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
-/// Regression guard: `--stdin` was removed from `machine run`; piped stdin is
-/// auto-detected from the host TTY state at dispatch instead.
-/// This test locks the public contract: the flag must not reappear in help.
+/// Regression guard on how `machine run` takes stdin.
+///
+/// This previously asserted `--stdin` must never appear, because piped stdin
+/// is auto-detected from the host TTY state and a flag that only re-stated
+/// that was noise. Auto-detection is unchanged and still the default — omit
+/// the flag and a pipe is read to the end and sent as one payload.
+///
+/// The flag is back for the one request auto-detection cannot serve.
+/// Streaming stdin into a running workload needs `host.stream.v1` on the
+/// signed plan, and a grant inferred from "stdin happens to be a pipe" would
+/// not be a grant at all — it would make the input plane's default-deny turn
+/// on the shape of the caller's shell. So the property worth locking is not
+/// the flag's absence but that the cheap path stayed cheap: streaming is
+/// requested explicitly, and everything else still needs no flag.
 #[test]
-fn machine_run_help_has_no_stdin_flag() {
+fn machine_run_stdin_is_auto_detected_and_streaming_is_explicit() {
     #[allow(deprecated)]
     let out = Command::cargo_bin("mvmctl")
         .unwrap()
@@ -21,8 +32,13 @@ fn machine_run_help_has_no_stdin_flag() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !help.contains("--stdin"),
-        "help still advertises --stdin:\n{help}"
+        help.contains("--stdin"),
+        "help must advertise --stdin, which is how streaming is requested:\n{help}"
+    );
+    assert!(
+        help.contains("`-` to stream yours"),
+        "the summary must say `-` is the streaming form, since that is the \
+         only thing the flag exists to request:\n{help}"
     );
     assert!(
         help.contains("--entrypoint"),

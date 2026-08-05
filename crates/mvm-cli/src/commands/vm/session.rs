@@ -712,12 +712,16 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
     // attach forwards to the entrypoint-runner leg (invoke::dispatch), which
     // requires a concrete u64 and has its own Timeout→124 mapping. Preserve
     // the prior default-30 kill window when --timeout is unset.
-    let exit_code = super::invoke::dispatch(
-        &record.vm_name,
-        stdin_bytes,
-        args.timeout.unwrap_or(30),
-        Some(&id),
-    )
+    let exit_code = super::invoke::dispatch(super::invoke::EntrypointDispatch {
+        vm_name: &record.vm_name,
+        // Attach dispatches into a VM some earlier invocation admitted, so
+        // there is no admitted plan in this process to open a stdin stream
+        // under — and `--stdin` here is a path or `-` read to the end, which
+        // is a complete payload either way.
+        stdin: super::invoke::DispatchStdin::OneShot(stdin_bytes),
+        timeout_secs: args.timeout.unwrap_or(30),
+        session_id: Some(&id),
+    })
     .with_context(|| format!("dispatching into session {id}"))
     .inspect_err(|e| {
         super::verb_audit::audit_verb_refusal(&record.vm_name, e);
@@ -1037,17 +1041,20 @@ fn cmd_start(args: StartArgs) -> Result<()> {
                 false, false, is_dev,
             ),
             services: Vec::new(),
+            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                "the session boot path resolves no entrypoint",
+            ),
         })?;
         let Some(ctx) = ctx else { return Ok(None) };
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
         let guest_profile = super::up::guest_profile_for_boot(is_dev, rootfs);
         super::up::attach_guest_boot_config_for_plan(
             &mut start_config,
-            &ctx.admitted.plan,
+            ctx.admitted.plan(),
             &ctx.host_signer_public_path,
             guest_profile,
         )?;
-        let plan_json = serde_json::to_string(&ctx.admitted.signed)
+        let plan_json = serde_json::to_string(ctx.admitted.signed())
             .context("serializing admitted plan for session start")?;
         let bundle_json = ctx
             .policy_bundle
@@ -1055,7 +1062,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             .map(serde_json::to_string)
             .transpose()
             .context("serializing admitted policy bundle for session start")?;
-        let tenant_id = ctx.admitted.plan.tenant.0.clone();
+        let tenant_id = ctx.admitted.plan().tenant.0.clone();
         let config_files = start_config.config_files;
         *ctx_sink.borrow_mut() = Some(ctx);
         Ok(Some(crate::exec::SessionAuditSubstrate {

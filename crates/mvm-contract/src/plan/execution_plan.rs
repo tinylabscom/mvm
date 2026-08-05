@@ -18,7 +18,7 @@ use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
     DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant, KeyRotationSpec, L3NetworkSpec,
     NetworkMode, Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
-    RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, WorkloadId,
+    RuntimeProfileRef, SecretBinding, SignedImageRef, StreamRetention, TenantId, WorkloadId,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -231,90 +231,105 @@ pub struct ExecutionPlan {
     /// sidecar is attached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceId>,
+
+    /// Whether this workload's captured output is kept after the run.
+    ///
+    /// Always serialized, unlike the optional pins above: the point of
+    /// admitting the mode is that the signed bytes state it outright, so an
+    /// absent transcript is attributable to a decision rather than to a gap in
+    /// the record. `#[serde(default)]` still makes a plan without the field
+    /// deserialize as [`StreamRetention::Persist`], the recording default.
+    #[serde(default)]
+    pub stream_retention: StreamRetention,
+}
+
+/// Minimal, valid local `ExecutionPlan`. Rebuilt inline rather than
+/// reusing `mvm-core`'s `plan::signing::test_support::sample_plan` —
+/// that fixture lives above `plan::signing` (which stays in
+/// `mvm-core`), so it's unreachable from here. A fixed timestamp
+/// stands in for `Utc::now()`, which needs chrono's `clock` feature
+/// this crate doesn't enable.
+///
+/// `pub(crate)` (not module-private) so other in-crate test modules —
+/// e.g. `crate::stream::input`'s plan-grant tests — can build a plan
+/// without duplicating this fixture.
+#[cfg(test)]
+pub(crate) fn minimal_plan() -> ExecutionPlan {
+    use alloc::collections::BTreeMap;
+    use alloc::string::ToString;
+
+    use chrono::{Duration, TimeZone};
+
+    use crate::plan::types::{AttestationMode, PlanSeccompTier, TimeoutSpec};
+
+    let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
+    ExecutionPlan {
+        environment: None,
+        schema_version: SCHEMA_VERSION,
+        plan_id: PlanId("fixture-plan".to_string()),
+        plan_version: 1,
+        tenant: TenantId("local".to_string()),
+        workload: WorkloadId("vm-test".to_string()),
+        runtime_profile: RuntimeProfileRef("firecracker".to_string()),
+        image: SignedImageRef {
+            name: "vm-test".to_string(),
+            sha256: "a".repeat(64),
+            cosign_bundle: None,
+            entrypoint_present: true,
+        },
+        resources: Resources {
+            cpus: 1,
+            mem_mib: 128,
+            disk_mib: 0,
+            timeouts: TimeoutSpec {
+                boot_secs: 30,
+                exec_secs: 0,
+            },
+        },
+        admission_profile: AdmissionProfile::local_default("vm:boot", PlanSeccompTier::Standard),
+        network_policy: PolicyRef("local-default".to_string()),
+        network_mode: Default::default(),
+        l3_network: None,
+        snapshot_at: Default::default(),
+        build_provenance: Default::default(),
+        fs_policy: FsPolicyRef("local-default".to_string()),
+        secrets: Vec::new(),
+        egress_policy: PolicyRef("local-default".to_string()),
+        redaction: Default::default(),
+        reversible_replacement: Default::default(),
+        tool_policy: PolicyRef("local-default".to_string()),
+        artifact_policy: ArtifactPolicy {
+            capture_paths: Vec::new(),
+            retention_days: 0,
+        },
+        audit_labels: BTreeMap::new(),
+        key_rotation: KeyRotationSpec { interval_days: 0 },
+        attestation: AttestationRequirement {
+            mode: AttestationMode::Noop,
+        },
+        release_pin: None,
+        post_run: PostRunLifecycle {
+            destroy_on_exit: true,
+            snapshot_on_idle: false,
+            idle_secs: 0,
+        },
+        valid_from,
+        valid_until: valid_from + Duration::minutes(10),
+        nonce: Nonce::from_bytes([0u8; 16]),
+        agent_verbs: None,
+        bundle: None,
+        deps_volume: None,
+        shares: Vec::new(),
+        services: Vec::new(),
+        stream_retention: StreamRetention::Persist,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloc::collections::BTreeMap;
-    use alloc::string::ToString;
     use alloc::vec;
 
-    use chrono::{Duration, TimeZone};
-
     use super::*;
-    use crate::plan::types::{AttestationMode, PlanSeccompTier, TimeoutSpec};
-
-    /// Minimal, valid local `ExecutionPlan`. Rebuilt inline rather than
-    /// reusing `mvm-core`'s `plan::signing::test_support::sample_plan` —
-    /// that fixture lives above `plan::signing` (which stays in
-    /// `mvm-core`), so it's unreachable from here. A fixed timestamp
-    /// stands in for `Utc::now()`, which needs chrono's `clock` feature
-    /// this crate doesn't enable.
-    fn minimal_plan() -> ExecutionPlan {
-        let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
-        ExecutionPlan {
-            environment: None,
-            schema_version: SCHEMA_VERSION,
-            plan_id: PlanId("fixture-plan".to_string()),
-            plan_version: 1,
-            tenant: TenantId("local".to_string()),
-            workload: WorkloadId("vm-test".to_string()),
-            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
-            image: SignedImageRef {
-                name: "vm-test".to_string(),
-                sha256: "a".repeat(64),
-                cosign_bundle: None,
-                entrypoint_present: true,
-            },
-            resources: Resources {
-                cpus: 1,
-                mem_mib: 128,
-                disk_mib: 0,
-                timeouts: TimeoutSpec {
-                    boot_secs: 30,
-                    exec_secs: 0,
-                },
-            },
-            admission_profile: AdmissionProfile::local_default(
-                "vm:boot",
-                PlanSeccompTier::Standard,
-            ),
-            network_policy: PolicyRef("local-default".to_string()),
-            network_mode: Default::default(),
-            l3_network: None,
-            snapshot_at: Default::default(),
-            build_provenance: Default::default(),
-            fs_policy: FsPolicyRef("local-default".to_string()),
-            secrets: Vec::new(),
-            egress_policy: PolicyRef("local-default".to_string()),
-            redaction: Default::default(),
-            reversible_replacement: Default::default(),
-            tool_policy: PolicyRef("local-default".to_string()),
-            artifact_policy: ArtifactPolicy {
-                capture_paths: Vec::new(),
-                retention_days: 0,
-            },
-            audit_labels: BTreeMap::new(),
-            key_rotation: KeyRotationSpec { interval_days: 0 },
-            attestation: AttestationRequirement {
-                mode: AttestationMode::Noop,
-            },
-            release_pin: None,
-            post_run: PostRunLifecycle {
-                destroy_on_exit: true,
-                snapshot_on_idle: false,
-                idle_secs: 0,
-            },
-            valid_from,
-            valid_until: valid_from + Duration::minutes(10),
-            nonce: Nonce::from_bytes([0u8; 16]),
-            agent_verbs: None,
-            bundle: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            services: Vec::new(),
-        }
-    }
 
     #[test]
     fn services_default_empty_and_roundtrip() {
@@ -394,5 +409,33 @@ mod tests {
         let round: ExecutionPlan =
             serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
         assert_eq!(round.agent_verbs, with.agent_verbs);
+    }
+
+    /// The recording default has to survive both directions: a plan that says
+    /// nothing records, and a plan that opts out says so in the bytes that get
+    /// signed. Omitting `persist` from the wire would be the cheaper encoding
+    /// and the wrong one — the mode is only useful if the artifact states it.
+    #[test]
+    fn stream_retention_defaults_to_persist_and_states_itself_on_the_wire() {
+        let plan = minimal_plan();
+        assert_eq!(plan.stream_retention, StreamRetention::Persist);
+
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            json.contains("\"stream_retention\":\"persist\""),
+            "the admitted mode must be in the signed bytes, not implied by absence: {json}"
+        );
+
+        // A plan predating the field still deserializes, and it records.
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("stream_retention");
+        let back: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(back.stream_retention, StreamRetention::Persist);
+
+        let mut opted_out = plan.clone();
+        opted_out.stream_retention = StreamRetention::Ephemeral;
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&opted_out).unwrap()).unwrap();
+        assert_eq!(round.stream_retention, StreamRetention::Ephemeral);
     }
 }
