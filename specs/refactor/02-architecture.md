@@ -66,6 +66,16 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 
 ## Backend & egress model
 
+### Launch authority
+
+Production launch is an `mvmd`-only capability. An authenticated `mvmd`
+request supplies the production launch authority and admitted execution
+context; `mvm` does not promote a local caller into production. All launches
+from `mvmctl`, the SDK, direct libraries, tests, benchmarks, or host-daemon
+development tooling are dev-mode launches, even when they consume a sealed or
+production-shaped artifact. This is a launch-origin invariant, not an
+operator-selected mode flag; see [ADR-037](../adrs/037-mvmd-only-production-launch.md).
+
 - Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload), and **wasm** (a WASI wasm-container — a core goal, see [§Wasm-container backend & `no_std` core](#wasm-container-backend--no_std-core-core-goal) below). **QEMU kept** as an opt-in Tier-2 Linux dev/test substrate (never workload-bearing; the drop was ratified against — see [07-progress-and-decisions.md](07-progress-and-decisions.md)). `mock` behind `test-support`.
 - Selected via the existing `BackendKind` enum + `backend_catalog!` registry — **never string-matched**. The ~6 remaining `backend.name() == "…"` sites in `mvm-cli` and the dead `"vz"` arms are removed.
 - **One host-mediated, default-deny, audited egress boundary for every backend**, transport-abstracted via the runner seam: vsock for microVM workloads and WASI host-calls for the wasm backend. Firecracker, libkrun, and HVF all use `WorkloadRunner` with `RealEndpointSpawner`; any backend that cannot mediate egress through the host fails closed on `--network-allow`. There is no guest NIC, raw packet tunnel, or smoltcp L3 fallback in the production workload path.

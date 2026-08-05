@@ -347,6 +347,12 @@ aren't even built into it, it runs only from a signed and admitted execution
 plan, and dependency, egress, and provenance gates are all enforced. There is no
 interactive way in, by construction.
 
+There is exactly one production launch authority: an authenticated launch
+kicked off by `mvmd`. Every other launch — including local `mvmctl`, SDK,
+library, test, benchmark, and host-daemon launches — is development mode. A
+production-shaped artifact or `--prod`-style preparation flag does not change
+that launch classification. See [ADR-037](adrs/037-mvmd-only-production-launch.md).
+
 The boundary is one-directional: development conveniences never carry over into
 a production workload, and a sealed production microVM can't be dropped back into
 an interactive dev session. Choosing production isn't a flag that loosens under
