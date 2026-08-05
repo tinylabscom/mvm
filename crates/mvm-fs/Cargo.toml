@@ -15,6 +15,7 @@ ext4-view.workspace = true
 hex.workspace = true
 libc = { workspace = true }
 mvm-contract.workspace = true
+rayon = "1"
 reqwest.workspace = true
 rustls.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
