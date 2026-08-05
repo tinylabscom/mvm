@@ -83,6 +83,32 @@ mvm.app({
 The IR types (`Workload`, `App`, `Resources`, …) are re-exported, so
 `import { Workload } from "@runmvm/mvm"` works directly.
 
+## Runtime SDK
+
+`Sandbox` has explicit `record` and `live` modes. In live mode it uses
+`mvmctl` to boot or attach to a development machine and exposes generated
+process/filesystem contract types:
+
+```ts
+import { Sandbox } from "@runmvm/mvm";
+
+const sb = Sandbox.create("node-22");
+const process = sb.commands.start(["node", "-e", "console.log('ready')"]);
+const result = await process!.wait({ onEvent: (event) => console.log(event.stream, event.data) });
+sb.files.write("/app/config.json", '{"ready":true}');
+console.log(new TextDecoder().decode(sb.files.read("/app/config.json")));
+sb.kill();
+```
+
+Live process handles support `wait`, streamed stdout/stderr callbacks,
+`sendStdin`, `signal`, and `kill`. The filesystem surface supports read,
+write, list, stat, mkdir, remove, and move. `sb.shell(...)` is a convenience
+for `/bin/sh -lc` in development only.
+
+Arbitrary process execution, shell, process control, filesystem RPC, and port
+forwarding fail closed before CLI traffic for production templates. SSH is not
+part of the SDK or runtime contract.
+
 ## Machine lifecycle wrappers
 
 `Machine` mirrors the beginner `mvmctl machine ...` command group for host

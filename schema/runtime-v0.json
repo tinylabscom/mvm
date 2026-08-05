@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Runtime",
+  "type": "object",
+  "required": [
+    "fs_entry",
+    "fs_stat",
+    "process_event",
+    "process_result"
+  ],
+  "properties": {
+    "fs_entry": {
+      "$ref": "#/definitions/RuntimeFsEntry"
+    },
+    "fs_stat": {
+      "$ref": "#/definitions/RuntimeFsStat"
+    },
+    "process_event": {
+      "$ref": "#/definitions/RuntimeProcessEvent"
+    },
+    "process_result": {
+      "$ref": "#/definitions/RuntimeProcessResult"
+    }
+  },
+  "definitions": {
+    "RuntimeFsEntry": {
+      "description": "Canonical filesystem directory-entry shape exposed by the live SDK.",
+      "type": "object",
+      "required": [
+        "kind",
+        "name",
+        "size"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeFsStat": {
+      "description": "Canonical filesystem metadata shape exposed by the live SDK.",
+      "type": "object",
+      "required": [
+        "canonical_path",
+        "kind",
+        "mode",
+        "size"
+      ],
+      "properties": {
+        "canonical_path": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "mtime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeProcessEvent": {
+      "description": "Canonical stream event emitted while a live process is awaited.",
+      "type": "object",
+      "required": [
+        "data",
+        "stream"
+      ],
+      "properties": {
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "stream": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeProcessResult": {
+      "description": "Canonical terminal result for a live process operation. The language SDKs expose the byte fields using their native byte container while preserving this shared shape at the contract boundary.",
+      "type": "object",
+      "required": [
+        "exit_code",
+        "stderr",
+        "stdout"
+      ],
+      "properties": {
+        "exit_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "stderr": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "stdout": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

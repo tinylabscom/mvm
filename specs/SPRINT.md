@@ -10,6 +10,15 @@
 
 ## Current issue delivery
 
+- [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
+      filesystem surface to Python and TypeScript, with a Rust-owned
+      `runtime-v0` schema and generated language models instead of duplicated
+      handwritten contracts. Client-side production guards cover every
+      development-only verb; SSH remains absent. Python (210 passed, 7 skipped)
+      and TypeScript (133 passed) SDK suites, machine fixtures, schema drift,
+      workspace check, and workspace all-target Clippy are green; the full
+      workspace test rerun is pending the shared embedded-helper build lock.
+
 - [x] Claim-witness CI documentation — **issue #2104**. Corrected the
       `security.yml` trigger and merge-blocking claims, removed three
       unreachable pull-request guards, and aligned the claim descriptions with

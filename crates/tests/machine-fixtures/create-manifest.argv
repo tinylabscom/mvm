@@ -1,0 +1,9 @@
+create
+--name
+web
+--manifest
+mvm.toml
+--profile
+dev
+--force
+--json

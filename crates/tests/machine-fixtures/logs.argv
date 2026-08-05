@@ -1,0 +1,5 @@
+logs
+web
+--follow
+--lines
+100
