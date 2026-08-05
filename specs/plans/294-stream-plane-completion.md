@@ -1,8 +1,11 @@
 # Plan 294 — stream plane completion and handoff
 
-**Status:** Active. Written to be picked up by someone with no prior context.
+**Status:** WS-A complete. WS-B outstanding.
 
-Tracking issue: tinylabscom/mvm#2152. Blocked PR: tinylabscom/mvm#2139.
+PR #2139 **merged** 2026-08-05 as `b567b01d6`, all lanes green. Issue #2152 closed.
+What remains is WS-B plus the renumbering and the fleet slice.
+
+Tracking issue: tinylabscom/mvm#2152 (closed). PR: tinylabscom/mvm#2139 (merged).
 
 This is the state-of-the-world doc for the workload stream plane. The design
 lives in `specs/plans/283-workload-stream-plane.md`, the follow-ups in
@@ -35,8 +38,8 @@ of the merge.
 
 | Branch | Worktree | State |
 | --- | --- | --- |
-| `docs/workload-stream-plane` | `.worktrees/mvm-stream-plane` | PR #2139, 60 commits, clean at `101c194d7`. **Conflicted with main.** |
-| `feat/stream-plane-followups` | `.worktrees/mvm-followups` | Clean at `a3643e1e4`. WS1 complete. No PR yet. |
+| `docs/workload-stream-plane` | *(worktree removable)* | **MERGED** as `b567b01d6`. |
+| `feat/stream-plane-followups` | `.worktrees/mvm-followups` | WS1 complete and pushed. **No PR yet.** |
 
 About 20 other worktrees are live and most have active work. Touch only these
 two.
