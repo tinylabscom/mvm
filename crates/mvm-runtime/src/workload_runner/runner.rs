@@ -971,7 +971,14 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // it: there is no retry and no fallback, so a guest that finds no
         // listener has no network at all. A no-op for every plan that did
         // not select the tunnel.
-        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir)?;
+        // The vsock-subdirectory convention, because every backend that
+        // reaches this runner is served by the HVF supervisor — the same
+        // one `spec_map` resolves its ports through.
+        crate::netd_spawn::spawn_netd_if_needed(
+            config,
+            &state_dir,
+            mvm_net::l3::config::NetdUdsLayout::HvfVsockDir,
+        )?;
 
         // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
         // below, so bind them here rather than inline.
