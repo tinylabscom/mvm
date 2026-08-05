@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-04
+Last updated: 2026-08-05
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -24,8 +24,10 @@ for detailed scope and acceptance criteria.
     - [~] Bind the tier to an attested artifact and replace the interactive
           feature/symbol witnesses with conformance scenarios. Local
           `machine run --deployment` verifies and persists the signed record
-          plus exact rootfs binding; remote extraction/boot, feature-fork
-          removal, and guest-image validation remain. Grant enforcement now
+          plus exact rootfs binding; remote extraction/boot are merged, and
+          persistent-OCI console listeners now pre-open only for dev profiles
+          (PR #2157). Feature-fork removal, guest-image validation, and the
+          final cross-path acceptance matrix remain. Grant enforcement now
           proves a complete ProdSafe grant refuses Exec and ConsoleOpen.
 
 - [~] Plan 290 — Sensitive egress redaction

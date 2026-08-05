@@ -2,7 +2,8 @@
 
 **Status:** In progress. WS1–WS3 are merged and their required queue gates are
 green; WS4 attestation binding and the universal-agent/conformance closure
-remain open.
+remain open. The persistent-OCI console-listener hardening is merged as PR
+#2157.
 
 **Goal:** A developer starts from an OCI image or a Nix flake, iterates on a
 machine until the workload actually works — including discovering the
@@ -143,7 +144,11 @@ same sealed, hash-pinned, CVE-scanned volume.
       `mvmctl machine run --deployment DIR` now verifies the signed deploy
       record and exact `rootfs.ext4`, persists the canonical deployment
       directory, and revalidates it on restart. Remote record extraction and
-      boot remain in follow-up issue #2144.
+      boot are merged; the final cross-path acceptance matrix remains in
+      #2144/#208.
+- [x] Keep host-side console listeners aligned with the run profile: persistent
+      OCI boots pre-open the console data range only for `dev`, while sealed
+      production boots expose no host-side console listeners (PR #2157).
 - [ ] Retire the `interactive` Cargo feature fork so one agent binary serves
       both tiers; the existing `RequestClass::{ProdSafe, DevOnly}` gate and the
       signed `VerbGrant` already do the enforcement.
