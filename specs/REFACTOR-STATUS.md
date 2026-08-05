@@ -1,10 +1,6 @@
 # Refactor status
 
-<<<<<<< HEAD
 Last updated: 2026-08-05
-=======
-Last updated: 2026-08-04
->>>>>>> b1153c154 (fix(hostd): release the withheld tail on writer silence)
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -25,14 +21,17 @@ for detailed scope and acceptance criteria.
         gates and merged into main
   - [~] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
-    - [~] Bind the tier to an attested artifact and replace the interactive
-          feature/symbol witnesses with conformance scenarios. Local
+    - [x] Bind the tier to an attested artifact. Local
           `machine run --deployment` verifies and persists the signed record
-          plus exact rootfs binding; remote extraction/boot are merged, and
-          persistent-OCI console listeners now pre-open only for dev profiles
-          (PR #2157). Feature-fork removal, guest-image validation, and the
-          final cross-path acceptance matrix remain. Grant enforcement now
-          proves a complete ProdSafe grant refuses Exec and ConsoleOpen.
+          plus exact rootfs binding; remote extraction/boot are merged, the
+          cross-path acceptance matrix is green, and child issues #2144 and
+          mvmd #208 are closed. Persistent-OCI console listeners now pre-open
+          only for dev profiles (PR #2157). Grant enforcement proves a
+          complete ProdSafe grant refuses both Exec and ConsoleOpen.
+    - [~] Replace the interactive feature/symbol witnesses with conformance
+          scenarios. Mainline workspace tests, Clippy, doctests, and policy
+          xtasks are green; feature-fork removal and full guest-image witness
+          replacement remain open pending the explicit security decision.
 
 - [~] Plan 290 — Sensitive egress redaction
       (`specs/plans/290-sensitive-egress-redaction.md`)

@@ -1,9 +1,10 @@
 # Develop → build → deploy: one stupidly simple path to an attested workload image
 
 **Status:** In progress. WS1–WS3 are merged and their required queue gates are
-green; WS4 attestation binding and the universal-agent/conformance closure
-remain open. The persistent-OCI console-listener hardening is merged as PR
-#2157.
+green; WS4 exact-artifact authority, local/remote deployment boot, and the
+required conformance/policy gates are complete. The universal-agent security
+decision remains open. The persistent-OCI console-listener hardening is merged
+as PR #2157.
 
 **Goal:** A developer starts from an OCI image or a Nix flake, iterates on a
 machine until the workload actually works — including discovering the
@@ -139,13 +140,13 @@ same sealed, hash-pinned, CVE-scanned volume.
 - [x] Make the agent-verb grant depend on the admitted run shape rather than
       the image sidecar: a baked-entrypoint boot on a non-dev profile receives
       ProdSafe verbs; a PTY or ad-hoc argv receives DevOnly verbs.
-- [~] Make the run tier come from whether the run uses an attested artifact,
+- [x] Make the run tier come from whether the run uses an attested artifact,
       not from a build variant and not from an unattested CLI flag. Local
       `mvmctl machine run --deployment DIR` now verifies the signed deploy
       record and exact `rootfs.ext4`, persists the canonical deployment
       directory, and revalidates it on restart. Remote record extraction and
-      boot are merged; the final cross-path acceptance matrix remains in
-      #2144/#208.
+      boot are merged; the cross-path acceptance matrix is complete and
+      tracked child issues #2144 and mvmd #208 are closed.
 - [x] Keep host-side console listeners aligned with the run profile: persistent
       OCI boots pre-open the console data range only for `dev`, while sealed
       production boots expose no host-side console listeners (PR #2157).
@@ -157,8 +158,10 @@ same sealed, hash-pinned, CVE-scanned volume.
       symbol-grep jobs live in `security.yml`, which does not run on pull
       requests, so a conformance scenario in the PR-gating suite is stronger
       than what it replaces, not weaker. The grant-enforcement unit now proves
-      a complete ProdSafe grant refuses both `Exec` and `ConsoleOpen`; the
-      feature-fork replacement and full guest-image validation remain open.
+      a complete ProdSafe grant refuses both `Exec` and `ConsoleOpen`, and the
+      mainline workspace conformance/policy gates are green; replacing the
+      feature fork and completing full guest-image validation remain tied to
+      the explicit universal-agent decision.
 
 ## Non-goals
 
