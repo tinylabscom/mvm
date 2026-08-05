@@ -820,9 +820,10 @@ mod tests {
         assert!(!is_active());
     }
 
-    // Portable: openpty + TIOCSCTTY + /dev/tty controlling-terminal semantics
-    // work on both Linux (the guest) and macOS (dev hosts), so this runs on
-    // both — the `TIOCSCTTY` const already carries per-OS values.
+    // This exercises Linux guest controlling-terminal semantics. macOS host
+    // test sandboxes do not consistently permit a forked child to acquire a
+    // controlling tty, while the guest runtime is Linux-only.
+    #[cfg(target_os = "linux")]
     #[test]
     fn child_acquires_controlling_tty() {
         let ws = Winsize {

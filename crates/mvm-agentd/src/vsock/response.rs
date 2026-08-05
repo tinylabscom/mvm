@@ -226,10 +226,10 @@ pub enum GuestResponse {
     /// whose `is_terminal` returns true (`Exit` or `Error`). The
     /// host reads frames in a loop until terminal.
     EntrypointEvent(EntrypointEvent),
-    /// One event in the streaming response of an `Exec` call (interactive
-    /// only). Terminated by `ExecEvent::Exit`.
+    /// One event in the streaming response of a DevOnly `Exec` call.
+    /// Terminated by `ExecEvent::Exit`.
     ExecEvent(ExecEvent),
-    /// Buffered outcomes of an `ExecBatch` call (interactive only), one per
+    /// Buffered outcomes of a DevOnly `ExecBatch` call, one per
     /// command in request order (truncated at the first non-zero exit).
     ExecBatchResult { outcomes: Vec<ExecOutcomeWire> },
     /// Ack for a `RunDetached` call: the detached workload was spawned

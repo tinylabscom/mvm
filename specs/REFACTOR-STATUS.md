@@ -6,7 +6,7 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
-- [~] Plan 291 — Develop → build → deploy an attested workload image
+- [x] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
   - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
         record; retain the local sealed artifact and ship it to mvmd through
@@ -19,19 +19,15 @@ for detailed scope and acceptance criteria.
         `deps install`, and bounded `deps capture-live` implementation are
         present. PR #2132 passed branch and merge-group Test, Lint, and Nix
         gates and merged into main
-  - [~] WS4 tier follows the attestation
+  - [x] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
-    - [x] Bind the tier to an attested artifact. Local
+    - [x] Bind the tier to an attested artifact and replace the interactive
+          feature/symbol witnesses with conformance scenarios. Local
           `machine run --deployment` verifies and persists the signed record
-          plus exact rootfs binding; remote extraction/boot are merged, the
-          cross-path acceptance matrix is green, and child issues #2144 and
-          mvmd #208 are closed. Persistent-OCI console listeners now pre-open
-          only for dev profiles (PR #2157). Grant enforcement proves a
-          complete ProdSafe grant refuses both Exec and ConsoleOpen.
-    - [~] Replace the interactive feature/symbol witnesses with conformance
-          scenarios. Mainline workspace tests, Clippy, doctests, and policy
-          xtasks are green; feature-fork removal and full guest-image witness
-          replacement remain open pending the explicit security decision.
+          plus exact rootfs binding; remote extraction/boot are merged, and
+          persistent-OCI console listeners now pre-open only for dev profiles
+          (PR #2157). The universal agent is built once, while runtime profile
+          and signed grant enforcement reject the complete DevOnly request set.
 
 - [~] Plan 290 — Sensitive egress redaction
       (`specs/plans/290-sensitive-egress-redaction.md`)

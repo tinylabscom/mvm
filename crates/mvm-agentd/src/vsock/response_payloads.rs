@@ -415,7 +415,7 @@ pub struct ExecOutcomeWire {
     pub duration_ms: u64,
     pub peak_rss_kib: Option<u64>,
 }
-/// One event in the response stream of an `Exec` call (interactive only).
+/// One event in the response stream of a DevOnly `Exec` call.
 /// The agent emits a sequence of these for a single `Exec` request,
 /// terminated by `Exit`. The host reads frames in a loop until terminal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

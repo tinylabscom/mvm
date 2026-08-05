@@ -26,18 +26,15 @@
 # transparently — `nix build` inside the sandbox runs on Linux,
 # so `pkgs` is Linux pkgs.
 #
-# ## Features
+# ## Runtime access
 #
-# `interactive` is opt-in. With it, the agent accepts the `Exec`
-# vsock request and shells out arbitrary commands — required for
-# `mvmctl exec`/`mvmctl console` against dev images. Without it
-# (production), the `Exec` symbol is absent — the
-# `prod-agent-no-exec` CI gate enforces this on the release lane.
+# The same binary serves every image tier. DevOnly requests are admitted by
+# the guest agent's runtime profile and signed verb grant, after protocol
+# authentication; image construction does not select a handler set.
 
 { pkgs
 , lib
 , mvmSrc
-, withInteractive ? false
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -65,8 +62,6 @@ pkgs.rustPlatform.buildRustPackage {
     # for `MANDATORY_DENY_RANGES` at boot from `/init` (uid 0) before
     # the main agent forks under setpriv.
     "--bin" "mvm-guest-netinit"
-  ] ++ lib.optionals withInteractive [
-    "--features" "mvm-agentd/interactive"
   ];
 
   # Same selection for the `nix flake check`-equivalent test run.

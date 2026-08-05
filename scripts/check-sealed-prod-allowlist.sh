@@ -10,9 +10,8 @@
 # does not run AND pass, which catches deletions and renames in
 # addition to the classifier widening the SealedProd allowlist.
 #
-# ADR reference: specs/adrs/002-microvm-security-posture.md
-#                §W4.1 (deny-unknown-fields), §W4.3 (compile-time
-#                symbol absence for do_exec / do_run_code).
+# The gate locks both profile classification and the signed-grant intersection
+# that protects DevOnly verbs in the universal guest-agent artifact.
 
 set -euo pipefail
 

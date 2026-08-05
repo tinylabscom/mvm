@@ -79,16 +79,12 @@ jobs:
         # fires here gets fixed, not listed.
         run: cargo audit
 
-  # ── Lane 2: Production-agent symbol contract ─────────────────────
-  # ADR-001 §W4.3 + ADR-005 §W5 — combined contract on the production
-  # guest agent binary. ONE build, ONE step, BOTH assertions:
-  #   • mvm_guest_agent::do_exec is ABSENT (W4.3 — no interactive leak)
-  #   • mvm_guest_agent::handle_run_entrypoint is PRESENT (W5 — the
-  #     constrained RunEntrypoint handler ships).
-  # Asserting both on the *same* binary in a single step prevents
-  # feature-flag drift from regressing half the contract silently.
-  prod-agent-runentry-contract:
-    name: Guest agent — symbol contract (ADR-001 §W4.3 + ADR-005 §W5)
+  # ── Lane 2: Guest-agent runtime boundary ─────────────────────────
+  # The guest agent is one universal artifact. Its runtime profile and
+  # launch-provisioned signed grant enforce DevOnly access, so this lane runs
+  # the request-policy, grant, and handler conformance tests directly.
+  guest-agent-runtime-boundary:
+    name: Guest agent — runtime profile and grant boundary
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -106,36 +102,8 @@ jobs:
           key: cargo-prodagent-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-prodagent-
 
-      - name: Build prod agent and assert symbol contract
+      - name: Run guest-agent runtime boundary tests
         run: ./scripts/check-prod-agent-no-exec.sh
-
-  # ── Lane 1b: No interactive console in a sealed prod agent ────────
-  # claim 15 / Plan 165 WS-C. The PTY-over-vsock console is the single
-  # dev-only interactive path; it's gated behind `interactive`, so a prod
-  # agent must not link it. Asserts the relay symbol is ABSENT (with a
-  # handle_run_entrypoint canary against a stripped table) and a
-  # positive control that it IS detectable WITH interactive.
-  prod-agent-no-console:
-    name: Guest agent — no interactive console (claim 15, Plan 165 WS-C)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-prodagent-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-prodagent-
-
-      - name: Build prod agent and assert no console symbols
-        run: ./scripts/check-prod-agent-no-console.sh
 
   # ── Lane 1b.2: No SSH of any kind, anywhere (ADR-001) ─────────────
   # "No SSH in microVMs, ever" is absolute — the tree once carried both a

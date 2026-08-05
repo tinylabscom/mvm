@@ -90,11 +90,6 @@ unsafe extern "C" fn on_reload_signal(_sig: libc::c_int) {
 /// operator manually `kill -TERM`s the agent or when in-place
 /// updates land later.
 ///
-/// `#[inline(never)]` is load-bearing for the symbol-contract
-/// gate (`scripts/check-prod-agent-no-exec.sh`) which asserts
-/// this symbol is present as positive evidence the handlers are
-/// wired in. Mirrors the same pattern on `handle_run_entrypoint`
-/// and `dispatch_via_warm_pool`.
 #[inline(never)]
 pub(crate) fn install_signal_handlers() {
     // SAFETY: zeroed sigaction is the documented "use defaults"

@@ -441,9 +441,8 @@ where
 
 /// Send an `Exec` request and stream its response. Invokes `on_event`
 /// for each `Stdout`/`Stderr` chunk as it arrives; returns the terminal
-/// `Exit` or `TimedOut`. Exec carries no `GuestCapability` — the agent
-/// gates it at compile time via the `interactive` feature — so this does
-/// a plain protocol hello (no capability requirement).
+/// `Exit` or `TimedOut`. The guest agent applies its runtime profile and
+/// signed-grant gate after protocol authentication.
 pub fn send_exec_streaming<F>(
     stream: &mut UnixStream,
     command: &str,
@@ -491,9 +490,8 @@ where
 /// Non-streaming: the workload runs independently of this connection, so
 /// there is exactly one response frame. Its exit is reported to the
 /// host's workload-exit port by the agent's reaper, not over this
-/// stream. Like `Exec`, `RunDetached` carries no `GuestCapability` — the
-/// agent gates it at compile time via the `interactive` feature — so this
-/// does a plain protocol hello.
+/// stream. Like `Exec`, `RunDetached` is admitted by the guest agent's
+/// runtime profile and signed-grant gate after protocol authentication.
 pub fn send_run_detached(
     stream: &mut UnixStream,
     argv: Vec<String>,

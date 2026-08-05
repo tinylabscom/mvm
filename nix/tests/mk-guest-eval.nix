@@ -202,11 +202,10 @@ in
 
   # ── Dev console wiring ────────────────────────────────────────
   #
-  # `withInteractive` is the console-wiring fact: it gates the agent's
-  # PTY-over-vsock relay (and `do_exec`) via the `interactive` Cargo
-  # feature. A dev image wires the interactive console; a sealed
-  # image has no console symbol. These assert the surfaced metadata
-  # tracks the entrypoint classification AND its dev/sealed override.
+  # `withInteractive` is the console-wiring fact. The agent binary is
+  # universal; runtime profile and signed-grant checks enforce DevOnly
+  # requests. These assert the surfaced image metadata tracks the entrypoint
+  # classification and its dev/sealed override.
 
   interactive_image_wires_console = (meta shellGuest).withInteractive == true
     && (meta shellGuest).accessible == true

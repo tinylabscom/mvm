@@ -23,7 +23,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-04` | `build` | The guest agent has no do_exec in production builds | `ci:prod-agent-runentry-contract` |
+| `MVM-SEC-04` | `build` | A production-safe run cannot invoke DevOnly guest-agent verbs | `fn:prod_safe_grant_refuses_all_dev_only_requests`, `ci:guest-agent-runtime-boundary` |
 
 ## app_deps
 
@@ -83,7 +83,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-15` | `build` | A sealed production microVM has no shell, no do_exec, and no PTY | `fn:console_refused_on_sealed_image`, `fn:prod_console_attachment_has_no_input`, `ci:prod-agent-no-console` |
+| `MVM-SEC-15` | `build` | A sealed production microVM has no shell, no do_exec, and no PTY | `fn:console_refused_on_sealed_image`, `fn:prod_console_attachment_has_no_input`, `fn:prod_safe_grant_refuses_all_dev_only_requests`, `ci:guest-agent-runtime-boundary` |
 
 ## runtime_overlay
 

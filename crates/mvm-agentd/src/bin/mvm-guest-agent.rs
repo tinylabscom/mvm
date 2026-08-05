@@ -29,7 +29,6 @@ mod handlers;
 mod health;
 #[path = "mvm-guest-agent/init.rs"]
 mod init;
-#[cfg(feature = "interactive")]
 #[path = "mvm-guest-agent/interactive.rs"]
 mod interactive;
 #[path = "mvm-guest-agent/monitoring.rs"]
@@ -125,12 +124,6 @@ use handlers::{
     handle_start_port_forward, handle_start_unix_socket_forward, handle_stream_input,
     handle_unmount_volume, handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
-#[cfg(not(feature = "interactive"))]
-use handlers::{
-    handle_console_close, handle_console_open, handle_console_resize, handle_exec,
-    handle_exec_batch, handle_run_code, handle_run_detached,
-};
-#[cfg(feature = "interactive")]
 use interactive::{
     handle_console_close, handle_console_open, handle_console_resize, handle_exec,
     handle_exec_batch, handle_run_code, handle_run_detached,
@@ -263,8 +256,8 @@ fn handle_client(
     // capability without parsing message text — this sits at the
     // protocol layer in addition to the per-handler policy checks
     // (dispatcher allowlists are not enough by themselves) and the
-    // `#[cfg(feature = "interactive")]` compile-time symbol-absence
-    // gate for `do_exec` / `do_run_code` (claim 4).
+    // Runtime profile and signed-grant checks are the load-bearing boundary
+    // for DevOnly verbs; handler code is shared by every guest artifact.
     if !req.allowed_in(active_profile) {
         let resp = GuestResponse::UnsupportedInProfile {
             profile: active_profile,
@@ -408,12 +401,9 @@ fn handle_client(
                 socket_mode,
             } => handle_start_unix_socket_forward(guest_path, host_vsock_port, socket_mode),
 
-            // PTY-over-vsock console — the single dev-only interactive path. The
-            // relay lives behind `#[cfg(feature = "interactive")]` so its symbols are
-            // absent from a sealed production agent (claim 15; mirrors the
-            // `do_exec` gate). The protocol profile gate
-            // above already rejects these verbs in sealed-prod, but the compile-time
-            // gate is the load-bearing guarantee — no console code is even linked.
+            // PTY-over-vsock console. The profile and signed-grant gates above
+            // reject this DevOnly verb before the handler is reached when the
+            // run is not eligible.
             GuestRequest::ConsoleOpen {
                 cols,
                 rows,
@@ -484,12 +474,8 @@ fn handle_client(
             } => handle_fs_remove(path, recursive),
             GuestRequest::FsMove { from, to, .. } => handle_fs_move(from, to),
 
-            // Process control verbs. Dev-only — the handler lives behind
-            // `#[cfg(feature = "interactive")]` so its symbols are stripped
-            // from prod builds (the `prod-agent-runentry-contract` CI
-            // gate enforces it). Prod builds return a typed
-            // `UnsupportedInProduction` error so SDK callers can branch
-            // on capability without parsing message text.
+            // Process control verbs. The profile and signed-grant gates above
+            // enforce their DevOnly classification before dispatch.
             GuestRequest::ProcStart {
                 argv,
                 env,

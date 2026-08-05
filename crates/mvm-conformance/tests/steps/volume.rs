@@ -118,8 +118,7 @@ fn cache_live_runtime_overlay(world: &CliWorld, source_dir: &Path, fingerprint: 
     );
     fs::create_dir_all(&layout.dir).expect("create isolated runtime-overlay cache");
     for (source_name, destination) in [
-        ("mvm-guest-agent-prod", &layout.agent),
-        ("mvm-guest-agent", &layout.agent_interactive),
+        ("mvm-guest-agent", &layout.agent),
         ("mvm-guest-netinit", &layout.netinit),
         ("mvm-seccomp-apply", &layout.seccomp_apply),
         ("mvm-verity-init", &layout.verity_init),

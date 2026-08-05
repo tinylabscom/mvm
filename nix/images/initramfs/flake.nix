@@ -71,7 +71,6 @@
           lib = pkgs.lib;
           mvmSrc = workspace;
           # The universal initramfs always ships the production agent.
-          withInteractive = false;
         };
 
       # Kernel version is part of the content-addressing tuple.  Until the

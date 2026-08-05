@@ -59,14 +59,6 @@ pub struct GuestRuntimeBinaryPaths<'a> {
     pub verity_init: &'a Path,
 }
 
-/// Cache segment keying the agent build variant. The `run --image` path needs
-/// the interactive (exec-capable) agent, and this module always builds with it
-/// (see [`GuestAgentBuildSpec`]); keying the cache by the variant means a stale,
-/// same-version agent built *without* interactive (the old, segment-less layout)
-/// is never reused for an exec-capable request — the cause of the
-/// "guest agent built without interactive feature" exec failure on a cache hit.
-const AGENT_VARIANT: &str = "interactive";
-
 impl GuestAgentLayout {
     /// `cache_key` names the cache generation: an mvmctl `version` for a
     /// compatibility cache, or a guest source fingerprint (`source_cache_key`)
@@ -76,8 +68,7 @@ impl GuestAgentLayout {
         let dir = cache_root
             .join("guest-agent")
             .join(cache_key)
-            .join(arch.to_string())
-            .join(AGENT_VARIANT);
+            .join(arch.to_string());
         Self {
             oci_init: dir.join("mvm-oci-init"),
             agent: dir.join("mvm-guest-agent"),
@@ -114,7 +105,6 @@ impl GuestAgentLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeOverlayGuestBinaries {
     pub agent: PathBuf,
-    pub agent_interactive: PathBuf,
     pub netinit: PathBuf,
     pub seccomp_apply: PathBuf,
     pub verity_init: PathBuf,
@@ -129,7 +119,6 @@ pub struct RuntimeOverlayGuestBinaries {
 pub struct RuntimeOverlayGuestLayout {
     pub dir: PathBuf,
     pub agent: PathBuf,
-    pub agent_interactive: PathBuf,
     pub netinit: PathBuf,
     pub seccomp_apply: PathBuf,
     pub verity_init: PathBuf,
@@ -149,7 +138,6 @@ impl RuntimeOverlayGuestLayout {
             .join(fingerprint);
         Self {
             agent: dir.join("agent"),
-            agent_interactive: dir.join("agent-interactive"),
             netinit: dir.join("netinit"),
             seccomp_apply: dir.join("seccomp-apply"),
             verity_init: dir.join("verity-init"),
@@ -164,7 +152,6 @@ impl RuntimeOverlayGuestLayout {
 
     fn is_complete(&self) -> bool {
         self.agent.is_file()
-            && self.agent_interactive.is_file()
             && self.netinit.is_file()
             && self.seccomp_apply.is_file()
             && self.verity_init.is_file()
@@ -178,7 +165,6 @@ impl RuntimeOverlayGuestLayout {
     fn binaries(&self) -> RuntimeOverlayGuestBinaries {
         RuntimeOverlayGuestBinaries {
             agent: self.agent.clone(),
-            agent_interactive: self.agent_interactive.clone(),
             netinit: self.netinit.clone(),
             seccomp_apply: self.seccomp_apply.clone(),
             verity_init: self.verity_init.clone(),
@@ -261,8 +247,6 @@ impl GuestAgentBuildSpec {
             "mvm-verity-init".to_string(),
             "--bin".to_string(),
             "mvm-egress-client".to_string(),
-            "--features".to_string(),
-            "mvm-agentd/interactive".to_string(),
             "--features".to_string(),
             "mvm-agentd/addons".to_string(),
         ]
@@ -629,24 +613,6 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;
     install_one(&output_dir.join("mvm-exit-report"), &layout.exit_report)?;
 
-    let dev_agent_args = vec![
-        "zigbuild".to_string(),
-        "--release".to_string(),
-        "--target".to_string(),
-        triple.to_string(),
-        "-p".to_string(),
-        "mvm-agentd".to_string(),
-        "--bin".to_string(),
-        "mvm-guest-agent".to_string(),
-        "--features".to_string(),
-        "mvm-agentd/interactive".to_string(),
-    ];
-    run_zigbuild(&spec, cargo.as_os_str(), &dev_agent_args)?;
-    install_one(
-        &output_dir.join("mvm-guest-agent"),
-        &layout.agent_interactive,
-    )?;
-
     Ok(layout.binaries())
 }
 
@@ -1011,16 +977,13 @@ mod tests {
     }
 
     #[test]
-    fn layout_is_versioned_arched_and_variant_keyed() {
+    fn layout_is_versioned_and_arched() {
         let version = env!("CARGO_PKG_VERSION");
         let l = GuestAgentLayout::under(Path::new("/c"), version, GuestArch::Aarch64);
         let expected_dir = PathBuf::from("/c")
             .join("guest-agent")
             .join(version)
-            .join("aarch64")
-            .join("interactive");
-        // The `interactive` segment keys the variant so a stale same-version agent
-        // built without interactive is never reused for the exec-capable request.
+            .join("aarch64");
         assert_eq!(l.dir, expected_dir);
         assert_eq!(l.oci_init, l.dir.join("mvm-oci-init"));
         assert_eq!(l.agent, l.dir.join("mvm-guest-agent"));
@@ -1031,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn build_argv_targets_musl_with_interactive_and_guest_bins() {
+    fn build_argv_targets_musl_and_guest_bins() {
         let spec = GuestAgentBuildSpec::new(
             PathBuf::from("/ws"),
             GuestArch::Aarch64,
@@ -1057,7 +1020,6 @@ mod tests {
             ]
         );
         assert!(argv.contains(&"mvm-agentd".to_string()));
-        assert!(argv.contains(&"mvm-agentd/interactive".to_string()));
     }
 
     #[test]
@@ -1327,10 +1289,6 @@ mod tests {
             PathBuf::from("/c/runtime-overlay-bins/1.2.3/x86_64/abc123")
         );
         assert_eq!(layout.agent, layout.dir.join("agent"));
-        assert_eq!(
-            layout.agent_interactive,
-            layout.dir.join("agent-interactive")
-        );
         assert_eq!(layout.netinit, layout.dir.join("netinit"));
         assert_eq!(layout.seccomp_apply, layout.dir.join("seccomp-apply"));
         assert_eq!(layout.runner, layout.dir.join("runner"));

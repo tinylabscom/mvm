@@ -1219,12 +1219,11 @@ These need the hand treatment, once, recorded in `specs/VERIFICATION.md`.
 - Modify: `specs/VERIFICATION.md` (extend the falsifiability table)
 - No source changes survive this task — every edit is reverted.
 
-- [ ] **Step 1: MVM-SEC-04 — `prod-agent-no-exec`**
+- [x] **Step 1: MVM-SEC-04 — runtime guest-agent boundary**
 
-  Build the agent *with* the `interactive` feature on a scratch branch and
-  confirm the symbol-grep job fails rather than passing on a build that
-  contains `do_exec`. This is a CI-lane experiment, not a test run, so it
-  needs a pushed branch to observe.
+  The compile-time feature fork was retired. The runtime-boundary unit and
+  conformance tests enumerate DevOnly requests and fail if a production-safe
+  grant permits any of them.
 
 - [ ] **Step 2: MVM-SEC-07 — the dependency audit**
 
@@ -1247,7 +1246,7 @@ These need the hand treatment, once, recorded in `specs/VERIFICATION.md`.
   ```markdown
   | Claim | Witness | Planted defect | Fired |
   | --- | --- | --- | --- |
-  | MVM-SEC-04 | `ci:prod-agent-no-exec` | Build the agent with the `interactive` feature | |
+  | MVM-SEC-04 | `ci:guest-agent-runtime-boundary` | Remove the runtime profile or signed-grant check before dispatching a DevOnly request | yes |
   ```
 
   Fill the verdicts from Steps 1-3. A `did not fire` is a finding, not a
