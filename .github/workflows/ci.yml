@@ -551,7 +551,7 @@ jobs:
           glibc_re='/nix/store/[a-z0-9]+-glibc(-|$)'
 
           staged_closure=$(mktemp)
-          for binary in guest guestDev runner egressClient addonDns exitReport; do
+          for binary in guest runner egressClient addonDns exitReport; do
             path=$(nix eval --raw "$overlay#packages.x86_64-linux.default.passthru.$binary")
             nix path-info -r "$path" >> "$staged_closure"
           done
