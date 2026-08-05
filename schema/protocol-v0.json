@@ -1130,7 +1130,7 @@
           ]
         },
         {
-          "description": "Run a command inside the guest (dev-only, requires interactive feature + SecurityPolicy).",
+          "description": "Run a command inside the guest (DevOnly, requires the runtime profile, signed verb grant, and SecurityPolicy).",
           "type": "object",
           "required": [
             "Exec"

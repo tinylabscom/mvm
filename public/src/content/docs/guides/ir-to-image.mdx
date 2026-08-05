@@ -259,7 +259,7 @@ What it provides:
 
 - **Firecracker kernel** (`vmlinux`)
 - **Busybox-as-PID-1 init** — under-5-second cold boot, no systemd
-- **Guest agent** — Rust binary built from `mvm-src`, communicates over vsock (ADR-001 W4.1, W6.1.2). In production builds, the `do_exec` symbol is gated out of the agent (CI claim 4); the `interactive` feature flag enables it for dev images only.
+- **Guest agent** — one universal Rust binary built from `mvm-src`, communicating over vsock (ADR-001 W4.1, W6.1.2). Production-safe runs receive a runtime profile and signed `VerbGrant`; DevOnly handlers remain unreachable without that authorization.
 - **Networking** — `eth0` configured via kernel boot args, NAT to host
 - **Privilege model** — PID 1 runs as uid 0 (kernel requirement); the entrypoint and agent run rootless (uid 1000 in prod, uid 0 in dev for the dev shell)
 - **Hardening** — `setpriv --no-new-privs` (W2.3), seccomp `standard` (W2.4), per-service uids (W2.1), read-only `/etc` overlay (W2.2), dm-verity verified boot (W3)

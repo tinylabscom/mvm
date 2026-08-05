@@ -1202,18 +1202,17 @@ reasoning behind each falsification, which plan 272 §WS-3 cites.
 
 ## What #1934 cannot reach
 
-Three of the sixteen claims have no `fn:` witness at all: **MVM-SEC-04**
-(no `do_exec` in a production build), **MVM-SEC-05** (fuzz targets),
-**MVM-SEC-07** (dependency audit). Their witnesses are a symbol-absence
-grep over a release binary, a fuzz lane, and a `cargo deny` job. There is
-no Rust function body whose mutation exercises any of them, and
+Two of the sixteen claims have no `fn:` witness at all: **MVM-SEC-05**
+(fuzz targets) and **MVM-SEC-07** (dependency audit). Their witnesses are a
+fuzz lane and a `cargo deny` job. There is no Rust function body whose
+mutation exercises either of them, and
 `check-mutation-witnesses` correctly reports them as reaching no mutable
 file rather than inventing a surface.
 
 A `ci:` witness nobody has seen fail is the same problem as a `fn:` one.
 These need the hand treatment, once, recorded in `specs/VERIFICATION.md`.
 
-## Task 8: Falsify the three CI-lane witnesses
+## Task 8: Falsify the remaining CI-lane witnesses
 
 **Files:**
 - Modify: `specs/VERIFICATION.md` (extend the falsifiability table)

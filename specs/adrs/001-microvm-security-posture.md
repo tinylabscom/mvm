@@ -72,7 +72,7 @@ beneath it.
 ├───────────────────────────────────────────────────────────────┤
 │ L4 — Guest agent (parses host messages, launches services)    │
 │      enforced by: uid 901 setpriv, no_new_privs,               │
-│                    `do_exec` absent in production,             │
+│                    runtime profile + signed VerbGrant,         │
 │                    fuzzed deserialization + deny_unknown_fields│
 ├───────────────────────────────────────────────────────────────┤
 │ L3 — Guest kernel (Linux from Nix, ephemeral, isolated)        │
@@ -124,7 +124,7 @@ per the threat model above.
 | 1 | No host-fs access from a guest beyond explicit shares | L2/L5 | Per-service uid; seccomp tier `standard` default; `setpriv --bounding-set=-all --no-new-privs`; user-volume allow-list with a read-only default; admission-enforced share matching |
 | 2 | No guest binary can elevate to uid 0 | L2/L4 | `setpriv --no-new-privs`; `/etc/{passwd,group,nsswitch.conf}` are read-only bind mounts, so a compromised service cannot mint a uid-0 entry |
 | 3 | A tampered rootfs ext4 fails to boot, on the block+ext4 backends | L3 | dm-verity sidecar + 64-hex roothash on the kernel cmdline + a verity-aware initramfs that owns the boot pivot in userspace; a flipped data block panics the kernel before userspace runs |
-| 4 | The guest agent contains no `do_exec` symbol in production builds | L4 | The exec handler is compiled in only under the `interactive` feature; a symbol-grep CI job asserts its absence from the production agent binary |
+| 4 | A production-safe run cannot invoke DevOnly guest-agent verbs | L4 | The universal agent classifies requests and requires both the runtime profile and a signed `VerbGrant`; the runtime-boundary CI lane and grant unit test cover the complete DevOnly set |
 | 5 | Vsock framing and supervisor-config JSON are fuzzed | L2/L4 | `cargo-fuzz` targets cover `GuestRequest`, `AuthenticatedFrame`, and the host-side `SupervisorConfig` parser; every host↔guest type is `#[serde(deny_unknown_fields)]` |
 | 6 | The pre-built dev image is hash-verified | supply chain | The per-arch checksums manifest is fetched and the artifact is streamed through SHA-256; a mismatch rejects and deletes the download |
 | 7 | Cargo dependencies are audited on every PR | supply chain | `cargo-deny` and `cargo-audit` CI jobs; a reproducibility double-build catches non-determinism that could mask injection |
@@ -135,7 +135,7 @@ per the threat model above.
 | 12 | Every host-side broker service is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited | cross-cutting | Binding-gated dispatch with a rejection ladder for unbound and out-of-profile calls; the handler registry is linted for policy-schema and composition coverage |
 | 13 | No raw secret value crosses the broker channel | data containment | `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space; secret-bearing buffers are zeroized on drop |
 | 14 | Every OCI image admission records provenance in the chain-signed audit log | supply chain | A `plan.oci_provenance` entry carries the registry host, repo, supplied reference, resolved manifest digest, layer digest list, trust policy, and cosign verdict; a production pull or run refuses a mutable reference before any network fetch |
-| 15 | A sealed production microVM has no shell, no `do_exec`, and no PTY | L4 | Only the dev `/init` variant serves a console; the sealed rootfs is dm-verity protected; the backend captures the guest console write-only, with no host input; the host accessible-gate refuses `console` on a sealed image; the agent's console and `do_exec` are both `interactive`-gated |
+| 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY | L4 | Only the dev `/init` variant serves a console; the sealed rootfs is dm-verity protected; the backend captures the guest console write-only, with no host input; the host accessible-gate refuses `console` on a sealed image; the universal agent's console and DevOnly handlers require the runtime profile and signed grant |
 
 **Claim 15 changed shape, and shrank.** It used to read "no interactive
 access to a sealed production microVM", and it held by *absence*: a

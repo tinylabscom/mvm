@@ -222,9 +222,8 @@ class SandboxDevOnly(SandboxLiveError):
     """Raised when the SDK refuses a live-mode ``commands.start``
     call because the resolved template is a *prod* template.
 
-    Per ADR-001 §W4.3 (security claim 4 in :doc:`CLAUDE.md`) the
-    guest agent strips the ``do_exec`` handler in production
-    builds. The agent itself fails closed, but the SDK refuses
+    The guest agent's runtime profile and signed grant refuse DevOnly
+    process-control requests in production. The agent itself fails closed, but the SDK refuses
     *before* any vsock traffic so a user typo doesn't make a
     spurious round-trip. ``commands.start`` is the only Sandbox
     surface that hits ``proc start``; ``files.write`` and

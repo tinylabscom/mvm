@@ -63,7 +63,7 @@ regression, not a win.
 - setpriv uid / group / no-new-privs drops preserved exactly (host-fs confinement; guest
   cannot elevate to uid 0).
 - dm-verity roothash still seals the rootfs (tampered rootfs fails to boot).
-- production agent still links no `do_exec` and no console symbol.
+- production-safe runs still refuse DevOnly verbs and console access through the runtime profile and signed grant.
 - seccomp tiers still applied per service.
 
 ## WS-1 — static setpriv, glibc out of the rootfs (implemented from this spec)
