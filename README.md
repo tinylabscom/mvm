@@ -69,6 +69,19 @@ mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -
 # Multiple args after `--` are the argv; the VM lives only for this command.
 mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
+# Run a Python file from the host checkout (the mount is read-only).
+# Repeat --mount for additional host directories.
+mvmctl machine run --image python:3.12 \
+  --mount "$PWD:/work:ro" -- python /work/app.py
+
+# Install pandas and run the file in the same transient VM.
+# The install disappears when this VM is torn down.
+mvmctl machine run --image python:3.12 \
+  --allow-host pypi.org:443 \
+  --allow-host files.pythonhosted.org:443 \
+  --mount "$PWD:/work:ro" \
+  -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && PYTHONPATH=/tmp/python-deps python /work/app.py'
+
 # Interactive dev shell (dev-tier images) — still transient
 mvmctl machine run --image alpine -it -- /bin/sh
 

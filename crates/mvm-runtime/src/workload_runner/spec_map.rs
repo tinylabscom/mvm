@@ -85,6 +85,35 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
     blocks
 }
 
+/// Resolve the guest block device for each configured volume.
+///
+/// The returned entries preserve `config.volumes` order. Directory shares have
+/// no block device and therefore produce `None`; disk volumes resolve to the
+/// exact `/dev/vd*` node present in [`workload_blocks`]. Keeping this mapping
+/// here makes callers use the same slot calculation as the VMM and the guest
+/// activation path.
+pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
+    let blocks = workload_blocks(config);
+    let disk_count = config
+        .volumes
+        .iter()
+        .filter(|volume| matches!(volume.kind, VmVolumeKind::Disk))
+        .count();
+    let first_user_block = blocks.len().saturating_sub(disk_count);
+    let mut block_devices = blocks[first_user_block..]
+        .iter()
+        .map(crate::driver::BlockDev::device_node);
+
+    config
+        .volumes
+        .iter()
+        .map(|volume| match volume.kind {
+            VmVolumeKind::DirShare => None,
+            VmVolumeKind::Disk => block_devices.next(),
+        })
+        .collect()
+}
+
 /// The guest device node the SDK sidecar lands on for this launch config, or
 /// `None` when no sidecar is attached.
 ///
@@ -94,18 +123,13 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
 /// boot carries a verity sidecar, a runtime overlay, and how many user volumes
 /// precede it.
 pub fn sdk_sidecar_block_device(config: &VmStartConfig) -> Option<String> {
-    let sidecar_host = config
-        .volumes
-        .iter()
-        .find(|v| {
-            v.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH
-                && matches!(v.kind, VmVolumeKind::Disk)
-        })
-        .map(|v| v.host.as_str())?;
-    workload_blocks(config)
-        .iter()
-        .find(|b| b.source.as_os_str() == std::ffi::OsStr::new(sidecar_host))
-        .map(crate::driver::BlockDev::device_node)
+    let sidecar_index = config.volumes.iter().position(|v| {
+        v.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH && matches!(v.kind, VmVolumeKind::Disk)
+    })?;
+    workload_volume_devices(config)
+        .get(sidecar_index)
+        .cloned()
+        .flatten()
 }
 
 /// Refuse a `DirShare` volume before a `VmmSpec` is assembled: the runner's
@@ -393,6 +417,26 @@ mod tests {
         assert_eq!(vol_block.source, PathBuf::from("/vol/data.img"));
         assert!(vol_block.read_only);
         assert!(!vol_block.ephemeral);
+    }
+
+    #[test]
+    fn volume_devices_follow_the_attached_block_slots() {
+        let cfg = VmStartConfig {
+            verity_path: Some("/img/rootfs.verity".into()),
+            runtime_overlay_path: Some("/img/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
+            runtime_overlay_roothash: Some("ab".repeat(32)),
+            volumes: vec![
+                disk_volume("/vol/first.img", "/first", true),
+                dir_share_volume("/host/share", "/share"),
+                disk_volume("/vol/second.img", "/second", false),
+            ],
+            ..base()
+        };
+        assert_eq!(
+            workload_volume_devices(&cfg),
+            vec![Some("/dev/vde".into()), None, Some("/dev/vdf".into())]
+        );
     }
 
     fn sdk_sidecar_volume(host: &str) -> mvm_core::vm_backend::VmVolume {
