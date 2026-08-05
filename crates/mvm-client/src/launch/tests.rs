@@ -374,8 +374,26 @@ async fn persistent_create_start_stop_restart_remove_roundtrip() {
     client.remove_machine(&id).await.expect("remove stopped");
     assert!(!machine_spec_path("p-web").exists());
     assert!(!machine_state_dir("p-web").exists());
+    assert!(
+        !mvm_core::config::vm_state_dir("p-web").exists(),
+        "remove drops the per-VM runtime dir; a stale endpoint socket there \
+         blocks the next launch under the same name"
+    );
     // Idempotent: removing again is Ok.
     client.remove_machine(&id).await.expect("re-remove");
+
+    // The name is immediately reusable: a fresh definition launches clean.
+    let request = persistent_request(&home.rootfs(), "p-web").build().unwrap();
+    let outcome = client.launch(request).await.expect("recreate same name");
+    assert_eq!(
+        outcome.machine.status,
+        mvm_core::client::dto::MachineStatus::Running
+    );
+    client.stop_machine(&id).await.expect("stop recreated");
+    client
+        .remove_machine_with(&id, RemoveOptions { force: false })
+        .await
+        .expect("remove recreated");
 }
 
 #[tokio::test]

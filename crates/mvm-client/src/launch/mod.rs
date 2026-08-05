@@ -736,6 +736,10 @@ impl LocalBackend {
                 self.stop_for_recreate(name);
             }
             self.release_session_resources(name)?;
+            // Drop the per-VM runtime dir too: a stale substitution-endpoint
+            // socket left behind blocks the next launch under the same name
+            // (the endpoint dies binding it, before its ready handshake).
+            remove_dir_if_present(&vm_state_dir(name))?;
             // The definition directory carries machine.json plus the
             // secret-refs sidecar (already cleared above) — drop it whole.
             remove_dir_if_present(&machine_state_dir(name))?;
