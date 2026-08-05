@@ -215,7 +215,10 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
             return Ok(());
         }
 
-        let exec = execute_plan(&plan)?;
+        let spinner = ui::spinner("Cleaning mvm cache...");
+        let exec_result = execute_plan(&plan);
+        spinner.finish_and_clear();
+        let exec = exec_result?;
         ui::success(&format!(
             "Cleanup tier {}: removed {} path(s), freed {}",
             t.name(),

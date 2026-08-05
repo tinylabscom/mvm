@@ -1286,6 +1286,9 @@ Then unify + retire the old paths:
 
 - [ ] Redesign to a small, discoverable verb set; `env` shown in `--help`.
 - [ ] Merge `setup`/`bootstrap` into one first-run `bootstrap`. Add the lifecycle verbs: **`upgrade`** (self-update `mvmctl`); **`uninstall`** (remove everything — the binary, `~/.mvm`, and installed host/guest artifacts); **`env cleanup`** (reclaim `~/.mvm` — caches + transient VM/build state, keeping config + keys); **`env reset`** (wipe `~/.mvm` back to a clean slate). These replace the fragmented `cache prune` / `pack prune` / `storage gc`. `env` becomes a visible top-level subcommand (today `hide = true`).
+- [x] `just clean` now removes build artifacts and the regenerable `~/.mvm/cache`
+      through `mvmctl env cleanup --cache`; cache cleanup shows progress, and
+      BDD coverage verifies every subcommand's help stays within 80 columns.
 - [ ] Replace the 31-arm dispatch `match` with a `Command` trait (`fn run(&self, ctx: &Cli) -> Result<()>`); one module per command; every command calls `mvm-client`.
 - [x] ~~`mvmctl serve` exposes the agent-facing server behind an `AgentProtocol` trait~~ — descoped. The MCP server was removed outright; no agent-protocol server surface remains.
 - [ ] Remove hidden/duplicate/dead verbs.

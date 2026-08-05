@@ -6,6 +6,17 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
+#[test]
+fn help_output_wraps_long_lines() {
+    let help =
+        "  command  A long description that must wrap before it exceeds the fixed output width";
+    let wrapped = constrain_help_output(help);
+
+    assert!(wrapped.lines().all(|line| line.chars().count() <= 80));
+    assert!(wrapped.lines().count() > 1);
+    assert!(wrapped.contains("\n  "));
+}
+
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
 use super::build::build;
