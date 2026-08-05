@@ -312,6 +312,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # `just bdd` exercises the generated Python/TypeScript SDK contracts;
+      # keep its generators available in this job as well as the standalone
+      # reusable BDD workflow.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
