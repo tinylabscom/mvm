@@ -1,0 +1,43 @@
+# Security-relevant controls, and whether each is reachable from production.
+#
+# The failure this exists for: a control that reports present and cannot fire.
+# An admission gate reading an argv nobody populates, a broker nothing
+# constructs, a scan whose bound set is always empty. Each of those shipped
+# correct and tested, and each was caught only by review.
+#
+# Name the symbol by a string that identifies it uniquely — usually the
+# re-exported alias rather than a bare `validate`, which every module has. The
+# gate refuses an entry that matches implausibly widely, because a symbol that
+# matches everything reports reachable no matter what.
+#
+# `dormant = false` is the normal case: the control has a production caller and
+# the gate fails if it loses one. `dormant = true` says so out loud, with a
+# reason — and the gate fails if it *gains* a caller, because then the
+# declaration is stale and the entry should go. The list may only shrink.
+
+[[control]]
+symbol = "validate_topology"
+file = "crates/mvm-contract/src/stream/mod.rs"
+dormant = true
+why = """
+Refuses a cyclic or fan-in edge topology. mvmd is the caller: it declares the \
+edges and holds the whole graph. mvm has no fleet, so a single-VM run has \
+nothing to validate. Pure function, no side effects, covered by its own tests, \
+and no claim in ADR-001 rests on it firing here."""
+
+[[control]]
+symbol = "check_plan_edges"
+file = "crates/mvm-contract/src/stream/edge.rs"
+dormant = true
+why = """
+Refuses a duplicate binding, a raw edge without the operator acknowledgement, \
+and an edge contending with operator stdin. Same reason as the topology \
+validator: mvmd declares the edges, so mvmd is where a plan carrying them is \
+admitted. Reachable from mvm only once mvm grows a caller that declares edges, \
+which it will not."""
+
+[[control]]
+symbol = "grants_input_for"
+file = "crates/mvm-contract/src/stream/input.rs"
+dormant = false
+why = "The input plane's default-deny check. Losing its caller reopens claim 17's grant."
