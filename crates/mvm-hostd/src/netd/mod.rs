@@ -52,7 +52,7 @@ pub mod linux;
 pub use audit::{AuditDrops, NetdAuditContext, NetdAuditor};
 pub use datapath::{
     DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, InboundDrain,
-    L3Datapath, LoopbackDatapath, LoopbackHandle, UnsupportedDatapath,
+    L3Datapath, LoopbackDatapath, LoopbackHandle, UnsupportedDatapath, V6Link,
 };
 pub use gateway::{
     Direction, Gateway, GatewayConfig, GatewayError, GatewayEvent, GatewayState, HostResolver,

@@ -47,11 +47,6 @@ use super::datapath::{
 };
 use super::metrics::GatewayMetrics;
 
-/// Prefix length the gateway's IPv6 address takes on the machine-wide
-/// interface: the IPv6 analogue of the IPv4 /30, the smallest prefix that
-/// leaves the guest on-link and nothing else.
-const GATEWAY_V6_PREFIX_LEN: u8 = 126;
-
 /// The addresses this session leased the guest, one per family.
 ///
 /// A host-originated packet — a reset, a synthesized datagram — is addressed
@@ -234,9 +229,12 @@ impl UserspaceSocketDatapath {
             addrs
                 .push(IpCidr::new(IpAddress::Ipv4(req.gateway), req.prefix_len))
                 .expect("a freshly created address list has room for its first entry");
-            if let Some(gateway) = req.gateway_v6 {
+            // The lease's own prefix length, not a second copy of it: the
+            // IPv6 analogue of the IPv4 /30, leaving the guest on-link and
+            // nothing else.
+            if let Some(v6) = req.v6 {
                 addrs
-                    .push(IpCidr::new(IpAddress::Ipv6(gateway), GATEWAY_V6_PREFIX_LEN))
+                    .push(IpCidr::new(IpAddress::Ipv6(v6.gateway), v6.prefix_len))
                     .expect("smoltcp's address list holds four");
             }
         });
@@ -248,7 +246,7 @@ impl UserspaceSocketDatapath {
         // whether or not anything is in it.
         let sockets = SocketSet::new(Vec::new());
 
-        let guest = GuestAddressing::new(req.guest, req.guest_v6);
+        let guest = GuestAddressing::new(req.guest, req.v6.map(|v6| v6.guest));
 
         // Bound before the handle exists, so a machine whose declared
         // mappings cannot all be served does not start. A listener silently
@@ -891,6 +889,7 @@ fn fold_throughput(metrics: &mut GatewayMetrics, stats: &tcp::PumpStats) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::datapath::V6Link;
     use super::limits::{
         ASSOCIATION_LIFETIME_MILLIS, HALF_CLOSED_TIMEOUT_MILLIS,
         HANDSHAKE_COMPLETION_TIMEOUT_MILLIS, RESET_DELIVERY_TIMEOUT_MILLIS,
@@ -930,8 +929,11 @@ mod tests {
             gateway: std::net::Ipv4Addr::new(10, 201, 0, 5),
             guest: std::net::Ipv4Addr::new(10, 201, 0, 6),
             prefix_len: 30,
-            gateway_v6: Some(FIXTURE_GATEWAY_V6),
-            guest_v6: Some(FIXTURE_GUEST_V6),
+            v6: Some(V6Link {
+                gateway: FIXTURE_GATEWAY_V6,
+                guest: FIXTURE_GUEST_V6,
+                prefix_len: 126,
+            }),
             mtu: MTU_V1,
             ingress: Vec::new(),
         }
@@ -1246,7 +1248,7 @@ mod tests {
             let bytes = match self.dst.ip() {
                 IpAddr::V4(dst) => emit_v4_segment(request().guest, dst, &segment),
                 IpAddr::V6(dst) => emit_v6_segment(
-                    request().guest_v6.expect("the fixture session holds one"),
+                    request().v6.expect("the fixture session holds one").guest,
                     dst,
                     &segment,
                 ),

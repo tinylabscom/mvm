@@ -150,6 +150,23 @@ impl ForwardingCapabilities {
     }
 }
 
+/// The IPv6 half of a machine's point-to-point link.
+///
+/// One value rather than a set of parallel fields: a gateway without its
+/// peer, or a pair without the prefix length that makes them on-link, is
+/// not a state any lease can produce, and a backend that has to interpret
+/// one is a backend that can get it wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V6Link {
+    /// Host side of the link, and the guest's default route.
+    pub gateway: Ipv6Addr,
+    /// The address assigned to the guest. Anti-spoofing compares every
+    /// outbound v6 packet's source against exactly this.
+    pub guest: Ipv6Addr,
+    /// Prefix length the pair sits in, so only the peer is on-link.
+    pub prefix_len: u8,
+}
+
 /// What the gateway asks a platform to set up for one machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatapathRequest {
@@ -163,11 +180,10 @@ pub struct DatapathRequest {
     pub guest: Ipv4Addr,
     /// Prefix length of the /30.
     pub prefix_len: u8,
-    /// The same pair in IPv6, when the session was issued one. `None` means
+    /// The same link in IPv6, when the session was issued one. `None` means
     /// this machine has no IPv6 address, and admission refuses the family
     /// before a packet ever reaches a backend.
-    pub gateway_v6: Option<Ipv6Addr>,
-    pub guest_v6: Option<Ipv6Addr>,
+    pub v6: Option<V6Link>,
     pub mtu: u16,
     /// Ingress mappings the plan declared.
     ///
@@ -472,8 +488,7 @@ mod tests {
             gateway: Ipv4Addr::new(10, 201, 0, 5),
             guest: Ipv4Addr::new(10, 201, 0, 6),
             prefix_len: 30,
-            gateway_v6: None,
-            guest_v6: None,
+            v6: None,
             mtu: 1500,
             ingress: Vec::new(),
         }

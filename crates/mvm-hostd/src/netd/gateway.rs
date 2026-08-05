@@ -31,7 +31,7 @@ use mvm_net::l3::{
 
 use super::datapath::{
     DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, InboundDrain,
-    L3Datapath,
+    L3Datapath, V6Link,
 };
 use super::metrics::GatewayMetrics;
 use super::packet::{build_udp_v4, build_udp_v6};
@@ -318,8 +318,15 @@ impl Gateway {
             // One lease, read once. A backend addressing a guest in a family
             // the lease never granted would be addressing somewhere nothing
             // admitted.
-            gateway_v6: config.lease.gateway_v6,
-            guest_v6: config.lease.guest_v6,
+            v6: config
+                .lease
+                .gateway_v6
+                .zip(config.lease.guest_v6)
+                .map(|(gateway, guest)| V6Link {
+                    gateway,
+                    guest,
+                    prefix_len: config.lease.prefix_len_v6(),
+                }),
             mtu: config.policy.mtu,
             // Copied out before the table moves into the admitter below. A
             // backend that serves ingress by binding a listener needs the

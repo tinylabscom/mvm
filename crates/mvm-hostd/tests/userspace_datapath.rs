@@ -69,7 +69,7 @@ use mvm_hostd::netd::userspace::limits::{
 };
 use mvm_hostd::netd::userspace::readiness::ReadinessSet;
 use mvm_hostd::netd::userspace::{UserspaceHandle, UserspaceSocketDatapath};
-use mvm_hostd::netd::{DatapathHandle, DatapathRequest, select_host_datapath};
+use mvm_hostd::netd::{DatapathHandle, DatapathRequest, V6Link, select_host_datapath};
 use mvm_net::channel::GuestService;
 use mvm_net::l3::{DenyCode, DnsBindingStore, FlowLimits, FlowTable, L3Admitter, OutboundVerdict};
 use smoltcp::phy::ChecksumCapabilities;
@@ -996,8 +996,14 @@ impl Translator {
                 gateway: cfg.gateway_ipv4,
                 guest: cfg.guest_ipv4,
                 prefix_len: cfg.lease().prefix_len(),
-                gateway_v6: cfg.gateway_ipv6,
-                guest_v6: cfg.guest_ipv6,
+                v6: cfg
+                    .gateway_ipv6
+                    .zip(cfg.guest_ipv6)
+                    .map(|(gateway, guest)| V6Link {
+                        gateway,
+                        guest,
+                        prefix_len: cfg.lease().prefix_len_v6(),
+                    }),
                 mtu: cfg.mtu,
                 ingress: Vec::new(),
             })

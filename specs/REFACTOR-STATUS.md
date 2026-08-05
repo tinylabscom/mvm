@@ -152,6 +152,22 @@ for detailed scope and acceptance criteria.
         `required_capabilities.ipv6_flows`, so a backend without it refuses
         at open with a shortfall naming it — closing ADR-037's fourth known
         defect. A plan that does not ask is unchanged in every byte.
+        **Both backends now carry the family.** The packet backend's v6
+        half is the host-side mirror of the guest's: an `AF_INET6`
+        `SIOCSIFADDR` puts the gateway's `/126` on the TUN, which is what
+        creates the connected prefix the guest's address sits in, and the
+        `inet` ruleset pins the v6 source beside the v4 one — so it
+        declares plain `FULL_L3`, `arbitrary_ipv6` included, since a device
+        that carries whole packets never cared which family they were in.
+        Witnessed on real hardware in the privileged lane (11/11): the
+        forward chain drops a v6 source the host never assigned while the
+        assigned one passes, proven by broadening the source match (the
+        spoof passes) and by deleting the rule (the control stops passing);
+        and with two machines open — so a neighbour's `/126` really is a
+        connected route — a guest still cannot reach the neighbour's
+        address, its gateway, or unrelated ULA space, mutation-proven
+        against the ULA arm. A v4-only lease loads a ruleset with no v6
+        rule in it at all.
         **Still unwired above the plan:** no `mvmctl` surface populates an
         `L3NetworkSpec` at all — every `SynthesisInput` site passes
         `l3_network: None`, and the boot path also hardcodes

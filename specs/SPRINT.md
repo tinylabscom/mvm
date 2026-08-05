@@ -963,7 +963,11 @@ updates only its own entry below.
       so a backend that cannot carry v6 flows refuses at open rather than
       dropping the guest's packets — which closes ADR-037's `ipv6_flows`
       known defect and leaves declared TCP ingress as the one remaining
-      over-claim there. Adding a unique-local pool did not turn a guest's
+      over-claim there. Both backends carry it: the privileged Linux
+      packet backend assigns the host side of the `/126` on its TUN and
+      pins the guest's v6 source in the same `inet` ruleset that pins its
+      v4 one, so it declares `FULL_L3` outright, witnessed against real
+      nftables on hardware and mutation-proven both ways. Adding a unique-local pool did not turn a guest's
       own address into permission to reach ULA space: a neighbour's leased
       address stays refused under `unrestricted`, witnessed end to end and
       mutation-proven. What no `mvmctl` surface does yet is populate an

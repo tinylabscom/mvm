@@ -250,7 +250,19 @@ address is empty, because a point-to-point IP interface has none.
 
   A backend that cannot carry v6 flows refuses the session before the VM
   boots, naming `ipv6_flows` in the shortfall, rather than handing the
-  guest an address whose packets go nowhere.
+  guest an address whose packets go nowhere. Both backends carry them
+  today. The socket backend re-opens each admitted v6 flow on a host
+  socket. The packet backend assigns the host side of the `/126` on its
+  tunnel device — which is what puts the guest's address in a connected
+  prefix — and pins the guest's v6 source in the same nftables ruleset
+  that pins its v4 one, so anti-spoofing is one mechanism across both
+  families rather than two that can disagree. A machine whose plan did
+  not ask for IPv6 loads a ruleset with no v6 rule in it at all.
+
+  The packet backend needs the host to forward IPv6
+  (`net.ipv6.conf.all.forwarding`) exactly as it needs the host to
+  forward IPv4. That is host configuration, not something a per-machine
+  datapath flips on a host's behalf.
 - Embedded-v4 addresses do not bypass the v4 rules. A v4-mapped,
   v4-compatible, NAT64, or 6to4 address is collapsed to the v4 address it
   carries and then judged by the whole v4 policy, so link-local metadata and

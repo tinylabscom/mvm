@@ -313,8 +313,11 @@ The bit is also what makes the capability honest. A leased v6 pair sets
 `required_capabilities.ipv6_flows`, so a backend that cannot carry v6 flows
 refuses the session at open with a shortfall naming `ipv6_flows`, before
 the VM boots — rather than letting the guest configure an address whose
-packets die somewhere it cannot see. The Linux TUN datapath declares
-`ipv6_flows: false` today, so it refuses exactly such a plan.
+packets die somewhere it cannot see. Both backends declare it now: the
+userspace gateway carries the flows without claiming it can emit an
+arbitrary v6 packet, and the Linux TUN datapath declares the whole
+`FULL_L3` set, because it assigns the v6 pair and pins the v6 source in
+the same ruleset that pins the v4 one.
 
 ### The handshake grants what both sides can support
 

@@ -223,8 +223,7 @@ fn measure_end_to_end_host_side() {
             gateway: admitter.lease().gateway,
             guest,
             prefix_len: 30,
-            gateway_v6: None,
-            guest_v6: None,
+            v6: None,
             mtu: limits::MTU_V1,
             ingress: Vec::new(),
         })

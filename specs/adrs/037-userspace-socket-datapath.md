@@ -479,8 +479,9 @@ or fully use.
   derives `required_capabilities.ipv6_flows` from that lease — one place,
   from the lease rather than from a constant. A backend without the
   capability now produces a `CapabilityShortfall` naming `ipv6_flows`
-  before the VM boots, which is what the Linux TUN datapath (`ipv6_flows:
-  false` until its v6 half lands) does today for such a plan.
+  before the VM boots. Both backends have the capability today: the Linux
+  TUN datapath's v6 half landed alongside this, so it declares the whole
+  `FULL_L3` set rather than refusing such a plan.
 
   **Supply.** The allocator carves a unique-local `/126` at the same index
   as the `/30`, `assign_config` sends it, and the granted feature bits say
