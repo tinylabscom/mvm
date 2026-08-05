@@ -34,21 +34,39 @@ pub(crate) fn grant_eligible(pty: bool, has_ad_hoc_argv: bool, is_dev_profile: b
     !pty && !has_ad_hoc_argv && !is_dev_profile
 }
 
+/// The verbs that carry bytes into a running workload's stdin. Granted only to
+/// a plan that also carries the input-plane service token, so the grant itself
+/// — not just the host-side gate — says whether this workload's stdin is
+/// reachable at all.
+const INPUT_VERBS: [&str; 2] = ["stream-input", "close-stream-input"];
+
+/// The volume verbs, attenuated away from a workload that declares no shares.
+const VOLUME_VERBS: [&str; 2] = ["mount-volume", "unmount-volume"];
+
 /// Compute the default agent-verb set for a workload.
 /// - `restrict_agent_verbs = false` → `None` (class-gate-only; unchanged behavior).
 /// - `restrict_agent_verbs = true` → all ProdSafe verbs, minus the volume verbs when the
 ///   workload declares no shares (the only safe per-workload attenuation;
-///   host-lifecycle verbs stay so pause/resume/snapshot/pooling never break).
+///   host-lifecycle verbs stay so pause/resume/snapshot/pooling never break),
+///   and minus the input verbs unless the plan carries the input-plane grant.
+///
+/// The input attenuation is not a convenience. The whole basis of the input
+/// plane is that permission to drive a sealed workload's stdin lives in the
+/// signed plan and so cannot be conferred locally; a default that handed every
+/// restricted workload a signed grant for the input verbs would move that
+/// decision back to the host gate alone.
 pub(crate) fn default_agent_verbs(
     restrict_agent_verbs: bool,
     has_shares: bool,
+    grants_input: bool,
 ) -> Option<Vec<VerbId>> {
     if !restrict_agent_verbs {
         return None;
     }
     let set = GuestRequest::prod_safe_verb_names()
         .iter()
-        .filter(|n| has_shares || (**n != "mount-volume" && **n != "unmount-volume"))
+        .filter(|n| has_shares || !VOLUME_VERBS.contains(*n))
+        .filter(|n| grants_input || !INPUT_VERBS.contains(*n))
         .map(|n| VerbId::new(n).expect("prod_safe_verb_names entries are valid kebab verbs"))
         .collect();
     Some(set)
@@ -85,13 +103,13 @@ mod tests {
 
     #[test]
     fn dev_gets_no_restriction() {
-        assert_eq!(default_agent_verbs(false, false), None);
-        assert_eq!(default_agent_verbs(false, true), None);
+        assert_eq!(default_agent_verbs(false, false, false), None);
+        assert_eq!(default_agent_verbs(false, true, true), None);
     }
 
     #[test]
     fn prod_without_shares_drops_volume_verbs_keeps_lifecycle_and_entrypoint() {
-        let set = default_agent_verbs(true, false).unwrap();
+        let set = default_agent_verbs(true, false, false).unwrap();
         let s: Vec<&str> = set.iter().map(|v| v.as_str()).collect();
         assert!(s.contains(&"run-entrypoint"));
         assert!(s.contains(&"readiness-status"));
@@ -102,14 +120,40 @@ mod tests {
 
     #[test]
     fn prod_with_shares_includes_mount() {
-        let set = default_agent_verbs(true, true).unwrap();
+        let set = default_agent_verbs(true, true, false).unwrap();
         assert!(set.iter().any(|v| v.as_str() == "mount-volume"));
+    }
+
+    #[test]
+    fn a_plan_without_the_input_grant_gets_no_signed_grant_for_the_input_verbs() {
+        // The property the input plane rests on: permission to drive a sealed
+        // workload's stdin travels in the signed plan. A default that granted
+        // the verbs to every restricted workload would leave the host gate as
+        // the only thing distinguishing a workload whose plan asked for input
+        // from one whose plan did not.
+        let without = default_agent_verbs(true, true, false).unwrap();
+        for verb in INPUT_VERBS {
+            assert!(
+                !without.iter().any(|v| v.as_str() == verb),
+                "{verb} was granted to a plan that carries no input grant"
+            );
+        }
+
+        let with = default_agent_verbs(true, true, true).unwrap();
+        for verb in INPUT_VERBS {
+            assert!(
+                with.iter().any(|v| v.as_str() == verb),
+                "{verb} must be granted to a plan that does carry the grant"
+            );
+        }
+        // And nothing else moved with it.
+        assert!(with.iter().any(|v| v.as_str() == "run-entrypoint"));
     }
 
     #[test]
     fn default_never_contains_a_devonly_verb() {
         // "exec"/"fs-read"/"proc-start" are DevOnly kind_names — none may appear.
-        let set = default_agent_verbs(true, true).unwrap();
+        let set = default_agent_verbs(true, true, true).unwrap();
         for banned in ["exec", "fs-read", "proc-start", "console-open"] {
             assert!(
                 !set.iter().any(|v| v.as_str() == banned),

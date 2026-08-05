@@ -13,9 +13,12 @@ audit.
 
 ## Security model
 
-Console access is intentionally gated by the image mode. Development images can
-expose a console; sealed production images should refuse interactive shell
-access and rely on declared entrypoints, logs, guest RPC, and audit records.
+Console access is intentionally gated by the image mode and launch policy.
+Development images may expose a console; sealed production images should refuse
+interactive shell access and rely on declared entrypoints, logs, guest RPC, and
+audit records. This console gate is separate from the agent-verb grant: a
+baked-entrypoint run on a non-dev profile can receive restricted ProdSafe verbs,
+while a PTY always requires DevOnly verbs.
 
 That distinction matters because an interactive shell is broad authority inside
 the guest. It is useful for debugging, but it is not the default control plane

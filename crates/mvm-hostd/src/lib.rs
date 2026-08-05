@@ -16,6 +16,8 @@
 //! - [`jailer`] — the `mvm-jailer-lite` seccomp + landlock confinement
 //!   helper, applied in-process by each role before it touches keys or
 //!   untrusted input.
+//! - [`stream`] — the per-VM workload output broker: one redaction seam, one
+//!   hash chain, one durable transcript, N followers.
 //! - [`bridge`] / [`firecracker_bridge`] / [`prelaunch`] / [`exit_capture`] —
 //!   the shared per-VM supervisor host-process substrate: bridge-sidecar
 //!   config parsing, the prelaunched-standby attach-verify, and the
@@ -65,4 +67,5 @@ pub mod plan_admission;
 /// `start_enter`) so the rejection ladder is unit-testable.
 pub mod prelaunch;
 pub mod run;
+pub mod stream;
 pub mod supervisor;

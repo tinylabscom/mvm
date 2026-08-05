@@ -24,7 +24,7 @@ pub use types::{
     L3NetworkSpec, NetworkMode, Nonce, NonceParseError, PlanId, PlanSeccompTier,
     PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
     RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
-    TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+    StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
 };
 pub use validity::FreshnessClaims;
 pub use verb::{VerbId, VerbIdError};

@@ -6,6 +6,7 @@
 //! real endpoint process.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -13,7 +14,7 @@ use mvm_agentd::vsock::BROKER_PORT;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
-use mvm_core::plan::{ExecutionPlan, SecretBinding};
+use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
@@ -29,7 +30,7 @@ use crate::checkpoint::{
     verify_lineage,
 };
 use crate::driver::{ChildForkRequest, RunningVm, StandbyParentSpawn, VmmDriver};
-use crate::egress_shared::decode_plan_secrets_from_state;
+use crate::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 use crate::standby_pool::SupervisorStandbyPool;
 use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
@@ -189,6 +190,75 @@ impl BrokerRegistrar for RealBrokerRegistrar {
     }
 }
 
+/// Republishes a workload's console capture (`<state_dir>/console.log`,
+/// write-only, written by every backend before the guest agent can say
+/// anything) into the per-VM output-stream broker — so a guest that panics
+/// on boot, fails dm-verity, or OOMs its agent still leaves a stream instead
+/// of an empty one.
+///
+/// A hook, not a direct call: the broker this republishes into is owned by
+/// the resident per-tenant daemon, which sits *above* this crate in the
+/// dependency graph (the daemon depends on the runtime, never the other way
+/// around), so this crate cannot name that broker's type. Same shape as
+/// [`EndpointSpawner`] and [`BrokerRegistrar`] just above — both exist to
+/// solve exactly this "the runtime needs the resident daemon to do
+/// something" problem — and, like the ordinary `VmBackend` methods this
+/// trait's two calls sit beside, `start`/`stop` are independent entry points
+/// keyed by `vm_name` rather than a value threaded between them: a `start`
+/// during `up` and the matching `stop` commonly run in different process
+/// invocations against the same disk-backed VM state, so nothing here can
+/// rely on an in-process object outliving the call that created it.
+///
+/// **Unconditional.** Unlike [`BrokerRegistrar`] (an unrelated, same-named
+/// host-services broker for `host.audit.v1`/`host.secrets.v1`), this is never
+/// gated on tenant admission. An unadmitted local run is exactly the case
+/// with the fewest other ways to see a boot failure, so it must not lose
+/// console capture either.
+pub trait ConsoleStreamer: Send + Sync {
+    /// Start capturing one workload's output. Best-effort: a real
+    /// implementation logs and continues on failure rather than failing a
+    /// workload boot over an observability feature.
+    fn start(&self, capture: &ConsoleCapture<'_>);
+
+    /// Stop following `vm_name`'s console, if anything started one.
+    /// Idempotent — a no-op for a VM whose console was never followed,
+    /// matching every other per-VM reaper `WorkloadRunner::stop` already
+    /// calls unconditionally.
+    fn stop(&self, vm_name: &str);
+}
+
+/// One workload's console capture: which VM, which file, the redaction policy
+/// its recorded output is cleared under, and whether that output is kept.
+///
+/// The policy rides along rather than being resolved on the far side because
+/// it is the *launch's* policy — the same value this call's caller already
+/// handed the substitution endpoint. A capture that picked its own would give
+/// one answer on egress and a different one in the transcript.
+///
+/// The retention mode rides along for the same reason and one more: it comes
+/// off the *signed plan*, so a streamer that read it from anywhere else would
+/// be honouring something nobody admitted.
+pub struct ConsoleCapture<'a> {
+    pub vm_name: &'a str,
+    /// The write-only capture file the backend is already writing.
+    pub console_log: &'a Path,
+    pub redaction: &'a RedactionPolicy,
+    /// Whether the admitted plan asked for a durable transcript. Capture and
+    /// live fan-out happen either way; this decides only what outlives the run.
+    pub retention: StreamRetention,
+}
+
+/// The hook a process that registered no real streamer gets: console bytes
+/// keep going to the write-only capture file on disk and nothing republishes
+/// them. An embedder driving this crate as a library, and every unit test
+/// that does not care about output capture, land here.
+pub struct NoopConsoleStreamer;
+
+impl ConsoleStreamer for NoopConsoleStreamer {
+    fn start(&self, _capture: &ConsoleCapture<'_>) {}
+    fn stop(&self, _vm_name: &str) {}
+}
+
 /// Everything the runner needs to start a workload: the admitted launch config,
 /// its tenant/secrets/redaction/policy, and the kernel cmdline the role above
 /// assembled.
@@ -304,15 +374,33 @@ pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> 
     driver: D,
     spawner: S,
     broker: B,
+    console_streamer: Arc<dyn ConsoleStreamer>,
 }
 
 impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
+    /// Build a runner over the process's registered console-streaming hook.
+    ///
+    /// Every production construction site goes through here and none of them
+    /// passes a streamer, so picking the hook up from the process registration
+    /// is what makes console capture reach all four backends at once — see
+    /// [`console_stream`](super::console_stream) for why the wiring is a
+    /// registration rather than an argument.
     pub fn new(driver: D, spawner: S, broker: B) -> Self {
         Self {
             driver,
             spawner,
             broker,
+            console_streamer: super::console_stream::active_console_streamer(),
         }
+    }
+
+    /// Override the console-streaming hook for this runner alone, ignoring
+    /// whatever the process registered. The seam a test drives its own double
+    /// through; production wires the real streamer once at startup instead.
+    #[must_use]
+    pub fn with_console_streamer(mut self, streamer: Arc<dyn ConsoleStreamer>) -> Self {
+        self.console_streamer = streamer;
+        self
     }
 
     /// Spawn the gating endpoint, compose the spec, and boot. The endpoint is
@@ -355,6 +443,17 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
 
         let vm = self.driver.boot(&spec)?;
 
+        // Unconditional and best-effort, and before the fallible activation
+        // handshake below rather than after it: the console is the only
+        // channel that still carries output if boot never reaches the guest
+        // agent, which includes a failure in that very handshake.
+        self.console_streamer.start(&ConsoleCapture {
+            vm_name: &inputs.config.name,
+            console_log: &socks.console_log,
+            redaction: inputs.redaction,
+            retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
+        });
+
         // Universal initramfs path: the guest PID-1 agent waits for a signed
         // ActivateEnvironment before exposing operational RPCs. Send it now,
         // while the broker registration below still has a guard that rolls back
@@ -393,9 +492,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     /// the child's rootfs from the parent's own verified content; run the
     /// host-side overlay-contract gate, spawn the child's own 0700 substitution
     /// endpoint keyed on its fresh id, resolve its host channel set and register
-    /// its host-services broker; then fork the VMM and require the restored
-    /// guest to prove it adopted a fresh VMGenID before the claim commits, so
-    /// the child's CSPRNG diverges from the parent's.
+    /// its host-services broker; then fork the VMM, start following its console
+    /// (the only channel that would show a hang or panic inside the handshake
+    /// window that follows), and require the restored guest to prove it adopted
+    /// a fresh VMGenID before the claim commits, so the child's CSPRNG diverges
+    /// from the parent's.
     ///
     /// The host-side plumbing is deliberately all on the near side of the fork.
     /// A cold boot has a kernel boot between wiring its channels and the guest
@@ -516,6 +617,20 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             channels: &channels,
         })?;
 
+        // Unconditional and best-effort, mirroring `start_workload`: started
+        // the moment the restored guest is live, before the fallible
+        // post-restore handshake below. A cold boot has a kernel boot to
+        // blame a silent hang on; a fork has none — the guest is already
+        // running the instant the fork resumes it — so the handshake window
+        // this call precedes is the one place a restore can wedge or panic
+        // with nothing else to show why.
+        self.console_streamer.start(&ConsoleCapture {
+            vm_name: &child.0,
+            console_log: &socks.console_log,
+            redaction: &redaction,
+            retention: plan_stream_retention(child_cfg.plan_json.as_deref()),
+        });
+
         // (7) Close that window before the claim commits: deliver the token to
         // the now-reachable guest and make it prove, on its own report, that it
         // rotated its generation identity and took the host's clock. Two children
@@ -525,8 +640,15 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         if let Err(refusal) = self.take_fresh_child_identity(&child.0, token, grant_envelope) {
             // The child is live and still carrying its parent's random state.
             // Unwinding alone would leave running exactly the VM this refusal
-            // exists to prevent, so stop it before returning.
+            // exists to prevent, so stop it before returning. `force_stop`
+            // only tears down the VMM, not the console follower this claim
+            // started above and `VmBackend::stop` never runs for a name that
+            // is refused here and never becomes live state, so this is the
+            // one place responsible for reaping it — after the teardown, so
+            // whatever the refused child prints as it dies is in the record
+            // of why it was refused.
             self.force_stop(&child.0, "refused forked standby child");
+            self.console_streamer.stop(&child.0);
             return Err(refusal);
         }
 
@@ -1034,7 +1156,18 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // sidecars. A teardown helper may remove marker files as part of its own
         // cleanup; the live handle must already own everything needed to stop
         // and verify the VMM independently of those mutable markers.
-        let vm = self.driver.attach(id)?;
+        let vm = match self.driver.attach(id) {
+            Ok(vm) => vm,
+            Err(err) => {
+                // A VM the driver cannot attach to still has a follower
+                // registered here. Propagating straight out strands that
+                // thread and leaves the transcript unsealed — so the capture
+                // is released on the way past, the same unconditional release
+                // the kill path performs, on the path that never reaches it.
+                self.console_streamer.stop(&id.0);
+                return Err(err);
+            }
+        };
         // Reap the per-VM secrets endpoint first, so a crashed VM's
         // decrypted-secret process can't outlive the guest. Idempotent + a no-op
         // when the VM spawned none.
@@ -1048,7 +1181,23 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // that registered none.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
         crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
-        vm.kill()
+        // Kill first, release the capture second. A guest writes its last
+        // words during the kill — a shutdown trace, a panic, whatever the
+        // kernel prints on the way down — and a follower stopped before it
+        // captures none of them: they land in the write-only console file and
+        // never in the chain, which is exactly the output an operator opens
+        // the transcript to find.
+        //
+        // The order costs nothing the other one had. The release is
+        // unconditional and runs whether or not the kill worked, so a VM that
+        // will not die still gets its capture sealed rather than stranding
+        // the follower; and for a VM whose console was never followed here it
+        // is the idempotent no-op it always was. `vm` is the handle taken
+        // before any sidecar reaping, so the kill does not depend on marker
+        // files a teardown helper may already have removed.
+        let killed = vm.kill();
+        self.console_streamer.stop(&id.0);
+        killed
     }
 
     fn stop_all(&self) -> Result<()> {
@@ -1131,6 +1280,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
@@ -1206,6 +1356,49 @@ mod tests {
                 broker_listen_socket: req.broker_listen_socket.map(Path::to_path_buf),
             });
             Ok(BrokerGuard::defused())
+        }
+    }
+
+    /// A `ConsoleStreamer` double proving the *wiring*, not re-proving the
+    /// follower's own polling correctness (that lives, and is tested, in
+    /// `mvm-hostd::stream::console_source` — the crate this one cannot
+    /// depend on, which is why the hook exists). Records every `start`/`stop`
+    /// call, and on `stop` snapshots whatever the console-log path holds at
+    /// that moment: a real follower's `stop` synchronously drains before
+    /// returning, so a wired `stop` that runs before the file is read back
+    /// would show up here as a snapshot missing bytes that were already on
+    /// disk.
+    #[derive(Default)]
+    struct RecordingConsoleStreamer {
+        started: Mutex<Vec<(String, PathBuf)>>,
+        stopped: Mutex<Vec<String>>,
+        captured_at_stop: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl ConsoleStreamer for RecordingConsoleStreamer {
+        fn start(&self, capture: &ConsoleCapture<'_>) {
+            self.started.lock().unwrap().push((
+                capture.vm_name.to_string(),
+                capture.console_log.to_path_buf(),
+            ));
+        }
+
+        fn stop(&self, vm_name: &str) {
+            self.stopped.lock().unwrap().push(vm_name.to_string());
+            let path = self
+                .started
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(name, _)| name == vm_name)
+                .map(|(_, path)| path.clone());
+            if let Some(path) = path {
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                self.captured_at_stop
+                    .lock()
+                    .unwrap()
+                    .insert(vm_name.to_string(), bytes);
+            }
         }
     }
 
@@ -1286,6 +1479,137 @@ mod tests {
         assert_eq!(spec.blocks[0].source, PathBuf::from("/img/rootfs.ext4"));
         // The write-only console capture path is set under the state dir.
         assert!(spec.console.log_path.ends_with("console.log"));
+    }
+
+    #[test]
+    fn start_workload_starts_console_streaming_and_stop_tears_it_down_without_losing_bytes() {
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let streamer = Arc::new(RecordingConsoleStreamer::default());
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        )
+        .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
+
+        let cfg = config("w-console");
+        let vm = runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "tenant-x",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: "root=/dev/vda".into(),
+            })
+            .expect("start_workload succeeds against the mock driver");
+
+        // Started exactly once, unconditionally (no admission gating: the
+        // hook must not inherit `BrokerRegistrar`'s tenant-gated posture),
+        // and pointed at the same console-log path the boot spec carries.
+        let expected_console_log = vm_state_dir(&cfg.name).join("console.log");
+        {
+            let started = streamer.started.lock().unwrap();
+            assert_eq!(
+                started.as_slice(),
+                [("w-console".to_string(), expected_console_log.clone())]
+            );
+        }
+        assert!(
+            streamer.stopped.lock().unwrap().is_empty(),
+            "must not stop before the workload ends"
+        );
+
+        // The boot-failure case this feature exists for: output that lands
+        // on the console between start and stop, with no agent involved.
+        std::fs::write(&expected_console_log, b"kernel panic\n")
+            .expect("write to the console-log path the hook was started with");
+
+        runner
+            .stop(vm.id())
+            .expect("stop succeeds against the mock driver");
+
+        // Stopped exactly once, by name, and the snapshot taken at that stop
+        // call sees the bytes written above -- proving `stop` is wired to run
+        // (and, for a real follower, drain) before the caller can observe the
+        // workload as torn down, not merely that the method was called.
+        assert_eq!(streamer.stopped.lock().unwrap().as_slice(), ["w-console"]);
+        assert_eq!(
+            streamer
+                .captured_at_stop
+                .lock()
+                .unwrap()
+                .get("w-console")
+                .expect("stop captured this vm's console"),
+            b"kernel panic\n"
+        );
+    }
+
+    #[test]
+    fn the_console_capture_outlives_the_kill_so_a_dying_guests_output_is_recorded() {
+        // A guest prints its last words *during* teardown. Releasing the
+        // capture before the kill leaves those bytes in the write-only
+        // console file and out of the chain — which is exactly the output an
+        // operator opens the transcript to find.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(tmp.path());
+
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let streamer = Arc::new(RecordingConsoleStreamer::default());
+        let runner = WorkloadRunner::new(
+            MockDriver::default().printing_on_kill(b"panic on the way down\n"),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        )
+        .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
+
+        let cfg = config("w-dying");
+        let vm = runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "tenant-x",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: "root=/dev/vda".into(),
+            })
+            .expect("start_workload succeeds against the mock driver");
+        std::fs::write(
+            vm_state_dir(&cfg.name).join("console.log"),
+            b"while it lived\n",
+        )
+        .expect("write the console capture");
+
+        runner.stop(vm.id()).expect("stop");
+
+        // The snapshot the hook takes at `stop` is what a real follower's
+        // final drain would see. It must hold the kill-time bytes.
+        let captured = streamer.captured_at_stop.lock().unwrap();
+        let seen = captured.get("w-dying").expect("stop captured this vm");
+        assert_eq!(seen.as_slice(), b"while it lived\npanic on the way down\n");
+    }
+
+    #[test]
+    fn a_kill_that_fails_still_releases_the_console_capture() {
+        // The property the old ordering bought and this one must not lose: a
+        // VM that will not die cannot strand its follower, or leave its
+        // transcript unsealed.
+        let streamer = Arc::new(RecordingConsoleStreamer::default());
+        let runner = WorkloadRunner::new(
+            MockDriver::default().refusing_attach(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        )
+        .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
+
+        let err = runner
+            .stop(&VmId("w-undead".to_string()))
+            .expect_err("the driver refuses to attach");
+        assert!(format!("{err:#}").contains("no such vm"), "{err:#}");
+        assert_eq!(streamer.stopped.lock().unwrap().as_slice(), ["w-undead"]);
     }
 
     #[test]
@@ -3326,6 +3650,11 @@ mod tests {
         driver: MockDriver,
         parent_state: StandbyState,
         orphan_child_dirs: usize,
+        /// Records every `ConsoleStreamer::start`/`stop` the claim made, so a
+        /// test can prove the console follower was wired into `claim_standby`
+        /// itself, not only the cold-boot path — every existing caller of this
+        /// helper ignores the field, so threading it through costs them nothing.
+        console_streamer: Arc<RecordingConsoleStreamer>,
     }
 
     /// Drive one full claim over a clean audited parent against `driver`, whose
@@ -3365,11 +3694,13 @@ mod tests {
         );
 
         let probe = driver.clone();
+        let streamer = Arc::new(RecordingConsoleStreamer::default());
         let runner = WorkloadRunner::new(
             driver,
             KeyingSpawner::default(),
             RecordingBrokerRegistrar::new(),
-        );
+        )
+        .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
         let ctx = ClaimContext {
             pool: &pool,
             checkpoints: &checkpoints,
@@ -3386,6 +3717,7 @@ mod tests {
             driver: probe,
             parent_state: pool.load("warm-parent").unwrap().state,
             orphan_child_dirs: orphan_child_dirs(),
+            console_streamer: streamer,
         }
     }
 
@@ -3489,6 +3821,94 @@ mod tests {
         assert_eq!(
             delivered[0].token, forks[0].genid.token,
             "the delivered token is the one the fork minted"
+        );
+    }
+
+    /// The standby-fork analogue of
+    /// `start_workload_starts_console_streaming_and_stop_tears_it_down_without_losing_bytes`:
+    /// a claim that commits must have started console streaming for the
+    /// child's own fresh name, at the same console-log path a cold boot would
+    /// use.
+    #[test]
+    fn claim_standby_starts_console_streaming_for_the_committed_child() {
+        let out = claim_with_scripted_handshake(MockDriver::default());
+        let child = out.result.expect("a clean handshake commits the claim");
+
+        // Not compared against a freshly-recomputed `vm_state_dir(&child.0)`:
+        // that helper's `MVM_HOME` override is already unwound by the time this
+        // assertion runs, so a second computation here would silently drift to
+        // the real (un-isolated) home instead of proving anything. The path's
+        // *shape* -- console.log directly under a dir named for the child --
+        // is what `standing_sockets` actually guarantees, isolation or not.
+        let started = out.console_streamer.started.lock().unwrap();
+        assert_eq!(
+            started.len(),
+            1,
+            "console streaming must start exactly once"
+        );
+        assert_eq!(started[0].0, child.0);
+        assert_eq!(
+            started[0].1.file_name(),
+            Some(std::ffi::OsStr::new("console.log"))
+        );
+        assert_eq!(
+            started[0].1.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new(child.0.as_str())),
+            "the console log must live under the child's own state dir, not the parent's"
+        );
+        drop(started);
+        assert!(
+            out.console_streamer.stopped.lock().unwrap().is_empty(),
+            "a committed claim leaves the console streamer running for the \
+             ordinary VmBackend::stop path to tear down later, exactly like a \
+             cold boot"
+        );
+    }
+
+    /// A restored child that never proves a fresh identity fails inside a real
+    /// window: the post-restore handshake, where the guest is already live but
+    /// not yet admitted. Without a console follower running through that
+    /// window, a hang or panic there leaves an operator with nothing but an
+    /// opaque `ClaimFailed` string. Also proves the follower is torn down on
+    /// refusal rather than leaked -- `force_stop` only kills the VMM, so
+    /// `claim_standby` itself must reap the streamer it started.
+    #[test]
+    fn claim_standby_stops_console_streaming_when_the_post_restore_handshake_is_refused() {
+        let out =
+            claim_with_scripted_handshake(MockDriver::default().with_unreachable_child_agent());
+        let err = out
+            .result
+            .expect_err("an unanswered handshake must refuse the claim");
+        assert!(matches!(err, StandbyError::ClaimFailed(_)));
+
+        let forks = out.driver.forked_children();
+        assert_eq!(
+            forks.len(),
+            1,
+            "the child was forked and resumed before the handshake ran"
+        );
+        let child_name = forks[0].child_vm_name.clone();
+
+        // Started while the child was live -- the only way an operator would
+        // see a hang or panic inside the handshake window this refusal covers.
+        let started = out.console_streamer.started.lock().unwrap();
+        assert_eq!(
+            started.len(),
+            1,
+            "console streaming must have started for the forked child"
+        );
+        assert_eq!(started[0].0, child_name);
+        assert_eq!(
+            started[0].1.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new(child_name.as_str())),
+            "the console log must live under the child's own state dir"
+        );
+        drop(started);
+        // ...and stopped once the claim gave up on it, so the follower thread
+        // does not outlive a child that was never admitted.
+        assert_eq!(
+            out.console_streamer.stopped.lock().unwrap().as_slice(),
+            [child_name]
         );
     }
 

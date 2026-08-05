@@ -49,6 +49,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --manifest <path>` | Boot a pre-built manifest (`mvm.toml`, its directory, or a slot name; short form `-m`). Mutually exclusive with `--flake`/`--image` |
 | `mvmctl machine run --image <ref>` | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest` |
 | `mvmctl machine run --name <name>` | Run under a machine identity (auto-generated if omitted) |
+| `mvmctl machine run --entrypoint --stdin <PATH>` | Feed the baked entrypoint's stdin from a file, sent as one complete payload with the call |
+| `mvmctl machine run --entrypoint --stdin -` | **Stream** this process's own stdin into the running workload: bytes arrive as they are written and your EOF closes the workload's stdin. Puts the `host.stream.v1` input grant on the signed plan, so a sealed production image whose entrypoint is shell-shaped — or whose entrypoint the host cannot resolve — is refused at admission. Not available with `--attach`, which dispatches into a machine this process did not admit. See [Workload input](/guides/workload-input/) |
 | `mvmctl machine run -d` | Boot a **persistent** machine detached and return immediately |
 | `mvmctl machine run --healthcheck '<cmd>'` | Declare the workload a long-running service: presence alone promotes the run to the **persistent** lifecycle (registered, shows in `machine ls`, torn down via `machine stop <name>`). Runs in the foreground unless combined with `-d`. `<cmd>` is exec'd in the guest by the resident host-agent daemon as its liveness check (exit 0 = healthy), actively probed on `--health-interval`; an unhealthy or crashed service is restarted with bounded exponential backoff. A run whose entrypoint exits still tears down on that exit code — a healthcheck on a run-to-completion task is a no-op |
 | `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec and actively enforced by the host-agent daemon's probe loop |
@@ -61,15 +63,16 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
 | `mvmctl machine run --flake <ref> --flake-profile <variant>` | Flake package variant (e.g. worker, gateway) |
 | `mvmctl machine run --host-service <service>` | Bind a host service the workload may call over the broker channel (repeatable, e.g. `host.audit.v1`). Baked into the signed execution plan: the broker refuses any service absent from the set. Binding an SDK-served service (`host.audit.v1`, `host.cost.v1`, `host.secrets.v1`, `host.time.v1`) also attaches the optional SDK sidecar read-only at `/mvm/sdk`. On an installed `mvmctl` a cold cache downloads the published sidecar for the running version and arch, hash-verifies it, and boots; the launch is refused if the download fails or the artifact is version-mismatched, tampered, or incomplete. From a source checkout the refusal names `nix build ./nix/images/runtime-overlay#sdk-sidecar-image` instead of downloading, because building it needs the builder VM |
-| `mvmctl machine session start <template> --agent-verb <verb>` | Boot a prod session with an explicit ProdSafe agent-verb allow-list instead of the computed sealed-image default. Repeatable; refused with `--dev` |
+| `mvmctl machine session start <template> --agent-verb <verb>` | Boot a prod session with an explicit ProdSafe agent-verb allow-list instead of the computed baked-entrypoint/non-dev default. Repeatable; refused with `--dev` |
 | `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
 | `mvmctl machine stop [name...]` | Stop one or more VMs by name, or `--all` |
 | `mvmctl machine ls` | List every microVM: persistent machines and running transients (alias: `ps`) |
 | `mvmctl machine ls -a` | Also show transient machines that are no longer running |
 | `mvmctl machine ls --json` | Output as JSON |
 | `mvmctl machine forward <name> -p PORT` | Forward a port from a running VM to localhost |
-| `mvmctl machine logs <name>` | View guest console logs (`-f` to follow, `-n` for line count) |
-| `mvmctl machine logs <name> --hypervisor` | View Firecracker hypervisor logs |
+| `mvmctl machine logs <name>` | View the workload's captured stdout/stderr — live while it runs, and still readable after it exits (`-f` to follow, `-n` for how many recorded records to replay first; a record is one captured write, not one line). Workload stdout is written to your stdout and stderr to your stderr, so an ordinary pipeline (`\| grep …`) filters the channel it asked for, and a closed pipe (`\| head -1`) ends the read cleanly rather than erroring. Falls back to the machine's console log when no output capture exists, saying so. Exits nonzero when there is no source at all, and warns on stderr when what it shows is a window rather than the whole run — a truncated capture, a pruned live window, or a hole between the recorded and live halves |
+| `mvmctl machine logs <name> --stream <stdout\|stderr\|trace\|all>` | Show one channel only (default `all`). Refused on a machine whose only source is its console log: that log merges both channels with no labels, so narrowing it has no honest answer. A recorded capture holding nothing on the requested channel is reported as such, not as a missing capture |
+| `mvmctl machine logs <name> --hypervisor` | View the VMM's own diagnostic log (`firecracker.log`) rather than workload output, `-f` to follow it. Firecracker writes one; the other backends do not |
 | `mvmctl machine diff <name>` | Show filesystem changes in a running VM (created/modified/deleted since boot) |
 | `mvmctl machine diff <name> --json` | Output filesystem diff as JSON |
 | `mvmctl machine wait <name> --for <component>` | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2. |
@@ -295,7 +298,10 @@ with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
 security `--profile`, OCI `--image`, signed `--receipt`, `--json`/`--dry-run`,
 and the SDK `--mode`/`--dev`/`--prod` transport. Arbitrary command dispatch
 requires a dev-feature guest agent (the `do_exec` handler is `interactive`-gated,
-claim 4); production guests run their baked entrypoint via `mvmctl machine run --entrypoint` (no shell).
+claim 4). A baked-entrypoint run on a non-dev profile receives the restricted
+ProdSafe grant; PTY and ad-hoc argv runs require DevOnly verbs. Production
+guests run their baked entrypoint via `mvmctl machine run --entrypoint` (no
+shell).
 
 | Command | Description |
 |---------|-------------|
@@ -348,7 +354,8 @@ flag:
 - **Foreground interactive** (`-t`/`--tty`, with `-i` accepted so `-it`
   parses): boot a fresh transient VM, run the requested argv attached to a PTY,
   return that command's exit code, then tear the VM down. **Dev-only** —
-  refused for a sealed image (claim 15) and when stdin is not a terminal.
+  requires DevOnly verbs, is refused for a sealed image (claim 15), and is
+  refused when stdin is not a terminal.
 - **Persistent** (`machine create` + `machine start`, or `machine run -d`):
   boot a machine that survives after the command returns and is reconnectable by
   name through `machine shell`/`exec`/`stop`. Bare `-d` auto-generates a name and
@@ -456,6 +463,48 @@ guest, on any tier.
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
 
+### Workload output capture
+
+`machine run` attaches to the workload's output by default — `--detach`,
+`--json`, and `--up-json` are the three ways to opt out. Interrupting an
+attached run on a **persistent** machine detaches from the output and leaves
+the machine running; the command says so before it blocks.
+
+Every workload's stdout and stderr are captured whether or not anybody is
+watching. Two sources feed one stream: the guest's entrypoint frames over
+vsock, which keep their channel, and the hypervisor's console capture, which
+covers boot and anything written after the guest agent is gone. Console-sourced
+records are recorded as `stdout` whichever fd wrote them, because a console is
+one merged byte stream; a narrowed `--stream` read prints a note saying so.
+
+Records are hash-chained and the recorded transcript is sealed to a Merkle root
+at exit, so `machine logs` verifies what it shows and **exits nonzero on a
+verification failure**, mirroring `mvmctl trust audit verify`. A pruned window
+is not a failure: retention is a ring, so a chatty workload loses its oldest
+records rather than being throttled or killed, and the loss is announced as a
+gap or truncation notice on stderr.
+
+Recording is on by default. `ExecutionPlan.stream_retention` (`persist` /
+`ephemeral`) is a signed plan field, not a CLI flag, recorded on
+the `plan.admitted` audit entry so an absent transcript is attributable rather
+than ambiguous. Nothing selects `ephemeral` today — every production caller
+takes the default — so treat the field as the place a future opt-out will live
+rather than one you can reach now.
+
+Three limits are worth knowing before you rely on this:
+
+- The recorded transcript is redacted; the **console fallback is not**, so a
+  read that falls back to (or splices in) the console shows raw guest bytes.
+- A machine started with `-d` is captured only for as long as the starting
+  process lives, so a detached machine's later output reaches no recorder. You
+  still see it, via the unchained console log.
+- A spliced read **repeats** the part the recording already showed, because
+  console byte offsets and transcript sequence numbers share no coordinate.
+  Duplicated, never lost.
+
+Full walkthrough: [Workload output
+streaming](/guides/workload-output-streaming/).
+
 ### Runtime overlay updates
 
 For overlay-backed guests, runtime updates happen on **start/restart**, not by
@@ -517,8 +566,9 @@ mvmctl machine stop  blue-fox-3f2a --yes      # tear it down when done
 `-d --name <N>` does the same with a name you choose.
 
 **Interactive is dev-only.** `-t`/`--tty` attaches the foreground command to a
-PTY and is refused for a sealed/production image (claim 15 — no interactive
-access to a sealed microVM) and when stdin is not a terminal. `machine run -it`
+PTY and requires DevOnly verbs; it is refused for a sealed/production image
+(claim 15 — no interactive access to a sealed microVM) and when stdin is not a
+terminal. `machine run -it`
 requires an argv after `--`; use `machine shell <name>` (or `machine exec
 <name>` with no argv) for the default shell on an already-running machine.
 

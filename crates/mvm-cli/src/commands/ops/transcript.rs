@@ -19,7 +19,8 @@ use mvm_core::config;
 use mvm_core::crypto::aead;
 use mvm_core::policy::audit::{LocalAuditBuilder, LocalAuditKind, event};
 use mvm_core::transcript::{
-    self, CaptureBinding, CaptureBounds, TranscriptManifest, TranscriptWriter,
+    self, CaptureBinding, CaptureBounds, MANIFEST_FILENAME, RetentionPolicy,
+    TRANSCRIPT_KEK_RECIPIENT as KEK_RECIPIENT, TranscriptManifest, TranscriptWriter,
     TranscriptWriterConfig,
 };
 use mvm_hostd::supervisor::audit::{
@@ -30,8 +31,6 @@ use mvm_hostd::supervisor::verify_audit_chain_entries;
 
 use super::super::vm::host_signer::PUBLIC_FILENAME;
 
-const MANIFEST_FILE: &str = "manifest.json";
-const KEK_RECIPIENT: &str = "transcript-kek";
 const DEFAULT_TENANT: &str = "local";
 const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_MAX_CHUNKS: u64 = 100_000;
@@ -192,7 +191,7 @@ impl TranscriptCtx {
         capture_id: &str,
     ) -> Result<(PathBuf, TranscriptManifest)> {
         let dir = self.capture_dir(tenant, capture_id);
-        let path = dir.join(MANIFEST_FILE);
+        let path = dir.join(MANIFEST_FILENAME);
         let raw = std::fs::read_to_string(&path).with_context(|| {
             format!("no such capture {capture_id} (looked in {})", dir.display())
         })?;
@@ -227,6 +226,9 @@ impl TranscriptCtx {
                 session_id: session.map(str::to_string),
             },
             bounds,
+            // A forensic capture of discrete frames is right to stop at its
+            // bound rather than quietly drop the start of what it recorded.
+            retention: RetentionPolicy::FailClosed,
             created_unix_secs: now_unix_secs(),
             recipient: KEK_RECIPIENT.to_string(),
             wrapped_data_key_b64: wrapped,
@@ -375,7 +377,7 @@ impl TranscriptCtx {
 }
 
 fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
-    let path = dir.join(MANIFEST_FILE);
+    let path = dir.join(MANIFEST_FILENAME);
     let json = serde_json::to_string_pretty(manifest)?;
     mvm_core::atomic_io::atomic_write(&path, json.as_bytes())
         .with_context(|| format!("writing {}", path.display()))
@@ -515,6 +517,7 @@ mod tests {
                 capture_id: manifest.capture_id.clone(),
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
+                retention: manifest.retention,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
@@ -546,6 +549,7 @@ mod tests {
                 capture_id: manifest.capture_id.clone(),
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
+                retention: manifest.retention,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
@@ -556,9 +560,9 @@ mod tests {
         write_manifest(&dir, &sealed).unwrap();
         anchor_manifest(&c, &sealed);
         // Same-length byte flip → hash mismatch on export.
-        let mut ct = std::fs::read(dir.join("0.chunk")).unwrap();
+        let mut ct = std::fs::read(dir.join("0.seg")).unwrap();
         ct[0] ^= 0xff;
-        std::fs::write(dir.join("0.chunk"), &ct).unwrap();
+        std::fs::write(dir.join("0.seg"), &ct).unwrap();
 
         assert!(c.export("t1", &id).is_err());
         assert!(audit_contains(&c, "transcript_refused"));

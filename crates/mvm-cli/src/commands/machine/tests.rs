@@ -1,5 +1,5 @@
 use super::receipt::MachineStartInitPolicy;
-use super::runtime::resolve_persistent_spec;
+use super::runtime::{PostStart, post_start_action, resolve_persistent_spec};
 use super::*;
 use crate::commands::{Cli, Commands};
 use clap::{CommandFactory, Parser};
@@ -2449,6 +2449,45 @@ fn advance_does_not_collide_with_the_port_forward_verb() {
     // `forward` still routes to the folded port-forwarding op, untouched.
     let forward = parse(&["forward", "myvm", "8080:80"]).expect("parse forward");
     assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
+}
+
+// ── post-start behaviour: attach unless told otherwise ────────────────────
+
+/// `machine run` used to end by printing "attach with `machine shell`" — the
+/// dev-only interactive path a sealed production machine bars outright, so the
+/// advice was unusable exactly where seeing output matters most. The default is
+/// now a real attach to the output stream; the machine-readable and detached
+/// forms keep their contracts.
+#[test]
+fn a_persistent_run_attaches_to_output_by_default() {
+    let args = parse_run(&["run", "--name", "m", "--ttl", "1h"]).expect("parse run");
+    assert!(!args.detach, "--ttl alone must not imply detach");
+    assert_eq!(post_start_action(&args), PostStart::Attach);
+}
+
+#[test]
+fn detach_prints_the_machine_id_instead_of_attaching() {
+    let args = parse_run(&["run", "-d", "--name", "m"]).expect("parse run");
+    assert_eq!(post_start_action(&args), PostStart::PrintId);
+}
+
+#[test]
+fn the_machine_readable_forms_never_attach() {
+    // Attaching would interleave workload bytes with the envelope a caller is
+    // parsing off stdout.
+    let envelope = parse_run(&["run", "--name", "m", "--up-json"]).expect("parse run");
+    assert_eq!(post_start_action(&envelope), PostStart::Envelope);
+
+    let json = parse_run(&["run", "--name", "m", "--json", "--ttl", "1h"]).expect("parse run");
+    assert_eq!(post_start_action(&json), PostStart::Quiet);
+}
+
+/// `--up-json` wins over `--detach`: the SDK boot envelope is the whole point
+/// of that flag, and a bare machine id would not parse as one.
+#[test]
+fn the_boot_envelope_outranks_the_detached_id() {
+    let args = parse_run(&["run", "-d", "--name", "m", "--up-json"]).expect("parse run");
+    assert_eq!(post_start_action(&args), PostStart::Envelope);
 }
 
 // ---- networking -----------------------------------------------------

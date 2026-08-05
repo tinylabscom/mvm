@@ -9,12 +9,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mvm_agentd::entrypoint::{CallCaps, CallOutcome, PayloadCapStream, execute};
+use mvm_agentd::entrypoint::{CallCaps, EntrypointCall};
+use mvm_agentd::entrypoint_stream::stream_call;
+use mvm_agentd::stream_input::InputDesk;
+use mvm_agentd::stream_pump::{CapturedOutput, StreamGap};
 use mvm_agentd::vsock::{
     ComponentState, EntrypointEvent, FsChange, FsChangeKind, GuestResponse, RunEntrypointError,
 };
 use mvm_agentd::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_agentd::worker_protocol::WorkerOutcome;
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 
 use crate::HandlerCtx;
 use crate::globals::{
@@ -106,9 +110,21 @@ fn emit_entrypoint_bytes(file: &mut dyn Write, bytes: &[u8], stdout: bool) {
     }
 }
 
-fn emit_entrypoint_output(file: &mut dyn Write, stdout: &[u8], stderr: &[u8]) {
-    emit_entrypoint_bytes(file, stdout, true);
-    emit_entrypoint_bytes(file, stderr, false);
+/// Replay one call's captured output onto the response stream: stdout, then
+/// stderr, then every control record. A retention gap is appended to the
+/// control records rather than written inline, so the host learns output was
+/// dropped without the notice landing in the middle of the workload's own
+/// bytes.
+///
+/// The warm path only. A warm worker answers with one buffered frame, so
+/// replay is all there is to do with it; the cold path streams each event as
+/// the pump produces it and never assembles a buffer to replay.
+fn emit_captured_output(file: &mut dyn Write, output: CapturedOutput) {
+    emit_entrypoint_bytes(file, &output.stdout, true);
+    emit_entrypoint_bytes(file, &output.stderr, false);
+    let mut records = output.controls;
+    records.extend(output.gaps.iter().map(StreamGap::control_record));
+    emit_controls(file, records);
 }
 
 /// Handle a `RunEntrypoint` request. Writes streaming events directly via
@@ -129,12 +145,25 @@ fn handle_run_entrypoint(
     stdin: Vec<u8>,
     timeout_secs: u64,
     env: Vec<(String, String)>,
+    stream_input: bool,
 ) -> GuestResponse {
     // When a warm-process pool is active, route through it instead
     // of the cold-respawn path. The host wire is identical;
     // the pool's `dispatch` synthesizes the same `EntrypointEvent`
     // stream (Stdout / Stderr / Exit | Error) we'd produce below.
     if let Some(Some(pool)) = WARM_POOL.get() {
+        // A warm worker's stdin belongs to the pool, not to this call, so
+        // there is no pipe to hand the input desk. Refusing is the only honest
+        // answer: accepting and quietly ignoring the flag would leave the host
+        // holding an input lease, and the writer offering frames, for a stdin
+        // that closed before the workload ever ran.
+        if stream_input {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::InternalError,
+                message: "streamed stdin is not available while a warm process pool is active"
+                    .into(),
+            });
+        }
         return dispatch_via_warm_pool(file, pool, stdin, timeout_secs, env);
     }
 
@@ -174,92 +203,46 @@ fn handle_run_entrypoint(
         }
     };
 
-    let outcome = execute(
+    let call = EntrypointCall {
         entrypoint,
-        tmpdir.path(),
-        &stdin,
-        Duration::from_secs(timeout_secs),
-        CallCaps::v1(),
+        cwd: tmpdir.path(),
+        stdin: &stdin,
+        timeout: Duration::from_secs(timeout_secs),
+        caps: CallCaps::v1(),
         env,
-    );
+        stream_input,
+    };
 
-    // tmpdir drops at end of scope (or on early-return below) and runs
-    // its `Drop` cleanup.
-    match outcome {
-        CallOutcome::Exited {
-            code,
-            stdout,
-            stderr,
-            controls,
-        } => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
-            evt(EntrypointEvent::Exit { code })
-        }
-        CallOutcome::Timeout {
-            stdout,
-            stderr,
-            controls,
-        } => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
-            evt(EntrypointEvent::Error {
-                kind: RunEntrypointError::Timeout,
-                message: format!("wrapper exceeded {timeout_secs}s timeout"),
-            })
-        }
-        CallOutcome::PayloadCap {
-            stream,
-            stdout,
-            stderr,
-            controls,
-        } => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
-            let stream_name = match stream {
-                PayloadCapStream::Stdin => "stdin",
-                PayloadCapStream::Stdout => "stdout",
-                PayloadCapStream::Stderr => "stderr",
-            };
-            evt(EntrypointEvent::Error {
-                kind: RunEntrypointError::PayloadCap,
-                message: format!("{stream_name} exceeded its cap"),
-            })
-        }
-        CallOutcome::SpawnFailed { message } => evt(EntrypointEvent::Error {
-            kind: RunEntrypointError::InternalError,
-            message,
-        }),
-        CallOutcome::WrapperCrashed {
-            signal,
-            stdout,
-            stderr,
-            controls,
-        } => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
-            evt(EntrypointEvent::Error {
-                kind: RunEntrypointError::WrapperCrashed,
-                message: format!("wrapper exited via signal {signal}"),
-            })
-        }
-    }
+    // Each event is framed the moment it arrives, so the host sees a
+    // long-running workload's output while it is still running. Nothing is
+    // held back to be replayed after the child exits — that replay is what
+    // made a streaming pump look silent from the outside. A `Control` here is
+    // either the agent's own (a retention gap, constructed in-process) or one
+    // that came off fd 3 through the reserved-kind gate, so a workload still
+    // cannot mint an agent-authored record.
+    //
+    // tmpdir drops at end of scope and runs its `Drop` cleanup.
+    let terminal = stream_call(call, &mut |event| {
+        write_response(&mut *file, &evt(event));
+    });
+    evt(terminal)
 }
 
-/// Emit each fd-3 control record as one `EntrypointEvent::Control`
-/// frame on the response stream. The cold-path counterpart to the
-/// wrapper's own control emission. v1 emits all records after stdout
-/// and stderr; the host already accepts non-terminal events in any
+/// Emit each control record a warm worker returned as one
+/// `EntrypointEvent::Control` frame on the response stream. Records go out
+/// after stdout and stderr, which the worker's single buffered response frame
+/// leaves no way to improve on; the host accepts non-terminal events in any
 /// order before the terminal `Exit` / `Error`.
+///
+/// Every record here has already passed the reserved-kind gate at the pool's
+/// ingest, so this writes agent-authored records and workload records that do
+/// not claim to be one.
 fn emit_controls(file: &mut dyn Write, records: Vec<mvm_agentd::entrypoint::ControlRecord>) {
-    for r in records {
-        write_response(
-            file,
-            &evt(EntrypointEvent::Control {
-                header_json: r.header_json,
-                payload: r.payload,
-            }),
-        );
+    for record in records {
+        // The conversion is also where the frame budget applies, so a record
+        // too wide to frame becomes a bounded notice instead of an oversized
+        // frame the writer would replace with a fatal error response.
+        write_response(file, &evt(record.into()));
     }
 }
 
@@ -292,8 +275,17 @@ fn dispatch_via_warm_pool(
             controls,
             outcome,
         }) => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
+            // The pool answers with buffers rather than a pump, so it can
+            // never report a gap — but it goes out the one emission path.
+            emit_captured_output(
+                file,
+                CapturedOutput {
+                    stdout,
+                    stderr,
+                    controls,
+                    gaps: Vec::new(),
+                },
+            );
             match outcome {
                 WorkerOutcome::Exit { code } => evt(EntrypointEvent::Exit { code }),
                 WorkerOutcome::Error { kind, message } => evt(EntrypointEvent::Error {
@@ -599,6 +591,7 @@ pub(crate) fn handle_run_entrypoint_request(
     stdin: Vec<u8>,
     timeout_secs: u64,
     env: Vec<(String, String)>,
+    stream_input: bool,
 ) -> GuestResponse {
     if matches!(
         ctx.boot_state.snapshot().entrypoint,
@@ -610,8 +603,24 @@ pub(crate) fn handle_run_entrypoint_request(
                 .to_string(),
         })
     } else {
-        handle_run_entrypoint(ctx.file, stdin, timeout_secs, env)
+        handle_run_entrypoint(ctx.file, stdin, timeout_secs, env, stream_input)
     }
+}
+
+/// Deliver one host-admitted input frame to the running workload's stdin.
+///
+/// Nothing here re-decides whether the writer was allowed to send it: that is
+/// the host gate's job, and it is the only place with the signed plan, the
+/// lease and the secret set to decide it with. The desk's own refusals are
+/// about *delivery* — no workload, a frame out of order, a queue at its
+/// budget — and none of them wait on the workload to read.
+pub(crate) fn handle_stream_input(frame: InputFrame) -> GuestResponse {
+    GuestResponse::StreamInputResult(InputDesk::write_frame(frame))
+}
+
+/// Deliver the withheld tail, then close the workload's stdin.
+pub(crate) fn handle_close_stream_input(close: CloseInput) -> GuestResponse {
+    GuestResponse::StreamInputResult(InputDesk::close(close))
 }
 
 #[cfg(not(feature = "interactive"))]

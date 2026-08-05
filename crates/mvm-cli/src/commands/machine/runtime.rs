@@ -1,6 +1,6 @@
 use super::*;
 use crate::commands::shared;
-use crate::commands::vm::invoke;
+use crate::commands::vm::{invoke, logs};
 use mvm_client::MvmClient;
 
 pub(super) fn resolve_persistent_spec(
@@ -137,24 +137,78 @@ fn run_persistent_post_start(
             cfg,
         );
     }
-    if args.up_json {
-        let build_mode_str = resolve_build_mode_for_envelope(args, name);
-        let envelope = serde_json::json!({
-            "schema_version": 1,
-            "vm_id": name,
-            "build_mode": build_mode_str,
-        });
-        println!("{envelope}");
-        return Ok(());
-    }
-    if !args.json {
-        if args.detach {
+    match post_start_action(args) {
+        PostStart::Envelope => {
+            let build_mode_str = resolve_build_mode_for_envelope(args, name);
+            let envelope = serde_json::json!({
+                "schema_version": 1,
+                "vm_id": name,
+                "build_mode": build_mode_str,
+            });
+            println!("{envelope}");
+            Ok(())
+        }
+        PostStart::Quiet => Ok(()),
+        PostStart::PrintId => {
             println!("{name}");
-        } else {
-            println!("machine {name} is up; attach with `machine shell {name}`");
+            Ok(())
+        }
+        PostStart::Attach => attach_to_output(name),
+    }
+}
+
+/// What `machine run` does once a persistent machine is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PostStart {
+    /// `--up-json`: the SDK boot envelope, and nothing else on stdout.
+    Envelope,
+    /// `--json`: the caller is parsing stdout, so say nothing extra.
+    Quiet,
+    /// `-d`/`--detach`: the machine id, for a caller that will come back later.
+    PrintId,
+    /// The default: follow the machine's output.
+    Attach,
+}
+
+/// Resolve the post-start behaviour from the flags alone, so the choice is
+/// testable without booting anything.
+pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
+    if args.up_json {
+        PostStart::Envelope
+    } else if args.json {
+        PostStart::Quiet
+    } else if args.detach {
+        PostStart::PrintId
+    } else {
+        PostStart::Attach
+    }
+}
+
+/// Follow a freshly-started machine's output.
+///
+/// Replaces a hint pointing at `machine shell`, which is the dev-only
+/// interactive path a sealed production machine bars outright — so the advice
+/// was unusable exactly where output matters most. Attaching to the capture
+/// works on every backend and in production, because the host owns it.
+///
+/// A machine with no capture is a note, not a failure: the machine booted, and
+/// that is what `machine run` was asked to do.
+fn attach_to_output(name: &str) -> Result<()> {
+    // Say what attaching means before it blocks. The machine is persistent, so
+    // interrupting detaches from the output and leaves it running — the
+    // opposite of what Ctrl-C does to a foreground transient run, and worth
+    // stating rather than leaving to be discovered.
+    eprintln!("attached to machine {name}; press Ctrl-C to detach (it keeps running)");
+    match logs::attach(name)? {
+        logs::AttachOutcome::Followed => Ok(()),
+        logs::AttachOutcome::NoCapture => {
+            eprintln!(
+                "note: machine {name} has no output capture to attach to; \
+                 `machine logs {name}` will show it once one exists"
+            );
+            Ok(())
         }
     }
-    Ok(())
 }
 
 fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
@@ -223,8 +277,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
     // Resolve `--net` / `--allow-host` into the egress policy exactly as the
     // transient argv path does, so a baked entrypoint enforces the same posture.
     let network_policy = shared::resolve_run_network_policy(args.net, &args.allow_host)?;
-    use std::io::IsTerminal as _;
-    let stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+    let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     invoke::run_entrypoint(invoke::EntrypointCall {
         source,
         stdin,
@@ -241,6 +294,41 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         attach: args.attach,
         network_policy,
     })
+}
+
+/// Turn `--stdin` into what the entrypoint call should do about stdin.
+///
+/// Three shapes, and the flag's value is what picks between them:
+/// - absent — read a piped stdin to the end and send it as one payload, which
+///   is what this command has always done and what nothing should change for a
+///   caller who did not ask;
+/// - `-` — stream this process's own stdin, which is a different contract with
+///   the guest (its stdin stays open, EOF is something the host sends) and so
+///   needs the input grant on the signed plan;
+/// - a path — read that file and send it as one payload; a file has an end the
+///   host already knows, so there is nothing to stream.
+fn resolve_entrypoint_stdin(spec: Option<&str>) -> Result<invoke::EntrypointStdin> {
+    resolve_entrypoint_stdin_with(spec, || {
+        use std::io::IsTerminal as _;
+        invoke::read_auto_stdin(std::io::stdin().is_terminal())
+    })
+}
+
+/// The mapping itself, with the one arm that reads this process's own stdin
+/// supplied rather than reached for — so every shape of the flag is decidable
+/// without a real fd behind it.
+fn resolve_entrypoint_stdin_with(
+    spec: Option<&str>,
+    piped: impl FnOnce() -> Result<Vec<u8>>,
+) -> Result<invoke::EntrypointStdin> {
+    match spec {
+        Some("-") => Ok(invoke::EntrypointStdin::Streaming),
+        Some(path) => Ok(invoke::EntrypointStdin::OneShot(
+            std::fs::read(path)
+                .with_context(|| format!("reading the entrypoint's stdin payload from {path}"))?,
+        )),
+        None => Ok(invoke::EntrypointStdin::OneShot(piped()?)),
+    }
 }
 
 /// Whether the launch's workload declared that it needs a real in-guest IP
@@ -346,6 +434,9 @@ pub(in crate::commands) fn boot_persistent_by_name(
             flake,
             kernel_pin,
             hypervisor,
+            // Booting by name carries no caller stdin, so it requests no input
+            // grant and the plan stays ungranted.
+            stdin: None,
             detach: true,
             image: None,
             manifest: None,
@@ -385,6 +476,108 @@ pub(in crate::commands) fn boot_persistent_by_name(
         },
         cfg,
     )
+}
+
+#[cfg(test)]
+mod entrypoint_stdin_tests {
+    use super::*;
+
+    /// Name the variant the flag resolved to. A payload and a stream are
+    /// different contracts with the guest, and only one of them puts the input
+    /// grant on the signed plan — so "it parsed" is not the property.
+    fn described(resolved: &invoke::EntrypointStdin) -> String {
+        match resolved {
+            invoke::EntrypointStdin::Streaming => "streaming".to_string(),
+            invoke::EntrypointStdin::OneShot(bytes) => {
+                format!("one-shot {:?}", String::from_utf8_lossy(bytes))
+            }
+        }
+    }
+
+    fn nothing_piped() -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    /// `expect_err` needs `Debug` on the success type, and the success type
+    /// here carries the caller's own stdin — which has no business in a panic
+    /// message. Name the variant instead.
+    fn refusal(resolved: Result<invoke::EntrypointStdin>, why: &str) -> anyhow::Error {
+        match resolved {
+            Err(error) => error,
+            Ok(resolved) => panic!("{why}, got {}", described(&resolved)),
+        }
+    }
+
+    #[test]
+    fn a_dash_asks_for_a_live_stream_rather_than_a_payload() {
+        // Resolving this to a payload would disable the feature outright: no
+        // grant requested, nothing streamed, and a green suite — the caller's
+        // only symptom is a workload that never sees what they typed.
+        let resolved =
+            resolve_entrypoint_stdin_with(Some("-"), nothing_piped).expect("`-` needs no fd");
+        assert!(
+            matches!(resolved, invoke::EntrypointStdin::Streaming),
+            "`--stdin -` must stream, got {}",
+            described(&resolved)
+        );
+    }
+
+    #[test]
+    fn a_path_is_read_once_and_sent_as_a_payload() {
+        // A file has an end the host already knows, so there is nothing to
+        // stream and nothing to ask a grant for.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("payload.json");
+        std::fs::write(&path, b"[[1], {}]").expect("write");
+        let resolved = resolve_entrypoint_stdin_with(Some(&path.to_string_lossy()), nothing_piped)
+            .expect("the file exists");
+        match resolved {
+            invoke::EntrypointStdin::OneShot(bytes) => assert_eq!(bytes, b"[[1], {}]"),
+            other => panic!("a path must send a payload, got {}", described(&other)),
+        }
+    }
+
+    #[test]
+    fn an_absent_flag_keeps_the_piped_payload_it_always_had() {
+        // Inferring a stream from a piped stdin would move every existing
+        // piped call onto the granted path without anybody asking for it.
+        let resolved = resolve_entrypoint_stdin_with(None, || Ok(b"piped in".to_vec()))
+            .expect("the piped read succeeded");
+        match resolved {
+            invoke::EntrypointStdin::OneShot(bytes) => assert_eq!(bytes, b"piped in"),
+            other => panic!("an absent flag must not stream, got {}", described(&other)),
+        }
+    }
+
+    #[test]
+    fn a_stdin_path_that_does_not_exist_fails_rather_than_sending_nothing() {
+        // Silently sending an empty payload would call the entrypoint with the
+        // wrong input and report success.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("absent.json");
+        let error = refusal(
+            resolve_entrypoint_stdin_with(Some(&missing.to_string_lossy()), nothing_piped),
+            "a missing payload file must not resolve",
+        );
+        assert!(
+            format!("{error:#}").contains("absent.json"),
+            "the refusal must name the file it could not read: {error:#}"
+        );
+    }
+
+    #[test]
+    fn a_failed_piped_read_fails_the_call() {
+        let error = refusal(
+            resolve_entrypoint_stdin_with(None, || {
+                Err(anyhow::anyhow!("stdin payload exceeds the limit"))
+            }),
+            "an unreadable stdin must not resolve to an empty payload",
+        );
+        assert!(
+            format!("{error:#}").contains("exceeds the limit"),
+            "{error:#}"
+        );
+    }
 }
 
 #[cfg(test)]

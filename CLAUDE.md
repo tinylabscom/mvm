@@ -95,7 +95,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge/native-gateway/passt impl lives in `mvm-runtime`.
 - `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
 - `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait + every backend impl (`libkrun`/`hvf_backend`+`hvf/`/`firecracker`/`qemu`/`mock`), VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
-- `mvm-client` -- the local/remote client facade behind one `dyn MvmClient`: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature). The CLI and SDKs route through it.
+- `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
 - `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries.
 
 **Top of graph (daemons, SDK, FFI):**
@@ -170,28 +170,36 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ## Security model
 
-mvm makes fifteen CI-enforced security claims (numbered 1–15 in
-`specs/claims/catalog.md`, the contiguous ledger), plus a `Preview`
-claim 16 (egress-substitution leak-gate, ADR-023 — witnesses are
-machine-checked but promotion into ADR-001's numbered prose is a
-pending maintainer decision, mirroring claim 14's path). Each one is
+mvm makes fifteen CI-enforced security claims (numbered 1–15), plus two
+`Preview` claims: 16 (egress-substitution leak-gate, ADR-023) and 17
+(workload input plane). For both, witnesses are machine-checked but
+promotion into ADR-001's numbered prose is a pending maintainer
+decision, mirroring claim 14's path. Each one is
 backed by a test or a workflow gate. **ADR-001
 (`specs/adrs/001-microvm-security-posture.md`) is the source of truth**
 for the claim numbering, threat model, and per-backend tier matrix;
-this section is the summary. Implementation is sequenced in
-`specs/plans/25-microvm-hardening.md`.
+this section is the summary.
 
-The claim→witness mapping is machine-checked: `specs/claims/catalog.md`
-is the source of truth for which test/CI lane backs which claim, and
-`xtask check-claim-catalog` (a Lint-job gate) fails if a named witness
-stops existing. Keep that table in sync when you rename or move a
-witness — the prose below is the narrative, the catalog is the ledger.
+**The ledger is the claims table inside ADR-001**, not a separate
+catalog file: `xtask check-claim-catalog` parses that table (rows 1–17,
+witnesses spelled `fn:<test_name>` / `ci:<job_name>`) and fails when a
+named witness stops existing. `model/claims.toml` is the parallel
+conformance ID register that `xtask check-conformance` reads. There is
+no `specs/claims/` directory; earlier revisions of this file pointed at
+`specs/claims/catalog.md`, which has never existed on this branch.
+
+Keep the ADR-001 table in sync when you rename or move a witness. The
+prose below is the narrative and the table is the ledger — and when the
+two disagree, **the table is right**: it is gated and the prose is not.
+Do not name a test here without checking it exists (`rg 'fn <name>'`);
+several of the names below were fabricated and survived for months
+precisely because nothing checks this file.
 
 Claim lineage:
 
 - Claims 1–7 ship with ADR-001's original posture.
-- Claim 8 was added by plan 64 (`specs/plans/64-supervisor-wiring.md`)
-  — see ADR-014 (`specs/adrs/014-signed-audited-execution-plans.md`).
+- Claim 8 was added by the supervisor-wiring plan — see ADR-014
+  (`specs/adrs/014-signed-audited-execution-plans.md`).
 - Claim 9 (signed bundles content-addressed) is Sprint 52 W2.
 - Claim 10 (default-deny egress) is Sprint 52 W3.
 - Claim 11 (app-dep volume sealed) was added by ADR-014 / Plan 73
@@ -202,20 +210,14 @@ Claim lineage:
   (`specs/adrs/020-host-services-broker.md`) /
   ADR-023 (`specs/adrs/023-secrets-subsystem-egress-substitution.md`).
 - Claim 15 (no interactive access to a sealed production microVM) was
-  added by Plan 165 WS-C
-  (`specs/plans/165-entrypoint-presence-and-sealed-interactivity.md`) —
-  the same interactive-access threat family as claim 4 / `do_exec`.
+  added by Plan 165 WS-C — the same interactive-access threat family as
+  claim 4 / `do_exec`.
 
-A fourteenth property — **OCI image provenance recorded in the
-chain-signed audit log** — has its own claim doc at
-`specs/claims/claim-10-oci-image-provenance.md` and is enforced
-under the claim 8 admission flow; promotion to the ADR-001 numbered
-table is tracked in `specs/plans/111-cardoso-gap-coordination.md`.
+OCI image provenance recorded in the chain-signed audit log is row 14
+of the ADR-001 table, enforced under the claim 8 admission flow.
 
-Companion docs: the Cardoso minimum-viable-policy mapping lives in
-ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist", and
-the source gap analysis is at
-`specs/research/sandboxes-for-ai-cardoso-gap-analysis.md`.
+Companion doc: the Cardoso minimum-viable-policy mapping lives in
+ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 
 1. **No host-fs access from a guest beyond explicit shares.** Per-service
    uid (W2.1), seccomp `standard` default (W1.1, W2.4), and `setpriv
@@ -226,16 +228,21 @@ the source gap analysis is at
    entry (W2.2).
 3. **A tampered rootfs ext4 fails to boot.** dm-verity sidecar +
    kernel-cmdline roothash + `mvm-verity-init` initramfs (W3 —
-   shipped 2026-04-30; see plan 27 + the runbook in
-   `specs/adrs/001-microvm-security-posture.md` §"Runbook: W3
-   verified-boot verification"). CI lane `verified-boot-artifacts`
-   in `security.yml` asserts the artifacts are emitted; live-KVM
-   tamper regression confirms the kernel panics before userspace
-   on a flipped data block.
+   shipped 2026-04-30; see plan 27 and the claim-3 row of
+   `specs/adrs/001-microvm-security-posture.md`'s "Claims ledger
+   (claim → witness)" table — there is no separate runbook section).
+   CI lane `verified-boot-artifacts` in `security.yml` asserts the
+   artifacts are emitted; `verify_and_resume_rejects_tampered_mem`
+   confirms a tampered snapshot is rejected before resume, and
+   live-KVM tamper regression confirms the kernel panics before
+   userspace on a flipped data block.
 4. **The guest agent does not contain `do_exec` in production
-   builds.** `prod-agent-no-exec` job in `.github/workflows/ci.yml`
-   builds the agent without `interactive` and asserts the
-   `mvm_guest_agent::do_exec` symbol is absent (W4.3).
+   builds.** `scripts/check-prod-agent-no-exec.sh`, run by the
+   `prod-agent-runentry-contract` job in
+   `.github/workflows/security.yml` (tag pushes + nightly cron +
+   manual dispatch, not every PR), builds the agent without
+   `interactive` and asserts the `mvm_guest_agent::do_exec` symbol is
+   absent (W4.3).
 5. **Vsock framing + supervisor-config JSON + the datapath ingress are
    fuzzed.** `cargo-fuzz` targets at `crates/mvm-agentd/fuzz/` cover
    `GuestRequest` and `AuthenticatedFrame` (W4.2).
@@ -252,16 +259,24 @@ the source gap analysis is at
    host↔guest type ensures unexpected fields fail-closed (W4.1). The
    virtio-net frame parsers that Plan 87/88 brought online live
    inside libkrun (C), passt (C), and gvproxy (Go) — their fuzz
-   coverage belongs upstream and is tracked in ADR-003 §"New
-   untrusted-input surfaces". Since the vsock-egress convergence
+   coverage belongs upstream, in those projects' own repositories;
+   `specs/adrs/003-hypervisor-egress-policy.md` was rewritten around
+   the vsock-only chokepoint and no longer tracks this gap under any
+   heading. Since the vsock-egress convergence, though,
    those three parsers are **off the workload path entirely** (no
    workload guest has a NIC); they remain reachable only from
    builder-VM and Stage 0 traffic, which carries no untrusted
    tenant workload.
-6. **Pre-built dev image is hash-verified.** `download_dev_image`
-   fetches the per-arch `*-checksums-sha256.txt` manifest, streams
-   the artifact through SHA-256, and rejects + deletes on mismatch
-   (W5.1). `MVM_SKIP_HASH_VERIFY=1` is the documented emergency
+6. **Pre-built dev image is hash-verified.** No function named
+   `download_dev_image` exists; the real pipeline is
+   `fetch_expected_hashes` + `verify_artifact_hash`
+   (`crates/mvm-cli/src/commands/env/artifact_verify.rs`), which fetch
+   the per-arch `*-checksums-sha256.txt` manifest, stream the
+   artifact through SHA-256, and reject + delete on mismatch (W5.1).
+   The builder-VM/dev-image orchestration in
+   `crates/mvm-cli/src/commands/env/builder_vm/stage0_cache.rs`
+   (`download_builder_vm_image`) and `.../builder_vm/default_microvm.rs`
+   call them. `MVM_SKIP_HASH_VERIFY=1` is the documented emergency
    escape; never set it in CI.
 7. **Cargo deps are audited on every PR.** `deny.toml` + the `deny`
    and `audit` jobs in CI (W5.2). Reproducibility double-build
@@ -269,7 +284,8 @@ the source gap analysis is at
 8. **Every workload runs from a signed, audited `ExecutionPlan`.**
    `mvmctl up` synthesizes a typed `ExecutionPlan`, signs it under
    the host's Ed25519 keypair at `~/.mvm/keys/host-signer.ed25519`
-   (mode 0600), verifies it through `mvm_plan::verify_plan`,
+   (mode 0600), verifies it through `mvm_core::plan::verify_plan`
+   (`mvm_plan` is not a crate — `plan` is a module of `mvm-core`),
    enforces the G4 validity window + nonce replay-store, and only
    then dispatches the backend. Each admission emits
    `plan.admitted` / `plan.launched` / `plan.failed` chain-signed
@@ -282,8 +298,9 @@ the source gap analysis is at
    protects the host signer's redacted `Debug`).
 9. **Every published bundle is content-addressed, key_id-pinned, and
    re-verified at fetch and at admit time.** Sprint 52 W2 +
-   admit-time re-verify follow-on. `mvm_plan::bundle::read_and_verify_bundle`
-   + `mvm_plan::bundle::verify_plan_bundle` exercise the
+   admit-time re-verify follow-on.
+   `mvm_core::plan::bundle::read_and_verify_bundle`
+   + `mvm_core::plan::bundle::verify_plan_bundle` exercise the
    rejection ladder on every PR: unknown-key, tampered manifest,
    key_id mismatch, tampered artifact, missing artifact, unsafe
    path, schema bump, pin-archive sha256 drift, pin-signature
@@ -291,8 +308,8 @@ the source gap analysis is at
    assert refusal on pin-without-context and pin-archive mismatch.
 10. **No untrusted workload reaches the network unless explicitly
     admitted by policy.** Sprint 52 W3. `policy_default_is_deny_all`
-    + `test_resolve_network_policy_default_is_deny_all` assert the
-    default-deny posture; `mvmctl up` emits an opt-in warning when
+    and `run_net_default_is_deny_all` (the ADR-001 row's witnesses)
+    assert the default-deny posture; `mvmctl up` emits an opt-in warning when
     the resolved policy is `unrestricted` (escape hatch is
     `MVM_ACK_UNRESTRICTED_NETWORK=1`, never set in CI). Cardoso-flavoured
     audit of DNS / vsock control-plane carve-out / Plan 104 broker
@@ -310,8 +327,11 @@ the source gap analysis is at
    closed on high/critical CVE findings or stub SBOM/CVE
    (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
    inspect` / `mvmctl deps audit` surface the sealed sidecars without
-   a VM spawn. The `app-deps-audit` job in `.github/workflows/ci.yml`
-   (Followup D) gates every PR: it exercises `mvmctl build compile` on
+   a VM spawn. The `app-deps-audit` job lives in
+   `.github/workflows/ci-full.yml` (Followup D), not `ci.yml` — that
+   workflow is `workflow_dispatch`-only, so this lane does **not**
+   gate every PR; it runs on manual dispatch. It exercises `mvmctl
+   build compile` on
    `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
    fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
    asserts `mvmctl deps inspect --json` reports a well-formed report,
@@ -325,33 +345,40 @@ the source gap analysis is at
 12. **Every host-side service the broker exposes is bound to a signed
     `ExecutionPlan.services` binding, enforced before handler
     dispatch, and audited via the chain-signed log.** Plan 104 W2 /
-    ADR-020. `service_call_denied_when_unbound` +
-    `service_call_denied_outside_profile` +
-    `audit_chain_contains_service_call_entries` +
-    `audit_chain_carries_no_payload_bytes` exercise the rejection
-    ladder. `xtask check-handler-adr-coverage` +
-    `xtask check-handler-policy-schema` +
-    `xtask check-handler-composition` lint the handler registry.
-    `fuzz_service_call.rs` (Plan 104 W6) exercises the dispatch
-    surface.
+    ADR-020. Witnesses, per the ADR-001 row:
+    `unbound_service_returns_not_bound` and
+    `service_call_rejects_unknown_envelope_fields`.
+
+    Earlier revisions of this bullet named
+    `service_call_denied_when_unbound`,
+    `service_call_denied_outside_profile`,
+    `audit_chain_contains_service_call_entries`,
+    `audit_chain_carries_no_payload_bytes`, a `fuzz_service_call.rs`
+    target, and three `xtask check-handler-*` gates. **None of them
+    exist**, and none ever did on this branch. The ADR-001 row was
+    always correct, so `check-claim-catalog` never went red — only this
+    file was wrong, which is why the ledger and not the narrative is
+    authoritative. Payload-freedom for the stream plane's own audit
+    entries is witnessed by
+    `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
 13. **No raw secret value crosses the broker channel.**
     `host.secrets.v1` returns destination-bound, time-bound signed
     credentials only; raw secret bytes never leave the supervisor's
-    address space. Plan 104 W5 / ADR-023 / ADR-020.
-    `host_secrets_v1_denied_outside_allowed_destinations` +
-    `zeroize_drop_zeros_secret_bytes` +
-    `handler_inter_call_memory_hygiene` +
-    `host_secrets_v1_signed_payload_jcs_roundtrip` +
-    `secrets_subprocess_cannot_reach_supervisor_memory` +
-    `placeholder_in_outbound_request_dropped_and_audited`
-    (S25 backstop) tests; ADR-023 hostile-guest matrix in W7.
+    address space. Plan 104 W5 / ADR-023 / ADR-020. Witnesses, per the
+    ADR-001 row:
+    `encode_secret_env_cmdline_round_trips_pairs_as_single_token` and
+    `substitute`. The six test names this bullet used to list
+    (`host_secrets_v1_denied_outside_allowed_destinations`,
+    `zeroize_drop_zeros_secret_bytes`,
+    `handler_inter_call_memory_hygiene`,
+    `host_secrets_v1_signed_payload_jcs_roundtrip`,
+    `secrets_subprocess_cannot_reach_supervisor_memory`,
+    `placeholder_in_outbound_request_dropped_and_audited`) do not exist
+    in the tree — same failure as claim 12's.
 14. **Every `mvmctl run --image <oci-ref>` admission records the OCI
-    image provenance in the chain-signed audit log.** Tracked as a
-    standalone claim doc at
-    `specs/claims/claim-10-oci-image-provenance.md`; promotion to
-    the ADR-001 numbered table is queued in Plan 111. Plan 85 Phase E
-    + F wire the user-facing OCI image runner to the same audit chain
-    that backs claim 8 — see `specs/claims/claim-10-oci-image-provenance.md`.
+    image provenance in the chain-signed audit log.** Row 14 of the
+    ADR-001 table. Plan 85 Phase E + F wire the user-facing OCI image
+    runner to the same audit chain that backs claim 8.
     `mvmctl image pull` materializes the layer set in `mvm-fs`'s
     allow-listed unpacker (`mvm_fs::oci::unpack::unpack_layer`),
     materializes an ext4 rootfs — by default in-process on the host
@@ -370,9 +397,10 @@ the source gap analysis is at
     labels; `mvm_hostd::supervisor::verify_audit_chain` continues to detect
     drift, surfaced via `mvmctl trust audit verify`. `--prod` refuses
     mutable references before any network fetch
-    (`crates/mvm-cli/src/commands/image.rs::
+    (`crates/mvm-cli/src/commands/image/pull_core.rs::
     prod_pull_requires_digest_pin_before_network` and
-    `prod_run_image_requires_digest_pin_before_network`), demands an
+    `prod_run_image_requires_digest_pin_before_network` — `image` is a
+    directory of modules, not a single `image.rs` file), demands an
     explicit registry policy, and requires cosign verification of the
     resolved digest before cache admission or boot. The OCI
     `unpack_layer` fuzz harness lives in
@@ -380,10 +408,12 @@ the source gap analysis is at
     + nightly cron + manual dispatch); the
     `oci-layer-unpack-adversarial`, `oci-digest-mismatch-reject`,
     `oci-malformed-manifest`, `oci-mutable-tag-prod-reject`,
-    `oci-reproducibility`, and `oci-image-runner-smoke` lanes in
-    `.github/workflows/ci.yml` gate every PR that touches the OCI
-    surface.
-15. **No interactive access to a sealed production microVM.** The sole
+    `oci-reproducibility`, and `oci-image-runner-smoke` lanes live in
+    `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
+    `workflow_dispatch`-only, so none of the six gate a PR; they run
+    on manual dispatch.
+15. **A sealed production microVM has no shell, no `do_exec`, and no
+    PTY.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
     console (`crates/mvm-agentd/src/console.rs`), which is gated behind
     the `interactive` Cargo feature — so a sealed prod agent (built
@@ -393,7 +423,8 @@ the source gap analysis is at
     variant serves a shell; (2) the prod rootfs is dm-verity sealed
     (claim 3); (3) the backend captures the guest console **write-only**
     to `console.log` with no host input fd
-    (`mvm_backend::libkrun::open_console_capture` /
+    (`mvm_runtime::libkrun::open_console_capture` — `mvm_backend` is
+    not a crate, this is a function in `mvm-runtime` — and
     `prod_console_attachment_has_no_input`); (4) the host
     `enforce_accessible_gate` refuses `mvmctl console` on a sealed VM
     (`console_refused_on_sealed_image`); (5) the agent console + `do_exec`
@@ -403,6 +434,27 @@ the source gap analysis is at
     sibling to `prod-agent-runentry-contract`. Serial-console passthrough
     was considered and rejected (fatal on an input-less console); there
     is exactly one interactive transport and it is dev-only.
+    This claim used to read "no interactive access", holding by
+    **absence** — a sealed VM had no host→guest byte path at all. The
+    workload input plane built one, so the claim shrank to the part that
+    still holds by absence, which is what its three witnesses check. The
+    input plane's own properties (stdin only, no program selection, no
+    argv or env change, refused without a plan grant) are policy enforced
+    by host code with no production caller, and are claimed separately as
+    `Preview` claim 17 with their limits.
+
+`Preview` claim 17 — **workload stdin is grant-gated, single-writer,
+secret-scanned across frames, and every refusal audited**
+(`crates/mvm-hostd/src/stream/input_gate.rs`). The channel is reachable:
+`mvmctl machine run --entrypoint --stdin -` opens the route under the plan
+that boot was admitted under, and the sealed-tier shell-entrypoint refusal
+now classifies an entrypoint resolved from the image's own `mvm-meta.json`
+sidecar, failing closed when it cannot resolve one. It stays a preview and
+not a numbered claim because one leg still has no production caller: the
+known-secret set is empty on every real VM (`InputGate::bind` is never
+called outside tests), so the secret scan's refusal has never fired in
+production. ADR-001's ledger carries the full limits note, marked closed or
+open individually; do not paraphrase this row as enforced without it.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port
@@ -418,9 +470,9 @@ Out of scope (named in ADR-001):
 
 `mvmctl doctor` reports the live posture on the running host
 (plan 40 folded the standalone `security` verb into doctor's
-unified diagnostics report). Architecture detail in
-`specs/adrs/001-microvm-security-posture.md`. Implementation
-sequence in `specs/plans/25-microvm-hardening.md`.
+unified diagnostics report). Architecture detail, the claims ledger,
+and the per-backend tier matrix are all in
+`specs/adrs/001-microvm-security-posture.md`.
 
 ## Testing
 

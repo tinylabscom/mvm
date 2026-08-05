@@ -187,6 +187,45 @@ impl L3NetworkSpec {
     }
 }
 
+/// Whether this workload's captured output is written to a durable
+/// transcript, or only fanned out to whoever is watching at the time.
+///
+/// Capture itself is not optional and is not expressed here: a live follower
+/// works either way. What this decides is whether the host keeps an encrypted,
+/// hash-chained copy on disk that outlives the run.
+///
+/// It rides in the signed plan rather than on a command line for one reason:
+/// an unaudited opt-out makes a missing transcript indistinguishable from a
+/// suppressed one. With the mode admitted and recorded, "was this run
+/// recorded?" is answerable from the chain alone even when "what did it print?"
+/// is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamRetention {
+    /// Keep an encrypted transcript, sealed to a verifiable manifest at exit.
+    #[default]
+    Persist,
+    /// Fan out live and keep nothing. No transcript is written, so a reader
+    /// attaching after the workload ends finds no recording of it.
+    Ephemeral,
+}
+
+impl StreamRetention {
+    /// The label spelling, kept identical to the serde representation so an
+    /// audit entry and a serialized plan can never disagree about the mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Persist => "persist",
+            Self::Ephemeral => "ephemeral",
+        }
+    }
+
+    /// Whether a durable transcript is written under this mode.
+    pub fn persists(self) -> bool {
+        matches!(self, Self::Persist)
+    }
+}
+
 /// How the workload image was specified — the source the deterministic build
 /// pipeline consumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

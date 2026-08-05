@@ -156,6 +156,11 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         sealed,
         profile == crate::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean,
     )
+    // The same argv baked into `etc/mvm/oci-entrypoint.json` above, put where
+    // the host can still read it: once this tree is an ext4 blob nothing on
+    // the host opens it, and admission has to know what the image runs before
+    // it decides whether anything may drive its stdin.
+    .with_entrypoint_argv(entrypoint.map(|e| e.argv.clone()).unwrap_or_default())
     .write_to_dir(rootfs_dir)
     .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
     Ok(())

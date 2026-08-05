@@ -350,6 +350,7 @@ mod tests {
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
+            stream_retention: Default::default(),
             l3_network: None,
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("plan-x".to_string()),

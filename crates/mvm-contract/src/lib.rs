@@ -44,6 +44,8 @@ pub mod policy;
 #[cfg(feature = "protocol")]
 pub mod protocol;
 #[cfg(feature = "protocol")]
+pub mod stream;
+#[cfg(feature = "protocol")]
 pub mod verify;
 
 #[cfg(feature = "volume")]

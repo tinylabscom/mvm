@@ -367,21 +367,28 @@ impl std::error::Error for ValidationError {}
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::stream_pump::{CapturedOutput, Pump, PumpOutcome, RetainingSink};
+use crate::vsock::EntrypointEvent;
+
 /// Per-call resource caps. v1: 1 MiB on each stream.
+///
+/// `stdout_max` / `stderr_max` bound how much of a stream may sit in guest
+/// memory at once. Past that bound the oldest held chunks are evicted and the
+/// loss is reported as a gap record; the workload is never stopped and a write
+/// is never refused. On the streaming path the held chunks are events on their
+/// way to the consumer, so an eviction there is output the consumer never
+/// receives — these caps decide what is dropped from emission, not only how
+/// long a tail is kept.
 #[derive(Debug, Clone, Copy)]
 pub struct CallCaps {
-    /// Maximum bytes accepted for the wrapper's stdin.
+    /// Maximum bytes accepted for the wrapper's stdin. The one cap that still
+    /// refuses: an over-sized request payload is rejected before spawn.
     pub stdin_max: usize,
-    /// Maximum bytes captured from the wrapper's stdout.
+    /// Maximum bytes retained from the wrapper's stdout.
     pub stdout_max: usize,
-    /// Maximum bytes captured from the wrapper's stderr.
+    /// Maximum bytes retained from the wrapper's stderr.
     pub stderr_max: usize,
     /// Maximum bytes captured from the wrapper's fd-3 control channel.
     /// Excess bytes are silently dropped
@@ -409,6 +416,12 @@ impl CallCaps {
     }
 }
 
+impl Default for CallCaps {
+    fn default() -> Self {
+        Self::v1()
+    }
+}
+
 /// One control-channel record parsed from the wrapper's fd-3 stream.
 /// Wire format (length-prefixed JSON header + length-prefixed payload)
 /// is documented at `mvm_agentd::vsock::EntrypointEvent::Control`.
@@ -418,54 +431,101 @@ pub struct ControlRecord {
     pub payload: Vec<u8>,
 }
 
-/// Outcome of running the wrapper. The caller maps this to the
-/// `EntrypointEvent` stream sent back over vsock.
-#[derive(Debug)]
-pub enum CallOutcome {
+impl From<ControlRecord> for EntrypointEvent {
+    /// Every route from a record to the wire runs through here, so the frame
+    /// budget applies to all of them: a record that cannot be framed is
+    /// replaced by a bounded notice instead of overflowing the writer, which
+    /// would end the call early and discard everything behind it.
+    fn from(record: ControlRecord) -> Self {
+        crate::stream_pump::control_within_frame_budget(record.header_json, record.payload)
+    }
+}
+
+/// One run of the validated wrapper, as a value.
+///
+/// Grouped rather than passed positionally because the streaming form takes a
+/// sink on top of these, and six same-shaped arguments are how call sites
+/// start transposing them.
+pub struct EntrypointCall<'a> {
+    /// The boot-validated wrapper to run.
+    pub entrypoint: &'a ValidatedEntrypoint,
+    /// Working directory for the call — its private TMPDIR in production.
+    pub cwd: &'a Path,
+    /// Bytes piped to the wrapper's stdin, which is then closed.
+    pub stdin: &'a [u8],
+    /// Wall-clock budget before the kill ladder starts.
+    pub timeout: Duration,
+    pub caps: CallCaps,
+    /// Environment injected after `env_clear()`.
+    pub env: Vec<(String, String)>,
+    /// Keep the child's stdin open after `stdin` is written, handing it to
+    /// [`crate::stream_input::InputDesk`] so admitted host frames can keep
+    /// feeding it until the host closes the stream.
+    ///
+    /// `false` closes stdin immediately, which is what makes a read-to-EOF
+    /// workload terminate. Opting in is therefore also opting into "this call
+    /// ends when the host says so, or when the deadline does".
+    pub stream_input: bool,
+}
+
+/// How one run of the wrapper ended, carrying nothing it produced.
+///
+/// [`CallOutcome`] is this plus the buffered form's [`CapturedOutput`]. The
+/// streaming form has no buffers to attach: every byte already left through
+/// the sink as it was read.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunOutcome {
     /// Wrapper exited normally with the given code.
-    Exited {
-        code: i32,
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        controls: Vec<ControlRecord>,
-    },
+    Exited { code: i32 },
     /// Wrapper exceeded the wall-clock timeout. Killed.
-    Timeout {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        controls: Vec<ControlRecord>,
-    },
-    /// One of the streams exceeded its cap. Killed.
-    PayloadCap {
-        stream: PayloadCapStream,
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        controls: Vec<ControlRecord>,
-    },
+    Timeout,
+    /// The request payload exceeded `stdin_max`; the wrapper was never
+    /// spawned.
+    StdinCap,
     /// `Command::spawn` itself failed.
     SpawnFailed { message: String },
     /// Wrapper exited via signal (segfault, OOM kill, etc.).
-    WrapperCrashed {
-        signal: i32,
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        controls: Vec<ControlRecord>,
-    },
+    WrapperCrashed { signal: i32 },
 }
 
-/// Which stream's cap was breached. `Stdin` means the request payload
-/// itself exceeded `stdin_max`; the wrapper was never spawned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PayloadCapStream {
-    Stdin,
-    Stdout,
-    Stderr,
+impl From<PumpOutcome> for RunOutcome {
+    fn from(outcome: PumpOutcome) -> Self {
+        match outcome {
+            PumpOutcome::Exited(code) => RunOutcome::Exited { code },
+            PumpOutcome::Crashed { signal } => RunOutcome::WrapperCrashed { signal },
+            PumpOutcome::Timeout => RunOutcome::Timeout,
+        }
+    }
 }
 
-/// Run the validated wrapper with the given stdin, timeout, and caps.
-/// Drains stdout and stderr concurrently into capped buffers; kills the
-/// wrapper on timeout or cap breach. Always reaps the child before
-/// returning.
+/// Outcome of running the wrapper. The caller maps this to the
+/// `EntrypointEvent` stream sent back over vsock.
+///
+/// There is no output-cap variant: a stream past its bound prunes and reports
+/// a gap in [`CapturedOutput::gaps`], so how much a workload said is never a
+/// way for its call to end.
+#[derive(Debug)]
+pub enum CallOutcome {
+    /// Wrapper exited normally with the given code.
+    Exited { code: i32, output: CapturedOutput },
+    /// Wrapper exceeded the wall-clock timeout. Killed.
+    Timeout { output: CapturedOutput },
+    /// The request payload exceeded `stdin_max`; the wrapper was never
+    /// spawned, so there is nothing captured to report.
+    StdinCap,
+    /// `Command::spawn` itself failed.
+    SpawnFailed { message: String },
+    /// Wrapper exited via signal (segfault, OOM kill, etc.).
+    WrapperCrashed { signal: i32, output: CapturedOutput },
+}
+
+/// Run the validated wrapper and collect everything it produced.
+///
+/// The buffered form of [`execute_streaming`], and nothing more: it passes a
+/// [`RetainingSink`] and folds what that kept into a [`CallOutcome`]. Callers
+/// that answer with one value at the end of a call want this; callers that
+/// have somewhere to put a byte the moment it exists want the streaming form,
+/// because retention here is bounded and streaming is not.
 pub fn execute(
     entrypoint: &ValidatedEntrypoint,
     cwd: &Path,
@@ -474,13 +534,58 @@ pub fn execute(
     caps: CallCaps,
     env: Vec<(String, String)>,
 ) -> CallOutcome {
+    let call = EntrypointCall {
+        entrypoint,
+        cwd,
+        stdin: stdin_data,
+        timeout,
+        caps,
+        env,
+        stream_input: false,
+    };
+    let mut retained = RetainingSink::new(&caps);
+    let outcome = execute_streaming(&call, &mut |event| retained.accept(event));
+    let output = retained.finish();
+    match outcome {
+        RunOutcome::Exited { code } => CallOutcome::Exited { code, output },
+        RunOutcome::Timeout => CallOutcome::Timeout { output },
+        RunOutcome::WrapperCrashed { signal } => CallOutcome::WrapperCrashed { signal, output },
+        RunOutcome::StdinCap => CallOutcome::StdinCap,
+        RunOutcome::SpawnFailed { message } => CallOutcome::SpawnFailed { message },
+    }
+}
+
+/// Run the validated wrapper, handing every event to `sink` as the kernel
+/// produces it.
+///
+/// The one place a workload's child is spawned and pumped. Output moves
+/// through [`crate::stream_pump`], which emits stdout, stderr, and fd-3
+/// control records without waiting for the child, so a `sink` that writes
+/// somewhere is what makes a long-running workload observable while it runs.
+/// Nothing is capped on the way out — [`CallCaps`]'s stream bounds govern
+/// retention, and this form retains nothing. Kills the wrapper on timeout
+/// only, never for producing too much output, and always reaps the child
+/// before returning.
+///
+/// `sink` runs on the pump's own loop, which is also where the child's
+/// deadline is checked. A sink that can block for an unbounded time must not
+/// be passed directly — see [`crate::entrypoint_stream::stream_call`], which
+/// exists to put one on the other side of a channel.
+pub fn execute_streaming(
+    call: &EntrypointCall<'_>,
+    sink: &mut dyn FnMut(EntrypointEvent),
+) -> RunOutcome {
+    let EntrypointCall {
+        entrypoint,
+        cwd,
+        stdin: stdin_data,
+        timeout,
+        caps,
+        env,
+        stream_input,
+    } = call;
     if stdin_data.len() > caps.stdin_max {
-        return CallOutcome::PayloadCap {
-            stream: PayloadCapStream::Stdin,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            controls: Vec::new(),
-        };
+        return RunOutcome::StdinCap;
     }
 
     // On Linux `spawn_path` references the validation fd by number via
@@ -496,7 +601,7 @@ pub fn execute(
     let _spawn_fd_guard = match dup_above_fd3(&entrypoint.file) {
         Ok(fd) => fd,
         Err(e) => {
-            return CallOutcome::SpawnFailed {
+            return RunOutcome::SpawnFailed {
                 message: format!("dup entrypoint fd above 3: {e}"),
             };
         }
@@ -521,7 +626,7 @@ pub fn execute(
     let (fd3_read, fd3_write_for_child) = match make_fd3_pipe() {
         Ok(pair) => pair,
         Err(e) => {
-            return CallOutcome::SpawnFailed {
+            return RunOutcome::SpawnFailed {
                 message: format!("create fd-3 pipe: {e}"),
             };
         }
@@ -534,10 +639,11 @@ pub fn execute(
     // `Command::env` panics if a key is empty / contains '=' or NUL, or a
     // value contains NUL, so drop those rather than pass them through.
     let safe_env = env
-        .into_iter()
+        .iter()
         .filter(|(k, v)| {
             !k.is_empty() && !k.contains('=') && !k.contains('\0') && !v.contains('\0')
         })
+        .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect::<Vec<_>>();
 
     use std::os::unix::process::CommandExt;
@@ -572,7 +678,7 @@ pub fn execute(
         Ok(c) => c,
         Err(e) => {
             // pipe fds are closed via Drop on the OwnedFd values.
-            return CallOutcome::SpawnFailed {
+            return RunOutcome::SpawnFailed {
                 message: format!("spawn {}: {}", program.display(), e),
             };
         }
@@ -589,74 +695,34 @@ pub fn execute(
     // open.
     drop(fd3_write_for_child);
 
-    // Pipe stdin and close. A write error here means the wrapper
-    // already died or closed its stdin; treat as soft failure and
-    // continue to wait/drain for whatever it did emit.
+    // Pipe the one-shot payload. A write error here means the wrapper already
+    // died or closed its stdin; treat as soft failure and continue to
+    // wait/drain for whatever it did emit.
     if let Some(mut pipe) = child.stdin.take() {
         let _ = pipe.write_all(stdin_data);
-        // Dropping `pipe` closes stdin; without that the wrapper may
+        if *stream_input {
+            // The host intends to keep writing, so the fd survives this scope
+            // and the EOF is the host's to send. `Pump::run` finds no stdin
+            // left on the `Child` and has nothing to close.
+            crate::stream_input::InputDesk::open(pipe);
+        }
+        // Otherwise dropping `pipe` closes stdin; without that the wrapper may
         // block forever on read.
     }
 
-    let breach_flag = Arc::new(AtomicBool::new(false));
-    let stdout_handle = drain_capped(
-        child.stdout.take().expect("piped"),
-        caps.stdout_max,
-        Arc::clone(&breach_flag),
-        PayloadCapStream::Stdout,
-    );
-    let stderr_handle = drain_capped(
-        child.stderr.take().expect("piped"),
-        caps.stderr_max,
-        Arc::clone(&breach_flag),
-        PayloadCapStream::Stderr,
-    );
-    let fd3_handle = drain_fd3(fd3_read, caps.fd3_max);
+    // Nothing here waits for the child to die before output moves: the pump
+    // hands each read straight to `sink`.
+    let outcome = Pump::new(caps)
+        .control_channel(fd3_read)
+        .deadline(Instant::now() + *timeout)
+        .run(&mut child, sink);
 
-    let deadline = Instant::now() + timeout;
-    let outcome = poll_for_exit(&mut child, deadline, &caps, &breach_flag);
-
-    let (stdout, stdout_breach) = stdout_handle.join().unwrap_or_else(|_| (Vec::new(), None));
-    let (stderr, stderr_breach) = stderr_handle.join().unwrap_or_else(|_| (Vec::new(), None));
-    let controls = fd3_handle.join().unwrap_or_default();
-    // Stream attribution: prefer whichever drain reported the breach.
-    // If both did (rare), surface stdout — picked because runaway
-    // stdout is the more common shape. The flag the poll loop watched
-    // is a coarse Boolean; this attribution is only used by the
-    // CallOutcome::PayloadCap arm below.
-    let breached_stream = stdout_breach.or(stderr_breach);
-
-    match outcome {
-        ChildOutcome::Exited(status) => {
-            if let Some(code) = status.code() {
-                CallOutcome::Exited {
-                    code,
-                    stdout,
-                    stderr,
-                    controls,
-                }
-            } else {
-                let signal = signal_of(&status);
-                CallOutcome::WrapperCrashed {
-                    signal,
-                    stdout,
-                    stderr,
-                    controls,
-                }
-            }
-        }
-        ChildOutcome::Timeout => CallOutcome::Timeout {
-            stdout,
-            stderr,
-            controls,
-        },
-        ChildOutcome::PayloadCap => CallOutcome::PayloadCap {
-            stream: breached_stream.unwrap_or(PayloadCapStream::Stdout),
-            stdout,
-            stderr,
-            controls,
-        },
+    if *stream_input {
+        // The child is reaped. A desk left open would answer the next host
+        // frame as if a workload were still reading it.
+        crate::stream_input::InputDesk::abandon();
     }
+    outcome.into()
 }
 
 /// Create an `O_CLOEXEC` pipe and return `(read_end, write_end)` as
@@ -817,54 +883,29 @@ pub(crate) fn spawn_path(entrypoint: &ValidatedEntrypoint) -> PathBuf {
     }
 }
 
-enum ChildOutcome {
-    Exited(std::process::ExitStatus),
-    Timeout,
-    PayloadCap,
-}
-
-fn poll_for_exit(
-    child: &mut Child,
-    deadline: Instant,
-    caps: &CallCaps,
-    breach_flag: &Arc<AtomicBool>,
-) -> ChildOutcome {
-    loop {
-        // Highest priority: cap breach takes precedence over timeout
-        // (a breach is a corrupt-input signal, timeout is just slow).
-        if breach_flag.load(Ordering::SeqCst) {
-            kill_and_reap(child, caps.kill_grace_period);
-            return ChildOutcome::PayloadCap;
-        }
-        match crate::child_wait::try_wait(child) {
-            Ok(Some(status)) => return ChildOutcome::Exited(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    kill_and_reap(child, caps.kill_grace_period);
-                    return ChildOutcome::Timeout;
-                }
-                std::thread::sleep(caps.poll_interval);
-            }
-            Err(_) => {
-                // try_wait returned an error — the child is in some
-                // bad state. Best effort: kill and report timeout.
-                kill_and_reap(child, caps.kill_grace_period);
-                return ChildOutcome::Timeout;
-            }
-        }
-    }
-}
-
-pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
-    // Negate the pid to address the entire process group — the child
-    // is its own process group leader (see `.process_group(0)` above),
-    // so `kill(-pgid, ...)` reaches the wrapper plus any descendants
-    // (e.g. a shell that exec'd a long-running `sleep`).
+/// Deliver `signal` to the child's whole process group.
+///
+/// Negating the pid is what makes this reach descendants: the child is its own
+/// group leader (`.process_group(0)` at spawn), so `kill(-pgid, …)` hits the
+/// wrapper plus anything it forked — e.g. a shell that exec'd a long-running
+/// `sleep`, which would otherwise survive and hold the output pipes open.
+pub(crate) fn signal_process_group(child: &Child, signal: libc::c_int) {
     let pgid = child.id() as i32;
-    // SAFETY: kill is async-signal-safe.
+    // SAFETY: kill performs no memory access; the negated pgid names the
+    // child's process group (it is the group leader via process_group(0)).
     unsafe {
-        libc::kill(-pgid, libc::SIGTERM);
+        libc::kill(-pgid, signal);
     }
+}
+
+/// Blocking SIGTERM → grace → SIGKILL → reap.
+///
+/// Callers that must keep servicing something else while the child winds down
+/// cannot use this — it owns the calling thread for up to `grace`. The stream
+/// pump drives the same ladder step-by-step from its own loop for exactly that
+/// reason.
+pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
+    signal_process_group(child, libc::SIGTERM);
     let escalate_at = Instant::now() + grace;
     while Instant::now() < escalate_at {
         if let Ok(Some(_)) = crate::child_wait::try_wait(child) {
@@ -872,142 +913,19 @@ pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // SAFETY: kill performs no memory access; the negated pgid signals the
-    // child's process group (it is the group leader via process_group(0)).
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
+    signal_process_group(child, libc::SIGKILL);
     let _ = crate::child_wait::wait(child);
 }
 
 #[cfg(unix)]
-fn signal_of(status: &std::process::ExitStatus) -> i32 {
+pub(crate) fn signal_of(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status.signal().unwrap_or(0)
 }
 
 #[cfg(not(unix))]
-fn signal_of(_status: &std::process::ExitStatus) -> i32 {
+pub(crate) fn signal_of(_status: &std::process::ExitStatus) -> i32 {
     0
-}
-
-/// Drain the parent end of the fd-3 pipe and parse framed control
-/// records. Frame layout:
-///
-/// ```text
-///   header_len:  u32 LE   (4 bytes; max 64 KiB)
-///   header_json: bytes    (header_len bytes; UTF-8 JSON)
-///   payload_len: u32 LE   (4 bytes)
-///   payload:     bytes    (payload_len bytes)
-/// ```
-///
-/// Reads until EOF (child closes its fd 3) or `total_max` bytes have
-/// been consumed — whichever comes first. Once the cap is hit we
-/// stop reading and return whatever records we've fully parsed; the
-/// channel is for structured records the host correlates by kind, so
-/// dropping further records on overflow is preferable to killing the
-/// wrapper. Header sizes >64 KiB are refused (frame-corruption signal).
-///
-/// Records that are partially received at EOF / cap are silently
-/// dropped — the host already accepts a streaming response that can
-/// terminate at any point.
-fn drain_fd3(read_fd: std::os::fd::OwnedFd, total_max: usize) -> JoinHandle<Vec<ControlRecord>> {
-    /// Per-frame header limit (defense in depth — the wrapper writes
-    /// short envelope JSON, not arbitrary blobs in the header).
-    const HEADER_MAX: usize = 64 * 1024;
-
-    std::thread::spawn(move || {
-        let file = std::fs::File::from(read_fd);
-        let mut reader = std::io::BufReader::new(file);
-        let mut records: Vec<ControlRecord> = Vec::new();
-        let mut consumed: usize = 0;
-
-        // Parse loop: each frame is `header_len:u32 LE` + header bytes
-        // + `payload_len:u32 LE` + payload bytes. Any read that returns
-        // EOF (Ok(0)) on the first read of a frame ends the loop
-        // cleanly; an EOF mid-frame discards the partial frame.
-        loop {
-            // header length
-            let mut len_buf = [0u8; 4];
-            match reader.read_exact(&mut len_buf) {
-                Ok(()) => {}
-                Err(_) => break, // EOF or transient I/O error
-            }
-            let header_len = u32::from_le_bytes(len_buf) as usize;
-            if header_len > HEADER_MAX {
-                break; // refuse oversized header — likely corrupt
-            }
-            consumed = consumed.saturating_add(4 + header_len);
-            if consumed > total_max {
-                break;
-            }
-
-            let mut header_bytes = vec![0u8; header_len];
-            if reader.read_exact(&mut header_bytes).is_err() {
-                break; // partial header → drop this and any later
-            }
-            let header_json = match String::from_utf8(header_bytes) {
-                Ok(s) => s,
-                Err(_) => break, // non-UTF-8 header → corrupt; stop
-            };
-
-            // payload length
-            if reader.read_exact(&mut len_buf).is_err() {
-                break;
-            }
-            let payload_len = u32::from_le_bytes(len_buf) as usize;
-            consumed = consumed.saturating_add(4 + payload_len);
-            if consumed > total_max {
-                break;
-            }
-
-            let mut payload = vec![0u8; payload_len];
-            if reader.read_exact(&mut payload).is_err() {
-                break;
-            }
-
-            records.push(ControlRecord {
-                header_json,
-                payload,
-            });
-        }
-
-        records
-    })
-}
-
-fn drain_capped<R: Read + Send + 'static>(
-    reader: R,
-    cap: usize,
-    breach_flag: Arc<AtomicBool>,
-    stream: PayloadCapStream,
-) -> JoinHandle<(Vec<u8>, Option<PayloadCapStream>)> {
-    std::thread::spawn(move || {
-        let mut buf: Vec<u8> = Vec::with_capacity(cap.min(64 * 1024));
-        let mut reader = std::io::BufReader::new(reader);
-        let mut chunk = [0u8; 4096];
-        let mut breached: Option<PayloadCapStream> = None;
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let space = cap.saturating_sub(buf.len());
-                    if space == 0 || space < n {
-                        let take = space;
-                        if take > 0 {
-                            buf.extend_from_slice(&chunk[..take]);
-                        }
-                        breached = Some(stream);
-                        breach_flag.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                Err(_) => break,
-            }
-        }
-        (buf, breached)
-    })
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@
 //! are never written to the normal audit chain, and capture is opt-in and
 //! bounded.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -17,18 +18,64 @@ use base64::engine::general_purpose::STANDARD as B64;
 
 use crate::crypto::aead;
 
+mod ring;
+mod segment;
+pub use ring::*;
+use segment::SegmentBounds;
+pub use segment::{SEGMENT_MAX_CHUNKS, SEGMENT_MAX_CIPHERTEXT_BYTES, check_safe_name};
+
 /// Filename of the host transcript key-encryption key, under the keys dir.
 pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 
-/// Current sealed-transcript manifest format. Unknown versions fail closed.
-pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 2;
+/// Manifest `recipient` for a capture whose data key is wrapped under the host
+/// KEK — the only wrapping scheme there is today. Named rather than spelled
+/// out at each writer because a reader decides where to look for the
+/// unwrapping key from this string, so a writer that drifts from it produces a
+/// capture nothing can open.
+pub const TRANSCRIPT_KEK_RECIPIENT: &str = "transcript-kek";
 
-/// Direction of a captured chunk relative to the workload.
+/// Filename of the sealed manifest inside a capture directory. Shared by every
+/// side that names it — the operator CLI, the supervisor's capture sink, and
+/// the stream reader — so a capture written by one is found by the others.
+pub const MANIFEST_FILENAME: &str = "manifest.json";
+
+/// Current sealed-transcript manifest format. Unknown versions fail closed.
+///
+/// Bumped 2 -> 3 when `ChunkRecord` grew `prev_hash`: that field is part of
+/// every chunk leaf the sealed root commits to, so a manifest sealed under
+/// the old layout now recomputes to a different root. Without the bump that
+/// manifest would fail `verify_sealed_root` with `SealedRootMismatch` —
+/// indistinguishable from actual tampering. Bumping the version makes
+/// `validate_format` (which every verifier calls before touching the root)
+/// reject it first, with an honest "old format" error instead of a false
+/// tamper signal.
+///
+/// Bumped 3 -> 4 when the manifest grew `refused_chunks`/`refused_bytes`, for
+/// the same reason: the sealed root now commits to them, so an old manifest
+/// would recompute to a different root and look tampered.
+///
+/// Bumped 4 -> 5 when chunks moved from one file each into shared segments:
+/// `ChunkRecord` grew `offset`, and the manifest grew `retention` plus
+/// `evicted_chunks`/`evicted_bytes`. Same reason again — every one of those is
+/// inside the sealed root.
+///
+/// Bumped 5 -> 6 when the manifest grew `adopted`, which the sealed root
+/// commits to for the same reason it commits to the refusal counters: a
+/// reader must not be able to strip the one field saying this manifest was
+/// reconstructed rather than sealed by the process that wrote the capture.
+pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 6;
+
+/// Direction of a captured chunk relative to the workload: network egress/
+/// ingress, or one of the workload's own output streams (stdout/stderr) plus
+/// a trace channel for structured diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     Egress,
     Ingress,
+    Stdout,
+    Stderr,
+    Trace,
 }
 
 /// One sealed transcript chunk recorded in the manifest.
@@ -36,10 +83,23 @@ pub enum Direction {
 #[serde(deny_unknown_fields)]
 pub struct ChunkRecord {
     pub seq: u64,
-    /// In-store filename, relative to the manifest directory. No path
+    /// Segment filename, relative to the manifest directory. No path
     /// components — verification rejects anything containing `/`, `\`, or `..`.
+    /// One segment holds many chunks, so this is shared with the chunks
+    /// written either side of this one.
     pub file: String,
+    /// Byte offset of this chunk's ciphertext inside `file`. Records tile
+    /// their segment exactly: verification refuses a gap, an overlap, or a
+    /// trailing byte no record accounts for. `#[serde(default)]` so manifests
+    /// written under the one-file-per-chunk layout still parse (and are then
+    /// refused on their format version, not misread as offset 0).
+    #[serde(default)]
+    pub offset: u64,
+    /// Sha256 (hex) of **this chunk's** ciphertext bytes — not the segment's.
+    /// Batching moved where the bytes live; it did not coarsen what the sealed
+    /// root commits to.
     pub sha256_hex: String,
+    /// Ciphertext length of this chunk, i.e. the width of its slice of `file`.
     pub size_bytes: u64,
     pub direction: Direction,
     /// True when the frame was denied by egress policy (dropped, not forwarded)
@@ -48,6 +108,14 @@ pub struct ChunkRecord {
     /// written before this field parse as `false` (forwarded).
     #[serde(default)]
     pub dropped: bool,
+    /// Sha256 (hex) of the previous chunk's on-disk ciphertext; all-zero
+    /// (64 `0` characters) for the first chunk. Chains chunks together so a
+    /// reordered or spliced-in record no longer matches its neighbor once the
+    /// sealed root is recomputed. `#[serde(default)]` so manifests written
+    /// before this field still parse — an empty string can never collide with
+    /// a real hash.
+    #[serde(default)]
+    pub prev_hash: String,
 }
 
 /// Which admitted workload/session a transcript belongs to. Capture is never
@@ -83,12 +151,71 @@ pub struct TranscriptManifest {
     pub wrapped_data_key_b64: String,
     /// Recipient binding allowed to decrypt later (e.g. a host key id).
     pub recipient: String,
+    /// Which admission policy this capture ran under. Sealed in the root so a
+    /// window whose head is gone cannot be passed off as a fail-closed
+    /// capture that simply never received those chunks.
+    #[serde(default)]
+    pub retention: RetentionPolicy,
     pub chunks: Vec<ChunkRecord>,
+    /// Chunks the writer was offered and did not store, because a bound was
+    /// reached or the write failed. Nonzero means `chunks` is a **prefix** of
+    /// what was captured, not the whole of it.
+    ///
+    /// Without this, a capture that stopped at its bound seals into a
+    /// manifest that passes both [`verify_sealed_root`] and [`verify_chunks`]
+    /// with nothing saying it is incomplete — a silently truncated artifact
+    /// that looks trustworthy. The sealed root commits to it, so it cannot be
+    /// stripped without breaking verification.
+    #[serde(default)]
+    pub refused_chunks: u64,
+    /// Plaintext bytes in the chunks counted by `refused_chunks`.
+    #[serde(default)]
+    pub refused_bytes: u64,
+    /// Chunks that landed and were later dropped by [`RetentionPolicy::Ring`]
+    /// to make room for newer ones. Nonzero means `chunks` is a **suffix** of
+    /// what was captured — the opposite end from `refused_chunks`, and the
+    /// distinction a reader needs to know which way the record is incomplete.
+    ///
+    /// The surviving window starts at `chunks[0].seq`, and `chunks[0]`'s
+    /// `prev_hash` still names the evicted chunk before it, so the linkage
+    /// anchors the window rather than pretending it is genesis.
+    #[serde(default)]
+    pub evicted_chunks: u64,
+    /// Plaintext bytes in the chunks counted by `evicted_chunks`.
+    #[serde(default)]
+    pub evicted_bytes: u64,
+    /// True when this manifest was reconstructed by a process that did not
+    /// own the live capture — the writer's own state was gone, so the
+    /// refusal and eviction counters above are a **floor** rather than the
+    /// whole shortfall.
+    ///
+    /// A capture is sealed from the writer that produced it whenever the
+    /// process holding that writer is the one that ends the run. When it is
+    /// not — a workload started detached and stopped by a later invocation —
+    /// the seal is rebuilt from what the capture left on disk, and nothing on
+    /// disk records what the departed process dropped between its last
+    /// durable append and its exit. Saying so is the difference between an
+    /// artifact that declares its own limits and one that quietly claims
+    /// completeness it cannot have.
+    #[serde(default)]
+    pub adopted: bool,
     /// RFC-6962 Merkle root over the capture binding, sealed-key metadata,
-    /// bounds, and ordered chunk records. The chunk records contain ciphertext
-    /// digests, never plaintext digests.
+    /// bounds, retention policy, refusal and eviction counts, and ordered
+    /// chunk records. The chunk records contain ciphertext digests, never
+    /// plaintext digests.
     #[serde(default)]
     pub sealed_root_hex: String,
+}
+
+impl TranscriptManifest {
+    /// Whether this transcript is missing chunks that were captured — lost
+    /// off the tail at a bound, evicted off the head by the ring, or
+    /// unaccountable because the manifest was rebuilt without the writer that
+    /// produced it. A consumer must not read any of the three as a complete
+    /// record of the workload's output.
+    pub fn is_truncated(&self) -> bool {
+        self.refused_chunks > 0 || self.evicted_chunks > 0 || self.adopted
+    }
 }
 
 /// Why a transcript operation refused. Fail-closed: any variant means the
@@ -101,17 +228,25 @@ pub enum TranscriptError {
     UnknownFormatVersion { got: u32, expected: u32 },
     #[error("chunk {seq} ({file}) missing on disk")]
     MissingChunk { seq: u64, file: String },
-    #[error("chunk {seq} ({file}) size mismatch: manifest {declared}, on-disk {actual}")]
-    SizeMismatch {
-        seq: u64,
-        file: String,
-        declared: u64,
-        actual: u64,
-    },
     #[error("chunk {seq} ({file}) hash mismatch (tampered)")]
     HashMismatch { seq: u64, file: String },
     #[error("unsafe chunk filename {0:?} (path components not allowed)")]
     UnsafeChunkName(String),
+    #[error("segment {file} holds {actual} bytes but the manifest accounts for {declared}")]
+    SegmentLengthMismatch {
+        file: String,
+        declared: u64,
+        actual: u64,
+    },
+    #[error("chunk {seq} does not tile segment {file}: offset {offset}, expected {expected}")]
+    SegmentLayoutInvalid {
+        seq: u64,
+        file: String,
+        offset: u64,
+        expected: u64,
+    },
+    #[error("segment {file} appears in more than one place in the manifest")]
+    SegmentRepeated { file: String },
     #[error("io error verifying {file}: {msg}")]
     Io { file: String, msg: String },
     #[error("chunk {seq} ({file}) failed to decrypt (wrong key or tampered ciphertext)")]
@@ -138,7 +273,13 @@ struct RootMetadata<'a> {
     created_unix_secs: u64,
     wrapped_data_key_b64: &'a str,
     recipient: &'a str,
+    retention: RetentionPolicy,
     chunk_count: usize,
+    refused_chunks: u64,
+    refused_bytes: u64,
+    evicted_chunks: u64,
+    evicted_bytes: u64,
+    adopted: bool,
 }
 
 #[derive(Serialize)]
@@ -161,7 +302,13 @@ pub fn sealed_root_hex(manifest: &TranscriptManifest) -> Result<String, Transcri
         created_unix_secs: manifest.created_unix_secs,
         wrapped_data_key_b64: &manifest.wrapped_data_key_b64,
         recipient: &manifest.recipient,
+        retention: manifest.retention,
         chunk_count: manifest.chunks.len(),
+        refused_chunks: manifest.refused_chunks,
+        refused_bytes: manifest.refused_bytes,
+        evicted_chunks: manifest.evicted_chunks,
+        evicted_bytes: manifest.evicted_bytes,
+        adopted: manifest.adopted,
     };
     let mut leaves = Vec::with_capacity(manifest.chunks.len() + 1);
     leaves.push(
@@ -257,65 +404,51 @@ impl CaptureBudget {
     }
 }
 
-/// Verify every manifest chunk against its on-disk file (size + sha256). Fails
-/// closed on an unknown format version, an unsafe filename, or a missing,
-/// oversized, or tampered chunk. Integrity only — does not decrypt.
+/// Verify every manifest chunk against the segment holding it. Fails closed on
+/// an unknown format version, an unsafe filename, a segment that is short
+/// (torn), long (bytes nothing accounts for), missing, or whose records do not
+/// tile it, and on any chunk whose own ciphertext digest no longer matches.
+/// Integrity only — does not decrypt.
 pub fn verify_chunks(manifest: &TranscriptManifest, dir: &Path) -> Result<(), TranscriptError> {
     validate_format(manifest)?;
-    for c in &manifest.chunks {
-        if c.file.is_empty()
-            || c.file.contains('/')
-            || c.file.contains('\\')
-            || c.file == "."
-            || c.file == ".."
-        {
-            return Err(TranscriptError::UnsafeChunkName(c.file.clone()));
-        }
-        let path = dir.join(&c.file);
-        let meta = std::fs::metadata(&path).map_err(|_| TranscriptError::MissingChunk {
-            seq: c.seq,
-            file: c.file.clone(),
-        })?;
-        if meta.len() != c.size_bytes {
-            return Err(TranscriptError::SizeMismatch {
-                seq: c.seq,
-                file: c.file.clone(),
-                declared: c.size_bytes,
-                actual: meta.len(),
-            });
-        }
-        let got =
-            crate::crypto::image_verify::sha256_file(&path).map_err(|e| TranscriptError::Io {
-                file: c.file.clone(),
-                msg: e.to_string(),
-            })?;
-        if got != c.sha256_hex {
-            return Err(TranscriptError::HashMismatch {
-                seq: c.seq,
-                file: c.file.clone(),
-            });
-        }
-    }
-    Ok(())
+    segment::verify_segments(&manifest.chunks, dir)
 }
 
-/// Bounded, AEAD-encrypting transcript writer. Each pushed payload is checked
-/// against the [`CaptureBudget`] *before* it is written, encrypted at rest with
-/// the per-capture data key, and recorded in the manifest by the sha256 of its
-/// **ciphertext** (so [`verify_chunks`] re-hashes what is on disk). The raw
-/// data key is the caller's to wrap for `recipient`; the writer only records
-/// the already-wrapped form.
+/// Bounded, AEAD-encrypting transcript writer. Each pushed payload is admitted
+/// against this capture's [`RetentionPolicy`] *before* it is written, encrypted
+/// at rest with the per-capture data key, appended to the current segment, and
+/// recorded in the manifest by the sha256 of its own **ciphertext** (so
+/// [`verify_chunks`] re-hashes exactly those bytes on disk). The raw data key
+/// is the caller's to wrap for `recipient`; the writer only records the
+/// already-wrapped form.
+///
+/// Many chunks share one segment file: the `segment` submodule holds the
+/// layout, and the reason retention evicts whole segments rather than chunks.
 pub struct TranscriptWriter {
-    dir: PathBuf,
     key: aead::Key,
+    store: segment::SegmentStore,
     budget: CaptureBudget,
-    chunks: Vec<ChunkRecord>,
+    retention: RetentionPolicy,
+    /// Live records, oldest first. A deque because ring eviction drops from
+    /// the front on every pruning admission.
+    chunks: VecDeque<ChunkRecord>,
+    /// Monotonic across evictions: a surviving window keeps the sequence
+    /// numbers the capture actually issued, so a gap reads as a gap.
+    next_seq: u64,
+    /// Digest of the newest chunk written, held separately from `chunks`
+    /// because eviction may have dropped the record carrying it while the
+    /// linkage it anchors must stay intact.
+    prev_hash: String,
     capture_id: String,
     binding: CaptureBinding,
     bounds: CaptureBounds,
     created_unix_secs: u64,
     wrapped_data_key_b64: String,
     recipient: String,
+    refused_chunks: u64,
+    refused_bytes: u64,
+    evicted_chunks: u64,
+    evicted_bytes: u64,
 }
 
 /// Construction parameters for a [`TranscriptWriter`] (grouped to keep the
@@ -326,6 +459,10 @@ pub struct TranscriptWriterConfig {
     pub capture_id: String,
     pub binding: CaptureBinding,
     pub bounds: CaptureBounds,
+    /// What happens at a bound: refuse the newest chunk, or drop the oldest.
+    /// A forensic capture of discrete frames wants the former; a continuous
+    /// output stream, where going quiet is the failure, wants the latter.
+    pub retention: RetentionPolicy,
     pub created_unix_secs: u64,
     pub recipient: String,
     pub wrapped_data_key_b64: String,
@@ -335,17 +472,85 @@ impl TranscriptWriter {
     /// `dir` must already exist. `key` encrypts chunks at rest.
     pub fn new(dir: impl Into<PathBuf>, key: aead::Key, config: TranscriptWriterConfig) -> Self {
         Self {
-            dir: dir.into(),
             key,
+            store: segment::SegmentStore::new(dir.into(), SegmentBounds::default()),
             budget: CaptureBudget::new(config.bounds),
-            chunks: Vec::new(),
+            retention: config.retention,
+            chunks: VecDeque::new(),
+            next_seq: 0,
+            prev_hash: "0".repeat(64),
             capture_id: config.capture_id,
             binding: config.binding,
             bounds: config.bounds,
             created_unix_secs: config.created_unix_secs,
             wrapped_data_key_b64: config.wrapped_data_key_b64,
             recipient: config.recipient,
+            refused_chunks: 0,
+            refused_bytes: 0,
+            evicted_chunks: 0,
+            evicted_bytes: 0,
         }
+    }
+
+    /// Chunks offered to [`push`](Self::push)/[`push_dropped`](Self::push_dropped)
+    /// that never landed. Nonzero means the capture lost its tail.
+    pub fn refused_chunks(&self) -> u64 {
+        self.refused_chunks
+    }
+
+    /// Plaintext bytes in the chunks counted by
+    /// [`refused_chunks`](Self::refused_chunks).
+    pub fn refused_bytes(&self) -> u64 {
+        self.refused_bytes
+    }
+
+    /// Count chunks that never reached this writer at all, so the sealed
+    /// manifest owns the whole shortfall rather than only the part the writer
+    /// saw.
+    ///
+    /// A capture whose appends run on a background thread can lose a record
+    /// before it is ever offered here: the hand-off is bounded, and a bound
+    /// that waited would put the producer behind the disk. Those records are
+    /// holes in exactly the way a refused push is, so they belong in the same
+    /// counters — otherwise [`seal`](Self::seal) hands back an artifact that
+    /// verifies clean while being silently incomplete.
+    pub fn note_unwritten(&mut self, chunks: u64, bytes: u64) {
+        self.refused_chunks = self.refused_chunks.saturating_add(chunks);
+        self.refused_bytes = self.refused_bytes.saturating_add(bytes);
+    }
+
+    /// Chunks that landed and were later dropped by ring retention. Nonzero
+    /// means the capture lost its head.
+    pub fn evicted_chunks(&self) -> u64 {
+        self.evicted_chunks
+    }
+
+    /// Plaintext bytes in the chunks counted by
+    /// [`evicted_chunks`](Self::evicted_chunks).
+    pub fn evicted_bytes(&self) -> u64 {
+        self.evicted_bytes
+    }
+
+    /// Segment files this capture currently owns. Bounded by retention, and —
+    /// unlike the chunk count — no longer growing one per push.
+    pub fn segment_count(&self) -> usize {
+        self.store.segment_count()
+    }
+
+    /// Where this capture's segments live, and where its manifest belongs.
+    pub fn dir(&self) -> &Path {
+        self.store.dir()
+    }
+
+    /// The record the most recent successful push produced, or `None` before
+    /// the first one lands.
+    ///
+    /// For a caller mirroring the manifest as it is built, so a later process
+    /// can rebuild the seal this writer would have produced. Reading it after
+    /// a refused push returns the previous record, which is correct: a refusal
+    /// produces no record to mirror.
+    pub fn last_chunk(&self) -> Option<&ChunkRecord> {
+        self.chunks.back()
     }
 
     /// Encrypt and append one payload chunk, or fail closed on a bound. The
@@ -365,54 +570,184 @@ impl TranscriptWriter {
         self.push_inner(direction, true, plaintext)
     }
 
+    /// Write the chunk, and remember it if it did not land.
+    ///
+    /// Every refusal — a bound reached, a write that failed — is a hole in
+    /// the capture. Counting it here, at the one place a chunk can fail to
+    /// land, is what lets [`seal`](Self::seal) mark the manifest truncated
+    /// instead of handing back an artifact that verifies clean while being
+    /// silently incomplete.
     fn push_inner(
         &mut self,
         direction: Direction,
         dropped: bool,
         plaintext: &[u8],
     ) -> Result<(), TranscriptError> {
-        self.budget.try_add(plaintext.len() as u64)?;
-        let seq = self.chunks.len() as u64;
-        let file = format!("{seq}.chunk");
+        let result = self.write_chunk(direction, dropped, plaintext);
+        if result.is_err() {
+            self.refused_chunks = self.refused_chunks.saturating_add(1);
+            self.refused_bytes = self.refused_bytes.saturating_add(plaintext.len() as u64);
+        }
+        result
+    }
+
+    fn write_chunk(
+        &mut self,
+        direction: Direction,
+        dropped: bool,
+        plaintext: &[u8],
+    ) -> Result<(), TranscriptError> {
+        self.admit(plaintext.len() as u64)?;
         let ciphertext = aead::seal(&self.key, plaintext);
-        let path = self.dir.join(&file);
-        std::fs::write(&path, &ciphertext).map_err(|e| TranscriptError::Io {
-            file: file.clone(),
-            msg: e.to_string(),
-        })?;
-        let sha256_hex =
-            crate::crypto::image_verify::sha256_file(&path).map_err(|e| TranscriptError::Io {
-                file: file.clone(),
-                msg: e.to_string(),
-            })?;
-        self.chunks.push(ChunkRecord {
+        let placement = self.store.append(&ciphertext, plaintext.len() as u64)?;
+        let sha256_hex = crate::plan::bundle::sha256_hex(&ciphertext);
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        let prev_hash = std::mem::replace(&mut self.prev_hash, sha256_hex.clone());
+        self.chunks.push_back(ChunkRecord {
             seq,
-            file,
+            file: placement.file,
+            offset: placement.offset,
             sha256_hex,
             size_bytes: ciphertext.len() as u64,
             direction,
             dropped,
+            prev_hash,
         });
         Ok(())
     }
 
-    /// Finalize the manifest for the chunks written so far.
+    /// Make room for one more `size`-byte chunk, per this capture's policy.
+    ///
+    /// [`RetentionPolicy::FailClosed`] refuses once the budget is spent.
+    /// [`RetentionPolicy::Ring`] never refuses: it frees whole sealed segments
+    /// until the newest chunk fits, and admits it regardless when there is
+    /// nothing left to free. That is the same "the newest write always wins"
+    /// decision the reader queues make, applied to the persisted copy.
+    fn admit(&mut self, size: u64) -> Result<(), TranscriptError> {
+        match self.retention {
+            RetentionPolicy::FailClosed => self.budget.try_add(size),
+            RetentionPolicy::Ring => {
+                self.evict_for(size);
+                Ok(())
+            }
+        }
+    }
+
+    /// Unlink whole sealed segments until `size` fits, dropping the records
+    /// they held.
+    ///
+    /// Eviction is oldest-first over an append-ordered store, so the records
+    /// for the unlinked segments are exactly the front of the queue.
+    fn evict_for(&mut self, size: u64) {
+        let evicted = self.store.evict_for(size, self.bounds);
+        if evicted.chunks == 0 {
+            return;
+        }
+        self.evicted_chunks = self.evicted_chunks.saturating_add(evicted.chunks);
+        self.evicted_bytes = self.evicted_bytes.saturating_add(evicted.bytes);
+        for _ in 0..evicted.chunks {
+            self.chunks.pop_front();
+        }
+    }
+
+    /// Finalize the manifest for the chunks still held, carrying forward how
+    /// many were refused off the tail and evicted off the head so the artifact
+    /// declares its own completeness.
     pub fn seal(self) -> TranscriptManifest {
+        self.sealed_manifest()
+    }
+
+    /// The manifest [`seal`](Self::seal) produces, for a caller that cannot
+    /// consume the writer.
+    ///
+    /// A writer whose pushes run on a background thread lives behind a lock,
+    /// and a lock cannot be moved out of. Borrowing costs a clone of the chunk
+    /// records, paid once at teardown, and removes the alternative: an
+    /// ownership handover whose failure arm has no manifest to hand back.
+    pub fn sealed_manifest(&self) -> TranscriptManifest {
         let mut manifest = TranscriptManifest {
             format_version: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
-            capture_id: self.capture_id,
-            binding: self.binding,
+            capture_id: self.capture_id.clone(),
+            binding: self.binding.clone(),
             bounds: self.bounds,
             created_unix_secs: self.created_unix_secs,
-            wrapped_data_key_b64: self.wrapped_data_key_b64,
-            recipient: self.recipient,
-            chunks: self.chunks,
+            wrapped_data_key_b64: self.wrapped_data_key_b64.clone(),
+            recipient: self.recipient.clone(),
+            retention: self.retention,
+            chunks: self.chunks.iter().cloned().collect(),
+            refused_chunks: self.refused_chunks,
+            refused_bytes: self.refused_bytes,
+            evicted_chunks: self.evicted_chunks,
+            evicted_bytes: self.evicted_bytes,
+            // A writer sealing its own capture accounts for the whole of it.
+            adopted: false,
             sealed_root_hex: String::new(),
         };
         manifest.sealed_root_hex =
             sealed_root_hex(&manifest).expect("fixed transcript root metadata serializes");
         manifest
     }
+}
+
+/// One decrypted chunk, still carrying the metadata the manifest recorded for
+/// it.
+///
+/// [`export`] concatenates a capture into one byte run, which is what a
+/// forensic dump wants and exactly wrong for a workload's output: a consumer
+/// rendering stdout separately from stderr, or resuming at a sequence number,
+/// needs the boundaries back. Both readers decrypt through the same verified
+/// path — see [`export_chunks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedChunk {
+    /// Capture-local sequence number, as issued by the writer. Monotonic
+    /// across ring eviction, so a hole in this run is a real hole.
+    pub seq: u64,
+    pub direction: Direction,
+    /// Whether egress policy denied the frame rather than forwarding it.
+    pub dropped: bool,
+    pub plaintext: Vec<u8>,
+}
+
+/// Verify a sealed transcript and decrypt it chunk by chunk, preserving each
+/// chunk's sequence number and direction. Integrity is checked first
+/// ([`verify_sealed_root`] then [`verify_chunks`]); a wrong key or tampered
+/// ciphertext fails closed on decrypt.
+pub fn export_chunks(
+    manifest: &TranscriptManifest,
+    dir: &Path,
+    key: &aead::Key,
+) -> Result<Vec<ExportedChunk>, TranscriptError> {
+    verify_sealed_root(manifest)?;
+    verify_chunks(manifest, dir)?;
+    // Verification proved every segment is exactly as long as its records
+    // account for, so each read below is bounded by bytes already on disk and
+    // each slice is in range.
+    let mut out = Vec::with_capacity(manifest.chunks.len());
+    for span in segment::segment_spans(&manifest.chunks)? {
+        let bytes = std::fs::read(dir.join(span.file)).map_err(|e| TranscriptError::Io {
+            file: span.file.to_string(),
+            msg: e.to_string(),
+        })?;
+        for chunk in span.chunks {
+            let ciphertext = segment::slice_chunk(&bytes, chunk)?;
+            let plaintext = aead::open(key, ciphertext).map_err(|_| TranscriptError::Decrypt {
+                seq: chunk.seq,
+                file: chunk.file.clone(),
+            })?;
+            out.push(ExportedChunk {
+                seq: chunk.seq,
+                direction: chunk.direction,
+                dropped: chunk.dropped,
+                plaintext,
+            });
+        }
+    }
+    // Segments are visited in manifest order, which is append order, so the
+    // run is already sorted; stating it here keeps a future out-of-order
+    // segment layout from silently reordering a capture.
+    debug_assert!(out.windows(2).all(|w| w[0].seq < w[1].seq));
+    Ok(out)
 }
 
 /// Verify a sealed transcript and decrypt its chunks back to the original
@@ -423,19 +758,9 @@ pub fn export(
     dir: &Path,
     key: &aead::Key,
 ) -> Result<Vec<u8>, TranscriptError> {
-    verify_sealed_root(manifest)?;
-    verify_chunks(manifest, dir)?;
     let mut out = Vec::new();
-    for c in &manifest.chunks {
-        let ciphertext = std::fs::read(dir.join(&c.file)).map_err(|e| TranscriptError::Io {
-            file: c.file.clone(),
-            msg: e.to_string(),
-        })?;
-        let plaintext = aead::open(key, &ciphertext).map_err(|_| TranscriptError::Decrypt {
-            seq: c.seq,
-            file: c.file.clone(),
-        })?;
-        out.extend_from_slice(&plaintext);
+    for chunk in export_chunks(manifest, dir, key)? {
+        out.extend_from_slice(&chunk.plaintext);
     }
     Ok(out)
 }
@@ -444,14 +769,30 @@ pub fn export(
 /// (mode 0600) on first use. Every per-capture data key is wrapped under this
 /// KEK so payloads stay unreadable without host access.
 pub fn load_or_init_kek(keys_dir: &Path) -> std::io::Result<aead::Key> {
-    let path = keys_dir.join(TRANSCRIPT_KEK_FILENAME);
-    if path.exists() {
-        return aead::Key::load(&path);
+    if let Some(kek) = load_kek(keys_dir)? {
+        return Ok(kek);
     }
-    std::fs::create_dir_all(keys_dir)?;
     let kek = aead::Key::random();
-    kek.persist(&path, 0o600)?;
+    std::fs::create_dir_all(keys_dir)?;
+    kek.persist(&keys_dir.join(TRANSCRIPT_KEK_FILENAME), 0o600)?;
     Ok(kek)
+}
+
+/// Load the host transcript KEK if it exists, without creating one.
+///
+/// The read-only half of [`load_or_init_kek`], for a caller that only wants to
+/// *open* a capture. Minting a KEK from a read path is worse than failing:
+/// every existing capture's wrapped data key was sealed under the old one, so
+/// the new key turns a missing-key problem into a permanent decrypt failure —
+/// and a second process minting concurrently makes it non-deterministic which
+/// one wins.
+pub fn load_kek(keys_dir: &Path) -> std::io::Result<Option<aead::Key>> {
+    let path = keys_dir.join(TRANSCRIPT_KEK_FILENAME);
+    match std::fs::metadata(&path) {
+        Ok(_) => aead::Key::load(&path).map(Some),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 /// Wrap a per-capture data key under the host KEK, base64 for the manifest's
@@ -494,7 +835,13 @@ mod tests {
             created_unix_secs: 1,
             wrapped_data_key_b64: String::new(),
             recipient: "host-key-1".to_string(),
+            retention: RetentionPolicy::FailClosed,
             chunks,
+            refused_chunks: 0,
+            refused_bytes: 0,
+            evicted_chunks: 0,
+            evicted_bytes: 0,
+            adopted: false,
             sealed_root_hex: String::new(),
         };
         manifest.sealed_root_hex = sealed_root_hex(&manifest).unwrap();
@@ -507,10 +854,12 @@ mod tests {
         ChunkRecord {
             seq: 0,
             file: name.to_string(),
+            offset: 0,
             sha256_hex: sha,
             size_bytes: body.len() as u64,
             direction: Direction::Egress,
             dropped: false,
+            prev_hash: "0".repeat(64),
         }
     }
 
@@ -519,10 +868,12 @@ mod tests {
         let m = manifest(vec![ChunkRecord {
             seq: 0,
             file: "0.bin".to_string(),
+            offset: 0,
             sha256_hex: "ab".to_string(),
             size_bytes: 2,
             direction: Direction::Ingress,
             dropped: false,
+            prev_hash: "0".repeat(64),
         }]);
         let json = serde_json::to_string(&m).unwrap();
         let back: TranscriptManifest = serde_json::from_str(&json).unwrap();
@@ -530,28 +881,282 @@ mod tests {
     }
 
     #[test]
-    fn sealed_root_vector_is_pinned() {
-        let m = manifest(vec![
+    fn stream_directions_round_trip_through_serde() {
+        for d in [Direction::Stdout, Direction::Stderr, Direction::Trace] {
+            let s = serde_json::to_string(&d).expect("serialize direction");
+            let back: Direction = serde_json::from_str(&s).expect("deserialize direction");
+            assert_eq!(d, back);
+        }
+    }
+
+    #[test]
+    fn chunk_missing_prev_hash_field_parses_with_empty_default() {
+        // A manifest written before `prev_hash` existed has no such key; it
+        // must still load rather than fail closed on an old capture.
+        let json = r#"{"seq":0,"file":"0.chunk","sha256_hex":"ab","size_bytes":2,"direction":"egress","dropped":false}"#;
+        let c: ChunkRecord = serde_json::from_str(json).expect("legacy chunk record parses");
+        assert_eq!(c.prev_hash, "");
+    }
+
+    /// Shared by `sealed_root_vector_is_pinned` and
+    /// `the_pre_linkage_root_vector_no_longer_verifies` so both tests exercise
+    /// the exact same chunk records — the only thing that may differ between
+    /// them is which root is stamped on the result.
+    fn two_chunk_manifest() -> TranscriptManifest {
+        manifest(vec![
             ChunkRecord {
                 seq: 0,
-                file: "0.chunk".to_string(),
+                file: "0.seg".to_string(),
+                offset: 0,
                 sha256_hex: "11".repeat(32),
                 size_bytes: 48,
                 direction: Direction::Egress,
                 dropped: false,
+                prev_hash: "0".repeat(64),
             },
             ChunkRecord {
                 seq: 1,
-                file: "1.chunk".to_string(),
+                file: "0.seg".to_string(),
+                offset: 48,
                 sha256_hex: "22".repeat(32),
                 size_bytes: 64,
                 direction: Direction::Ingress,
                 dropped: true,
+                prev_hash: "11".repeat(32),
             },
-        ]);
+        ])
+    }
+
+    /// The exact bytes the sealed root of [`two_chunk_manifest`] is a Merkle
+    /// tree over: leaf 0 is the serialized root metadata, then one leaf per
+    /// chunk record in capture order.
+    ///
+    /// Pinned as the preimage rather than as the resulting digest. A digest
+    /// pin catches the same changes, but the only way to re-pin one is to
+    /// paste the hex out of the failure it just produced — so the value ends
+    /// up asserting that the code agrees with itself, and a reviewer has no
+    /// way to tell an intended change from an accidental one. These bytes are
+    /// readable: a new field, a reordered leaf, or a changed domain separator
+    /// shows up in the diff as the thing it is.
+    const PINNED_ROOT_PREIMAGE: [&str; 3] = [
+        r#"{"domain":"mvm.transcript.metadata.v1","format_version":6,"capture_id":"cap-1","binding":{"tenant_id":"t","vm_name":"vm","session_id":null},"bounds":{"max_duration_secs":60,"max_bytes":1000,"max_chunks":3},"created_unix_secs":1,"wrapped_data_key_b64":"","recipient":"host-key-1","retention":"fail_closed","chunk_count":2,"refused_chunks":0,"refused_bytes":0,"evicted_chunks":0,"evicted_bytes":0,"adopted":false}"#,
+        r#"{"domain":"mvm.transcript.chunk.v1","chunk":{"seq":0,"file":"0.seg","offset":0,"sha256_hex":"1111111111111111111111111111111111111111111111111111111111111111","size_bytes":48,"direction":"egress","dropped":false,"prev_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}"#,
+        r#"{"domain":"mvm.transcript.chunk.v1","chunk":{"seq":1,"file":"0.seg","offset":48,"sha256_hex":"2222222222222222222222222222222222222222222222222222222222222222","size_bytes":64,"direction":"ingress","dropped":true,"prev_hash":"1111111111111111111111111111111111111111111111111111111111111111"}}"#,
+    ];
+
+    #[test]
+    fn sealed_root_vector_is_pinned() {
+        let m = two_chunk_manifest();
+        // Derived from the pinned bytes, never from a second call into
+        // `sealed_root_hex`: computing the expectation from the code under
+        // test would compare the production path against itself and assert
+        // nothing at all.
+        let from_preimage = hex::encode(mvm_contract::merkle::merkle_root(&PINNED_ROOT_PREIMAGE));
         assert_eq!(
-            m.sealed_root_hex,
-            "81cf47b6993c2752d0a50ed0051151d6354986863f5b6265ae723e664c4f6dda"
+            m.sealed_root_hex, from_preimage,
+            "the sealed root no longer commits to PINNED_ROOT_PREIMAGE; diff the leaf \
+             construction in `sealed_root_hex` against those bytes to see what moved"
+        );
+    }
+
+    #[test]
+    fn pinned_chunk_leaves_decode_to_the_fixture_chunk_records() {
+        // Turns a root mismatch from "some hex moved" into a field-level diff:
+        // a `ChunkRecord` that gains, loses, or renames a field fails here
+        // naming the field, rather than only as a changed digest.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PinnedChunkLeaf {
+            domain: String,
+            chunk: ChunkRecord,
+        }
+
+        let m = two_chunk_manifest();
+        assert_eq!(
+            PINNED_ROOT_PREIMAGE.len(),
+            m.chunks.len() + 1,
+            "the preimage must hold the metadata leaf plus one leaf per chunk"
+        );
+        for (leaf, record) in PINNED_ROOT_PREIMAGE[1..].iter().zip(&m.chunks) {
+            let decoded: PinnedChunkLeaf =
+                serde_json::from_str(leaf).expect("pinned chunk leaf parses as a chunk record");
+            assert_eq!(decoded.domain, "mvm.transcript.chunk.v1");
+            assert_eq!(&decoded.chunk, record);
+        }
+    }
+
+    /// The root `sealed_root_vector_is_pinned` pinned before the manifest
+    /// grew `refused_chunks`/`refused_bytes`.
+    const PRE_REFUSAL_ROOT_HEX: &str =
+        "73b077cace4f804b2d2d83d293d12a0d63a398423bad12c611eb633b15c90206";
+
+    #[test]
+    fn a_manifest_sealed_before_the_refusal_count_fails_on_version_not_root() {
+        // The whole reason the format version moved with the field: an honest
+        // old capture must be refused as old, never as tampered.
+        let mut m = manifest_with_root(PRE_REFUSAL_ROOT_HEX);
+        m.format_version = 3;
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::UnknownFormatVersion {
+                got: 3,
+                expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION
+            })
+        );
+    }
+
+    /// The root `sealed_root_vector_is_pinned` pinned before `ChunkRecord`
+    /// grew `prev_hash`. Captured here, unchanged, only so the test below can
+    /// prove it no longer verifies.
+    const PRE_LINKAGE_ROOT_HEX: &str =
+        "81cf47b6993c2752d0a50ed0051151d6354986863f5b6265ae723e664c4f6dda";
+
+    /// The root `sealed_root_vector_is_pinned` pinned before chunks moved into
+    /// shared segments — before `ChunkRecord` carried an `offset` and before
+    /// the manifest carried a retention policy or an eviction count.
+    const PRE_SEGMENT_ROOT_HEX: &str =
+        "1c0d5a649e45081b0f2ac16d30744b97aff3117002717719e9ba1601d9ca1c29";
+
+    /// The root `sealed_root_vector_is_pinned` pinned before the manifest
+    /// grew `adopted`.
+    const PRE_ADOPTION_ROOT_HEX: &str =
+        "854edc1c7c06e0bed82ea0061653410cd33ab0d0e685f4e9ef8b9d9d911de320";
+
+    /// Same chunk records as `two_chunk_manifest`, but stamped with a caller
+    /// supplied root instead of a freshly computed one.
+    fn manifest_with_root(root_hex: &str) -> TranscriptManifest {
+        let mut m = two_chunk_manifest();
+        m.sealed_root_hex = root_hex.to_string();
+        m
+    }
+
+    #[test]
+    fn the_pre_linkage_root_vector_no_longer_verifies() {
+        // Guards the re-pin itself: if this ever passes again, the chunk-record
+        // layout silently reverted and the new vector is meaningless.
+        //
+        // `two_chunk_manifest` stamps the *current* format_version (via the
+        // `manifest` helper), so this exercises the root comparison, not the
+        // version check: the manifest passes `validate_format` and only then
+        // fails on the stale root.
+        let m = manifest_with_root(PRE_LINKAGE_ROOT_HEX);
+        assert_eq!(m.format_version, TRANSCRIPT_MANIFEST_FORMAT_VERSION);
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
+    fn a_manifest_sealed_before_segments_fails_on_version_not_root() {
+        // Same reason as every prior re-pin: an honest capture written under
+        // the one-file-per-chunk layout must be refused as old, never as
+        // tampered. Confusing the two degrades the tamper signal itself.
+        let mut m = manifest_with_root(PRE_SEGMENT_ROOT_HEX);
+        m.format_version = 4;
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::UnknownFormatVersion {
+                got: 4,
+                expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION
+            })
+        );
+    }
+
+    #[test]
+    fn the_pre_segment_root_vector_no_longer_verifies() {
+        // Guards the re-pin: if this ever passes again, the segment layout
+        // silently reverted and the new vector means nothing.
+        let m = manifest_with_root(PRE_SEGMENT_ROOT_HEX);
+        assert_eq!(m.format_version, TRANSCRIPT_MANIFEST_FORMAT_VERSION);
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
+    fn a_manifest_sealed_before_the_adoption_flag_fails_on_version_not_root() {
+        // Same rule as every prior re-pin: an honest older capture is refused
+        // as old, never as tampered.
+        let mut m = manifest_with_root(PRE_ADOPTION_ROOT_HEX);
+        m.format_version = 5;
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::UnknownFormatVersion {
+                got: 5,
+                expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION
+            })
+        );
+    }
+
+    #[test]
+    fn the_pre_adoption_root_vector_no_longer_verifies() {
+        let m = manifest_with_root(PRE_ADOPTION_ROOT_HEX);
+        assert_eq!(m.format_version, TRANSCRIPT_MANIFEST_FORMAT_VERSION);
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
+    fn flipping_the_adoption_flag_breaks_the_sealed_root() {
+        // The point of putting it inside the root: a manifest cannot be
+        // laundered into looking self-sealed by editing one boolean.
+        let mut m = two_chunk_manifest();
+        verify_sealed_root(&m).expect("the fixture verifies as written");
+        m.adopted = true;
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
+    fn stale_format_version_manifest_fails_on_version_not_root_mismatch() {
+        // A manifest sealed by pre-linkage code: format_version 2, and a
+        // chunk with no `prev_hash` key at all — not a defaulted empty
+        // string, the key is simply absent, exactly like a real capture
+        // written before the field existed. `sealed_root_hex` is some value
+        // that pre-linkage code could plausibly have produced; its exact
+        // content never matters, since the version check must refuse the
+        // manifest before the root is ever compared.
+        let json = format!(
+            r#"{{"format_version":2,"capture_id":"cap-1","binding":{{"tenant_id":"t","vm_name":"vm","session_id":null}},"bounds":{{"max_duration_secs":60,"max_bytes":1000,"max_chunks":3}},"created_unix_secs":1,"wrapped_data_key_b64":"","recipient":"host-key-1","chunks":[{{"seq":0,"file":"0.chunk","sha256_hex":"{}","size_bytes":48,"direction":"egress","dropped":false}}],"sealed_root_hex":"{}"}}"#,
+            "11".repeat(32),
+            "33".repeat(32),
+        );
+        let m: TranscriptManifest =
+            serde_json::from_str(&json).expect("a pre-linkage manifest still parses");
+        assert_eq!(
+            m.chunks[0].prev_hash, "",
+            "no prev_hash key in the source JSON"
+        );
+        // An old-but-honest manifest and an attacker-tampered one must never
+        // produce the same error: this is the version-refusal error, never
+        // `SealedRootMismatch`.
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::UnknownFormatVersion {
+                got: 2,
+                expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION
+            })
+        );
+    }
+
+    #[test]
+    fn current_format_version_manifest_round_trips_through_verify_and_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(4), writer_config());
+        w.push(Direction::Stdout, b"hello ").unwrap();
+        w.push(Direction::Stderr, b"world").unwrap();
+        let manifest = w.seal();
+        assert_eq!(manifest.format_version, TRANSCRIPT_MANIFEST_FORMAT_VERSION);
+        verify_sealed_root(&manifest).expect("current-version manifest verifies");
+        assert_eq!(
+            export(&manifest, dir.path(), &fixed_key(4)).unwrap(),
+            b"hello world"
         );
     }
 
@@ -609,10 +1214,12 @@ mod tests {
         let c = ChunkRecord {
             seq: 7,
             file: "gone.bin".to_string(),
+            offset: 0,
             sha256_hex: "00".to_string(),
             size_bytes: 1,
             direction: Direction::Egress,
             dropped: false,
+            prev_hash: "0".repeat(64),
         };
         assert!(matches!(
             verify_chunks(&manifest(vec![c]), dir.path()).unwrap_err(),
@@ -626,10 +1233,12 @@ mod tests {
         let c = ChunkRecord {
             seq: 0,
             file: "../escape".to_string(),
+            offset: 0,
             sha256_hex: "00".to_string(),
             size_bytes: 1,
             direction: Direction::Egress,
             dropped: false,
+            prev_hash: "0".repeat(64),
         };
         assert!(matches!(
             verify_chunks(&manifest(vec![c]), dir.path()).unwrap_err(),
@@ -657,10 +1266,34 @@ mod tests {
                 session_id: None,
             },
             bounds: bounds(),
+            retention: RetentionPolicy::FailClosed,
             created_unix_secs: 1,
             recipient: "host-key-1".to_string(),
             wrapped_data_key_b64: "wrapped".to_string(),
         }
+    }
+
+    /// A writer with room for a real stream capture — wider bounds than
+    /// [`bounds`], which is deliberately tight for budget-exhaustion tests.
+    fn writer_at(dir: &Path) -> TranscriptWriter {
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 1 << 20,
+            max_chunks: 64,
+        };
+        TranscriptWriter::new(dir, fixed_key(1), cfg)
+    }
+
+    #[test]
+    fn pushed_chunks_link_to_their_predecessor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = writer_at(dir.path());
+        w.push(Direction::Stdout, b"one").expect("push one");
+        w.push(Direction::Stdout, b"two").expect("push two");
+        let m = w.seal();
+        assert_eq!(m.chunks[0].prev_hash, "0".repeat(64));
+        assert_eq!(m.chunks[1].prev_hash, m.chunks[0].sha256_hex);
     }
 
     #[test]
@@ -766,6 +1399,114 @@ mod tests {
     }
 
     #[test]
+    fn a_complete_capture_declares_itself_complete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = writer_at(dir.path());
+        w.push(Direction::Stdout, b"all of it").expect("push");
+        let manifest = w.seal();
+        assert!(!manifest.is_truncated());
+        assert_eq!(manifest.refused_chunks, 0);
+        assert_eq!(manifest.refused_bytes, 0);
+    }
+
+    #[test]
+    fn a_capture_that_hit_its_bound_seals_as_truncated() {
+        // The forensic failure this exists for: without the refusal count a
+        // capture that stopped at its bound verifies clean and reads as the
+        // whole of a quiet workload's output.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 1 << 20,
+            max_chunks: 1,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        w.push(Direction::Stdout, b"first").expect("first fits");
+        assert!(w.push(Direction::Stdout, b"second").is_err());
+        assert!(w.push_dropped(Direction::Stderr, b"third!").is_err());
+        assert_eq!(w.refused_chunks(), 2);
+        assert_eq!(w.refused_bytes(), 12);
+
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 1);
+        assert!(
+            manifest.is_truncated(),
+            "a manifest missing chunks must say so"
+        );
+        assert_eq!(manifest.refused_chunks, 2);
+        assert_eq!(manifest.refused_bytes, 12);
+        verify_sealed_root(&manifest).expect("a truncated capture still seals a valid root");
+        verify_chunks(&manifest, dir.path()).expect("the chunks that did land verify");
+    }
+
+    #[test]
+    fn chunks_that_never_reached_the_writer_still_truncate_the_manifest() {
+        // The background-writer case: a bounded hand-off that sheds rather
+        // than pacing its producer loses records the writer never sees, and a
+        // manifest that only counted the writer's own refusals would call that
+        // capture complete.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), writer_config());
+        w.push(Direction::Stdout, b"landed").expect("push");
+        assert!(!w.sealed_manifest().is_truncated());
+
+        w.note_unwritten(4, 96);
+        assert_eq!(w.refused_chunks(), 4);
+        assert_eq!(w.refused_bytes(), 96);
+
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 1);
+        assert!(manifest.is_truncated());
+        assert_eq!(manifest.refused_chunks, 4);
+        assert_eq!(manifest.refused_bytes, 96);
+        verify_sealed_root(&manifest).expect("the shortfall is inside the root");
+        verify_chunks(&manifest, dir.path()).expect("the chunk that did land verifies");
+    }
+
+    #[test]
+    fn unwritten_counts_add_to_what_the_writer_already_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 1 << 20,
+            max_chunks: 1,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        w.push(Direction::Stdout, b"first").expect("first fits");
+        assert!(w.push(Direction::Stdout, b"second").is_err());
+        w.note_unwritten(2, 10);
+
+        assert_eq!(w.refused_chunks(), 3);
+        assert_eq!(w.refused_bytes(), 16);
+    }
+
+    #[test]
+    fn hiding_the_refusal_count_breaks_the_sealed_root() {
+        // The count is only worth anything if it cannot be filed off: the root
+        // commits to it, so a truncated capture cannot be passed off as whole.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 1 << 20,
+            max_chunks: 1,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        w.push(Direction::Stdout, b"first").expect("first fits");
+        assert!(w.push(Direction::Stdout, b"second").is_err());
+        let mut manifest = w.seal();
+
+        manifest.refused_chunks = 0;
+        manifest.refused_bytes = 0;
+        assert_eq!(
+            verify_sealed_root(&manifest),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
     fn export_fails_closed_on_a_tampered_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
@@ -773,9 +1514,9 @@ mod tests {
         let manifest = w.seal();
         // Flip a byte in place (same length) so the hash check — not the size
         // check — is what refuses.
-        let mut ct = std::fs::read(dir.path().join("0.chunk")).unwrap();
+        let mut ct = std::fs::read(dir.path().join("0.seg")).unwrap();
         ct[0] ^= 0xff;
-        std::fs::write(dir.path().join("0.chunk"), &ct).unwrap();
+        std::fs::write(dir.path().join("0.seg"), &ct).unwrap();
         let err = export(&manifest, dir.path(), &fixed_key(7)).unwrap_err();
         assert!(matches!(err, TranscriptError::HashMismatch { .. }));
     }
@@ -874,8 +1615,334 @@ mod tests {
             TranscriptError::BoundExceeded(_)
         ));
         assert!(
-            !dir.path().join("0.chunk").exists(),
+            !dir.path().join("0.seg").exists(),
             "no ciphertext lands when the budget refuses the chunk"
         );
+    }
+
+    // --- batching: many chunks, few files -------------------------------
+
+    /// A writer wide enough that neither bound binds, so a test measures the
+    /// segment layout rather than retention.
+    fn roomy_writer_at(dir: &Path, retention: RetentionPolicy) -> TranscriptWriter {
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: u64::MAX,
+            max_bytes: u64::MAX,
+            max_chunks: u64::MAX,
+        };
+        cfg.retention = retention;
+        TranscriptWriter::new(dir, fixed_key(11), cfg)
+    }
+
+    fn files_in(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .expect("read capture dir")
+            .filter_map(Result::ok)
+            .count()
+    }
+
+    #[test]
+    fn a_hundred_thousand_chunks_produce_a_bounded_number_of_files() {
+        // The regression this task exists for: one file per chunk made the
+        // chunk cap an inode cap, and the cap had to be set below a second of
+        // log output. Files must scale with bytes, not with pushes.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = roomy_writer_at(dir.path(), RetentionPolicy::FailClosed);
+        for _ in 0..100_000 {
+            w.push(Direction::Stdout, b"x").expect("push");
+        }
+        let segments = w.segment_count();
+        let manifest = w.seal();
+        assert_eq!(
+            manifest.chunks.len(),
+            100_000,
+            "every chunk is still its own record"
+        );
+
+        // 1024 chunks per segment, and 100k one-byte chunks are far short of
+        // the 1 MiB size trigger, so this is the count trigger alone.
+        let ceiling = 100_000usize.div_ceil(SEGMENT_MAX_CHUNKS as usize) + 1;
+        assert!(
+            segments <= ceiling,
+            "100k chunks landed in {segments} segments, expected at most {ceiling}"
+        );
+        assert_eq!(files_in(dir.path()), segments);
+    }
+
+    #[test]
+    fn a_sealed_manifest_over_batched_segments_verifies_and_exports_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = roomy_writer_at(dir.path(), RetentionPolicy::FailClosed);
+        // Enough pushes to cross several segment boundaries.
+        let mut expected = Vec::new();
+        for i in 0..(SEGMENT_MAX_CHUNKS * 3 + 7) {
+            let body = format!("line-{i}\n").into_bytes();
+            expected.extend_from_slice(&body);
+            w.push(Direction::Stdout, &body).expect("push");
+        }
+        assert!(w.segment_count() >= 4, "the stream spans several segments");
+        let manifest = w.seal();
+
+        verify_sealed_root(&manifest).expect("a batched capture still seals a verifiable root");
+        verify_chunks(&manifest, dir.path()).expect("every chunk verifies inside its segment");
+        assert_eq!(
+            export(&manifest, dir.path(), &fixed_key(11)).expect("export"),
+            expected,
+            "export reproduces the byte stream in order across segment boundaries"
+        );
+    }
+
+    #[test]
+    fn the_sealed_root_still_commits_to_each_chunks_own_digest() {
+        // Batching moved the bytes, not what the root attests: changing one
+        // chunk's recorded digest, while every other record and the segment
+        // file stay untouched, must still break the root.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = roomy_writer_at(dir.path(), RetentionPolicy::FailClosed);
+        for i in 0..8u8 {
+            w.push(Direction::Stdout, &[i; 4]).expect("push");
+        }
+        let manifest = w.seal();
+        assert_eq!(
+            manifest
+                .chunks
+                .iter()
+                .map(|c| c.file.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0.seg"; 8],
+            "all eight share one segment"
+        );
+        assert_ne!(
+            manifest.chunks[3].sha256_hex, manifest.chunks[4].sha256_hex,
+            "neighbours in one file still carry their own digests"
+        );
+
+        let mut filed_off = manifest.clone();
+        filed_off.chunks[4].sha256_hex = "00".repeat(32);
+        assert_eq!(
+            verify_sealed_root(&filed_off),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+
+        let mut moved = manifest.clone();
+        moved.chunks[4].offset += 1;
+        assert_eq!(
+            verify_sealed_root(&moved),
+            Err(TranscriptError::SealedRootMismatch),
+            "where a chunk sits in its segment is sealed too"
+        );
+    }
+
+    #[test]
+    fn one_tampered_byte_inside_a_segment_is_still_detected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = roomy_writer_at(dir.path(), RetentionPolicy::FailClosed);
+        for i in 0..5u8 {
+            w.push(Direction::Stdout, &[i; 16]).expect("push");
+        }
+        let manifest = w.seal();
+        let target = &manifest.chunks[3];
+        let path = dir.path().join(&target.file);
+        let mut bytes = std::fs::read(&path).expect("segment");
+        // Same length, inside the fourth chunk's range: the hash check, not
+        // the length check, is what must refuse.
+        let at = target.offset as usize + 2;
+        bytes[at] ^= 0xff;
+        std::fs::write(&path, &bytes).expect("tamper");
+
+        assert_eq!(
+            verify_chunks(&manifest, dir.path()),
+            Err(TranscriptError::HashMismatch {
+                seq: 3,
+                file: target.file.clone(),
+            })
+        );
+        assert!(export(&manifest, dir.path(), &fixed_key(11)).is_err());
+    }
+
+    #[test]
+    fn a_torn_final_segment_fails_closed_rather_than_exporting_less() {
+        // A capture killed mid-append leaves a short last segment. Exporting
+        // the bytes that survived would hand back a silently shorter stream
+        // that verifies clean.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = roomy_writer_at(dir.path(), RetentionPolicy::FailClosed);
+        for i in 0..4u8 {
+            w.push(Direction::Stdout, &[i; 8]).expect("push");
+        }
+        let manifest = w.seal();
+        let path = dir.path().join(&manifest.chunks[0].file);
+        let bytes = std::fs::read(&path).expect("segment");
+        std::fs::write(&path, &bytes[..bytes.len() - 3]).expect("tear the tail off");
+
+        let err = verify_chunks(&manifest, dir.path()).expect_err("a torn segment is refused");
+        assert!(
+            matches!(err, TranscriptError::SegmentLengthMismatch { .. }),
+            "a torn capture must read as short, not as tampered: {err}"
+        );
+        assert!(export(&manifest, dir.path(), &fixed_key(11)).is_err());
+    }
+
+    #[test]
+    fn a_capture_that_survived_a_short_write_still_verifies_and_exports() {
+        // A full disk mid-append refuses the chunk but leaves the bytes that
+        // fit. Those bytes belong to no record, so `verify_chunks` would
+        // refuse the segment holding them — and it refuses the whole manifest,
+        // which under fail-closed retention never evicts away. One transient
+        // ENOSPC would cost every intact segment in the artifact.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = roomy_writer_at(dir.path(), RetentionPolicy::FailClosed);
+        w.push(Direction::Stdout, b"before ").expect("first chunk");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("0.seg"))
+            .and_then(|mut handle| std::io::Write::write_all(&mut handle, b"PARTIAL"))
+            .expect("leave a partial write on disk");
+
+        w.push(Direction::Stdout, b"after")
+            .expect("the capture carries on");
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 2);
+        assert_eq!(files_in(dir.path()), 1, "no segment was abandoned");
+
+        verify_sealed_root(&manifest).expect("the capture still seals a valid root");
+        verify_chunks(&manifest, dir.path()).expect("the capture still verifies");
+        assert_eq!(
+            export(&manifest, dir.path(), &fixed_key(11)).expect("export"),
+            b"before after"
+        );
+    }
+
+    // --- ring retention on the durable copy -----------------------------
+
+    #[test]
+    fn a_ring_capture_keeps_the_newest_window_instead_of_refusing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.retention = RetentionPolicy::Ring;
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: u64::MAX,
+            max_bytes: u64::MAX,
+            max_chunks: 2 * SEGMENT_MAX_CHUNKS,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(12), cfg);
+        let total = SEGMENT_MAX_CHUNKS * 5;
+        for i in 0..total {
+            w.push(Direction::Stdout, format!("{i}\n").as_bytes())
+                .expect("a ring never refuses");
+        }
+        assert_eq!(w.refused_chunks(), 0, "a cap prunes, it never refuses");
+        assert!(w.evicted_chunks() > 0);
+
+        let manifest = w.seal();
+        assert!(manifest.is_truncated(), "a windowed capture says so");
+        assert_eq!(manifest.retention, RetentionPolicy::Ring);
+        assert_eq!(
+            manifest.evicted_chunks + manifest.chunks.len() as u64,
+            total,
+            "every chunk is either still held or accounted as evicted"
+        );
+        let last = manifest.chunks.last().expect("a live window");
+        assert_eq!(last.seq, total - 1, "the newest write always survives");
+
+        verify_sealed_root(&manifest).expect("the surviving window seals a valid root");
+        verify_chunks(&manifest, dir.path()).expect("the surviving segments verify");
+        let out = export(&manifest, dir.path(), &fixed_key(12)).expect("export the window");
+        assert!(out.ends_with(format!("{}\n", total - 1).as_bytes()));
+    }
+
+    #[test]
+    fn an_evicted_window_keeps_its_sequence_numbers_and_its_anchor() {
+        // A gap must read as a gap: sequence numbers cannot restart, and the
+        // first surviving record must still name the chunk before it so a
+        // verifier has an anchor rather than a fake genesis.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.retention = RetentionPolicy::Ring;
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: u64::MAX,
+            max_bytes: u64::MAX,
+            max_chunks: SEGMENT_MAX_CHUNKS,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(13), cfg);
+        for i in 0..(SEGMENT_MAX_CHUNKS * 3) {
+            w.push(Direction::Stdout, format!("{i}").as_bytes())
+                .expect("push");
+        }
+        let manifest = w.seal();
+        let first = manifest.chunks.first().expect("a live window");
+        assert!(first.seq > 0, "the window starts where the capture got to");
+        assert_ne!(
+            first.prev_hash,
+            "0".repeat(64),
+            "a pruned window must not claim to be genesis"
+        );
+    }
+
+    #[test]
+    fn hiding_the_eviction_count_breaks_the_sealed_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.retention = RetentionPolicy::Ring;
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: u64::MAX,
+            max_bytes: u64::MAX,
+            max_chunks: SEGMENT_MAX_CHUNKS,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(14), cfg);
+        for _ in 0..(SEGMENT_MAX_CHUNKS * 3) {
+            w.push(Direction::Stdout, b"x").expect("push");
+        }
+        let mut manifest = w.seal();
+        assert!(manifest.evicted_chunks > 0);
+        manifest.evicted_chunks = 0;
+        manifest.evicted_bytes = 0;
+        assert_eq!(
+            verify_sealed_root(&manifest),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
+    fn restating_a_ring_capture_as_fail_closed_breaks_the_sealed_root() {
+        // A windowed artifact relabelled as one that would have refused reads
+        // as a complete capture of a quiet workload. The root commits to the
+        // policy so that relabelling cannot happen quietly.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.retention = RetentionPolicy::Ring;
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(15), cfg);
+        w.push(Direction::Stdout, b"out").expect("push");
+        let mut manifest = w.seal();
+        manifest.retention = RetentionPolicy::FailClosed;
+        assert_eq!(
+            verify_sealed_root(&manifest),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
+    fn a_ring_capture_bounds_its_file_count_as_well_as_its_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.retention = RetentionPolicy::Ring;
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: u64::MAX,
+            max_bytes: u64::MAX,
+            max_chunks: 4 * SEGMENT_MAX_CHUNKS,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(16), cfg);
+        for _ in 0..(SEGMENT_MAX_CHUNKS * 20) {
+            w.push(Direction::Stdout, b"x").expect("push");
+        }
+        // The live window spans at most `max_chunks / SEGMENT_MAX_CHUNKS`
+        // sealed segments plus the open one; eviction unlinks the rest.
+        assert!(
+            w.segment_count() <= 6,
+            "20k chunks left {} segments live",
+            w.segment_count()
+        );
+        assert_eq!(files_in(dir.path()), w.segment_count());
     }
 }

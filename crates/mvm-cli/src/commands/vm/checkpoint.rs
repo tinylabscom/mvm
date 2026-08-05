@@ -1007,14 +1007,17 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         restrict_agent_verbs: !parent_agent_verbs.is_empty()
             || super::agent_verbs::grant_eligible(false, false, false),
         services: Vec::new(),
+        entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+            "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
+        ),
     })?;
 
     let child_plan_json = admission.as_ref().map(|ctx| {
-        serde_json::to_string(&ctx.admitted.signed).expect("admitted plan is always serializable")
+        serde_json::to_string(ctx.admitted.signed()).expect("admitted plan is always serializable")
     });
     let child_tenant_id = admission
         .as_ref()
-        .map(|ctx| ctx.admitted.plan.tenant.0.clone());
+        .map(|ctx| ctx.admitted.plan().tenant.0.clone());
 
     // Mint the child's verb-grant sidecar up front so it's readable below for
     // post-restore delivery. Mirrors the former Vz backend's fork path.
@@ -1241,6 +1244,9 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         restrict_agent_verbs: !parent_agent_verbs.is_empty()
             || super::agent_verbs::grant_eligible(false, false, false),
         services: Vec::new(),
+        entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+            "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
+        ),
     })?;
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig {
@@ -1888,6 +1894,7 @@ mod tests {
             accessible: false,
             sealed: true,
             entrypoint_kind: "command".to_string(),
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             expected_boot_ms: 300,
             agent_binary: "real".to_string(),
@@ -1915,6 +1922,7 @@ mod tests {
             accessible: true,
             sealed: false,
             entrypoint_kind: "shell".to_string(),
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             expected_boot_ms: 300,
             agent_binary: "real".to_string(),
@@ -1994,6 +2002,7 @@ mod tests {
             accessible: false,
             sealed: true,
             entrypoint_kind: "command".to_string(),
+            entrypoint_argv: Vec::new(),
             init_system: "busybox".to_string(),
             expected_boot_ms: 300,
             agent_binary: "real".to_string(),

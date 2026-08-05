@@ -115,15 +115,15 @@ use crate::state::{ActivationState, AgentBootState, AgentState, IntegrationState
 use crate::transport::{AgentListener, accept_control, bind_listener};
 
 use handlers::{
-    handle_checkpoint_integrations, handle_entrypoint_status, handle_fs_diff, handle_fs_list,
-    handle_fs_mkdir, handle_fs_move, handle_fs_read, handle_fs_remove, handle_fs_stat,
-    handle_fs_write, handle_integration_status, handle_mount_volume, handle_ping,
-    handle_post_restore, handle_primed_status, handle_probe_status, handle_proc_kill,
-    handle_proc_list, handle_proc_send_input, handle_proc_signal, handle_proc_start,
-    handle_proc_wait, handle_readiness_status, handle_resource_usage,
-    handle_run_entrypoint_request, handle_sleep_prep, handle_start_port_forward,
-    handle_start_unix_socket_forward, handle_unmount_volume, handle_update_idle_timeout,
-    handle_wake, handle_worker_status,
+    handle_checkpoint_integrations, handle_close_stream_input, handle_entrypoint_status,
+    handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move, handle_fs_read,
+    handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
+    handle_mount_volume, handle_ping, handle_post_restore, handle_primed_status,
+    handle_probe_status, handle_proc_kill, handle_proc_list, handle_proc_send_input,
+    handle_proc_signal, handle_proc_start, handle_proc_wait, handle_readiness_status,
+    handle_resource_usage, handle_run_entrypoint_request, handle_sleep_prep,
+    handle_start_port_forward, handle_start_unix_socket_forward, handle_stream_input,
+    handle_unmount_volume, handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
 #[cfg(not(feature = "interactive"))]
 use handlers::{
@@ -387,7 +387,14 @@ fn handle_client(
                 stdin,
                 timeout_secs,
                 env,
-            } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env),
+                stream_input,
+            } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env, stream_input),
+
+            // The host→guest half of the stream plane. Admission happened on
+            // the host, at the gate that holds the signed plan; what reaches
+            // here is bytes it already cleared, in the order it cleared them.
+            GuestRequest::StreamInput(frame) => handle_stream_input(frame),
+            GuestRequest::CloseStreamInput(close) => handle_close_stream_input(close),
 
             GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
 

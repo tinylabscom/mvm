@@ -34,8 +34,9 @@ Linux + /dev/kvm           →  Firecracker
   workloads and a *runtime* SDK for driving them, both thin wrappers over one
   conformance-pinned surface
 - **Security claims, CI-enforced** — 15+ numbered claims (signed execution
-  plans, chain-signed audit log, dm-verity boot, default-deny egress, sealed
-  prod images with no interactive access, secret substitution over vsock)
+  plans, chain-signed audit log, dm-verity boot, default-deny egress, run-shaped
+  agent-verb grants, sealed prod images that refuse interactive access, secret
+  substitution over vsock)
 
 ## Install
 
@@ -166,8 +167,9 @@ first `machine run --image ...`.
 ### 2. From a Nix flake (`mkGuest`)
 
 Reproducible, minimal guests built from a flake — the guest carries only what
-you declare. `mkGuest` has three entrypoint forms; the form decides the security
-posture:
+you declare. `mkGuest` has three entrypoint forms; the form sets the image's
+default accessibility and profile metadata, while the launch profile and run
+shape decide the agent-verb grant:
 
 ```nix
 {
@@ -205,8 +207,12 @@ mvmctl machine run   --flake . -- ./app # build + boot + run
 
 Builds run `nix build` inside a builder VM — **host Nix is never used or
 required**, so the same `mvmctl` produces byte-identical artifacts on every host.
-Sealed images are dm-verity verified and have no interactive access; the dev
-form keeps a console. See the
+Sealed images are dm-verity verified and refuse interactive access — no shell,
+no `do_exec`, no PTY; the dev form keeps a console. At launch, a
+baked-entrypoint run on a non-dev profile gets the restricted ProdSafe
+agent-verb grant, while a PTY or ad-hoc argv run requires DevOnly verbs. This
+grant is chosen from the run shape and profile, not from whether an OCI rootfs
+carries a sealed sidecar bit. See the
 [mkGuest guide](public/src/content/docs/guides/nix-flakes.md) and
 `nix/lib/default.nix` for the full API.
 
@@ -376,9 +382,10 @@ mvmctl run --mode live ./script.py     # boot a real microVM and execute
 ```
 
 Interactive surfaces (`exec`, `commands.start`, `console`) are **dev-tier only**;
-against a sealed prod image they refuse with `SandboxDevOnly` — no silent
-fallback (claim 4). `Machine` is the persistent-handle variant; `Session` drives
-function-entrypoint `invoke`.
+they refuse with `SandboxDevOnly` when the run needs DevOnly verbs but admission
+offers only the restricted ProdSafe grant — no silent fallback (claim 4).
+`Machine` is the persistent-handle variant; `Session` drives function-entrypoint
+`invoke`.
 
 **Rust** — the runtime SDK is the `MvmClient` facade (`crates/mvm-client`), an
 `async` trait with a `LocalBackend` (in-process, drives the host directly) and a
@@ -566,9 +573,25 @@ claims), each backed by a named test or workflow gate. In summary:
     authorized cleartext path.
 14. **Every `run --image` admission records OCI image provenance** in the
     chain-signed audit log.
-15. **No interactive access to a sealed production microVM** — the console is
+15. **A sealed production microVM has no shell, no `do_exec`, no PTY, and no
+    input that can change what runs** — the console is
     `interactive`-feature-gated, the prod rootfs is verity-sealed, console
     capture is write-only, and the host gate refuses `console` on a sealed VM.
+    The host→guest input channel carries bytes to an already-running
+    entrypoint's stdin and nothing else — it cannot select a program, alter
+    argv or env, or spawn anything, and it is refused outright without a grant
+    in the signed plan.
+
+Claim 15 used to hold by *absence*: there was no host→guest byte path at all.
+The workload input channel built one, so refusing input is now a policy
+decision rather than a consequence of there being nothing to refuse. ADR-001
+carries that rewording, plus a `Preview` claim 17 for the input channel with
+the four limits that keep it a preview — including that it has no operator
+surface yet. See
+[Workload input](public/src/content/docs/guides/workload-input.md).
+
+    Separately, the restricted ProdSafe grant is issued only to a baked-entrypoint
+    run on a non-dev profile; PTY and ad-hoc argv paths require DevOnly verbs.
 
 The guest agent runs as an unprivileged uid under `setpriv`; `~/.mvm` and
 `~/.mvm/cache` are mode 0700. **Out of scope** (named in ADR-001): a malicious

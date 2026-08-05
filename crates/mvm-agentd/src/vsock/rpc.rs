@@ -5,6 +5,7 @@
 use std::os::unix::net::UnixStream;
 
 use anyhow::{Result, bail};
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 use mvm_core::security::AgentProfile;
 
 use super::*;
@@ -328,6 +329,63 @@ pub fn require_capabilities(
 
     Ok(negotiated)
 }
+/// One `RunEntrypoint` call as a value.
+///
+/// Grouped rather than passed positionally because the fields are all
+/// caller-supplied policy for the same call, and `stream_input` is the kind of
+/// trailing `bool` that reads as noise at a call site until it is named.
+#[derive(Debug, Clone, Default)]
+pub struct RunEntrypointCall {
+    /// Bytes piped to the wrapper's stdin before the call starts.
+    pub stdin: Vec<u8>,
+    /// Wall-clock budget for the call.
+    pub timeout_secs: u64,
+    /// Env injected into the workload after `env_clear()`.
+    pub env: Vec<(String, String)>,
+    /// Keep the workload's stdin open for `StreamInput` frames. Only a plan
+    /// carrying the input grant gets this; see `mvm_hostd::stream::InputGate`.
+    pub stream_input: bool,
+}
+
+/// Deliver one gate-admitted input frame to the workload's stdin.
+///
+/// One RPC per frame, and deliberately so: the guest's production control
+/// listener answers one operational request per connection, so a caller that
+/// waits for each answer before offering the next is the only shape in which
+/// arrival order at the guest is the order the gate accepted. Batching or
+/// pipelining would put that ordering at the mercy of the transport, and the
+/// gate's secret scan is defined over acceptance order.
+pub fn send_stream_input(
+    stream: &mut UnixStream,
+    frame: InputFrame,
+) -> Result<StreamInputResult, RpcError> {
+    stream_input_result(stream, GuestRequest::StreamInput(frame))
+}
+
+/// Deliver the tail the gate withheld and close the workload's stdin.
+pub fn send_close_stream_input(
+    stream: &mut UnixStream,
+    close: CloseInput,
+) -> Result<StreamInputResult, RpcError> {
+    stream_input_result(stream, GuestRequest::CloseStreamInput(close))
+}
+
+fn stream_input_result(
+    stream: &mut UnixStream,
+    req: GuestRequest,
+) -> Result<StreamInputResult, RpcError> {
+    match call_unary(stream, &req)? {
+        GuestResponse::StreamInputResult(result) => Ok(result),
+        // `check_response` already enforced the contract, which names this
+        // variant and no other.
+        other => Err(RpcError::OffContract {
+            verb: req.verb().name(),
+            got: other.variant(),
+            expected: req.response_contract().responses,
+        }),
+    }
+}
+
 /// Send a `RunEntrypoint` request and consume the streaming
 /// `EntrypointEvent` response.
 ///
@@ -342,19 +400,24 @@ pub fn require_capabilities(
 /// count.
 pub fn send_run_entrypoint<F>(
     stream: &mut UnixStream,
-    stdin: Vec<u8>,
-    timeout_secs: u64,
-    env: Vec<(String, String)>,
+    call: RunEntrypointCall,
     mut on_event: F,
 ) -> Result<EntrypointEvent>
 where
     F: FnMut(&EntrypointEvent),
 {
     require_capabilities(stream, &[GuestCapability::RunEntrypoint])?;
+    let RunEntrypointCall {
+        stdin,
+        timeout_secs,
+        env,
+        stream_input,
+    } = call;
     let req = GuestRequest::RunEntrypoint {
         stdin,
         timeout_secs,
         env,
+        stream_input,
     };
     let mut session = RpcSession::open(stream)?;
     session.write(stream, &req)?;
@@ -499,6 +562,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plain call: no streamed input, so the guest closes stdin as soon as
+    /// the payload is written.
+    fn run_call(stdin: &[u8]) -> RunEntrypointCall {
+        RunEntrypointCall {
+            stdin: stdin.to_vec(),
+            timeout_secs: 30,
+            ..RunEntrypointCall::default()
+        }
+    }
 
     #[test]
     fn test_negotiate_protocol_round_trip_on_stream() {
@@ -790,10 +863,9 @@ mod tests {
         });
 
         let mut received: Vec<EntrypointEvent> = Vec::new();
-        let terminal = send_run_entrypoint(&mut host, b"in".to_vec(), 30, Vec::new(), |evt| {
-            received.push(evt.clone())
-        })
-        .expect("send_run_entrypoint");
+        let terminal =
+            send_run_entrypoint(&mut host, run_call(b"in"), |evt| received.push(evt.clone()))
+                .expect("send_run_entrypoint");
 
         guest_handle.join().unwrap();
 
@@ -847,10 +919,9 @@ mod tests {
         });
 
         let mut received: Vec<EntrypointEvent> = Vec::new();
-        let terminal = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |evt| {
-            received.push(evt.clone())
-        })
-        .expect("send_run_entrypoint");
+        let terminal =
+            send_run_entrypoint(&mut host, run_call(b""), |evt| received.push(evt.clone()))
+                .expect("send_run_entrypoint");
 
         guest_handle.join().unwrap();
 
@@ -883,7 +954,7 @@ mod tests {
             write_frame(&mut guest, &GuestResponse::Pong).unwrap();
         });
 
-        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |_| {});
+        let result = send_run_entrypoint(&mut host, run_call(b""), |_| {});
         guest_handle.join().unwrap();
 
         let err = result.expect_err("should reject Pong");
@@ -916,7 +987,7 @@ mod tests {
             .unwrap();
         });
 
-        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |_| {});
+        let result = send_run_entrypoint(&mut host, run_call(b""), |_| {});
         guest_handle.join().unwrap();
 
         let err = result.expect_err("should surface guest error");
@@ -1262,6 +1333,7 @@ mod tests {
             stdin: vec![],
             timeout_secs: 5,
             env: vec![],
+            stream_input: false,
         };
         let mut events = 0usize;
         call_streaming(&mut client, &req, |_e| events += 1).unwrap();

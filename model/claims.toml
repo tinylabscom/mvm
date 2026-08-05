@@ -108,6 +108,7 @@ witnesses = [
     "ci:fuzz_authenticated_frame",
     "ci:fuzz_supervisor_config",
     "ci:fuzz_datapath_ingress",
+    "ci:fuzz_input_frame",
 ]
 
 [[claim]]
@@ -226,7 +227,10 @@ id = "MVM-SEC-15"
 level = "build"
 witness_kinds = ["fn", "ci"]
 suite = "prod_console"
-statement = "No interactive access to a sealed production microVM"
+statement = "A sealed production microVM has no shell, no do_exec, and no PTY"
+# Scoped to what the three witnesses check. The host→guest input plane's
+# properties are policy rather than absence and have no production caller;
+# they are claimed separately, as Preview MVM-SEC-17, with their limits.
 witnesses = [
     "fn:console_refused_on_sealed_image",
     "fn:prod_console_attachment_has_no_input",
@@ -243,4 +247,25 @@ witnesses = [
     "fn:handed_placeholders_never_contain_the_secret_value",
     "fn:substitution_endpoint_refuses_unbound_destination",
     "fn:audit_chain_carries_no_secret_value",
+]
+
+[[claim]]
+id = "MVM-SEC-17"
+level = "build"
+witness_kinds = ["fn"]
+suite = "workload_input"
+statement = "Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited"
+# Preview, not shipped: one leg still has no production caller — the
+# known-secret set is empty on every real VM because `InputGate::bind` is
+# never called outside tests, so the scan's refusal has never fired in
+# production. The operator surface and the shell-entrypoint refusal are now
+# live. The limits are stated in full, marked closed or open individually, in
+# the ADR-001 ledger's "Preview 17 limits" note; do not read this row as
+# enforced without it.
+witnesses = [
+    "fn:input_is_refused_without_a_plan_grant",
+    "fn:a_second_writer_is_refused_while_the_lease_is_held",
+    "fn:secret_material_split_across_frames_is_still_refused",
+    "fn:every_refusal_is_audited",
+    "fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason",
 ]

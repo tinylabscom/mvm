@@ -1,95 +1,24 @@
-//! VM observability: logs, layered diagnostics, the running-VM listing, and
-//! slot allocation/reservation bookkeeping.
+//! VM observability: layered diagnostics, the running-VM listing, and slot
+//! allocation/reservation bookkeeping.
+//!
+//! Workload output is **not** here. It used to be: a `logs` entry point that
+//! shelled `tail`/`tail -f` at the console capture through
+//! `require_linux_env()` + [`run_in_vm_stdout`]. That indirection is a no-op
+//! on Linux and macOS 13-25 and hands back the dev-VM environment on macOS
+//! 26+, where nothing is left to dispatch to — so the same command read a
+//! host file on two tiers and failed outright on the third, for a file that
+//! was always host-side. Output is read through `mvm_core::stream_client`
+//! instead, which resolves the host broker, the VM's durable transcript, and
+//! that same console capture, directly and identically everywhere.
 
 use anyhow::{Context, Result};
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use tracing::{instrument, warn};
 
 use crate::base::config::{RunInfo, VmSlot};
 use crate::base::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
-use crate::base::ui;
 use crate::firecracker;
 
 use super::{abs_vms_dir, firecracker_vsock_uds_path, require_linux_env};
-
-/// Show logs from a named VM.
-///
-/// By default shows the guest serial console (`console.log`).
-/// With `hypervisor=true`, shows Firecracker hypervisor logs (`firecracker.log`).
-pub fn logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()> {
-    let state_dir = mvm_core::config::vm_state_dir(name);
-    let log_file = resolve_log_path(&state_dir, hypervisor)
-        .with_context(|| format!("No logs found for VM '{name}' (is the name correct?)"))?;
-    show_log_file(&log_file, follow, lines)
-}
-
-/// Resolve the backend-captured host log without crossing a guest execution
-/// boundary. Every supported VMM writes its serial console into the VM state
-/// directory, including macOS HVF and libkrun workloads.
-fn resolve_log_path(state_dir: &Path, hypervisor: bool) -> Result<PathBuf> {
-    let filename = if hypervisor {
-        "firecracker.log"
-    } else {
-        "console.log"
-    };
-    let requested = state_dir.join(filename);
-    if requested.is_file() {
-        return Ok(requested);
-    }
-
-    if !hypervisor {
-        let legacy = state_dir.join("firecracker.log");
-        if legacy.is_file() {
-            ui::warn(
-                "console.log not found; showing firecracker.log (VM started before log split)",
-            );
-            return Ok(legacy);
-        }
-    }
-
-    anyhow::bail!("neither the requested log nor a legacy fallback exists")
-}
-
-fn show_log_file(log_file: &Path, follow: bool, lines: u32) -> Result<()> {
-    let mut command = Command::new("tail");
-    command.args(tail_arguments(log_file, follow, lines));
-    if follow {
-        let status = command
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .with_context(|| format!("following {}", log_file.display()))?;
-        if !status.success() {
-            anyhow::bail!("tail failed for {} with {status}", log_file.display());
-        }
-    } else {
-        let output = command
-            .output()
-            .with_context(|| format!("reading {}", log_file.display()))?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "tail failed for {} with {}: {}",
-                log_file.display(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-    }
-    Ok(())
-}
-
-fn tail_arguments(log_file: &Path, follow: bool, lines: u32) -> Vec<OsString> {
-    let mut arguments = vec![OsString::from("-n"), OsString::from(lines.to_string())];
-    if follow {
-        arguments.push(OsString::from("-f"));
-    }
-    arguments.push(log_file.as_os_str().to_owned());
-    arguments
-}
 
 // ============================================================================
 // VM diagnostics
@@ -430,35 +359,6 @@ pub(super) fn release_slot_reservation(slot: &VmSlot) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn log_path_resolves_host_console_and_legacy_fallback() {
-        let state_dir = tempfile::tempdir().unwrap();
-        let console = state_dir.path().join("console.log");
-        std::fs::write(&console, "console").unwrap();
-        assert_eq!(resolve_log_path(state_dir.path(), false).unwrap(), console);
-
-        std::fs::remove_file(&console).unwrap();
-        let legacy = state_dir.path().join("firecracker.log");
-        std::fs::write(&legacy, "legacy").unwrap();
-        assert_eq!(resolve_log_path(state_dir.path(), false).unwrap(), legacy);
-    }
-
-    #[test]
-    fn log_path_refuses_missing_or_wrong_stream() {
-        let state_dir = tempfile::tempdir().unwrap();
-        assert!(resolve_log_path(state_dir.path(), false).is_err());
-
-        std::fs::write(state_dir.path().join("console.log"), "console").unwrap();
-        assert!(resolve_log_path(state_dir.path(), true).is_err());
-    }
-
-    #[test]
-    fn follow_tail_arguments_include_requested_line_count() {
-        let path = Path::new("/tmp/console log");
-        let expected = ["-n", "200", "-f", "/tmp/console log"].map(OsString::from);
-        assert_eq!(tail_arguments(path, true, 200), expected);
-    }
 
     #[test]
     fn console_warning_patterns_detect_kernel_panic() {

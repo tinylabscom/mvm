@@ -3,6 +3,7 @@
 //! audit projection. Profile classification lives in `request_policy`.
 
 use super::*;
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 use serde::{Deserialize, Serialize};
 
 /// Request sent from host to guest vsock agent.
@@ -104,6 +105,16 @@ pub enum GuestRequest {
         /// a plain call; omitted on the wire defaults to empty.
         #[serde(default)]
         env: Vec<(String, String)>,
+        /// Keep the workload's stdin open after `stdin` is written, so
+        /// `StreamInput` frames can keep feeding it until `CloseStreamInput`.
+        ///
+        /// Off by default, and the host only turns it on for a plan that
+        /// carries the input grant. It has to be a per-call decision rather
+        /// than the agent's default: an entrypoint whose stdin stays open
+        /// never sees EOF, so a `cat`-shaped workload under a host that
+        /// forgot to close would run to its timeout instead of exiting.
+        #[serde(default)]
+        stream_input: bool,
     },
     /// Run an arbitrary argv as a detached workload (dev-only).
     ///
@@ -431,6 +442,32 @@ pub enum GuestRequest {
         code: String,
         timeout_secs: Option<u64>,
     },
+
+    /// Deliver one host-admitted chunk of bytes to the running workload's
+    /// stdin.
+    ///
+    /// Production-safe, and default-deny at the *host* end: these bytes have
+    /// already passed the host's input gate, which refuses unless the signed
+    /// `ExecutionPlan` carries the input grant, arbitrates a single-writer
+    /// lease, and scans for the host's own secret material across frame
+    /// boundaries. The guest cannot re-derive any of that, so it checks the
+    /// one thing it can see locally — that `seq` advances past the last frame
+    /// it delivered — and otherwise queues the bytes without waiting for the
+    /// workload to read them.
+    ///
+    /// Only a call that opted into streamed input (`RunEntrypoint`'s
+    /// `stream_input`) keeps its child's stdin open; anything else answers
+    /// `StreamInputResult::Refused { kind: NoWorkload }`.
+    StreamInput(InputFrame),
+
+    /// End the workload's input stream: deliver the tail the host's gate
+    /// withheld, then close the stdin fd.
+    ///
+    /// Closing the fd *is* the EOF — a flag or a sentinel byte would leave a
+    /// read-to-EOF workload blocked on a `read` that never returns. The
+    /// trailing bytes go first, because they are the writer's last ones and
+    /// the close is what proved they were only ever a prefix of a secret.
+    CloseStreamInput(CloseInput),
 }
 
 impl GuestRequest {
@@ -487,6 +524,8 @@ impl GuestRequest {
             Self::UnmountVolume { .. } => "unmount-volume",
             Self::UpdateIdleTimeout { .. } => "update-idle-timeout",
             Self::RunCode { .. } => "run-code",
+            Self::StreamInput(_) => "stream-input",
+            Self::CloseStreamInput(_) => "close-stream-input",
         }
     }
 }
@@ -896,6 +935,7 @@ mod tests {
             stdin: vec![1, 2, 3, 4, 5],
             timeout_secs: 30,
             env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())],
+            stream_input: false,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
@@ -904,7 +944,9 @@ mod tests {
                 stdin,
                 timeout_secs,
                 env,
+                stream_input,
             } => {
+                assert!(!stream_input, "the default call closes stdin");
                 assert_eq!(stdin, vec![1, 2, 3, 4, 5]);
                 assert_eq!(timeout_secs, 30);
                 assert_eq!(
@@ -977,6 +1019,7 @@ mod tests {
             stdin: vec![],
             timeout_secs: 5,
             env: vec![],
+            stream_input: false,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
@@ -1128,8 +1171,20 @@ mod tests {
                     stdin: Vec::new(),
                     timeout_secs: 0,
                     env: Vec::new(),
+                    stream_input: false,
                 },
                 "run-entrypoint",
+            ),
+            (
+                GuestRequest::StreamInput(InputFrame {
+                    seq: 0,
+                    payload: Vec::new(),
+                }),
+                "stream-input",
+            ),
+            (
+                GuestRequest::CloseStreamInput(CloseInput::default()),
+                "close-stream-input",
             ),
             (
                 GuestRequest::PostRestore {

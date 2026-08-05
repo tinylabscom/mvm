@@ -6,7 +6,10 @@ auditability, logging, encryption, and traceability are built into the
 foundation — not bolted on — and the whole thing is meant to feel effortless.
 
 Our posture is uncompromising. We never allow interactive access to a running
-production microVM — no SSH, no console, no shell. We never patch or update a
+production microVM — no SSH, no console, no shell. The only path that carries
+bytes inward is stdin to an entrypoint that was already fixed when the plan was
+admitted: it is denied unless the signed plan grants it, and it cannot choose
+what runs. We never patch or update a
 running microVM; **we rebuild it from source and replace it.** Every workload
 runs from a signed, audited plan, so nothing executes without full traceability.
 And because we own the entire transport layer between the microVM and the
@@ -310,7 +313,9 @@ verbs people already expect — and a few they don't.
   over the same trusted channel, without ever reaching the raw host.
 - **Live logs and observability.** Stream a workload's output as it runs — follow
   its logs live, even for a sealed production microVM, because the console is
-  captured write-only with no path back in. On top of that, workloads emit
+  captured write-only: the capture itself is a reader and cannot hand out a
+  writable handle. (Bytes can travel inward, but only over the separate
+  plan-granted stdin channel, never over the console.) On top of that, workloads emit
   metering and chain-signed audit entries, and a single `watch` command streams
   every network request, file write, and admission event as it happens. `doctor`
   reports the live security posture and per-backend capabilities of the host
@@ -386,11 +391,20 @@ reality. Grouped by the property they protect, here is what we guarantee.
 
 ### No interactive access to production
 
-There is no way into a sealed production workload. The guest agent that serves
-an interactive shell simply isn't present in a production build, and the host
-refuses to attach a console to a sealed image. The only interactive surface in
-the entire system is the dev-mode builder shell, and it can never reach a
-production microVM.
+There is no interactive way into a sealed production workload. The guest agent
+that serves an interactive shell simply isn't present in a production build, and
+the host refuses to attach a console to a sealed image. The only interactive
+surface in the entire system is the dev-mode builder shell, and it can never
+reach a production microVM.
+
+One non-interactive path does carry bytes inward, and it is worth being precise
+about rather than glossing: a workload can be granted a stdin channel in its
+signed plan. It writes to the stdin of an entrypoint that was fixed at
+admission, so it cannot select a program, change argv or the environment, or
+spawn anything; without the grant every write is refused and the refusal is
+chain-signed. That makes this property a policy rather than the absence it used
+to be — a weaker thing, stated as such. It has no operator surface yet, and
+ADR-001 carries it as a `Preview` claim with the limits that keep it one.
 
 ### Immutable and verified at boot
 

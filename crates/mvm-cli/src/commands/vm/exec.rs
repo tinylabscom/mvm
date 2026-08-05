@@ -451,23 +451,26 @@ pub(in crate::commands) fn run_secure_with_source(
                 admit_is_dev,
             ),
             services: admit_host_services.clone(),
+            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                "an ad-hoc argv run replaces the image entrypoint",
+            ),
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {
-            super::plan_persist::write_plan(vm_name, &c.admitted.plan)
+            super::plan_persist::write_plan(vm_name, c.admitted.plan())
                 .context("persisting admitted plan for the transient run")?;
         }
         let guest_profile = super::up::guest_profile_for_boot(admit_is_dev, rootfs);
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
         super::up::attach_guest_boot_config_for_plan(
             &mut start_config,
-            &c.admitted.plan,
+            c.admitted.plan(),
             &c.host_signer_public_path,
             guest_profile,
         )?;
-        let plan_json = serde_json::to_string(&c.admitted.signed)
+        let plan_json = serde_json::to_string(c.admitted.signed())
             .context("serializing admitted plan for the transient run")?;
         let bundle_json = c
             .policy_bundle
@@ -476,7 +479,7 @@ pub(in crate::commands) fn run_secure_with_source(
             .transpose()
             .context("serializing admitted policy bundle for the transient run")?;
         let substrate = crate::exec::SessionAuditSubstrate {
-            tenant_id: c.admitted.plan.tenant.0.clone(),
+            tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
             bundle_json,
             config_files: start_config.config_files,
@@ -969,14 +972,15 @@ fn emit_oci_run_admission(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        stream_retention: Default::default(),
     };
     let ledger = InMemoryNonceLedger::new();
     let admitted = admit_for_run(&input, &SystemClock, &ledger, None, None)?;
     let signer = load_or_init().context("loading host signer for OCI provenance audit")?;
     let emitter =
         AuditEmitter::new(signer.signing).context("opening audit chain for OCI provenance")?;
-    emitter.emit_admitted(&admitted.plan, &admitted.signer_id)?;
-    emitter.emit_oci_provenance(&admitted.plan, image.provenance.audit_labels())?;
+    emitter.emit_admitted(admitted.plan(), admitted.signer_id())?;
+    emitter.emit_oci_provenance(admitted.plan(), image.provenance.audit_labels())?;
     Ok(())
 }
 
