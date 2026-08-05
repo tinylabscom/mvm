@@ -150,7 +150,7 @@ for detailed scope and acceptance criteria.
         and fan-out, creates no capture directory, and seals to no manifest
         rather than to an empty one that would assert the workload printed
         nothing. ADR-035 records the posture including the three limits found
-        during execution (the console fallback is unredacted, the follow half
+        during execution (the console fallback is redacted on read, the follow half
         is open for detached workloads, a spliced read repeats its adopted
         prefix). Website guide `guides/workload-output-streaming.md` plus the
         stream surfaces in the CLI reference. `CLAUDE.md` corrected on the

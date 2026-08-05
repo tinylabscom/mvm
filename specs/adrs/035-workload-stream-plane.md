@@ -180,9 +180,10 @@ manifest with zero chunks asserts that the workload printed nothing, which is
 a different and false claim.
 
 `Ephemeral` does not mean no bytes reach disk. The backend still writes its
-own `console.log` into the VM state dir — outside this plane, unredacted,
-untouched by the retention mode — and `mvmctl machine logs` still falls back
-to reading it once the broker is gone. An operator choosing `Ephemeral` to
+own `console.log` into the VM state dir — outside this plane and untouched by
+the retention mode, though no longer unredacted: the reader masks each chunk
+before a consumer sees it — and `mvmctl machine logs` still falls back to
+reading it once the broker is gone. An operator choosing `Ephemeral` to
 keep sensitive output off disk needs to know that choice does not do that;
 it only forgoes the audited, hash-chained copy.
 
@@ -408,12 +409,18 @@ VMM's, written before anything in this plane sees it. When a recording exists
 but does not cover the whole run, `mvmctl logs` now shows the recording and
 then splices the console behind it, so both appear in one read.
 
-This exposure is not new; the console-only path always read raw bytes. What
-changed is its reach: it went from a rare edge case to every ordinary `machine
-run -d` followed by a later `machine stop`. So the honest statement is *the
-broker has one redaction seam and every consumer of the broker sees masked
-output* — not *no consumer sees unredacted output*. The second sentence is
-false while the console fallback exists.
+**Closed.** The console reader now applies the same detector before handing
+bytes to a consumer, read-side, so the file the VMM owns is unchanged. What
+survives is narrower and worth stating exactly: redaction is applied per 64 KiB
+read, so a value straddling a read boundary is two partial matches and neither
+fires. Carrying a tail across reads would close that and withhold the newest
+bytes from a follower until more arrived — a worse defect on the path
+operators reach for when nothing else works.
+
+So the honest statement is now *every consumer sees masked output, with a
+documented gap at read boundaries on the console path* — stronger than the
+previous *the broker has one seam and every consumer of the broker sees masked
+output*, and still not *no unmasked byte can ever reach a consumer*.
 
 ### 2. The follow half is open for detached workloads
 
