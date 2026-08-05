@@ -732,11 +732,28 @@ impl AuditEmitter {
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
     /// carrying its captured exit code.
     pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
+        self.emit_exited_with_capture(plan, Some(exit_code), backend)
+    }
+
+    /// Emit `plan.exited` with capture fidelity: a missing exit capture is
+    /// recorded as `exit_code=none` + `captured=false` rather than being
+    /// attested as a successful exit 0 the guest never reported.
+    pub fn emit_exited_with_capture(
+        &self,
+        plan: &ExecutionPlan,
+        exit_code: Option<i32>,
+        backend: &str,
+    ) -> Result<()> {
+        let (code, captured) = match exit_code {
+            Some(code) => (code.to_string(), "true"),
+            None => ("none".to_string(), "false"),
+        };
         self.emit(
             plan,
             "plan.exited",
             [
-                ("exit_code".to_string(), exit_code.to_string()),
+                ("exit_code".to_string(), code),
+                ("captured".to_string(), captured.to_string()),
                 ("backend".to_string(), backend.to_string()),
             ],
         )
@@ -830,6 +847,24 @@ impl AuditEmitter {
     }
 
     fn emit_entry(&self, entry: &AuditEntry) -> Result<()> {
+        // Callers may be synchronous (the CLI) or already inside an async
+        // runtime (an in-process `MvmClient` consumer). Building + blocking
+        // on a runtime from an async worker thread panics, so when a runtime
+        // context is present the emit runs on a short-lived scoped thread —
+        // emission is rare (a handful of entries per boot), so the thread
+        // cost is negligible.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.emit_entry_blocking(entry))
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("audit emit thread panicked"))?
+            });
+        }
+        self.emit_entry_blocking(entry)
+    }
+
+    fn emit_entry_blocking(&self, entry: &AuditEntry) -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1306,6 +1341,42 @@ mod tests {
         // And the single-entry chain still verifies.
         let count = verify_audit_chain(&dir.path().join("local.jsonl"), &vk).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn emit_exited_records_capture_fidelity() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-CAP");
+
+        // A captured exit records the code and captured=true.
+        emitter
+            .emit_exited_with_capture(&plan, Some(0), "mock")
+            .unwrap();
+        // A missing capture must never be attested as exit 0.
+        emitter
+            .emit_exited_with_capture(&plan, None, "mock")
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"true\""), "got: {}", lines[0]);
+        assert!(lines[0].contains("\"0\""), "got: {}", lines[0]);
+        assert!(lines[1].contains("\"false\""), "got: {}", lines[1]);
+        assert!(lines[1].contains("\"none\""), "got: {}", lines[1]);
+        assert!(
+            !lines[1].contains("\"0\""),
+            "uncaptured must not read as exit 0"
+        );
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 2);
     }
 
     #[test]

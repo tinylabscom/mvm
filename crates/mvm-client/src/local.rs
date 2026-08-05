@@ -25,8 +25,6 @@ use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
     OciManifestFetcher, UnpackOptions, UnpackReport, unpack_layer_with_prior_paths,
 };
-use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
-use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
 use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
@@ -48,20 +46,38 @@ use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 /// Drives the host's VM backend directly. Construct with [`LocalBackend::new`]
 /// (auto-selected backend) or [`LocalBackend::with_hypervisor`].
 pub struct LocalBackend {
-    backend: AnyBackend,
+    pub(crate) backend: AnyBackend,
+    /// Injected secret lifecycle service for launch-time reference
+    /// validation/recording. `None` builds the production-wired
+    /// [`crate::secret::SecretService::local`] on first use.
+    pub(crate) secret_service: Option<std::sync::Arc<crate::secret::SecretService>>,
 }
 
 impl LocalBackend {
     pub fn new() -> Self {
         Self {
             backend: AnyBackend::auto_select(),
+            secret_service: None,
         }
     }
 
     pub fn with_hypervisor(name: &str) -> Self {
         Self {
             backend: AnyBackend::from_hypervisor(name),
+            secret_service: None,
         }
+    }
+
+    /// Replace the secret lifecycle service this client validates and
+    /// records machine secret references through (tests inject a fixture
+    /// store; production uses the default).
+    #[must_use]
+    pub fn with_secret_service(
+        mut self,
+        service: std::sync::Arc<crate::secret::SecretService>,
+    ) -> Self {
+        self.secret_service = Some(service);
+        self
     }
 
     /// The backend-observed VMs on this host — every VMM's live listing plus this
@@ -275,7 +291,7 @@ impl Default for LocalBackend {
     }
 }
 
-fn map_status(s: &VmStatus) -> MachineStatus {
+pub(crate) fn map_status(s: &VmStatus) -> MachineStatus {
     match s {
         VmStatus::Running => MachineStatus::Running,
         VmStatus::Starting => MachineStatus::Starting,
@@ -322,7 +338,7 @@ fn load_name_registry() -> VmNameRegistry {
 /// after a successful stop, so it stops showing as registered. A load or save
 /// failure is ignored — a direct-boot VM carries no registry entry, and the
 /// stop this follows already succeeded regardless.
-fn deregister_from_name_registry(name: &str) {
+pub(crate) fn deregister_from_name_registry(name: &str) {
     let path = mvm_runtime::vm::name_registry::registry_path();
     if let Ok(mut registry) = VmNameRegistry::load(&path) {
         registry.deregister(name);
@@ -362,7 +378,7 @@ fn to_state(info: VmInfo, reg: Option<&VmRegistration>) -> MachineState {
     }
 }
 
-fn backend_err(e: impl std::fmt::Display) -> MvmError {
+pub(crate) fn backend_err(e: impl std::fmt::Display) -> MvmError {
     MvmError::Backend {
         reason: e.to_string(),
     }
@@ -396,7 +412,7 @@ fn classify_image(image: &str) -> ImageSource {
 /// Resolve `spec.image` to a host `rootfs.ext4` path, materializing in-process
 /// as needed (no subprocess, no CLI). Registry pulls are async; the dir +
 /// pre-materialized cases are synchronous.
-async fn resolve_local_rootfs(image: &str, name: &str) -> Result<PathBuf> {
+pub(crate) async fn resolve_local_rootfs(image: &str, name: &str) -> Result<PathBuf> {
     match classify_image(image) {
         ImageSource::Materialized(path) => Ok(path),
         // An already-unpacked tree carries no unpack report, so there is
@@ -517,7 +533,7 @@ fn unpack_one_layer(
 /// `(verity_path, roothash)` when both are present and the hash is well-formed
 /// (64-hex); `(None, None)` for an unverified image. A `&Path` adapter over
 /// `mvm_runtime::microvm::probe_verity_sidecar`, which does the host-side read.
-fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<String>) {
+pub(crate) fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<String>) {
     mvm_runtime::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
 }
 
@@ -585,101 +601,49 @@ impl MvmClient for LocalBackend {
             .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
     }
 
-    async fn create_machine(&self, _spec: MachineSpec) -> Result<MachineState> {
-        // Create-without-boot needs the machine registry (spec persistence),
-        // which is a CLI-side path not wired into the in-process backend.
-        Err(MvmError::Backend {
-            reason: "local create (persist without boot) is not wired in the in-process backend; \
-                     use run_machine, or the CLI's `machine create`"
-                .into(),
-        })
+    async fn create_machine(&self, spec: MachineSpec) -> Result<MachineState> {
+        if !spec.env.is_empty() {
+            return Err(MvmError::InvalidSpec {
+                reason: "the persisted machine definition carries no environment variables; \
+                         refusing to silently drop them (use the CLI run path)"
+                    .into(),
+            });
+        }
+        let request = crate::launch::LaunchRequest::builder(
+            crate::launch::LifecycleMode::Persistent,
+            spec.image,
+        )
+        .name(spec.name)
+        .cpus(spec.cpus)
+        .memory_mib(spec.memory_mib)
+        .build()?;
+        self.create_from_request(&request)
     }
 
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
-        let rootfs = resolve_local_rootfs(&spec.image, &spec.name).await?;
-        let (verity_path, roothash) = host_verity_sidecars(&rootfs);
-
-        // libkrun/mock carry their own kernel; HVF boots an explicit
-        // arm64 kernel Image. Resolve it from the per-arch workload-kernel
-        // cache the CLI's run path populates — the facade stays
-        // cache-hit-or-error; the heavier build/fetch flows are CLI concerns.
-        let kernel_path = if self.backend.kind() == BackendKind::Hvf {
-            let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
-            let arch = mvm_core::arch::GuestArch::host().to_string();
-            // Through the resolver rather than a bare existence check, so a
-            // cache hit here is verified against its recorded digest like
-            // every other read. `source_checkout: false` only shapes which
-            // non-hit variant comes back; this facade treats any of them the
-            // same way.
-            let path = match mvm_build::kernel_fetch::resolve_kernel(
-                &cache, &arch, "workload", false,
-            ) {
-                mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-                    verified.path().to_path_buf()
-                }
-                _ => {
-                    return Err(backend_err(format!(
-                        "hvf needs a verified workload kernel at {} — run a `mvmctl machine run` \
-                         once (or `mvmctl build kernel build`) to populate the cache",
-                        mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload")
-                            .display()
-                    )));
-                }
-            };
-            Some(path)
-        } else {
-            None
-        };
-
-        let req = LocalRunRequest {
-            name: spec.name.clone(),
-            rootfs_path: rootfs,
-            kernel_path,
-            verity_path: verity_path.map(PathBuf::from),
-            roothash,
-            cpus: spec.cpus,
-            mem_mib: spec.memory_mib,
-            backend_name: self.backend.name().to_string(),
-        };
-
-        // A fresh per-run ledger: local runs are one-shot from this process, so
-        // replay protection spans this admission (the CLI uses the same
-        // per-invocation shape). Keys dir `None` → the host signer at
-        // `~/.mvm/keys/`.
-        let ledger = InMemoryNonceLedger::new();
-        let clock = SystemClock;
-        // `{:#}` keeps the anyhow context chain — "backend start after
-        // signed-plan admission" alone hides the actionable root cause.
-        let started = admit_and_boot_local(
-            &self.backend,
-            &req,
-            LocalRunContext {
-                clock: &clock,
-                ledger: &ledger,
-                host_signer_keys_dir: None,
-            },
+        // Env vars have no delivery seam on the in-process boot path; refuse
+        // rather than silently drop values the caller believes were set.
+        if !spec.env.is_empty() {
+            return Err(MvmError::InvalidSpec {
+                reason: "guest environment variables are not supported by the in-process \
+                         local backend (no delivery seam); use the CLI run path"
+                    .into(),
+            });
+        }
+        let request = crate::launch::LaunchRequest::builder(
+            crate::launch::LifecycleMode::Transient,
+            spec.image,
         )
-        .map_err(|e| backend_err(format!("{e:#}")))?;
-
-        Ok(MachineState {
-            id: MachineId(started.vm_id.0),
-            name: spec.name,
-            status: MachineStatus::Running,
-            backend: self.backend.name().to_string(),
-            cpus: spec.cpus,
-            memory_mib: spec.memory_mib,
-            ..Default::default()
-        })
+        .name(spec.name)
+        .cpus(spec.cpus)
+        .memory_mib(spec.memory_mib)
+        .build()?;
+        let outcome = self.launch(request).await?;
+        Ok(outcome.machine)
     }
 
-    async fn start_machine(&self, _id: &MachineId) -> Result<MachineState> {
-        // Starting a created/stopped machine needs the machine registry (spec
-        // persistence) to know what to boot — a CLI-side path not wired here.
-        Err(MvmError::Backend {
-            reason: "local start of a created machine is not wired in the in-process backend; \
-                     use run_machine, or the CLI's `machine start`"
-                .into(),
-        })
+    async fn start_machine(&self, id: &MachineId) -> Result<MachineState> {
+        self.start_persistent(&id.0).await
     }
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
@@ -696,9 +660,17 @@ impl MvmClient for LocalBackend {
         };
         // Deregister from the name registry only on a successful stop; on
         // failure the entry (and any readiness the caller recorded) stays so
-        // the user can see what happened.
+        // the user can see what happened. A persistent machine's spec is
+        // never touched by stop — only remove deletes a definition.
         if result.is_ok() {
             deregister_from_name_registry(&id.0);
+            // Release the stopped owner's volume-attachment leases (re-sealing
+            // any just-in-time unlocked volume). Best-effort: the stop itself
+            // already succeeded.
+            use crate::volume::VolumeService as _;
+            if let Err(e) = crate::volume::LocalVolumeService::new().release_owner_leases(&id.0) {
+                tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
+            }
         }
         result.map_err(backend_err)
     }
@@ -766,27 +738,12 @@ impl MvmClient for LocalBackend {
     }
 
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
-        let vid = VmId(id.0.clone());
-        // Idempotent: removing an absent machine is `Ok` (trait contract).
-        // `list` is the source of truth for what this backend can see, so an
-        // id it doesn't know is already "removed".
-        let present = self
-            .backend
-            .list()
-            .map_err(backend_err)?
-            .iter()
-            .any(|v| v.id == vid);
-        if !present {
-            return Ok(());
-        }
-        // This backend is registry-less — it drives live VMs the VMM tracks,
-        // with no persisted spec to delete (which is why `create`/`start`
-        // fail closed above). For that model `stop` *is* the removal: it tears
-        // the VM down and clears the run-state marker the VMM lists on, so the
-        // machine drops out of `list`. Idempotent on an already-stopped VM.
-        // (The CLI's `machine rm` additionally deletes a persisted machine
-        // record — a spec store this in-process backend doesn't own.)
-        self.backend.stop(&vid).map_err(backend_err)
+        // The non-forced flow: a RUNNING persistent machine is refused (the
+        // reviewed force flow is `remove_machine_with`); a stopped persistent
+        // definition is deleted; a spec-less name gets idempotent transient
+        // cleanup. Removing an absent machine is `Ok` (trait contract).
+        self.remove_machine_with(id, crate::launch::RemoveOptions::default())
+            .await
     }
 
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
@@ -871,21 +828,9 @@ impl MvmClient for LocalBackend {
         let was_running = matches!(self.backend.status(&vid), Ok(VmStatus::Running));
         if was_running {
             self.backend.stop(&vid).map_err(backend_err)?;
-            // LocalBackend's run path requires an image reference.
-            let image = desired.image.clone().ok_or_else(|| MvmError::InvalidSpec {
-                reason: "the local backend cannot relaunch a manifest-backed machine \
-                         (no image reference); use the CLI verb"
-                    .into(),
-            })?;
-            let spec = MachineSpec {
-                name: desired.name.clone(),
-                image,
-                cpus: desired.cpus,
-                memory_mib: mvm_core::util::parse_human_size(&desired.memory)
-                    .map_err(backend_err)?,
-                env: vec![],
-            };
-            return self.run_machine(spec).await;
+            // Relaunch the persisted definition through the persistent start
+            // path — the same admitted boot every lifecycle verb uses.
+            return self.start_persistent(&desired.name).await;
         }
 
         Ok(MachineState {

@@ -214,9 +214,39 @@ updates only its own entry below.
       pagination walk, serde/unknown-field pins, and seeded property loops
       over untrusted audit input.
 
-- [ ] #2079 — persistent + transient launch lifecycle through
-      `LocalBackend` (starts after #2078/#2080/#2081 land the shared
-      inventory/volume/secret types).
+- [x] #2079 — persistent + transient launch lifecycle through
+      `LocalBackend`. `mvm_client::launch` adds the typed `LaunchRequest`
+      (builder-validated at the client boundary: explicit
+      `Transient`/`Persistent` mode, image source, optional name —
+      required for persistent, generated for transient — cpu/memory,
+      backend override, profile, TTL, deny-all-only network policy,
+      typed volume attachments, typed secret references; command
+      overrides, env vars, and egress allow-lists are refused, never
+      dropped). Both modes route through the one admitted-boot seam:
+      `mvm_hostd::run::admit_and_boot_local` grew launch volumes (baked
+      into the signed plan's `shares`, claim-1 checked), a
+      `destroy_on_exit` intent, and optional chain emission
+      (`plan.admitted`/`launched`/`failed` now fire inside
+      `admit_and_start`). `LocalBackend` implements persistent
+      create/start/stop/restart/inspect/remove over the reused
+      `mvm-runtime::machine::persist` spec store (reconcile + force
+      recreate; stop never deletes the spec; removing a RUNNING
+      persistent machine is refused without the explicit force flow) and
+      transient run-to-completion (`wait_for_exit` + captured exit code +
+      `plan.exited`), TTL reaping, and idempotent cleanup
+      (`release_owner_leases`, `clear_machine_references`, registry
+      entries, state dirs). Closes both deferred hooks:
+      `SecretService::record_machine_references` at create/launch +
+      `validate_for_admission` on every admission with references +
+      `clear_machine_references` at remove, and inventory
+      `secret_ref_count` now reads the real `secret-refs.json` sidecar.
+      43 new tests (26 mock-backed lifecycle + 10 request-validation in
+      mvm-client, 4 seam/emitter tests in mvm-hostd — incl. sidecar-ref
+      re-validation on relaunch, deployment-source refusal, post-admission
+      gate refusals emitting terminal plan.failed, and plan.exited capture
+      fidelity — plus inventory count coverage); the Linux/KVM Firecracker E2E for both modes ships
+      `#[ignore]`-gated in `crates/mvm-client/tests/launch_lifecycle_live.rs`
+      (jailer-lite lane pattern; CI wiring deferred).
 
 - [x] #2091 — no workload runs as root. `mvm-oci-init` is pid 1 and spawned
       the agent as a root child, so `is_pid1()` was false, `apply_activation`

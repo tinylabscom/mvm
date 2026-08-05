@@ -162,6 +162,19 @@ impl From<&mvm_core::vm_backend::VmVolume> for RuntimeVolume {
     }
 }
 
+impl From<&RuntimeVolume> for mvm_core::vm_backend::VmVolume {
+    fn from(v: &RuntimeVolume) -> Self {
+        mvm_core::vm_backend::VmVolume {
+            host: v.host.clone(),
+            guest: v.guest.clone(),
+            size: v.size.clone(),
+            read_only: v.read_only,
+            kind: v.kind,
+            encrypted: v.encrypted,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Config discovery and parsing
 // ---------------------------------------------------------------------------

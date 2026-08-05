@@ -17,6 +17,7 @@ pub mod audit;
 pub mod boot;
 pub mod connect;
 pub mod inventory;
+pub mod launch;
 pub mod local;
 pub mod readiness;
 pub mod registration;
@@ -41,6 +42,10 @@ pub use boot::{
     backend_is_running, backend_stop_by_name, require_hypervisor_selectable, start_prepared,
 };
 pub use connect::{Target, connect};
+pub use launch::{
+    ExitReport, LaunchNetworkPolicy, LaunchOutcome, LaunchRequest, LaunchRequestBuilder,
+    LaunchVolumeSpec, LifecycleMode, RemoveOptions,
+};
 pub use local::LocalBackend;
 pub use readiness::{readiness_of, record_readiness, touch_activity};
 pub use registration::{
