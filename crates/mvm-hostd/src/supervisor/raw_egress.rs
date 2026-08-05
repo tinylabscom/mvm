@@ -196,14 +196,17 @@ where
         upstream.write_all(&leftover).await?;
     }
     eprintln!("raw-egress: connected target {target}");
-    // EOF on either side ends the copy; a reset surfaces as an error we swallow so
+    // EOF on either side ends the copy; a reset surfaces as an error we log so
     // one torn-down connection never crashes the accept loop.
-    if let Ok((guest_to_upstream, upstream_to_guest)) =
-        tokio::io::copy_bidirectional(&mut guest, &mut upstream).await
-    {
-        eprintln!(
-            "raw-egress: completed target {target} guest_to_upstream_bytes={guest_to_upstream} upstream_to_guest_bytes={upstream_to_guest}"
-        );
+    match tokio::io::copy_bidirectional(&mut guest, &mut upstream).await {
+        Ok((guest_to_upstream, upstream_to_guest)) => {
+            eprintln!(
+                "raw-egress: completed target {target} guest_to_upstream_bytes={guest_to_upstream} upstream_to_guest_bytes={upstream_to_guest}"
+            );
+        }
+        Err(e) => {
+            eprintln!("raw-egress: splicing target {target} failed: {e}");
+        }
     }
     Ok(())
 }
