@@ -17,8 +17,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use mvm_hostd::netd::config::{NETD_READY_MARKER, NetdConfig, NetdUdsLayout};
 use mvm_hostd::netd::{
-    Gateway, GatewayConfig, GatewayError, GatewayEvent, GatewayState, InboundDrain, StaticResolver,
-    UdsGuestChannelProvider, select_host_datapath,
+    Gateway, GatewayConfig, GatewayError, GatewayEvent, GatewayState, InboundDrain,
+    NetdAuditContext, NetdAuditor, StaticResolver, UdsGuestChannelProvider, select_host_datapath,
 };
 use mvm_net::channel::{GuestChannelProvider, GuestService};
 use mvm_net::l3::{DnsLimits, FlowLimits};
@@ -99,6 +99,17 @@ fn run() -> Result<()> {
     )
     .map_err(|err| explain_open_failure(err, selection.fallback_reason.as_deref()))?;
 
+    // Opened before the ready marker so the tunnel's first decision has
+    // somewhere to go. An absent host signer key leaves it inert rather than
+    // refusing the launch — the same posture the substitution endpoint takes.
+    let mut auditor = NetdAuditor::open(NetdAuditContext {
+        tenant: config.tenant.clone(),
+        machine_id: config.vm_id.clone(),
+        plan_digest: config.plan_digest.clone(),
+        session: session.to_string(),
+        policy_epoch: config.policy_epoch,
+    });
+
     // Both channels are bound and the gateway holds a datapath: it is now
     // safe to start the VM.
     {
@@ -128,7 +139,10 @@ fn run() -> Result<()> {
 
     let start = std::time::Instant::now();
     let result = serve(
-        &mut gateway,
+        &mut Tunnel {
+            gateway: &mut gateway,
+            auditor: &mut auditor,
+        },
         &mut *control_conn.stream,
         &mut *data_conn.stream,
         data_fd,
@@ -140,6 +154,10 @@ fn run() -> Result<()> {
     for event in gateway.close() {
         log_event(&event);
     }
+    // After the gateway's own teardown, so the closing entry is the last
+    // thing on the chain for this session and carries what the dedup tables
+    // were still holding when it ended.
+    auditor.finish();
     let _ = control.close();
     let _ = data.close();
     let _ = provider.revoke_instance(&instance);
@@ -249,6 +267,25 @@ enum GuestChannel {
     Ended,
 }
 
+/// The gateway and the record of what it decided.
+///
+/// They travel together because every event the drive loop takes off the
+/// gateway is also a fact the tamper-evident chain has to hear about, and a
+/// path that took one without the other is exactly the gap that made a
+/// refusal unprovable.
+struct Tunnel<'a> {
+    gateway: &'a mut Gateway,
+    auditor: &'a mut NetdAuditor,
+}
+
+impl Tunnel<'_> {
+    /// Note one decision: the operator-facing line, and the chain entry.
+    fn record(&mut self, event: &GatewayEvent) {
+        log_event(event);
+        self.auditor.observe(event);
+    }
+}
+
 /// Drive the tunnel until either side finishes.
 ///
 /// `clock` supplies milliseconds. It is a parameter rather than a read of
@@ -256,21 +293,21 @@ enum GuestChannel {
 /// function of the caller's inputs, and a test can advance time without
 /// waiting for it.
 fn serve(
-    gateway: &mut Gateway,
+    tunnel: &mut Tunnel<'_>,
     control: &mut dyn mvm_net::channel::GuestStream,
     data: &mut dyn mvm_net::channel::GuestStream,
     data_fd: RawFd,
     clock: &dyn Fn() -> u64,
 ) -> Result<()> {
-    if handshake(gateway, control, clock)? == Session::Ended {
+    if handshake(tunnel, control, clock)? == Session::Ended {
         return Ok(());
     }
-    pump(gateway, data, data_fd, clock)
+    pump(tunnel, data, data_fd, clock)
 }
 
 /// HELLO on control, CONFIG back, then READY.
 fn handshake(
-    gateway: &mut Gateway,
+    tunnel: &mut Tunnel<'_>,
     control: &mut dyn mvm_net::channel::GuestStream,
     clock: &dyn Fn() -> u64,
 ) -> Result<Session> {
@@ -282,11 +319,12 @@ fn handshake(
         if n == 0 {
             return Ok(Session::Ended);
         }
-        let (reply, events) = gateway
+        let (reply, events) = tunnel
+            .gateway
             .handle_control_frame(&buf[..n], clock())
             .context("handling a guest control frame")?;
         for event in &events {
-            log_event(event);
+            tunnel.record(event);
         }
         if !reply.is_empty() {
             control
@@ -294,7 +332,7 @@ fn handshake(
                 .context("writing the control reply")?;
             control.flush().ok();
         }
-        match gateway.state() {
+        match tunnel.gateway.state() {
             GatewayState::Ready => return Ok(Session::Live),
             GatewayState::Closed => return Ok(Session::Ended),
             _ => {}
@@ -305,7 +343,7 @@ fn handshake(
 /// Steady state: wait until the guest channel or the datapath has work, or
 /// the tick expires, then service both.
 fn pump(
-    gateway: &mut Gateway,
+    tunnel: &mut Tunnel<'_>,
     data: &mut dyn mvm_net::channel::GuestStream,
     data_fd: RawFd,
     clock: &dyn Fn() -> u64,
@@ -327,7 +365,7 @@ fn pump(
     // Read once, here, while the handle is certainly open. The loop never
     // re-reads it, so it cannot register a descriptor that a close has
     // already released, and it hands back exactly what it registered.
-    let datapath_fd = gateway.datapath().readiness_fd();
+    let datapath_fd = tunnel.gateway.datapath().readiness_fd();
     if let Some(fd) = datapath_fd {
         poll.registry()
             .register(
@@ -338,7 +376,7 @@ fn pump(
             .context("registering the datapath")?;
     }
 
-    let outcome = drive(gateway, data, data_fd, &mut poll, &mut events, clock);
+    let outcome = drive(tunnel, data, data_fd, &mut poll, &mut events, clock);
 
     // Deregister before the caller closes the gateway, which closes the
     // datapath handle. A registered descriptor that is then closed is a
@@ -354,7 +392,7 @@ fn pump(
 }
 
 fn drive(
-    gateway: &mut Gateway,
+    tunnel: &mut Tunnel<'_>,
     data: &mut dyn mvm_net::channel::GuestStream,
     data_fd: RawFd,
     poll: &mut mio::Poll,
@@ -375,7 +413,7 @@ fn drive(
         let now = clock();
 
         if backlog.guest || events.iter().any(|event| event.token() == GUEST_DATA) {
-            match drain_guest_data(gateway, data, &mut buf, now)? {
+            match drain_guest_data(tunnel, data, &mut buf, now)? {
                 GuestChannel::Ended => return Ok(()),
                 GuestChannel::Backlogged => backlog.guest = true,
                 GuestChannel::Idle => backlog.guest = false,
@@ -391,7 +429,8 @@ fn drive(
         // Fatal rather than counted. A datapath that cannot be serviced
         // cannot carry traffic, and carrying on would put the tunnel back
         // in the silent-hang state this call exists to remove.
-        backlog.datapath = gateway
+        backlog.datapath = tunnel
+            .gateway
             .service_datapath(now)
             .context("servicing the datapath")?
             == InboundDrain::Backlogged;
@@ -400,12 +439,12 @@ fn drive(
         // datapath that reports no descriptor makes progress only here, and
         // a transport's own timers have to be serviced whether or not
         // either side sent anything.
-        let inbound = gateway.poll_inbound(now);
+        let inbound = tunnel.gateway.poll_inbound(now);
         for event in &inbound.events {
-            log_event(event);
+            tunnel.record(event);
         }
         backlog.inbound = inbound.drain == InboundDrain::Backlogged;
-        for frame in gateway.take_guest_frames() {
+        for frame in tunnel.gateway.take_guest_frames() {
             let delivered = write_frame(data, data_fd, &frame, WRITE_STALL_DEADLINE)
                 .context("writing to the guest")?;
             if delivered == Delivery::GuestGone {
@@ -413,7 +452,7 @@ fn drive(
             }
         }
         data.flush().ok();
-        gateway.tick(now);
+        tunnel.gateway.tick(now);
     }
 }
 
@@ -424,7 +463,7 @@ fn drive(
 /// is reported back rather than silently dropped, so the caller comes
 /// straight back instead of waiting on a readiness edge already spent.
 fn drain_guest_data(
-    gateway: &mut Gateway,
+    tunnel: &mut Tunnel<'_>,
     data: &mut dyn mvm_net::channel::GuestStream,
     buf: &mut [u8],
     now: u64,
@@ -443,15 +482,21 @@ fn drain_guest_data(
             }
             Err(err) => return Err(err).context("reading the data channel"),
         };
-        match gateway.ingest_data_bytes(&buf[..n], now) {
+        match tunnel.gateway.ingest_data_bytes(&buf[..n], now) {
             Ok(events) => {
                 for event in &events {
-                    log_event(event);
+                    tunnel.record(event);
                 }
             }
             Err(err) => {
                 // A protocol violation ends the session; it does not take
-                // the host down.
+                // the host down. The refusal is recorded from here rather
+                // than from the events the call returns: an ingest that
+                // fails returns the error instead of the events it built,
+                // so this is the only place the decision is still known.
+                tunnel.record(&GatewayEvent::MalformedFrame {
+                    detail: err.to_string(),
+                });
                 eprintln!("mvm-netd: dropping the tunnel: {err}");
                 return Ok(GuestChannel::Ended);
             }
@@ -796,6 +841,7 @@ mod tests {
             vm_id: vm_id.into(),
             boot_id: "boot-1".into(),
             plan_digest: "sha256:plan".into(),
+            tenant: "local".into(),
             uds_layout: NetdUdsLayout::PerVmDir,
             gateway_ipv4: "10.201.0.5".parse().expect("gateway address"),
             guest_ipv4: "10.201.0.6".parse().expect("guest address"),
@@ -816,6 +862,23 @@ mod tests {
             dns_qps: 50,
             ingress: Vec::new(),
         }
+    }
+
+    /// An auditor attached to nothing. These tests drive the loop's own
+    /// behaviour; what reaches the chain is covered in `netd::audit`, and
+    /// pointing every one of them at a real signer would make them assert
+    /// the audit path by accident rather than on purpose.
+    fn unaudited() -> NetdAuditor {
+        NetdAuditor::with_recorder(
+            None,
+            NetdAuditContext {
+                tenant: "local".into(),
+                machine_id: "netd-test".into(),
+                plan_digest: "sha256:plan".into(),
+                session: "0".into(),
+                policy_epoch: 1,
+            },
+        )
     }
 
     fn open_gateway(config: &NetdConfig, network: &dyn L3Datapath) -> Gateway {
@@ -954,7 +1017,12 @@ mod tests {
         let mut gateway = open_gateway(&config, &network);
         let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
 
-        let drained = drain_guest_data(&mut gateway, &mut StreamingGuest::default(), &mut buf, 0)
+        let mut auditor = unaudited();
+        let mut tunnel = Tunnel {
+            gateway: &mut gateway,
+            auditor: &mut auditor,
+        };
+        let drained = drain_guest_data(&mut tunnel, &mut StreamingGuest::default(), &mut buf, 0)
             .expect("a guest that keeps sending is not an error");
 
         assert_eq!(
@@ -1180,7 +1248,12 @@ mod tests {
             reads: 0,
         };
 
-        pump(&mut gateway, &mut guest, data_fd, &|| OPENED_AT_MILLIS)
+        let mut auditor = unaudited();
+        let mut tunnel = Tunnel {
+            gateway: &mut gateway,
+            auditor: &mut auditor,
+        };
+        pump(&mut tunnel, &mut guest, data_fd, &|| OPENED_AT_MILLIS)
             .expect("the loop ends with the guest, not with an error");
 
         let turns = log.lock().expect("turn log").clone();
@@ -1216,7 +1289,12 @@ mod tests {
         let mut gateway = open_gateway(&config, &network);
         let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
 
-        let drained = drain_guest_data(&mut gateway, &mut SignalStorm::default(), &mut buf, 0)
+        let mut auditor = unaudited();
+        let mut tunnel = Tunnel {
+            gateway: &mut gateway,
+            auditor: &mut auditor,
+        };
+        let drained = drain_guest_data(&mut tunnel, &mut SignalStorm::default(), &mut buf, 0)
             .expect("an interrupted read is not an error");
 
         assert_eq!(
@@ -1325,10 +1403,14 @@ mod tests {
         let clock = move || monotonic_millis(start);
         let expected = server_reply(&config);
 
+        let mut auditor = unaudited();
         let (read, served) = std::thread::scope(|scope| {
             let served = scope.spawn(|| {
                 serve(
-                    &mut gateway,
+                    &mut Tunnel {
+                        gateway: &mut gateway,
+                        auditor: &mut auditor,
+                    },
                     &mut *host_control,
                     &mut *host_data,
                     data_fd,
@@ -1401,10 +1483,14 @@ mod tests {
         let clock = || SERVICE_CLOCK_MILLIS;
         let expected = server_reply(&config);
 
+        let mut auditor = unaudited();
         let (read, served) = std::thread::scope(|scope| {
             let served = scope.spawn(|| {
                 serve(
-                    &mut gateway,
+                    &mut Tunnel {
+                        gateway: &mut gateway,
+                        auditor: &mut auditor,
+                    },
                     &mut *host_control,
                     &mut *host_data,
                     data_fd,
@@ -1485,10 +1571,14 @@ mod tests {
             }
         };
 
+        let mut auditor = unaudited();
         let served = std::thread::scope(|scope| {
             let served = scope.spawn(|| {
                 serve(
-                    &mut gateway,
+                    &mut Tunnel {
+                        gateway: &mut gateway,
+                        auditor: &mut auditor,
+                    },
                     &mut *host_control,
                     &mut *host_data,
                     data_fd,

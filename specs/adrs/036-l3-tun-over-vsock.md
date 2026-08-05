@@ -619,18 +619,87 @@ classes* and their counters, never a line per packet.
 
 ## Audit and observability
 
-Events go into the existing chain-signed log via the supervisor's
-recorder. New `LocalAuditKind` variants cover: tunnel requested,
-connected, configured, ready, disconnected; DNS admitted/denied; flow
-admitted/denied/closed; ingress opened/closed; malformed frame; spoofed
-packet; queue overflow; rate-limit action; and resource cleanup.
+Decisions go onto the existing chain-signed per-tenant log through the
+supervisor's `Recorder`, under a new `EventCategory::L3` — the same
+plan-less route `icmp` and `dns` take, and for the same reason: the
+gateway is a per-machine process holding a plan *digest* rather than an
+`ExecutionPlan`, and the `flow` category is mandatorily plan-bound.
 
-Entries carry machine ID, session ID, plan digest, policy rule ID,
-policy epoch, protocol version, the address/port tuple, direction,
-reason code, and byte/packet counts.
+The `LocalAuditKind::L3*` variants are **not** this path. They belong to
+the unsigned local operations log at `<mvm_home>/log/audit.jsonl`; the
+tamper-evident record is `<mvm_home>/audit/<tenant>.jsonl`, and that is
+the one this gateway writes.
+
+Served today, one event name each:
+
+| Event | From |
+|---|---|
+| `l3.tunnel_ready` | the handshake completing |
+| `l3.tunnel_disconnected` | teardown, carrying what never reached the chain |
+| `l3.flow_admitted` | the first packet of a flow to a destination |
+| `l3.flow_denied` | a refused guest packet, with its reason code |
+| `l3.ingress_delivered` | the first return packet admitted from a remote |
+| `l3.ingress_denied` | a refused inbound packet, with its reason code |
+| `l3.dns_admitted` | an answered question, with the answer *count* |
+| `l3.dns_denied` | a refused question, with its reason |
+| `l3.malformed_frame` | a framing violation that ends the tunnel |
+| `l3.stale_session` | a frame carrying a session that is not the live one |
+| `l3.queue_overflow` | a packet dropped because a queue was full |
+| `l3.rate_limited` | the DNS rate limiter refusing a query |
+
+A spoofed-source packet is `l3.flow_denied` with `reason=spoofed_source`
+rather than an event of its own — the deny code already names it.
+
+**Not served, and why.** Tunnel *requested*, *connected*, and *configured*
+have no call site: the handshake produces a single `GatewayEvent`, at
+`ready`. Flow *closed* has none either — idle flows are reaped on a timer
+that returns a count rather than events. Ingress *opened* and *closed*
+likewise: the declared-ingress table is fixed at configuration time and
+its lifetime produces no event. Each would need a gateway change to
+surface, and inventing an entry with no decision behind it would put a
+fact on the chain that nothing observed.
+
+Every entry carries machine ID, session ID, plan digest, policy epoch,
+and protocol version. Decision entries add the address/port tuple,
+direction, verdict, and reason code. **No policy rule ID and no
+byte/packet counts** — neither is on a `GatewayEvent`, and volume is a
+counter rather than an audit fact.
+
+### One entry per decision, never one per packet
+
+`GatewayEvent` is per packet. An entry per packet would be a write
+amplifier into the host's audit log that a guest drives at line rate, so
+repeats fold into the first entry for their bucket and the fold is
+counted. Two dedup tables: one keyed only on host-defined enumerations
+(deny reason, direction), one on guest-chosen values (destination, DNS
+name) and capped. A decision that cannot get a bucket in the capped table
+degrades to its class key rather than going unrecorded — **granularity
+gives way under pressure, the record does not**.
+
+Those caps are the whole rate bound: a bucket emits at most once per
+window, so a guest that never repeats a destination can cause at most
+`2 × (256 + 128) = 768` entries per 30-second window. A separate emission
+budget was considered and dropped — above the caps it can never fire, below
+them it fires first and makes the degrade-to-class path unreachable, so it
+is a knob that either does nothing or silently loses refusals. What the
+tables fold is counted and written to the chain at teardown, so the log
+states its own completeness.
+
+### Failure policy
+
+Emission is **fail-open and counted**. This process is the only way a
+workload reaches the network; failing closed on a signer fault would turn
+a full disk into a network outage for every machine on the host, and the
+decision an entry describes has already been enforced whether or not it
+was recorded. Failures increment a counter the teardown entry carries. An
+absent host signer key leaves the gateway serving un-audited rather than
+refusing to serve, matching the substitution endpoint at the same seam.
 
 Entries never carry packet payloads, DNS payloads beyond normalized
-metadata, authorization headers, secrets, or application content.
+metadata, authorization headers, secrets, or application content. A DNS
+name is the one guest-chosen string kept, as the metadata the policy
+decision was made against, and every guest-derived label is clamped.
+
 
 ## Security guarantees
 

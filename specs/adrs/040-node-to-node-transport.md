@@ -152,7 +152,7 @@ choosing a widening on the plan author's behalf.
 declaration, landed in the policy projection and the lease before any
 transport consumes them.
 
-### P4 — The audit chain does not reach the L3 gateway at all
+### P4 — The audit chain does not reach the L3 gateway at all — CLOSED
 
 I3 asks that the chain-signed audit log still record what happened. It
 does not record what happens now.
@@ -176,8 +176,14 @@ Connecting `GatewayEvent` to the chain-signed log is worth doing on its
 own merits, for the local path, with its own rate-discipline decision
 about which decision classes are chain-entries and which stay counters.
 
-**Unblocked by:** its own workstream, on the local path, before the hop
-exists.
+**Closed.** `mvm_hostd::netd::audit::NetdAuditor` now routes every
+`GatewayEvent` onto the chain-signed per-tenant log through the existing
+supervisor `Recorder`, under `EventCategory::L3`, with the
+rate-discipline decision this section asked for made explicitly: bounded
+dedup on decision classes, a per-window emission budget, and a teardown
+entry stating what neither admitted. See ADR-036 §"Audit and
+observability" for the served set and the six facts that remain
+unserved.
 
 ## The design, so far as it can be settled now
 

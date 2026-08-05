@@ -296,6 +296,9 @@ fn build_netd_config(config: &mvm_core::vm_backend::VmStartConfig) -> Result<Str
         // of the same machine never share an identity.
         boot_id: plan.plan_id.0.clone(),
         plan_digest: plan.plan_id.0.clone(),
+        // The gateway's refusals belong on the same chain as the admission
+        // that authorized the workload they refuse on behalf of.
+        tenant: plan.tenant.0.clone(),
         uds_layout: NetdUdsLayout::PerVmDir,
         gateway_ipv4: lease.gateway,
         guest_ipv4: lease.guest,

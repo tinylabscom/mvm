@@ -166,7 +166,7 @@ rather than from intent:
 
 | Const | Value | Rationale |
 |---|---|---|
-| `DEFAULT_MAX_HOST_SOCKETS` | 256 | An affordability bound, not a demand: what the host can carry at 44.32 MiB against the real per-flow cost below, held well under `DEFAULT_MAX_FLOWS` (4096) because a descriptor costs more than a table entry |
+| `DEFAULT_MAX_HOST_SOCKETS` | 256 | An affordability bound, not a demand: what the host can carry at 44.51 MiB against the real per-flow cost below, held well under `DEFAULT_MAX_FLOWS` (4096) because a descriptor costs more than a table entry |
 | `FD_RESERVE` | 64 | Uncounted slack for audit log, vsock, control channel, logging and the readiness pair; binds only when the raised `RLIMIT_NOFILE` is under 320 |
 | `DEFAULT_MAX_HALF_OPEN` | 64 | A connecting descriptor each; sized for a real connect burst — page-load fan-out, parallel package install, sidecar startup — not for a flood |
 | `HALF_OPEN_TIMEOUT_MILLIS` | 10_000 | Matches ordinary connect timeouts |
@@ -213,11 +213,12 @@ machine-wide device  2 × 256 packets × 1500 bytes      =    768,000 bytes
 half-open SYNs      64 × 1500 bytes                    =     96,000 bytes
 one UDP poll batch  64 × 3 × 1500 bytes                =    288,000 bytes
 one ingress batch   16 × 3 × 1500 bytes                =     72,000 bytes
+audit dedup tables (256 + 128) × 512 bytes              =    196,608 bytes
                                                          --------------
-MEMORY_CEILING_BYTES                                     46,476,608 bytes
+MEMORY_CEILING_BYTES                                     46,673,216 bytes
 ```
 
-**46,476,608 bytes is 44.32 MiB**, not 32 MiB. It is an upper bound and not
+**46,673,216 bytes is 44.51 MiB**, not 32 MiB. It is an upper bound and not
 an attainable state — flows, half-open entries, associations and ingress
 listeners all draw on the same descriptor budget, so a machine cannot hold
 256 of one and the full cap of each of the others at the same instant — but
@@ -230,12 +231,17 @@ The discrepancy this section used to record is closed. The doc comment on
 `DEFAULT_MAX_HOST_SOCKETS` said the worst case at a cap of 256 was "back
 under 44 MiB", which counted only the per-flow term (45,252,608 bytes,
 43.16 MiB) and omitted the three machine-level terms the constant itself
-sums; it now states 44.32 MiB and names both figures so the smaller one
+sums; it now states 44.51 MiB and names both figures so the smaller one
 cannot be mistaken for the ceiling again.
 
-Each of the five terms is asserted separately as well as in the total, and
+The audit dedup tables are a gateway-level term in a datapath-level
+ceiling. They are counted here because this constant is the one place the
+process's guest-drivable footprint is stated, and a table a guest fills by
+choosing destinations is guest-drivable memory wherever it sits.
+
+Each of the six terms is asserted separately as well as in the total, and
 the machine-wide device — the one with no named constant — is asserted as
-the **residual** of the four that do. That is not redundancy: two terms of
+the **residual** of the five that do. That is not redundancy: two terms of
 equal size move the total identically, so a total on its own cannot say
 which one went, and a residual form makes a dropped term fail under its own
 name. Declared UDP ingress added the fifth term, and adding it is what

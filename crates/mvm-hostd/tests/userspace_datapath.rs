@@ -720,6 +720,7 @@ fn config(vm_id: &str, tcp: &[NetdRule], udp: &[NetdRule]) -> NetdConfig {
         vm_id: vm_id.into(),
         boot_id: "boot-1".into(),
         plan_digest: "sha256:plan".into(),
+        tenant: "local".into(),
         uds_layout: NetdUdsLayout::PerVmDir,
         gateway_ipv4: Ipv4Addr::new(10, 201, 0, 5),
         guest_ipv4: Ipv4Addr::new(10, 201, 0, 6),

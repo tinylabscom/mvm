@@ -101,7 +101,7 @@ for detailed scope and acceptance criteria.
         evicting — and the memory ceiling moved with it: a fifth term,
         `UDP_INGRESS_BUFFER_BYTES`, and one shared per-poll divisor took the
         association batch from 4 datagrams to 3, so the ceiling is now
-        46,476,608 bytes (44.32 MiB). `declared_ingress: true` is honest for
+        46,673,216 bytes (44.51 MiB). `declared_ingress: true` is honest for
         datagrams; declared **TCP** ingress binds nothing here and stays
         recorded as an over-claim
   - [~] WS3 (#2116) — IPv6 as a first-class family (ADR-038). **Host side
@@ -168,9 +168,9 @@ for detailed scope and acceptance criteria.
         nodes, so a destination IP does not name a VM and a peer's address
         collides with a local machine's; the policy language cannot name a
         peer workload and `IngressTable::admits` takes no source, so
-        admitting a peer means admitting the host network; and no
-        `AuditEmitter` reaches `netd` at all, so there is no local audit
-        record for the hop to preserve. The ADR records the design, the
+        admitting a peer means admitting the host network. The fourth
+        blocker — no audit record for the hop to preserve — is now closed
+        by the gateway audit path below. The ADR records the design, the
         rejected alternatives, and the four unblocking conditions
   - [~] WS8 (#2120) — mvmd-facing node-control API, mvm side only.
         **The mvm half is implemented** (`mvm_hostd::nodectl`, ADR-041,
@@ -186,6 +186,32 @@ for detailed scope and acceptance criteria.
         the verification seam here, so this *half*-unblocks #2119 rather
         than unblocking it — a key scoped to a node pair would still be a
         second trust root. The fleet-orchestration half stays in mvmd
+  - [x] Gateway audit (#2151) — the L3 gateway now writes chain-signed
+        entries. `mvm_hostd::netd::audit::NetdAuditor` routes every
+        `GatewayEvent` through the **existing** supervisor `Recorder`
+        under a new `EventCategory::L3`, so there is one audit path
+        rather than a second one. Twelve event names, one per variant.
+        Decisions, never traffic: an entry per packet would be a write
+        amplifier a guest drives at line rate, so repeats fold into two
+        bounded dedup tables — one keyed on host-defined enumerations,
+        one on guest-chosen values and capped. A decision that cannot get
+        a guest-keyed bucket **degrades to its class key rather than going
+        unrecorded**. The caps are the whole rate bound (768 entries per
+        30s); a separate emission budget was considered and dropped,
+        because above the caps it never fires and below them it makes the
+        degrade path unreachable.
+        Emission is fail-open and counted, because this process is the
+        only way a workload reaches the network and a signer fault must
+        not become a network outage; what never reached the chain is
+        written to the chain at teardown. Mutating `fact_for` to drop
+        `FlowDenied` reddens nine tests, including the end-to-end one
+        against the shipping binary; stubbing `emit` reddens thirteen.
+        Both dedup tables joined `MEMORY_CEILING_BYTES` and its
+        residual-form assertion.
+        **Six facts ADR-036 named are not emitted** — tunnel
+        requested/connected/configured, flow closed, ingress
+        opened/closed — because none has a call site; recorded as such in
+        the ADR rather than claimed
   - [ ] WS9 (#2121) — WSL2 validation on a real runner; documented and
         scheduled rather than claimed, since no live Windows host is
         available

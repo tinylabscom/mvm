@@ -13,10 +13,10 @@ have to rediscover.
 
 Plan 287 (the userspace socket datapath) is complete: all sixteen tasks,
 plus five defects found and fixed after them. What remains of epic #2111
-is not datapath work. It is a control surface, a transport that cannot be
+is not datapath work. It was a control surface, a transport that cannot be
 built yet, a guest-kernel measurement, and an audit gap — four unrelated
 things that happened to be filed under one epic because they were all
-deferred by plan 285.
+deferred by plan 285. The audit gap is closed; three remain.
 
 Keeping them in plan 287 would have made a finished document look
 unfinished. They live here instead.
@@ -88,18 +88,58 @@ ADR-038 requires this be measured rather than assumed, because guest
 kernels are being cut to the virtual hardware floor in parallel and
 enabling the option blind would quietly reverse part of that.
 
-### The gateway emits no audit entries (#2151)
+### The gateway emits chain-signed audit entries (#2151) — LANDED
 
-- [ ] Emit chain-signed entries for the gateway decisions ADR-036 §Audit
-      already enumerates — the `LocalAuditKind` variants exist
+- [x] `crates/mvm-hostd/src/netd/audit.rs` — `NetdAuditor`, routed through
+      the existing supervisor `Recorder` under a new `EventCategory::L3`.
+      One audit path, not a second one
+- [x] Twelve event names, one per `GatewayEvent` variant: tunnel
+      ready/disconnected, flow admitted/denied, ingress
+      delivered/denied, DNS admitted/denied, malformed frame, stale
+      session, queue overflow, rate limited
+- [x] Decisions, never traffic. Two bounded dedup tables — one keyed on
+      host-defined enumerations, one on guest-chosen values and capped.
+      A decision that cannot get a guest-keyed bucket degrades to its
+      class key rather than going unrecorded. The caps are the whole rate
+      bound; a separate emission budget was considered and dropped as a
+      knob that either never fires or silently loses refusals
+- [x] Fail-open and counted. What never reached the chain is written to
+      the chain at teardown
+- [x] Both dedup tables joined `MEMORY_CEILING_BYTES` and its
+      residual-form assertion; the ceiling moved 46,476,608 → 46,673,216
+      bytes
 
-There is no `AuditEmitter` anywhere under `crates/mvm-hostd/src/netd/`.
-`log_event` turns five of twelve `GatewayEvent` variants into stderr and
-drops the rest into counters. So the seam where default-deny is enforced
-for `l3-vsock` writes nothing to the tamper-evident record.
+**Mutation-proved.** `fact_for` returning `None` for `FlowDenied` — the
+one decision this issue exists to record — reddens **nine** tests,
+including `a_denied_flow_lands_on_the_chain_with_its_reason_and_destination`
+and the end-to-end `a_refused_packet_leaves_a_verifiable_entry_on_the_real_processs_chain`.
+Stubbing `emit` so it writes nothing reddens **thirteen**. Both restored,
+all green.
 
-Worth fixing on the local path regardless of cross-node work, and ADR-040
-lists it as one of four blockers on #2119.
+**Verified.** 2247 pass across `mvm-hostd`/`mvm-net`/`mvm-protocol` and 2811
+across `mvm-core`/`mvm-runtime`, 0 failures; 17 tests added (15 unit, 2
+end-to-end against the shipping binary). The closure budget did not move
+(279 of 279) — the auditor reuses tokio, chrono and ed25519, all already
+linked. Run on a Linux host: this Mac's loader was wedged (`syspolicyd`
+spinning, every freshly built binary hanging at `_dyld_start`), so no test
+binary could start locally.
+
+**Not emitted, and deliberately.** ADR-036 §Audit named tunnel
+requested/connected/configured, flow closed, and ingress opened/closed.
+None has a call site: the handshake produces one `GatewayEvent` (at
+`ready`), idle flows are reaped by a timer returning a count, and the
+declared-ingress table is fixed at configuration time. Surfacing any of
+them is a gateway change, not an audit change.
+
+- [ ] Give the gateway events for the six unserved facts above, if an
+      operator ever needs them. Not obviously worth a `GatewayEvent`
+      variant apiece
+
+**A correction to ADR-036.** It said the `LocalAuditKind::L3*` variants
+were the mechanism. They are not — those belong to the *unsigned* local
+operations log. The chain is `<mvm_home>/audit/<tenant>.jsonl`, reached
+through the `Recorder`. The ADR now says so.
+
 
 ### WSL2 validation (#2121)
 

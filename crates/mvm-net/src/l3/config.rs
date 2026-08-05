@@ -34,6 +34,11 @@ pub struct NetdConfig {
     pub vm_id: String,
     pub boot_id: String,
     pub plan_digest: String,
+    /// Whose audit chain this machine's gateway decisions belong on. Taken
+    /// from the signed plan so a refusal lands beside the admission that
+    /// authorized the workload, rather than in a stream of its own.
+    #[serde(default = "default_tenant")]
+    pub tenant: String,
 
     /// Which socket-directory convention this backend uses.
     pub uds_layout: NetdUdsLayout,
@@ -72,6 +77,10 @@ pub struct NetdConfig {
     /// Declared ingress mappings, `"tcp"` or `"udp"`.
     #[serde(default)]
     pub ingress: Vec<NetdIngress>,
+}
+
+fn default_tenant() -> String {
+    "local".to_string()
 }
 
 fn default_max_flows() -> usize {
@@ -271,6 +280,7 @@ mod tests {
             vm_id: "vm-a".into(),
             boot_id: "boot-1".into(),
             plan_digest: "sha256:plan".into(),
+            tenant: "local".into(),
             uds_layout: NetdUdsLayout::PerVmDir,
             gateway_ipv4: Ipv4Addr::new(10, 201, 0, 5),
             guest_ipv4: Ipv4Addr::new(10, 201, 0, 6),

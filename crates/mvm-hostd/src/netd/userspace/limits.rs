@@ -13,9 +13,9 @@ use mvm_protocol::l3::limits::{MIN_IPV4_HEADER, MTU_V1};
 /// An affordability bound rather than a demand figure, and worth saying so:
 /// nothing here claims a workload needs 256 concurrent connections. What
 /// the number is set against is [`MEMORY_CEILING_BYTES`], which at this cap
-/// is **46,476,608 bytes, 44.32 MiB** — the whole ceiling, machine-level
+/// is **46,673,216 bytes, 44.51 MiB** — the whole ceiling, machine-level
 /// terms included, not the per-flow term alone (that is 45,252,608 bytes,
-/// 43.16 MiB, and quoting it as the ceiling understates by 1.2 MiB).
+/// 43.16 MiB, and quoting it as the ceiling understates by 1.35 MiB).
 ///
 /// The per-flow cost is [`FLOW_BUFFER_BYTES`]: 176,768 bytes, both socket
 /// ring buffers plus both per-flow device queues at MTU size, 5.4x the
@@ -376,11 +376,21 @@ pub const UDP_BUFFER_BYTES: usize =
 pub const UDP_INGRESS_BUFFER_BYTES: usize =
     DEFAULT_MAX_UDP_INGRESS_LISTENERS * DATAGRAMS_PER_SOURCE_POLL * MTU_V1 as usize;
 
+/// Worst-case bytes the gateway's audit dedup tables hold at their caps.
+///
+/// A gateway-level term in a datapath-level ceiling, which needs saying:
+/// this constant is the one place the *process's* guest-drivable footprint
+/// is counted, and a table a guest fills by choosing destinations is
+/// guest-drivable memory whether it sits above the datapath or inside it.
+/// Leaving it out would make the ceiling understate by a term that grows
+/// with a cap somebody else owns.
+pub const AUDIT_DEDUP_BUFFER_BYTES: usize = crate::netd::audit::DEDUP_TABLE_BYTES;
+
 /// Worst-case buffer footprint for one machine at the socket cap: every
 /// flow at its own bound, plus the machine-wide guest-facing device the
 /// datapath handle owns, plus the SYNs its half-open table is holding, plus
 /// the datagram batches its associations and its ingress listeners can each
-/// produce in one poll.
+/// produce in one poll, plus what the gateway's audit dedup tables hold.
 ///
 /// An upper bound, not an attainable state: half-open entries, established
 /// flows, UDP associations, and ingress listeners share one descriptor
@@ -391,14 +401,15 @@ pub const UDP_INGRESS_BUFFER_BYTES: usize =
 /// because a ceiling that has to be reasoned about to be believed is a
 /// ceiling nobody will re-check.
 ///
-/// As shipped: 46,476,608 bytes, 44.32 MiB. The figure belongs in the test
+/// As shipped: 46,673,216 bytes, 44.51 MiB. The figure belongs in the test
 /// beside it and not only here — a ceiling that lives as arithmetic in a
 /// comment drifts the first time a buffer changes.
 pub const MEMORY_CEILING_BYTES: usize = DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES
     + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize
     + HALF_OPEN_BUFFER_BYTES
     + UDP_BUFFER_BYTES
-    + UDP_INGRESS_BUFFER_BYTES;
+    + UDP_INGRESS_BUFFER_BYTES
+    + AUDIT_DEDUP_BUFFER_BYTES;
 
 #[cfg(test)]
 mod tests {
@@ -435,6 +446,8 @@ mod tests {
         assert_eq!(UDP_BUFFER_BYTES, 288_000);
         // 16 ingress listeners × 3 datagrams × 1500 bytes.
         assert_eq!(UDP_INGRESS_BUFFER_BYTES, 72_000);
+        // (256 destination + 128 class) dedup buckets × 512 bytes.
+        assert_eq!(AUDIT_DEDUP_BUFFER_BYTES, 196_608);
         // The handle's own guest-facing device: one machine-wide queue in
         // each direction, DEFAULT_QUEUE_DEPTH deep, at the link MTU. It is
         // the one term with no named constant, so it is subtracted back out
@@ -446,19 +459,20 @@ mod tests {
                 - DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES
                 - HALF_OPEN_BUFFER_BYTES
                 - UDP_BUFFER_BYTES
-                - UDP_INGRESS_BUFFER_BYTES,
+                - UDP_INGRESS_BUFFER_BYTES
+                - AUDIT_DEDUP_BUFFER_BYTES,
             2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize
         );
         assert_eq!(2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize, 768_000);
         // 256 flows at that, plus the handle's own 2 × 256 × 1500, plus the
-        // SYNs the half-open table holds, plus one poll's association batch
-        // and one poll's ingress batch.
+        // SYNs the half-open table holds, plus one poll's association batch,
+        // one poll's ingress batch, and both audit dedup tables.
         assert_eq!(
             MEMORY_CEILING_BYTES,
-            256 * 176_768 + 768_000 + 96_000 + 288_000 + 72_000
+            256 * 176_768 + 768_000 + 96_000 + 288_000 + 72_000 + 196_608
         );
-        // 44.32 MiB. Not 43.16 — that is the per-flow term on its own.
-        assert_eq!(MEMORY_CEILING_BYTES, 46_476_608);
+        // 44.51 MiB. Not 43.16 — that is the per-flow term on its own.
+        assert_eq!(MEMORY_CEILING_BYTES, 46_673_216);
         const {
             assert!(
                 DEFAULT_MAX_HOST_SOCKETS < mvm_net::l3::flow::DEFAULT_MAX_FLOWS,

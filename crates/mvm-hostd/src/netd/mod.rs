@@ -29,6 +29,8 @@ pub mod config {
         }
     }
 }
+/// Chain-signed audit for the gateway's decisions.
+pub mod audit;
 pub mod datapath;
 pub mod gateway;
 pub mod metrics;
@@ -47,6 +49,7 @@ pub mod userspace;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
+pub use audit::{AuditDrops, NetdAuditContext, NetdAuditor};
 pub use datapath::{
     DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, InboundDrain,
     L3Datapath, LoopbackDatapath, LoopbackHandle, UnsupportedDatapath,
