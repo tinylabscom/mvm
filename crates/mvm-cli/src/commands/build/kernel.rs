@@ -50,8 +50,8 @@ struct BuildArgs {
     /// Where the kernel comes from. `compile` builds locally via Stage 0
     /// (host arch only); `download` fetches a published prebuilt for the
     /// release; `auto` downloads if available, else compiles.
-    #[arg(long, value_enum, default_value_t = Source::Compile)]
-    source: Source,
+    #[arg(long, value_enum)]
+    source: Option<Source>,
 
     /// Target architecture. Defaults to the host arch. Only `download`
     /// can target a non-host arch (Stage 0 cannot cross-compile).
@@ -104,6 +104,7 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
     use crate::commands::env::builder_vm::KernelVariant;
     use crate::ui;
 
+    let source = args.source.unwrap_or_else(source_from_global_policy);
     let arch = args.arch.clone().unwrap_or_else(|| host_arch().to_string());
 
     // (variant, cache-label) — the label keys the cache dir + the
@@ -121,7 +122,7 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
     };
 
     for (variant, label) in &variants {
-        let path = acquire_kernel(args.source, *variant, label, &arch, verbose)?;
+        let path = acquire_kernel(source, *variant, label, &arch, verbose)?;
         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let mib = bytes as f64 / (1024.0 * 1024.0);
 
@@ -144,6 +145,25 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
         run_boot_check(&variants, &arch)?;
     }
     Ok(())
+}
+
+/// Resolve the kernel source once for the whole command. An explicit
+/// `--source` wins; otherwise the global `--kernel-source` flag or
+/// `MVM_KERNEL_SOURCE` policy applies. Keeping this policy shared means a
+/// contributor can opt into published kernels for both builder bootstrap and
+/// direct kernel acquisition without changing command lines.
+#[cfg(feature = "builder-vm")]
+fn source_from_global_policy() -> Source {
+    source_from_policy(crate::commands::env::builder_vm::resolve_kernel_source())
+}
+
+#[cfg(feature = "builder-vm")]
+fn source_from_policy(policy: Option<crate::commands::env::builder_vm::KernelSource>) -> Source {
+    match policy {
+        Some(crate::commands::env::builder_vm::KernelSource::Compile) | None => Source::Compile,
+        Some(crate::commands::env::builder_vm::KernelSource::Download) => Source::Download,
+        Some(crate::commands::env::builder_vm::KernelSource::Auto) => Source::Auto,
+    }
 }
 
 /// JSON metrics emitted next to the cached kernel — the same shape the
@@ -342,7 +362,8 @@ fn run_build(_args: BuildArgs, _verbose: bool) -> Result<()> {
 
 #[cfg(all(test, feature = "builder-vm"))]
 mod tests {
-    use super::{boot_check_run_args, count_builtin_symbols};
+    use super::{Source, boot_check_run_args, count_builtin_symbols, source_from_policy};
+    use crate::commands::env::builder_vm::KernelSource;
 
     #[test]
     fn counts_only_lines_ending_in_y() {
@@ -362,6 +383,16 @@ CONFIG_G=y
     #[test]
     fn empty_config_is_zero() {
         assert_eq!(count_builtin_symbols(""), 0);
+    }
+
+    #[test]
+    fn global_kernel_policy_controls_the_default_source() {
+        assert_eq!(source_from_policy(None), Source::Compile);
+        assert_eq!(
+            source_from_policy(Some(KernelSource::Download)),
+            Source::Download
+        );
+        assert_eq!(source_from_policy(Some(KernelSource::Auto)), Source::Auto);
     }
 
     #[test]

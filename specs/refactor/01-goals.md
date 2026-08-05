@@ -29,7 +29,7 @@ Two capabilities the restructure treats as **core goals**, not by-products of si
 ## Reference models (studied, not copied)
 
 - **supermachine** (single crate, 4 bins, ~20 deps, **one** feature, bundled kernel, HVF via `applevisor-sys`, KVM via `kvm-ioctls`, `mio` event loop instead of a full async runtime, `mimalloc`, sub-100ms snapshot restore). North star for lean deps + low memory + external API shape (`Image`/`Vm`/`Pool`/`ExecBuilder`, warmup/snapshot/streaming-exec/`expose_tcp`/live host mounts).
-- **microsandbox** crate naming: `agentd`, `cli`, `filesystem`, `image`, `network`, `protocol`, `runtime`, `utils`. Adopted (with `mvm-` prefix).
+- **Modular runtime crate naming:** `agentd`, `cli`, `filesystem`, `image`, `network`, `protocol`, `runtime`, `utils`. Adopted (with `mvm-` prefix).
 - **holospaces**: `default-features = false` no_std core with `std` as an opt-in feature; `unsafe_code = "forbid"` at the workspace; no_std OCI layer decoders → the wasm/browser path.
 - **Rust guidelines** (gist `c3161f55…`): builder pattern over many-arg fns; traits over duplicated fns; newtypes over stringly-typed APIs; `thiserror` in libs; minimal deps; minimal default features; `mlock`/`zeroize`/`subtle` for secrets; small functions; `[lints]` with pedantic; release profile tuning.
 

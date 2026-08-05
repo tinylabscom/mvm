@@ -20,25 +20,96 @@ pub(crate) fn ensure_default_microvm_image(
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
     let cache = mvm_core::config::mvm_cache_dir();
     let arch = builder_vm_host_arch();
-    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, find_builder_vm_flake().is_ok());
+    let source_checkout = find_builder_vm_flake().is_ok();
+    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, source_checkout);
     // Name which kernel variant a run resolved and where it came from. Without
     // this breadcrumb a wrong-kernel boot (e.g. a non-verity kernel under a
     // verity-sealed rootfs) is invisible host-side until the guest panics.
     let (provenance, path) = match resolved {
         WorkloadKernelBootstrap::Cached(path) => ("cached", path),
         WorkloadKernelBootstrap::BuildLocal(path) => {
-            ui::warn(
-                "Workload kernel cache is cold; `machine run --image` will not build it implicitly.",
-            );
-            anyhow::bail!("{}", missing_workload_kernel_message(&path));
+            match workload_kernel_source(source_checkout) {
+                KernelSource::Download => {
+                    download_workload_kernel(arch, &path)?;
+                    ("downloaded", path)
+                }
+                #[cfg(feature = "builder-vm")]
+                KernelSource::Auto => match download_workload_kernel(arch, &path) {
+                    Ok(()) => ("downloaded", path),
+                    Err(download_error) => {
+                        ui::warn(&format!(
+                            "Published workload kernel unavailable ({download_error}); building it locally from the source checkout."
+                        ));
+                        ("built", build_local_workload_kernel()?)
+                    }
+                },
+                KernelSource::Compile => ("built", build_local_workload_kernel()?),
+            }
         }
-        WorkloadKernelBootstrap::Download(dest) => {
-            download_workload_kernel(arch, &dest)?;
-            ("downloaded", dest)
-        }
+        WorkloadKernelBootstrap::Download(dest) => match workload_kernel_source(source_checkout) {
+            KernelSource::Compile => {
+                if !source_checkout {
+                    anyhow::bail!(
+                        "{} MVM_KERNEL_SOURCE=compile requires an mvm source checkout so the workload kernel can be built locally. Set MVM_KERNEL_SOURCE=download or unset it to use the published kernel.",
+                        missing_workload_kernel_message(&dest)
+                    );
+                }
+                ("built", build_local_workload_kernel()?)
+            }
+            KernelSource::Download => {
+                download_workload_kernel(arch, &dest)?;
+                ("downloaded", dest)
+            }
+            #[cfg(feature = "builder-vm")]
+            KernelSource::Auto => {
+                download_workload_kernel(arch, &dest)?;
+                ("downloaded", dest)
+            }
+        },
     };
     ui::info(&format!("Workload kernel: {provenance} at {path}"));
     Ok(path)
+}
+
+#[cfg(feature = "builder-vm")]
+fn workload_kernel_source(source_checkout: bool) -> KernelSource {
+    resolve_kernel_source().unwrap_or_else(|| default_workload_kernel_source(source_checkout))
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn workload_kernel_source(source_checkout: bool) -> KernelSource {
+    default_workload_kernel_source(source_checkout)
+}
+
+pub(super) fn default_workload_kernel_source(source_checkout: bool) -> KernelSource {
+    if source_checkout {
+        KernelSource::Compile
+    } else {
+        KernelSource::Download
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+fn build_local_workload_kernel() -> Result<String> {
+    ui::notice(
+        "No cached workload kernel. Building it once in Stage 0; the first run can take several minutes, then warm starts use the cache.",
+    );
+    let path = build_kernel_via_stage0(KernelVariant::Workload, false)
+        .context(
+            "build the dm-verity-capable workload kernel; retry with `mvmctl kernel build --which workload` or `just kernel-workload`",
+        )?;
+    let path = path.display().to_string();
+    ui::success(&format!(
+        "Workload kernel built and cached. Future machine runs will skip this step: {path}"
+    ));
+    Ok(path)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn build_local_workload_kernel() -> Result<String> {
+    anyhow::bail!(
+        "building the workload kernel requires the builder-vm feature; use a release binary or set MVM_KERNEL_SOURCE=download"
+    )
 }
 
 /// Whether a kernel image carries device-mapper + dm-verity support (needed to
@@ -183,7 +254,9 @@ pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
     format!(
         "workload kernel missing (expected at {expected_path}). \
          `machine run --image` needs a dm-verity-capable workload kernel before the guest can boot. \
-         Create it once with `mvmctl kernel build --which workload` or `just kernel-workload`, then retry."
+         In a source checkout it is built automatically on first use; set \
+         `MVM_KERNEL_SOURCE=download` to use the published kernel instead, or create it manually \
+         with `mvmctl kernel build --which workload` or `just kernel-workload`."
     )
 }
 

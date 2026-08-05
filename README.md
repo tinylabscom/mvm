@@ -32,6 +32,23 @@ Linux + /dev/kvm           →  Firecracker
   agent-verb grants, sealed prod images that refuse interactive access, secret
   substitution over vsock)
 
+## Local. A real microVM in milliseconds.
+
+The steady state is deliberately simple: give mvm an image and a command, and
+it gives the workload its own Linux kernel, memory boundary, writable root, and
+host-brokered I/O. The warm path uses cached VM and image artifacts, so the
+microVM starts in milliseconds. Cold mode may download or build those
+artifacts; mvm explains that work and caches it for the next run.
+
+```bash
+mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
+```
+
+Network access is off by default. Filesystem sharing, egress, and secrets are
+explicit launch decisions recorded in the signed execution plan — there is no
+SSH session, daemon to operate, or container fallback hiding behind this
+command.
+
 ## Install
 
 ```bash
@@ -166,10 +183,10 @@ mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
 Provenance (registry, repo, resolved digest, layer list, cosign verdict) is
 recorded in the chain-signed audit log; `--prod` refuses mutable tags before any
-network fetch. In a source checkout, OCI boots also need a cached
-dm-verity-capable workload kernel; build it once with
-`mvmctl kernel build --which workload` (or `just kernel-workload`) before the
-first `machine run --image ...`.
+network fetch. In a source checkout, the first OCI boot automatically builds
+the dedicated dm-verity-capable workload kernel through Stage 0 and caches it.
+Use `MVM_KERNEL_SOURCE=download` to prefer the matching hash-verified release
+kernel, or `mvmctl kernel build --which workload` when you want to prewarm it.
 
 ### 2. From a Nix flake (`mkGuest`)
 

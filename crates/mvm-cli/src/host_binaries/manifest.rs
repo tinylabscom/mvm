@@ -24,6 +24,8 @@ pub struct SourceBuiltBinary {
     pub package: &'static str,
     /// Name on disk after cargo zigbuild and in the extracted cache.
     pub name: &'static str,
+    /// Comma-separated Cargo features required by the binary target.
+    pub features: &'static str,
 }
 
 pub const HOST_BINARIES: &[HostBinary] = &[
@@ -66,4 +68,5 @@ pub const SEED_BINARIES: &[&str] = &["stage0-init", "mvm-rootfs-patcher"];
 pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary {
     package: "mvm-agentd",
     name: "mvm-egress-client",
+    features: "addons",
 }];
