@@ -284,7 +284,7 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
     signed bytes). Surfaced by `--host-service <SERVICE>` on `machine run` and
     the transient run path; a malformed id is refused before it can reach a
     plan.
-  - `mvm_protocol::plan::sdk_sidecar` answers the single question — does this
+  - `mvm_contract::plan::sdk_sidecar` answers the single question — does this
     plan bind a service the SDK cdylib serves? `SDK_HOST_SERVICES` is the exact
     versioned set (`host.audit.v1`, `host.cost.v1`, `host.secrets.v1`,
     `host.time.v1`); `broker.v1` and a hypothetical `host.audit.v2` do not

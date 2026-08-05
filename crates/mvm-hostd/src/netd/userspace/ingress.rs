@@ -51,10 +51,10 @@ use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 
+use mvm_contract::l3::ip::proto;
 use mvm_core::policy::projection::Proto;
 use mvm_net::l3::IngressMapping;
 use mvm_net::l3::flow::FlowKey;
-use mvm_protocol::l3::ip::proto;
 
 use crate::netd::datapath::DatapathError;
 

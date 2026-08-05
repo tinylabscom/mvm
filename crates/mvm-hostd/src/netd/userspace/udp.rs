@@ -40,9 +40,9 @@ use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 
+use mvm_contract::l3::ip::UDP_HEADER_LEN;
+use mvm_contract::l3::ip::proto;
 use mvm_net::l3::flow::FlowKey;
-use mvm_protocol::l3::ip::UDP_HEADER_LEN;
-use mvm_protocol::l3::ip::proto;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr, UdpPacket, UdpRepr};
 use socket2::{Domain, Protocol, Socket, Type};

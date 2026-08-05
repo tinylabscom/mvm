@@ -5,7 +5,7 @@
 //! module turns that stream into RFC 6962 transparency-log artifacts: a
 //! Merkle root over the whole log and an `O(log n)` inclusion proof for a
 //! single line. All the tree math lives in
-//! [`mvm_protocol::merkle`] (the same `no_std` code a browser runs); this
+//! [`mvm_contract::merkle`] (the same `no_std` code a browser runs); this
 //! module only supplies the leaf bytes and the fail-closed policy.
 //!
 //! ## Leaf bytes
@@ -27,10 +27,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
-use mvm_protocol::merkle::{InclusionProof, build_inclusion_proof, merkle_root};
+use mvm_contract::merkle::{InclusionProof, build_inclusion_proof, merkle_root};
 
 use crate::audit::emitter;
-use mvm_protocol::verify::verify_audit_chain_bytes;
+use mvm_contract::verify::verify_audit_chain_bytes;
 
 /// Read a tenant's audit lines as Merkle leaves, in file order, **after**
 /// verifying the chain is intact — from the SAME bytes. The file is read
@@ -91,8 +91,8 @@ mod tests {
     use super::*;
     use crate::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
     use ed25519_dalek::SigningKey;
+    use mvm_contract::merkle::{verify_inclusion, verify_signed_root};
     use mvm_core::plan::{PlanId, TenantId};
-    use mvm_protocol::merkle::{verify_inclusion, verify_signed_root};
     use std::collections::BTreeMap;
 
     fn fresh_key() -> SigningKey {
@@ -184,7 +184,7 @@ mod tests {
     }
 
     // The anti-drift guarantee: build the root + a proof on the HOST side,
-    // then verify them with the `mvm_protocol::merkle` verifier (the exact
+    // then verify them with the `mvm_contract::merkle` verifier (the exact
     // code a browser runs). Agreement proves the host's leaf bytes == the
     // verifier's leaf bytes. Sibling to
     // `mvm_verify_matches_supervisor_chain` in `supervisor::audit_file`.
@@ -215,11 +215,11 @@ mod tests {
         let timestamp = "2026-07-26T00:00:00Z";
         let root_hex = hex::encode(root);
         let payload =
-            mvm_protocol::merkle::root_signing_bytes("local", size, &root_hex, timestamp).unwrap();
+            mvm_contract::merkle::root_signing_bytes("local", size, &root_hex, timestamp).unwrap();
         use ed25519_dalek::Signer;
         let sig = key.sign(&payload);
         use base64::Engine;
-        let mut signed = mvm_protocol::merkle::SignedAuditRoot {
+        let mut signed = mvm_contract::merkle::SignedAuditRoot {
             tenant: "local".to_string(),
             tree_size: size,
             root_hash: root_hex,

@@ -75,14 +75,18 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// 275 (was 274): the exact-pinned, zero-dependency `leakguard` detector adds
 /// one crate to enforce default-on credential masking on protected egress.
 ///
-/// 279 (was 275): the userspace socket datapath, which is the macOS forwarding
+/// 274 (was 275): consolidating the protocol and volume contracts into the
+/// feature-gated `mvm-contract` package removes one package from the default
+/// closure while preserving the protocol-only default feature set.
+///
+/// 278 (was 274): the userspace socket datapath, which is the macOS forwarding
 /// backend and the fallback wherever the Linux TUN probe fails, brings
 /// `smoltcp` (default features off — `medium-ip`, the two IP protocols and the
 /// two socket types only), `mio`, and `socket2`. It cannot be gated off by
 /// default: on macOS it is the only backend, so a build without it would refuse
 /// every `l3-vsock` plan on that platform. Four crates for a whole forwarding
 /// backend, and `smoltcp` is `#![deny(unsafe_code)]` and 0BSD.
-const CLOSURE_BUDGET: usize = 279;
+const CLOSURE_BUDGET: usize = 278;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

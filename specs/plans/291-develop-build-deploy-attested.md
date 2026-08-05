@@ -138,8 +138,12 @@ same sealed, hash-pinned, CVE-scanned volume.
 - [x] Make the agent-verb grant depend on the admitted run shape rather than
       the image sidecar: a baked-entrypoint boot on a non-dev profile receives
       ProdSafe verbs; a PTY or ad-hoc argv receives DevOnly verbs.
-- [ ] Make the run tier come from whether the run uses an attested artifact,
-      not from a build variant and not from an unattested CLI flag.
+- [~] Make the run tier come from whether the run uses an attested artifact,
+      not from a build variant and not from an unattested CLI flag. Local
+      `mvmctl machine run --deployment DIR` now verifies the signed deploy
+      record and exact `rootfs.ext4`, persists the canonical deployment
+      directory, and revalidates it on restart. Remote record extraction and
+      boot remain in follow-up issue #2144.
 - [ ] Retire the `interactive` Cargo feature fork so one agent binary serves
       both tiers; the existing `RequestClass::{ProdSafe, DevOnly}` gate and the
       signed `VerbGrant` already do the enforcement.

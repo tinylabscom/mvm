@@ -22,11 +22,11 @@ pub mod signing;
 pub mod toml_loader;
 
 // `security`, `reversible_replacement`, `policies`, `redaction`, and
-// `bundle` are pure-DTO leaves that now live in `mvm-protocol`; re-exported
+// `bundle` are pure-DTO leaves that now live in `mvm-contract`; re-exported
 // here as module aliases so every existing
 // `crate::policy::{security,reversible_replacement,policies,redaction,bundle}::X`
 // path keeps resolving unchanged.
-pub use mvm_protocol::policy::{bundle, policies, redaction, reversible_replacement, security};
+pub use mvm_contract::policy::{bundle, policies, redaction, reversible_replacement, security};
 
 pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
 pub use policies::{

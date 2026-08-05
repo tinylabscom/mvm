@@ -52,8 +52,8 @@ impl GuestService {
             Self::WorkloadExit => 5251,
             Self::MachineControl => 5252,
             Self::Substitution => 5253,
-            Self::NetworkControl => mvm_protocol::l3::L3_CONTROL_PORT,
-            Self::NetworkData { queue } => mvm_protocol::l3::data_port(queue),
+            Self::NetworkControl => mvm_contract::l3::L3_CONTROL_PORT,
+            Self::NetworkData { queue } => mvm_contract::l3::data_port(queue),
             Self::Broker => 5300,
         }
     }
@@ -280,11 +280,11 @@ mod tests {
         assert_eq!(GuestService::Broker.port(), 5300);
         assert_eq!(
             GuestService::NetworkControl.port(),
-            mvm_protocol::l3::L3_CONTROL_PORT
+            mvm_contract::l3::L3_CONTROL_PORT
         );
         assert_eq!(
             GuestService::NetworkData { queue: 0 }.port(),
-            mvm_protocol::l3::L3_DATA_PORT_BASE
+            mvm_contract::l3::L3_DATA_PORT_BASE
         );
     }
 
@@ -338,7 +338,7 @@ mod tests {
         for q in 0..4u16 {
             assert_eq!(
                 GuestService::NetworkData { queue: q }.port(),
-                mvm_protocol::l3::L3_DATA_PORT_BASE + u32::from(q)
+                mvm_contract::l3::L3_DATA_PORT_BASE + u32::from(q)
             );
         }
     }

@@ -1,6 +1,6 @@
 //! Drift-lock between the two RFC 8785 realizations this workspace carries.
 //!
-//! `mvm_protocol::ir::canonicalize` (the load-bearing hand-rolled `no_std`
+//! `mvm_contract::ir::canonicalize` (the load-bearing hand-rolled `no_std`
 //! JCS writer that feeds `ir_hash`) and `serde_jcs` (the canonicalizer used by
 //! [`crate::semantic_address::semantic_address`]) are independent
 //! implementations of the same canonical form. Nothing else proves they emit
@@ -25,7 +25,7 @@
 #[cfg(test)]
 mod tests {
     use crate::semantic_address::semantic_address;
-    use mvm_protocol::ir::{
+    use mvm_contract::ir::{
         App, Entrypoint, EnvValue, Image, Resources, Source, Workload, canonicalize, ir_hash,
     };
     use sha2::{Digest, Sha256};

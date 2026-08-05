@@ -17,8 +17,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::IpNet;
+use mvm_contract::l3::{ParsedIpPacket, ip, proto};
 use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
-use mvm_protocol::l3::{ParsedIpPacket, ip, proto};
 
 use super::alloc::{AddressFamily, AddressLease};
 use super::dns::DnsBindingStore;
@@ -68,7 +68,7 @@ impl Default for L3PolicyConfig {
             admitted_private: Vec::new(),
             icmp: IcmpPolicy::default(),
             allow_fragments: false,
-            mtu: mvm_protocol::l3::MTU_V1,
+            mtu: mvm_contract::l3::MTU_V1,
             policy_epoch: 0,
         }
     }

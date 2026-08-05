@@ -826,7 +826,7 @@ mod tests {
         input.services = services
             .iter()
             .map(|s| {
-                mvm_protocol::protocol::broker::ServiceId::parse(*s).expect("fixture service id")
+                mvm_contract::protocol::broker::ServiceId::parse(*s).expect("fixture service id")
             })
             .collect();
         synthesize_plan(&input).expect("fixture plan synthesizes")

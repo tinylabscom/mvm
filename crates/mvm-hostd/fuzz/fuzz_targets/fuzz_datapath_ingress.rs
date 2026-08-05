@@ -41,8 +41,8 @@ use mvm_net::l3::{
     DnsBindingStore, DnsLimits, FlowKey, FlowLimits, FlowTable, IngressTable, L3Admitter,
     L3PolicyConfig, OutboundVerdict,
 };
-use mvm_protocol::l3::limits::MTU_V1;
-use mvm_protocol::l3::{ip, proto};
+use mvm_contract::l3::limits::MTU_V1;
+use mvm_contract::l3::{ip, proto};
 
 /// Frames per input. A datapath is stateful — one packet can open a flow
 /// but never also send on it — so an exec has to be a short sequence. The

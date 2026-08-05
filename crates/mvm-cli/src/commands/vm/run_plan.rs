@@ -60,7 +60,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::commands::build::trace_secret_scan::SecretFinding;
-use mvm_protocol::ir::{App, Workload};
+use mvm_contract::ir::{App, Workload};
 
 use super::managed_secrets::lower_app_secrets;
 use crate::commands::build::sandbox_record::{
@@ -326,7 +326,7 @@ fn extract_script_arg(args: &RunArgs) -> Result<PathBuf> {
 fn synthesis_input_for_app<'a>(
     workload: &'a Workload,
     app: &'a App,
-    network_mode: mvm_protocol::plan::NetworkMode,
+    network_mode: mvm_contract::plan::NetworkMode,
 ) -> Result<SynthesisInput<'a>> {
     let lowered_secrets = lower_app_secrets(app);
     // `SynthesisInput` borrows `image_sha256` as `&str`; we need a

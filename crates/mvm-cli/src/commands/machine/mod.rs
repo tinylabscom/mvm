@@ -45,7 +45,7 @@ use mvm_runtime::machine::persist::{
 
 use super::Cli;
 use super::build::build;
-use super::vm::exec::{RunArgs, RunProfile, run_secure, run_secure_with_source};
+use super::vm::exec::{RunArgs, RunProfile, run_secure_with_source};
 use super::vm::group::VmCmd;
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
@@ -205,11 +205,11 @@ impl MachineAction {
 /// transport would make one plan mean different things in different places.
 pub(in crate::commands) fn derive_network_mode(
     needs_raw_ip_stack: bool,
-) -> mvm_protocol::plan::NetworkMode {
+) -> mvm_contract::plan::NetworkMode {
     if needs_raw_ip_stack {
-        mvm_protocol::plan::NetworkMode::L3Vsock
+        mvm_contract::plan::NetworkMode::L3Vsock
     } else {
-        mvm_protocol::plan::NetworkMode::HostVsockProxy
+        mvm_contract::plan::NetworkMode::HostVsockProxy
     }
 }
 
@@ -220,7 +220,7 @@ pub(in crate::commands) fn derive_network_mode(
 /// host. Conflating them is how a plan starts meaning different things in
 /// different places.
 pub(in crate::commands) fn check_host_can_serve(
-    mode: mvm_protocol::plan::NetworkMode,
+    mode: mvm_contract::plan::NetworkMode,
 ) -> anyhow::Result<()> {
     if !mode.is_l3_vsock() {
         return Ok(());
@@ -238,7 +238,7 @@ pub(in crate::commands) fn check_host_can_serve(
 /// Settle and validate the networking configuration before anything boots.
 pub(in crate::commands) fn preflight_network(
     needs_raw_ip_stack: bool,
-) -> anyhow::Result<mvm_protocol::plan::NetworkMode> {
+) -> anyhow::Result<mvm_contract::plan::NetworkMode> {
     let mode = derive_network_mode(needs_raw_ip_stack);
     check_host_can_serve(mode)?;
     Ok(mode)
@@ -249,17 +249,20 @@ pub(in crate::commands) fn preflight_network(
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineRunArgs {
     /// Boot an OCI image.
-    #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake", "runtime_pack"])]
+    #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake", "runtime_pack", "deployment"])]
     pub image: Option<String>,
     /// Boot a pre-built manifest.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake", "runtime_pack"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake", "runtime_pack", "deployment"])]
     pub manifest: Option<String>,
     /// Build and boot a Nix flake.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest", "runtime_pack"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest", "runtime_pack", "deployment"])]
     pub flake: Option<String>,
     /// Boot a verified runtime pack.
-    #[arg(long, conflicts_with_all = ["image", "manifest", "flake"])]
+    #[arg(long, conflicts_with_all = ["image", "manifest", "flake", "deployment"])]
     pub runtime_pack: bool,
+    /// Boot a local attested deployment (deploy.json plus rootfs.ext4).
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["image", "manifest", "flake", "runtime_pack"])]
+    pub deployment: Option<PathBuf>,
     /// Select a flake package.
     #[arg(long, value_name = "PROFILE", requires = "flake")]
     pub flake_profile: Option<String>,
@@ -355,7 +358,7 @@ pub(in crate::commands) struct MachineRunArgs {
     pub kernel_pin: Option<String>,
     // ── Action axis: --entrypoint dispatches the image's baked entrypoint ──
     /// Run the image's baked entrypoint.
-    #[arg(long, conflicts_with_all = ["argv", "tty", "interactive"])]
+    #[arg(long, conflicts_with_all = ["argv", "tty", "interactive", "deployment"])]
     pub entrypoint: bool,
     /// Boot a fresh VM for the entrypoint.
     #[arg(long, requires = "entrypoint", conflicts_with = "reset")]
@@ -370,7 +373,7 @@ pub(in crate::commands) struct MachineRunArgs {
     #[arg(
         long,
         requires_all = ["entrypoint", "name"],
-        conflicts_with_all = ["image", "manifest", "flake", "fresh", "reset", "detach"]
+        conflicts_with_all = ["image", "manifest", "flake", "deployment", "fresh", "reset", "detach"]
     )]
     pub attach: bool,
     /// Command and arguments to run in the guest.
@@ -488,15 +491,65 @@ impl MachineRunArgs {
         if self.image.is_none()
             && self.manifest.is_none()
             && self.flake.is_none()
+            && self.deployment.is_none()
             && !self.runtime_pack
         {
             bail!(
-                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, or \
+                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, or \
                  `--runtime-pack` to boot a new machine"
             );
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LocalDeployment {
+    pub directory: PathBuf,
+    pub rootfs: PathBuf,
+    pub boot_artifact_sha256: String,
+}
+
+/// Validate and resolve a local deployment before it can influence boot.
+/// Both the record schema and the exact selected rootfs bytes are checked.
+pub(super) fn resolve_local_deployment(path: &Path) -> Result<LocalDeployment> {
+    let directory = fs::canonicalize(path)
+        .with_context(|| format!("resolving deployment directory {}", path.display()))?;
+    if !directory.is_dir() {
+        bail!(
+            "deployment path is not a directory: {}",
+            directory.display()
+        );
+    }
+    let record_path = directory.join("deploy.json");
+    let rootfs = directory.join("rootfs.ext4");
+    let record = mvm_sdk::deploy::read_deploy_record(&record_path)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("reading deployment record {}", record_path.display()))?;
+    mvm_sdk::deploy::verify_boot_artifact(&rootfs, &record.boot_artifact)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("verifying deployment boot artifact {}", rootfs.display()))?;
+    Ok(LocalDeployment {
+        directory,
+        rootfs,
+        boot_artifact_sha256: record.boot_artifact.sha256,
+    })
+}
+
+/// Turn a validated deployment into the common transient-run image source.
+pub(super) fn local_deployment_image_source(
+    deployment: &LocalDeployment,
+) -> Result<crate::exec::ImageSource> {
+    let kernel_path = super::env::builder_vm::ensure_workload_kernel()
+        .context("resolving workload kernel for local deployment")?;
+    super::env::builder_vm::assert_workload_kernel_supports_verity(&kernel_path)?;
+    Ok(crate::exec::ImageSource::Prebuilt {
+        kernel_path,
+        rootfs_path: deployment.rootfs.display().to_string(),
+        initrd_path: None,
+        label: format!("deployment:{}", deployment.directory.display()),
+        virtiofs_oci_root: None,
+    })
 }
 
 /// The lifecycle `machine run` resolves to, computed purely from the parsed
@@ -611,26 +664,29 @@ fn machine_run_spec(
     resolved_manifest_slot: Option<&str>,
 ) -> Result<MachineSpec> {
     validate_machine_name(&name)?;
-    let (image, manifest) = if let Some(slot) = resolved_manifest_slot {
+    let (image, manifest, deployment) = if let Some(path) = &args.deployment {
+        let deployment = resolve_local_deployment(path)?;
+        (None, None, Some(deployment.directory.display().to_string()))
+    } else if let Some(slot) = resolved_manifest_slot {
         // Flake was pre-built; store the slot hash as the manifest source.
-        (None, Some(slot.to_string()))
+        (None, Some(slot.to_string()), None)
     } else if let Some(m) = &args.manifest {
         // Manifest-backed: store the manifest ref.
-        (None, Some(m.clone()))
+        (None, Some(m.clone()), None)
     } else if let Some(img) = &args.image {
         // Image-backed: store the OCI ref.
-        (Some(img.clone()), None)
+        (Some(img.clone()), None, None)
     } else if args.runtime_pack {
         // The verified runtime pack is its own source; recorded via
         // `runtime_pack: true` below, not `image`/`manifest`.
-        (None, None)
+        (None, None, None)
     } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
         // Test escape: kernel + rootfs from env vars; no persistent source.
-        (None, None)
+        (None, None, None)
     } else {
         bail!(
-            "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, or \
-             `--runtime-pack` to create machine {name:?}"
+            "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, or \
+                 `--runtime-pack` to create machine {name:?}"
         );
     };
     super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
@@ -641,6 +697,7 @@ fn machine_run_spec(
         name,
         image,
         manifest,
+        deployment,
         resolved_digest: None,
         runtime_pack: args.runtime_pack,
         net: args.net,
@@ -1039,6 +1096,7 @@ impl MachineCreateArgs {
             name,
             image: Some(image),
             manifest: None,
+            deployment: None,
             resolved_digest: None,
             runtime_pack: false,
             net,
@@ -1424,6 +1482,7 @@ fn run_args_for_image_revert(
             json: run.json,
             name: None,
             manifest,
+            deployment: None,
             runtime_pack: false,
             flake_profile: None,
             net: false,

@@ -35,8 +35,8 @@ path = "../../mvm-core"
 [dependencies.mvm-net]
 path = "../../mvm-net"
 
-[dependencies.mvm-protocol]
-path = "../../mvm-protocol"
+[dependencies.mvm-contract]
+path = "../../mvm-contract"
 
 # Fuzz the gateway packet parser + payload rebuilder.
 # `packet::parse` runs on every frame the guest puts on the wire (the

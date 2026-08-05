@@ -382,9 +382,9 @@ mod tests {
             guest_port: 53,
         }];
         let table = cfg.to_ingress_table().unwrap();
-        assert!(table.admits(mvm_protocol::l3::proto::UDP, 53));
+        assert!(table.admits(mvm_contract::l3::proto::UDP, 53));
         assert!(
-            !table.admits(mvm_protocol::l3::proto::TCP, 53),
+            !table.admits(mvm_contract::l3::proto::TCP, 53),
             "a datagram mapping opens no stream port"
         );
     }
@@ -415,7 +415,7 @@ mod tests {
             guest_port: 80,
         }];
         let table = cfg.to_ingress_table().unwrap();
-        assert!(table.admits(mvm_protocol::l3::proto::TCP, 80));
+        assert!(table.admits(mvm_contract::l3::proto::TCP, 80));
     }
 
     #[test]

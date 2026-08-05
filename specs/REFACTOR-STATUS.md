@@ -174,7 +174,7 @@ for detailed scope and acceptance criteria.
         rejected alternatives, and the four unblocking conditions
   - [~] WS8 (#2120) — mvmd-facing node-control API, mvm side only.
         **The mvm half is implemented** (`mvm_hostd::nodectl`, ADR-041,
-        sequenced in `specs/plans/292-node-control-api.md`): ownership is
+        sequenced in `specs/plans/295-node-control-api.md`): ownership is
         a uid comparison against the connection's peer credential and
         never a field in the message, so a caller is refused a machine it
         does not own and a listing carries only its own. Forcing
@@ -238,9 +238,11 @@ for detailed scope and acceptance criteria.
   - [~] WS4 tier follows the attestation
     - [x] Agent-verb grant derives from admitted run shape, not image sidecar
     - [~] Bind the tier to an attested artifact and replace the interactive
-          feature/symbol witnesses with conformance scenarios. Grant
-          enforcement now proves a complete ProdSafe grant refuses Exec and
-          ConsoleOpen; feature-fork removal and guest-image validation remain.
+          feature/symbol witnesses with conformance scenarios. Local
+          `machine run --deployment` verifies and persists the signed record
+          plus exact rootfs binding; remote extraction/boot, feature-fork
+          removal, and guest-image validation remain. Grant enforcement now
+          proves a complete ProdSafe grant refuses Exec and ConsoleOpen.
 
 - [~] Plan 290 — Sensitive egress redaction
       (`specs/plans/290-sensitive-egress-redaction.md`)

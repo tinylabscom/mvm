@@ -1,4 +1,4 @@
-# Plan 292 — The node-control API, and what is left of the L3 epic
+# Plan 295 — The node-control API, and what is left of the L3 epic
 
 **Status: In progress**
 **ADRs: [041](../adrs/041-node-control-api.md) (this surface),

@@ -18,8 +18,8 @@
 //! the computed values instead of asserting. If a diff to this file is not
 //! accompanied by a reason an address legitimately moved, the change is a bug.
 
-use mvm_protocol::ir::ir_hash;
-use mvm_protocol::merkle::{interior_hash, leaf_hash, merkle_root};
+use mvm_contract::ir::ir_hash;
+use mvm_contract::merkle::{interior_hash, leaf_hash, merkle_root};
 use serde_json::json;
 
 /// Print-instead-of-assert mode, for reseeding after an intended change.

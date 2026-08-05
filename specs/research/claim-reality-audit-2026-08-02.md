@@ -67,7 +67,7 @@ Carried lead: claim 14 (OCI image provenance) was promotion-pending and not in t
 
 ### F5 — `trusted_build_egress()` is unrestricted, deliberately, and guarded only by prose
 
-`mvm_protocol::policy::network_policy::trusted_build_egress()` returns `Self::unrestricted()`. That is intentional and well-handled: it is one named, greppable constructor; cloud-metadata and link-local stay blocked by the always-on mandatory deny; a test pins that it is *not* the deny-all default; and the doc says **"Never use it for a workload (`mvmctl run`/`up`/`invoke`): those default to `deny_all`."**
+`mvm_contract::policy::network_policy::trusted_build_egress()` returns `Self::unrestricted()`. That is intentional and well-handled: it is one named, greppable constructor; cloud-metadata and link-local stay blocked by the always-on mandatory deny; a test pins that it is *not* the deny-all default; and the doc says **"Never use it for a workload (`mvmctl run`/`up`/`invoke`): those default to `deny_all`."**
 
 The gap is the enforcement of that last sentence. Its callers are the builder/dev path (`builder_runner/runner.rs:135`, `libkrun_builder.rs:363`), which is correct — but **I found no gate that mechanically prevents a future workload path from calling it.** The protection is a doc comment plus review, for the one constructor that turns off the project's headline security claim.
 

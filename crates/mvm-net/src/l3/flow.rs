@@ -171,7 +171,7 @@ impl FlowTable {
             .iter()
             .filter(|(key, state)| {
                 let idle = now_millis.saturating_sub(state.last_seen_millis);
-                let limit = if key.protocol == mvm_protocol::l3::proto::TCP {
+                let limit = if key.protocol == mvm_contract::l3::proto::TCP {
                     tcp_idle
                 } else {
                     dgram_idle
@@ -229,7 +229,7 @@ impl FlowTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::l3::proto;
+    use mvm_contract::l3::proto;
     use std::net::Ipv4Addr;
 
     fn key(protocol: u8, guest_port: u16, remote_port: u16) -> FlowKey {

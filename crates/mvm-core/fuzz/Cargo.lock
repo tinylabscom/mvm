@@ -571,7 +571,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "keyring",
- "mvm-protocol",
+ "mvm-contract",
  "rand",
  "regex",
  "secrecy",
@@ -600,7 +600,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-protocol"
+name = "mvm-contract"
 version = "0.18.0"
 dependencies = [
  "base64",

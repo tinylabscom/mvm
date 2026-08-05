@@ -115,8 +115,8 @@ impl HalfOpen {
     /// from a second component staying correct. The lease is the authority
     /// on where this guest is.
     pub fn reset_for_guest(&self, guest: GuestAddressing) -> Option<Vec<u8>> {
-        let parsed = mvm_protocol::l3::ip::parse(&self.syn).ok()?;
-        let acknowledging = mvm_protocol::l3::ip::tcp_sequence(&self.syn, &parsed)?;
+        let parsed = mvm_contract::l3::ip::parse(&self.syn).ok()?;
+        let acknowledging = mvm_contract::l3::ip::tcp_sequence(&self.syn, &parsed)?;
         synthesize_rst(&self.key, guest.matching(self.key.remote)?, acknowledging)
     }
 }
@@ -1492,9 +1492,9 @@ fn is_writable(socket: &TcpStream) -> bool {
 mod tests {
     use super::*;
     use crate::netd::test_packets::{tcp, v4_packet};
+    use mvm_contract::l3::ip::proto;
+    use mvm_contract::l3::limits::MTU_V1;
     use mvm_net::l3::flow::FlowKey;
-    use mvm_protocol::l3::ip::proto;
-    use mvm_protocol::l3::limits::MTU_V1;
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
     use std::time::{Duration, Instant};
@@ -1566,7 +1566,7 @@ mod tests {
             proto::TCP,
             Ipv4Addr::new(10, 0, 0, 2),
             Ipv4Addr::new(10, 0, 0, 1),
-            &tcp(50_000, 443, mvm_protocol::l3::ip::TCP_SYN),
+            &tcp(50_000, 443, mvm_contract::l3::ip::TCP_SYN),
         )
     }
 
@@ -1962,10 +1962,10 @@ mod tests {
     #[test]
     fn a_failed_connect_synthesizes_a_reset_toward_the_guest() {
         let rst = held_syn_reset();
-        let parsed = mvm_protocol::l3::ip::parse(&rst).expect("the synthesized packet must parse");
+        let parsed = mvm_contract::l3::ip::parse(&rst).expect("the synthesized packet must parse");
         assert_eq!(parsed.protocol, proto::TCP);
-        let flags = mvm_protocol::l3::ip::tcp_flags(&rst, &parsed).expect("a TCP header");
-        assert!(flags & mvm_protocol::l3::ip::TCP_RST != 0);
+        let flags = mvm_contract::l3::ip::tcp_flags(&rst, &parsed).expect("a TCP header");
+        assert!(flags & mvm_contract::l3::ip::TCP_RST != 0);
 
         // Sourced from the destination the flow was admitted for and
         // addressed to the leased guest — the guest's stack drops anything
@@ -1987,7 +1987,7 @@ mod tests {
         let syn_source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         assert_ne!(syn_source, guest(), "the fixture must be able to tell");
         let rst = held_syn_reset();
-        let parsed = mvm_protocol::l3::ip::parse(&rst).expect("parses");
+        let parsed = mvm_contract::l3::ip::parse(&rst).expect("parses");
         assert_eq!(parsed.dst, guest());
         assert_ne!(parsed.dst, syn_source);
     }
@@ -2020,7 +2020,7 @@ mod tests {
     /// choice of one nibble.
     #[test]
     fn a_lying_tcp_data_offset_cannot_suppress_the_reset() {
-        let mut header = tcp(50_000, 443, mvm_protocol::l3::ip::TCP_SYN);
+        let mut header = tcp(50_000, 443, mvm_contract::l3::ip::TCP_SYN);
         header[4..8].copy_from_slice(&41u32.to_be_bytes());
         // 15 words = a 60-byte header declared inside 20 bytes.
         header[12] = 0xF0;
@@ -2063,7 +2063,7 @@ mod tests {
         };
         let rst = synthesize_rst(&key, IpAddr::V6(guest_v6), 7).expect("an IPv6 reset");
 
-        let parsed = mvm_protocol::l3::ip::parse(&rst).expect("parses");
+        let parsed = mvm_contract::l3::ip::parse(&rst).expect("parses");
         assert_eq!(parsed.version, 6);
         assert_eq!(parsed.protocol, proto::TCP);
         assert_eq!(parsed.src, IpAddr::V6(remote));
@@ -2184,10 +2184,10 @@ mod tests {
             let resolved = t.resolve(&mut metrics);
             if !resolved.failed.is_empty() {
                 assert_eq!(resolved.resets.len(), 1);
-                let parsed = mvm_protocol::l3::ip::parse(&resolved.resets[0]).expect("parses");
+                let parsed = mvm_contract::l3::ip::parse(&resolved.resets[0]).expect("parses");
                 let flags =
-                    mvm_protocol::l3::ip::tcp_flags(&resolved.resets[0], &parsed).expect("flags");
-                assert!(flags & mvm_protocol::l3::ip::TCP_RST != 0);
+                    mvm_contract::l3::ip::tcp_flags(&resolved.resets[0], &parsed).expect("flags");
+                assert!(flags & mvm_contract::l3::ip::TCP_RST != 0);
                 assert_eq!(parsed.dst, guest());
                 assert_eq!(
                     metrics.datapath_errors, 0,

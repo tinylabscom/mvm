@@ -13,19 +13,17 @@ autobins = false
 substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + backend-local vsock listeners)"
 
 [dependencies]
-mvm-volume-contract = { workspace = true, features = ["local"] }
+# Volume backend contract plus the IR/protocol types used by persistence.
+mvm-contract = { workspace = true, features = ["local", "volume"] }
 # `egress-ca`: `substitution_spawn::build_egress_tls_delivery`
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
 mvm-core = { workspace = true, features = ["egress-ca"] }
 # The L3 policy core: the address allocator and the gateway's admitted
 # configuration shape. Acyclic HIGH->LOW — mvm-net deps only mvm-core and
-# mvm-protocol.
+# mvm-contract.
 mvm-net.workspace = true
 mvm-agentd.workspace = true
-# IR `HealthCheck` that `machine::persist` (de)serializes. Direct dep
-# on the no_std foundation crate now that the IR lives there.
-mvm-protocol.workspace = true
 # `builder-vm`/`pure-mkfs` for the overlay-aware admission gate
 # (`builder_vm::admit_overlay_aware`) called from every backend's
 # `start` impl.

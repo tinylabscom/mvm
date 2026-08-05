@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use mvm_contract::ir::MountSource;
 use mvm_core::volume::{VolumeError, VolumeName};
-use mvm_protocol::ir::MountSource;
 
 use crate::storage::volume::provider::{StorageProvider, VolumeSpec};
 

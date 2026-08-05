@@ -407,7 +407,7 @@ fn attach_universal_initramfs_with_resolver(
 ///    makes on this host, so a contributor whose overlay is source-built never
 ///    silently downloads a sidecar.
 pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
-    services: &[mvm_protocol::protocol::broker::ServiceId],
+    services: &[mvm_contract::protocol::broker::ServiceId],
 ) -> Result<Option<SdkSidecarAttachment>> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
@@ -443,7 +443,7 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
 /// the bindings that demanded the sidecar and where it was going to be mounted,
 /// not just the URL that 404'd.
 fn sdk_sidecar_download_failure_context(
-    services: &[mvm_protocol::protocol::broker::ServiceId],
+    services: &[mvm_contract::protocol::broker::ServiceId],
     version: &str,
     arch: mvm_core::arch::GuestArch,
 ) -> String {
@@ -462,11 +462,11 @@ fn sdk_sidecar_download_failure_context(
 #[cfg(test)]
 mod sdk_sidecar_host_resolution_tests {
     use super::*;
+    use mvm_contract::protocol::broker::ServiceId;
     use mvm_core::arch::GuestArch;
     use mvm_fs::sdk_sidecar::{
         SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
     };
-    use mvm_protocol::protocol::broker::ServiceId;
     use sha2::{Digest, Sha256};
 
     fn svc(raw: &str) -> ServiceId {

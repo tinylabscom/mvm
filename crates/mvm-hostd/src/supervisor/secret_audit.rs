@@ -8,7 +8,7 @@
 //! chain-signed stream as the claim-8 plan events, so `verify_audit_chain`
 //! (surfaced by `mvmctl audit verify`) detects any tampering.
 
-use mvm_protocol::ir::AuthType;
+use mvm_contract::ir::AuthType;
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder, RecorderError};
 use mvm_core::policy::RewriteProofRecord;

@@ -62,6 +62,7 @@ use std::time::{Duration, Instant};
 use mvm_agentd::l3::{
     AgentState, MemoryTun, NetAgent, RecordingConfigurator, RecordingPrivilegeDropper,
 };
+use mvm_contract::l3::MTU_V1;
 use mvm_hostd::netd::config::{NETD_READY_MARKER, NetdConfig, NetdEgress, NetdRule, NetdUdsLayout};
 use mvm_hostd::netd::userspace::limits::{
     HALF_CLOSED_TIMEOUT_MILLIS, HANDSHAKE_COMPLETION_TIMEOUT_MILLIS,
@@ -71,7 +72,6 @@ use mvm_hostd::netd::userspace::{UserspaceHandle, UserspaceSocketDatapath};
 use mvm_hostd::netd::{DatapathHandle, DatapathRequest, select_host_datapath};
 use mvm_net::channel::GuestService;
 use mvm_net::l3::{DenyCode, DnsBindingStore, FlowLimits, FlowTable, L3Admitter, OutboundVerdict};
-use mvm_protocol::l3::MTU_V1;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
     IpProtocol, Ipv4Packet, Ipv4Repr, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber, UdpPacket,

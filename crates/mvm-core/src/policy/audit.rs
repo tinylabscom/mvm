@@ -5,12 +5,12 @@ use anyhow::{Context, Result};
 
 /// `LocalAuditKind`, `LocalAuditEvent`, and the per-tenant
 /// `AuditAction`/`AuditEntry` DTOs live in
-/// `mvm_protocol::policy::audit`, re-exported here so every existing
+/// `mvm_contract::policy::audit`, re-exported here so every existing
 /// `crate::policy::audit::{LocalAuditKind, LocalAuditEvent,
 /// AuditAction, AuditEntry}` path keeps resolving unchanged. This
 /// module carries the `std::fs`-backed writer, the composition
 /// helpers, and the clock-stamped constructor those DTOs need.
-pub use mvm_protocol::policy::audit::{AuditAction, AuditEntry, LocalAuditEvent, LocalAuditKind};
+pub use mvm_contract::policy::audit::{AuditAction, AuditEntry, LocalAuditEvent, LocalAuditKind};
 
 // ============================================================================
 // Local mvmctl audit log (single-host operations)
@@ -28,10 +28,10 @@ const ROTATE_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 /// Create a [`LocalAuditEvent`] stamped with the current UTC time.
 ///
 /// A free function rather than an inherent method on
-/// `LocalAuditEvent`: that type now lives in `mvm-protocol`, and the
+/// `LocalAuditEvent`: that type now lives in `mvm-contract`, and the
 /// orphan rule forbids `mvm-core` from adding inherent `impl`s to a
 /// foreign type. `Utc::now()` also needs chrono's `clock` feature
-/// (std), unavailable in the no_std `mvm-protocol` crate.
+/// (std), unavailable in the no_std `mvm-contract` crate.
 pub fn now_event(
     kind: LocalAuditKind,
     vm_name: Option<String>,
@@ -317,10 +317,10 @@ mod tests {
 
     // `LocalAuditKind`/`LocalAuditEvent`/`AuditAction`/`AuditEntry`
     // serde-shape tests moved with the types to
-    // `mvm_protocol::policy::audit`. What stays here exercises the
+    // `mvm_contract::policy::audit`. What stays here exercises the
     // `std::fs`-backed writer, the `event()`/`LocalAuditBuilder`
     // composition, the `audit_emit!` macro, and the Stage 0 tail
-    // readers — none of which mvm-protocol can host.
+    // readers — none of which mvm-contract can host.
 
     #[test]
     fn read_last_stage0_event_picks_the_last_stage0_line() {

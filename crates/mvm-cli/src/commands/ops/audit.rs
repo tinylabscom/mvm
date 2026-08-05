@@ -7,9 +7,9 @@ use crate::ui;
 
 use ed25519_dalek::VerifyingKey;
 use mvm_client::audit::{AuditSourceId, AuditSourceKind, LocalAuditReader};
+use mvm_contract::merkle::{InclusionProof, SignedAuditRoot, verify_inclusion, verify_signed_root};
 use mvm_core::user_config::MvmConfig;
 use mvm_hostd::supervisor::SignedEnvelope;
-use mvm_protocol::merkle::{InclusionProof, SignedAuditRoot, verify_inclusion, verify_signed_root};
 
 use super::super::vm::audit_chain::{AuditEmitter, audit_path_for_tenant, default_audit_dir};
 use super::super::vm::host_signer;
@@ -406,7 +406,7 @@ fn audit_publish_root(tenant: &str) -> Result<()> {
 /// Build an inclusion proof for the selector-resolved leaf and print it
 /// (paired with the current signed root) as JSON, or a one-line summary.
 fn audit_prove(tenant: &str, selector: &str, json: bool) -> Result<()> {
-    use mvm_protocol::merkle::build_inclusion_proof;
+    use mvm_contract::merkle::build_inclusion_proof;
 
     let signer =
         host_signer::load_or_init().context("loading host signer to build inclusion proof")?;
@@ -1340,7 +1340,7 @@ mod merkle_verb_tests {
     use super::*;
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
-    use mvm_protocol::merkle::{build_inclusion_proof, merkle_root, root_signing_bytes};
+    use mvm_contract::merkle::{build_inclusion_proof, merkle_root, root_signing_bytes};
 
     fn fresh_key() -> SigningKey {
         let mut seed = [0u8; 32];

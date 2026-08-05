@@ -8,7 +8,7 @@
 
 **Architecture:** Today the guest boot path is driven by kernel command line and differs between Nix rootfs (`mvm-verity-init` + busybox `/init`) and OCI rootfs (`mvm-oci-init`). The runtime overlay is attached as a second block device. This plan inverts control: the initramfs is generic, the agent is PID 1, and the host tells the agent what to mount over a signed vsock channel. The initramfs hash becomes part of the attestation statement. Warm snapshot restore remains the fast path; the universal initramfs is the standardized cold-boot shape that warm parents are built from.
 
-**Tech Stack:** Rust (`mvm-agentd`, `mvm-runtime`, `mvm-protocol`), deterministic cargo build (`cargo zigbuild` + newc cpio for the initramfs), Nix (kernels, rootfs images, overlays), `cargo nextest`, `cargo clippy --workspace --all-targets -- -D warnings`.
+**Tech Stack:** Rust (`mvm-agentd`, `mvm-runtime`, `mvm-contract`), deterministic cargo build (`cargo zigbuild` + newc cpio for the initramfs), Nix (kernels, rootfs images, overlays), `cargo nextest`, `cargo clippy --workspace --all-targets -- -D warnings`.
 
 ## Global Constraints
 
@@ -38,8 +38,8 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 ## Task 1: Define `ActivateEnvironment` and the boot state machine
 
 **Files:**
-- `crates/mvm-protocol/src/protocol/guest_request.rs` — add the new request variant.
-- `crates/mvm-protocol/src/protocol/capability.rs` — advertise `ActivateEnvironment` support.
+- `crates/mvm-contract/src/protocol/guest_request.rs` — add the new request variant.
+- `crates/mvm-contract/src/protocol/capability.rs` — advertise `ActivateEnvironment` support.
 - `crates/mvm-agentd/src/agent/state.rs` — `BootState` enum and guarded transitions.
 - `crates/mvm-agentd/src/agent/audit.rs` — boot-stage audit events.
 - `crates/mvm-agentd/src/protocol/activate.rs` — payload type + validation.
@@ -112,8 +112,8 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 - [x] **Step 6: Run tests and clippy**
 
   ```bash
-  cargo nextest run -p mvm-protocol -p mvm-agentd
-  cargo clippy -p mvm-protocol -p mvm-agentd -- -D warnings
+  cargo nextest run -p mvm-contract -p mvm-agentd
+  cargo clippy -p mvm-contract -p mvm-agentd -- -D warnings
   ```
 
 - [x] **Step 7: Commit**

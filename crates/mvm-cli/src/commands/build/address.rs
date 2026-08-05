@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
+use mvm_contract::ir::{Workload, ir_hash};
 use mvm_core::semantic_address::semantic_address;
 use mvm_core::user_config::MvmConfig;
-use mvm_protocol::ir::{Workload, ir_hash};
 
 use super::Cli;
 use super::ir_input::load_ir_json_workload;
@@ -89,7 +89,7 @@ fn render(identities: &Identities, json: bool) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_protocol::ir::{App, Entrypoint, Image, Resources, Source as IrSource};
+    use mvm_contract::ir::{App, Entrypoint, Image, Resources, Source as IrSource};
 
     fn sample_workload() -> Workload {
         Workload {

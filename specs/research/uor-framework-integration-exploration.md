@@ -19,8 +19,8 @@ The broader UOR Framework ontology, Prism substrate, and PrimeShield crypto are 
 |---|---|---|
 | `SemanticAddress` | `crates/mvm-core/src/semantic_address.rs` | `sha256(JCS(Workload))` rendered as `sha256:<64-hex>`, with Unicode NFC normalization. A distinct newtype with validating parse, serde round-trips, a pinned golden test vector, and the published UOR-ADDR JSON fixture set. |
 | `semantic_address()` | same | Validates IR schema version first, normalizes JSON strings/object keys to NFC, then `serde_jcs::to_vec` + `sha2::Sha256`. |
-| `ir_hash()` | `crates/mvm-protocol/src/ir/hash.rs` | Same JCS + SHA-256, rendered as bare 64-hex (no `sha256:` prefix). Used inside launch plans and audit records. |
-| `canonicalize()` | `crates/mvm-protocol/src/ir/canonicalize.rs` | Hand-rolled `no_std` JCS writer. A drift-lock test (`canonicalizer_equivalence.rs`) proves it matches `serde_jcs` byte-for-byte. |
+| `ir_hash()` | `crates/mvm-contract/src/ir/hash.rs` | Same JCS + SHA-256, rendered as bare 64-hex (no `sha256:` prefix). Used inside launch plans and audit records. |
+| `canonicalize()` | `crates/mvm-contract/src/ir/canonicalize.rs` | Hand-rolled `no_std` JCS writer. A drift-lock test (`canonicalizer_equivalence.rs`) proves it matches `serde_jcs` byte-for-byte. |
 | `mvmctl build address` | `crates/mvm-cli/src/commands/build/address.rs` | CLI surface that prints the independent `SemanticAddress` and `ir_hash` identities. |
 
 Key boundary property: `SemanticAddress` is explicitly **not** interchangeable with `Sha256Hex`, `OciDigest`, `KeyId`, or `Nonce`. There are no `From`/`Into`/`Deref` impls between them, and tests enforce that separation.
@@ -124,7 +124,7 @@ A natural next step is to persist `SemanticAddress` in the signed `ExecutionPlan
 
 ### 4. `uor-addr` crate adoption (deferred to WS11 P4)
 
-The only scenario where taking the `uor-addr` crate is clearly justified is the browser/wasm path. If `mvm-protocol` needs to compute workload addresses in the browser, or if the TypeScript/Python SDKs must produce bit-identical labels with the Rust host, `uor-addr` is purpose-built for that: `no_std`, `forbid(unsafe)`, WASM Component Model, and published conformance vectors.
+The only scenario where taking the `uor-addr` crate is clearly justified is the browser/wasm path. If `mvm-contract` needs to compute workload addresses in the browser, or if the TypeScript/Python SDKs must produce bit-identical labels with the Rust host, `uor-addr` is purpose-built for that: `no_std`, `forbid(unsafe)`, WASM Component Model, and published conformance vectors.
 
 Before adoption, run the full verification checklist:
 
@@ -188,7 +188,7 @@ VM IDs, operation IDs, session IDs, capability tokens, and plan nonces need uniq
 
 ## Alignment with simplification plan
 
-The refactor direction wants fewer crates, fewer features, fewer deps, and `mvm-protocol` as a `no_std` wasm-clean core. UOR-ADDR aligns best as a **wasm-layer dependency decision** (P4), not as a host-layer dependency now. The host already has everything it needs (`serde_jcs`, `sha2`). Delaying the `uor-addr` crate decision until the browser/wasm slice is being built keeps the simplification plan on track and avoids premature supply-chain expansion.
+The refactor direction wants fewer crates, fewer features, fewer deps, and `mvm-contract` as a `no_std` wasm-clean core. UOR-ADDR aligns best as a **wasm-layer dependency decision** (P4), not as a host-layer dependency now. The host already has everything it needs (`serde_jcs`, `sha2`). Delaying the `uor-addr` crate decision until the browser/wasm slice is being built keeps the simplification plan on track and avoids premature supply-chain expansion.
 
 ## Summary table
 

@@ -13,7 +13,7 @@ mvm-core.workspace = true
 # IR `NetworkMode` the registry resolves. Direct dep on the no_std
 # foundation crate now that the IR lives there — mvm-net no longer
 # needs mvm-sdk's build-time tooling for this.
-mvm-protocol.workspace = true
+mvm-contract.workspace = true
 # CIDR containment for the address allocator, the admitted-private
 # ranges, and the ingress/DNS range guards. Same crate the shared
 # claim-10 projection already uses, so the two cannot disagree.

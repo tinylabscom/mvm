@@ -177,7 +177,7 @@ pub fn sealed_root_hex(manifest: &TranscriptManifest) -> Result<String, Transcri
             .map_err(|e| TranscriptError::SealedRootSerialization(e.to_string()))?,
         );
     }
-    Ok(hex::encode(mvm_protocol::merkle::merkle_root(&leaves)))
+    Ok(hex::encode(mvm_contract::merkle::merkle_root(&leaves)))
 }
 
 /// Verify the manifest-stored root against a fresh recomputation. This checks

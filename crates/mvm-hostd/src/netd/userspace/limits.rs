@@ -5,8 +5,8 @@
 //! is a file descriptor, so its cap is derived from the process budget
 //! rather than inherited from the flow table.
 
+use mvm_contract::l3::limits::{MIN_IPV4_HEADER, MTU_V1};
 use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
-use mvm_protocol::l3::limits::{MIN_IPV4_HEADER, MTU_V1};
 
 /// Ceiling on concurrent host sockets for one machine.
 ///
@@ -137,7 +137,7 @@ pub const DATAGRAMS_PER_SOURCE_POLL: usize = DEFAULT_QUEUE_DEPTH / DATAGRAM_SOUR
 /// delivered as though it were whole is corrupt data the guest has no way
 /// to detect.
 pub const MAX_DATAGRAM_PAYLOAD_BYTES: usize =
-    MTU_V1 as usize - MIN_IPV4_HEADER - mvm_protocol::l3::ip::UDP_HEADER_LEN;
+    MTU_V1 as usize - MIN_IPV4_HEADER - mvm_contract::l3::ip::UDP_HEADER_LEN;
 
 /// How long an association lives, measured from the datagram that opened
 /// it and never extended.

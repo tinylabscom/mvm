@@ -128,7 +128,7 @@ difference (below), not a hidden one.
 ## Protocol
 
 A small binary protocol, deliberately not a general object
-deserializer. It lives in `mvm-protocol` (`#![no_std]` + alloc,
+deserializer. It lives in `mvm-contract` (`#![no_std]` + alloc,
 `forbid(unsafe_code)`) so guest and host share exactly one
 implementation and so it is trivially fuzzable.
 

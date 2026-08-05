@@ -23,12 +23,12 @@ mvm-net.workspace = true
 # The `MvmClient` facade: read-only listing/inspect commands route through
 # `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
 mvm-client.workspace = true
-# `mvmctl compile` reads the Workload IR (mvm_protocol::ir, re-exported from
-# mvm_protocol::ir) and routes it through the compile pipeline.
+# `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
+# mvm_contract::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true
-# Direct IR access (`mvm_protocol::ir::…`) for the command surfaces that
+# Direct IR access (`mvm_contract::ir::…`) for the command surfaces that
 # only need the DTOs, not the rest of the SDK's build-time tooling.
-mvm-protocol.workspace = true
+mvm-contract.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 # Real ext4 inode lookup for the Stage 0 post-build check (replaces the

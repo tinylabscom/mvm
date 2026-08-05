@@ -311,7 +311,7 @@ fn handshake(
     control: &mut dyn mvm_net::channel::GuestStream,
     clock: &dyn Fn() -> u64,
 ) -> Result<Session> {
-    let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
+    let mut buf = vec![0u8; mvm_contract::l3::MAX_WIRE_LEN];
     loop {
         let n = control
             .read(&mut buf)
@@ -399,7 +399,7 @@ fn drive(
     events: &mut mio::Events,
     clock: &dyn Fn() -> u64,
 ) -> Result<()> {
-    let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
+    let mut buf = vec![0u8; mvm_contract::l3::MAX_WIRE_LEN];
     let mut backlog = Backlog::default();
     loop {
         let wait = if backlog.any() { Duration::ZERO } else { TICK };
@@ -661,6 +661,7 @@ mod tests {
     use mvm_agentd::l3::{
         AgentState, MemoryTun, NetAgent, RecordingConfigurator, RecordingPrivilegeDropper,
     };
+    use mvm_contract::l3::proto;
     use mvm_hostd::netd::config::{NetdEgress, NetdRule};
     use mvm_hostd::netd::{
         DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
@@ -668,7 +669,6 @@ mod tests {
     };
     use mvm_net::channel::GuestStream;
     use mvm_net::l3::{AdmittedPacket, FlowKey};
-    use mvm_protocol::l3::proto;
 
     use super::*;
 
@@ -919,7 +919,7 @@ mod tests {
         tcp[0..2].copy_from_slice(&SERVER_PORT.to_be_bytes());
         tcp[2..4].copy_from_slice(&GUEST_PORT.to_be_bytes());
         tcp[12] = 0x50;
-        tcp[13] = mvm_protocol::l3::ip::TCP_ACK;
+        tcp[13] = mvm_contract::l3::ip::TCP_ACK;
         let total = 20 + tcp.len();
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45;
@@ -959,7 +959,7 @@ mod tests {
             }
             self.reads += 1;
             if self.reads == 1 {
-                let len = u32::try_from(mvm_protocol::l3::limits::MAX_FRAME_LEN).expect("len");
+                let len = u32::try_from(mvm_contract::l3::limits::MAX_FRAME_LEN).expect("len");
                 buf[..4].copy_from_slice(&len.to_be_bytes());
                 return Ok(4);
             }
@@ -1015,7 +1015,7 @@ mod tests {
         let config = test_config("netd-backlog");
         let network = QueuedNetwork::default();
         let mut gateway = open_gateway(&config, &network);
-        let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
+        let mut buf = vec![0u8; mvm_contract::l3::MAX_WIRE_LEN];
 
         let mut auditor = unaudited();
         let mut tunnel = Tunnel {
@@ -1105,7 +1105,7 @@ mod tests {
             record(&self.log, Turn::GuestRead);
             self.reads += 1;
             if self.reads == 1 {
-                let len = u32::try_from(mvm_protocol::l3::limits::MAX_FRAME_LEN).expect("len");
+                let len = u32::try_from(mvm_contract::l3::limits::MAX_FRAME_LEN).expect("len");
                 buf[..4].copy_from_slice(&len.to_be_bytes());
                 return Ok(4);
             }
@@ -1195,7 +1195,7 @@ mod tests {
     /// its own witnesses; this test is about what the steady-state loop does
     /// once it is past one.
     fn make_ready(gateway: &mut Gateway, session: u64) {
-        use mvm_protocol::l3::{Config, Hello, MessageType, Ready, frame};
+        use mvm_contract::l3::{Config, Hello, MessageType, Ready, frame};
         let hello = frame::encode(MessageType::Hello, 0, 0, &Hello::v1().encode()).expect("hello");
         let (config_frame, _) = gateway
             .handle_control_frame(&hello, 0)
@@ -1287,7 +1287,7 @@ mod tests {
         let config = test_config("netd-eintr");
         let network = QueuedNetwork::default();
         let mut gateway = open_gateway(&config, &network);
-        let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
+        let mut buf = vec![0u8; mvm_contract::l3::MAX_WIRE_LEN];
 
         let mut auditor = unaudited();
         let mut tunnel = Tunnel {

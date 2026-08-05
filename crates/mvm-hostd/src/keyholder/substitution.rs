@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use mvm_protocol::ir::{AuthType, SecretRef, host_matches};
+use mvm_contract::ir::{AuthType, SecretRef, host_matches};
 use rand::RngCore;
 use zeroize::Zeroizing;
 
@@ -221,8 +221,8 @@ pub enum SignDispatchError {
 mod tests {
     use super::*;
     use crate::keyholder::LocalResolver;
+    use mvm_contract::ir::{AuthType, SecretMount};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_protocol::ir::{AuthType, SecretMount};
     use secrecy::SecretBox;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};

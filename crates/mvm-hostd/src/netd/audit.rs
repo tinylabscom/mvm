@@ -319,7 +319,7 @@ impl NetdAuditor {
             ),
             (
                 "protocol_version".to_string(),
-                mvm_protocol::l3::limits::PROTOCOL_VERSION.to_string(),
+                mvm_contract::l3::limits::PROTOCOL_VERSION.to_string(),
             ),
         ]
     }

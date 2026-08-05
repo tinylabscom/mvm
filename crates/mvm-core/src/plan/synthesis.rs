@@ -182,7 +182,7 @@ pub struct SynthesisInput<'a> {
     /// channel, threaded verbatim into the plan. Empty (the common case) means
     /// the workload calls none: the broker answers `NotBound` and the launch
     /// path attaches no SDK sidecar.
-    pub services: Vec<mvm_protocol::protocol::broker::ServiceId>,
+    pub services: Vec<mvm_contract::protocol::broker::ServiceId>,
 }
 
 /// The L3 spec a plan carries, given its mode.

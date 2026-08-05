@@ -124,7 +124,7 @@ Premise verified before building, and this time it held: five of seven surfaces 
 
 The sharpest finding is what the existing `ir_hash` tests are: **all four are relational** — stable for identical input, key-order independent, different values differ, 64 hex long. A canonicalization change that moves every address consistently satisfies all of them. Demonstrated by planting exactly that (hash the canonical form with a trailing newline): the four unit tests stayed green and only the new vectors fired.
 
-- [x] `crates/mvm-protocol/tests/address_vectors.rs` — 14 vectors over `ir_hash`, `leaf_hash`, `interior_hash`, `merkle_root`. Includes the RFC-6962 odd-tail case (promote, never duplicate — the property that avoids the duplicate-leaf forgery) and astral-plane keys, where JCS's UTF-16 sort order diverges from UTF-8.
+- [x] `crates/mvm-contract/tests/address_vectors.rs` — 14 vectors over `ir_hash`, `leaf_hash`, `interior_hash`, `merkle_root`. Includes the RFC-6962 odd-tail case (promote, never duplicate — the property that avoids the duplicate-leaf forgery) and astral-plane keys, where JCS's UTF-16 sort order diverges from UTF-8.
 - [x] NFC and NFD forms pinned as *different* addresses, recording in a test that `ir_hash` does not normalize (S5's status quo) rather than leaving it as tribal knowledge.
 - [x] `compute_plan_id` vectors in `plan/content_id.rs`. Worth pinning specifically because this surface does **not** use JCS — it relies on serde_json's default key ordering, which holds only while `preserve_order` is off. `check-content-address-determinism` pins that feature flag; nothing pinned the address the flag protects.
 - [x] `bundle_sha256` vectors in `plan/bundle.rs`, including a raw-byte case (NUL, 0xff, 0x80) that a digest passing through any string conversion would fail.
@@ -137,7 +137,7 @@ The sharpest finding is what the existing `ir_hash` tests are: **all four are re
 
 **What the bar actually needed.** `mvm_verify_matches_supervisor_chain` already compared the two implementations, but over a chain generated **fresh with a random key on every run**. Those bytes exist only inside that process, so they can never reach a verifier that does not link the host signer — and an oracle bar means little if each implementation only ever sees input it produced itself.
 
-**Honesty about the third verifier.** The riscv32 target is `cargo build -p mvm-protocol --lib` only; bare metal has no test harness, so it is a *compile* oracle, not an executing one. The executing pair is the host verifier and the `no_std` mirror, with wasm executing the mirror a second way. Claiming three executing oracles would have been wrong.
+**Honesty about the third verifier.** The riscv32 target is `cargo build -p mvm-contract --lib` only; bare metal has no test harness, so it is a *compile* oracle, not an executing one. The executing pair is the host verifier and the `no_std` mirror, with wasm executing the mirror a second way. Claiming three executing oracles would have been wrong.
 
 - [x] `tests/vectors/audit-chain-v1.jsonl` + `.pubkey` — a signed chain frozen on disk. Deterministic via a fixed signing seed and fixed timestamps (Ed25519 is deterministic per RFC 8032). `MVM_REGEN_AUDIT_CORPUS=1` rewrites it.
 - [x] `mvm-hostd` owns generating it and asserts the committed bytes still match what the signer emits, so the corpus cannot drift from the writer unnoticed — the failure names the real consequence: every chain already written just became unverifiable.

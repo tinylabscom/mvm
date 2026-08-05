@@ -22,12 +22,12 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::RawFd;
 
+use mvm_contract::l3::ip::{self, ParsedIpPacket, proto};
+use mvm_contract::l3::limits::MTU_V1;
 use mvm_net::l3::AdmittedPacket;
 use mvm_net::l3::admit::DenyCode;
 use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
 use mvm_net::l3::flow::FlowKey;
-use mvm_protocol::l3::ip::{self, ParsedIpPacket, proto};
-use mvm_protocol::l3::limits::MTU_V1;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};

@@ -716,7 +716,7 @@ dependencies = [
  "ext4-view",
  "hex",
  "libc",
- "mvm-protocol",
+ "mvm-contract",
  "reqwest",
  "rustix",
  "rustls",
@@ -741,7 +741,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-protocol"
+name = "mvm-contract"
 version = "0.18.0"
 dependencies = [
  "base64",

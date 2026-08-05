@@ -1,6 +1,6 @@
 //! DNS admission-time pin construction and `NetworkPolicy` resolution.
 //! The [`DnsPin`]/[`DnsPinRegistry`] DTO and their pure parse/match
-//! methods live in `mvm_protocol::policy::dns_pin`, re-exported here so
+//! methods live in `mvm_contract::policy::dns_pin`, re-exported here so
 //! every existing `crate::policy::dns_pin::{DnsPin, DnsPinRegistry}`
 //! path keeps resolving unchanged.
 
@@ -8,7 +8,7 @@ use std::net::IpAddr;
 
 use chrono::{Duration, Utc};
 
-pub use mvm_protocol::policy::dns_pin::{DnsPin, DnsPinRegistry};
+pub use mvm_contract::policy::dns_pin::{DnsPin, DnsPinRegistry};
 
 /// Construct a pin from the canonical inputs. Computes
 /// `resolved_at = Utc::now()` and `expires_at =
@@ -16,10 +16,10 @@ pub use mvm_protocol::policy::dns_pin::{DnsPin, DnsPinRegistry};
 /// validity window — typically 1h, capped per tenant policy.
 ///
 /// A free function rather than an inherent method on [`DnsPin`]:
-/// that type now lives in `mvm-protocol`, and the orphan rule
+/// that type now lives in `mvm-contract`, and the orphan rule
 /// forbids `mvm-core` from adding inherent `impl`s to a foreign
 /// type. `Utc::now()` also needs chrono's `clock` feature (std),
-/// unavailable in the no_std `mvm-protocol` crate.
+/// unavailable in the no_std `mvm-contract` crate.
 pub fn new_pin(dest: impl Into<String>, ips: Vec<IpAddr>, ttl: Duration) -> DnsPin {
     let now = Utc::now();
     let expires = now + ttl;

@@ -89,7 +89,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 **Libraries, low → high:**
 
-- `mvm-protocol` -- `#![no_std]` + alloc, `forbid(unsafe_code)`; the wasm/browser-capable foundation. The audit-log verifier (and, incrementally, the `Workload` IR + wire protocol + policy DTOs). Builds on `wasm32-unknown-unknown`.
+- `mvm-contract` -- `#![no_std]` + alloc, `forbid(unsafe_code)`; the wasm/browser-capable foundation. The audit-log verifier (and, incrementally, the `Workload` IR + wire protocol + policy DTOs). Builds on `wasm32-unknown-unknown`.
 - `mvm-core` -- std: types, IDs, config/paths (`MVM_HOME`), crypto, signing, routing. Absorbs `plan` (typed signed `ExecutionPlan`), `policy`, `crypto` (attestation/keystore/secret_store/snapshot + opt-in cosign behind `manifest-verify`). **Default build has no async deps**: `tokio` is optional, pulled only by the off-by-default `hostd-transport` or `manifest-verify` features. `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
 - `mvm-fs` -- image → mountable rootfs: OCI distribution client (registry/manifest/layer fetch + allow-listed `unpack/`) + a pure-Rust, memory-safe, deterministic ext4 writer (no `mkfs`, no subprocess) + `overlay`. Absorbs the old `mvm-ext4` + `mvm-oci`.
 - `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge/native-gateway/passt impl lives in `mvm-runtime`.
@@ -112,11 +112,11 @@ Root package: `src/lib.rs` (facade: `mvmctl::core`=mvm-core, `mvmctl::runtime`/`
 
 Binary: `mvmctl` (from root, delegates to mvm-cli)
 
-**Dependency direction (high → low):** `mvm-cli` → {`mvm-runtime`, `mvm-hostd`, `mvm-client`, `mvm-sdk`} → `mvm-client` → `mvm-runtime` → {`mvm-fs`, `mvm-net`, `mvm-build`} → `mvm-core` → `mvm-protocol`. `mvm-protocol` (no_std) is the foundation; `mvm-core` builds on it. `mvm-agentd` (guest) and the per-role bin crates sit at the top; nothing depends on them as a library.
+**Dependency direction (high → low):** `mvm-cli` → {`mvm-runtime`, `mvm-hostd`, `mvm-client`, `mvm-sdk`} → `mvm-client` → `mvm-runtime` → {`mvm-fs`, `mvm-net`, `mvm-build`} → `mvm-core` → `mvm-contract`. `mvm-contract` (no_std) is the foundation; `mvm-core` builds on it. `mvm-agentd` (guest) and the per-role bin crates sit at the top; nothing depends on them as a library.
 
 **Key module locations:**
 
-mvm-protocol: `verify` (audit-log verifier), `ir/` (Workload IR), wire/policy DTOs.
+mvm-contract: `verify` (audit-log verifier), `ir/` (Workload IR), wire/policy DTOs.
 
 mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `config.rs` (paths/`MVM_HOME`)
 

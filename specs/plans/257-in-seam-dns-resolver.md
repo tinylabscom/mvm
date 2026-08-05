@@ -4,18 +4,18 @@
 
 **Goal:** Give a NIC-less guest working, host-mediated, audited name resolution — a guest DNS stub on 127.0.0.1:53 forwards each query over the existing vsock egress plane to a policy-gated host resolver that answers only allow-listed names (pins-first, no live lookup), filters answers against a strict SSRF/rebinding classifier, chain-audits every query, and is rate-limited.
 
-**Architecture:** One `NetworkPolicy` → one `EgressGate` gates both the DNS name and the TCP connect. A new `MVM_DNS/1` first-line marker routes per-query vsock streams into the existing `raw_egress` dispatch to a host `dns_handler`; an in-house `forbid(unsafe)` DNS codec in `mvm-protocol` parses the query and encodes the answer; the guest stub folds into `mvm-egress-client`.
+**Architecture:** One `NetworkPolicy` → one `EgressGate` gates both the DNS name and the TCP connect. A new `MVM_DNS/1` first-line marker routes per-query vsock streams into the existing `raw_egress` dispatch to a host `dns_handler`; an in-house `forbid(unsafe)` DNS codec in `mvm-contract` parses the query and encodes the answer; the guest stub folds into `mvm-egress-client`.
 
-**Tech Stack:** Rust; `mvm-protocol` (no_std forbid-unsafe DNS codec), `mvm-core` (SSRF/rebinding IP classifier, shared `TokenBucket`), `mvm-agentd` (guest UDP+TCP stub in `mvm-egress-client`), `mvm-hostd` (host `dns_handler` + `MVM_DNS/1` dispatch + `EventCategory::Dns` audit), `mvm-runtime` (`EgressGate::dns_verdict`), `cargo-fuzz`, cucumber `@live`.
+**Tech Stack:** Rust; `mvm-contract` (no_std forbid-unsafe DNS codec), `mvm-core` (SSRF/rebinding IP classifier, shared `TokenBucket`), `mvm-agentd` (guest UDP+TCP stub in `mvm-egress-client`), `mvm-hostd` (host `dns_handler` + `MVM_DNS/1` dispatch + `EventCategory::Dns` audit), `mvm-runtime` (`EgressGate::dns_verdict`), `cargo-fuzz`, cucumber `@live`.
 
 Branches off `fix/egress-connect-completion` (Part 1: honest CONNECT ack + happy-eyeballs). Delivers a guest DNS stub on `127.0.0.1:53` that forwards over the existing vsock egress plane to a host DNS handler which resolves only allow-listed names, filters answers, audits every query, and is rate-limited. One `NetworkPolicy` drives both the DNS name gate and the TCP connect gate.
 
 ## Baked-in decisions
 
 - **Pins-first answer source.** An allow-listed QNAME is answered directly from `EgressGate`'s pin registry (`gate.pins.lookup(name).ips`, already resolved at admission by `mvm_core::policy::dns_pin::resolve_network_policy_pins`). No live upstream lookup. Fall back to a gated upstream lookup (`raw_egress::resolve_hostname_ips_pure`) **only** for the `Unrestricted`/wildcard-parent-domain case with no pin — mirroring `EgressGate::decide_hostname_request`'s three-way branch. DNS-tunneling is closed by construction: a name not admitted by policy never triggers an upstream query.
-- **Dedicated DNS-answer IP classifier (guard 2), stricter than TCP.** Reject A/AAAA answers in RFC1918 (`10/8`, `172.16/12`, `192.168/16`), IPv6 ULA (`fc00::/7`), link-local (`169.254/16`, `fe80::/10`), loopback (`127/8`, `::1`), and metadata (`169.254.169.254`) **unless that exact IP is explicitly allow-listed** (i.e. pin-sourced). `MANDATORY_DENY_RANGES` (`crates/mvm-protocol/src/policy/network_policy.rs:498`) is **not** touched — the deliberate RFC1918-allowed TCP-connect posture stays; the DNS answer filter is a separate, stricter predicate.
+- **Dedicated DNS-answer IP classifier (guard 2), stricter than TCP.** Reject A/AAAA answers in RFC1918 (`10/8`, `172.16/12`, `192.168/16`), IPv6 ULA (`fc00::/7`), link-local (`169.254/16`, `fe80::/10`), loopback (`127/8`, `::1`), and metadata (`169.254.169.254`) **unless that exact IP is explicitly allow-listed** (i.e. pin-sourced). `MANDATORY_DENY_RANGES` (`crates/mvm-contract/src/policy/network_policy.rs:498`) is **not** touched — the deliberate RFC1918-allowed TCP-connect posture stays; the DNS answer filter is a separate, stricter predicate.
 - **Transport.** Per-query vsock stream reusing the existing raw-egress connection: guest dials host vsock port `5253`, writes a new `MVM_DNS/1\n` first-line marker, then a 2-byte-length-prefixed DNS query (DNS-over-TCP framing); host replies with a length-prefixed response. Dispatched by a new branch in `raw_egress::handle_raw_conn` (async) and `handle_raw_conn_blocking` (vsock), beside the existing `http_forward::FRAME_LINE` branch.
-- **Codec** lives in `mvm-protocol` (`#![no_std]` + `forbid(unsafe_code)`), question + A/AAAA answers only, bounded, fail-closed. Not `hickory-proto`.
+- **Codec** lives in `mvm-contract` (`#![no_std]` + `forbid(unsafe_code)`), question + A/AAAA answers only, bounded, fail-closed. Not `hickory-proto`.
 - **Guest stub** folds into `mvm-egress-client` (`crates/mvm-agentd/src/egress_client.rs`), UDP + TCP on `127.0.0.1:53`, reusing `HostVsockSession`.
 - **Audit** reuses the per-VM chain-signed `Recorder` (`crate::supervisor::audit_recorder::Recorder`, `record_unbound`) already threaded into the substitution endpoint; new `EventCategory::Dns`.
 - **Rate-limit** reuses a `TokenBucket` (consolidated into `mvm_core::rate_limit`) plus a concurrency cap.
@@ -26,7 +26,7 @@ Branches off `fix/egress-connect-completion` (Part 1: honest CONNECT ack + happy
 - No spec/PR/plan refs in code comments (CI-gated: `Plan N`, `ADR-\d+`, `#\d+`, `W\d.`), and no plan-navigation comments in final code. Comments explain *why*, not *which task*.
 - Traits/enums over stringly-typed flags; **exhaustive matches — no `_ =>` on our own enums**.
 - No backwards-compat shims/aliases; hard renames.
-- `mvm-protocol` stays `#![no_std]` + `forbid(unsafe_code)`; the codec must build on `wasm32-unknown-unknown`.
+- `mvm-contract` stays `#![no_std]` + `forbid(unsafe_code)`; the codec must build on `wasm32-unknown-unknown`.
 - The DNS handler is a **claim-10 security seam**: the codec fuzz target, the answer-IP filter unit matrix, and per-query chain-signed audit are **load-bearing, not optional**.
 - All `~/.mvm` paths go through `mvm_core::config` helpers.
 - Before **every** commit: `cargo nextest run` for the touched crates + `cargo clippy --workspace -- -D warnings` + `cargo fmt --all -- --check`. (Doctests via `cargo test -p <crate> --doc` when a task adds doc examples.)
@@ -38,20 +38,20 @@ Branches off `fix/egress-connect-completion` (Part 1: honest CONNECT ack + happy
 
 ---
 
-## Task 1 — In-house `forbid(unsafe)` DNS codec in `mvm-protocol`
+## Task 1 — In-house `forbid(unsafe)` DNS codec in `mvm-contract`
 
 **Files**
-- Create `crates/mvm-protocol/src/protocol/dns.rs`
-- Modify `crates/mvm-protocol/src/protocol/mod.rs` (add `pub mod dns;` after `pub mod broker;` — line 8 region)
-- Modify `crates/mvm-core/src/protocol.rs` (add `pub use mvm_protocol::protocol::dns;` re-export so `mvm_core::protocol::dns` resolves, mirroring `mvm_core::policy::dns_pin`)
-- Test: inline `#[cfg(test)] mod tests` in `crates/mvm-protocol/src/protocol/dns.rs`
+- Create `crates/mvm-contract/src/protocol/dns.rs`
+- Modify `crates/mvm-contract/src/protocol/mod.rs` (add `pub mod dns;` after `pub mod broker;` — line 8 region)
+- Modify `crates/mvm-core/src/protocol.rs` (add `pub use mvm_contract::protocol::dns;` re-export so `mvm_core::protocol::dns` resolves, mirroring `mvm_core::policy::dns_pin`)
+- Test: inline `#[cfg(test)] mod tests` in `crates/mvm-contract/src/protocol/dns.rs`
 
 **Interfaces**
 
 Consumes: `&[u8]` (untrusted wire bytes), `core::net::{IpAddr, Ipv4Addr, Ipv6Addr}`.
 Produces:
 ```rust
-// crates/mvm-protocol/src/protocol/dns.rs
+// crates/mvm-contract/src/protocol/dns.rs
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::IpAddr;
@@ -146,9 +146,9 @@ fn decode_never_panics_on_arbitrary_bytes() {
     }
 }
 ```
-- [x] **Step 2: Run — expect FAIL (module missing).** `cargo nextest run -p mvm-protocol dns::`
+- [x] **Step 2: Run — expect FAIL (module missing).** `cargo nextest run -p mvm-contract dns::`
 - [x] **Step 3: Minimal impl in `dns.rs`.** 12-byte header parse (reject `TooShort` < 12, `TooLong` > `MAX_DNS_MESSAGE`); require `qr==0` else `NotAQuery`; `qdcount==1` else `MultiQuestion`; read labels (len-prefixed, reject 0xC0 compression pointers in questions, cap total 253, reject label > 63) into a lowercased dotted name; map QTYPE 1→`A`, 28→`Aaaa`, else `UnsupportedQType`; require QCLASS IN(1); reject trailing bytes → `TrailingGarbage`. `encode_response`: header with `qr=1, rd copied, ra=1, rcode`, echo the question section verbatim, append `ips.len()` RRs (NAME `0xC0 0x0C`, TYPE per qtype, CLASS `0x00 0x01`, TTL `0x00000078`, RDLENGTH 4/16, RDATA). All arithmetic bounded; `#![forbid(unsafe_code)]` inherited from crate.
-- [x] **Step 4: Run — expect PASS.** Also `cargo build -p mvm-protocol --target wasm32-unknown-unknown` (no_std clean).
+- [x] **Step 4: Run — expect PASS.** Also `cargo build -p mvm-contract --target wasm32-unknown-unknown` (no_std clean).
 - [x] **Step 5: Commit.** `feat(protocol): in-house forbid(unsafe) DNS question/A/AAAA codec`.
 
 ---
@@ -157,7 +157,7 @@ fn decode_never_panics_on_arbitrary_bytes() {
 
 **Files**
 - Create `crates/mvm-agentd/fuzz/fuzz_targets/fuzz_dns_codec.rs`
-- Modify `crates/mvm-agentd/fuzz/Cargo.toml` (add `mvm-protocol` path dep near line 30; add `[[bin]] name = "fuzz_dns_codec"` after the `fuzz_builder_request` block ~line 73)
+- Modify `crates/mvm-agentd/fuzz/Cargo.toml` (add `mvm-contract` path dep near line 30; add `[[bin]] name = "fuzz_dns_codec"` after the `fuzz_builder_request` block ~line 73)
 
 **Interfaces**
 
@@ -165,7 +165,7 @@ Consumes: `&[u8]`. Produces: no return (must never panic).
 ```rust
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use mvm_protocol::protocol::dns::{decode_query, encode_response, DnsRcode};
+use mvm_contract::protocol::dns::{decode_query, encode_response, DnsRcode};
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(q) = decode_query(data) {
