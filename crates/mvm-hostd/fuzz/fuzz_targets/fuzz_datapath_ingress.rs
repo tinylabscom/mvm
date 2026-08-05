@@ -35,6 +35,7 @@ use mvm_core::policy::projection::CanonicalEgress;
 use mvm_hostd::netd::userspace::UserspaceSocketDatapath;
 use mvm_hostd::netd::userspace::readiness::ReadinessSet;
 use mvm_hostd::netd::userspace::tcp::{EstablishedFlow, HalfOpenTable};
+use mvm_hostd::netd::userspace::GuestAddressing;
 use mvm_hostd::netd::{DatapathHandle, DatapathRequest, GatewayMetrics};
 use mvm_net::l3::alloc::AddressLease;
 use mvm_net::l3::{
@@ -74,7 +75,8 @@ fuzz_target!(|data: &[u8]| {
     let Ok(readiness) = ReadinessSet::new() else {
         return;
     };
-    let mut half_open = HalfOpenTable::new(HALF_OPEN_CAPACITY, IpAddr::V4(GUEST), readiness.watch());
+    let guest = GuestAddressing::new(GUEST, None);
+    let mut half_open = HalfOpenTable::new(HALF_OPEN_CAPACITY, guest, readiness.watch());
     let mut flow: Option<EstablishedFlow> = None;
     let mut now: u64 = 0;
 
@@ -133,7 +135,7 @@ fuzz_target!(|data: &[u8]| {
                 if flow.is_none()
                     && let Ok(opened) = EstablishedFlow::from_half_open(
                         entry,
-                        IpAddr::V4(GUEST),
+                        guest,
                         MTU_V1 as usize,
                         now,
                     )
@@ -216,6 +218,7 @@ fn open_handle() -> Option<mvm_hostd::netd::userspace::UserspaceHandle> {
             gateway: GATEWAY,
             guest: GUEST,
             prefix_len: 30,
+            v6: None,
             mtu: MTU_V1,
             ingress: Vec::new(),
         })
