@@ -10,6 +10,11 @@
 
 ## Current issue delivery
 
+- [x] Claim-witness CI documentation — **issue #2104**. Corrected the
+      `security.yml` trigger and merge-blocking claims, removed three
+      unreachable pull-request guards, and aligned the claim descriptions with
+      the workflows that actually run them.
+
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
       refuses tampered or unpinned source volumes, and can emit the canonical
@@ -26,9 +31,11 @@
 - [~] Develop → build → deploy an attested workload image — **plan 291**.
       WS1–WS3 are merged with their queue-gate evidence. WS4 remains open:
       local `machine run --deployment` now verifies and persists an exact
-      deploy record/rootfs binding, while remote record extraction and boot,
-      the universal-agent design decision, and guest-image conformance remain
-      open. Tracking issue #2144 owns the local/remote boot acceptance matrix.
+      deploy record/rootfs binding, remote record extraction and boot are
+      merged, and persistent-OCI console pre-open is limited to dev profiles
+      (PR #2157). The universal-agent design decision and guest-image
+      conformance remain open. Tracking issues #2144/#208 own the final
+      local/remote boot acceptance matrix.
 - [x] `mvmctl deploy` — **plan 291 WS1**. Local deployment now has a durable
       sealed archive and deploy record path, with BLAKE3 as the native artifact
       identity, SHA-256 retained for interoperability, optional environment
