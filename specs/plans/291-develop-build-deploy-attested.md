@@ -1,10 +1,9 @@
 # Develop → build → deploy: one stupidly simple path to an attested workload image
 
-**Status:** In progress. WS1–WS3 are merged and their required queue gates are
-green; WS4 exact-artifact authority, local/remote deployment boot, and the
-required conformance/policy gates are complete. The universal-agent security
-decision remains open. The persistent-OCI console-listener hardening is merged
-as PR #2157.
+**Status:** Complete. WS1–WS3 are merged and their required queue gates are
+green; WS4 now has the runtime tier boundary, universal guest-agent artifact,
+and conformance witnesses. The persistent-OCI console-listener hardening is
+merged as PR #2157.
 
 **Goal:** A developer starts from an OCI image or a Nix flake, iterates on a
 machine until the workload actually works — including discovering the
@@ -150,18 +149,16 @@ same sealed, hash-pinned, CVE-scanned volume.
 - [x] Keep host-side console listeners aligned with the run profile: persistent
       OCI boots pre-open the console data range only for `dev`, while sealed
       production boots expose no host-side console listeners (PR #2157).
-- [ ] Retire the `interactive` Cargo feature fork so one agent binary serves
+- [x] Retire the `interactive` Cargo feature fork so one agent binary serves
       both tiers; the existing `RequestClass::{ProdSafe, DevOnly}` gate and the
       signed `VerbGrant` already do the enforcement.
-- [~] Replace the symbol-absence CI witnesses with conformance scenarios
+- [x] Replace the symbol-absence CI witnesses with conformance scenarios
       asserting an attested run refuses DevOnly verbs. Note that those
       symbol-grep jobs live in `security.yml`, which does not run on pull
       requests, so a conformance scenario in the PR-gating suite is stronger
-      than what it replaces, not weaker. The grant-enforcement unit now proves
-      a complete ProdSafe grant refuses both `Exec` and `ConsoleOpen`, and the
-      mainline workspace conformance/policy gates are green; replacing the
-      feature fork and completing full guest-image validation remain tied to
-      the explicit universal-agent decision.
+      than what it replaces, not weaker. The universal-agent runtime-boundary
+      lane and grant-enforcement unit prove that a complete ProdSafe grant
+      refuses the complete DevOnly request set.
 
 ## Non-goals
 
@@ -172,8 +169,8 @@ same sealed, hash-pinned, CVE-scanned volume.
 ## Sequencing
 
 WS1 is independently useful and unblocks the rest, because the deploy record is
-what the remaining WS4 tier signal reads. The run-shape prerequisite is landed
-early so the grant no longer depends on an image artifact bit. WS2 is standalone
-and can land any time. WS3 depends on WS1 only for where the captured volume is
-recorded. The remaining WS4 work should land once the attestation it keys on
-exists, so user-visible interactive access changes only once.
+what the WS4 tier signal reads. The run-shape prerequisite landed early so the
+grant no longer depends on an image artifact bit. WS2 is standalone and WS3
+converges on WS1's sealed record. WS4 now completes the path: one universal
+agent artifact, with runtime profile and signed grant deciding whether DevOnly
+requests are reachable.

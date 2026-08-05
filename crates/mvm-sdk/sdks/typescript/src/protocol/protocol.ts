@@ -491,7 +491,7 @@ message: string
  */
 export type RunEntrypointError = ("PayloadCap" | "Timeout" | "Busy" | "WrapperCrashed" | "NotReady" | "EntrypointInvalid" | "SessionKilled" | "InternalError")
 /**
- * One event in the response stream of an `Exec` call (interactive only). The agent emits a sequence of these for a single `Exec` request, terminated by `Exit`. The host reads frames in a loop until terminal.
+ * One event in the response stream of a DevOnly `Exec` call. The agent emits a sequence of these for a single `Exec` request, terminated by `Exit`. The host reads frames in a loop until terminal.
  */
 export type ExecEvent = ({
 Stdout: {

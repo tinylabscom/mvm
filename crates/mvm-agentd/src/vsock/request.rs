@@ -59,13 +59,14 @@ pub enum GuestRequest {
     /// (`PRIMED_MARKER_PATH`); the agent reports its presence. Used by the
     /// host's warm-snapshot barrier to seal a deterministic, fully-warmed base.
     PrimedStatus,
-    /// Run a command inside the guest (dev-only, requires interactive feature + SecurityPolicy).
+    /// Run a command inside the guest (DevOnly, requires the runtime profile,
+    /// signed verb grant, and SecurityPolicy).
     Exec {
         command: String,
         stdin: Option<String>,
         timeout_secs: Option<u64>,
     },
-    /// Tier-2 batched exec (interactive only): stage files, then run a sequence of
+    /// Tier-2 batched exec (DevOnly): stage files, then run a sequence of
     /// argv commands in-guest in a single round-trip, returning one buffered
     /// outcome per command. The chain stops at the first non-zero exit. This is
     /// the one-round-trip counterpart to the host driving `FsWrite` + `Exec`
@@ -218,8 +219,8 @@ pub enum GuestRequest {
     // Production-safe (unlike `Exec`): every verb is constrained by
     // the agent's uid 901 + read-only bind mounts + the
     // `mvm-core::crypto::policy::path` deny-list. Extending the
-    // `prod-agent-runentry-contract` CI lane to assert handler
-    // symbols PRESENT in prod builds is part of the per-verb landing.
+    // Filesystem paths remain constrained by the agent uid, read-only mounts,
+    // and the path deny-list.
     // ========================================================================
     /// Read one bounded chunk from `path`, optionally starting at `offset`.
     /// Callers transfer larger files through repeated offset-addressed calls.
@@ -309,11 +310,9 @@ pub enum GuestRequest {
     // The wire types are compiled into every `mvm-agentd` build so a
     // host caller against a prod agent gets a typed
     // `ProcErrorKind::UnsupportedInProduction` rather than a
-    // transport error. The agent-side **handler** lives in
-    // `crate::process_rpc`, gated behind the `interactive` feature —
-    // which means the function symbols are absent from prod builds.
-    // The combined `prod-agent-runentry-contract` CI gate asserts
-    // this symbol contract.
+    // transport error. The agent-side handler lives in `crate::process_rpc`;
+    // the dispatcher admits these requests only for a runtime profile and
+    // signed grant that authorize DevOnly process control.
     //
     // Distinct from `Exec` (single-shot, blocking) and from
     // `RunEntrypoint` (production-safe baked program). Process
@@ -422,8 +421,8 @@ pub enum GuestRequest {
     /// `mvmctl session reap`.
     UpdateIdleTimeout { secs: u64 },
     /// Run user-supplied source code in the wrapper's native
-    /// interpreter. Dev-only — gated behind the agent's `interactive`
-    /// feature flag, same fence as `Exec`. The host
+    /// interpreter. DevOnly — gated by the agent's runtime profile and
+    /// signed grant, same fence as `Exec`. The host
     /// (`mvmctl session run-code`) provides additional gating: the
     /// session must be `mode=Dev`.
     ///

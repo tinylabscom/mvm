@@ -400,7 +400,7 @@ fn docker_runtime_artifacts(
             reason: "resolved agent path has no parent directory".to_string(),
         })?;
     Ok(DockerRuntimeArtifacts {
-        agent_binary: binaries.agent_interactive,
+        agent_binary: binaries.agent,
         overlay_bins_dir,
     })
 }
@@ -1027,12 +1027,11 @@ mod tests {
     }
 
     #[test]
-    fn docker_runtime_uses_the_interactive_agent_from_the_overlay_artifact() {
+    fn docker_runtime_uses_the_universal_agent_from_the_overlay_artifact() {
         let root = PathBuf::from("/cache/runtime-overlay-bins");
         let artifacts =
             docker_runtime_artifacts(mvm_build::guest_agent_build::RuntimeOverlayGuestBinaries {
                 agent: root.join("agent"),
-                agent_interactive: root.join("agent-interactive"),
                 netinit: root.join("netinit"),
                 ping: root.join("ping"),
                 seccomp_apply: root.join("seccomp-apply"),
@@ -1044,7 +1043,7 @@ mod tests {
             })
             .expect("map runtime overlay binaries");
 
-        assert_eq!(artifacts.agent_binary, root.join("agent-interactive"));
+        assert_eq!(artifacts.agent_binary, root.join("agent"));
         assert_eq!(artifacts.overlay_bins_dir, root);
     }
 

@@ -236,13 +236,12 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    confirms a tampered snapshot is rejected before resume, and
    live-KVM tamper regression confirms the kernel panics before
    userspace on a flipped data block.
-4. **The guest agent does not contain `do_exec` in production
-   builds.** `scripts/check-prod-agent-no-exec.sh`, run by the
-   `prod-agent-runentry-contract` job in
-   `.github/workflows/security.yml` (tag pushes + nightly cron +
-   manual dispatch, not every PR), builds the agent without
-   `interactive` and asserts the `mvm_guest_agent::do_exec` symbol is
-   absent (W4.3).
+4. **A production-safe run cannot invoke DevOnly guest-agent verbs.**
+   `scripts/check-prod-agent-no-exec.sh`, run by the
+   `guest-agent-runtime-boundary` job in `.github/workflows/security.yml`,
+   exercises the universal agent's runtime profile and signed grant boundary
+   (W4.3). The unit and conformance tests enumerate the complete DevOnly
+   request set.
 5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
    targets at `crates/mvm-agentd/fuzz/` cover `GuestRequest` and
    `AuthenticatedFrame` (W4.2). Plan 88 W6 adds
@@ -405,14 +404,12 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
     `workflow_dispatch`-only, so none of the six gate a PR; they run
     on manual dispatch.
-15. **A sealed production microVM has no shell, no `do_exec`, and no
-    PTY.** The sole
+15. **A sealed production microVM has no shell, no DevOnly guest-agent
+    verbs, and no PTY.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
-    console (`crates/mvm-agentd/src/console.rs`), which is gated behind
-    the `interactive` Cargo feature — so a sealed prod agent (built
-    `--no-default-features`, `withInteractive = false` in `mkGuest`) links
-    no console symbol, exactly mirroring claim 4's `do_exec` exclusion.
-    Plan 165 WS-C. Five independent layers: (1) only the dev `/init`
+    console (`crates/mvm-agentd/src/console.rs`). The universal agent
+    dispatches it only when the runtime profile and signed grant authorize
+    the request. Plan 165 WS-C. Five independent layers: (1) only the dev `/init`
     variant serves a shell; (2) the prod rootfs is dm-verity sealed
     (claim 3); (3) the backend captures the guest console **write-only**
     to `console.log` with no host input fd
@@ -420,11 +417,10 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     not a crate, this is a function in `mvm-runtime` — and
     `prod_console_attachment_has_no_input`); (4) the host
     `enforce_accessible_gate` refuses `mvmctl console` on a sealed VM
-    (`console_refused_on_sealed_image`); (5) the agent console + `do_exec`
-    are `interactive`-gated. CI: the `prod-agent-no-console` symbol-grep job
-    in `.github/workflows/security.yml` (`scripts/check-prod-agent-no-console.sh`)
-    asserts the console symbol is absent from a production agent build,
-    sibling to `prod-agent-runentry-contract`. Serial-console passthrough
+    (`console_refused_on_sealed_image`); (5) the agent console and DevOnly
+    handlers are grant-gated. CI: the `guest-agent-runtime-boundary` job in
+    `.github/workflows/security.yml` runs the runtime refusal suite.
+    Serial-console passthrough
     was considered and rejected (fatal on an input-less console); there
     is exactly one interactive transport and it is dev-only.
     This claim used to read "no interactive access", holding by

@@ -818,9 +818,9 @@ fn cmd_run_code(args: RunCodeArgs) -> Result<()> {
 /// the result. Mirrors `run_in_session`'s I/O shape but goes through
 /// the structured `RunCode` verb rather than a shell-quote of the
 /// code body. The agent's `/etc/mvm/wrapper.json`-based dispatch
-/// picks the right interpreter; if the wrapper's language is
-/// unknown or the agent was built without `interactive`, the response
-/// surfaces the refusal directly.
+/// picks the right interpreter; if the wrapper's language is unknown or the
+/// runtime gate refuses the request, the response surfaces the refusal
+/// directly.
 fn dispatch_run_code(
     id: &SessionId,
     record: &mvm_core::session::SessionRecord,
@@ -902,12 +902,10 @@ fn require_dev_mode(
 /// the existing `Exec` vsock verb. Streams stdout/stderr to mvmctl's
 /// own streams; exits non-zero with the wrapper's exit code on failure.
 ///
-/// Note: `Exec` is dev-only on the guest side (gated by the `interactive`
-/// agent feature). This verb is itself gated by
-/// `require_dev_mode` above, but if the session's substrate VM was
-/// somehow built with a prod agent the underlying call will fail
-/// with `Error { message: "exec not available" }` — surface that to
-/// the user as-is.
+/// Note: `Exec` is DevOnly on the guest side (gated by the runtime profile
+/// and signed grant). This verb is itself gated by `require_dev_mode` above;
+/// the underlying call still enforces the same policy and surfaces any typed
+/// refusal to the user.
 fn run_in_session(
     id: &SessionId,
     record: &mvm_core::session::SessionRecord,

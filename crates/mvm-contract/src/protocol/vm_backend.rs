@@ -965,7 +965,7 @@ impl LayerCoverage {
 /// 1. No host-fs access from a guest beyond explicit shares
 /// 2. No guest binary can elevate to uid 0
 /// 3. A tampered rootfs ext4 fails to boot
-/// 4. The guest agent does not contain `do_exec` in production builds
+/// 4. A production-safe run cannot invoke DevOnly guest-agent verbs
 /// 5. Vsock framing is fuzzed
 /// 6. Pre-built dev image is hash-verified
 /// 7. Cargo deps are audited on every PR

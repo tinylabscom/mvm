@@ -24,7 +24,7 @@ Language surfaces live under `crates/mvm-sdk/sdks/` (moved off the repo root as 
 
 ### Runtime SDK + decorator
 
-Both are first-class and enabled — a user can control a live microVM via `mvm-client` from SDK code, not just author one ahead of time. The security boundary is **no shell in prod**: lifecycle operations, the declared entrypoint, audited output, `expose_tcp`, snapshot, and fork are all allowed against a sealed production VM. Arbitrary interactive `exec` or console access into a sealed prod VM stays dev-only, gated behind `dev-shell` — this is the same boundary that backs claims 4 and 15 in the security model (no `do_exec` symbol, no console symbol, in a production agent build).
+Both are first-class and enabled — a user can control a live microVM via `mvm-client` from SDK code, not just author one ahead of time. The security boundary is **no shell in prod**: lifecycle operations, the declared entrypoint, audited output, `expose_tcp`, snapshot, and fork are all allowed against a sealed production VM. Arbitrary interactive `exec` or console access into a sealed prod VM stays dev-only, enforced by the runtime profile and signed `VerbGrant` — this is the same boundary that backs claims 4 and 15 in the security model.
 
 ## Testing — BDD-first
 

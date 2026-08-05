@@ -166,12 +166,10 @@ SDK callers can branch on capability without parsing message text —
 this is the protocol-layer analog of
 `ProcErrorKind::UnsupportedInProduction` for process RPC.
 
-The profile gate is **complementary** to the existing compile-time
-gate (`#[cfg(feature = "interactive")]` for `do_exec` / `do_run_code` /
-process RPC handlers per ADR-001 §W4.3, claim 4). The compile-time
-gate keeps the handler symbols *absent* from production binaries; the
-profile gate keeps the dispatcher *reachable but refusing* for dev
-verbs in sealed-prod. Both checks run on every request.
+The profile gate is the runtime security boundary for the universal agent.
+The same artifact carries the DevOnly handlers in every image, but the
+dispatcher refuses them unless the runtime profile and signed `VerbGrant`
+authorize the request. Both checks run on every request.
 
 ### Run-shaped agent grants
 

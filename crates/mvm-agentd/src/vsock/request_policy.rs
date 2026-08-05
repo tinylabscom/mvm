@@ -9,9 +9,9 @@ use mvm_core::security::AgentProfile;
 ///
 /// Wire types are compiled into every agent build; this classifier
 /// is the dispatcher-side gate that rejects out-of-profile verbs
-/// *before* the per-variant handler runs. Complemented by the
-/// compile-time symbol-absence story (`do_exec`, `do_run_code`,
-/// process RPC handlers gated by `interactive`).
+/// *before* the per-variant handler runs. DevOnly handlers are compiled into
+/// the universal artifact, but remain unreachable until this gate and the
+/// signed-grant check both authorize the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestClass {
     /// Allowed under `SealedProd` and `Dev` profiles. Includes the

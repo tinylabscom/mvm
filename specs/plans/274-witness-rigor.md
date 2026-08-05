@@ -1202,29 +1202,27 @@ reasoning behind each falsification, which plan 272 §WS-3 cites.
 
 ## What #1934 cannot reach
 
-Three of the sixteen claims have no `fn:` witness at all: **MVM-SEC-04**
-(no `do_exec` in a production build), **MVM-SEC-05** (fuzz targets),
-**MVM-SEC-07** (dependency audit). Their witnesses are a symbol-absence
-grep over a release binary, a fuzz lane, and a `cargo deny` job. There is
-no Rust function body whose mutation exercises any of them, and
+Two of the sixteen claims have no `fn:` witness at all: **MVM-SEC-05**
+(fuzz targets) and **MVM-SEC-07** (dependency audit). Their witnesses are a
+fuzz lane and a `cargo deny` job. There is no Rust function body whose
+mutation exercises either of them, and
 `check-mutation-witnesses` correctly reports them as reaching no mutable
 file rather than inventing a surface.
 
 A `ci:` witness nobody has seen fail is the same problem as a `fn:` one.
 These need the hand treatment, once, recorded in `specs/VERIFICATION.md`.
 
-## Task 8: Falsify the three CI-lane witnesses
+## Task 8: Falsify the remaining CI-lane witnesses
 
 **Files:**
 - Modify: `specs/VERIFICATION.md` (extend the falsifiability table)
 - No source changes survive this task — every edit is reverted.
 
-- [ ] **Step 1: MVM-SEC-04 — `prod-agent-no-exec`**
+- [x] **Step 1: MVM-SEC-04 — runtime guest-agent boundary**
 
-  Build the agent *with* the `interactive` feature on a scratch branch and
-  confirm the symbol-grep job fails rather than passing on a build that
-  contains `do_exec`. This is a CI-lane experiment, not a test run, so it
-  needs a pushed branch to observe.
+  The compile-time feature fork was retired. The runtime-boundary unit and
+  conformance tests enumerate DevOnly requests and fail if a production-safe
+  grant permits any of them.
 
 - [ ] **Step 2: MVM-SEC-07 — the dependency audit**
 
@@ -1247,7 +1245,7 @@ These need the hand treatment, once, recorded in `specs/VERIFICATION.md`.
   ```markdown
   | Claim | Witness | Planted defect | Fired |
   | --- | --- | --- | --- |
-  | MVM-SEC-04 | `ci:prod-agent-no-exec` | Build the agent with the `interactive` feature | |
+  | MVM-SEC-04 | `ci:guest-agent-runtime-boundary` | Remove the runtime profile or signed-grant check before dispatching a DevOnly request | yes |
   ```
 
   Fill the verdicts from Steps 1-3. A `did not fire` is a finding, not a

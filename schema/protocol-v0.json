@@ -446,7 +446,7 @@
       ]
     },
     "ExecEvent": {
-      "description": "One event in the response stream of an `Exec` call (interactive only). The agent emits a sequence of these for a single `Exec` request, terminated by `Exit`. The host reads frames in a loop until terminal.",
+      "description": "One event in the response stream of a DevOnly `Exec` call. The agent emits a sequence of these for a single `Exec` request, terminated by `Exit`. The host reads frames in a loop until terminal.",
       "oneOf": [
         {
           "description": "Bytes from the command's stdout, as they arrive.",
@@ -1130,7 +1130,7 @@
           ]
         },
         {
-          "description": "Run a command inside the guest (dev-only, requires interactive feature + SecurityPolicy).",
+          "description": "Run a command inside the guest (DevOnly, requires the runtime profile, signed verb grant, and SecurityPolicy).",
           "type": "object",
           "required": [
             "Exec"
@@ -1166,7 +1166,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Tier-2 batched exec (interactive only): stage files, then run a sequence of argv commands in-guest in a single round-trip, returning one buffered outcome per command. The chain stops at the first non-zero exit. This is the one-round-trip counterpart to the host driving `FsWrite` + `Exec` frames itself; `peak_rss_kib` is agent-measured here. Answered by a single `ExecBatchResult` frame.",
+          "description": "Tier-2 batched exec (DevOnly): stage files, then run a sequence of argv commands in-guest in a single round-trip, returning one buffered outcome per command. The chain stops at the first non-zero exit. This is the one-round-trip counterpart to the host driving `FsWrite` + `Exec` frames itself; `peak_rss_kib` is agent-measured here. Answered by a single `ExecBatchResult` frame.",
           "type": "object",
           "required": [
             "ExecBatch"
@@ -2077,7 +2077,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Run user-supplied source code in the wrapper's native interpreter. Dev-only — gated behind the agent's `interactive` feature flag, same fence as `Exec`. The host (`mvmctl session run-code`) provides additional gating: the session must be `mode=Dev`.\n\nThe interpreter is selected by reading `/etc/mvm/wrapper.json` at dispatch time: - `language = \"python\"` → `python3 -c <code>` - `language = \"node\"`   → `node -e <code>`\n\nOther values, or a missing/unparseable wrapper.json, refuse with a wire-stable error message.\n\nThis call is stateless: each request spawns a fresh interpreter process, so `from foo import bar` in call 1 isn't visible in call 2.",
+          "description": "Run user-supplied source code in the wrapper's native interpreter. DevOnly — gated by the agent's runtime profile and signed grant, same fence as `Exec`. The host (`mvmctl session run-code`) provides additional gating: the session must be `mode=Dev`.\n\nThe interpreter is selected by reading `/etc/mvm/wrapper.json` at dispatch time: - `language = \"python\"` → `python3 -c <code>` - `language = \"node\"`   → `node -e <code>`\n\nOther values, or a missing/unparseable wrapper.json, refuse with a wire-stable error message.\n\nThis call is stateless: each request spawns a fresh interpreter process, so `from foo import bar` in call 1 isn't visible in call 2.",
           "type": "object",
           "required": [
             "RunCode"
@@ -2587,7 +2587,7 @@
           "additionalProperties": false
         },
         {
-          "description": "One event in the streaming response of an `Exec` call (interactive only). Terminated by `ExecEvent::Exit`.",
+          "description": "One event in the streaming response of a DevOnly `Exec` call. Terminated by `ExecEvent::Exit`.",
           "type": "object",
           "required": [
             "ExecEvent"
@@ -2600,7 +2600,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Buffered outcomes of an `ExecBatch` call (interactive only), one per command in request order (truncated at the first non-zero exit).",
+          "description": "Buffered outcomes of a DevOnly `ExecBatch` call, one per command in request order (truncated at the first non-zero exit).",
           "type": "object",
           "required": [
             "ExecBatchResult"

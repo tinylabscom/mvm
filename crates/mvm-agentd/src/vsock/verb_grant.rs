@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn prod_safe_grant_refuses_interactive_requests() {
+    fn prod_safe_grant_refuses_all_dev_only_requests() {
         use mvm_core::plan::{Nonce, VerbGrant, VerbId};
 
         let grant = VerbGrant {
@@ -446,10 +446,53 @@ mod tests {
                 env: vec![],
                 argv: vec![],
             },
+            GuestRequest::ConsoleClose { session_id: 1 },
+            GuestRequest::ConsoleResize {
+                session_id: 1,
+                cols: 80,
+                rows: 24,
+            },
+            GuestRequest::ExecBatch {
+                stages: vec![],
+                commands: vec![],
+                timeout_secs: Some(1),
+            },
+            GuestRequest::RunCode {
+                code: "print(1)".into(),
+                timeout_secs: Some(1),
+            },
+            GuestRequest::RunDetached {
+                argv: vec!["/bin/true".into()],
+                env: vec![],
+            },
+            GuestRequest::ProcStart {
+                argv: vec!["/bin/true".into()],
+                env: Default::default(),
+                cwd: None,
+                stdin: vec![],
+                timeout_secs: Some(1),
+            },
+            GuestRequest::ProcList,
+            GuestRequest::ProcSignal {
+                pid_token: "test".into(),
+                signum: 15,
+            },
+            GuestRequest::ProcSendInput {
+                pid_token: "test".into(),
+                bytes: vec![],
+            },
+            GuestRequest::ProcWait {
+                pid_token: "test".into(),
+                timeout_secs: Some(1),
+            },
+            GuestRequest::ProcKill {
+                pid_token: "test".into(),
+            },
         ];
 
         for request in requests {
             assert_eq!(request.class(), RequestClass::DevOnly);
+            assert!(request.allowed_in(mvm_core::security::AgentProfile::Dev));
             assert!(matches!(
                 enforce_verb_grant(&request, Some(&grant)),
                 Some(GuestResponse::VerbNotAuthorized { .. })

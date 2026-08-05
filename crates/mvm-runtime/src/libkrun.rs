@@ -1520,8 +1520,8 @@ mod tests {
         // claim 15: the backend captures the guest console
         // to a WRITE-ONLY sink — there is no host fd from which the guest
         // could read console input. The only interactive path is the
-        // interactive-gated agent vsock console, which a sealed prod agent
-        // does not link.
+        // runtime-gated agent vsock console, which a sealed prod run
+        // cannot authorize.
         use std::io::{Read, Write};
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = tmp.path().join("console.log");
