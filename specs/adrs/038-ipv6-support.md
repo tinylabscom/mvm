@@ -1,7 +1,8 @@
 # ADR-038 — IPv6 as a first-class address family
 
-**Status: Accepted — host side and guest kernel landed 2026-08-04;
-in-guest address configuration outstanding**
+**Status: Accepted — host admission, guest kernel, and in-guest address
+configuration landed 2026-08-04; host-side v6 address *allocation*
+outstanding**
 **Date: 2026-08-02**
 
 **What shipped.** The admission guard admits IPv6; `embedded_v4` extracts
@@ -18,9 +19,17 @@ would have dragged XFRM in are disabled explicitly, and the required-disable
 guard proves their absence on every build. See §"`CONFIG_IPV6` in the
 workload kernel".
 
-**What has not.** In-guest v6 address configuration alongside the existing
-v4 bring-up. The kernel can speak v6; the agent does not yet assign an
-address, so a guest still cannot originate it.
+**And the guest agent.** A `CONFIG` carrying a v6 half now brings that half
+up beside the v4 one — address, on-link peer, default route, resolver —
+over rtnetlink, in the same privileged setup phase, before the drop. See
+§"In-guest configuration: rtnetlink, not ioctl".
+
+**What has not.** Host-side v6 *allocation*. Every layer from the guest
+kernel up through admission is dual-stack, but nothing hands a guest a v6
+address to configure: the allocator carves IPv4 leases from an IPv4 pool,
+and `assign_config` sends `v6: None`. Until that changes, the guest code
+this ADR describes is exercised only by its tests. See §"The allocation gap
+this leaves".
 **Complements ADR-036 (L3 TUN-over-vsock) and ADR-037 (the userspace
 socket datapath). Supersedes nothing; it removes IPv6 from ADR-036's
 deferred set and gives it a design.**
@@ -187,9 +196,75 @@ Four `xfrm4_tunnel_register`/`deregister` symbols appear, from IPv4 tunnel
 registration stubs rather than the transform framework. There is no XFRM
 state machine and no netlink interface for a guest to reach.
 
-**Still outstanding:** in-guest v6 address configuration alongside the
-existing v4 bring-up. The kernel can now speak v6; the guest agent does not
-yet assign an address.
+## In-guest configuration: rtnetlink, not ioctl
+
+The v4 bring-up assigns its address, netmask, peer, MTU, flags, and default
+route through `SIOCSIF*` / `SIOCADDRT` ioctls on an `AF_INET` socket. The
+obvious move was to mirror it on an `AF_INET6` socket. That road runs out
+halfway:
+
+- the v6 address ioctl takes `struct in6_ifreq`, a different shape from
+  `ifreq`, so `ifreq_for` and `set_sockaddr_in` do not generalise; and
+- the v6 route ioctl takes `struct in6_rtmsg`, whose fields `libc` declares
+  private. Constructing one means hand-rolling the struct anyway.
+
+So the ioctl path buys a partial mirror and still ends in hand-rolled
+kernel structs. rtnetlink carries both halves with one mechanism, and this
+crate already speaks it: the boot-time blackhole installer sends
+`RTM_NEWROUTE` over a synchronous `AF_NETLINK` socket. The IPv6 bring-up
+shares that socket type, its ABI constants, and its request framing rather
+than forking a second copy.
+
+Three requests, in this order:
+
+1. `RTM_NEWADDR` — the address and its prefix, with `IFA_F_NODAD`.
+   Duplicate Address Detection has no neighbour to find on a
+   point-to-point link whose only other end is the gateway, and it would
+   leave the address unusable while it looked.
+2. `RTM_NEWROUTE` — the peer as an on-link `/128` on the device. This is
+   the v6 analogue of `SIOCSIFDSTADDR`: without it the default route is
+   accepted only when the peer happens to fall inside the assigned prefix.
+3. `RTM_NEWROUTE` — `::/0` via the peer, naming the device explicitly.
+
+All three are built by a pure function that returns the exact wire bytes
+and the label each failure is reported under, so the order, the constants,
+and every field are asserted on any host — no socket, no privilege, no
+Linux. The platform-gated code only hands them to the kernel in turn. Each
+runs before `drop_privileges`, in the same phase as the v4 sequence:
+`CAP_NET_ADMIN` is not held one instruction longer than it already was.
+
+`EEXIST` on any of the three is success. An address and its routes are
+desired state, not write-once operations.
+
+**A v6-only `CONFIG` is refused, not half-applied.** The MTU, the link
+state, and the default route all hang off the v4 sequence, so a guest
+handed a v6-only assignment would come up looking configured with no route
+off its link. The allocator assigns a v4 pair with every lease, so this is
+a contradiction to name rather than a case to serve. IPv6 is additive here.
+
+## The allocation gap this leaves
+
+Nothing in production hands a guest a v6 address, so the guest code above
+is unreachable outside its tests. Four facts, each independently
+sufficient:
+
+- `AddressAllocator` carves fixed subnets out of an IPv4-only pool. There
+  is no v6 pool and no v6 arm.
+- The one lease constructor that can carry a v6 pair is fed by a config
+  whose only production producer hardcodes no v6 pair. Its comment still
+  says the workload kernel is built without IPv6, which this ADR
+  superseded.
+- `assign_config` reads the lease and sends `v6: None` regardless,
+  discarding `guest_v6` / `gateway_v6` even when the lease carries them —
+  though it does forward the same pair to the datapath, so the two
+  consumers of one lease already disagree.
+- `features::GRANTED_V1` is `0`, so the `IPV6` feature bit is never
+  granted, and the guest's `HELLO` never offers it.
+
+Closing this is a host-side decision about where v6 addresses come from —
+a pool to carve, or a pair supplied per machine — not a further guest
+change. Its capability-honesty consequence is recorded in ADR-037
+§"Known defects in what shipped".
 
 ## What this does not do
 

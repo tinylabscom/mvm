@@ -396,10 +396,12 @@ filename because `285` is used twice on main).
 
 ## Known defects in what shipped
 
-None of these is a design property. Two of the three are now closed and
+None of these is a design property. Two of the four are now closed and
 are kept here, struck through, with what closed them: an ADR that quietly
 deleted its own defect list would leave nothing to check the fix against.
-The third is open.
+The other two are open, and they are the same shape: a capability this
+backend advertises truthfully that nothing on the demand side can ask for
+or fully use.
 
 - ~~**A 50 ms latency floor on everything the host originates.**~~
   **Closed.** Every host socket this datapath opens — a half-open connect,
@@ -468,6 +470,35 @@ The third is open.
   bound. Until stream ingress lands here, `declared_ingress: true` remains
   an over-claim for TCP on this backend, and saying so is the point of this
   entry.
+- **`ipv6_flows: true` is honest about this backend and unreachable from
+  either end.** The declaration says the backend carries TCP and UDP over
+  IPv6, which it does — the datapath is family-generic, and admission
+  judges a v6 destination under rules that mirror v4. What is missing is
+  everything on both sides of it.
+
+  **Nothing can require it.** `required_capabilities` is populated in
+  exactly one place, from a constant literal that names `tcp`, `udp`,
+  `controlled_dns`, and `declared_ingress` and leaves the rest at `NONE`.
+  No plan field, no network policy, and no `NetdConfig` key maps into a
+  `ForwardingCapabilities`, so `ipv6_flows` cannot appear in a shortfall
+  and no admission decision can turn on it. `shortfall` checks it; nothing
+  ever asks.
+
+  **Nothing can use it.** The guest agent now configures a v6 address when
+  it is assigned one (ADR-038), but no host assigns one: the allocator has
+  no v6 pool, `assign_config` sends `v6: None` while forwarding the same
+  lease's v6 pair to the datapath, and `features::GRANTED_V1` is `0`. So a
+  guest never holds a v6 address, and `admit_outbound` refuses the family
+  for want of one before any capability is consulted.
+
+  This is not the `declared_ingress` failure mode — nothing is advertised
+  here that the backend would fail to serve if asked. It is a capability
+  with no demand-side expression and no supply of addresses, which makes
+  the declaration true and inert. It is recorded because "true and inert"
+  and "true and load-bearing" are indistinguishable from the constant
+  alone, and the next person to read `ipv6_flows: true` should not have to
+  re-derive which one it is. Closing it is ADR-038's allocation gap plus a
+  decision about whether a plan should be able to demand v6 at all.
 - ~~**`Gateway::poll_inbound` drains without a per-pass budget.**~~
   **Closed.** The drain is bounded by `MAX_INBOUND_PACKETS_PER_PASS` and
   reports `InboundDrain::Backlogged` when the budget is what stopped it, so

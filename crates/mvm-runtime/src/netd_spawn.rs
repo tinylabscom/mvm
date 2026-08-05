@@ -312,9 +312,10 @@ fn build_netd_config(
         uds_layout: layout,
         gateway_ipv4: lease.gateway,
         guest_ipv4: lease.guest,
-        // No IPv6 pair. The local launch path allocates none, and the
-        // workload kernel is built without IPv6, so a guest handed an
-        // address could not configure it.
+        // No IPv6 pair: the address allocator carves IPv4 leases out of an
+        // IPv4 pool, so there is none to pass on. The workload kernel and
+        // the guest agent both handle v6 now — the allocator is what is
+        // left.
         gateway_ipv6: None,
         guest_ipv6: None,
         mtu: spec.mtu,

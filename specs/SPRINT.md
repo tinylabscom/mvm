@@ -909,12 +909,20 @@ updates only its own entry below.
       real host listener per declared UDP mapping, bound on exactly the
       address the mapping named, with delivery still decided by
       `admit_inbound` rather than by the datapath. Declared **TCP** ingress
-      on this backend stays unserved and is recorded as the remaining
-      over-claim rather than smoothed over.
-      Remaining plan-287 workstreams (IPv6, benchmarking,
-      zero-copy, node-to-node transport, the node-control API, WSL2) are
-      untouched; the `utun` + PF backend is closed by ADR-039's rejection
-      rather than queued.
+      on this backend stays unserved and is recorded as an open over-claim
+      rather than smoothed over.
+      IPv6 (ADR-038) is now complete from the guest kernel up through
+      admission: the workload kernel carries `CONFIG_IPV6` without pulling
+      XFRM in, and the guest agent brings a v6 address, on-link peer,
+      default route and resolver up over rtnetlink whenever a `CONFIG`
+      carries a v6 half, in the same privileged phase as the v4 sequence.
+      **No host assigns one yet** — the allocator has no v6 pool and
+      `assign_config` sends `v6: None` — so `ipv6_flows: true` joins
+      declared TCP ingress in ADR-037's known defects as a capability that
+      is true of the backend and unreachable from either end. Remaining
+      plan-287 workstreams (benchmarking, zero-copy, node-to-node
+      transport, the node-control API, WSL2) are untouched; the `utun` + PF
+      backend is closed by ADR-039's rejection rather than queued.
 
 ---
 

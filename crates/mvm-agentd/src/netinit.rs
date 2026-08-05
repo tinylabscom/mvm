@@ -275,46 +275,21 @@ pub fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
 
 /// Netlink `RTM_NEWROUTE` wire encoding for blackhole routes.
 ///
-/// We replaced the async `rtnetlink` crate (which dragged
-/// `tokio` and `async-trait` into the guest closure) with a hand-rolled
-/// message over a synchronous `AF_NETLINK` socket. The message is ~36
-/// bytes of stable kernel UAPI; building it needs no dependency. The
-/// encoding
-/// lives off the `cfg(linux)` socket code so its byte layout is
-/// unit-tested on any host — and the module is gated to `linux`-or-`test`
-/// so a macOS production build (where only the Linux installer would call
-/// it) doesn't carry it as dead code.
+/// We replaced the async `rtnetlink` crate (which dragged `tokio` and
+/// `async-trait` into the guest closure) with a hand-rolled message over a
+/// synchronous `AF_NETLINK` socket. The message is 36 bytes of stable
+/// kernel UAPI; building it needs no dependency. The encoding lives off the
+/// `cfg(linux)` socket code so its byte layout is unit-tested on any host —
+/// and the module is gated to `linux`-or-`test` so a macOS production build
+/// (where only the Linux installer would call it) doesn't carry it as dead
+/// code.
 ///
-/// Constants are duplicated from `<linux/rtnetlink.h>` / `<linux/netlink.h>`
-/// — frozen kernel ABI, never renumbered. `constants_match_libc` (a
-/// Linux-only test) pins each to `libc`'s value so a typo can't slip past
-/// CI even though we don't link a netlink crate.
+/// The constants and the framing come from `crate::netlink`, which the L3
+/// agent's IPv6 bring-up shares.
 #[cfg(any(target_os = "linux", test))]
 mod wire {
+    pub use crate::netlink::wire::*;
     use std::net::Ipv4Addr;
-
-    /// `RTM_NEWROUTE` — create/modify a routing table entry.
-    pub const RTM_NEWROUTE: u16 = 24;
-    /// `NLM_F_REQUEST` — this message is a request.
-    pub const NLM_F_REQUEST: u16 = 0x01;
-    /// `NLM_F_CREATE` — create the object if it doesn't exist.
-    pub const NLM_F_CREATE: u16 = 0x400;
-    /// `NLM_F_ACK` — ask the kernel for an explicit ACK (an `nlmsgerr`
-    /// with `error == 0`), so the installer can confirm the route landed
-    /// instead of fire-and-forget.
-    pub const NLM_F_ACK: u16 = 0x04;
-    /// `AF_INET` — `rtm_family` for an IPv4 route.
-    pub const AF_INET_U8: u8 = 2;
-    /// `RT_TABLE_MAIN` — the main routing table.
-    pub const RT_TABLE_MAIN: u8 = 254;
-    /// `RTPROT_BOOT` — installed by the boot process (us, from `/init`).
-    pub const RTPROT_BOOT: u8 = 3;
-    /// `RT_SCOPE_UNIVERSE` — global scope (a blackhole applies everywhere).
-    pub const RT_SCOPE_UNIVERSE: u8 = 0;
-    /// `RTN_BLACKHOLE` — drop matching packets, no ICMP unreachable.
-    pub const RTN_BLACKHOLE: u8 = 6;
-    /// `RTA_DST` — the route's destination-prefix attribute.
-    pub const RTA_DST: u16 = 1;
 
     /// Encode an `RTM_NEWROUTE` netlink message installing a blackhole
     /// route for `addr/prefix_len`. Pure: returns the exact wire bytes
@@ -328,17 +303,13 @@ mod wire {
     /// `seq` is echoed back in the ACK so the caller can match request
     /// to reply on a socket it owns exclusively.
     pub fn encode_blackhole_route_v4(addr: Ipv4Addr, prefix_len: u8, seq: u32) -> Vec<u8> {
-        // Fixed total: no optional attributes, so we can stamp nlmsg_len
-        // up front rather than back-patch it. 16 + 12 + 8.
-        const TOTAL_LEN: u32 = 36;
-        let mut msg = Vec::with_capacity(TOTAL_LEN as usize);
-
-        // struct nlmsghdr — fields are host-endian per the netlink ABI.
-        msg.extend_from_slice(&TOTAL_LEN.to_ne_bytes()); // nlmsg_len
-        msg.extend_from_slice(&RTM_NEWROUTE.to_ne_bytes()); // nlmsg_type
-        msg.extend_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
-        msg.extend_from_slice(&seq.to_ne_bytes()); // nlmsg_seq
-        msg.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid — 0: kernel fills it
+        let mut msg = Vec::with_capacity(36);
+        push_nlmsghdr(
+            &mut msg,
+            RTM_NEWROUTE,
+            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK,
+            seq,
+        );
 
         // struct rtmsg — single-byte fields need no endian handling.
         msg.push(AF_INET_U8); // rtm_family
@@ -351,14 +322,12 @@ mod wire {
         msg.push(RTN_BLACKHOLE); // rtm_type — drop, no ICMP unreachable
         msg.extend_from_slice(&0u32.to_ne_bytes()); // rtm_flags
 
-        // struct rtattr { rta_len, rta_type } + 4-byte IPv4 destination.
         // The address is already network-order in `octets()`, which is
         // what the kernel wants in RTA_DST.
-        msg.extend_from_slice(&8u16.to_ne_bytes()); // rta_len = 4 (hdr) + 4 (addr)
-        msg.extend_from_slice(&RTA_DST.to_ne_bytes()); // rta_type
-        msg.extend_from_slice(&addr.octets()); // destination prefix
+        push_rtattr(&mut msg, RTA_DST, &addr.octets());
 
-        debug_assert_eq!(msg.len(), TOTAL_LEN as usize);
+        finish(&mut msg);
+        debug_assert_eq!(msg.len(), 36);
         msg
     }
 }
@@ -374,28 +343,16 @@ use wire::*;
 mod linux {
     use super::*;
 
+    use crate::netlink::NetlinkSocket;
     use std::io;
-    use std::mem::zeroed;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    /// `NLMSG_ERROR` — the kernel's ACK/error reply type. Carries an
-    /// `i32` error immediately after its `nlmsghdr`: `0` = success ACK,
-    /// `-errno` = failure.
-    const NLMSG_ERROR: u16 = 2;
 
     /// Production [`RouteInstaller`] that talks to the kernel directly
     /// over a `NETLINK_ROUTE` socket — synchronous `sendto`/`recv`, no
     /// runtime. Requires CAP_NET_ADMIN in the current
     /// user namespace; the binary runs as root from `/init` BEFORE the
     /// agent setpriv's down to uid 901.
-    ///
-    /// Owns the socket fd for its lifetime (`OwnedFd` closes it on
-    /// drop). `seq` numbers requests so each ACK can be matched to its
-    /// send on this exclusively-owned socket.
     pub struct RawNetlinkInstaller {
-        fd: OwnedFd,
-        seq: AtomicU32,
+        sock: NetlinkSocket,
     }
 
     impl RawNetlinkInstaller {
@@ -405,89 +362,8 @@ mod linux {
         /// maps this to a distinct exit code so `/init` can tell a
         /// systemic netlink failure from a per-route one.
         pub fn open() -> Result<Self, String> {
-            // SAFETY: socket() with constant args; we check the return.
-            let raw =
-                unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE) };
-            if raw < 0 {
-                return Err(format!(
-                    "open AF_NETLINK socket: {}",
-                    io::Error::last_os_error()
-                ));
-            }
-            // SAFETY: raw is a fresh, owned, valid fd (checked >= 0).
-            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-
-            // Bind with nl_pid = 0 so the kernel assigns a unique port
-            // id; nl_groups = 0 (we send unicast requests, want no
-            // multicast). zeroed() gives nl_pad = 0 as required.
-            // SAFETY: sockaddr_nl is a plain-data struct of integer fields, so
-            // an all-zero bit pattern is a valid, fully-initialized value.
-            let mut addr: libc::sockaddr_nl = unsafe { zeroed() };
-            addr.nl_family = libc::AF_NETLINK as u16;
-            // SAFETY: addr is a valid sockaddr_nl for the bind's len.
-            let rc = unsafe {
-                libc::bind(
-                    fd.as_raw_fd(),
-                    &addr as *const libc::sockaddr_nl as *const libc::sockaddr,
-                    size_of::<libc::sockaddr_nl>() as libc::socklen_t,
-                )
-            };
-            if rc < 0 {
-                return Err(format!(
-                    "bind AF_NETLINK socket: {}",
-                    io::Error::last_os_error()
-                ));
-            }
-            Ok(Self {
-                fd,
-                seq: AtomicU32::new(0),
-            })
-        }
-
-        /// Send one encoded request to the kernel (nl_pid = 0) and wait
-        /// for its ACK. Returns the kernel's `nlmsgerr` code: `0` for
-        /// success, otherwise the positive errno.
-        fn send_and_ack(&self, msg: &[u8]) -> Result<i32, String> {
-            let fd = self.fd.as_raw_fd();
-            // SAFETY: sockaddr_nl is a plain-data struct of integer fields, so
-            // an all-zero bit pattern is a valid, fully-initialized value.
-            let mut dst: libc::sockaddr_nl = unsafe { zeroed() };
-            dst.nl_family = libc::AF_NETLINK as u16; // nl_pid = 0 → the kernel
-            // SAFETY: msg is a valid slice; dst is a valid sockaddr_nl.
-            let sent = unsafe {
-                libc::sendto(
-                    fd,
-                    msg.as_ptr() as *const libc::c_void,
-                    msg.len(),
-                    0,
-                    &dst as *const libc::sockaddr_nl as *const libc::sockaddr,
-                    size_of::<libc::sockaddr_nl>() as libc::socklen_t,
-                )
-            };
-            if sent < 0 {
-                return Err(format!("netlink send: {}", io::Error::last_os_error()));
-            }
-
-            // The ACK is a single NLMSG_ERROR: nlmsghdr(16) + i32 error
-            // + the echoed request header. 1 KiB is ample.
-            let mut buf = [0u8; 1024];
-            // SAFETY: buf is a valid, sized destination.
-            let r = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
-            if r < 0 {
-                return Err(format!("netlink recv: {}", io::Error::last_os_error()));
-            }
-            let r = r as usize;
-            // Need at least nlmsghdr(16) + error(4) to read the verdict.
-            if r < 20 {
-                return Err(format!("short netlink ACK: {r} bytes"));
-            }
-            let nlmsg_type = u16::from_ne_bytes([buf[4], buf[5]]);
-            if nlmsg_type != NLMSG_ERROR {
-                return Err(format!("unexpected netlink reply type {nlmsg_type}"));
-            }
-            // nlmsgerr.error sits right after the 16-byte nlmsghdr.
-            let err = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
-            Ok(-err) // kernel reports -errno; flip to a positive errno (0 = ACK)
+            let sock = NetlinkSocket::open().map_err(|e| format!("open AF_NETLINK socket: {e}"))?;
+            Ok(Self { sock })
         }
     }
 
@@ -500,10 +376,13 @@ mod linux {
                     "internal: install_blackhole called with IPv6 cidr {cidr} (v6 not supported yet)"
                 ));
             };
-            // Start seq at 1 (0 reads as "no seq" in some tooling).
-            let seq = self.seq.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-            let msg = encode_blackhole_route_v4(v4.network(), v4.prefix_len(), seq);
-            match self.send_and_ack(&msg)? {
+            let msg =
+                encode_blackhole_route_v4(v4.network(), v4.prefix_len(), self.sock.next_seq());
+            match self
+                .sock
+                .send_and_ack(&msg)
+                .map_err(|e| format!("netlink exchange: {e}"))?
+            {
                 0 => Ok(()),
                 // EEXIST: the blackhole is already installed. The route
                 // is desired state, not a write-once op — idempotent Ok.
@@ -770,25 +649,8 @@ mod tests {
         assert_eq!(u32::from_ne_bytes(msg[8..12].try_into().unwrap()), 7, "seq");
     }
 
-    /// We duplicate the netlink constants from `<linux/rtnetlink.h>`
-    /// rather than depend on a netlink crate (dep budget).
-    /// This Linux-only test pins each one to `libc`'s value so a typo
-    /// can't reach the kernel — it runs on CI, where libc exposes the
-    /// real UAPI numbers. (macOS dev hosts skip it; libc has no netlink.)
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn constants_match_libc() {
-        assert_eq!(RTM_NEWROUTE, libc::RTM_NEWROUTE);
-        assert_eq!(NLM_F_REQUEST, libc::NLM_F_REQUEST as u16);
-        assert_eq!(NLM_F_CREATE, libc::NLM_F_CREATE as u16);
-        assert_eq!(NLM_F_ACK, libc::NLM_F_ACK as u16);
-        assert_eq!(AF_INET_U8, libc::AF_INET as u8);
-        assert_eq!(RT_TABLE_MAIN, libc::RT_TABLE_MAIN);
-        assert_eq!(RTPROT_BOOT, libc::RTPROT_BOOT);
-        assert_eq!(RT_SCOPE_UNIVERSE, libc::RT_SCOPE_UNIVERSE);
-        assert_eq!(RTN_BLACKHOLE, libc::RTN_BLACKHOLE);
-        assert_eq!(RTA_DST, libc::RTA_DST);
-    }
+    // The netlink constants this encoder uses are pinned to libc's values
+    // in `crate::netlink`, where they now live.
 
     // ────────────────────────────────────────────────────────────
     // Console-scrape parser tests

@@ -77,6 +77,10 @@ pub mod lifecycle_hooks;
 /// `RawNetlinkInstaller` (a synchronous `AF_NETLINK` socket via libc)
 /// is Linux-only and gated inside the module.
 pub mod netinit;
+/// Shared rtnetlink plumbing: the kernel ABI constants, the request
+/// framing, and the synchronous socket that both `netinit`'s blackhole
+/// routes and the L3 agent's IPv6 bring-up send through.
+pub mod netlink;
 pub mod probes;
 /// Restore-time guest wall-clock synchronization.
 pub mod restore_clock;

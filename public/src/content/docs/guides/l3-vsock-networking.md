@@ -223,12 +223,22 @@ address is empty, because a point-to-point IP interface has none.
 
 ## Limits in this version
 
-- IPv6 is admitted and carried by the host, but **the workload kernel does
-  not yet configure a v6 address**, so a guest cannot originate v6 traffic
-  today. The host-side half — admission, the address-class rules, and flow
-  translation — has shipped; the guest half has not. An IPv6 destination is
-  therefore unreachable from a guest for now, and unreachable rather than
-  slow.
+- **IPv6 is complete except for the address assignment, which is host-side.**
+  The workload kernel speaks IPv6; admission judges a v6 destination under
+  rules that mirror v4; and the guest agent configures a v6 address, its
+  point-to-point peer, a default route through that peer, and the assigned
+  resolver whenever the host's `CONFIG` carries a v6 half. It does that
+  over rtnetlink, in the same setup phase as the v4 bring-up and before
+  privileges are dropped, so a dual-stack assignment costs the guest no
+  extra privilege and no extra process.
+
+  What no host does yet is *assign* one. The address allocator carves IPv4
+  leases out of an IPv4 pool, and the assignment the gateway sends is
+  v4-only, so every guest today receives a v4-only `CONFIG` and comes up
+  exactly as it did before. An IPv6 destination therefore remains
+  unreachable from a guest — but the missing piece is now a host-side
+  allocation, not a guest that could not use the result. A `CONFIG`
+  carrying a v6 half and no v4 half is refused rather than half-applied.
 - Embedded-v4 addresses do not bypass the v4 rules. A v4-mapped,
   v4-compatible, NAT64, or 6to4 address is collapsed to the v4 address it
   carries and then judged by the whole v4 policy, so link-local metadata and

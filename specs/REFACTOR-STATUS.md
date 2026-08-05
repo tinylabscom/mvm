@@ -104,8 +104,9 @@ for detailed scope and acceptance criteria.
         46,673,216 bytes (44.51 MiB). `declared_ingress: true` is honest for
         datagrams; declared **TCP** ingress binds nothing here and stays
         recorded as an over-claim
-  - [~] WS3 (#2116) — IPv6 as a first-class family (ADR-038). **Host side
-        landed; the guest kernel is untouched and unmeasured.** The fuzz
+  - [~] WS3 (#2116) — IPv6 as a first-class family (ADR-038). **Admission,
+        the guest kernel, and in-guest configuration have all landed;
+        host-side v6 *allocation* is what is left.** The fuzz
         gate that blocked the admission change is closed, so the guard now
         admits v6. One `embedded_v4` extraction runs ahead of every other
         rule and hands its result to the entire existing v4 class check —
@@ -119,11 +120,26 @@ for detailed scope and acceptance criteria.
         The userspace backend carries v6 flows and still cannot emit an
         arbitrary v6 packet, so `ipv6_flows: true` with
         `arbitrary_ipv6: false`; `FULL_L3_V4` is renamed `FULL_L3`.
-        **Remaining: `CONFIG_IPV6` in the guest kernel**, which ADR-038
-        requires be measured rather than assumed — work is in flight to
-        shrink guest kernels to the virtual hardware floor and adding it
-        blind would silently reverse part of that. Until that measurement
-        is taken and the guest is configured, no guest can originate v6
+        `CONFIG_IPV6` landed in the workload kernel, measured at +200,704 B
+        and carrying no IPsec — the v6-IPsec options that drag XFRM in are
+        disabled explicitly, so `XFRM`/`XFRM_ALGO`/`XFRM_USER` stay in the
+        required-disable set and their absence is proven every build. The
+        guest agent then grew the v6 half of its bring-up: address, on-link
+        peer, default route and resolver over rtnetlink — chosen over an
+        `AF_INET6` ioctl mirror because `in6_rtmsg`'s fields are private in
+        `libc`, so that road ends in hand-rolled structs anyway. The
+        requests are built by a pure function, so their order and every
+        field are asserted off Linux; skipping the address request, the
+        agent's v6 mapping, or the peer in the default route each reddens a
+        distinct test. It runs in the same privileged phase as the v4
+        sequence, so `CAP_NET_ADMIN` is held no longer than before, and a
+        v6-only CONFIG is refused rather than half-applied.
+        **Remaining: host-side v6 allocation.** No production path assigns
+        a v6 address — the allocator has no v6 pool, `assign_config` sends
+        `v6: None` while forwarding the same lease's v6 pair to the
+        datapath, and `GRANTED_V1` is `0` — so no guest can originate v6
+        yet, and `ipv6_flows: true` is recorded in ADR-037's known defects
+        as true but unreachable from either end
   - [x] WS4 (#2117) — benchmarked 2026-08-04; **multi-queue rejected, no
         implementation code**, which is the intended outcome when the
         numbers do not support the work. Six `#[ignore]`d benchmarks extend
