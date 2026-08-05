@@ -93,8 +93,33 @@ user or an auditor.
   diagnostic material there is — lands only in the unredacted file. The moment
   most worth reading is the one least protected.
 
-  Run the same `PiiRedactor` over console bytes on the read path, before they
-  reach a consumer. Read-side, so the file the VMM owns is untouched.
+  Run redaction over console bytes on the read path, before they reach a
+  consumer. Read-side, so the file the VMM owns is untouched.
+
+  **"Run the same `PiiRedactor`" is not directly possible, and that is the
+  work.** `PiiRedactor` lives in `mvm-hostd::supervisor::pii_redactor` and is
+  welded to that crate's egress inspector — it implements `Inspector`, and
+  carries `async_trait`, `InspectorVerdict`, `RequestCtx`. The console readers
+  are `mvm_core::stream_client::{console, output}`, and `mvm-client` reads
+  through them too. Both sit *below* `mvm-hostd`, so neither can name the type.
+
+  Injecting a trait from `mvm-cli` covers only the CLI. `mvm-client` reads
+  consoles as well and cannot reach `mvm-hostd` either, so that shape leaves a
+  consumer unredacted — the "correct, tested, unreachable" failure WS4 exists
+  to catch, inverted.
+
+  So the shape is: extract the pattern-matching core of `PiiRedactor` — the
+  `RegexSet` machinery and its rule names, which have no inspector dependency —
+  into `mvm-core` beside the existing `ingress_redaction` primitive, leave the
+  `Inspector` impl in `mvm-hostd` wrapping it, and have `ConsoleTail` hold it
+  non-optionally so an unredacted tail cannot be constructed. `mvm-core`
+  already carries `regex`, so the move adds no dependency.
+
+  Two things to get right. `OutputRequest` is `Copy`; adding an `Arc` field
+  breaks that across every construction site, so the redactor should travel
+  beside it rather than inside it. And the seam should be fallible in the same
+  shape as `mvm-hostd`'s stream `redact` seam, so a detector that can give up
+  fails closed rather than emitting raw bytes.
 
   Keep the existing notice honest: it currently tells an operator the console
   merges streams, is unchained, and is unredacted. When the third stops being
