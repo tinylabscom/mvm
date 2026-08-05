@@ -1,6 +1,6 @@
 use mvm_cli::host_binaries::{
     embedded::EMBEDDED,
-    manifest::{HOST_BINARIES, HostBinary},
+    manifest::{BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES, HostBinary},
 };
 
 #[test]
@@ -41,4 +41,14 @@ fn embedded_bootstrap_support_binaries_include_egress_client() {
             .iter()
             .any(|binary| binary.name == "mvm-egress-client")
     );
+}
+
+#[test]
+fn egress_client_manifest_selects_the_addons_feature() {
+    let binary = BOOTSTRAP_SUPPORT_BINARIES
+        .iter()
+        .find(|binary| binary.name == "mvm-egress-client")
+        .expect("bootstrap manifest must include mvm-egress-client");
+    assert_eq!(binary.package, "mvm-agentd");
+    assert_eq!(binary.features, "addons");
 }

@@ -95,7 +95,9 @@ fn build_local_workload_kernel() -> Result<String> {
         "No cached workload kernel. Building it once in Stage 0; the first run can take several minutes, then warm starts use the cache.",
     );
     let path = build_kernel_via_stage0(KernelVariant::Workload, false)
-        .context("build the dm-verity-capable workload kernel")?;
+        .context(
+            "build the dm-verity-capable workload kernel; retry with `mvmctl kernel build --which workload` or `just kernel-workload`",
+        )?;
     let path = path.display().to_string();
     ui::success(&format!(
         "Workload kernel built and cached. Future machine runs will skip this step: {path}"
