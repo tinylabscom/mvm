@@ -41,3 +41,13 @@ symbol = "grants_input_for"
 file = "crates/mvm-contract/src/stream/input.rs"
 dormant = false
 why = "The input plane's default-deny check. Losing its caller reopens claim 17's grant."
+
+[[control]]
+symbol = "EdgeConnector"
+file = "crates/mvm-hostd/src/stream/edge_connector.rs"
+dormant = true
+why = """
+Pumps one workload's output into another's stdin. Caller-driven by design, and \
+the caller is mvmd: mvm has no fleet and so nothing here declares an edge to \
+drive. Covered by its own integration tests against the real broker, reader \
+and gate."""
