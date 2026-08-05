@@ -45,6 +45,7 @@ base.mkKernel {
     "VIRTIO_FS"
     "FUSE_FS"
     "TUN"
+    "IPV6"
   ]
   ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_SIZE" ];
   # Workload-only disables. Each drop lives here (not in shared base.nix)
@@ -110,6 +111,21 @@ base.mkKernel {
   #                 normal sub-second variance. Callers can still request the
   #                 performance-oriented build explicitly for experiments.
   extraDisables = [
+    # IPv6 itself selects only the SHA-1 library; every one of these is an
+    # IPsec-for-v6 option that `olddefconfig` would enable alongside it and
+    # that drags in the XFRM transform framework. None is reachable by a
+    # workload — the guest has one point-to-point link and no tunnels — and
+    # XFRM/XFRM_ALGO/XFRM_USER stay in the required-disable set, so the
+    # config guard is what proves they are absent rather than a comment.
+    "IPV6_MIP6"
+    "IPV6_VTI"
+    "INET6_AH"
+    "INET6_ESP"
+    "INET6_ESP_OFFLOAD"
+    "INET6_ESPINTCP"
+    "INET6_IPCOMP"
+    "INET6_XFRM_TUNNEL"
+    "INET6_TUNNEL"
     "NETFILTER"
     "BLK_DEV_MD"
     "BLK_DEV_LOOP"

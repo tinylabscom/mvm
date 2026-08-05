@@ -435,7 +435,6 @@ let
   baseDisables = [
     "MODULES" # everything built-in; no /lib/modules tree
     "MODULE_SIG" # NOP without MODULES; explicit
-    "IPV6" # no v6 path in any current mvm VM
     # mvm's audit path is the userspace, chain-signed host-services flow
     # (`host.audit.v1`, hostd, verifier), not Linux kernel audit or audit
     # netlink. The guest/runtime path and the builder path do not ship

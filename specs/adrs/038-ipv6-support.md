@@ -1,6 +1,7 @@
 # ADR-038 — IPv6 as a first-class address family
 
-**Status: Accepted — host side landed 2026-08-04; guest kernel still open**
+**Status: Accepted — host side and guest kernel landed 2026-08-04;
+in-guest address configuration outstanding**
 **Date: 2026-08-02**
 
 **What shipped.** The admission guard admits IPv6; `embedded_v4` extracts
@@ -11,13 +12,15 @@ analogues; and the capability seam carries `ipv6_flows` separately from
 *before* relaxing the guard — was honoured: the fuzz target and its IPv6
 corpus landed first.
 
-**What has not, and why it is not merely pending.** `CONFIG_IPV6` in the
-workload kernel. The delta was measured on 2026-08-04 and the build is
-**refused**: IPv6 selects the XFRM/IPsec framework, which sits in the
-required disable set. See §"`CONFIG_IPV6` in the workload kernel" — the
-question turns out to be a security-posture one, not a size one. The host
-admits and carries v6 regardless; a guest cannot originate it, which is a
-gap in reach rather than in safety.
+**The guest kernel too.** `CONFIG_IPV6=y` in the workload kernel, at a
+measured cost of 200,704 bytes and no IPsec — the IPsec-for-v6 options that
+would have dragged XFRM in are disabled explicitly, and the required-disable
+guard proves their absence on every build. See §"`CONFIG_IPV6` in the
+workload kernel".
+
+**What has not.** In-guest v6 address configuration alongside the existing
+v4 bring-up. The kernel can speak v6; the agent does not yet assign an
+address, so a guest still cannot originate it.
 **Complements ADR-036 (L3 TUN-over-vsock) and ADR-037 (the userspace
 socket datapath). Supersedes nothing; it removes IPv6 from ADR-036's
 deferred set and gives it a design.**
@@ -148,53 +151,45 @@ un-ships.
 
 ## `CONFIG_IPV6` in the workload kernel
 
-**Measured 2026-08-04 on a Linux 6.8 host, and the framing below is wrong.**
-This was posed as a size-and-boot-time question. It is not. Enabling
-`CONFIG_IPV6` is refused outright by the kernel-config guard:
+**Built and measured on a Linux 6.12.100 kernel, 2026-08-04.** IPv6 is
+enabled in the workload kernel and costs no IPsec.
+
+| | baseline | with IPv6 | delta |
+|---|---|---|---|
+| `bzImage` | 4,072,448 B | 4,273,152 B | **+200,704 B (+4.9%)** |
+| built-in symbols | 72,523 | 75,208 | +2,685 |
+
+That is the "few hundred kilobytes" this ADR anticipated, so IPv6 lands
+unconditionally rather than becoming an image variant.
+
+**What it took, and the false start worth recording.** The first attempt
+enabled `IPV6` alone and the config guard refused the build:
 
 ```
 ERROR: required kernel disables were reverted by olddefconfig: XFRM_ALGO XFRM
 ```
 
-**Corrected the same day, after reading the Kconfig rather than inferring
-from the failure.** Core IPv6 selects only `CRYPTO_LIB_SHA1`. What pulls
-XFRM in is two *optional* sub-features that `olddefconfig` enabled
-alongside it — `IPV6_MIP6` (IPv6 Mobility, RFC 3775) and `IPV6_VTI`
-(virtual tunneling), both defaulting off and neither part of IPv6.
+The initial reading — that IPv6 *requires* IPsec — was wrong. Core IPv6
+selects only `CRYPTO_LIB_SHA1`. What `olddefconfig` enables alongside it
+is the IPsec-for-v6 family, and those select XFRM:
 
-So IPv6 costs no IPsec. Disabling those two beside enabling `IPV6` keeps
-`XFRM`, `XFRM_ALGO` and `XFRM_USER` out, and the guard stays the proof of
-it: if a later option drags XFRM back, the build fails exactly as it did
-here. The guard caught a real expansion — just not the one first
-attributed to it.
+`IPV6_MIP6`, `IPV6_VTI`, `INET6_AH`, `INET6_ESP`, `INET6_ESP_OFFLOAD`,
+`INET6_ESPINTCP`, `INET6_IPCOMP`, `INET6_XFRM_TUNNEL`, `INET6_TUNNEL`
 
-A size measurement alone would have missed this: the kernel builds, it is
-a few hundred kilobytes larger exactly as predicted, and it quietly carries
-the XFRM stack into every guest. The guard is what caught it.
+Disabling those beside enabling `IPV6` builds cleanly. The resulting config
+carries `CONFIG_IPV6=y` and `# CONFIG_XFRM_USER is not set`, and the guard
+passes — which is the point: `XFRM`, `XFRM_ALGO` and `XFRM_USER` stay in
+the *required* disable set, so their absence is proven on every build
+rather than asserted in a comment. If a later option drags XFRM back, the
+build fails exactly as it did here.
 
-The decision is therefore the straightforward one this ADR originally
-posed: enable `IPV6` in the workload kernel, disable `IPV6_MIP6` and
-`IPV6_VTI` beside it, and record the size and boot deltas as a known
-accepted cost. No security property changes, and the required-disable set
-is untouched.
+Four `xfrm4_tunnel_register`/`deregister` symbols appear, from IPv4 tunnel
+registration stubs rather than the transform framework. There is no XFRM
+state machine and no netlink interface for a guest to reach.
 
-The host side is unaffected: it admits and carries v6 regardless. A guest
-simply cannot originate it, which is a gap in reach rather than in safety.
-
-The original framing, retained for the record:
-
-The original blocker is real but small: the guest kernel needs the option
-compiled in, plus in-guest address configuration alongside the existing v4
-bring-up.
-
-It carries a coordination cost. Work is in flight to shrink guest kernels
-to the virtual hardware floor, and adding `CONFIG_IPV6` silently reverses
-part of that if landed carelessly. So the kernel change is **measured, not
-assumed**: build both, record the image-size and boot-time delta in the
-implementation plan, and land it as a known accepted cost rather than an
-unexplained regression. If the delta proves material rather than the few
-hundred kilobytes expected, IPv6 becomes a guest-image variant instead of
-an unconditional default.
+**Still outstanding:** in-guest v6 address configuration alongside the
+existing v4 bring-up. The kernel can now speak v6; the guest agent does not
+yet assign an address.
 
 ## What this does not do
 
