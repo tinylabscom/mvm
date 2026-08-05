@@ -650,13 +650,13 @@ impl LocalBackend {
                 expires_at: expires_at_from_ttl(request.ttl_seconds),
                 ..Default::default()
             },
-            plan_id: started.admitted.plan_id.0.clone(),
+            plan_id: started.admitted.plan_id().0.clone(),
             mode: if transient {
                 LifecycleMode::Transient
             } else {
                 LifecycleMode::Persistent
             },
-            plan: started.admitted.plan,
+            plan: started.admitted.plan().clone(),
         }
     }
 }

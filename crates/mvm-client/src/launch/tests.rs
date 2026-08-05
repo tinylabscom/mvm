@@ -10,11 +10,11 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::secret::AuthType;
 use crate::secret::{SecretService, SecretValueInput};
 use mvm_core::client::MvmClient;
 use mvm_core::util::test_env::TestEnv;
 use mvm_hostd::keyholder::{FileBindingStore, SecretBindingMeta};
-use mvm_protocol::ir::AuthType;
 
 /// Isolated `MVM_HOME` for every test in this module. `TestEnv` serializes
 /// process-wide env mutation behind its global lock.

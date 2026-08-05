@@ -389,9 +389,9 @@ mod tests {
             },
         )
         .expect("admitted boot with a volume");
-        assert_eq!(started.admitted.plan.shares.len(), 1);
-        assert_eq!(started.admitted.plan.shares[0].guest_path, "/data/work");
-        assert!(started.admitted.plan.post_run.destroy_on_exit);
+        assert_eq!(started.admitted.plan().shares.len(), 1);
+        assert_eq!(started.admitted.plan().shares[0].guest_path, "/data/work");
+        assert!(started.admitted.plan().post_run.destroy_on_exit);
 
         let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
         assert!(chain.contains("plan.admitted"), "got: {chain}");
