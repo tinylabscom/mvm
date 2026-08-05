@@ -64,8 +64,9 @@ mod builder_backend_attempt_order_tests {
 
 #[cfg(test)]
 mod default_microvm_tests {
+    use super::default_microvm::default_workload_kernel_source;
     use super::{
-        WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
+        KernelSource, WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
         missing_workload_kernel_message, resolve_workload_kernel_bootstrap,
     };
 
@@ -155,7 +156,16 @@ mod default_microvm_tests {
     }
 
     #[test]
-    fn missing_workload_kernel_message_points_to_explicit_create_commands() {
+    fn source_checkout_defaults_to_local_build_and_installed_binary_to_download() {
+        assert_eq!(default_workload_kernel_source(true), KernelSource::Compile);
+        assert_eq!(
+            default_workload_kernel_source(false),
+            KernelSource::Download
+        );
+    }
+
+    #[test]
+    fn missing_workload_kernel_message_explains_automatic_and_manual_paths() {
         let msg =
             missing_workload_kernel_message("/cache/builder-vm/aarch64/kernels/workload/vmlinux");
         assert!(msg.contains("mvmctl kernel build --which workload"));

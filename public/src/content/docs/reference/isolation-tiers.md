@@ -7,6 +7,24 @@ Untrusted-code isolation today splits into two tiers. This page describes both
 on their own terms, states which one mvm is, and gives the honest tradeoff so
 you can pick the right one for a given workload.
 
+## High-level summary
+
+mvm is the choice when the workload needs **real Linux**: an unmodified OCI
+image, arbitrary native dependencies, multiple processes, a filesystem, or
+ordinary Linux syscalls. Each run gets a full guest kernel and microVM boundary,
+with signed admission, default-deny networking, private writable state, and
+explicit host mounts.
+
+A no-OS function tier is the choice when the workload already fits a restricted
+ABI and the absolute lowest cold-start latency matters more than general Linux
+compatibility. It avoids booting an operating system, but that speed comes with
+a narrower execution model.
+
+The practical rule is simple: **choose mvm for compatibility and isolation;
+choose the no-OS tier for constrained pure functions at extreme scale; compose
+both when an application has both shapes of work.** Warm mvm starts reduce the
+latency difference without giving up the full Linux environment.
+
 ## The two tiers
 
 **Full-OS microVM** — what mvm runs. A real Linux kernel plus userspace,

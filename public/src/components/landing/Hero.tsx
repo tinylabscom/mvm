@@ -2,17 +2,11 @@ import { useState, useEffect } from "react";
 import { Button } from "../ui/button";
 
 const lines = [
-  { text: "$ mvmctl dev", delay: 0 },
-  { text: "  Detecting platform... macOS (Apple Silicon)", delay: 800, dim: true },
-  { text: "  Backend: libkrun (Apple Hypervisor.framework)", delay: 1400, dim: true },
-  { text: "  Ready.", delay: 2000, accent: true },
-  { text: "", delay: 2400 },
-  { text: "$ mvmctl build --flake .", delay: 2800 },
-  { text: "  Building rootfs via Nix...", delay: 3400, dim: true },
-  { text: "  rootfs: 48.2 MB (squashfs)", delay: 4000, accent: true },
-  { text: "", delay: 4400 },
-  { text: "$ mvmctl up --flake . --cpus 2", delay: 4800 },
-  { text: "  Booted in 1.2s. Health: OK", delay: 5400, accent: true },
+  { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
+  { text: '  python -c "print(2 + 2)"', delay: 500 },
+  { text: "  Pulling image and preparing a private root...", delay: 1200, dim: true },
+  { text: "  Booted. Own kernel. Network: deny-all.", delay: 2500, accent: true },
+  { text: "  Warm microVM start: milliseconds.", delay: 3100, accent: true },
 ];
 
 function TerminalAnimation() {
@@ -57,9 +51,9 @@ function TerminalAnimation() {
 }
 
 const stats = [
-  { value: "<2s", label: "snapshot boot" },
-  { value: "~50MB", label: "rootfs images" },
-  { value: "0", label: "SSH required" },
+  { value: "ms", label: "warm microVM starts" },
+  { value: "1", label: "kernel per workload" },
+  { value: "0", label: "SSH or daemon" },
 ];
 
 export function Hero() {
@@ -93,16 +87,17 @@ export function Hero() {
             </div>
 
             <h1 className="text-4xl font-bold leading-[1.1] tracking-tight text-title sm:text-5xl xl:text-6xl">
-              Firecracker microVMs,
+              Local. A real microVM
               <br />
               <span className="bg-linear-to-r from-accent via-nix to-accent bg-clip-text text-transparent">
-                without the toil.
+                in milliseconds.
               </span>
             </h1>
 
             <p className="max-w-lg text-lg leading-relaxed text-body">
-              Build reproducible VM images with Nix. Boot them in under 2 seconds
-              on macOS or Linux. No SSH. No containers. Just workloads.
+              Run untrusted code behind a real hypervisor with one command. The
+              first run prepares the image and kernel; warm runs start in
+              milliseconds. No SSH. No daemon. No container fallback.
             </p>
 
             {/* Install command */}

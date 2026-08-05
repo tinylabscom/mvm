@@ -11,6 +11,13 @@ use host_binaries_toolchain::{
     workspace_root_from_manifest_dir,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmbeddedSourceBinary {
+    package: String,
+    name: String,
+    features: String,
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = workspace_root_from_manifest_dir(&manifest_dir);
@@ -43,11 +50,21 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MVM_EMBED_RUSTC");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_ZIG");
 
-    // HOST_BINARIES (installed into the builder/dev VM rootfs) + SEED_BINARIES
-    // (host-side only, e.g. the Stage 0 nix-seed's /init). Both are
-    // `mvm-build` `[[bin]]`s; both get cross-compiled + embedded the same way.
-    let mut manifest = read_rust_manifest(&workspace_root);
-    manifest.extend(read_seed_binaries(&workspace_root));
+    // HOST_BINARIES (installed into the builder/dev VM rootfs), SEED_BINARIES
+    // (host-side only, e.g. the Stage 0 nix-seed's /init), and bootstrap
+    // support binaries all get cross-compiled + embedded. The support list
+    // includes binaries owned by crates other than mvm-build, so retain the
+    // package name alongside each binary instead of assuming one package.
+    let mut manifest: Vec<EmbeddedSourceBinary> = read_rust_manifest(&workspace_root)
+        .into_iter()
+        .chain(read_seed_binaries(&workspace_root))
+        .map(|name| EmbeddedSourceBinary {
+            package: "mvm-build".to_string(),
+            name,
+            features: String::new(),
+        })
+        .collect();
+    manifest.extend(read_bootstrap_support_binaries(&workspace_root));
     let mut entries = Vec::new();
 
     // The host-vm bins are statically musl-linked and embedded for the host
@@ -62,18 +79,22 @@ fn main() {
     // plain-`cargo build` fast-path was once tried on the false premise that
     // the bins are C-free; it broke CI, which has no musl-gcc.)
 
-    for name in manifest.iter() {
-        let out_file = bins_out.join(name);
+    for binary in &manifest {
+        let out_file = bins_out.join(&binary.name);
         run_cargo_zigbuild(
-            &workspace_root,
-            &host_target_dir,
-            name,
-            &pin.target,
-            &pin.zig,
-            &out_file,
+            ZigbuildRequest::default()
+                .with_root(&workspace_root)
+                .with_target_dir(&host_target_dir)
+                .with_package(&binary.package)
+                .with_binary(&binary.name)
+                .with_features(&binary.features)
+                .with_target(&pin.target)
+                .with_zig_pin(&pin.zig)
+                .with_output(&out_file)
+                .build(),
         );
         let sha = sha256_hex(&out_file);
-        entries.push((name.clone(), out_file.clone(), sha));
+        entries.push((binary.name.clone(), out_file.clone(), sha));
         println!(
             "cargo:rerun-if-changed={}",
             workspace_root.join("crates/mvm-build/src/bin").display()
@@ -258,6 +279,42 @@ fn read_seed_binaries(root: &Path) -> Vec<String> {
     read_quoted_strings_block(&src, "SEED_BINARIES")
 }
 
+/// Parse bootstrap support binaries from `manifest.rs`. These binaries are
+/// mounted under `/mvm-bins` before the builder rootfs has its normal runtime
+/// contents, so they must be embedded even though they are not installed into
+/// the steady-state VM image.
+fn read_bootstrap_support_binaries(root: &Path) -> Vec<EmbeddedSourceBinary> {
+    let src =
+        std::fs::read_to_string(root.join("crates/mvm-cli/src/host_binaries/manifest.rs")).unwrap();
+    parse_bootstrap_support_binaries(&src)
+}
+
+fn parse_bootstrap_support_binaries(src: &str) -> Vec<EmbeddedSourceBinary> {
+    let packages = read_quoted_field_block(src, "BOOTSTRAP_SUPPORT_BINARIES", "package:");
+    let names = read_quoted_field_block(src, "BOOTSTRAP_SUPPORT_BINARIES", "name:");
+    let features = read_quoted_field_block(src, "BOOTSTRAP_SUPPORT_BINARIES", "features:");
+    assert_eq!(
+        packages.len(),
+        names.len(),
+        "bootstrap support binary package/name entries must be paired"
+    );
+    assert_eq!(
+        packages.len(),
+        features.len(),
+        "bootstrap support binary package/name/features entries must be paired"
+    );
+    packages
+        .into_iter()
+        .zip(names)
+        .zip(features)
+        .map(|((package, name), features)| EmbeddedSourceBinary {
+            package,
+            name,
+            features,
+        })
+        .collect()
+}
+
 fn read_manifest_section<'a>(src: &'a str, name: &str) -> &'a str {
     let start = src
         .find(name)
@@ -286,56 +343,138 @@ fn read_quoted_strings_block(src: &str, section: &str) -> Vec<String> {
     out
 }
 
-/// Extract the first double-quoted string on `line` that appears after `key`.
-fn run_cargo_zigbuild(
-    root: &Path,
-    target_dir: &Path,
-    pkg: &str,
-    target: &str,
-    zig_pin: &str,
-    out: &Path,
-) {
-    eprintln!("[build.rs] cargo zigbuild --release --target {target} -p mvm-build --bin {pkg}");
+#[derive(Default)]
+struct ZigbuildRequest<'a> {
+    root: Option<&'a Path>,
+    target_dir: Option<&'a Path>,
+    package: Option<&'a str>,
+    binary: Option<&'a str>,
+    features: Option<&'a str>,
+    target: Option<&'a str>,
+    zig_pin: Option<&'a str>,
+    output: Option<&'a Path>,
+}
+
+impl<'a> ZigbuildRequest<'a> {
+    fn with_root(mut self, root: &'a Path) -> Self {
+        self.root = Some(root);
+        self
+    }
+
+    fn with_target_dir(mut self, target_dir: &'a Path) -> Self {
+        self.target_dir = Some(target_dir);
+        self
+    }
+
+    fn with_package(mut self, package: &'a str) -> Self {
+        self.package = Some(package);
+        self
+    }
+
+    fn with_binary(mut self, binary: &'a str) -> Self {
+        self.binary = Some(binary);
+        self
+    }
+
+    fn with_features(mut self, features: &'a str) -> Self {
+        self.features = Some(features);
+        self
+    }
+
+    fn with_target(mut self, target: &'a str) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    fn with_zig_pin(mut self, zig_pin: &'a str) -> Self {
+        self.zig_pin = Some(zig_pin);
+        self
+    }
+
+    fn with_output(mut self, output: &'a Path) -> Self {
+        self.output = Some(output);
+        self
+    }
+
+    fn build(self) -> ZigbuildSpec<'a> {
+        ZigbuildSpec {
+            root: self.root.expect("zigbuild request root"),
+            target_dir: self.target_dir.expect("zigbuild request target dir"),
+            package: self.package.expect("zigbuild request package"),
+            binary: self.binary.expect("zigbuild request binary"),
+            features: self.features.expect("zigbuild request features"),
+            target: self.target.expect("zigbuild request target"),
+            zig_pin: self.zig_pin.expect("zigbuild request Zig pin"),
+            output: self.output.expect("zigbuild request output"),
+        }
+    }
+}
+
+struct ZigbuildSpec<'a> {
+    root: &'a Path,
+    target_dir: &'a Path,
+    package: &'a str,
+    binary: &'a str,
+    features: &'a str,
+    target: &'a str,
+    zig_pin: &'a str,
+    output: &'a Path,
+}
+
+fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
+    eprintln!(
+        "[build.rs] cargo zigbuild --release --target {} -p {} --bin {}",
+        spec.target, spec.package, spec.binary
+    );
     // We need the rustup-managed cargo, not the Homebrew one. The Homebrew
     // cargo sets RUSTC=rustc which doesn't have the cross targets, and that
     // value propagates into the nested `cargo build` that cargo-zigbuild
     // spawns. Using the rustup cargo avoids that.
-    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
+    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(spec.target));
     let mut cmd = Command::new(&cargo);
     cmd.args([
         "zigbuild",
         "--release",
         "--target",
-        target,
+        spec.target,
         "-p",
-        "mvm-build",
+        spec.package,
         "--bin",
-        pkg,
-    ])
-    .env("RUSTC", &rustc)
-    // Dedicated target dir — see the deadlock note in main().
-    .env("CARGO_TARGET_DIR", target_dir)
-    .env_remove("RUSTUP_TOOLCHAIN")
-    .env_remove("RUSTC_WRAPPER")
-    .env_remove("RUSTC_WORKSPACE_WRAPPER")
-    .current_dir(root);
-    apply_zigbuild_env(&mut cmd, target_dir);
+        spec.binary,
+    ]);
+    if !spec.features.is_empty() {
+        cmd.args(["--features", spec.features]);
+    }
+    cmd.env("RUSTC", &rustc)
+        // Dedicated target dir — see the deadlock note in main().
+        .env("CARGO_TARGET_DIR", spec.target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .current_dir(spec.root);
+    apply_zigbuild_env(&mut cmd, spec.target_dir);
     // Pin the zig binary cargo-zigbuild uses. Left to PATH, a Homebrew-upgraded
     // zig (newer than the pin) fails downstream with a cryptic `CacheCheckFailed`.
-    if let Some(zig) = pinned_zig_path_or_fail(zig_pin) {
+    if let Some(zig) = pinned_zig_path_or_fail(spec.zig_pin) {
         cmd.env("CARGO_ZIGBUILD_ZIG_PATH", zig);
     }
     let status = cmd.status().expect(
         "spawn `cargo zigbuild` — \
          install with: `cargo install cargo-zigbuild --version 0.20.0`",
     );
-    assert!(status.success(), "cargo zigbuild failed for {pkg}");
-    let built = target_dir
-        .join(strip_glibc(target))
+    assert!(
+        status.success(),
+        "cargo zigbuild failed for package {}, binary {}",
+        spec.package,
+        spec.binary
+    );
+    let built = spec
+        .target_dir
+        .join(strip_glibc(spec.target))
         .join("release")
-        .join(pkg);
-    std::fs::copy(&built, out)
-        .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
+        .join(spec.binary);
+    std::fs::copy(&built, spec.output)
+        .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), spec.output.display()));
 }
 
 fn apply_zigbuild_env(cmd: &mut Command, target_dir: &Path) {
@@ -414,6 +553,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_bootstrap_support_binaries_with_their_own_package() {
+        let src = r#"
+pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[
+    SourceBuiltBinary {
+        package: "mvm-agentd",
+        name: "mvm-egress-client",
+        features: "addons",
+    },
+];
+"#;
+        assert_eq!(
+            parse_bootstrap_support_binaries(src),
+            vec![EmbeddedSourceBinary {
+                package: "mvm-agentd".to_string(),
+                name: "mvm-egress-client".to_string(),
+                features: "addons".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn resolve_target_for_arch_picks_pinned_triple() {
         let toolchain: toml::Value = toml::from_str(
             "zig = \"0.13.0\"\n\
@@ -487,6 +647,7 @@ pub const SEED_BINARIES: &[&str] = &["stage0-init"];
 pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary {
     package: "mvm-agentd",
     name: "mvm-egress-client",
+    features: "addons",
 }];
 "#;
         assert_eq!(

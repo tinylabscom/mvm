@@ -92,8 +92,9 @@ the nix-build sandbox + egress-lockdown bits). Because the config is
 custom, `cache.nixos.org` has no substitute, so the first build on a
 fresh machine compiles the kernel from source (3-10 min, memory-heavy).
 
-`mvmctl build kernel build` makes that compile explicit and one-time, so
-it stops hijacking your first build:
+`mvmctl build kernel build` makes that compile explicit and one-time. Image
+backed runs from a source checkout also bootstrap this kernel automatically;
+prebuilding it is useful when you want the first interactive run to be warm:
 
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
@@ -102,6 +103,9 @@ just run -- build kernel build --which builder
 
 # Or both kernels:
 just run -- build kernel build --all
+
+# The same policy applies to the direct kernel recipe:
+MVM_KERNEL_SOURCE=download just kernel-workload
 ```
 
 To skip the kernel compile entirely on a fresh machine, boot the builder

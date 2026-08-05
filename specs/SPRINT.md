@@ -76,6 +76,21 @@
       isolated home. Workspace tests, check, all-target clippy, formatting, and
       both home policy gates are green.
 
+- [x] Source-checkout kernel bootstrap reliability. `just kernel-workload` and
+      `mvmctl kernel build --which workload` now embed the Stage 0 egress client
+      they need to reach Nix caches, so a first-time local compile completes
+      instead of failing with an opaque source-fetch error. `MVM_KERNEL_SOURCE`
+      provides a persistent compile/download/auto choice, with explicit CLI
+      flags taking precedence. Covered by manifest, policy, and end-to-end
+      builder-kernel validation.
+- [x] One-command local microVM UX. A cold source checkout now builds the
+      dedicated dm-verity workload kernel automatically during the first
+      `machine run --image`, reports the first-run cost, and caches the result;
+      installed binaries download the matching hash-verified release kernel,
+      while `MVM_KERNEL_SOURCE=download|auto` remains explicit. The landing
+      page and security docs now state the warm-millisecond promise alongside
+      first-run behavior and the default-deny trust model.
+
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
 Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,
@@ -898,7 +913,7 @@ The bar: a codebase an **expert human can read and navigate**, fully tested, fol
 ### Reference models (studied, not copied)
 
 - **supermachine** (single crate, 4 bins, ~20 deps, **one** feature, bundled kernel, HVF via `applevisor-sys`, KVM via `kvm-ioctls`, `mio` event loop instead of a full async runtime, `mimalloc`, sub-100ms snapshot restore). North star for lean deps + low memory + external API shape (`Image`/`Vm`/`Pool`/`ExecBuilder`, warmup/snapshot/streaming-exec/`expose_tcp`/live host mounts).
-- **microsandbox** crate naming: `agentd`, `cli`, `filesystem`, `image`, `network`, `protocol`, `runtime`, `utils`. Adopted (with `mvm-` prefix).
+- **Modular runtime crate naming:** `agentd`, `cli`, `filesystem`, `image`, `network`, `protocol`, `runtime`, `utils`. Adopted (with `mvm-` prefix).
 - **holospaces**: `default-features = false` no_std core with `std` as an opt-in feature; `unsafe_code = "forbid"` at the workspace; no_std OCI layer decoders → the wasm/browser path.
 - **Rust guidelines** (gist `c3161f55…`): builder pattern over many-arg fns; traits over duplicated fns; newtypes over stringly-typed APIs; `thiserror` in libs; minimal deps; minimal default features; `mlock`/`zeroize`/`subtle` for secrets; small functions; `[lints]` with pedantic; release profile tuning.
 
@@ -1225,7 +1240,7 @@ Then unify + retire the old paths:
 **WS-DX — developer experience & performance** (the story #1637 promises)
 
 - [ ] **Sub-second launch**, verified: a timed `mvmctl up` → PTY shell → `mvmctl down` e2e on Mac (HVF) and Linux (libkrun + FC), asserting sub-second boot + clean teardown.
-- [ ] **Warm start / warm pool** (pre-warmed standby VMs), **snapshot / fork / restore** (bake once, fork many via CoW, fast restore), **streaming exec**, **`expose_tcp`** (host↔guest port forward), **live host-directory mount** — the supermachine/microsandbox-shaped capabilities, exposed through `mvm-client` + the SDK.
+- [ ] **Warm start / warm pool** (pre-warmed standby VMs), **snapshot / fork / restore** (bake once, fork many via CoW, fast restore), **streaming exec**, **`expose_tcp`** (host↔guest port forward), **live host-directory mount** — the fast-local-runtime capabilities, exposed through `mvm-client` + the SDK.
 - [ ] `specs/plans/255-vsock-first-snapshot-egress-adoption.md` details the
       vsock-first snapshot/egress/warm-start adoption boundary (tracking issue:
       #1851). Phase 0 (spec) + Phase 1 (snapshot storage) merged to main (#1853);

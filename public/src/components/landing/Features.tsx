@@ -5,7 +5,7 @@ const features = [
     icon: "layers",
     title: "Multi-Backend",
     description:
-      "Auto-detects your platform. Firecracker on Linux, Apple Virtualization on macOS 26+, Docker as universal fallback. One CLI, any runtime.",
+      "Auto-detects your platform. Firecracker on Linux, Apple Virtualization on macOS 26+, and libkrun on older macOS. No shared-kernel fallback.",
     accent: "from-accent/20 to-accent/5",
   },
   {
@@ -26,7 +26,7 @@ const features = [
     icon: "lock",
     title: "No SSH. Ever.",
     description:
-      "MicroVMs communicate via Firecracker vsock. The guest agent handles lifecycle, health checks, and startup grace periods.",
+      "Host-brokered control uses typed vsock or the backend equivalent. Guests do not need SSH, inbound ports, or a host daemon you operate.",
     accent: "from-green/20 to-green/5",
   },
   {

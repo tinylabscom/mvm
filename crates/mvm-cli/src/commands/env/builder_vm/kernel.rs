@@ -43,22 +43,20 @@ impl KernelVariant {
     }
 }
 
-/// Where the builder VM's kernel comes from when bootstrapping its
-/// image, from `MVM_KERNEL_SOURCE` (set by the global `--kernel-source`
-/// flag). `download` boots the builder VM on a published, hash-verified
-/// kernel — building only the rootfs locally and pairing the kernel in,
-/// so a fresh bootstrap skips the multi-minute kernel compile. Unset →
-/// the default `nix build default` path (kernel compiled in-image).
-#[cfg(feature = "builder-vm")]
+/// Where a kernel comes from during builder bootstrap or workload-kernel
+/// acquisition. The value comes from `MVM_KERNEL_SOURCE` (set by the global
+/// `--kernel-source` flag). `download` uses a published, hash-verified kernel;
+/// `compile` realizes it locally through Stage 0; `auto` prefers the published
+/// artifact and falls back to a local build when a source checkout is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum KernelSource {
+pub(crate) enum KernelSource {
     Compile,
     Download,
     Auto,
 }
 
 #[cfg(feature = "builder-vm")]
-pub(super) fn resolve_kernel_source() -> Option<KernelSource> {
+pub(crate) fn resolve_kernel_source() -> Option<KernelSource> {
     let raw = std::env::var("MVM_KERNEL_SOURCE").ok()?;
     match raw.trim().to_ascii_lowercase().as_str() {
         "" => None,

@@ -187,6 +187,8 @@ build-supervisors:
     cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
+# Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
+# MVM_KERNEL_SOURCE=auto to prefer it and compile when no asset is available.
 kernel-workload:
     cargo run -- kernel build --which workload
 

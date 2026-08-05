@@ -5,6 +5,55 @@ description: "mvm runs untrusted Linux workloads in microVMs. This page explains
 
 mvm's job is to let you run **untrusted code** — third-party software, AI-generated scripts, CI runners, sandbox workloads — and trust the isolation. This page explains the security model in one diagram and one matrix.
 
+## What you get by default
+
+For the ordinary command — `mvmctl machine run --image ... -- ...` — mvm starts
+from a deny-by-default posture. The exact enforcement tier is printed by
+`mvmctl doctor` and in launch receipts, but the user-visible contract is:
+
+- **A real microVM boundary:** each workload gets its own guest memory, virtual
+  devices, and Linux kernel. A container is never silently substituted.
+- **A private filesystem:** the image and the workload's ephemeral writable
+  layer are visible inside the guest. Host directories are absent unless you
+  explicitly mount them; mounts are a deliberate part of the launch plan.
+- **No network by default:** there is no egress until you enable networking and
+  admit destinations with `--allow-host`. Inbound access is not implied by an
+  outbound rule.
+- **No raw host secrets in the guest:** secret-aware egress substitutes
+  credentials at the host boundary, so the workload receives only the
+  placeholder or response it is authorized to use.
+- **An auditable launch decision:** the image, resource limits, mounts, network
+  posture, admission profile, and backend are captured in the signed execution
+  plan before boot.
+
+These defaults are intentionally stronger than “a VM with a public network.”
+They make the safe path the shortest path while keeping explicit escape hatches
+visible in the command line and the receipt.
+
+### What mvm defends
+
+mvm is designed to bound an untrusted guest that tries to escape to the host,
+read another workload's state, use an undeclared host mount, reach private host
+services, or obtain a credential that was not released for its destination.
+The guest-to-host control channel is host-brokered and typed; it is not SSH and
+does not require an inbound guest listener.
+
+### What mvm does not defend
+
+mvm trusts the host operating system, the selected hypervisor, and the release
+or source artifacts used to build it. A compromised host or hypervisor is
+outside this boundary. A workload can also misuse a destination, mount, secret,
+or capability that its operator explicitly allowed. Multi-tenant sharing inside
+one guest and hardware-backed remote attestation are not default guarantees.
+
+### Your responsibility
+
+Use the strictest profile that fits the workload, keep networking disabled when
+it is unnecessary, allowlist only the destinations required, prefer read-only
+mounts, pin production images by digest, set resource and lifetime limits, and
+keep the host patched. The security posture is visible and enforceable, but it
+cannot infer whether an explicitly granted capability is safe for your code.
+
 ## The five trust layers
 
 ```
