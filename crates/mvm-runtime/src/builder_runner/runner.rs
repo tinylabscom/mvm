@@ -276,10 +276,9 @@ mod tests {
             .expect("build orchestrates against the mock driver");
 
         assert!(outcome.stopped);
-        // A single builder spec was booted: 4 disks, trusted, builder cmdline.
+        // A single builder spec was booted: 4 disks and the builder cmdline.
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
-        assert!(specs[0].trusted_builder);
         assert_eq!(specs[0].blocks.len(), 4);
         assert!(specs[0].cmdline.contains("init=/sbin/mvm-host-vm-init"));
         // The input disk was packed and the output extracted (empty tar from the

@@ -20,14 +20,13 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_agentd::vsock::{
-    CONSOLE_PORT_BASE, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports,
-};
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, VmBackend,
     VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
+use mvm_net::channel::GuestService;
 
 use crate::base::ui;
 use crate::driver::spec::KernelImage;
@@ -183,22 +182,22 @@ fn bridge_spec_for_vsock(cid: u32, state_dir: &Path, channels: &[VsockPort]) -> 
     for port in channels {
         match port.direction {
             VsockDirection::HostDials => host_dials.push(QemuBridgeHostDial {
-                guest_port: port.guest_port,
+                guest_port: port.port(),
                 // Re-derived from the state dir (the flat `vsock-<port>.sock`
                 // convention the host-side resolver probes), never the spec's
                 // backend-neutral hint — the same discipline the hvf, libkrun,
                 // and Firecracker drivers apply to the agent socket, so binder
                 // and resolver can't drift.
-                listen_uds: vm_vsock_port_socket_at(state_dir, port.guest_port),
+                listen_uds: vm_vsock_port_socket_at(state_dir, port.port()),
             }),
             // The workload-exit port has no runner-bound listener — its
             // `host_uds` is the captured-code output file, not a socket. The
             // bridge accepts the report and persists it (see qemu.rs).
-            VsockDirection::GuestDials if port.guest_port == WORKLOAD_EXIT_PORT => {
+            VsockDirection::GuestDials if port.service == GuestService::WorkloadExit => {
                 exit_capture_state_dir = Some(state_dir.to_path_buf());
             }
             VsockDirection::GuestDials => guest_dials.push(QemuBridgeGuestDial {
-                guest_port: port.guest_port,
+                guest_port: port.port(),
                 target_uds: port.host_uds.clone(),
             }),
         }
@@ -481,17 +480,17 @@ mod tests {
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
 
-    fn host_dials(guest_port: u32, uds: &str) -> VsockPort {
+    fn host_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
-            guest_port,
+            service,
             host_uds: uds.into(),
             direction: VsockDirection::HostDials,
         }
     }
 
-    fn guest_dials(guest_port: u32, uds: &str) -> VsockPort {
+    fn guest_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
-            guest_port,
+            service,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -511,7 +510,6 @@ mod tests {
             console: ConsoleCapture {
                 log_path: "/state/w/console.log".into(),
             },
-            trusted_builder: false,
         }
     }
 
@@ -709,11 +707,16 @@ mod tests {
     fn bridge_spec_maps_channels_by_direction_and_re_derives_host_sockets() {
         let state_dir = Path::new("/state/w");
         let channels = vec![
-            host_dials(GUEST_AGENT_PORT, "/run/agent-hint.sock"),
-            guest_dials(EGRESS_PORT, "/run/egress.sock"),
-            guest_dials(WORKLOAD_EXIT_PORT, "/state/w/workload.exit"),
-            guest_dials(BROKER_PORT, "/run/broker.sock"),
-            host_dials(CONSOLE_PORT_BASE + 1, "/run/console-hint.sock"),
+            host_dials(GuestService::MachineControl, "/run/agent-hint.sock"),
+            guest_dials(GuestService::Substitution, "/run/egress.sock"),
+            guest_dials(GuestService::WorkloadExit, "/state/w/workload.exit"),
+            guest_dials(GuestService::Broker, "/run/broker.sock"),
+            host_dials(
+                GuestService::ConsoleData {
+                    port: CONSOLE_PORT_BASE + 1,
+                },
+                "/run/console-hint.sock",
+            ),
         ];
         let spec = bridge_spec_for_vsock(9, state_dir, &channels);
 
@@ -757,7 +760,7 @@ mod tests {
         let spec = bridge_spec_for_vsock(
             3,
             Path::new("/state/w"),
-            &[host_dials(GUEST_AGENT_PORT, "/run/agent.sock")],
+            &[host_dials(GuestService::MachineControl, "/run/agent.sock")],
         );
         assert_eq!(spec.exit_capture_state_dir, None);
         assert!(spec.guest_dials.is_empty());

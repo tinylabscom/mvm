@@ -84,7 +84,6 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
         console: ConsoleCapture {
             log_path: state_dir.join("console.log"),
         },
-        trusted_builder: false,
     }
 }
 

@@ -14,12 +14,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorConfig};
-use mvm_agentd::vsock::{CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_libkrun_pid, vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
     VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
+use mvm_net::channel::GuestService;
 
 use crate::driver::spec::KernelImage;
 use crate::driver::{BlockDev, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection};
@@ -155,8 +156,8 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // re-bound here.
     for port in &spec.vsock {
         krun = match port.direction {
-            VsockDirection::HostDials => krun.add_vsock_port(port.guest_port),
-            VsockDirection::GuestDials => krun.add_host_listen_port(port.guest_port),
+            VsockDirection::HostDials => krun.add_vsock_port(port.port()),
+            VsockDirection::GuestDials => krun.add_host_listen_port(port.port()),
         };
     }
 
@@ -184,7 +185,7 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         // there. A spec without an EGRESS_PORT channel (none of the workload
         // paths) leaves this unset and the derived socket unchanged.
         transparent_terminator_port: None,
-        egress_relay_socket: spec.host_socket_for_port(EGRESS_PORT),
+        egress_relay_socket: spec.host_socket_for_service(GuestService::Substitution),
     })
 }
 
@@ -447,20 +448,20 @@ impl RunningVm for LibkrunRunningVm {
 mod tests {
     use super::*;
     use crate::driver::{ConsoleCapture, VsockPort};
-    use mvm_agentd::vsock::{BROKER_PORT, WORKLOAD_EXIT_PORT};
+    use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, WORKLOAD_EXIT_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
 
-    fn host_dials(guest_port: u32, uds: &str) -> VsockPort {
+    fn host_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
-            guest_port,
+            service,
             host_uds: uds.into(),
             direction: VsockDirection::HostDials,
         }
     }
 
-    fn guest_dials(guest_port: u32, uds: &str) -> VsockPort {
+    fn guest_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
-            guest_port,
+            service,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -480,7 +481,6 @@ mod tests {
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
-            trusted_builder: false,
         }
     }
 
@@ -542,8 +542,8 @@ mod tests {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![
-                host_dials(GUEST_AGENT_PORT, "/run/agent.sock"),
-                guest_dials(EGRESS_PORT, "/run/egress.sock"),
+                host_dials(GuestService::MachineControl, "/run/agent.sock"),
+                guest_dials(GuestService::Substitution, "/run/egress.sock"),
             ],
             vec![],
         );
@@ -664,11 +664,16 @@ mod tests {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![
-                host_dials(GUEST_AGENT_PORT, "/run/agent.sock"),
-                guest_dials(EGRESS_PORT, "/run/egress.sock"),
-                guest_dials(WORKLOAD_EXIT_PORT, "/run/exit.sock"),
-                guest_dials(BROKER_PORT, "/run/broker.sock"),
-                host_dials(CONSOLE_PORT_BASE + 1, "/run/console.sock"),
+                host_dials(GuestService::MachineControl, "/run/agent.sock"),
+                guest_dials(GuestService::Substitution, "/run/egress.sock"),
+                guest_dials(GuestService::WorkloadExit, "/run/exit.sock"),
+                guest_dials(GuestService::Broker, "/run/broker.sock"),
+                host_dials(
+                    GuestService::ConsoleData {
+                        port: CONSOLE_PORT_BASE + 1,
+                    },
+                    "/run/console.sock",
+                ),
             ],
             vec![],
         );

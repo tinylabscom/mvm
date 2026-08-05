@@ -8,6 +8,8 @@
 
 use std::path::PathBuf;
 
+use mvm_net::channel::GuestService;
+
 /// Where a VM's kernel comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelImage {
@@ -50,12 +52,19 @@ pub enum VsockDirection {
     GuestDials,
 }
 
-/// One vsock port mapping between a guest port and a host unix socket.
+/// One typed guest service mapping to a host unix socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VsockPort {
-    pub guest_port: u32,
+    pub service: GuestService,
     pub host_uds: PathBuf,
     pub direction: VsockDirection,
+}
+
+impl VsockPort {
+    /// The numeric vsock port used at the VMM boundary.
+    pub fn port(&self) -> u32 {
+        self.service.port()
+    }
 }
 
 /// Write-only host capture of the guest console. There is no input fd — the
@@ -84,22 +93,16 @@ pub struct VmmSpec {
     pub blocks: Vec<BlockDev>,
     pub vsock: Vec<VsockPort>,
     pub console: ConsoleCapture,
-    /// Trusted-builder VM: it carries no untrusted workload, so it boots WITHOUT
-    /// the claim-10 egress gate (no `EGRESS_PORT` relay required). A workload
-    /// leaves this `false` so a missing egress relay fails closed rather than
-    /// booting ungated.
-    pub trusted_builder: bool,
 }
 
 impl VmmSpec {
-    /// The host unix socket a standing vsock port binds to, found by its
-    /// guest-port number. `None` when the spec carries no channel for that
-    /// port. Both drivers resolve the egress/agent/broker sockets through this
-    /// one lookup instead of each re-scanning `vsock`.
-    pub fn host_socket_for_port(&self, guest_port: u32) -> Option<PathBuf> {
+    /// The host unix socket a standing guest service binds to.
+    /// `None` when the spec carries no channel for that service. Drivers use
+    /// this lookup instead of each re-scanning the raw channel list.
+    pub fn host_socket_for_service(&self, service: GuestService) -> Option<PathBuf> {
         self.vsock
             .iter()
-            .find(|p| p.guest_port == guest_port)
+            .find(|p| p.service == service)
             .map(|p| p.host_uds.clone())
     }
 }
@@ -119,5 +122,18 @@ mod tests {
         assert_eq!(mk(0).device_node(), "/dev/vda");
         assert_eq!(mk(1).device_node(), "/dev/vdb");
         assert_eq!(mk(25).device_node(), "/dev/vdz");
+    }
+
+    #[test]
+    fn typed_vsock_service_resolves_its_transport_port() {
+        let channel = VsockPort {
+            service: GuestService::NetworkData { queue: 0 },
+            host_uds: "/run/network-data.sock".into(),
+            direction: VsockDirection::GuestDials,
+        };
+        assert_eq!(
+            channel.port(),
+            GuestService::NetworkData { queue: 0 }.port()
+        );
     }
 }

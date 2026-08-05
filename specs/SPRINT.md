@@ -478,7 +478,13 @@ updates only its own entry below.
       the guest boots, and every stop path reaps it. Privileged Linux lane
       run on a KVM host (6/6, live forwarding witness, clean teardown); 23
       hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
-      and refuses; native Windows is not claimed.
+      and refuses; native Windows is not claimed. Follow-up issue #2186 now
+      closes the remaining launch-shape seam: every standing channel in
+      `VmmSpec` is identified by `GuestService`, the workload mapper emits the
+      typed L3 control/data channels, and `mvm-netd` receives the
+      backend-specific socket layout instead of assuming one convention.
+      The physical spec is also role-neutral: builder boots use the same typed
+      substitution channel and no longer carry a `trusted_builder` flag.
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
       dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and

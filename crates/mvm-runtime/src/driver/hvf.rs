@@ -13,15 +13,14 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_agentd::vsock::{
-    BROKER_PORT, CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports,
-};
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, VmBackend, VmCapabilities, VmExitStatus,
     VmId, VmStatus,
 };
+use mvm_net::channel::GuestService;
 
 use crate::driver::spec::KernelImage;
 use crate::driver::{DuplexStream, RunningVm, VmmDriver, VmmSpec};
@@ -108,18 +107,11 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         })
         .collect();
 
-    // Guests that need host egress carry an explicit EGRESS_PORT relay socket in
-    // the spec. Workloads must provide one; trusted builders now provide the same
-    // vsock relay so every backend uses one egress path.
-    let egress_relay_socket = match spec.host_socket_for_port(EGRESS_PORT) {
-        Some(socket) => Some(socket),
-        None if spec.trusted_builder => None,
-        None => {
-            return Err(anyhow!(
-                "hvf workload spec is missing the EGRESS_PORT vsock relay socket"
-            ));
-        }
-    };
+    // Every boot carries the substitution channel, including builder boots.
+    // Requiring it here keeps a malformed spec from creating an ungated path.
+    let egress_relay_socket = spec
+        .host_socket_for_service(GuestService::Substitution)
+        .ok_or_else(|| anyhow!("hvf spec is missing the EGRESS_PORT vsock relay socket"))?;
 
     // An empty spec cmdline means "use the supervisor's workload default"
     // (`init=/init`); a non-empty one (e.g. the builder rootfs's
@@ -135,9 +127,9 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
     let console_data_sockets = spec
         .vsock
         .iter()
-        .filter(|p| dev_console_data_ports().any(|cp| cp == p.guest_port))
+        .filter(|p| matches!(p.service, GuestService::ConsoleData { .. }))
         .map(|p| ConsoleDataSocket {
-            guest_port: p.guest_port,
+            guest_port: p.port(),
             host_socket: p.host_uds.clone(),
         })
         .collect();
@@ -160,12 +152,12 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         // `hvf-agent.sock`, so binder and resolver can't drift.
         agent_socket: Some(hvf_agent_socket(&paths.state_dir)),
         substitution_socket: None,
-        egress_relay_socket,
+        egress_relay_socket: Some(egress_relay_socket),
         // An admitted workload carries a BROKER_PORT relay socket; the supervisor
         // splices the guest's BROKER_PORT dial to it so host.audit.v1 /
         // host.secrets.v1 reach the per-VM broker (or the per-tenant host-agent
         // daemon). Absent for a builder/dev VM, which runs no admitted workload.
-        broker_socket: spec.host_socket_for_port(BROKER_PORT),
+        broker_socket: spec.host_socket_for_service(GuestService::Broker),
         console_data_sockets,
     })
 }
@@ -386,7 +378,7 @@ mod tests {
 
     fn egress_port(uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: EGRESS_PORT,
+            service: GuestService::Substitution,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -394,7 +386,7 @@ mod tests {
 
     fn agent_port(uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: GUEST_AGENT_PORT,
+            service: GuestService::MachineControl,
             host_uds: uds.into(),
             direction: VsockDirection::HostDials,
         }
@@ -402,7 +394,7 @@ mod tests {
 
     fn broker_port(uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: BROKER_PORT,
+            service: GuestService::Broker,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -422,7 +414,6 @@ mod tests {
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
-            trusted_builder: false,
         }
     }
 
@@ -633,8 +624,8 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_trusted_builder_uses_the_same_egress_relay() {
-        let mut spec = spec_with(
+    fn relay_config_requires_the_same_egress_relay_for_builder_boots() {
+        let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![
                 agent_port("/run/agent.sock"),
@@ -642,7 +633,6 @@ mod tests {
             ],
             vec![],
         );
-        spec.trusted_builder = true;
         let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
         assert_eq!(
             cfg.egress_relay_socket,
@@ -787,7 +777,7 @@ mod tests {
 
     fn console_vsock_port(port: u32, uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: port,
+            service: GuestService::ConsoleData { port },
             host_uds: uds.into(),
             direction: VsockDirection::HostDials,
         }

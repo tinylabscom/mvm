@@ -34,7 +34,9 @@ Every task's requirements implicitly include this section.
 
 - **Reuse the existing restore machinery.** `capture_vm_full`, `FcForkRestorer::restore_fork`, and `guarded_load_resume` already work and are guarded. Call them. Do not write a second capture or restore path, and do not call the two still-refused entry points named above.
 - **No guest NIC, ever.** vsock is the sole boundary. `VmmSpec` has no NIC field — keep it that way. The no-NIC guard runs inside `guarded_load_resume`; never bypass it or restore without it.
-- **Never set `trusted_builder: true` on a workload-bearing VM.** It disables the claim-10 egress gate; it exists for the builder VM only.
+- **Do not encode builder or workload role in `VmmSpec`.** Every boot carries
+  the typed substitution channel; the builder runner owns its endpoint and a
+  workload runner owns its admitted relay.
 - **No competitor proper nouns** anywhere — code, comments, tests, commit messages, PR text, branch names.
 - **No spec references in code comments.** `Plan`, `ADR`, `#NNNN`, `W#`, `Phase N` are CI-gated by `xtask check-no-spec-refs`. Explain *why* in prose instead. (Files under `specs/` are exempt.)
 - **`#[allow(clippy::...)]` is banned outright**, including `too_many_arguments`. Use a params struct (the repo already uses `CaptureVmFullParams`, `ForkParams`, `WarmParams`, `ClaimContext` for exactly this).
@@ -214,7 +216,11 @@ git commit -m "feat(standby): carry the captured parent checkpoint on the standb
 **Two things the implementer must not miss:**
 
 1. **Do not kill the parent here.** `capture_vm_full` pauses, saves memory, and resumes a *live* VM. `FcDriver::boot` calls `firecracker_guard.defuse()`, so Firecracker keeps running after the returned `RunningVm` is dropped — that is intended. Task 4 releases the parent after capture.
-2. **A factory parent carries no workload, so it has no egress relay wired.** `trusted_builder` must stay `false`. If the guest's egress gate refuses to boot without a relay, wire the parent a minimal vsock egress port — do **not** flip `trusted_builder` to paper over it. Report which you needed.
+2. **A factory parent carries no workload, so it has no workload relay wired.**
+   It still carries the typed substitution channel required by every boot. If
+   the guest's egress gate refuses to boot without a relay, wire the parent a
+   minimal vsock egress port rather than weakening the gate. Report which you
+   needed.
 
 **Files:**
 - Modify: `crates/mvm-runtime/src/driver/traits.rs` (add `vm_full_control` with a fail-closed default)
@@ -245,7 +251,7 @@ pub struct VmmSpec {
     pub name: String, pub kernel: KernelImage, pub initramfs: Option<PathBuf>,
     pub cmdline: String, pub vcpus: u32, pub memory_mib: u32,
     pub mem_initial_mib: Option<u32>, pub blocks: Vec<BlockDev>,
-    pub vsock: Vec<VsockPort>, pub console: ConsoleCapture, pub trusted_builder: bool,
+    pub vsock: Vec<VsockPort>, pub console: ConsoleCapture,
 }
 ```
 
@@ -324,7 +330,6 @@ Add `vm_full_control` to `VmmDriver` in `driver/traits.rs` with the `None` defau
             console: ConsoleCapture {
                 log_path: PathBuf::from(&spec.vm_state_dir).join("console.log"),
             },
-            trusted_builder: false,
         };
 
         // `boot` returns only once the guest agent answered over vsock, so the
@@ -1159,7 +1164,10 @@ The parent must boot **identically to a workload**: same drives, same verity and
 
 Where the seam lands is your judgment; state your choice and reasoning in your report. Two shapes worth weighing: populate the standby spec CLI-side from a real `VmStartConfig` that has been through the overlay pipeline, or hoist the parent spawn itself to the CLI layer so it reuses that pipeline directly. Whichever you pick, a future change to the workload's boot shape must not silently diverge the parent's — say in your report how your choice achieves that.
 
-Keep the existing guarantees intact: no guest NIC, `trusted_builder: false`, `template_id` propagated, the parent left running for capture, and no plan/endpoint/broker on a factory parent (that is the structural never-promote property).
+Keep the existing guarantees intact: no guest NIC, a typed substitution
+channel, `template_id` propagated, the parent left running for capture, and no
+plan/endpoint/broker on a factory parent (that is the structural never-promote
+property).
 
 **Seam as landed.** The parent's boot inputs are derived in the role layer, from
 the launch config the CLI already ran through `attach_runtime_overlay_if_cached`:
