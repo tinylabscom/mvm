@@ -144,6 +144,38 @@ async fn transient_launch_boots_admitted_and_audited() {
 }
 
 #[tokio::test]
+async fn launch_recovers_from_stale_runtime_dir_leftovers() {
+    let home = Isolated::new();
+    let client = mock_client();
+
+    // A crashed prior run leaves runtime residue (e.g. a dead endpoint
+    // socket) under the per-VM dir; the machine is not running, so a fresh
+    // launch must clear it rather than trip over it.
+    let stale = vm_state_dir("t-stale");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("substitution-endpoint.sock"), b"").unwrap();
+
+    let request = transient_request(&home.rootfs())
+        .name("t-stale")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch over residue");
+    assert_eq!(
+        outcome.machine.status,
+        mvm_core::client::dto::MachineStatus::Running
+    );
+    assert!(
+        !stale.join("substitution-endpoint.sock").exists(),
+        "stale residue cleared before boot"
+    );
+    client
+        .stop_machine(&outcome.machine.id)
+        .await
+        .expect("stop");
+    client.cleanup_transient("t-stale").expect("cleanup");
+}
+
+#[tokio::test]
 async fn transient_launch_without_a_name_generates_one() {
     let home = Isolated::new();
     let client = mock_client();

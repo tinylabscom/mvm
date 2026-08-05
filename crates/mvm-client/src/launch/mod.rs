@@ -237,6 +237,13 @@ impl LocalBackend {
     /// created.
     pub(crate) async fn boot_admitted(&self, params: BootParams) -> Result<StartedMachine> {
         let backend = self.launch_backend(params.backend_override.as_deref())?;
+        // Crash/unclean-stop leftovers in the per-VM runtime dir (notably a
+        // stale substitution-endpoint socket) make the fresh endpoint die
+        // binding it before its ready handshake; a non-running machine owns
+        // no live state there, so recover by starting from an empty dir.
+        if !self.machine_running(&params.name) {
+            remove_dir_if_present(&vm_state_dir(&params.name))?;
+        }
         let rootfs = crate::local::resolve_local_rootfs(&params.image, &params.name).await?;
         let (verity_path, roothash) = crate::local::host_verity_sidecars(&rootfs);
         let kernel_path = Self::resolve_workload_kernel(&backend)?;
