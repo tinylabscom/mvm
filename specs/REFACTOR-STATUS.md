@@ -120,10 +120,12 @@ for detailed scope and acceptance criteria.
         The userspace backend carries v6 flows and still cannot emit an
         arbitrary v6 packet, so `ipv6_flows: true` with
         `arbitrary_ipv6: false`; `FULL_L3_V4` is renamed `FULL_L3`.
-        `CONFIG_IPV6` landed in the workload kernel, measured at +200,704 B
-        and carrying no IPsec — the v6-IPsec options that drag XFRM in are
-        disabled explicitly, so `XFRM`/`XFRM_ALGO`/`XFRM_USER` stay in the
-        required-disable set and their absence is proven every build. The
+        `CONFIG_IPV6` landed in the workload kernel, measured at +184,320 B
+        and one built-in symbol, carrying no IPsec and no tunnels — the
+        v6-IPsec options that drag XFRM in are disabled explicitly, so
+        `XFRM`/`XFRM_ALGO`/`XFRM_USER` stay in the required-disable set and
+        their absence is proven every build, and 6-in-4 is disabled beside
+        them because it carries no XFRM for that guard to catch. The
         guest agent then grew the v6 half of its bring-up: address, on-link
         peer, default route and resolver over rtnetlink — chosen over an
         `AF_INET6` ioctl mirror because `in6_rtmsg`'s fields are private in
