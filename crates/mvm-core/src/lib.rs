@@ -76,6 +76,7 @@ pub mod packs;
 /// same-page merged. Pure decision only, fails closed to `Refuse`; no
 /// kernel/`madvise` enforcement lives here.
 pub mod page_merge;
+pub mod pii;
 /// Compiled-in release-signing identity: the OIDC issuer and identity
 /// templates a stock binary trusts for its own release packs, with
 /// version interpolation.

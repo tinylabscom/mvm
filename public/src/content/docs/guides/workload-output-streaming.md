@@ -182,10 +182,12 @@ be described here as the same shape; it is not any more — it has an operator
 surface.)
 
 Were it selected, `ephemeral` would still not mean no bytes land on disk. The
-backend writes its own `console.log` regardless — outside this plane,
-unredacted, unaffected by the retention mode — and once the run ends, `mvmctl
-machine logs` falls back to reading that file, printing the run's output in
-full. What `ephemeral` drops is the audited, hash-chained copy, not the output's
+backend writes its own `console.log` regardless — outside this plane and
+unaffected by the retention mode — and once the run ends, `mvmctl machine
+logs` falls back to reading that file, printing the run's output. That
+fallback is redacted as it is read, so it is not a rawer copy, but the masking
+is applied per 64 KiB read: a value split across a read boundary is not
+caught. What `ephemeral` drops is the audited, hash-chained copy, not the output's
 readability afterward.
 
 There is deliberately **no CLI flag** for this. A flag would make a missing
