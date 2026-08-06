@@ -109,6 +109,12 @@ const OPS_SUB: &[(&str, AuditPosture)] = &[
 // cache. Like `compile`, it produces build outputs but doesn't touch the
 // security audit chain — the Stage-0 supply-chain events the compile arm
 // may trigger are emitted by the shared bootstrap, same as `dev`.
+const TEMPLATE_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("search", AuditPosture::ReadOnly),
+    ("info", AuditPosture::ReadOnly),
+];
+
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
 // `build runtime-overlay build` primes the shared guest-runtime cache for the
@@ -449,6 +455,8 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("init", AuditPosture::InteractiveOrControl),
     // `generate` is a project-scaffolding surface, like `init`.
     ("generate", AuditPosture::InteractiveOrControl),
+    // `template` is a read-only catalog browser (bundled + remote).
+    ("template", AuditPosture::DelegatesToSub(TEMPLATE_SUB)),
     ("watch", AuditPosture::InteractiveOrControl),
     // VM lifecycle. `up` and `invoke` are retired (folded into `machine run`'s
     // argv lifecycle + `--entrypoint` action). `run` survives hidden as the SDK

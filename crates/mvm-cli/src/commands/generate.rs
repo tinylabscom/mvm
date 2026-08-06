@@ -1,12 +1,12 @@
 //! `mvmctl generate` — unified project-generation entry point.
 //!
 //! This verb wraps the existing generation paths so users don't have to
-//! remember whether a workload starts from an SDK source file, a catalog
-//! preset, or a natural-language prompt:
+//! remember whether a workload starts from an SDK source file, a template
+//! registry entry, or a natural-language prompt:
 //!
-//!   - `mvmctl generate sdk app.py -o ./my-app`      → `build compile`
-//!   - `mvmctl generate template python ./my-app`    → `init --catalog python`
-//!   - `mvmctl generate prompt "python api" ./my-app` → `init --prompt "..."`
+//!   - `mvmctl generate sdk app.py -o ./my-app`         → `build compile`
+//!   - `mvmctl generate template python ./my-app`       → registry scaffold
+//!   - `mvmctl generate prompt "python api" ./my-app`   → `init --prompt "..."`
 //!
 //! The generated directory contains a runnable mvm project: `flake.nix`,
 //! `mvm.toml`, and any baseline/source files the chosen generator needs.
@@ -19,6 +19,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
+use crate::template_registry::RegistryConfig;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -42,13 +43,13 @@ pub(in crate::commands) enum GenerateAction {
         out: PathBuf,
     },
 
-    /// Generate from a bundled catalog entry or scaffold preset.
+    /// Generate from a template registry entry.
     ///
-    /// Names are matched first against `mvmctl catalog list`; if no
-    /// catalog entry matches, the known presets (`minimal`, `http`,
-    /// `postgres`, `worker`, `python`) are tried.
+    /// Looks up the name in the bundled core catalog first, then falls
+    /// back to the remote registry (fetching and caching the template if
+    /// necessary).
     Template {
-        /// Catalog entry or preset name.
+        /// Template name.
         name: String,
 
         /// Directory to scaffold.
@@ -97,15 +98,25 @@ fn generate_sdk(cli: &Cli, script: PathBuf, out: PathBuf, cfg: &MvmConfig) -> Re
 }
 
 fn generate_template(name: &str, dir: &str) -> Result<()> {
-    let catalog = super::catalog::load_bundled_catalog();
-    let preset = catalog
-        .find(name)
-        .map(|entry| entry.profile.as_str())
-        .unwrap_or(name);
+    let cfg = RegistryConfig::load();
+    let entry = tokio_block(crate::template_registry::resolve(&cfg, name))?;
 
-    crate::template_cmd::init(dir, true, ".", Some(preset), None)
+    let target = std::path::Path::new(".").join(dir);
+    let display_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(dir)
+        .to_string();
+    crate::template_cmd::scaffold_from_template_entry(&target, &display_name, &entry)
 }
 
 fn generate_prompt(description: &str, dir: &str) -> Result<()> {
     crate::template_cmd::init(dir, true, ".", None, Some(description))
+}
+
+fn tokio_block<F, T>(future: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::runtime::Runtime::new()?.block_on(future)
 }
