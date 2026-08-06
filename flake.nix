@@ -75,6 +75,7 @@
               shfmt
               treefmt
               zig
+              zsh
             ]) ++ optionalCargoTools;
 
             buildInputs = with pkgs; [
@@ -86,6 +87,22 @@
             PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev ];
 
             shellHook = ''
+              case "$-" in
+                *i*)
+                  if [ "''${MVM_PRESERVE_PERSONAL_SHELL:-1}" = 1 ] \
+                    && [ -z "''${MVM_PERSONAL_SHELL_ACTIVE:-}" ]; then
+                    case "''${SHELL##*/}" in
+                      bash|zsh)
+                        if personal_shell="$(command -v "''${SHELL##*/}" 2>/dev/null)"; then
+                          export MVM_PERSONAL_SHELL_ACTIVE=1
+                          exec "$personal_shell" -i
+                        fi
+                        ;;
+                    esac
+                  fi
+                  ;;
+              esac
+
               echo "mvm development shell"
               echo "Rust toolchain: ${rustChannel}"
               echo "Try: just build, just test, or just lint"

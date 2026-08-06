@@ -644,6 +644,10 @@ workflow. Host Nix remains optional for running `mvmctl`: workload Nix
 evaluation and image builds still run inside the managed builder VM. The
 microVM library and image-building flake lives separately under [`nix/`](nix/).
 
+When opened interactively, the development shell re-enters your configured
+`$SHELL`, so aliases and functions from your normal shell startup files remain
+available. Set `MVM_PRESERVE_PERSONAL_SHELL=0` to keep Nix’s default Bash shell.
+
 After building, run `mvmctl doctor` — it reports the resolved builder backend
 and emits install hints for anything missing.
 
