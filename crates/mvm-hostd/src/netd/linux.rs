@@ -976,13 +976,16 @@ mod tests {
             None,
         );
         assert!(rules.contains("policy drop"), "{rules}");
-        assert!(rules.contains("ip saddr 10.201.0.6/32 accept"), "{rules}");
+        assert!(
+            rules.contains("ip saddr 10.201.0.6/32 counter accept"),
+            "{rules}"
+        );
         assert!(
             rules.contains("ip saddr 10.201.0.6/32 masquerade"),
             "{rules}"
         );
         assert!(
-            rules.contains("ct state established,related accept"),
+            rules.contains("ct state established,related counter accept"),
             "return traffic must be stateful: {rules}"
         );
         assert!(
@@ -1021,7 +1024,7 @@ mod tests {
             Some(GUEST_V6),
         );
         assert!(
-            rules.contains("ip6 saddr fd6d:766d:1::2/128 accept"),
+            rules.contains("ip6 saddr fd6d:766d:1::2/128 counter accept"),
             "{rules}"
         );
         assert!(
@@ -1029,7 +1032,9 @@ mod tests {
             "{rules}"
         );
         assert!(
-            rules.contains("ip6 daddr fd6d:766d:1::2/128 ct state established,related accept"),
+            rules.contains(
+                "ip6 daddr fd6d:766d:1::2/128 ct state established,related counter accept",
+            ),
             "v6 return traffic must be stateful too: {rules}"
         );
     }
@@ -1046,7 +1051,7 @@ mod tests {
             Some(GUEST_V6),
         );
         let accept = rules
-            .find("ip6 saddr fd6d:766d:1::2/128 accept")
+            .find("ip6 saddr fd6d:766d:1::2/128 counter accept")
             .expect("the v6 accept must be present");
         let drop = rules
             .find("iifname \"mvmnvma\" drop")
