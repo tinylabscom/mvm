@@ -27,6 +27,7 @@ impl TopLevelCommand for Commands {
             Commands::Build(a) => build::group::run(cli, a, cfg),
             Commands::Deploy(a) => deploy::run(cli, a, cfg),
             Commands::Kernel(a) => build::kernel::run(cli, a, cfg),
+            Commands::Generate(a) => generate::run(cli, a, cfg),
             Commands::Watch(a) => watch::run(cli, a, cfg),
             Commands::Manifest(a) => manifest::run(cli, a, cfg),
             Commands::Image(a) => image::run(cli, a, cfg),

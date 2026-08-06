@@ -7,6 +7,7 @@ mod deploy;
 mod deps;
 mod dispatch;
 pub(crate) mod env;
+mod generate;
 mod image;
 mod machine;
 mod manifest;
@@ -105,8 +106,11 @@ pub(in crate::commands) enum Commands {
     /// Build the custom microVM kernels (builder / workload)
     #[command(display_order = 3)]
     Kernel(build::kernel::Args),
-    /// Scaffold a new project
+    /// Generate a runnable microVM project from SDK, template, or prompt
     #[command(display_order = 4)]
+    Generate(generate::Args),
+    /// Scaffold a new project
+    #[command(display_order = 5)]
     Init(env::init::Args),
     /// System diagnostics and dependency checks
     #[command(display_order = 5)]
