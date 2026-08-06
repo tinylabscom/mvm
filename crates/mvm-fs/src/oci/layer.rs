@@ -681,20 +681,20 @@ impl CacheWriterReader {
 /// Wraps a sync reader and computes a running SHA-256 over every byte
 /// that passes through. Used to verify a cached layer without loading it
 /// into memory first.
-struct HashingReader<R: Read> {
+pub(crate) struct HashingReader<R: Read> {
     inner: R,
     hasher: Sha256,
 }
 
 impl<R: Read> HashingReader<R> {
-    fn new(inner: R) -> Self {
+    pub(crate) fn new(inner: R) -> Self {
         Self {
             inner,
             hasher: Sha256::new(),
         }
     }
 
-    fn finalize(self) -> [u8; 32] {
+    pub(crate) fn finalize(self) -> [u8; 32] {
         let digest = self.hasher.finalize();
         digest.into()
     }

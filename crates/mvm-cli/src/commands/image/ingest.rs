@@ -4,13 +4,17 @@
 
 use std::fs;
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use flate2::read::GzDecoder;
 
 use mvm_build::rootfs::MaterializeExt4Input;
 use mvm_core::domain::manifest::canonical_key_for_path;
-use mvm_fs::oci::{LinuxPlatform, read_oci_archive};
+use mvm_fs::oci::{
+    LinuxPlatform, UnpackOptions, read_oci_archive, stream_oci_archive,
+    unpack_layer_with_prior_paths,
+};
 
 use super::cache::sha256_hex;
 use super::materialize::{
@@ -41,7 +45,7 @@ pub(super) fn ingest_local_archive(
     }
     let file = fs::File::open(archive_path)
         .with_context(|| format!("open OCI archive {}", archive_path.display()))?;
-    ingest_archive_from_reader(
+    ingest_archive_streamed(
         cache_root,
         BufReader::new(file),
         supplied_reference,
@@ -72,6 +76,120 @@ pub(super) fn ingest_stdin_archive(
         "stdin_archive",
         "OCI archive on stdin",
     )
+}
+
+/// True for OCI layer media types that are gzip-compressed tarballs.
+fn is_gzip_layer(media_type: &str) -> bool {
+    media_type.ends_with("+gzip")
+        || media_type.ends_with(".gzip")
+        || media_type.contains("tar.gzip")
+}
+
+/// Stream a seekable local OCI archive straight to unpacked layers without
+/// buffering every blob in memory. This mirrors [`ingest_archive_from_reader`]
+/// but uses [`stream_oci_archive`], which builds an entry offset map and then
+/// hands each layer blob to the hardened unpacker as a sized stream.
+fn ingest_archive_streamed<R: Read + std::io::Seek>(
+    cache_root: &Path,
+    reader: R,
+    supplied_reference: &str,
+    source_label: &str,
+    source_descr: &str,
+) -> Result<ResolvedOciRunImage> {
+    let platform = LinuxPlatform::for_current_arch();
+    let unpacked_parent = cache_root.join("unpacked");
+    fs::create_dir_all(&unpacked_parent)
+        .with_context(|| format!("create {}", unpacked_parent.display()))?;
+    let tmp_unpack = tempfile::Builder::new()
+        .prefix("streaming-")
+        .tempdir_in(&unpacked_parent)
+        .with_context(|| "create temporary unpack directory")?;
+    let tmp_path = tmp_unpack.path().to_path_buf();
+
+    let mut prior_layer_paths = std::collections::HashSet::<PathBuf>::new();
+    let mut deferred_nodes = Vec::new();
+    let metadata = stream_oci_archive(reader, &platform, |descriptor, raw| {
+        let report = if is_gzip_layer(&descriptor.media_type) {
+            unpack_layer_with_prior_paths(
+                GzDecoder::new(raw),
+                &tmp_path,
+                &UnpackOptions::default(),
+                &prior_layer_paths,
+            )
+        } else {
+            unpack_layer_with_prior_paths(
+                raw,
+                &tmp_path,
+                &UnpackOptions::default(),
+                &prior_layer_paths,
+            )
+        }
+        .map_err(|e| mvm_fs::oci::OciError::Registry(e.to_string()))?;
+        if !report.refused.is_empty() {
+            return Err(mvm_fs::oci::OciError::Registry(format!(
+                "layer {} refused entries: {:?}",
+                descriptor.digest, report.refused
+            )));
+        }
+        prior_layer_paths.extend(report.paths_written);
+        deferred_nodes.extend(report.deferred_nodes);
+        Ok(())
+    })
+    .with_context(|| format!("stream {source_descr}"))?;
+
+    let manifest_hex = sha256_hex(&metadata.manifest_digest)?;
+    let unpacked_root = unpacked_parent.join(&manifest_hex);
+    if unpacked_root.exists() {
+        fs::remove_dir_all(&unpacked_root)
+            .with_context(|| format!("remove stale unpacked root {}", unpacked_root.display()))?;
+    }
+    fs::rename(&tmp_path, &unpacked_root).with_context(|| {
+        format!(
+            "rename unpack directory {} to {}",
+            tmp_path.display(),
+            unpacked_root.display()
+        )
+    })?;
+
+    let rootfs_rel = format!("rootfs/{manifest_hex}-{}/rootfs.ext4", oci_runtime_tag());
+    let rootfs_abs = cache_root.join(&rootfs_rel);
+    let rootfs_only_tree =
+        prepare_rootfs_only_tree(cache_root, &unpacked_root, &metadata.manifest_digest)?;
+    super::cache::write_deferred_nodes(cache_root, &metadata.manifest_digest, &deferred_nodes)?;
+    materialize_overlay_lean_rootfs(
+        cache_root,
+        &unpacked_root,
+        &rootfs_abs,
+        &metadata.manifest_digest,
+        deferred_nodes,
+    )?;
+
+    let provenance = OciProvenance {
+        schema_version: 1,
+        source: source_label.to_string(),
+        supplied_reference: supplied_reference.to_string(),
+        canonical_reference: metadata.manifest_digest.clone(),
+        registry: String::new(),
+        repository: String::new(),
+        tag: None,
+        resolved_digest: metadata.manifest_digest.clone(),
+        layer_digests: metadata
+            .layer_descriptors
+            .iter()
+            .map(|d| d.digest.clone())
+            .collect(),
+        trust_policy: "local-archive-digest-verified".to_string(),
+        verification_status: "content-digest-verified (dev)".to_string(),
+    };
+    Ok(ResolvedOciRunImage {
+        reference: metadata.manifest_digest.clone(),
+        resolved_digest: metadata.manifest_digest,
+        rootfs_path: rootfs_abs,
+        unpacked_root: Some(rootfs_only_tree),
+        pulled: true,
+        provenance,
+        auth_source: None,
+    })
 }
 
 /// Shared archive-ingest core: digest-verify the archive from `reader`, unpack
@@ -438,6 +556,28 @@ mod tests {
             "OCI archive with traversal layer",
         )
         .expect_err("local archive ingest must reject traversal entries");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("refused") || msg.contains("traversal"),
+            "got {msg}"
+        );
+    }
+
+    #[test]
+    fn local_archive_streaming_layer_traversal_is_rejected() {
+        // The seekable file path now uses stream_oci_archive, which must still
+        // reject traversal entries via the same hardened unpack_layer.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let archive_path = tmp.path().join("traversal.tar");
+        let archive = oci_archive_with_layer(&traversal_layer_gzip());
+        std::fs::write(&archive_path, archive).unwrap();
+        let err = ingest_local_archive(
+            tmp.path(),
+            &archive_path,
+            "oci-archive:traversal.tar",
+            false,
+        )
+        .expect_err("streaming local archive ingest must reject traversal entries");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("refused") || msg.contains("traversal"),

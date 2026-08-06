@@ -12,14 +12,13 @@
 //! hostile archive entry name can never escape onto the host here.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
-use serde::Deserialize;
-
-use crate::oci::layer::LayerDescriptor;
+use crate::oci::layer::{HashingReader, LayerDescriptor};
 use crate::oci::manifest::{LinuxPlatform, matches_linux_platform};
 use crate::oci::manifest_types::OciManifest;
 use crate::oci::{OciError, verify_sha256_digest};
+use serde::Deserialize;
 
 /// Hard cap on the total bytes buffered from one archive. Blobs are
 /// content-addressed, so resolving index → manifest → layers means buffering;
@@ -58,6 +57,26 @@ pub struct OciArchiveImage {
 pub struct OciArchiveLayer {
     pub descriptor: LayerDescriptor,
     pub bytes: Vec<u8>,
+}
+
+/// Metadata for an OCI image read out of a seekable local layout archive.
+/// Unlike [`OciArchiveImage`], this does not buffer layer blobs; the caller
+/// supplies a callback to [`stream_oci_archive`] that consumes each layer
+/// stream as it is read.
+#[derive(Debug, Clone)]
+pub struct OciArchiveMetadata {
+    /// `sha256:<hex>` of the selected image manifest.
+    pub manifest_digest: String,
+    /// `sha256:<hex>` of the image config blob.
+    pub config_digest: String,
+    /// Digest-verified image config JSON blob.
+    pub config_bytes: Vec<u8>,
+    /// `architecture` from the image config.
+    pub architecture: String,
+    /// `os` from the image config.
+    pub os: String,
+    /// Layer descriptors in manifest order.
+    pub layer_descriptors: Vec<LayerDescriptor>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +181,116 @@ pub fn read_oci_archive<R: Read>(
     })
 }
 
+/// Stream a seekable OCI image-layout archive, verifying metadata blobs
+/// immediately and passing each layer blob to `on_layer` as a sized stream.
+///
+/// This is the seekable/seekable-reader counterpart to
+/// [`read_oci_archive`]: it does not buffer layer blobs into memory. The
+/// caller's callback receives the raw layer bytes and is responsible for
+/// hashing/decompressing/unpacking. After the callback returns, this function
+/// finalizes the SHA-256 digest over the streamed bytes and fails closed on
+/// mismatch.
+///
+/// `reader` must implement both [`Read`] and [`Seek`] so the implementation
+/// can build an entry offset map in one pass and then jump to each needed
+/// blob. Use [`read_oci_archive`] for non-seekable readers such as stdin.
+pub fn stream_oci_archive<R, F>(
+    mut reader: R,
+    platform: &LinuxPlatform,
+    mut on_layer: F,
+) -> Result<OciArchiveMetadata, OciError>
+where
+    R: Read + Seek,
+    F: FnMut(&LayerDescriptor, &mut dyn Read) -> Result<(), OciError>,
+{
+    let offsets = index_tar_entries(&mut reader)?;
+
+    let layout = read_blob_at(&mut reader, &offsets, OCI_LAYOUT_FILE)?;
+    let marker: OciLayoutMarker = serde_json::from_slice(&layout)
+        .map_err(|e| OciError::Registry(format!("parse oci-layout: {e}")))?;
+    if marker.image_layout_version != SUPPORTED_LAYOUT_VERSION {
+        return Err(OciError::Registry(format!(
+            "unsupported OCI image layout version {:?} (want {SUPPORTED_LAYOUT_VERSION})",
+            marker.image_layout_version
+        )));
+    }
+
+    let index_bytes = read_blob_at(&mut reader, &offsets, INDEX_FILE)?;
+    let manifest_digest = select_manifest_digest(&index_bytes, platform)?;
+
+    let manifest_path = blob_path(&manifest_digest)?;
+    let manifest_bytes = read_blob_at(&mut reader, &offsets, &manifest_path)?;
+    verify_sha256_digest(&manifest_bytes, &manifest_digest)?;
+    let OciManifest::Image(image) = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| OciError::Registry(format!("parse image manifest: {e}")))?
+    else {
+        return Err(OciError::Registry(
+            "selected manifest is an image index, not an image manifest".into(),
+        ));
+    };
+    if image.layers.is_empty() {
+        return Err(OciError::Registry(
+            "OCI image manifest has no layers".into(),
+        ));
+    }
+
+    let config_digest = image.config.digest.clone();
+    let config_path = blob_path(&config_digest)?;
+    let config_bytes = read_blob_at(&mut reader, &offsets, &config_path)?;
+    verify_sha256_digest(&config_bytes, &config_digest)?;
+    let config: ImageConfigPlatform = serde_json::from_slice(&config_bytes)
+        .map_err(|e| OciError::Registry(format!("parse image config: {e}")))?;
+    if config.os != "linux" {
+        return Err(OciError::Registry(format!(
+            "OCI image targets os {:?}, not linux",
+            config.os
+        )));
+    }
+    if config.architecture != platform.architecture {
+        return Err(OciError::Registry(format!(
+            "OCI image architecture {:?} does not match host {:?}",
+            config.architecture, platform.architecture
+        )));
+    }
+
+    let mut layer_descriptors = Vec::with_capacity(image.layers.len());
+    for entry in &image.layers {
+        let path = blob_path(&entry.digest)?;
+        let (offset, size) = offsets.get(&path).copied().ok_or_else(|| {
+            OciError::Registry(format!("OCI archive missing blob {}", entry.digest))
+        })?;
+        let descriptor = LayerDescriptor {
+            digest: entry.digest.clone(),
+            size: entry.size as u64,
+            media_type: entry.media_type.clone(),
+        };
+
+        reader
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| OciError::Registry(format!("seek to layer {}: {e}", entry.digest)))?;
+        let mut limited = (&mut reader).take(size);
+        let mut hasher = HashingReader::new(&mut limited);
+        on_layer(&descriptor, &mut hasher)?;
+        let computed = format!("sha256:{}", hex::encode(hasher.finalize()));
+        if computed != entry.digest {
+            return Err(OciError::DigestMismatch {
+                expected: entry.digest.clone(),
+                computed,
+            });
+        }
+        layer_descriptors.push(descriptor);
+    }
+
+    Ok(OciArchiveMetadata {
+        manifest_digest,
+        config_digest,
+        config_bytes,
+        architecture: config.architecture,
+        os: config.os,
+        layer_descriptors,
+    })
+}
+
 /// Slurp every tar entry into a `path -> bytes` map, normalizing a leading
 /// `./`. Only entries we resolve by exact key (`oci-layout`, `index.json`,
 /// `blobs/sha256/<hex>`) are ever read back, so a hostile entry *name* cannot
@@ -199,6 +328,63 @@ fn read_tar_entries<R: Read>(reader: R) -> Result<BTreeMap<String, Vec<u8>>, Oci
         out.insert(path, bytes);
     }
     Ok(out)
+}
+
+/// Build a `path -> (data_offset, size)` map for every regular file in a
+/// seekable tar archive, normalizing a leading `./`. This is the first pass
+/// of [`stream_oci_archive`]; no blob bytes are buffered.
+fn index_tar_entries<R: Read + Seek>(reader: R) -> Result<BTreeMap<String, (u64, u64)>, OciError> {
+    let mut archive = tar::Archive::new(reader);
+    let mut out: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let tar_entries = archive
+        .entries()
+        .map_err(|e| OciError::Registry(format!("read OCI archive tar: {e}")))?;
+    for entry in tar_entries {
+        let entry = entry.map_err(|e| OciError::Registry(format!("OCI archive entry: {e}")))?;
+        if entry.header().entry_type() != tar::EntryType::Regular {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| OciError::Registry(format!("OCI archive entry path: {e}")))?
+            .to_string_lossy()
+            .trim_start_matches("./")
+            .to_string();
+        let size = entry.header().size().unwrap_or(0);
+        let offset = entry.raw_file_position();
+        out.insert(path, (offset, size));
+    }
+    Ok(out)
+}
+
+/// Read a small blob by its tar path, using the offset map built by
+/// [`index_tar_entries`].
+fn read_blob_at<R: Read + Seek>(
+    reader: &mut R,
+    offsets: &BTreeMap<String, (u64, u64)>,
+    path: &str,
+) -> Result<Vec<u8>, OciError> {
+    let (offset, size) = offsets
+        .get(path)
+        .copied()
+        .ok_or_else(|| OciError::Registry(format!("OCI archive missing blob {path}")))?;
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| OciError::Registry(format!("seek to {path}: {e}")))?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    reader
+        .take(size)
+        .read_to_end(&mut bytes)
+        .map_err(|e| OciError::Registry(format!("read {path}: {e}")))?;
+    Ok(bytes)
+}
+
+/// Translate a `sha256:<hex>` digest into the archive blob path.
+fn blob_path(digest: &str) -> Result<String, OciError> {
+    let hex = digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| OciError::Registry(format!("blob digest is not sha256: {digest}")))?;
+    Ok(format!("{BLOBS_PREFIX}{hex}"))
 }
 
 /// Look up a `sha256:<hex>` blob by its content address.
@@ -261,6 +447,7 @@ fn select_manifest_digest(
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+    use std::io::Cursor;
 
     fn digest_of(bytes: &[u8]) -> String {
         format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
@@ -527,5 +714,145 @@ mod tests {
         let full = ArchiveFixture::default().build();
         let err = read(&full[..full.len() / 2]).unwrap_err().to_string();
         assert!(!err.is_empty());
+    }
+
+    fn stream(bytes: &[u8]) -> Result<(OciArchiveMetadata, Vec<Vec<u8>>), OciError> {
+        let mut layers: Vec<Vec<u8>> = Vec::new();
+        let metadata = stream_oci_archive(
+            Cursor::new(bytes.to_vec()),
+            &LinuxPlatform::for_current_arch(),
+            |descriptor, raw| {
+                assert_eq!(
+                    descriptor.media_type,
+                    "application/vnd.oci.image.layer.v1.tar+gzip"
+                );
+                let mut buf = Vec::new();
+                raw.read_to_end(&mut buf)
+                    .map_err(|e| OciError::Registry(format!("read layer: {e}")))?;
+                layers.push(buf);
+                Ok(())
+            },
+        )?;
+        Ok((metadata, layers))
+    }
+
+    #[test]
+    fn streaming_reads_a_valid_single_arch_archive() {
+        let bytes = ArchiveFixture::default().build();
+        let (metadata, layers) = stream(&bytes).expect("stream valid archive parses");
+        assert_eq!(metadata.os, "linux");
+        assert_eq!(
+            metadata.architecture,
+            LinuxPlatform::for_current_arch().architecture
+        );
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0], b"layer-bytes-pretend-tar-gz");
+        assert!(metadata.manifest_digest.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn streaming_digest_mismatch_is_rejected() {
+        let f = ArchiveFixture {
+            corrupt_layer_digest: true,
+            ..Default::default()
+        };
+        let err = stream(&f.build()).unwrap_err().to_string();
+        assert!(
+            err.contains("mismatch") || err.contains("missing blob"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn streaming_unexpected_extra_entries_are_ignored() {
+        let f = ArchiveFixture {
+            extra_entries: vec![
+                (
+                    "blobs/sha256/unreferenced-blob".to_string(),
+                    b"junk".to_vec(),
+                ),
+                ("a-stray-top-level-file".to_string(), b"junk".to_vec()),
+            ],
+            ..Default::default()
+        };
+        let (metadata, layers) = stream(&f.build()).expect("stream archive with extras parses");
+        assert_eq!(metadata.layer_descriptors.len(), 1);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0], b"layer-bytes-pretend-tar-gz");
+    }
+
+    #[test]
+    fn streaming_handles_reordered_entries() {
+        // Build an archive where the layer blob appears before the index and
+        // manifest. The offset map lets stream_oci_archive still find every
+        // blob by digest, so order is irrelevant.
+        let layer = b"layer-bytes-pretend-tar-gz".to_vec();
+        let layer_digest = digest_of(&layer);
+        let config = format!(
+            r#"{{"architecture":"{}","os":"linux","rootfs":{{"type":"layers","diff_ids":["{}"]}}}}"#,
+            LinuxPlatform::for_current_arch().architecture, layer_digest
+        )
+        .into_bytes();
+        let config_digest = digest_of(&config);
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"{IMAGE_MANIFEST_MEDIA}","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{cfg_sz}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{layer_digest}","size":{lyr_sz}}}]}}"#,
+            cfg_sz = config.len(),
+            lyr_sz = layer.len(),
+        )
+        .into_bytes();
+        let manifest_digest = digest_of(&manifest);
+        let index = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"{IMAGE_MANIFEST_MEDIA}","digest":"{manifest_digest}","size":{mf_sz},"platform":{{"architecture":"{arch}","os":"linux"}}}}]}}"#,
+            mf_sz = manifest.len(),
+            arch = LinuxPlatform::for_current_arch().architecture,
+        )
+        .into_bytes();
+
+        let add = |b: &mut tar::Builder<Vec<u8>>, name: &str, data: &[u8]| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, name, data).unwrap();
+        };
+        let mut builder = tar::Builder::new(Vec::new());
+        // Layer first, then config, then manifest, then index, then layout.
+        add(
+            &mut builder,
+            &format!(
+                "{BLOBS_PREFIX}{}",
+                layer_digest.strip_prefix("sha256:").unwrap()
+            ),
+            &layer,
+        );
+        add(
+            &mut builder,
+            &format!(
+                "{BLOBS_PREFIX}{}",
+                config_digest.strip_prefix("sha256:").unwrap()
+            ),
+            &config,
+        );
+        add(
+            &mut builder,
+            &format!(
+                "{BLOBS_PREFIX}{}",
+                manifest_digest.strip_prefix("sha256:").unwrap()
+            ),
+            &manifest,
+        );
+        add(&mut builder, INDEX_FILE, &index);
+        add(
+            &mut builder,
+            OCI_LAYOUT_FILE,
+            format!(r#"{{"imageLayoutVersion":"{SUPPORTED_LAYOUT_VERSION}"}}"#).as_bytes(),
+        );
+        let bytes = builder.into_inner().unwrap();
+
+        let (metadata, layers) = stream(&bytes).expect("reordered archive streams");
+        assert_eq!(metadata.layer_descriptors.len(), 1);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0], b"layer-bytes-pretend-tar-gz");
     }
 }

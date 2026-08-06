@@ -58,7 +58,9 @@ mod registry;
 // drive the unpack and to surface refusals in audit-chain entries.
 pub mod unpack;
 
-pub use archive::{OciArchiveImage, OciArchiveLayer, read_oci_archive};
+pub use archive::{
+    OciArchiveImage, OciArchiveLayer, OciArchiveMetadata, read_oci_archive, stream_oci_archive,
+};
 pub use error::OciError;
 pub use layer::{LayerDescriptor, LayerFetchOptions, OciLayerFetcher};
 pub use manifest::{
