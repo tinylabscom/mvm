@@ -430,11 +430,11 @@ fn two_machines_forward_admitted_packets_through_the_shared_hook() {
     let a_listing = nft_chain_listing(&table, &a_chain);
     let b_listing = nft_chain_listing(&table, &b_chain);
     assert!(
-        counter_packets(&a_listing, &format!("ip saddr {}/32", a.guest)) > 0,
+        counter_packets(&a_listing, &format!("ip saddr {}", a.guest)) > 0,
         "machine a's admitted packet must traverse its forward chain: {a_listing}"
     );
     assert!(
-        counter_packets(&b_listing, &format!("ip saddr {}/32", b.guest)) > 0,
+        counter_packets(&b_listing, &format!("ip saddr {}", b.guest)) > 0,
         "machine b's admitted packet must traverse its forward chain: {b_listing}"
     );
 
