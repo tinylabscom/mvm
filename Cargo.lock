@@ -3073,16 +3073,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-host-services-ffi"
-version = "0.18.0"
-dependencies = [
- "mvm-agentd",
- "mvm-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "mvm-hostd"
 version = "0.18.0"
 dependencies = [

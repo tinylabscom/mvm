@@ -1,5 +1,5 @@
-#![forbid(unsafe_code)]
-//! mvm-sdk — build-time Rust SDK for declaring mvm workloads.
+#![deny(unsafe_code)]
+//! mvm-sdk — Rust SDK for declaring, recording, and driving mvm workloads.
 //!
 //! Builder-pattern surface (no globals), build-time DSL only in v1 (no
 //! `Session`/`RemoteFunction`); corpus byte-identity gates release.
@@ -82,6 +82,11 @@ pub mod compile;
 /// `Workload` IR. Pure tree-sitter; never imports the user's code.
 /// Closed `mvm.*` helper allowlist; non-literal kwargs rejected.
 pub mod decorator;
+
+/// In-guest host-services C-ABI cdylib (`libmvm_host_services.so`) loaded by
+/// the Python and TypeScript SDKs. Unsafe code is confined to this module.
+#[allow(unsafe_code)]
+mod host_services_ffi;
 
 /// Deploy-bundle assembly and local attestation for mvmd-owned control-plane
 /// flows. Builds the single `.tar.gz` (compile output plus embedded

@@ -34,7 +34,7 @@ plan 272 §WS-3.
 
 The deciding argument is not tidiness. WS3 hand-copied the list of claims
 that mutation testing cannot reach into prose and recorded **three**
-(MVM-SEC-04/05/07). `check-mutation-witnesses` *derives* that list from the
+(MVM-SEC-04/05/07). `check-mutation-witnesses` _derives_ that list from the
 ledger and reports **four** — it also names **MVM-SEC-16**, whose three
 witnesses are real Rust functions that cargo-mutants skips only because they
 live in `crates/mvm-hostd/tests/`. A hand-maintained copy of a computed list
@@ -73,15 +73,15 @@ None is a reason not to proceed.
 obvious `store-failure-output = true` bulk-captures stdout/stderr from
 failing tests in a suite that handles host signer keys, grant tokens, the
 secret store, and audit chains. `check-no-display-on-secret-types`
-protects types *named* like secrets; it does nothing about a raw byte
+protects types _named_ like secrets; it does nothing about a raw byte
 buffer, a key path, or a token surfaced by a debug assertion. WS2 Task 5
 therefore sets `store-failure-output = false`. The job log remains the
 place to read a failure.
 
 **S2 — Mutation testing executes deliberately-broken security code.**
 WS4 mutates plan verification, seccomp filter construction, the egress
-policy resolver, and the host signer, then *runs the suite against the
-mutant*. That is, by design, running the code with a safety check
+policy resolver, and the host signer, then _runs the suite against the
+mutant_. That is, by design, running the code with a safety check
 removed: it can write to a real `~/.mvm`, mint keys at the wrong path or
 mode, install firewall rules nothing cleans up, and leave VMs running.
 The lane runs under an isolated `MVM_HOME` **and** `HOME`
@@ -93,7 +93,7 @@ disposable container, and never on a developer machine. WS4 Task 10 Step
 `enforced_by` can be narrowed to a trivial file and a mutation baseline
 can be lowered; either makes a claim look backed while reducing its
 backing, and both read as routine in a diff. WS4 Task 14 makes
-`--check-baseline` refuse a *lowered* baseline unless an explicit
+`--check-baseline` refuse a _lowered_ baseline unless an explicit
 `--rebaseline` flag and a written reason are supplied. Narrowing
 `enforced_by` is a review red flag on par with deleting a witness; say so
 in the PR that introduces the field.
@@ -101,11 +101,11 @@ in the PR that introduces the field.
 **S4 — WS1 is claim-bearing, not hygiene, and should be scoped
 accordingly.** Three of the unprotected structs sit on enforcement paths:
 
-| Struct | Path | Claim | Failure direction if layout drifts |
-| --- | --- | --- | --- |
-| `CapHeader` / `CapData` | `capset(2)` | MVM-SEC-02 (no elevation to uid 0) | Writes the wrong capability word — can *widen* privileges |
-| `DmIoctl` / `DmTargetSpec` | device-mapper table load | MVM-SEC-03 (tampered rootfs fails to boot) | Possibly loads a device that is not verity-backed |
-| `MvmHsvcBuf` | broker C ABI | MVM-SEC-12 / MVM-SEC-13 | Over-read in an SDK process whose heap holds signed broker credentials |
+| Struct                     | Path                     | Claim                                      | Failure direction if layout drifts                                     |
+| -------------------------- | ------------------------ | ------------------------------------------ | ---------------------------------------------------------------------- |
+| `CapHeader` / `CapData`    | `capset(2)`              | MVM-SEC-02 (no elevation to uid 0)         | Writes the wrong capability word — can _widen_ privileges              |
+| `DmIoctl` / `DmTargetSpec` | device-mapper table load | MVM-SEC-03 (tampered rootfs fails to boot) | Possibly loads a device that is not verity-backed                      |
+| `MvmHsvcBuf`               | broker C ABI             | MVM-SEC-12 / MVM-SEC-13                    | Over-read in an SDK process whose heap holds signed broker credentials |
 
 MVM-SEC-03's entry in `model/claims.toml` lists only a CI lane, but the
 ADR-001 ledger also names `fn:verify_and_resume_rejects_tampered_mem` —
@@ -139,7 +139,7 @@ deferred.
 
 ---
 
-# WS1 — ABI layout contracts  ✅ shipped in #1940
+# WS1 — ABI layout contracts ✅ shipped in #1940
 
 **Why.** Seventeen `#[repr(C)]` items live under `crates/`. Four carry a
 compile-time **size** assertion (`SockaddrVm` in `qemu.rs:858` and
@@ -149,14 +149,14 @@ none asserts a single field offset — so a same-size field reordering, the
 most common ABI drift there is, compiles clean everywhere in the tree
 today. The thirteen with nothing at all include the two worst cases:
 
-- `MvmHsvcBuf` (`crates/mvm-host-services-ffi/src/lib.rs:72`) — the C-ABI
+- `MvmHsvcBuf` (`crates/mvm-sdk/src/host_services_ffi.rs:72`) — the C-ABI
   struct **every language SDK dlopens**. Layout drift here is not a
   Rust-side bug; it is an out-of-bounds read inside somebody else's
   Python or Node runtime, with no Rust diagnostic anywhere.
 - `hv_vcpu_exit_t` / `hv_vcpu_exit_exception_t`
   (`crates/mvm-runtime/src/hvf/sys.rs:63,71`) — hand-written mirrors of
-  Apple Hypervisor.framework types. These are populated *by the
-  framework*; a field-offset mismatch silently misreads the vCPU exit
+  Apple Hypervisor.framework types. These are populated _by the
+  framework_; a field-offset mismatch silently misreads the vCPU exit
   reason, which is the control-flow input of the whole HVF backend.
 
 There is also a duplication problem the assertions will make visible:
@@ -180,11 +180,13 @@ used to derive it.
 ## Task 1: Layout contracts for the C-ABI and Hypervisor.framework types
 
 **Files:**
-- Modify: `crates/mvm-host-services-ffi/src/lib.rs` (after line 78)
+
+- Modify: `crates/mvm-sdk/src/host_services_ffi.rs` (after line 78)
 - Modify: `crates/mvm-runtime/src/hvf/sys.rs` (after line 76)
 
 **Interfaces:**
-- Produces: the `const _: () = assert!(...)` house pattern that Tasks 2–3 replicate, and the header-derivation comment convention that `check-abi-layout` (Task 4) does *not* verify but reviewers do.
+
+- Produces: the `const _: () = assert!(...)` house pattern that Tasks 2–3 replicate, and the header-derivation comment convention that `check-abi-layout` (Task 4) does _not_ verify but reviewers do.
 - Consumes: nothing.
 
 - [x] **Step 1: Derive the Hypervisor.framework values from the SDK header**
@@ -263,7 +265,7 @@ used to derive it.
 
 - [x] **Step 4: Add the `MvmHsvcBuf` contract**
 
-  Insert after line 78 of `crates/mvm-host-services-ffi/src/lib.rs`. This
+  Insert after line 78 of `crates/mvm-sdk/src/host_services_ffi.rs`. This
   one is pointer-width-dependent, so it is gated rather than weakened
   into a tautology (`size_of::<T>() == 2 * size_of::<usize>()` would pass
   for any two pointer-sized fields in any order and is worth nothing):
@@ -288,11 +290,11 @@ used to derive it.
 - [x] **Step 5: Verify and commit**
 
   ```sh
-  cargo check -p mvm-host-services-ffi -p mvm-runtime
-  cargo nextest run -p mvm-host-services-ffi -p mvm-runtime
+  cargo check -p mvm-sdk -p mvm-runtime
+  cargo nextest run -p mvm-sdk -p mvm-runtime
   rustup run nightly cargo fmt --all
   git -C /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan272-witness-rigor add \
-    crates/mvm-host-services-ffi/src/lib.rs crates/mvm-runtime/src/hvf/sys.rs
+    crates/mvm-sdk/src/host_services_ffi.rs crates/mvm-runtime/src/hvf/sys.rs
   git -C /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan272-witness-rigor commit -m \
     "feat(abi): pin the C-ABI and Hypervisor.framework struct layouts at compile time"
   ```
@@ -300,6 +302,7 @@ used to derive it.
 ## Task 2: Layout contracts for the seven `sockaddr_vm` copies
 
 **Files:**
+
 - Modify: `crates/mvm-agentd/src/bin/mvm-guest-agent/socket.rs:13`
 - Modify: `crates/mvm-agentd/src/console.rs:103`
 - Modify: `crates/mvm-build/src/bin/mvm-host-vm-init.rs:1846`
@@ -308,6 +311,7 @@ used to derive it.
 - Modify: `crates/mvm-runtime/src/qemu.rs:858` and `crates/mvm-hostd/src/supervisor/substitution_proxy.rs:1395` — these two already assert size; replace the one-line assertion with the full block so they also carry alignment and field offsets
 
 **Interfaces:**
+
 - Consumes: the assertion pattern from Task 1.
 - Produces: an identical contract on all seven copies, so a future consolidation can prove the copies were interchangeable.
 
@@ -384,12 +388,14 @@ used to derive it.
 ## Task 3: Layout contracts for the remaining kernel-ABI types
 
 **Files:**
+
 - Modify: `crates/mvm-agentd/src/bin/mvm-setpriv.rs:230,238` — `CapHeader`, `CapData` (`linux/capability.h`: `__user_cap_header_struct`, `__user_cap_data_struct`)
 - Modify: `crates/mvm-agentd/src/guest_mount.rs:352` — `DmTargetSpec` (`linux/dm-ioctl.h`), and top up the existing size-only `DmIoctl` assertion at :350 with alignment and offsets
 - Modify: `crates/mvm-agentd/src/bin/mvm-verity-init.rs:419` — `DmTargetSpec` (same header), and the same `DmIoctl` top-up at :417
 - Modify: `crates/mvm-agentd/src/console.rs:113` — `Winsize` (`struct winsize`, `sys/ioctl.h`)
 
 **Interfaces:**
+
 - Consumes: the pattern from Tasks 1–2.
 - Produces: full `repr(C)` coverage, which is the precondition for the Task 4 gate to pass on a clean tree.
 
@@ -496,7 +502,7 @@ used to derive it.
   This is the question that decides whether the whole plan's highest
   severity sits here. MVM-SEC-03 says a tampered rootfs fails to boot,
   enforced by a dm-verity target built from `DmIoctl` + `DmTargetSpec`.
-  If a *misparsed* target can produce a device that loads successfully
+  If a _misparsed_ target can produce a device that loads successfully
   but is not verity-backed, the drift is fail-open and the claim is
   silently void on any host where it occurs.
 
@@ -510,7 +516,7 @@ used to derive it.
     day) but it is not a claim-3 hole.
   - **Loads a working non-verity device** → fail-open. Record it as a
     finding, raise it in the WS1 PR, and file it as its own issue — a
-    layout contract is then the *mitigation* for a real gap, not just
+    layout contract is then the _mitigation_ for a real gap, not just
     drift insurance.
 
   Either answer goes into the WS1 PR body. Do not skip this step because
@@ -550,6 +556,7 @@ used to derive it.
 ## Task 4: `xtask check-abi-layout`
 
 **Files:**
+
 - Create: `xtask/src/check_abi_layout.rs`
 - Modify: `xtask/src/main.rs` (register the subcommand)
 - Modify: `.github/workflows/ci.yml` (Lint job, after the `check-claim-catalog` step)
@@ -557,6 +564,7 @@ used to derive it.
 - Modify: `specs/VERIFICATION.md` (falsifiability row)
 
 **Interfaces:**
+
 - Consumes: nothing from Tasks 1–3 at the code level, but requires them merged or it fails on a clean tree.
 - Produces: `cargo run -p xtask -- check-abi-layout`, exit 0 on clean, exit 1 with a per-struct diagnostic otherwise.
 
@@ -795,8 +803,8 @@ used to derive it.
   the `Conformance claim catalog` step:
 
   ```yaml
-      - name: repr(C) types carry a layout contract
-        run: cargo run -p xtask -- check-abi-layout
+  - name: repr(C) types carry a layout contract
+    run: cargo run -p xtask -- check-abi-layout
   ```
 
 - [x] **Step 8: Plant a defect and record that the gate fired**
@@ -868,7 +876,7 @@ used to derive it.
 
 ---
 
-# WS2 — a nextest profile that exists  ✅ shipped in #1943
+# WS2 — a nextest profile that exists ✅ shipped in #1943
 
 **Why.** `Justfile:157` defines:
 
@@ -912,10 +920,12 @@ process-external, since per-test process isolation does not help it.
 ## Task 5: Create the profile
 
 **Files:**
+
 - Create: `.config/nextest.toml`
 - Modify: `Justfile` (comment on `test-ci` now describes what it does)
 
 **Interfaces:**
+
 - Produces: profiles `default` and `ci`, consumed by `just test`, `just test-ci`, and the `ci-full.yml` test job.
 
 - [x] **Step 1: Confirm the failure first**
@@ -1014,22 +1024,21 @@ process-external, since per-test process isolation does not help it.
 - [x] **Step 5: Add the JUnit artifact to the CI test job**
 
   In `.github/workflows/ci-full.yml`, change the workspace test step
-  (currently `cargo nextest run --workspace --all-targets` around line
-  213) to add `--profile ci`, and add an upload step guarded by
+  (currently `cargo nextest run --workspace --all-targets` around line 213) to add `--profile ci`, and add an upload step guarded by
   `if: always()` so a failing run still publishes the report. Pin the
   action by SHA per S6 — resolve the current `v4` SHA with
   `gh api repos/actions/upload-artifact/git/ref/tags/v4 -q .object.sha`
   and substitute it below rather than copying this one blind:
 
   ```yaml
-      - name: Upload test report
-        if: always()
-        uses: actions/upload-artifact@<sha>  # v4
-        with:
-          name: nextest-junit
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: warn
-          retention-days: 14
+  - name: Upload test report
+    if: always()
+    uses: actions/upload-artifact@<sha> # v4
+    with:
+      name: nextest-junit
+      path: target/nextest/ci/junit.xml
+      if-no-files-found: warn
+      retention-days: 14
   ```
 
 - [x] **Step 6: Commit**
@@ -1043,9 +1052,11 @@ process-external, since per-test process isolation does not help it.
 ## Task 6: Measure whether any test actually contends
 
 **Files:**
+
 - No source changes. Output goes to `/tmp/` and into the Task 7 decision.
 
 **Interfaces:**
+
 - Produces: the list of tests, if any, that fail under parallel load but pass serially. Task 7 consumes it.
 
 - [x] **Step 1: Establish the serial baseline**
@@ -1083,7 +1094,7 @@ process-external, since per-test process isolation does not help it.
   ```
 
   A filtered run may not reproduce it — the SPRINT.md note says it passed
-  47/47 in isolation, so the trigger is the *rest of the suite* running
+  47/47 in isolation, so the trigger is the _rest of the suite_ running
   alongside. If the filtered loop is clean, reproduce it the way it was
   observed: full `cargo nextest run --workspace` passes, watching only
   that name. Then determine what it shares with the rest of the suite:
@@ -1121,9 +1132,11 @@ process-external, since per-test process isolation does not help it.
 ## Task 7: Add test groups only for what Task 6 found
 
 **Files:**
+
 - Modify: `.config/nextest.toml`
 
 **Interfaces:**
+
 - Consumes: the contended-test list from Task 6.
 - Produces: a `[test-groups]` table and matching overrides, or a recorded finding that none are needed.
 
@@ -1131,8 +1144,8 @@ process-external, since per-test process isolation does not help it.
 
   A test that needs a unique tempdir and does not have one is a bug in
   the test, and a test group would paper over it. Serialize only what
-  genuinely shares a process-external resource *by design* — the Stage 0
-  advisory lock is the plausible case, because its whole subject *is* a
+  genuinely shares a process-external resource _by design_ — the Stage 0
+  advisory lock is the plausible case, because its whole subject _is_ a
   cross-process lock on a fixed path. `update_check_does_not_emit_audit_entry`
   is more likely a test-side fix than a group; decide from what Task 6
   Step 3 found, and record the reasoning either way.
@@ -1180,7 +1193,7 @@ process-external, since per-test process isolation does not help it.
 
 ---
 
-# WS3 — the witnesses mutation testing cannot reach  ❌ STRUCK → plan 272 §WS-3
+# WS3 — the witnesses mutation testing cannot reach ❌ STRUCK → plan 272 §WS-3
 
 **Struck. Do not execute this workstream — it lives in plan 272 §WS-3.**
 
@@ -1215,6 +1228,7 @@ These need the hand treatment, once, recorded in `specs/VERIFICATION.md`.
 ## Task 8: Falsify the remaining CI-lane witnesses
 
 **Files:**
+
 - Modify: `specs/VERIFICATION.md` (extend the falsifiability table)
 - No source changes survive this task — every edit is reverted.
 
@@ -1243,9 +1257,9 @@ These need the hand treatment, once, recorded in `specs/VERIFICATION.md`.
   table:
 
   ```markdown
-  | Claim | Witness | Planted defect | Fired |
-  | --- | --- | --- | --- |
-  | MVM-SEC-04 | `ci:guest-agent-runtime-boundary` | Remove the runtime profile or signed-grant check before dispatching a DevOnly request | yes |
+  | Claim      | Witness                           | Planted defect                                                                        | Fired |
+  | ---------- | --------------------------------- | ------------------------------------------------------------------------------------- | ----- |
+  | MVM-SEC-04 | `ci:guest-agent-runtime-boundary` | Remove the runtime profile or signed-grant check before dispatching a DevOnly request | yes   |
   ```
 
   Fill the verdicts from Steps 1-3. A `did not fire` is a finding, not a
@@ -1286,20 +1300,20 @@ The original WS4 in this plan — `enforced_by` in `model/claims.toml`, an
 `--rebaseline` ratchet — is **struck**. #1934 shipped the same idea and
 is better on four counts:
 
-| This plan proposed | #1934 does |
-| --- | --- |
-| A hand-maintained `enforced_by` list per claim | Derives the surface from the ledger — a `fn:` witness resolves to its declaring file, using the repo's `#[cfg(test)] mod tests`-beside-the-impl convention |
-| Nightly-only, so invisible on PRs | A millisecond **surface pin** every PR plus the hours-long `--run` nightly, so a claim losing coverage is a reviewable diff |
-| A `--rebaseline` flag guarding a lowered number | `check_accepted_reasons` requires a stated reason per accepted miss, and names the failure mode it prevents |
-| `mutation = "not-applicable"` + reason, hand-written | Reports claims reaching no mutable file and pins them, rather than fabricating a value |
+| This plan proposed                                   | #1934 does                                                                                                                                                 |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A hand-maintained `enforced_by` list per claim       | Derives the surface from the ledger — a `fn:` witness resolves to its declaring file, using the repo's `#[cfg(test)] mod tests`-beside-the-impl convention |
+| Nightly-only, so invisible on PRs                    | A millisecond **surface pin** every PR plus the hours-long `--run` nightly, so a claim losing coverage is a reviewable diff                                |
+| A `--rebaseline` flag guarding a lowered number      | `check_accepted_reasons` requires a stated reason per accepted miss, and names the failure mode it prevents                                                |
+| `mutation = "not-applicable"` + reason, hand-written | Reports claims reaching no mutable file and pins them, rather than fabricating a value                                                                     |
 
 Do not re-propose the struck design. The one gap found reviewing #1934
 is filed as #1946 (hermetic execution), not reimplemented here.
 
 **A note on why the hand sweep was dropped, beyond redundancy.** A
 spot-check ran MVM-SEC-10's seven witnesses before this re-scope. Six
-fired; one appeared not to. The apparent miss was the *defect in the
-wrong place* — `resolve_run_network_policy` calls `NetworkPolicy::deny_all()`
+fired; one appeared not to. The apparent miss was the _defect in the
+wrong place_ — `resolve_run_network_policy` calls `NetworkPolicy::deny_all()`
 directly rather than going through `Default`, so neutering the `Default`
 impl never touched the path that witness guards. Re-run against the
 correct line, it fired. A hand sweep's "did not fire" is ambiguous
