@@ -45,13 +45,29 @@ pub(super) fn ingest_local_archive(
     }
     let file = fs::File::open(archive_path)
         .with_context(|| format!("open OCI archive {}", archive_path.display()))?;
-    ingest_archive_streamed(
-        cache_root,
-        BufReader::new(file),
-        supplied_reference,
-        "local_archive",
-        &format!("OCI archive {}", archive_path.display()),
-    )
+    let source_descr = format!("OCI archive {}", archive_path.display());
+    // Stream regular files (seekable) to avoid buffering every blob; fall back
+    // to the buffered reader for pipes, stdin-style special files, etc.
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("stat OCI archive {}", archive_path.display()))?;
+    if metadata.file_type().is_file() {
+        ingest_archive_streamed(
+            cache_root,
+            BufReader::new(file),
+            supplied_reference,
+            "local_archive",
+            &source_descr,
+        )
+    } else {
+        ingest_archive_from_reader(
+            cache_root,
+            BufReader::new(file),
+            supplied_reference,
+            "local_archive",
+            &source_descr,
+        )
+    }
 }
 
 /// Ingest an OCI image-layout archive streamed on stdin (`run --image -`). Same
