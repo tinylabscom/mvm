@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+
 use tracing::{info, warn};
 
 use crate::supervisor::ebpf_telemetry::{ObservabilityTarget, TelemetryEvent};
@@ -19,11 +22,28 @@ pub struct ProbeConfig {
 /// A running telemetry probe for one VM.
 pub struct ProbeHandle {
     target: ObservabilityTarget,
+    #[cfg(target_os = "linux")]
+    events: std::sync::mpsc::Receiver<TelemetryEvent>,
+    #[cfg(target_os = "linux")]
+    detach: Option<std::sync::mpsc::Sender<()>>,
+    #[cfg(target_os = "linux")]
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ProbeHandle {
     pub(super) fn new(target: ObservabilityTarget) -> Self {
-        Self { target }
+        Self {
+            target,
+            #[cfg(target_os = "linux")]
+            events: {
+                let (_, rx) = std::sync::mpsc::channel();
+                rx
+            },
+            #[cfg(target_os = "linux")]
+            detach: None,
+            #[cfg(target_os = "linux")]
+            worker: None,
+        }
     }
 
     pub fn target(&self) -> &ObservabilityTarget {
@@ -52,22 +72,18 @@ impl EgressTelemetry {
             backend = ?target.backend_kind,
             "attaching egress telemetry probe"
         );
-        inner_attach(&self.config, &target)?;
-        Ok(ProbeHandle::new(target))
+        inner_attach(&self.config, target)
     }
 
     /// Detach the telemetry probe for the given VM.
     pub fn detach(&self, handle: ProbeHandle) {
         info!(vm = %handle.target.vm_name, "detaching egress telemetry probe");
+        inner_detach(handle);
     }
 
     /// Drain any pending telemetry events.
-    ///
-    /// Real implementations backed by eBPF ring buffers or procfs
-    /// polling would return events here. The stub returns an empty
-    /// iterator.
-    pub fn poll_events(&self, _handle: &ProbeHandle) -> Vec<TelemetryEvent> {
-        Vec::new()
+    pub fn poll_events(&self, handle: &ProbeHandle) -> Vec<TelemetryEvent> {
+        inner_poll_events(handle)
     }
 }
 
@@ -77,19 +93,35 @@ pub enum TelemetryError {
     MissingSubstitutionPid(String),
     #[error("eBPF loader not available on this platform")]
     UnsupportedPlatform,
+    #[error("eBPF load/attach failed: {0}")]
+    LoadFailed(String),
 }
 
 #[cfg(not(target_os = "linux"))]
-fn inner_attach(_config: &ProbeConfig, target: &ObservabilityTarget) -> Result<(), TelemetryError> {
+fn inner_attach(
+    _config: &ProbeConfig,
+    target: ObservabilityTarget,
+) -> Result<ProbeHandle, TelemetryError> {
     warn!(
         vm = %target.vm_name,
         "eBPF egress telemetry is only available on Linux; using no-op stub"
     );
-    Ok(())
+    Ok(ProbeHandle::new(target))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inner_detach(_handle: ProbeHandle) {}
+
+#[cfg(not(target_os = "linux"))]
+fn inner_poll_events(_handle: &ProbeHandle) -> Vec<TelemetryEvent> {
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]
-fn inner_attach(config: &ProbeConfig, target: &ObservabilityTarget) -> Result<(), TelemetryError> {
+fn inner_attach(
+    config: &ProbeConfig,
+    target: ObservabilityTarget,
+) -> Result<ProbeHandle, TelemetryError> {
     let Some(_pid) = target.substitution_pid else {
         return Err(TelemetryError::MissingSubstitutionPid(
             target.vm_name.clone(),
@@ -100,24 +132,52 @@ fn inner_attach(config: &ProbeConfig, target: &ObservabilityTarget) -> Result<()
         .ebpf_object_path
         .clone()
         .or_else(default_ebpf_object_path);
-    if let Some(path) = object_path {
-        if path.exists() {
-            if let Err(e) = load_aya_program(&path, target) {
-                warn!(error = %e, vm = %target.vm_name, "failed to load eBPF program");
-            } else {
-                info!(vm = %target.vm_name, "eBPF egress probe attached");
-                return Ok(());
+    let Some(path) = object_path else {
+        return Ok(procfs_handle(target, config));
+    };
+    if !path.exists() {
+        return if config.enable_procfs_fallback {
+            Ok(procfs_handle(target, config))
+        } else {
+            warn!(vm = %target.vm_name, "eBPF object missing and procfs fallback disabled");
+            Ok(ProbeHandle::new(target))
+        };
+    }
+
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let (detach_tx, detach_rx) = std::sync::mpsc::channel();
+
+    let vm_name = target.vm_name.clone();
+    let worker = std::thread::Builder::new()
+        .name(format!("ebpf-egress-{vm_name}"))
+        .spawn(move || {
+            if let Err(e) = ebpf_worker(path, vm_name, events_tx, detach_rx) {
+                warn!(error = %e, "eBPF worker failed");
             }
-        }
-    }
+        })
+        .map_err(|e| TelemetryError::LoadFailed(e.to_string()))?;
 
-    if config.enable_procfs_fallback {
-        info!(vm = %target.vm_name, "using procfs fallback for egress telemetry");
-    } else {
-        warn!(vm = %target.vm_name, "no eBPF object and procfs fallback disabled");
-    }
+    Ok(ProbeHandle {
+        target,
+        events: events_rx,
+        detach: Some(detach_tx),
+        worker: Some(worker),
+    })
+}
 
-    Ok(())
+#[cfg(target_os = "linux")]
+fn inner_detach(handle: ProbeHandle) {
+    if let Some(tx) = handle.detach {
+        let _ = tx.send(());
+    }
+    if let Some(worker) = handle.worker {
+        let _ = worker.join();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn inner_poll_events(handle: &ProbeHandle) -> Vec<TelemetryEvent> {
+    handle.events.try_iter().collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -134,19 +194,72 @@ fn default_ebpf_object_path() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn load_aya_program(
-    path: &std::path::Path,
-    target: &ObservabilityTarget,
-) -> Result<(), aya::EbpfError> {
-    let _ebpf = aya::Ebpf::load_file(path)?;
-    info!(
-        vm = %target.vm_name,
-        pid = target.substitution_pid,
-        "Aya eBPF object loaded from {}"
-        , path.display()
-    );
-    // Full attach/ring-buffer setup is deferred to a follow-up commit
-    // once the eBPF object is built in the Linux builder VM.
+fn procfs_handle(target: ObservabilityTarget, _config: &ProbeConfig) -> ProbeHandle {
+    info!(vm = %target.vm_name, "using procfs fallback for egress telemetry");
+    ProbeHandle::new(target)
+}
+
+#[cfg(target_os = "linux")]
+fn ebpf_worker(
+    path: PathBuf,
+    vm_name: String,
+    events: std::sync::mpsc::Sender<TelemetryEvent>,
+    detach: std::sync::mpsc::Receiver<()>,
+) -> Result<(), TelemetryError> {
+    let mut ebpf =
+        aya::Ebpf::load_file(&path).map_err(|e| TelemetryError::LoadFailed(e.to_string()))?;
+
+    let program: &mut aya::programs::KProbe = ebpf
+        .program_mut("mvm_hostd_egress_tcp_connect")
+        .ok_or_else(|| TelemetryError::LoadFailed("program not found".into()))?
+        .try_into()
+        .map_err(|e| TelemetryError::LoadFailed(format!("{e:?}")))?;
+    program
+        .load()
+        .map_err(|e| TelemetryError::LoadFailed(e.to_string()))?;
+    program
+        .attach("tcp_connect", 0)
+        .map_err(|e| TelemetryError::LoadFailed(e.to_string()))?;
+
+    info!(vm = %vm_name, "eBPF egress probe attached to tcp_connect");
+
+    // The ring buffer is optional: older spikes may only use aya-log.
+    let mut ring_buf: Option<aya::maps::RingBuf<&mut aya::maps::MapData>> =
+        ebpf.map_mut("EVENTS").and_then(|m| m.try_into().ok());
+    if ring_buf.is_none() {
+        warn!(vm = %vm_name, "EVENTS ring buffer not found; probe loaded but no events will be read");
+    }
+
+    loop {
+        if detach.try_recv().is_ok() {
+            break;
+        }
+
+        if let Some(ref mut rb) = ring_buf {
+            match rb.next() {
+                Some(_item) => {
+                    // Placeholder: each ring-buffer record counts as one
+                    // observed egress packet. Future iterations will parse
+                    // the destination out of the record bytes.
+                    let _ = events.send(TelemetryEvent::Egress(super::events::EgressEvent {
+                        destination: std::net::SocketAddr::from((
+                            std::net::Ipv4Addr::UNSPECIFIED,
+                            0,
+                        )),
+                        bytes: 0,
+                        latency_us: None,
+                    }));
+                }
+                None => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    info!(vm = %vm_name, "eBPF egress probe detached");
     Ok(())
 }
 

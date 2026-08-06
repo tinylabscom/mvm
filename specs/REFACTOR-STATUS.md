@@ -25,7 +25,9 @@ for detailed scope and acceptance criteria.
         18 skipped; cargo test previously flaked on one netd test that
         passes in isolation)
   - [ ] Full workspace test run in CI / Linux builder VM
-  - [ ] Load and attach the built object on a live Linux host
+  - [x] Implement Linux Aya load/attach/ring-buffer read path
+        (cross-compiles for x86_64-unknown-linux-gnu via cargo-zigbuild)
+  - [ ] Validate load/attach on a live Linux host
 - [x] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
   - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy

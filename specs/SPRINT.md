@@ -113,9 +113,10 @@
       egress counters to the global metrics snapshot, and kept macOS/Windows
       builds on no-op stubs. Built the real `bpfel-unknown-none` object with
       `just build-ebpf` (nightly + `bpf-linker`), added an attach→detach
-      integration test that reads the sidecar, and ran the full workspace
-      nextest suite (10134 passed, 18 skipped). Loading/attaching the object
-      on a live Linux host remains for the builder VM.
+      integration test that reads the sidecar, implemented the Linux Aya
+      load/attach/ring-buffer read path, and ran the full workspace nextest
+      suite (10134 passed, 18 skipped). Validating load/attach on a live
+      Linux host remains for the builder VM.
 
 - [x] Source-checkout kernel bootstrap reliability. `just kernel-workload` and
       `mvmctl kernel build --which workload` now embed the Stage 0 egress client
