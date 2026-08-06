@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use super::agent_bridge::AgentBridge;
 use super::console_bridge::ConsoleBridge;
 use super::substitution_bridge::{
-    EgressBudget, EndpointRelayAction, GuestEndpointRelay, SubstitutionBridge,
+    EgressBudget, EndpointRelayAction, GuestEndpointRelay, READ_CHUNK, SubstitutionBridge,
 };
 use super::vsock_transport::{
     OP_CREDIT_REQUEST, OP_CREDIT_UPDATE, OP_REQUEST, OP_RESPONSE, OP_RST, OP_RW, OP_SHUTDOWN,
@@ -54,6 +54,15 @@ impl<'a> VsockHandlerContext<'a> {
 
     pub(crate) fn remove_recv(&mut self, host_port: u32, guest_port: u32) {
         self.transport.remove_recv(host_port, guest_port);
+        self.transport.remove_tx_credit(host_port, guest_port);
+    }
+
+    pub(crate) fn tx_credit_available(&self, host_port: u32, guest_port: u32) -> u32 {
+        self.transport.tx_credit_available(host_port, guest_port)
+    }
+
+    pub(crate) fn consume_tx_credit(&mut self, host_port: u32, guest_port: u32, n: u32) {
+        self.transport.consume_tx_credit(host_port, guest_port, n);
     }
 
     pub(crate) fn evict_idle_recv(&mut self) -> Vec<(u32, u32)> {
@@ -353,15 +362,50 @@ impl GuestPortHandler for WorkloadExitHandler {
 }
 
 struct StreamRelayHandler {
+    guest_port: u32,
     bridge: SubstitutionBridge,
     headers: HashMap<u32, VsockHdr>,
+    tx_pending: HashMap<u32, Vec<u8>>,
 }
 
 impl StreamRelayHandler {
-    fn with_budget(_guest_port: u32, budget: EgressBudget) -> Self {
+    fn with_budget(guest_port: u32, budget: EgressBudget) -> Self {
         Self {
+            guest_port,
             bridge: SubstitutionBridge::with_budget(budget),
             headers: HashMap::new(),
+            tx_pending: HashMap::new(),
+        }
+    }
+
+    fn flush_tx_pending(&mut self, ctx: &mut VsockHandlerContext<'_>, conn_id: u32) {
+        if let Some(bytes) = self.tx_pending.remove(&conn_id) {
+            if let Some(hdr) = self.headers.get(&conn_id).copied() {
+                self.queue_up_to_credit(ctx, conn_id, hdr, bytes);
+            } else {
+                // No remembered header yet; keep the bytes buffered.
+                self.tx_pending.insert(conn_id, bytes);
+            }
+        }
+    }
+
+    fn queue_up_to_credit(
+        &mut self,
+        ctx: &mut VsockHandlerContext<'_>,
+        conn_id: u32,
+        hdr: VsockHdr,
+        bytes: Vec<u8>,
+    ) {
+        let avail = ctx.tx_credit_available(self.guest_port, conn_id) as usize;
+        if avail == 0 {
+            self.tx_pending.insert(conn_id, bytes);
+            return;
+        }
+        let send_len = bytes.len().min(avail);
+        ctx.queue_reply(&hdr, OP_RW, &bytes[..send_len]);
+        ctx.consume_tx_credit(self.guest_port, conn_id, send_len as u32);
+        if send_len < bytes.len() {
+            self.tx_pending.insert(conn_id, bytes[send_len..].to_vec());
         }
     }
 }
@@ -396,10 +440,11 @@ impl GuestPortHandler for StreamRelayHandler {
                 }
             }
             OP_CREDIT_REQUEST => ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]),
-            OP_SHUTDOWN => {
+            OP_SHUTDOWN | OP_RST => {
                 if self.headers.remove(&hdr.src_port).is_some() {
                     self.bridge.close_connection(hdr.src_port);
                 }
+                self.tx_pending.remove(&hdr.src_port);
                 ctx.remove_recv(hdr.dst_port, hdr.src_port);
                 ctx.queue_reply(&hdr, OP_RST, &[]);
             }
@@ -408,19 +453,50 @@ impl GuestPortHandler for StreamRelayHandler {
     }
 
     fn drain(&mut self, ctx: &mut VsockHandlerContext<'_>) -> Option<u32> {
-        if !self.bridge.is_active() {
+        if !self.bridge.is_active() && self.tx_pending.is_empty() {
             return None;
         }
-        let drained = self.bridge.drain_endpoint_bytes();
-        for (conn_id, bytes) in drained.ready {
+
+        // First, try to push any buffered egress bytes that previously lacked
+        // guest receive credit. This lets progress resume as soon as the guest
+        // sends a credit update, even if the endpoint has no new data yet.
+        let pending_conn_ids: Vec<u32> = self.tx_pending.keys().copied().collect();
+        for conn_id in pending_conn_ids {
+            self.flush_tx_pending(ctx, conn_id);
+        }
+
+        // Only pull more bytes from the endpoint when we have credit for them.
+        // This keeps the in-memory pending queue bounded and preserves stream
+        // ordering for each connection.
+        let guest_port = self.guest_port;
+        let tx_pending = &self.tx_pending;
+        let mut limit = |conn_id: u32| -> usize {
+            if tx_pending.contains_key(&conn_id) {
+                return 0;
+            }
+            let avail = ctx.tx_credit_available(guest_port, conn_id) as usize;
+            READ_CHUNK.min(avail)
+        };
+        let drained = self.bridge.drain_endpoint_bytes_limited(&mut limit);
+        for (conn_id, mut bytes) in drained.ready {
+            if let Some(pending) = self.tx_pending.remove(&conn_id) {
+                let mut combined = pending;
+                combined.append(&mut bytes);
+                bytes = combined;
+            }
             if let Some(hdr) = self.headers.get(&conn_id).copied() {
-                ctx.queue_reply(&hdr, OP_RW, &bytes);
+                self.queue_up_to_credit(ctx, conn_id, hdr, bytes);
             }
         }
         for conn_id in drained.closed {
+            self.flush_tx_pending(ctx, conn_id);
+            self.tx_pending.remove(&conn_id);
             if let Some(hdr) = self.headers.remove(&conn_id) {
                 ctx.remove_recv(hdr.dst_port, hdr.src_port);
-                ctx.queue_reply(&hdr, OP_RST, &[]);
+                ctx.queue_reply(&hdr, OP_SHUTDOWN, &[]);
+                if let Some((h, _)) = ctx.transport.pending_rx.back_mut() {
+                    h.flags = 3;
+                }
             }
         }
         if ctx.flush_rx() { Some(0) } else { None }

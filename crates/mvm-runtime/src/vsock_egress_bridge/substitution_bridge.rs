@@ -22,7 +22,7 @@ use crate::vmm::vsock_transport::CONNECTION_IDLE_TIMEOUT;
 use crate::vmm::vsock_transport::MAX_CONNECTIONS;
 
 /// Per-drain read budget per endpoint connection.
-const READ_CHUNK: usize = 16 * 1024;
+pub(crate) const READ_CHUNK: usize = 16 * 1024;
 /// Maximum number of active raw/SOCKS5/DNS/substitution streams per workload.
 pub(crate) const MAX_EGRESS_STREAMS: usize = 128;
 /// Sustained egress byte budget shared by all host-mediated workload streams.
@@ -150,7 +150,18 @@ pub(crate) trait GuestEndpointRelay {
     fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction;
 
     /// Drain host→guest endpoint bytes once from every active connection.
+    #[allow(dead_code)]
     fn drain_endpoint_bytes(&mut self) -> EndpointRelayDrain;
+
+    /// Drain endpoint bytes with a per-connection read limit.
+    ///
+    /// `limit(conn_id)` returns the maximum bytes to read for that connection.
+    /// A limit of zero skips the connection, leaving any buffered bytes in the
+    /// socket for a later drain.
+    fn drain_endpoint_bytes_limited(
+        &mut self,
+        limit: &mut dyn FnMut(u32) -> usize,
+    ) -> EndpointRelayDrain;
 
     /// Close the endpoint side of `conn_id`.
     fn close_connection(&mut self, conn_id: u32);
@@ -289,10 +300,24 @@ impl GuestEndpointRelay for SubstitutionBridge {
     }
 
     fn drain_endpoint_bytes(&mut self) -> EndpointRelayDrain {
+        self.drain_endpoint_bytes_limited(&mut |_| READ_CHUNK)
+    }
+
+    fn drain_endpoint_bytes_limited(
+        &mut self,
+        limit: &mut dyn FnMut(u32) -> usize,
+    ) -> EndpointRelayDrain {
         let mut ready = Vec::new();
         let mut closed = self.evict_idle_at(Instant::now());
         for (conn_id, conn) in self.conns.iter_mut() {
-            let allowance = self.budget.reserve_read(READ_CHUNK, Instant::now());
+            let max = limit(*conn_id);
+            if max == 0 {
+                continue;
+            }
+            let allowance = self
+                .budget
+                .reserve_read(max.min(READ_CHUNK), Instant::now());
+
             if allowance == 0 {
                 // The endpoint remains readable while the token bucket refills.
                 // Avoid a hot loop in the host-I/O poller without tearing down a
