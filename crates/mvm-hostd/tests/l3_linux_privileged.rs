@@ -69,6 +69,13 @@ fn udp_packet(src: Ipv4Addr, dst: Ipv4Addr, dst_port: u16) -> Vec<u8> {
     packet[9] = 17;
     packet[12..16].copy_from_slice(&src.octets());
     packet[16..20].copy_from_slice(&dst.octets());
+    let checksum = packet[..20]
+        .chunks_exact(2)
+        .map(|word| u32::from(u16::from_be_bytes([word[0], word[1]])))
+        .fold(0u32, |sum, word| sum + word);
+    let checksum = ((checksum & 0xffff) + (checksum >> 16)) as u16;
+    let checksum = (!checksum).to_be_bytes();
+    packet[10..12].copy_from_slice(&checksum);
     let mut udp = vec![0u8; 8];
     udp[0..2].copy_from_slice(&40000u16.to_be_bytes());
     udp[2..4].copy_from_slice(&dst_port.to_be_bytes());
