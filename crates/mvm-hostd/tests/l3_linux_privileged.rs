@@ -357,8 +357,8 @@ fn two_open_machines_keep_each_others_forwarding_rules_active() {
         return;
     }
     let dp = LinuxDatapath::new();
-    let a = request("privtest-forward-a", 70);
-    let b = request("privtest-forward-b", 71);
+    let a = request("privtest-a-forward", 70);
+    let b = request("privtest-b-forward", 71);
     let table = mvm_hostd::netd::linux::table_name(&a.machine_id);
     let a_iface = mvm_hostd::netd::linux::device_name(&a.machine_id);
     let b_iface = mvm_hostd::netd::linux::device_name(&b.machine_id);
@@ -404,8 +404,8 @@ fn two_machines_forward_admitted_packets_through_the_shared_hook() {
         return;
     }
     let dp = LinuxDatapath::new();
-    let a = request("privtest-packet-a", 72);
-    let b = request("privtest-packet-b", 73);
+    let a = request("privtest-a-packet", 72);
+    let b = request("privtest-b-packet", 73);
     let table = mvm_hostd::netd::linux::table_name(&a.machine_id);
     let a_chain = mvm_hostd::netd::linux::forward_chain_name(&a.machine_id);
     let b_chain = mvm_hostd::netd::linux::forward_chain_name(&b.machine_id);
