@@ -469,13 +469,30 @@ pub fn materialize_ext4_pure(
     if let Some(label) = &input.volume_label {
         options = options.with_volume_label(label.as_bytes());
     }
-    let materialized =
-        mvm_fs::rootfs::materialize_ext4_pure(&input.unpacked_root, &input.output, &options)?;
-    let verity_root_hash = maybe_emit_verity_sidecars(input)?;
+    // Build the whole image in memory so we can compute dm-verity before any
+    // disk write, avoiding a full read-back of the just-written rootfs.
+    let (image, size_bytes) = mvm_fs::rootfs::build_ext4_pure(&input.unpacked_root, &options)?;
+
+    if let Some(parent) = input.output.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| RootfsError::WriteOutput {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(&input.output, &image).map_err(|source| RootfsError::WriteOutput {
+        path: input.output.clone(),
+        source,
+    })?;
+
+    let verity_root_hash = if input.emit_verity {
+        Some(emit_verity_sidecars_for_image(&input.output, &image)?)
+    } else {
+        None
+    };
 
     Ok(MaterializedExt4 {
-        path: materialized.path,
-        size_bytes: materialized.size_bytes,
+        path: input.output.clone(),
+        size_bytes,
         verity_root_hash,
     })
 }
@@ -488,7 +505,7 @@ fn write_sidecar(path: &std::path::Path, body: &[u8]) -> Result<(), RootfsError>
     })
 }
 
-#[cfg(feature = "pure-mkfs")]
+#[cfg(all(feature = "pure-mkfs", feature = "builder-vm"))]
 fn maybe_emit_verity_sidecars(input: &MaterializeExt4Input) -> Result<Option<String>, RootfsError> {
     if !input.emit_verity {
         return Ok(None);

@@ -66,6 +66,7 @@ lzma-rs = "0.3"
 
 mvm-core.workspace = true
 mvm-fs.workspace = true
+rayon = "1"
 mvm-agentd.workspace = true
 # `LibkrunNetworkProvider` impls the `NetworkProvider`
 # seam. mvm-net deps only mvm-core + mvm-sdk, so this edge is acyclic.

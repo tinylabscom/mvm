@@ -23,6 +23,7 @@
 //! instead of rebuilding or re-downloading it.
 
 use mvm_core::arch::GuestArch;
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -197,14 +198,19 @@ pub fn build_runtime_overlay_from_guest_binaries(
     let root = staging.path().join("overlay-root");
     std::fs::create_dir_all(&root)?;
 
-    stage_runtime_overlay_binary(&bins.agent, &root.join("agent"))?;
-    stage_runtime_overlay_binary(&bins.netinit, &root.join("netinit"))?;
-    stage_runtime_overlay_binary(&bins.ping, &root.join("ping"))?;
-    stage_runtime_overlay_binary(&bins.seccomp_apply, &root.join("seccomp-apply"))?;
-    stage_runtime_overlay_binary(&bins.runner, &root.join("runner"))?;
-    stage_runtime_overlay_binary(&bins.egress_client, &root.join("egress-client"))?;
-    stage_runtime_overlay_binary(&bins.addon_dns, &root.join("addon-dns"))?;
-    stage_runtime_overlay_binary(&bins.exit_report, &root.join("exit-report"))?;
+    let binaries = [
+        (&bins.agent, root.join("agent")),
+        (&bins.netinit, root.join("netinit")),
+        (&bins.ping, root.join("ping")),
+        (&bins.seccomp_apply, root.join("seccomp-apply")),
+        (&bins.runner, root.join("runner")),
+        (&bins.egress_client, root.join("egress-client")),
+        (&bins.addon_dns, root.join("addon-dns")),
+        (&bins.exit_report, root.join("exit-report")),
+    ];
+    binaries
+        .into_par_iter()
+        .try_for_each(|(src, dst)| stage_runtime_overlay_binary(src, &dst))?;
     std::fs::write(root.join("VERSION"), format!("{version}\n"))?;
 
     let image = mvm_fs::ext4::build_image(&collect_overlay_nodes(&root)?).map_err(|e| {
@@ -222,13 +228,17 @@ pub fn build_runtime_overlay_from_guest_binaries(
 
     let artifact_dir = staging.path().join("artifact");
     std::fs::create_dir_all(&artifact_dir)?;
-    std::fs::write(artifact_dir.join("overlay.ext4"), &image)?;
-    std::fs::write(artifact_dir.join("overlay.verity"), &verity.hash_tree)?;
-    std::fs::write(
-        artifact_dir.join("overlay.roothash"),
-        format!("{roothash}\n"),
-    )?;
-    std::fs::write(artifact_dir.join("VERSION"), format!("{version}\n"))?;
+    let roothash_body = format!("{roothash}\n");
+    let version_body = format!("{version}\n");
+    let artifact_writes = [
+        ("overlay.ext4", image.as_slice()),
+        ("overlay.verity", verity.hash_tree.as_slice()),
+        ("overlay.roothash", roothash_body.as_bytes()),
+        ("VERSION", version_body.as_bytes()),
+    ];
+    artifact_writes
+        .into_par_iter()
+        .try_for_each(|(name, bytes)| std::fs::write(artifact_dir.join(name), bytes))?;
 
     let built = read_overlay_artifact_from_dir(&artifact_dir, &arch.to_string())?;
     install_overlay_into_cache(&built, cache_root, &InstallOptions { overwrite: true })?;
@@ -763,10 +773,15 @@ pub fn install_overlay_into_cache(
     crate::cache_install::reap_stale_staging(parent, &source.arch);
     std::fs::create_dir(&staging)?;
 
-    install_file_with_perms(&source.overlay_ext4, &staging.join("overlay.ext4"))?;
-    install_file_with_perms(&source.sidecar, &staging.join("overlay.verity"))?;
-    install_file_with_perms(&source.roothash_file, &staging.join("overlay.roothash"))?;
-    install_file_with_perms(&source_version_file, &staging.join("VERSION"))?;
+    let cache_copies = [
+        (&source.overlay_ext4, staging.join("overlay.ext4")),
+        (&source.sidecar, staging.join("overlay.verity")),
+        (&source.roothash_file, staging.join("overlay.roothash")),
+        (&source_version_file, staging.join("VERSION")),
+    ];
+    cache_copies
+        .into_par_iter()
+        .try_for_each(|(src, dst)| install_file_with_perms(src, &dst))?;
     write_checksum_manifest(&staging)?;
     std::fs::write(
         staging.join(LOCAL_BUILD_EPOCH_FILE),

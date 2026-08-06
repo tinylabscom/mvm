@@ -28,6 +28,11 @@ use std::process::Command;
 /// into the build.
 const ALLOWLIST: &[&str] = &[
     "bitflags",
+    // `criterion` (the mvm-fs benchmark harness) pulls itertools 0.10, while
+    // cucumber / derive-more / indexmap / zerotrie already resolve itertools
+    // 0.14. Both majors are dev-only/test paths; criterion has no 0.14-compatible
+    // release.
+    "itertools",
     "getrandom",
     "hashbrown",
     // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;
