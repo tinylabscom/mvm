@@ -62,6 +62,9 @@ struct RemoteTemplateMeta {
     default_memory_mib: u32,
     #[serde(default)]
     tags: Vec<String>,
+    /// Additional files to download from the template directory.
+    #[serde(default)]
+    files: Vec<String>,
 }
 
 /// Registry configuration.
@@ -229,6 +232,22 @@ async fn fetch_and_cache_remote_template(
     )
     .await?;
     download_text(&format!("{}/flake.nix", base), &cache_dir.join("flake.nix")).await?;
+
+    // Download any extra files declared by the template (SDK sources, app/
+    // directories, etc.).
+    let meta_text = std::fs::read_to_string(cache_dir.join("template.toml"))
+        .with_context(|| format!("re-reading template.toml from {}", cache_dir.display()))?;
+    let meta: RemoteTemplateMeta = toml::from_str(&meta_text)
+        .with_context(|| format!("parsing template.toml from {}", cache_dir.display()))?;
+    for file in &meta.files {
+        let file_url = format!("{}/{}", base, file);
+        let dest = cache_dir.join(file);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent dir for {}", dest.display()))?;
+        }
+        download_text(&file_url, &dest).await?;
+    }
 
     read_cached_remote_template(&cache_dir)
 }

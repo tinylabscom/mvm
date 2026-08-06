@@ -32,6 +32,7 @@ description = "demo remote template"
 default_vcpus = 2
 default_memory_mib = 512
 tags = ["demo"]
+files = ["app.py"]
 "#,
     )
     .unwrap();
@@ -44,6 +45,20 @@ tags = ["demo"]
     entrypoint = "hello";
   };
 }
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        tpl.join("app.py"),
+        r#"import mvm
+
+@mvm.app(
+    image=mvm.python_image(python="3.12"),
+    resources=mvm.resources(cpu=1, memory_mb=256),
+)
+def main() -> str:
+    return "hello"
 "#,
     )
     .unwrap();
@@ -132,6 +147,11 @@ fn generate_template_fetches_and_scaffolds_remote_template() {
     assert!(
         generated_manifest.is_file(),
         "mvm.toml must be scaffolded from template metadata"
+    );
+    let generated_app = project_dir.join("app.py");
+    assert!(
+        generated_app.is_file(),
+        "declared extra files must be copied from the remote template"
     );
 
     let manifest = std::fs::read_to_string(generated_manifest).unwrap();

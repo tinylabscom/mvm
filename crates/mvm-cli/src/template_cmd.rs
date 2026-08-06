@@ -1116,11 +1116,51 @@ pub fn scaffold_from_template_entry(
                     .replace("{{name}}", name);
                 fs::write(&readme_path, content)?;
             }
+
+            // Copy any additional files the template declared (SDK sources,
+            // app directories, etc.). Skip template metadata and files that
+            // were already generated above.
+            copy_cached_template_files(cache_dir, dir, &["template.toml", "flake.nix"])?;
         }
     }
 
     for line in next_steps_lines(dir, name) {
         crate::ui::info(&line);
+    }
+    Ok(())
+}
+
+/// Copy every file from `cache_dir` into `dest`, preserving relative paths
+/// and skipping entries named in `skip`.
+fn copy_cached_template_files(cache_dir: &Path, dest: &Path, skip: &[&str]) -> Result<()> {
+    copy_cached_template_files_recursive(cache_dir, cache_dir, dest, skip)
+}
+
+fn copy_cached_template_files_recursive(
+    root: &Path,
+    current: &Path,
+    dest: &Path,
+    skip: &[&str],
+) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let src = entry.path();
+        let rel = src.strip_prefix(root).expect("entries are under root");
+        if src.is_dir() {
+            copy_cached_template_files_recursive(root, &src, dest, skip)?;
+        } else if src.is_file() {
+            if skip.iter().any(|name| rel.as_os_str() == *name) {
+                continue;
+            }
+            let dst = dest.join(rel);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if !dst.exists() {
+                fs::copy(&src, &dst)
+                    .with_context(|| format!("copying {} from cache", src.display()))?;
+            }
+        }
     }
     Ok(())
 }
