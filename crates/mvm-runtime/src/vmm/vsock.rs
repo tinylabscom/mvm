@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use super::vsock_handlers::{VsockHandlerContext, VsockHandlerRegistry, VsockLifecycleState};
 #[cfg(test)]
 use super::vsock_transport::{
-    GUEST_CID, HOST_BUF_ALLOC, HOST_CID, TYPE_STREAM, VIRTIO_ID_VSOCK, VIRTIO_MAGIC, VIRTIO_VERSION,
+    GUEST_CID, HDR_LEN, HOST_BUF_ALLOC, HOST_CID, OP_SHUTDOWN, TYPE_STREAM, VIRTIO_ID_VSOCK,
+    VIRTIO_MAGIC, VIRTIO_VERSION,
 };
 use super::vsock_transport::{
     OP_CREDIT_UPDATE, OP_REQUEST, OP_RESPONSE, OP_RST, OP_RW, RegisterWrite, VsockHdr,
@@ -115,11 +116,17 @@ impl VsockShared {
             }
         }
         let flushed = self.transport.flush_rx();
+        // A guest TX notification may carry a credit update that unblocks
+        // host→guest data buffered in the handlers. Run host I/O here so the
+        // vCPU thread can make progress even if the dedicated host-I/O thread
+        // is blocked waiting for endpoint readability.
+        let host_io = self.service_host_io();
         let drained = self.transport.interrupt_status & 1 != 0;
-        drained || flushed
+        drained || flushed || host_io
     }
 
     fn handle_packet(&mut self, hdr: VsockHdr, payload: &[u8]) {
+        self.transport.record_tx_credit(&hdr);
         let mut ctx = VsockHandlerContext::new(&mut self.transport, &mut self.lifecycle);
         if self.handlers.dispatch_packet(&mut ctx, hdr, payload) {
             return;
@@ -156,6 +163,10 @@ impl VsockShared {
         self.handlers.cancel();
         self.transport.recv_cnt.clear();
         self.transport.pending_rx.clear();
+    }
+    #[cfg(test)]
+    fn provide_rx_descriptor(&mut self, buf_addr: u64, buf_len: usize) {
+        self.transport.test_provide_rx_descriptor(buf_addr, buf_len);
     }
 
     pub(super) fn poll_fds(&self) -> Vec<std::os::fd::RawFd> {
@@ -518,6 +529,7 @@ mod tests {
             len: raw.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, &raw);
@@ -626,6 +638,7 @@ mod tests {
             len: raw.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, &raw);
@@ -781,6 +794,7 @@ mod tests {
             len: 5,
             op: OP_RW,
             typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, b"1.2.3");
@@ -958,5 +972,206 @@ mod tests {
         d.set_console_sockets([]).unwrap();
         assert!(!d.service_host_io());
         assert!(d.transport.pending_rx.is_empty());
+    }
+    #[test]
+    fn egress_port_relays_large_payload_without_loss() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+
+        // 10 MiB of deterministic payload.
+        let payload_len: usize = 10 * 1024 * 1024;
+        let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
+        let payload_for_server = payload.clone();
+
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            // Read the raw-egress target line the guest sends.
+            let mut target_buf = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                c.read_exact(&mut byte).unwrap();
+                if byte[0] == b'\n' {
+                    break;
+                }
+                target_buf.push(byte[0]);
+            }
+            // Write the large payload.
+            c.write_all(&payload_for_server).unwrap();
+            // Hold the connection open briefly, then close gracefully.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+
+        let mut d = dev();
+        d.set_substitution_endpoint(&sock);
+
+        // Guest opens the stream with a raw-egress target line.
+        let raw = b"files.pythonhosted.org:443\n".to_vec();
+        let rw = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1500,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
+            len: raw.len() as u32,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            buf_alloc: (payload_len as u32) + 1024,
+            ..Default::default()
+        };
+        d.handle_packet(rw, &raw);
+
+        // Repeatedly service host I/O and provide fresh RX buffers until the
+        // connection closes and no payload remains queued.
+        let mut received = Vec::new();
+        let mut shutdown_seen = false;
+        let rx_buf_addr = 0x6000_0000u64;
+        for _ in 0..2000 {
+            d.provide_rx_descriptor(rx_buf_addr, HDR_LEN + 65536);
+
+            let _ = d.service_host_io();
+
+            // Collect any OP_RW payloads addressed to our src_port.
+            let mut found = false;
+            let pending: Vec<_> = d.transport.pending_rx.drain(..).collect();
+            for (h, p) in pending {
+                if h.op == OP_RW && h.dst_port == 1500 {
+                    received.extend_from_slice(&p);
+                    found = true;
+                } else if h.op == OP_SHUTDOWN && h.dst_port == 1500 {
+                    shutdown_seen = true;
+                }
+            }
+
+            if shutdown_seen && !found {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // Wait for the server to finish writing and close.
+        server.join().unwrap();
+
+        assert!(
+            shutdown_seen,
+            "expected graceful SHUTDOWN for the egress stream"
+        );
+        assert_eq!(
+            received.len(),
+            payload_len,
+            "expected {payload_len} bytes, got {}",
+            received.len()
+        );
+        assert_eq!(received, payload, "payload mismatch");
+    }
+
+    #[test]
+    fn host_honors_guest_tx_credit_for_large_endpoint_reply() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("credit.sock");
+
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+
+        let reply_payload = vec![b'x'; 200];
+        let reply_for_server = reply_payload.clone();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let _ = c.read(&mut buf).unwrap();
+            c.write_all(&reply_for_server).unwrap();
+            c.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+
+        let mut d = dev();
+        d.set_substitution_endpoint(&sock);
+
+        // Guest opens the stream advertising only 64 bytes of receive credit.
+        let raw = b"files.pythonhosted.org:443\n".to_vec();
+        let rw = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1700,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
+            len: raw.len() as u32,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            buf_alloc: 64,
+            ..Default::default()
+        };
+        d.handle_packet(rw, &raw);
+
+        // Wait for the endpoint to accept and write the reply.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let mut received = Vec::new();
+        let rx_buf_addr = 0x6000_0000u64;
+        for _ in 0..100 {
+            d.provide_rx_descriptor(rx_buf_addr, HDR_LEN + 256);
+            let _ = d.service_host_io();
+            let pending: Vec<_> = d.transport.pending_rx.drain(..).collect();
+            for (h, p) in pending {
+                if h.op == OP_RW && h.dst_port == 1700 {
+                    received.extend_from_slice(&p);
+                }
+            }
+            if !received.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // The host must not send more than the advertised 64 bytes.
+        assert_eq!(
+            received.len(),
+            64,
+            "host sent {} bytes but guest advertised only 64",
+            received.len()
+        );
+
+        // Guest acknowledges the first 64 bytes.
+        let credit = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1700,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
+            len: 0,
+            op: OP_CREDIT_UPDATE,
+            typ: TYPE_STREAM,
+            buf_alloc: 64,
+            fwd_cnt: 64,
+            ..Default::default()
+        };
+        d.handle_packet(credit, &[]);
+
+        for _ in 0..100 {
+            d.provide_rx_descriptor(rx_buf_addr, HDR_LEN + 256);
+            let _ = d.service_host_io();
+            let pending: Vec<_> = d.transport.pending_rx.drain(..).collect();
+            for (h, p) in pending {
+                if h.op == OP_RW && h.dst_port == 1700 {
+                    received.extend_from_slice(&p);
+                }
+            }
+            if received.len() >= 128 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            received.len(),
+            128,
+            "host did not resume after credit update: got {} bytes",
+            received.len()
+        );
+
+        server.join().unwrap();
     }
 }

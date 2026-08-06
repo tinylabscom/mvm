@@ -186,7 +186,7 @@ where
     let mut upstream = match connect_first_admitted(ips, port, timeout).await {
         Some(stream) => stream,
         None => {
-            eprintln!("raw-egress: no admitted address reachable for {target}");
+            tracing::warn!(target = %target, "raw-egress: no admitted address reachable");
             write_connect_ack_async(&mut guest, ConnectAck::Fail).await?;
             return Ok(());
         }
@@ -195,17 +195,20 @@ where
     if !leftover.is_empty() {
         upstream.write_all(&leftover).await?;
     }
-    eprintln!("raw-egress: connected target {target}");
+    tracing::debug!(target = %target, "raw-egress: connected");
     // EOF on either side ends the copy; a reset surfaces as an error we log so
     // one torn-down connection never crashes the accept loop.
     match tokio::io::copy_bidirectional(&mut guest, &mut upstream).await {
         Ok((guest_to_upstream, upstream_to_guest)) => {
-            eprintln!(
-                "raw-egress: completed target {target} guest_to_upstream_bytes={guest_to_upstream} upstream_to_guest_bytes={upstream_to_guest}"
+            tracing::debug!(
+                target = %target,
+                guest_to_upstream,
+                upstream_to_guest,
+                "raw-egress: completed"
             );
         }
         Err(e) => {
-            eprintln!("raw-egress: splicing target {target} failed: {e}");
+            tracing::warn!(target = %target, error = %e, "raw-egress: splicing failed");
         }
     }
     Ok(())
@@ -374,13 +377,13 @@ fn handle_raw_conn_blocking(
     let upstream = match connect_first_admitted_blocking(&ips, port, timeout) {
         Some(stream) => stream,
         None => {
-            eprintln!("raw-egress: no admitted address reachable for {target}");
+            tracing::warn!(target = %target, "raw-egress: no admitted address reachable");
             write_connect_ack_blocking(&mut guest, ConnectAck::Fail)?;
             return Ok(());
         }
     };
     write_connect_ack_blocking(&mut guest, ConnectAck::Ok)?;
-    eprintln!("raw-egress: connected target {target}");
+    tracing::debug!(target = %target, "raw-egress: connected");
     let guest_fd = guest.as_raw_fd();
     set_nonblocking(guest_fd)?;
     upstream.set_nonblocking(true)?;
@@ -398,7 +401,6 @@ fn handle_raw_conn_blocking(
 /// Write the host's one-byte connect-result ack on the blocking raw-egress path.
 #[cfg(target_os = "linux")]
 fn write_connect_ack_blocking(guest: &mut std::fs::File, ack: ConnectAck) -> std::io::Result<()> {
-    use std::io::Write;
     guest.write_all(&[ack.as_byte()])?;
     guest.flush()
 }
