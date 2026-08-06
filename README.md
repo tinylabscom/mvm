@@ -166,6 +166,33 @@ with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl build compile
 | [`examples/egress-probe`](examples/egress-probe) | Nix flake | One-shot workload that TCP-probes targets and exits a verdict — exercises egress policy |
 | [`examples/audit-probe`](examples/audit-probe) | Nix flake | In-guest `host.audit.v1` round-trip fixture |
 
+### From a template
+
+You can also scaffold a new project from a template instead of starting from
+an empty directory. A small core set ships with `mvmctl` and works offline;
+richer templates are fetched from the [`mvm-templates`](https://github.com/tinylabscom/mvm-templates)
+registry on first use and cached under `~/.mvm/templates/remote/`.
+
+```bash
+# List bundled + cached templates
+mvmctl template list
+
+# Show details for one template
+mvmctl template info python
+
+# Scaffold a project from a template
+mvmctl generate template python ./my-python-app
+
+# Search the remote registry
+mvmctl template search pandas
+```
+
+Templates can be Nix flakes or SDK-based. Nix templates ship a `flake.nix`;
+SDK templates ship source files (e.g. `app.py`) plus a generated `flake.nix`.
+See the [`mvm-templates` README](https://github.com/tinylabscom/mvm-templates/blob/main/README.md)
+for how to author one, including the optional `files` list that tells `mvmctl`
+which additional files to copy into the generated project.
+
 ---
 
 ## Defining a workload
