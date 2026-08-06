@@ -683,12 +683,24 @@ impl EstablishedFlow {
     /// a retransmission timeout, and a symptom that expensive has to be
     /// countable from outside the process.
     pub fn pump(&mut self, now_millis: u64, metrics: &mut GatewayMetrics) -> PumpStats {
+        self.pump_with_host_writer(now_millis, metrics, write_some)
+    }
+
+    fn pump_with_host_writer<F>(
+        &mut self,
+        now_millis: u64,
+        metrics: &mut GatewayMetrics,
+        mut write_host: F,
+    ) -> PumpStats
+    where
+        F: FnMut(&mut TcpStream, &mut [u8], usize) -> (usize, HostWrite),
+    {
         let mut stats = PumpStats::default();
         let dropped_before = self.device.dropped_to_guest();
         // Ingest what the guest sent and let the stack answer it, so this
         // pass works on the freshest state rather than the last one's.
         self.poll(now_millis);
-        if self.guest_to_host(&mut stats) {
+        if self.guest_to_host(&mut stats, &mut write_host) {
             self.guest_fin_seen = true;
         }
         self.forward_guest_fin();
@@ -741,7 +753,7 @@ impl EstablishedFlow {
     /// this a no-op.
     pub fn on_guest_fin(&mut self) {
         let mut stats = PumpStats::default();
-        if self.guest_to_host(&mut stats) {
+        if self.guest_to_host(&mut stats, &mut write_some) {
             self.guest_fin_seen = true;
         }
         self.forward_guest_fin();
@@ -995,7 +1007,10 @@ impl EstablishedFlow {
     /// unconsumed bytes hold the stack's receive window closed, and the
     /// guest's own TCP stops sending. Nothing counts them and nothing has
     /// to.
-    fn guest_to_host(&mut self, stats: &mut PumpStats) -> bool {
+    fn guest_to_host<F>(&mut self, stats: &mut PumpStats, write_host: &mut F) -> bool
+    where
+        F: FnMut(&mut TcpStream, &mut [u8], usize) -> (usize, HostWrite),
+    {
         let Self {
             host,
             sockets,
@@ -1015,7 +1030,7 @@ impl EstablishedFlow {
         let mut budget = max_bytes_per_pass();
         while budget > 0 {
             let borrowed = &mut *stream;
-            let step = match socket.recv(|data| write_some(borrowed, data, budget)) {
+            let step = match socket.recv(|data| write_host(borrowed, data, budget)) {
                 Ok(step) => step,
                 // Every byte the guest will ever send has been handed over.
                 Err(RecvError::Finished) => return true,
@@ -1527,6 +1542,25 @@ mod tests {
         /// on `queue_drops_egress` call the real signature instead.
         fn pump_ignoring_metrics(&mut self, now_millis: u64) -> PumpStats {
             self.pump(now_millis, &mut GatewayMetrics::default())
+        }
+
+        /// Drive the real pump with a host writer that deterministically
+        /// reports backpressure. The production pump still uses the actual
+        /// socket writer; this only removes kernel buffer timing from the
+        /// sustained backpressure test.
+        fn pump_with_host_write_blocked(&mut self, now_millis: u64) -> PumpStats {
+            self.pump_with_host_writer(
+                now_millis,
+                &mut GatewayMetrics::default(),
+                |_, data, budget| {
+                    let take = data.len().min(budget);
+                    if take == 0 {
+                        (0, HostWrite::Idle)
+                    } else {
+                        (0, HostWrite::Blocked)
+                    }
+                },
+            )
         }
     }
 
@@ -2549,6 +2583,18 @@ mod tests {
         (flow, peer, g)
     }
 
+    /// A flow with guest data waiting to go out, paired with a deterministic
+    /// host writer used by the sustained backpressure test. The real-socket
+    /// fixture above remains useful for checking the OS-facing path, but its
+    /// writability can change as the kernel moves bytes between buffers.
+    fn established_flow_with_blocked_host_buffer()
+    -> (EstablishedFlow, std::net::TcpStream, FakeGuest) {
+        let (host, peer) = host_pair();
+        let (mut flow, mut g) = flow_over(host);
+        g.offer(&mut flow, SOCKET_RX_BUFFER);
+        (flow, peer, g)
+    }
+
     /// Pump until `wanted` reaches the guest, accumulating everything the
     /// stack emits on the way.
     ///
@@ -2603,10 +2649,10 @@ mod tests {
     /// from.
     #[test]
     fn backpressure_holds_while_the_guest_keeps_pushing() {
-        let (mut flow, _peer, mut g) = established_flow_with_full_host_buffer();
+        let (mut flow, _peer, mut g) = established_flow_with_blocked_host_buffer();
         for pass in 0..16u64 {
             g.offer(&mut flow, SOCKET_RX_BUFFER);
-            let stats = flow.pump_ignoring_metrics(pass);
+            let stats = flow.pump_with_host_write_blocked(pass);
             assert_eq!(stats.to_host, 0, "the host socket is still full");
             assert!(
                 flow.bytes_buffered() <= FLOW_BUFFER_BYTES,
