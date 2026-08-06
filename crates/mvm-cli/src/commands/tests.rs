@@ -2869,6 +2869,18 @@ fn test_catalog_info_parses() {
     }
 }
 
+#[test]
+fn test_catalog_includes_python_pandas() {
+    let catalog = catalog::load_bundled_catalog();
+    let entry = catalog
+        .find("python-pandas")
+        .expect("python-pandas catalog entry exists");
+    assert_eq!(entry.profile, "python-pandas");
+    assert_eq!(entry.default_cpus, 2);
+    assert_eq!(entry.default_memory_mib, 512);
+    assert!(entry.tags.contains(&"pandas".to_string()));
+}
+
 // --- Console CLI tests (now under `machine console`) ---
 
 #[test]
@@ -3713,6 +3725,61 @@ fn test_init_catalog_conflicts_with_preset() {
         result.is_err(),
         "--catalog and --preset are mutually exclusive"
     );
+}
+
+// --- Generate CLI tests ---
+
+#[test]
+fn test_generate_sdk_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "generate", "sdk", "app.py", "-o", "./my-app"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Generate(generate::Args {
+            action: generate::GenerateAction::Sdk { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_generate_template_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "generate", "template", "python", "./my-app"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Generate(generate::Args {
+            action: generate::GenerateAction::Template { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_generate_prompt_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "generate",
+        "prompt",
+        "python api with postgres",
+        "./my-app",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Generate(generate::Args {
+            action: generate::GenerateAction::Prompt { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_generate_sdk_default_out() {
+    let cli = Cli::try_parse_from(["mvmctl", "generate", "sdk", "app.py"]).unwrap();
+    match cli.command {
+        Commands::Generate(generate::Args {
+            action: generate::GenerateAction::Sdk { out, .. },
+        }) => assert_eq!(out, std::path::PathBuf::from("./out")),
+        _ => panic!("expected generate sdk"),
+    }
 }
 
 // --- Cache CLI tests ---
