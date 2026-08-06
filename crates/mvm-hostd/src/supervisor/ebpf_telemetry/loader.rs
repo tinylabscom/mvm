@@ -130,8 +130,6 @@ fn default_ebpf_object_path() -> Option<PathBuf> {
         .join("bpfel-unknown-none")
         .join("release")
         .join("mvm-hostd-ebpf")
-        .join("mvm-hostd-ebpf")
-        .with_extension("o")
         .into()
 }
 

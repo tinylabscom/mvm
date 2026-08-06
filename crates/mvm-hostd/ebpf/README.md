@@ -10,7 +10,7 @@ VM (or any Linux host with nightly + `bpf-linker`):
 
 ```bash
 cd crates/mvm-hostd/ebpf
-cargo build --release --target bpfel-unknown-none
+cargo build --release --target bpfel-unknown-none -Z build-std=core
 ```
 
 The resulting object file lands at:

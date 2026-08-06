@@ -49,6 +49,13 @@ impl EbpfTelemetryManager {
         }
     }
 
+    /// Test-only helper: returns whether a handle is currently stored for
+    /// the given VM name.
+    #[cfg(test)]
+    pub fn is_attached(&self, vm_name: &str) -> bool {
+        self.handles.contains_key(vm_name)
+    }
+
     /// Attach a telemetry probe for the VM named `vm_name`.
     ///
     /// Reads the observability target sidecar written by the runtime.
@@ -180,7 +187,61 @@ mod tests {
         let mut manager = EbpfTelemetryManager::new();
         manager.attach("nonexistent-vm");
         // No observability target exists, so no handle is stored.
-        assert!(manager.handles.is_empty());
+        assert!(!manager.is_attached("nonexistent-vm"));
         manager.detach("nonexistent-vm");
+    }
+
+    #[test]
+    fn attach_reads_observability_target_from_mode_json() {
+        let _lock = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: test-scoped mutation of MVM_HOME, serialized by
+        // HOME_TEST_LOCK so no other test observes this value.
+        unsafe { std::env::set_var("MVM_HOME", tmp.path()) };
+
+        let vm_name = "ebpf-attach-test";
+        let target = mvm_runtime::base::observability_target::VmObservabilityTarget {
+            backend_kind: "libkrun".to_string(),
+            state_dir: tmp.path().join("vms").join(vm_name),
+            socket_dir: tmp.path().join("sockets").join(vm_name),
+            tenant_id: Some("tenant-42".to_string()),
+            plan_id: Some("plan-abc".to_string()),
+            vmm: mvm_runtime::base::observability_target::VmmTarget {
+                process_name: "mvm-libkrun-supervisor".to_string(),
+                pid_file: tmp.path().join("vmm.pid"),
+                pid: None,
+                runs_as_root: false,
+            },
+            helpers: vec![mvm_runtime::base::observability_target::ProcessTarget {
+                role: "substitution".to_string(),
+                process_name: "mvm-substitution-endpoint".to_string(),
+                pid_file: tmp.path().join("substitution.pid"),
+                pid: None,
+            }],
+            vsock: mvm_runtime::base::observability_target::VsockTarget {
+                guest_cid: None,
+                socket_dir: tmp.path().join("sockets").join(vm_name),
+            },
+            network: mvm_runtime::base::observability_target::NetworkTarget {
+                has_netd: false,
+                substitution_socket: tmp.path().join("subst.sock"),
+            },
+            cgroup_path: None,
+        };
+
+        let mut meta = mvm_runtime::base::runtime_meta::dev_attached(
+            mvm_core::vm_backend::StartMode::Detached,
+        );
+        meta.observability_target = Some(target);
+        mvm_runtime::base::runtime_meta::write(vm_name, &meta).unwrap();
+
+        let mut manager = EbpfTelemetryManager::new();
+        manager.attach(vm_name);
+        assert!(manager.is_attached(vm_name));
+
+        manager.detach(vm_name);
+        assert!(!manager.is_attached(vm_name));
     }
 }

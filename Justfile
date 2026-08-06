@@ -4,6 +4,7 @@
 set dotenv-load := false
 
 # Extract workspace version from Cargo.toml
+
 version := `grep -A 5 '^\[workspace\.package\]' Cargo.toml | grep '^version' | head -1 | cut -d '"' -f 2`
 
 # Default recipe - show help
@@ -24,6 +25,7 @@ install-hooks:
 # needs: the exact zig from the `ziglang` PyPI package + the musl rust targets.
 # Homebrew's `zig` drifts to newer, incompatible releases (fails downstream with
 # `CacheCheckFailed`); build.rs auto-detects the `ziglang`-installed zig instead.
+
 # Run once per machine (or after a toolchain pin bump).
 toolchain-embed:
     #!/usr/bin/env bash
@@ -49,9 +51,10 @@ check:
 # `cargo install cargo-zigbuild`, a `zig` on PATH, and
 # `rustup target add x86_64-unknown-linux-gnu`. musl is intentionally not the
 # default — libc's ioctl request arg is c_int there vs c_ulong on glibc, so the
+
 # COW FICLONE path (mvm-runtime) only type-checks against glibc.
 check-linux TARGET="x86_64-unknown-linux-gnu":
-    cargo zigbuild --target {{TARGET}} --workspace --lib --all-features
+    cargo zigbuild --target {{ TARGET }} --workspace --lib --all-features
 
 # Bare-metal no_std proof for the embeddable foundation crate (mvm-contract).
 # A `-none-elf` target exposes only core + alloc with no std to leak into, so
@@ -59,23 +62,25 @@ check-linux TARGET="x86_64-unknown-linux-gnu":
 # mainline stand-in for the RISC-V microcontrollers the on-device verifier
 # targets; lib-only means an rlib with no final link, so no cross-linker is
 # needed. Note: riscv32imc parts (no atomics) and Xtensa parts need extra
+
 # shims/toolchains — see specs/notes for the embedding track.
 check-embedded TARGET="riscv32imac-unknown-none-elf":
-    rustup target add {{TARGET}}
-    cargo build -p mvm-contract --lib --target {{TARGET}}
+    rustup target add {{ TARGET }}
+    cargo build -p mvm-contract --lib --target {{ TARGET }}
 
 # Run mvmctl with arguments
 run *ARGS:
-    cargo run -- {{ARGS}}
+    cargo run -- {{ ARGS }}
 
 # Run mvmctl with the dev env set (worktree-local MVM_HOME).
 dev *ARGS:
-    sh ./bin/dev {{ARGS}}
+    sh ./bin/dev {{ ARGS }}
 
 # Run cargo with the dev env set (worktree-local MVM_HOME /
+
 # CARGO_TARGET_DIR / CARGO_HOME).
 dev-cargo *ARGS:
-    bash -c 'source scripts/dev-env.sh && cargo {{ARGS}}'
+    bash -c 'source scripts/dev-env.sh && cargo {{ ARGS }}'
 
 # Run cargo test --workspace with the dev env.
 dev-test:
@@ -85,21 +90,32 @@ dev-test:
 dev-clippy:
     just dev-cargo clippy --workspace -- -D warnings
 
+# Build the host-side eBPF object for vsock egress telemetry.
+
+# Requires nightly Rust and `cargo install bpf-linker`.
+build-ebpf:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd crates/mvm-hostd/ebpf
+    PATH="${HOME}/.cargo/bin:${PATH}" cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core
+
 # Run cargo check with the dev env.
 dev-check:
     just dev-cargo check --workspace
 
 # Prebuild or refresh the version-matched read-only runtime overlay once so
 # later required-overlay boots can reuse it without rebuilding guest binaries
+
 # on the hot path. Pass through extra args like `--force` or `--source download`.
 runtime-overlay *ARGS:
-    just dev build runtime-overlay build {{ARGS}}
+    just dev build runtime-overlay build {{ ARGS }}
 
 # Prebuild or refresh the version-matched read-only runtime overlay once so
 # later required-overlay boots can reuse it without rebuilding guest binaries
+
 # on the hot path. Kept as a compatibility alias for `just runtime-overlay`.
 runtime-overlay-build *ARGS:
-    just runtime-overlay {{ARGS}}
+    just runtime-overlay {{ ARGS }}
 
 # Build the publishable SDK artifacts without building the full Rust workspace.
 sdk-build: sdk-build-python sdk-build-typescript
@@ -109,6 +125,7 @@ sdk-build-python:
     uv build crates/mvm-sdk/sdks/python --out-dir crates/mvm-sdk/sdks/python/dist
 
 # Install TypeScript SDK dependencies locally. Run once after a fresh clone or
+
 # whenever package-lock.json changes.
 sdk-install-typescript:
     npm --prefix crates/mvm-sdk/sdks/typescript ci
@@ -118,7 +135,6 @@ sdk-build-typescript:
     npm --prefix crates/mvm-sdk/sdks/typescript run build
 
 # ── Testing (nextest) ────────────────────────────────────────────────────
-
 # Run all tests, keeping the full output at target/nextest/last-run.log.
 #
 # An intermittent failure in a suite this size is only diagnosable from the
@@ -131,6 +147,7 @@ sdk-build-typescript:
 #
 # `pipefail` is load-bearing: without it the recipe reports `tee`'s status and
 # a failing suite exits 0, which is the exact silent-green this whole change
+
 # is trying to remove.
 test:
     #!/usr/bin/env bash
@@ -139,6 +156,7 @@ test:
     cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
 
 # Doctests. nextest does NOT run doctests, so `just test` skips them;
+
 # this is the companion that keeps doc-fence coverage gated.
 test-doc:
     cargo test --workspace --doc
@@ -147,6 +165,7 @@ test-doc:
 # worktrees/branches (a content cache, not a build lock, so parallel
 # sessions don't serialize on it). Incremental is OFF because sccache and
 # incremental compilation are mutually exclusive: this trades inner-loop
+
 # incremental for cross-worktree cache hits. Needs `cargo install sccache`.
 test-cached:
     @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
@@ -155,14 +174,15 @@ test-cached:
 
 # Test a single crate
 test-crate CRATE:
-    cargo nextest run -p {{CRATE}}
+    cargo nextest run -p {{ CRATE }}
 
 # Run tests matching a filter expression
 test-filter FILTER:
-    cargo nextest run --workspace -E 'test({{FILTER}})'
+    cargo nextest run --workspace -E 'test({{ FILTER }})'
 
 # Run tests under the `ci` profile: no retries, slow-test warnings, and a
 # JUnit report at target/nextest/ci/junit.xml carrying pass/fail structure
+
 # only (no captured test output — see .config/nextest.toml).
 test-ci:
     cargo nextest run --workspace --profile ci
@@ -174,6 +194,7 @@ test-cargo:
 # BDD conformance suite (cucumber-rs): builds mvmctl and the TypeScript SDK,
 # checks generated SDK artifacts, then runs every Gherkin scenario under
 # features/suites/ against it. Scenarios tagged `@wip` describe
+
 # not-yet-implemented coverage and are filtered out by the runner.
 bdd:
     cargo build --bin mvmctl
@@ -184,6 +205,7 @@ bdd:
 
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
+
 # a targeted rebuild or CI.
 build-supervisors:
     cargo build -p mvm-hostd --bin mvm-substitution-endpoint --bin mvm-hvf-supervisor
@@ -191,19 +213,21 @@ build-supervisors:
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
+
 # MVM_KERNEL_SOURCE=auto to prefer it and compile when no asset is available.
 kernel-workload:
     cargo run -- kernel build --which workload
 
 # Live macOS Apple-Silicon HVF proof for OCI --allow-host:
 #  1. exact `machine run --image ... --allow-host ... -- ps aux` path
-#  2. admit/deny relay proof over the host-vsock egress endpoint
+
+# 2. admit/deny relay proof over the host-vsock egress endpoint
 hvf-oci-allow-host-smoke:
     bash scripts/check-hvf-oci-allow-host-smoke.sh
 
 # ── Model / Conformance gates ────────────────────────────────────────────
-
 # R1: the model is the single source. Verify model/*.toml, the generated
+
 # CONFORMANCE.md, and the honesty/deferral meta-gates.
 model:
     cargo run -p xtask -- check-conformance
@@ -240,6 +264,7 @@ clippy:
 # stay out of `cargo nextest run --workspace` (nextest lists tests via `--list`,
 # which a `harness = false` target cannot answer), and `--all-targets` above
 # honors `required-features`, so nothing else builds it — a struct change
+
 # elsewhere in the workspace can break it unnoticed.
 clippy-bdd:
     cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings
@@ -248,8 +273,8 @@ clippy-bdd:
 lint: fmt-check clippy clippy-bdd model
 
 # ── Claim mutation testing ───────────────────────────────────────────────
-
 # Verify the committed mutation surface still matches the claims ledger.
+
 # Milliseconds, needs no cargo-mutants — this is the part CI runs per PR.
 mutation-surface:
     cargo run -p xtask -- check-mutation-witnesses
@@ -262,12 +287,14 @@ mutation-surface:
 # its check removed, so it must not reach a real mvm state root — and that
 # confinement lives where cargo-mutants is actually spawned, so every
 # caller gets it rather than each one carrying its own copy. This recipe
+
 # had no wrapper at all until that landed, which is the failure mode.
 mutation-witnesses:
     cargo run -p xtask -- check-mutation-witnesses --run
 
 # Re-pin the surface after a witness legitimately moved. Cheap, and keeps
 # the stated reasons on existing accepted misses. Add --run to also
+
 # re-record the misses themselves (hours, and it discards those reasons).
 mutation-repin:
     cargo run -p xtask -- check-mutation-witnesses --write-baseline
@@ -281,11 +308,11 @@ ci: lint test test-doc bdd
 preflight: ci
 
 # ── Release ──────────────────────────────────────────────────────────────
-
 # Cut a release with automatic version bump (based on conventional commits)
 # Cut the next release (auto-detected version) via a PR. `main` is protected
 # (enforce_admins + merge queue), so the version bump lands through a PR — a
 # direct `git push` to main is rejected. After the PR merges, run
+
 # `just release-tag <version>` to publish.
 release-auto:
     #!/usr/bin/env bash
@@ -304,22 +331,23 @@ release-auto:
 release VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "==> Preparing release v{{VERSION}}"
+    echo "==> Preparing release v{{ VERSION }}"
     cargo fmt --all
     cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
     cargo clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
-    just _release-prep "{{VERSION}}"
+    just _release-prep "{{ VERSION }}"
 
 # Shared release prep: on a `release/v<version>` branch, bump every version pin,
 # prepend the changelog, commit, push, and open the release PR. Bumps the
 # workspace version AND every internal path-dep pin — the old `mvm-[a-z]*` regex
 # missed `mvm`, `mvm-ext4`, `libkrun-sys`, `mvm-egress-proxy`, which then
+
 # version-mismatched on `cargo update`.
 _release-prep VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
-    V="{{VERSION}}"
+    V="{{ VERSION }}"
     BRANCH="release/v$V"
     git switch -c "$BRANCH"
     sed -i.bak -E \
@@ -350,11 +378,12 @@ _release-prep VERSION:
     echo "==> Opened release PR for v$V. Merge it via the queue, then run: just release-tag $V"
 
 # After the release PR merges: tag the merged main commit and push the tag,
+
 # which triggers the build + publish pipeline. Tags are not branch-protected.
 release-tag VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
-    V="{{VERSION}}"
+    V="{{ VERSION }}"
     git fetch origin main
     # The bump commit must be on main (the release PR merged) before tagging.
     if ! git show "origin/main:Cargo.toml" | grep -qE "^version = \"$V\""; then
@@ -371,7 +400,7 @@ release-build:
 
 # Cross-compile release binary for a target
 release-build-target TARGET:
-    cargo build --release --target {{TARGET}} --features host,user,template-registry-s3,release-artifact-bootstrap
+    cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap
 
 # Dry-run crates.io publish (all crates in dependency order)
 publish-dry-run:
@@ -383,12 +412,12 @@ deploy-guard:
 
 # Print workspace version
 @version:
-    echo {{version}}
+    echo {{ version }}
 
 # Create a git tag for the current workspace version
 tag:
-    git tag v{{version}}
-    @echo "Tagged v{{version}}"
+    git tag v{{ version }}
+    @echo "Tagged v{{ version }}"
 
 # ── Documentation ────────────────────────────────────────────────────────
 
@@ -498,9 +527,10 @@ clean:
 # Reap leaked host-side helper subprocesses (broker/host-agent/signer/etc.)
 # older than N minutes (default 30). Backstop for the in-binary parent-death
 # watchdog; clears orphans from past test runs across worktrees. DRY_RUN=1 to
+
 # preview, e.g. `DRY_RUN=1 just reap-helpers` or `just reap-helpers 5`.
 reap-helpers MINUTES="30":
-    ./scripts/reap-helper-orphans.sh {{MINUTES}}
+    ./scripts/reap-helper-orphans.sh {{ MINUTES }}
 
 # Security audit (cargo-audit — RUSTSEC advisories against Cargo.lock)
 audit:
@@ -518,13 +548,14 @@ security-gate-prod-agent:
     ./scripts/check-prod-agent-no-exec.sh
 
 # Run the GuestRequest deserializer fuzzer (ADR-001 §W4.2). Default 5min.
+
 # Override with: just fuzz-guest-request 3600
 fuzz-guest-request SECONDS="300":
-    cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{SECONDS}}
+    cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{ SECONDS }}
 
 # Run the AuthenticatedFrame envelope fuzzer (ADR-001 §W4.2). Default 5min.
 fuzz-authenticated-frame SECONDS="300":
-    cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_authenticated_frame -- -max_total_time={{SECONDS}}
+    cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_authenticated_frame -- -max_total_time={{ SECONDS }}
 
 # Check for outdated dependencies
 outdated:
@@ -532,7 +563,7 @@ outdated:
 
 # Watch open PRs for a GitHub repo
 watch-prs repo="tinylabscom/mvm" interval="10":
-    watch -n {{interval}} "gh pr list --repo {{repo}} --state open --json number,title,mergeStateStatus,reviewDecision,isDraft --jq '.[] | \"#\(.number)  \(.mergeStateStatus // \"UNKNOWN\")  review=\(.reviewDecision // \"NONE\")  draft=\(.isDraft)  \(.title)\"'"
+    watch -n {{ interval }} "gh pr list --repo {{ repo }} --state open --json number,title,mergeStateStatus,reviewDecision,isDraft --jq '.[] | \"#\(.number)  \(.mergeStateStatus // \"UNKNOWN\")  review=\(.reviewDecision // \"NONE\")  draft=\(.isDraft)  \(.title)\"'"
 
 # List all available recipes
 @_default:

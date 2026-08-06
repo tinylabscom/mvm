@@ -18,10 +18,11 @@ for detailed scope and acceptance criteria.
         macOS/Windows builds on no-op stubs
   - [x] Host workspace `check`, `mvm-runtime`/`mvm-hostd` all-target Clippy,
         `cargo fmt`, and focused telemetry unit tests pass
-  - [ ] Build the real Aya eBPF object with nightly + `bpf-linker` inside
-        the Linux builder VM
-  - [ ] End-to-end launch→attach→detach integration test
-  - [ ] Full workspace test run in CI / builder VM
+  - [x] Build the real Aya eBPF object with nightly + `bpf-linker`
+        (`just build-ebpf` builds `bpfel-unknown-none` on any host)
+  - [x] End-to-end attach→detach integration test via `mode.json` sidecar
+  - [ ] Full workspace test run in CI / Linux builder VM
+  - [ ] Load and attach the built object on a live Linux host
 - [x] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
   - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy

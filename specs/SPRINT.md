@@ -111,10 +111,12 @@
       `VmObservabilityTarget` as a `mode.json` sidecar, wired
       `EbpfTelemetryManager` into `Supervisor::launch`/`stop`, added vsock
       egress counters to the global metrics snapshot, and kept macOS/Windows
-      builds on no-op stubs. Workspace `check`, `mvm-runtime` and `mvm-hostd`
-      all-target Clippy, formatting, and focused telemetry unit tests pass on
-      the host. The real eBPF object build remains gated on nightly +
-      `bpf-linker` inside the Linux builder VM.
+      builds on no-op stubs. Built the real `bpfel-unknown-none` object with
+      `just build-ebpf` (nightly + `bpf-linker`) and added an attach→detach
+      integration test that reads the sidecar. Workspace `check`,
+      `mvm-runtime` and `mvm-hostd` all-target Clippy, formatting, and focused
+      telemetry unit tests pass on the host; loading/attaching the object on
+      a live Linux host remains for the builder VM.
 
 - [x] Source-checkout kernel bootstrap reliability. `just kernel-workload` and
       `mvmctl kernel build --which workload` now embed the Stage 0 egress client

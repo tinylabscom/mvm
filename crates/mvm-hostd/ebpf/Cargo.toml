@@ -26,3 +26,5 @@ rpath = false
 lto = true
 panic = "abort"
 codegen-units = 1
+
+[workspace]
