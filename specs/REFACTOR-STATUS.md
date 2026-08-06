@@ -6,6 +6,22 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
+      `feat/ebpf-vsock-egress-telemetry`
+  - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader
+        and eBPF program into `mvm-hostd` and the observability target
+        metadata into `mvm-runtime`
+  - [x] Add `VmObservabilityTarget` sidecar in `mode.json` and wire
+        `EbpfTelemetryManager` attach/detach hooks into
+        `Supervisor::launch`/`stop`
+  - [x] Add vsock egress counters to the global metrics snapshot and keep
+        macOS/Windows builds on no-op stubs
+  - [x] Host workspace `check`, `mvm-runtime`/`mvm-hostd` all-target Clippy,
+        `cargo fmt`, and focused telemetry unit tests pass
+  - [ ] Build the real Aya eBPF object with nightly + `bpf-linker` inside
+        the Linux builder VM
+  - [ ] End-to-end launch→attach→detach integration test
+  - [ ] Full workspace test run in CI / builder VM
 - [x] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
   - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy

@@ -87,9 +87,6 @@ members = [
     # the host/user product-surface feature aggregation.
     "crates/mvm-conformance",
     "xtask",
-    # Spike for host-side vsock egress telemetry using eBPF/Aya.
-    # Linux-only at runtime; compiles as a no-op stub on macOS.
-    "crates/mvm-ebpf-egress",
 ]
 # cargo-fuzz crates have to be excluded from the main workspace because
 # they depend on libfuzzer-sys, which only builds under cargo-fuzz's
@@ -174,8 +171,6 @@ authors = ["mvm contributors"]
 too_many_arguments = "deny"
 
 [workspace.dependencies]
-mvm-ebpf-egress = { path = "crates/mvm-ebpf-egress", version = "0.18.0" }
-
 # Async runtime.
 #
 # Narrowed from `features = ["full"]` to the union actually used

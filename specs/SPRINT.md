@@ -104,6 +104,18 @@
       was the host-toolchain probe under isolated `CARGO_HOME`, and that test
       passed when rerun with the normal Cargo home.
 
+- [x] Host-side eBPF vsock egress telemetry spike — **issue #2211**.
+      Removed the standalone `mvm-ebpf-egress` crate and folded the Aya
+      loader/probe into `mvm-hostd` (userspace attach/detach) and
+      `mvm-runtime` (observability target metadata). Added
+      `VmObservabilityTarget` as a `mode.json` sidecar, wired
+      `EbpfTelemetryManager` into `Supervisor::launch`/`stop`, added vsock
+      egress counters to the global metrics snapshot, and kept macOS/Windows
+      builds on no-op stubs. Workspace `check`, `mvm-runtime` and `mvm-hostd`
+      all-target Clippy, formatting, and focused telemetry unit tests pass on
+      the host. The real eBPF object build remains gated on nightly +
+      `bpf-linker` inside the Linux builder VM.
+
 - [x] Source-checkout kernel bootstrap reliability. `just kernel-workload` and
       `mvmctl kernel build --which workload` now embed the Stage 0 egress client
       they need to reach Nix caches, so a first-time local compile completes

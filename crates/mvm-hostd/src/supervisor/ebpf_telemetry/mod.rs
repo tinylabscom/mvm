@@ -1,10 +1,22 @@
 //! Host-side vsock egress telemetry integration.
 //!
-//! Wires `mvm-ebpf-egress` into the supervisor lifecycle: when a VM starts,
-//! the supervisor reads the per-VM observability target from `mode.json`
-//! and asks the telemetry collector to attach. When the VM stops, the
-//! probe is detached. Events are reflected in metrics and optionally in
+//! Wires an eBPF/procfs collector into the supervisor lifecycle: when a VM
+//! starts, the supervisor reads the per-VM observability target from
+//! `mode.json` and asks the telemetry collector to attach. When the VM stops,
+//! the probe is detached. Events are reflected in metrics and optionally in
 //! the chain-signed audit log.
+//!
+//! The eBPF program itself lives in `crates/mvm-hostd/ebpf/` and is built
+//! separately with nightly + bpf-linker so the main workspace stays on stable
+//! Rust.
+
+mod events;
+mod loader;
+mod target;
+
+pub use events::{EgressEvent, TelemetryEvent};
+pub use loader::{EgressTelemetry, ProbeConfig, ProbeHandle, TelemetryError};
+pub use target::ObservabilityTarget;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -16,8 +28,8 @@ use crate::supervisor::audit_recorder::{EventCategory, Recorder, RecorderError};
 
 /// Manages per-VM egress telemetry probes.
 pub struct EbpfTelemetryManager {
-    telemetry: mvm_ebpf_egress::EgressTelemetry,
-    handles: HashMap<String, mvm_ebpf_egress::ProbeHandle>,
+    telemetry: EgressTelemetry,
+    handles: HashMap<String, ProbeHandle>,
 }
 
 impl Default for EbpfTelemetryManager {
@@ -29,7 +41,7 @@ impl Default for EbpfTelemetryManager {
 impl EbpfTelemetryManager {
     pub fn new() -> Self {
         Self {
-            telemetry: mvm_ebpf_egress::EgressTelemetry::new(mvm_ebpf_egress::ProbeConfig {
+            telemetry: EgressTelemetry::new(ProbeConfig {
                 ebpf_object_path: None,
                 enable_procfs_fallback: true,
             }),
@@ -85,11 +97,11 @@ impl EbpfTelemetryManager {
 
     async fn record_event(
         &self,
-        event: mvm_ebpf_egress::TelemetryEvent,
+        event: TelemetryEvent,
         recorder: &Recorder,
     ) -> Result<(), RecorderError> {
         match event {
-            mvm_ebpf_egress::TelemetryEvent::Egress(evt) => {
+            TelemetryEvent::Egress(evt) => {
                 global()
                     .vsock_egress_events_total
                     .fetch_add(1, Ordering::Relaxed);
@@ -119,7 +131,7 @@ impl EbpfTelemetryManager {
     }
 }
 
-fn read_observability_target(vm_name: &str) -> Option<mvm_ebpf_egress::ObservabilityTarget> {
+fn read_observability_target(vm_name: &str) -> Option<ObservabilityTarget> {
     let meta = mvm_runtime::base::runtime_meta::read(vm_name)
         .ok()
         .flatten()?;
@@ -130,7 +142,7 @@ fn read_observability_target(vm_name: &str) -> Option<mvm_ebpf_egress::Observabi
         .substitution_target()
         .and_then(|h| mvm_runtime::base::observability_target::read_pid_file(&h.pid_file));
 
-    let mut obs = mvm_ebpf_egress::ObservabilityTarget::new(vm_name)
+    let mut obs = ObservabilityTarget::new(vm_name)
         .with_backend(backend_kind)
         .with_state_dir(target.state_dir);
     if let Some(pid) = substitution_pid {

@@ -509,7 +509,7 @@ impl Supervisor {
             return Err(SupervisorError::EgressEnforcement(e));
         }
         self.installed_firewalls
-            .insert(workload_key.clone(), firewall_spec);
+            .insert(workload_key.clone(), firewall_spec.clone());
         self.firewall_plan_keys
             .insert(plan.plan_id.clone(), workload_key);
 
@@ -520,6 +520,11 @@ impl Supervisor {
                 .await?;
             return Err(SupervisorError::from(e));
         }
+
+        // Attach host-side egress telemetry to the running VM. This is
+        // best-effort: a failure here is logged but must not fail launch,
+        // because the probe is observability-only.
+        self.ebpf_telemetry.attach(&firewall_spec.vm_id);
 
         // Step 5: Verified → Launched → Running. A later real impl
         // will block between Launched and Running waiting for the

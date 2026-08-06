@@ -2995,19 +2995,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-ebpf-egress"
-version = "0.18.0"
-dependencies = [
- "aya",
- "aya-log",
- "mvm-core",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "mvm-fs"
 version = "0.18.0"
 dependencies = [
@@ -3049,6 +3036,8 @@ version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aya",
+ "aya-log",
  "base64",
  "chrono",
  "ctor",
@@ -3067,7 +3056,6 @@ dependencies = [
  "mvm-build",
  "mvm-contract",
  "mvm-core",
- "mvm-ebpf-egress",
  "mvm-net",
  "mvm-runtime",
  "mvm-sdk",

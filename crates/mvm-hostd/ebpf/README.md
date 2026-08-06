@@ -1,4 +1,4 @@
-# mvm-ebpf-egress-ebpf
+# mvm-hostd-ebpf
 
 Kernel-side eBPF program for host-side vsock egress telemetry.
 
@@ -9,24 +9,24 @@ This crate is **not** part of the main workspace because it requires the
 VM (or any Linux host with nightly + `bpf-linker`):
 
 ```bash
-cd crates/mvm-ebpf-egress/ebpf
+cd crates/mvm-hostd/ebpf
 cargo build --release --target bpfel-unknown-none
 ```
 
 The resulting object file lands at:
 
 ```
-target/bpfel-unknown-none/release/mvm-ebpf-egress/mvm-ebpf-egress
+target/bpfel-unknown-none/release/mvm-hostd-ebpf/mvm-hostd-ebpf
 ```
 
 Copy or symlink it to:
 
 ```
-crates/mvm-ebpf-egress/ebpf/target/bpfel-unknown-none/release/mvm-ebpf-egress/mvm-ebpf-egress.o
+crates/mvm-hostd/ebpf/target/bpfel-unknown-none/release/mvm-hostd-ebpf/mvm-hostd-ebpf.o
 ```
 
-The userspace loader (`mvm-ebpf-egress/src/lib.rs`) looks for the object at
-that path by default, or at the path configured via
+The userspace loader (`mvm-hostd/src/supervisor/ebpf_telemetry/loader.rs`)
+looks for the object at that path by default, or at the path configured via
 `ProbeConfig::ebpf_object_path`.
 
 ## Tooling

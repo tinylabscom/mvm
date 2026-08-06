@@ -97,7 +97,6 @@ mvm-contract.workspace = true
 # `mvm-runtime` provides the `VmNameRegistry` the TTL reaper walks, plus the
 # `VmBackend` implementations dispatched from `AnyBackend`.
 mvm-runtime.workspace = true
-mvm-ebpf-egress.workspace = true
 # guest vsock exec protocol (`send_exec_streaming`, `GUEST_AGENT_PORT`) —
 # the healthcheck probe's host->guest exec leg.
 mvm-agentd.workspace = true
@@ -152,6 +151,10 @@ rustix = { version = "1.1", features = ["fs"] }
 
 # mvm-jailer-lite confinement: seccomp + landlock are Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
+# Aya userspace loader for the vsock egress telemetry probe. The eBPF program
+# itself lives in `ebpf/` and is built separately with nightly + bpf-linker.
+aya = "0.13"
+aya-log = "0.2"
 seccompiler = { workspace = true }
 landlock = { workspace = true }
 
