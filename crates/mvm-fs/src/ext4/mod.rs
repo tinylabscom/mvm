@@ -38,6 +38,9 @@ pub mod mkfs;
 pub mod verity;
 
 use std::collections::BTreeMap;
+
+use rayon::prelude::*;
+
 pub const BLOCK_SIZE: u32 = 4096;
 const BLOCK_SIZE_USIZE: usize = BLOCK_SIZE as usize;
 const INODE_SIZE: u16 = 256;
@@ -346,6 +349,12 @@ impl Image {
     }
     fn total_bytes(&self) -> u64 {
         self.total_blocks as u64 * BLOCK_SIZE as u64
+    }
+    /// Merge all blocks from `other` into this image. The caller must ensure
+    /// the two images have disjoint block sets; overlapping blocks are taken
+    /// from `other`.
+    fn merge_from(&mut self, other: Self) {
+        self.blocks.extend(other.blocks);
     }
     fn block_mut(&mut self, block: u32) -> &mut [u8; BLOCK_SIZE_USIZE] {
         self.blocks
@@ -785,20 +794,34 @@ where
     write_bitmaps(&mut img, &layout);
     write_backups(&mut img, &layout);
 
+    // Inode writes stay sequential: multiple inodes share a 4 KiB inode-table
+    // block, so parallel writers would race on the same block.
     for p in &planned {
         write_inode(&mut img, &layout, p);
-        match p.kind {
-            Kind::Dir => write_dir_blocks(&mut img, p),
-            Kind::File => {}
-            Kind::Symlink => {
-                if let Some(ext) = p.extents.first() {
-                    // Long symlink: target in a data block.
-                    let off = img.block_off(ext.phys);
+    }
+
+    // Directory and long-symlink data blocks are at disjoint physical extents,
+    // so emit them in parallel and merge back into the shared image.
+    let data_images: Vec<Image> = planned
+        .par_iter()
+        .filter(|p| p.kind == Kind::Dir || (p.kind == Kind::Symlink && !p.extents.is_empty()))
+        .map(|p| {
+            let mut local = Image::new(0);
+            match p.kind {
+                Kind::Dir => write_dir_blocks(&mut local, p),
+                Kind::Symlink => {
+                    let ext = p.extents.first().expect("filtered above");
+                    let off = local.block_off(ext.phys);
                     let t = p.symlink_target.clone().unwrap_or_default();
-                    img.put_bytes(off, t.as_bytes());
+                    local.put_bytes(off, t.as_bytes());
                 }
+                Kind::File => unreachable!(),
             }
-        }
+            local
+        })
+        .collect();
+    for local in data_images {
+        img.merge_from(local);
     }
 
     img.emit_chunks(&mut emit).map_err(EmitImageError::Emit)?;

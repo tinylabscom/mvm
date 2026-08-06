@@ -50,4 +50,9 @@ pub enum OciError {
     /// the value configured on `LayerFetchOptions::max_size`.
     #[error("layer size {declared} bytes exceeds cap of {cap} bytes")]
     LayerTooLarge { declared: u64, cap: u64 },
+
+    /// The layer tarball could not be unpacked to the caller-supplied
+    /// output root. The wrapped string is the underlying unpack error.
+    #[error("layer unpack failed: {0}")]
+    Unpack(String),
 }

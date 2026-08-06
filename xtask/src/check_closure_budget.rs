@@ -71,7 +71,12 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// 274 (was 275): consolidating the protocol and volume contracts into the
 /// feature-gated `mvm-contract` package removes one package from the default
 /// closure while preserving the protocol-only default feature set.
-const CLOSURE_BUDGET: usize = 274;
+///
+/// 279 (was 274): adopting `rayon` for parallel file walks, copies, ext4
+/// directory/symlink block emission, and dm-verity hash-tree computation;
+/// measured delta +5 crates (rayon, rayon-core, crossbeam-deque,
+/// crossbeam-epoch, crossbeam-utils).
+const CLOSURE_BUDGET: usize = 279;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

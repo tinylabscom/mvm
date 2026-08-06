@@ -68,7 +68,7 @@ pub struct LaunchEntrypoint {
     pub env: BTreeMap<String, String>,
 }
 
-/// One `--add-dir host:guest[:mode]` mapping.
+/// One `--mount host:guest[:mode]` mapping.
 ///
 /// The host directory is materialized into a small ext4 image attached as
 /// an extra Firecracker drive, then mounted at `guest_path` by a wrapper
@@ -93,26 +93,26 @@ impl AddDir {
     /// component is unambiguously path-shaped (contains a slash).
     pub fn parse(spec: &str) -> Result<Self> {
         let (host, rest) = spec.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!("--add-dir '{spec}': expected 'host:guest[:mode]', missing ':'")
+            anyhow::anyhow!("--mount '{spec}': expected 'host:guest[:mode]', missing ':'")
         })?;
         if host.is_empty() {
-            anyhow::bail!("--add-dir '{spec}': host path must not be empty");
+            anyhow::bail!("--mount '{spec}': host path must not be empty");
         }
 
         let (guest, read_only) = match rest.rsplit_once(':') {
             Some((path, "ro")) => (path, true),
             Some((path, "rw")) => (path, false),
             Some((_, tail)) if looks_like_mode_typo(tail) => {
-                anyhow::bail!("--add-dir '{spec}': unknown mode '{tail}' (expected 'ro' or 'rw')");
+                anyhow::bail!("--mount '{spec}': unknown mode '{tail}' (expected 'ro' or 'rw')");
             }
             _ => (rest, true),
         };
 
         if guest.is_empty() {
-            anyhow::bail!("--add-dir '{spec}': guest path must not be empty");
+            anyhow::bail!("--mount '{spec}': guest path must not be empty");
         }
         if !guest.starts_with('/') {
-            anyhow::bail!("--add-dir '{spec}': guest path must be absolute (start with '/')");
+            anyhow::bail!("--mount '{spec}': guest path must be absolute (start with '/')");
         }
         Ok(Self {
             host_path: expand_tilde(host),
@@ -732,7 +732,7 @@ pub fn shell_quote(arg: &str) -> String {
 }
 
 /// Build the wrapper script that runs inside the guest:
-///   1. mounts each `--add-dir` ext4 image at the exact VMM-assigned block device
+///   1. mounts each `--mount` ext4 image at the exact VMM-assigned block device
 ///   2. exports launch-plan-derived env vars (when target is LaunchPlan)
 ///   3. exports CLI `--env` vars (CLI overrides launch-plan)
 ///   4. cds into `working_dir` (when target is LaunchPlan and it's set)
@@ -810,10 +810,10 @@ pub fn transient_run_dev_console(pty: bool, image_sealed: bool) -> bool {
 }
 
 /// Remove the transient VM's host state dir (`~/.mvm/vms/<name>`, which also
-/// holds any `--add-dir` extra images) once the VM is stopped. Host-side
+/// holds any `--mount` extra images) once the VM is stopped. Host-side
 /// `std::fs` — never `run_in_vm`, which targets a path *inside* the guest and
 /// (on macOS) would wake a builder VM to `rm` a path that isn't there, leaking
-/// the real host dir. Runs for every transient run, `--add-dir` or not: the
+/// the real host dir. Runs for every transient run, `--mount` or not: the
 /// backend writes `hvf.pid` / `console.log` here regardless, so a plain OCI
 /// launch created the dir and must clean it up too. Best-effort — teardown must
 /// never fail on a cleanup error.
@@ -856,9 +856,9 @@ fn remove_transient_state_dir(staging_dir: &str) {
 /// Decide whether snapshot restore is safe for this request.
 ///
 /// Only enabled for the trivial case: a registered template (so the image
-/// has a snapshot at all), no `--add-dir` extras (so the drive layout
+/// has a snapshot at all), no `--mount` extras (so the drive layout
 /// matches the snapshot's recorded layout), and a backend that advertises
-/// snapshot support. Adding `--add-dir` would change the drive count and
+/// snapshot support. Adding `--mount` would change the drive count and
 /// break the snapshot — that case stays cold-boot for now.
 pub fn snapshot_eligible(
     image: &ImageSource,
@@ -996,6 +996,11 @@ fn run_inner(
     let timing = crate::commands::vm::phase_timing::enabled();
     let t_start = timing.then(std::time::Instant::now);
 
+    // Validate inputs that do not depend on the image before doing any
+    // expensive work (OCI layer pulls, snapshot probes, etc.). A bad --mount
+    // host path should fail fast rather than after downloading a guest image.
+    validate_add_dirs_before_resolve(&req.add_dirs)?;
+
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
     // cold-boot cost when the request is snapshot-eligible.
@@ -1003,7 +1008,7 @@ fn run_inner(
 
     let t_image_resolved = timing.then(std::time::Instant::now);
 
-    // Build read-only ext4 images for each --add-dir, staged in a transient
+    // Build read-only ext4 images for each --mount, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
     let AddDirStaging {
         vm_name,
@@ -1209,7 +1214,7 @@ fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
     }
 }
 
-/// Per-`--add-dir` staging: a small RO ext4 image built for each host
+/// Per-`--mount` staging: a small RO ext4 image built for each host
 /// directory mapping, plus the VM name / staging dir the images live under.
 struct AddDirStaging {
     vm_name: String,
@@ -1217,7 +1222,32 @@ struct AddDirStaging {
     volumes: Vec<mvm_runtime::image::RuntimeVolume>,
 }
 
-/// Build read-only ext4 images for each `--add-dir`, staged in a transient
+/// Fail fast if any `--mount` host path is missing or not a directory.
+///
+/// This runs before image resolution so a typo in a host path does not pay
+/// for an OCI pull only to error out during volume staging.
+fn validate_add_dirs_before_resolve(add_dirs: &[AddDir]) -> Result<()> {
+    for dir in add_dirs {
+        let path = Path::new(&dir.host_path);
+        if !path.exists() {
+            anyhow::bail!(
+                "--mount '{}' -> '{}': host path does not exist",
+                dir.host_path,
+                dir.guest_path
+            );
+        }
+        if !path.is_dir() {
+            anyhow::bail!(
+                "--mount '{}' -> '{}': host path is not a directory",
+                dir.host_path,
+                dir.guest_path
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Build read-only ext4 images for each `--mount`, staged in a transient
 /// VM's `extras` subdirectory so cleanup is straightforward.
 fn stage_add_dir_volumes(req: &ExecRequest) -> Result<AddDirStaging> {
     let vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
@@ -1232,7 +1262,7 @@ fn stage_add_dir_volumes(req: &ExecRequest) -> Result<AddDirStaging> {
         mvm_runtime::image::build_dir_image_ro(&dir.host_path, &label, &image_path).with_context(
             || {
                 format!(
-                    "preparing --add-dir image for '{}' -> '{}'",
+                    "preparing --mount image for '{}' -> '{}'",
                     dir.host_path, dir.guest_path
                 )
             },
@@ -1242,7 +1272,7 @@ fn stage_add_dir_volumes(req: &ExecRequest) -> Result<AddDirStaging> {
             guest: dir.guest_path.clone(),
             size: String::new(),
             read_only: dir.read_only,
-            // `--add-dir` builds an RO ext4 image, so this is a disk.
+            // `--mount` builds an RO ext4 image, so this is a disk.
             ..Default::default()
         });
     }
@@ -1362,7 +1392,7 @@ fn build_start_config(
         memory_mib: req.memory_mib,
         mem_initial_mib: req.mem_initial_mib,
         ports: Vec::new(),
-        // User `--add-dir` volumes first, then the SDK sidecar. The order is
+        // User `--mount` volumes first, then the SDK sidecar. The order is
         // the block-device order every backend assigns, so keeping the
         // host-resolved sidecar last means adding or removing it never
         // renumbers a user volume's device.
@@ -1402,7 +1432,7 @@ struct BootAttempt<'a> {
 /// housekeeping since there is no daemon to do it between invocations.
 ///
 /// Returns the effective VM name — a claimed standby runs under its own
-/// standby id, not `vm_name`. On a cold-boot failure the `--add-dir`
+/// standby id, not `vm_name`. On a cold-boot failure the `--mount`
 /// staging is cleaned up and the error is returned, exactly as the inline
 /// boot sequence this replaces used to do.
 fn boot_transient_vm(
@@ -1499,7 +1529,7 @@ fn install_ctrlc_teardown(
     interrupted
 }
 
-/// Resolve the guest block devices for the transient command's `--add-dir`
+/// Resolve the guest block devices for the transient command's `--mount`
 /// volumes. `build_start_config` places those volumes before any SDK sidecar,
 /// while the runtime mapper resolves their actual slots after rootfs, verity,
 /// and runtime-overlay devices have been accounted for.
@@ -1511,7 +1541,7 @@ fn add_dir_block_devices(config: &VmStartConfig, count: usize) -> Result<Vec<Str
     let devices = mvm_runtime::workload_runner::workload_volume_devices(config);
     if devices.len() < count {
         anyhow::bail!(
-            "expected {count} --add-dir volumes, but the start config carries only {}",
+            "expected {count} --mount volumes, but the start config carries only {}",
             devices.len()
         );
     }
@@ -1523,7 +1553,7 @@ fn add_dir_block_devices(config: &VmStartConfig, count: usize) -> Result<Vec<Str
         .map(|(idx, device)| {
             device.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "--add-dir volume {idx} has no attached block device on the workload runner"
+                    "--mount volume {idx} has no attached block device on the workload runner"
                 )
             })
         })
@@ -1532,7 +1562,7 @@ fn add_dir_block_devices(config: &VmStartConfig, count: usize) -> Result<Vec<Str
 
 /// Tear down the transient VM after the guest command finishes (or fails to
 /// dispatch): stop the backend VM, top up the warm pool toward its target,
-/// sync back any writable `--add-dir` mounts, and remove the host VM state
+/// sync back any writable `--mount` mounts, and remove the host VM state
 /// directory (`~/.mvm/vms/<name>`), which includes the `extras` staging
 /// subdirectory and any backend files such as `hvf.pid` / `console.log`.
 ///
@@ -1559,7 +1589,7 @@ fn teardown_transient_vm(
         tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
     }
 
-    // Writable --add-dir uses rsync-back. With the VM stopped the
+    // Writable --mount uses rsync-back. With the VM stopped the
     // ext4 image is no longer in use, so we mount it host-side and rsync
     // its contents over the host directory before nuking the staging dir.
     // Failures here are warned but do not override the guest exit code.
@@ -1570,7 +1600,7 @@ fn teardown_transient_vm(
         let image_path = format!("{staging_dir}/extra-{idx}.ext4");
         if let Err(e) = mvm_runtime::image::rsync_image_to_host(&image_path, &dir.host_path) {
             ui::warn(&format!(
-                "writable --add-dir sync-back failed for '{}' -> '{}': {e:#}",
+                "writable --mount sync-back failed for '{}' -> '{}': {e:#}",
                 dir.host_path, dir.guest_path,
             ));
         }
@@ -1596,7 +1626,7 @@ fn remove_transient_state_dirs(effective_dir: &Path, requested_dir: &Path) {
 /// Mirrors the snapshot path in `cmd_run`: allocate a slot, build a
 /// `FlakeRunConfig` matching the snapshot's recorded layout, then call
 /// `microvm::restore_from_template_snapshot`. The caller is responsible for
-/// ensuring the request is `snapshot_eligible` first (no `--add-dir`,
+/// ensuring the request is `snapshot_eligible` first (no `--mount`,
 /// template image source).
 fn restore_via_snapshot(
     vm_name: &str,
@@ -1794,7 +1824,7 @@ fn direct_pty_inline_argv(req_argv: &[String], req: &ExecRequest, labels: &[Stri
 //   2. dispatch N  → ExecOutput per call
 //   3. tear down   → on idle / max / close / shutdown
 //
-// They deliberately NOT support `--add-dir` (volumes, rsync-back,
+// They deliberately NOT support `--mount` (volumes, rsync-back,
 // staging dirs) — session VMs are meant for repeated calls against a
 // clean closure, not interactive file mounts.
 
@@ -1809,7 +1839,7 @@ pub struct SessionVm {
 /// Boot a session microVM from a registered template. Snapshot-resume
 /// is taken when the template has one and the backend supports it
 /// (matches the eligibility rule in [`snapshot_eligible`] for the
-/// no-`--add-dir` case), unless an admission hook supplies per-boot
+/// no-`--mount` case), unless an admission hook supplies per-boot
 /// state that must ride the fresh boot path.
 ///
 /// `vm_name_prefix` becomes the human-readable part of the VM name —
@@ -1959,7 +1989,7 @@ pub fn dispatch_in_session(
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
     // Reuse build_guest_wrapper by constructing a minimal ExecRequest
-    // with no add_dirs (sessions don't take --add-dir). The wrapper
+    // with no add_dirs (sessions don't take --mount). The wrapper
     // emits `set -e\n<env exports>\n<argv>\n`.
     let req = ExecRequest {
         name: None,
@@ -2281,6 +2311,43 @@ mod tests {
     }
 
     #[test]
+    fn validate_add_dirs_rejects_missing_host_path() {
+        let dirs = vec![AddDir {
+            host_path: "/definitely/not/a/real/path".into(),
+            guest_path: "/work".into(),
+            read_only: true,
+        }];
+        let err = validate_add_dirs_before_resolve(&dirs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("does not exist"), "got: {msg}");
+        assert!(msg.contains("/definitely/not/a/real/path"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_add_dirs_rejects_non_directory_host_path() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let dirs = vec![AddDir {
+            host_path: file.path().to_str().unwrap().into(),
+            guest_path: "/work".into(),
+            read_only: true,
+        }];
+        let err = validate_add_dirs_before_resolve(&dirs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is not a directory"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_add_dirs_accepts_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = vec![AddDir {
+            host_path: dir.path().to_str().unwrap().into(),
+            guest_path: "/work".into(),
+            read_only: true,
+        }];
+        validate_add_dirs_before_resolve(&dirs).expect("existing directory should validate");
+    }
+
+    #[test]
     fn shell_quote_basic() {
         assert_eq!(shell_quote("hello"), "'hello'");
         assert_eq!(shell_quote("hello world"), "'hello world'");
@@ -2343,7 +2410,7 @@ mod tests {
             ..Default::default()
         };
         let error = add_dir_block_devices(&config, 1).expect_err("missing volume must fail");
-        assert!(error.to_string().contains("expected 1 --add-dir volumes"));
+        assert!(error.to_string().contains("expected 1 --mount volumes"));
     }
 
     #[test]
@@ -3193,7 +3260,7 @@ mod tests {
 
     #[test]
     fn remove_transient_state_dir_removes_the_host_dir() {
-        // Every transient run (with or without --add-dir) creates its state dir
+        // Every transient run (with or without --mount) creates its state dir
         // when the backend writes hvf.pid / console.log there, so teardown must
         // remove it host-side — not via run_in_vm, which targets the guest.
         let tmp = tempfile::tempdir().expect("tempdir");

@@ -357,7 +357,9 @@ for detailed scope and acceptance criteria.
         with a local standalone authority, capability-gated forwarding
         backends, and the launch-specification no-guest-NIC guard
   - [x] Privileged Linux lane executed on a Linux/KVM host: real host TUN,
-        real nftables, live forwarding witness, verified-clean teardown
+        real nftables, one shared default-drop forward hook with isolated
+        per-machine chains, live forwarding witnesses for two machines,
+        verified-clean teardown (nine privileged tests)
   - [x] BDD suite `s25_l3_vsock` (23 hermetic scenarios)
   - [x] Workload `VmmSpec` mapping carries the typed L3 control/data channels;
         netd socket layout follows the selected backend

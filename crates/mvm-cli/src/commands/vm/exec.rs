@@ -635,7 +635,7 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
             anyhow::bail!("--profile restrictive does not allow --env");
         }
         if !args.add_dir.is_empty() {
-            anyhow::bail!("--profile restrictive does not allow --add-dir");
+            anyhow::bail!("--profile restrictive does not allow --mount");
         }
     }
 
@@ -643,7 +643,7 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
         for spec in &args.add_dir {
             if !crate::exec::AddDir::parse(spec)?.read_only {
                 anyhow::bail!(
-                    "--add-dir '{spec}' requests rw; use --profile dev for writable host shares"
+                    "--mount '{spec}' requests rw; use --profile dev for writable host shares"
                 );
             }
         }
@@ -1725,7 +1725,7 @@ mod tests {
         args.add_dir.push(".:/work".to_string());
 
         let err = validate_run_profile(&args).expect_err("restrictive rejects shares");
-        assert!(err.to_string().contains("does not allow --add-dir"));
+        assert!(err.to_string().contains("does not allow --mount"));
     }
 
     #[test]

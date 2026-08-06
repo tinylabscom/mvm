@@ -12,9 +12,11 @@ description = "Image → mountable rootfs for mvm: OCI distribution client (regi
 [dependencies]
 async-trait = "0.1"
 ext4-view.workspace = true
+flate2.workspace = true
 hex.workspace = true
 libc = { workspace = true }
 mvm-contract.workspace = true
+rayon = "1"
 reqwest.workspace = true
 rustls.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
@@ -31,8 +33,13 @@ xattr = { workspace = true }
 [dev-dependencies]
 am-fs-ext4 = "0.4"
 base64.workspace = true
+criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "rt-multi-thread", "test-util", "time"] }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "in_memory_build"
+harness = false

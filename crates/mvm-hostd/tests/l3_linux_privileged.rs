@@ -12,7 +12,14 @@
 
 use std::net::Ipv4Addr;
 
-use mvm_hostd::netd::{DatapathRequest, ForwardingCapabilities, L3Datapath, linux::LinuxDatapath};
+use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
+use mvm_hostd::netd::{
+    DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath, linux::LinuxDatapath,
+};
+use mvm_net::l3::{
+    AddressLease, DnsBindingStore, FlowTable, IngressTable, L3Admitter, L3PolicyConfig,
+    OutboundVerdict,
+};
 
 /// Whether the privileged lane is enabled. Absent, every test here reports
 /// success without asserting anything — the alternative is a suite that is
@@ -29,6 +36,77 @@ fn request(machine_id: &str, third_octet: u8) -> DatapathRequest {
         prefix_len: 30,
         mtu: 1500,
     }
+}
+
+fn udp_packet(src: Ipv4Addr, dst: Ipv4Addr, dst_port: u16) -> Vec<u8> {
+    let payload = b"live-witness";
+    let total = 20 + 8 + payload.len();
+    let mut packet = vec![0u8; 20];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&src.octets());
+    packet[16..20].copy_from_slice(&dst.octets());
+    let mut udp = vec![0u8; 8];
+    udp[0..2].copy_from_slice(&40000u16.to_be_bytes());
+    udp[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    udp[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    packet.extend_from_slice(&udp);
+    packet.extend_from_slice(payload);
+    packet
+}
+
+fn admitting_policy(req: &DatapathRequest) -> L3Admitter {
+    let policy = L3PolicyConfig {
+        egress: CanonicalEgress::Rules(vec![CanonicalRule {
+            proto: Proto::Udp,
+            net: "93.184.216.0/24".parse().expect("test CIDR is valid"),
+            port_lo: 9999,
+            port_hi: 9999,
+        }]),
+        ..L3PolicyConfig::default()
+    };
+    let mut admitter = L3Admitter::new(
+        AddressLease::for_test(req.gateway, req.guest),
+        policy,
+        FlowTable::with_defaults(),
+        DnsBindingStore::with_defaults(),
+        IngressTable::with_defaults(),
+    );
+    admitter.set_ready(true);
+    admitter
+}
+
+fn send_admitted_packet(
+    handle: &mut dyn DatapathHandle,
+    admitter: &mut L3Admitter,
+    packet: &[u8],
+    tick: u64,
+) {
+    match admitter.admit_outbound(packet, tick) {
+        OutboundVerdict::Forward(packet) => handle.send_to_network(&packet).expect("write packet"),
+        other => panic!("the packet must be admitted, got {other:?}"),
+    }
+}
+
+fn nft_chain_listing(table: &str, chain: &str) -> String {
+    let output = std::process::Command::new("nft")
+        .args(["-a", "list", "chain", "inet", table, chain])
+        .output()
+        .expect("nft list chain");
+    assert!(output.status.success(), "nft list chain failed: {output:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn counter_packets(listing: &str, rule_fragment: &str) -> u64 {
+    listing
+        .lines()
+        .find(|line| line.contains(rule_fragment))
+        .and_then(|line| line.split("counter packets ").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("missing packet counter for {rule_fragment}: {listing}"))
 }
 
 /// Read the interface list straight from the kernel rather than shelling
@@ -187,13 +265,127 @@ fn the_host_tun_is_not_something_a_guest_can_address() {
         .output()
         .expect("nft list");
     let rules = String::from_utf8_lossy(&listing.stdout);
-    assert!(rules.contains("policy drop"), "{rules}");
     assert!(
         rules.contains(&req.guest.to_string()),
         "the ruleset must pin the assigned guest address: {rules}"
     );
+    assert!(
+        rules.contains("policy drop"),
+        "the shared forward chain must default-deny: {rules}"
+    );
+    assert!(
+        rules.contains(&format!("iifname \"{iface}\" drop")),
+        "spoofed packets from this machine must be dropped: {rules}"
+    );
+    assert!(
+        rules.contains(&format!("oifname \"{iface}\" drop")),
+        "unsolicited packets to this machine must be dropped: {rules}"
+    );
 
     handle.close().expect("close");
+}
+
+/// Two machines must be able to coexist under one host-wide default-drop
+/// chain. A machine-specific chain may only be reached by jumps scoped to its
+/// own interface, so it cannot drop the other machine's traffic.
+#[test]
+fn two_open_machines_keep_each_others_forwarding_rules_active() {
+    if !enabled() {
+        eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
+        return;
+    }
+    let dp = LinuxDatapath::new();
+    let a = request("privtest-forward-a", 70);
+    let b = request("privtest-forward-b", 71);
+    let table = mvm_hostd::netd::linux::table_name(&a.machine_id);
+    let a_iface = mvm_hostd::netd::linux::device_name(&a.machine_id);
+    let b_iface = mvm_hostd::netd::linux::device_name(&b.machine_id);
+
+    let mut ha = dp.open(&a).expect("open machine a");
+    let mut hb = dp.open(&b).expect("open machine b");
+    assert!(nft_table_exists(&table));
+
+    let listing = std::process::Command::new("nft")
+        .args(["list", "table", "inet", &table])
+        .output()
+        .expect("nft list shared table");
+    let rules = String::from_utf8_lossy(&listing.stdout);
+    assert!(rules.contains("policy drop"), "{rules}");
+    for iface in [&a_iface, &b_iface] {
+        assert!(
+            rules.contains(&format!("iifname \"{iface}\" drop")),
+            "{iface} must retain source anti-spoofing: {rules}"
+        );
+        assert!(
+            rules.contains(&format!("oifname \"{iface}\" drop")),
+            "{iface} must retain destination default-deny: {rules}"
+        );
+    }
+
+    // Removing one machine must not remove the shared table or the other
+    // machine's chains.
+    ha.close().expect("close machine a");
+    assert!(nft_table_exists(&table));
+    let remaining = std::process::Command::new("nft")
+        .args(["list", "table", "inet", &table])
+        .output()
+        .expect("nft list remaining table");
+    let remaining_rules = String::from_utf8_lossy(&remaining.stdout);
+    assert!(
+        remaining_rules.contains(&format!("iifname \"{b_iface}\" drop")),
+        "machine b's source anti-spoofing must survive machine a teardown: {remaining_rules}"
+    );
+
+    hb.close().expect("close machine b");
+    assert!(!nft_table_exists(&table));
+}
+
+/// The shared forward hook must actually admit traffic for both machines,
+/// not merely retain both sets of rules in the table listing.
+#[test]
+fn two_machines_forward_admitted_packets_through_the_shared_hook() {
+    if !enabled() {
+        eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
+        return;
+    }
+    let dp = LinuxDatapath::new();
+    let a = request("privtest-packet-a", 72);
+    let b = request("privtest-packet-b", 73);
+    let table = mvm_hostd::netd::linux::table_name(&a.machine_id);
+    let a_chain = mvm_hostd::netd::linux::forward_chain_name(&a.machine_id);
+    let b_chain = mvm_hostd::netd::linux::forward_chain_name(&b.machine_id);
+    let mut ha = dp.open(&a).expect("open machine a");
+    let mut hb = dp.open(&b).expect("open machine b");
+    let mut aa = admitting_policy(&a);
+    let mut ab = admitting_policy(&b);
+
+    send_admitted_packet(
+        ha.as_mut(),
+        &mut aa,
+        &udp_packet(a.guest, Ipv4Addr::new(93, 184, 216, 5), 9999),
+        1,
+    );
+    send_admitted_packet(
+        hb.as_mut(),
+        &mut ab,
+        &udp_packet(b.guest, Ipv4Addr::new(93, 184, 216, 6), 9999),
+        1,
+    );
+
+    let a_listing = nft_chain_listing(&table, &a_chain);
+    let b_listing = nft_chain_listing(&table, &b_chain);
+    assert!(
+        counter_packets(&a_listing, &format!("ip saddr {}/32", a.guest)) > 0,
+        "machine a's admitted packet must traverse its forward chain: {a_listing}"
+    );
+    assert!(
+        counter_packets(&b_listing, &format!("ip saddr {}/32", b.guest)) > 0,
+        "machine b's admitted packet must traverse its forward chain: {b_listing}"
+    );
+
+    ha.close().expect("close machine a");
+    hb.close().expect("close machine b");
+    assert!(!nft_table_exists(&table));
 }
 
 /// Read an interface's RX packet counter. This is the kernel's own view of
@@ -220,12 +412,6 @@ fn an_admitted_packet_reaches_the_host_stack_and_a_denied_one_does_not() {
         eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
         return;
     }
-    use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
-    use mvm_net::l3::{
-        AddressLease, DnsBindingStore, FlowTable, IngressTable, L3Admitter, L3PolicyConfig,
-        OutboundVerdict,
-    };
-
     let dp = LinuxDatapath::new();
     let req = request("privtest-fwd", 50);
     let iface = mvm_hostd::netd::linux::device_name(&req.machine_id);
@@ -233,46 +419,7 @@ fn an_admitted_packet_reaches_the_host_stack_and_a_denied_one_does_not() {
 
     // A lease matching the datapath's addressing, and a policy admitting
     // exactly one destination and port.
-    let lease = AddressLease::for_test(req.gateway, req.guest);
-    let policy = L3PolicyConfig {
-        egress: CanonicalEgress::Rules(vec![CanonicalRule {
-            proto: Proto::Udp,
-            // A routable public range. Documentation and benchmarking
-            // ranges are refused by the address-class check before the
-            // allow-list is reached, which would test the wrong thing.
-            net: "93.184.216.0/24".parse().unwrap(),
-            port_lo: 9999,
-            port_hi: 9999,
-        }]),
-        ..L3PolicyConfig::default()
-    };
-    let mut admitter = L3Admitter::new(
-        lease,
-        policy,
-        FlowTable::with_defaults(),
-        DnsBindingStore::with_defaults(),
-        IngressTable::with_defaults(),
-    );
-    admitter.set_ready(true);
-
-    fn udp_packet(src: Ipv4Addr, dst: Ipv4Addr, dst_port: u16) -> Vec<u8> {
-        let payload = b"live-witness";
-        let total = 20 + 8 + payload.len();
-        let mut p = vec![0u8; 20];
-        p[0] = 0x45;
-        p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
-        p[8] = 64;
-        p[9] = 17;
-        p[12..16].copy_from_slice(&src.octets());
-        p[16..20].copy_from_slice(&dst.octets());
-        let mut u = vec![0u8; 8];
-        u[0..2].copy_from_slice(&40000u16.to_be_bytes());
-        u[2..4].copy_from_slice(&dst_port.to_be_bytes());
-        u[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
-        p.extend_from_slice(&u);
-        p.extend_from_slice(payload);
-        p
-    }
+    let mut admitter = admitting_policy(&req);
 
     // A destination the policy refuses: nothing may reach the device.
     let before_denied = rx_packets(&iface);
