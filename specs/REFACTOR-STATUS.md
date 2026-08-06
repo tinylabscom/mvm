@@ -21,6 +21,9 @@ for detailed scope and acceptance criteria.
   - [x] Build the real Aya eBPF object with nightly + `bpf-linker`
         (`just build-ebpf` builds `bpfel-unknown-none` on any host)
   - [x] End-to-end attach→detach integration test via `mode.json` sidecar
+  - [x] Full workspace test run on the host (cargo nextest: 10134 passed,
+        18 skipped; cargo test previously flaked on one netd test that
+        passes in isolation)
   - [ ] Full workspace test run in CI / Linux builder VM
   - [ ] Load and attach the built object on a live Linux host
 - [x] Plan 291 — Develop → build → deploy an attested workload image
