@@ -596,6 +596,10 @@ for detailed scope and acceptance criteria.
         backends, and the launch-specification no-guest-NIC guard
   - [x] Privileged Linux lane executed on a Linux/KVM host: real host TUN,
         real nftables, live forwarding witness, verified-clean teardown
+  - [~] IPv6 host datapath and shared `inet mvmn` isolation are implemented;
+        the 13-test Linux/KVM acceptance lane covers dual-stack assignment,
+        IPv6 anti-spoofing, and two-machine chain teardown/forwarding, but has
+        not yet been rerun on the current combined branch
   - [x] BDD suite `s25_l3_vsock` (23 hermetic scenarios)
   - [ ] macOS forwarding backend — capability-declared and refusing; the
         userspace socket gateway is not implemented

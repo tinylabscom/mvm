@@ -15,6 +15,7 @@
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use mvm_net::l3::AdmittedPacket;
@@ -50,6 +51,9 @@ const fn ioctl_request_max() -> u64 {
 /// Prefix for every device and table this datapath creates, so a sweep can
 /// find them all and nothing unrelated is ever touched.
 const RESOURCE_PREFIX: &str = "mvmn";
+const NFT_TABLE: &str = "mvmn";
+const NFT_FORWARD_CHAIN: &str = "forward";
+const NFT_POSTROUTING_CHAIN: &str = "postrouting";
 
 #[repr(C, align(8))]
 struct IfReqFlags {
@@ -224,12 +228,17 @@ impl LinuxHandle {
         if let Some(v6) = req.v6 {
             set_v6_address(&self.iface, v6.gateway, v6.prefix_len)?;
         }
-        apply_nft(&nft_ruleset(
+        let _lock = nft_lock()?;
+        if let Err(error) = install_nft(
             &self.table,
             &self.iface,
+            &self.machine_id,
             req.guest,
             self.guest_v6,
-        ))?;
+        ) {
+            let _ = remove_shared_table_if_empty(&self.table);
+            return Err(error);
+        }
         self.nft_applied = true;
         Ok(())
     }
@@ -237,7 +246,13 @@ impl LinuxHandle {
     /// The nftables ruleset this handle installed. Exposed so the shape is
     /// assertable without root.
     pub fn ruleset(&self) -> String {
-        nft_ruleset(&self.table, &self.iface, self.guest, self.guest_v6)
+        nft_ruleset(
+            &self.table,
+            &self.iface,
+            &self.machine_id,
+            self.guest,
+            self.guest_v6,
+        )
     }
 
     pub fn iface(&self) -> &str {
@@ -276,8 +291,8 @@ impl DatapathHandle for LinuxHandle {
         if self.closed {
             return Ok(());
         }
-        self.closed = true;
         if self.dry_run {
+            self.closed = true;
             self.file = None;
             return Ok(());
         }
@@ -288,12 +303,24 @@ impl DatapathHandle for LinuxHandle {
         //
         // Each step is best-effort because this also runs on the
         // failed-setup path, where some of it was never created.
-        if self.nft_applied {
-            let _ = delete_nft_table(&self.table);
-            self.nft_applied = false;
-        }
+        let result = if self.nft_applied {
+            match nft_lock() {
+                Ok(lock) => {
+                    let result = delete_machine_nft(&self.table, &self.iface, &self.machine_id);
+                    drop(lock);
+                    result
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            Ok(())
+        };
         self.file = None;
-        Ok(())
+        if result.is_ok() {
+            self.nft_applied = false;
+            self.closed = true;
+        }
+        result
     }
 
     fn description(&self) -> String {
@@ -331,9 +358,19 @@ pub fn device_name(machine_id: &str) -> String {
     format!("{RESOURCE_PREFIX}{}", slug(machine_id, budget))
 }
 
-/// nftables table name for a machine.
-pub fn table_name(machine_id: &str) -> String {
-    format!("{RESOURCE_PREFIX}_{}", slug(machine_id, 32))
+/// nftables table shared by all machine-scoped chains.
+pub fn table_name(_machine_id: &str) -> String {
+    NFT_TABLE.to_string()
+}
+
+/// Filter chain for one machine inside the shared nftables table.
+pub fn forward_chain_name(machine_id: &str) -> String {
+    format!("{RESOURCE_PREFIX}_f_{}", slug(machine_id, 32))
+}
+
+/// NAT chain for one machine inside the shared nftables table.
+pub fn nat_chain_name(machine_id: &str) -> String {
+    format!("{RESOURCE_PREFIX}_n_{}", slug(machine_id, 32))
 }
 
 /// Reduce an identifier to `[a-z0-9]`, truncated to `budget` characters.
@@ -356,44 +393,133 @@ fn slug(input: &str, budget: usize) -> String {
     out
 }
 
-/// The nftables ruleset for one machine.
+/// A complete shared-table ruleset containing the first machine's chains.
 ///
-/// Two layers, neither load-bearing on its own: masquerade so replies come
-/// back, and a filter that drops anything whose source is not the address
-/// this machine was assigned. Userspace admission has already made that
-/// decision; this is what still holds if a rule elsewhere is wrong.
-///
-/// The table is `inet`, so one ruleset covers both families and the v6
-/// source is pinned by the same mechanism as the v4 one. A machine with no
-/// v6 address emits no v6 rule at all — it has no source to pin, and the
-/// closing `drop` already refuses the family.
-fn nft_ruleset(table: &str, iface: &str, guest: Ipv4Addr, guest_v6: Option<Ipv6Addr>) -> String {
-    let (v6_masquerade, v6_forward) = match guest_v6 {
-        Some(guest) => (
-            format!("\x20   ip6 saddr {guest}/128 masquerade\n"),
-            format!(
-                "\x20   iifname \"{iface}\" ip6 saddr {guest}/128 accept\n\
-                 \x20   oifname \"{iface}\" ip6 daddr {guest}/128 ct state established,related accept\n"
-            ),
-        ),
-        None => (String::new(), String::new()),
-    };
+/// The shared forward base chain owns the host-wide default drop. Each
+/// machine gets regular chains reached only by interface-scoped jumps, so a
+/// machine's rules cannot drop packets belonging to another machine.
+fn nft_ruleset(
+    table: &str,
+    iface: &str,
+    machine_id: &str,
+    guest: Ipv4Addr,
+    guest_v6: Option<Ipv6Addr>,
+) -> String {
+    let forward_chain = forward_chain_name(machine_id);
+    let nat_chain = nat_chain_name(machine_id);
     format!(
-        "table inet {table} {{\n\
-         \x20 chain postrouting {{\n\
-         \x20   type nat hook postrouting priority srcnat; policy accept;\n\
-         \x20   ip saddr {guest}/32 masquerade\n\
-         {v6_masquerade}\
-         \x20 }}\n\
-         \x20 chain forward {{\n\
-         \x20   type filter hook forward priority filter; policy drop;\n\
-         \x20   iifname \"{iface}\" ip saddr {guest}/32 accept\n\
-         \x20   oifname \"{iface}\" ip daddr {guest}/32 ct state established,related accept\n\
-         {v6_forward}\
-         \x20   iifname \"{iface}\" drop\n\
-         \x20 }}\n\
-         }}\n"
+        "add table inet {table}\n\
+         add chain inet {table} {NFT_POSTROUTING_CHAIN} {{ type nat hook postrouting priority srcnat; policy accept; }}\n\
+         add chain inet {table} {NFT_FORWARD_CHAIN} {{ type filter hook forward priority filter; policy drop; }}\n\
+         {machine_rules}",
+        machine_rules = machine_ruleset(table, iface, guest, guest_v6, &forward_chain, &nat_chain,)
     )
+}
+
+fn shared_table_ruleset(table: &str) -> String {
+    format!(
+        "add table inet {table}\n\
+         add chain inet {table} {NFT_POSTROUTING_CHAIN} {{ type nat hook postrouting priority srcnat; policy accept; }}\n\
+         add chain inet {table} {NFT_FORWARD_CHAIN} {{ type filter hook forward priority filter; policy drop; }}\n"
+    )
+}
+
+fn machine_ruleset(
+    table: &str,
+    iface: &str,
+    guest: Ipv4Addr,
+    guest_v6: Option<Ipv6Addr>,
+    forward_chain: &str,
+    nat_chain: &str,
+) -> String {
+    let (v6_forward, v6_return, v6_nat) = guest_v6.map_or_else(
+        || (String::new(), String::new(), String::new()),
+        |guest| {
+            (
+                format!(
+                    "add rule inet {table} {forward_chain} iifname \"{iface}\" ip6 saddr {guest}/128 counter accept\n"
+                ),
+                format!(
+                    "add rule inet {table} {forward_chain} oifname \"{iface}\" ip6 daddr {guest}/128 ct state established,related counter accept\n"
+                ),
+                format!(
+                    "add rule inet {table} {nat_chain} iifname \"{iface}\" ip6 saddr {guest}/128 masquerade\n"
+                ),
+            )
+        },
+    );
+    format!(
+        "add chain inet {table} {forward_chain}\n\
+         add chain inet {table} {nat_chain}\n\
+         add rule inet {table} {NFT_FORWARD_CHAIN} iifname \"{iface}\" jump {forward_chain}\n\
+         add rule inet {table} {NFT_FORWARD_CHAIN} oifname \"{iface}\" jump {forward_chain}\n\
+         add rule inet {table} {NFT_POSTROUTING_CHAIN} iifname \"{iface}\" jump {nat_chain}\n\
+         add rule inet {table} {forward_chain} iifname \"{iface}\" ip saddr {guest}/32 counter accept\n\
+         {v6_forward}\
+         add rule inet {table} {forward_chain} iifname \"{iface}\" drop\n\
+         add rule inet {table} {forward_chain} oifname \"{iface}\" ip daddr {guest}/32 ct state established,related counter accept\n\
+         {v6_return}\
+         add rule inet {table} {forward_chain} oifname \"{iface}\" drop\n\
+         add rule inet {table} {nat_chain} iifname \"{iface}\" ip saddr {guest}/32 masquerade\n\
+         {v6_nat}",
+    )
+}
+
+fn install_nft(
+    table: &str,
+    iface: &str,
+    machine_id: &str,
+    guest: Ipv4Addr,
+    guest_v6: Option<Ipv6Addr>,
+) -> Result<(), DatapathError> {
+    ensure_shared_table(table)?;
+    let forward_chain = forward_chain_name(machine_id);
+    let nat_chain = nat_chain_name(machine_id);
+    apply_nft(&machine_ruleset(
+        table,
+        iface,
+        guest,
+        guest_v6,
+        &forward_chain,
+        &nat_chain,
+    ))
+}
+
+fn ensure_shared_table(table: &str) -> Result<(), DatapathError> {
+    if !nft_table_exists_for_runtime(table)? {
+        apply_nft(&shared_table_ruleset(table))?;
+    }
+    let forward = list_nft_chain(table, NFT_FORWARD_CHAIN)?;
+    if !forward.contains("type filter hook forward") || !forward.contains("policy drop") {
+        return Err(DatapathError::PrivilegeRequired {
+            operation: "validating the shared nftables forward policy",
+            detail: "the mvm-owned forward chain is missing its default drop policy".to_string(),
+        });
+    }
+    let postrouting = list_nft_chain(table, NFT_POSTROUTING_CHAIN)?;
+    if !postrouting.contains("type nat hook postrouting") || !postrouting.contains("policy accept")
+    {
+        return Err(DatapathError::PrivilegeRequired {
+            operation: "validating the shared nftables NAT policy",
+            detail: "the mvm-owned postrouting chain is missing its accept policy".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn nft_lock() -> Result<mvm_core::util::atomic_io::FileLock, DatapathError> {
+    let runtime =
+        mvm_core::config::ensure_runtime_dir().map_err(|source| DatapathError::SetupFailed {
+            what: "nftables lock directory",
+            machine_id: String::new(),
+            source,
+        })?;
+    mvm_core::util::atomic_io::FileLock::acquire(&Path::new(&runtime).join("netd-nftables"))
+        .map_err(|error| DatapathError::SetupFailed {
+            what: "nftables lock",
+            machine_id: String::new(),
+            source: std::io::Error::other(error.to_string()),
+        })
 }
 
 /// Load a ruleset through `nft -f -`.
@@ -430,18 +556,115 @@ fn apply_nft(rules: &str) -> Result<(), DatapathError> {
     Ok(())
 }
 
-fn delete_nft_table(table: &str) -> Result<(), DatapathError> {
-    let status = Command::new("nft")
-        .args(["delete", "table", "inet", table])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        // A table that is already gone is the desired state, not a failure.
-        Ok(())
+fn nft_table_exists_for_runtime(table: &str) -> Result<bool, DatapathError> {
+    let output = Command::new("nft")
+        .args(["list", "table", "inet", table])
+        .output()
+        .map_err(|source| DatapathError::SetupFailed {
+            what: "nft",
+            machine_id: String::new(),
+            source,
+        })?;
+    Ok(output.status.success())
+}
+
+fn list_nft_chain(table: &str, chain: &str) -> Result<String, DatapathError> {
+    let output = Command::new("nft")
+        .args(["-a", "list", "chain", "inet", table, chain])
+        .output()
+        .map_err(|source| DatapathError::SetupFailed {
+            what: "nft",
+            machine_id: String::new(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(DatapathError::PrivilegeRequired {
+            operation: "listing nftables rules",
+            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
     }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn delete_machine_nft(table: &str, iface: &str, machine_id: &str) -> Result<(), DatapathError> {
+    if !nft_table_exists_for_runtime(table)? {
+        return Ok(());
+    }
+    let forward_chain = forward_chain_name(machine_id);
+    let nat_chain = nat_chain_name(machine_id);
+    let forward = list_nft_chain(table, NFT_FORWARD_CHAIN)?;
+    let postrouting = list_nft_chain(table, NFT_POSTROUTING_CHAIN)?;
+    let mut rules = String::new();
+    for handle in jump_handles(&forward, &forward_chain, iface)? {
+        rules.push_str(&format!(
+            "delete rule inet {table} {NFT_FORWARD_CHAIN} handle {handle}\n"
+        ));
+    }
+    for handle in jump_handles(&postrouting, &nat_chain, iface)? {
+        rules.push_str(&format!(
+            "delete rule inet {table} {NFT_POSTROUTING_CHAIN} handle {handle}\n"
+        ));
+    }
+    rules.push_str(&format!(
+        "delete chain inet {table} {forward_chain}\n\
+         delete chain inet {table} {nat_chain}\n"
+    ));
+    apply_nft(&rules)?;
+    remove_shared_table_if_empty(table)
+}
+
+fn jump_handles(
+    chain_listing: &str,
+    target_chain: &str,
+    iface: &str,
+) -> Result<Vec<u64>, DatapathError> {
+    let target = format!("jump {target_chain}");
+    let interface = format!("\"{iface}\"");
+    let mut handles = Vec::new();
+    for line in chain_listing.lines() {
+        if !line.contains(&target) || !line.contains(&interface) {
+            continue;
+        }
+        let handle = line
+            .split("# handle ")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| DatapathError::PrivilegeRequired {
+                operation: "identifying nftables teardown rules",
+                detail: format!("rule for {iface} has no nft handle"),
+            })?;
+        handles.push(handle);
+    }
+    Ok(handles)
+}
+
+fn remove_shared_table_if_empty(table: &str) -> Result<(), DatapathError> {
+    if !nft_table_exists_for_runtime(table)? {
+        return Ok(());
+    }
+    let listing = {
+        let output = Command::new("nft")
+            .args(["list", "table", "inet", table])
+            .output()
+            .map_err(|source| DatapathError::SetupFailed {
+                what: "nft",
+                machine_id: String::new(),
+                source,
+            })?;
+        if !output.status.success() {
+            return Ok(());
+        }
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let has_machine_chain = listing.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("chain mvmn_f_") || trimmed.starts_with("chain mvmn_n_")
+    });
+    if !has_machine_chain {
+        apply_nft(&format!("delete table inet {table}\n"))?;
+    }
+    Ok(())
 }
 
 /// Assign the host address, set the MTU, and bring the interface up.
@@ -681,7 +904,9 @@ mod tests {
     #[test]
     fn distinct_machines_get_distinct_devices() {
         assert_ne!(device_name("vm-a"), device_name("vm-b"));
-        assert_ne!(table_name("vm-a"), table_name("vm-b"));
+        assert_eq!(table_name("vm-a"), table_name("vm-b"));
+        assert_ne!(forward_chain_name("vm-a"), forward_chain_name("vm-b"));
+        assert_ne!(nat_chain_name("vm-a"), nat_chain_name("vm-b"));
     }
 
     #[test]
@@ -701,10 +926,11 @@ mod tests {
         // and injection is what would *add* statements, so compare the
         // counts against a benign id instead.
         let guest = Ipv4Addr::new(10, 201, 0, 6);
-        let hostile_rules = nft_ruleset(&table, &device, guest, Some(GUEST_V6));
+        let hostile_rules = nft_ruleset(&table, &device, hostile, guest, Some(GUEST_V6));
         let benign_rules = nft_ruleset(
             &table_name("vm-a"),
             &device_name("vm-a"),
+            "vm-a",
             guest,
             Some(GUEST_V6),
         );
@@ -742,7 +968,13 @@ mod tests {
 
     #[test]
     fn the_ruleset_defaults_to_drop_and_pins_the_guest_source() {
-        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6), None);
+        let rules = nft_ruleset(
+            "mvmn",
+            "mvmnvma",
+            "vm-a",
+            Ipv4Addr::new(10, 201, 0, 6),
+            None,
+        );
         assert!(rules.contains("policy drop"), "{rules}");
         assert!(rules.contains("ip saddr 10.201.0.6/32 accept"), "{rules}");
         assert!(
@@ -761,7 +993,13 @@ mod tests {
 
     #[test]
     fn the_ruleset_has_no_bridge_and_no_tap() {
-        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6), None);
+        let rules = nft_ruleset(
+            "mvmn",
+            "mvmnvma",
+            "vm-a",
+            Ipv4Addr::new(10, 201, 0, 6),
+            None,
+        );
         for forbidden in ["bridge", "tap", "br0", "virbr"] {
             assert!(
                 !rules.contains(forbidden),
@@ -776,8 +1014,9 @@ mod tests {
     #[test]
     fn the_ruleset_pins_the_v6_source_when_the_lease_carries_one() {
         let rules = nft_ruleset(
-            "mvmn_vma",
+            "mvmn",
             "mvmnvma",
+            "vm-a",
             Ipv4Addr::new(10, 201, 0, 6),
             Some(GUEST_V6),
         );
@@ -800,8 +1039,9 @@ mod tests {
     #[test]
     fn the_v6_accept_precedes_the_fail_closed_drop() {
         let rules = nft_ruleset(
-            "mvmn_vma",
+            "mvmn",
             "mvmnvma",
+            "vm-a",
             Ipv4Addr::new(10, 201, 0, 6),
             Some(GUEST_V6),
         );
@@ -819,21 +1059,28 @@ mod tests {
     /// superset, not a reordering. Its own `drop` is what refuses v6.
     #[test]
     fn a_v4_only_lease_gets_a_ruleset_with_no_v6_rule_at_all() {
-        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6), None);
+        let rules = nft_ruleset(
+            "mvmn",
+            "mvmnvma",
+            "vm-a",
+            Ipv4Addr::new(10, 201, 0, 6),
+            None,
+        );
         assert_eq!(
             rules,
-            "table inet mvmn_vma {\n\
-             \x20 chain postrouting {\n\
-             \x20   type nat hook postrouting priority srcnat; policy accept;\n\
-             \x20   ip saddr 10.201.0.6/32 masquerade\n\
-             \x20 }\n\
-             \x20 chain forward {\n\
-             \x20   type filter hook forward priority filter; policy drop;\n\
-             \x20   iifname \"mvmnvma\" ip saddr 10.201.0.6/32 accept\n\
-             \x20   oifname \"mvmnvma\" ip daddr 10.201.0.6/32 ct state established,related accept\n\
-             \x20   iifname \"mvmnvma\" drop\n\
-             \x20 }\n\
-             }\n"
+            "add table inet mvmn\n\
+             add chain inet mvmn postrouting { type nat hook postrouting priority srcnat; policy accept; }\n\
+             add chain inet mvmn forward { type filter hook forward priority filter; policy drop; }\n\
+             add chain inet mvmn mvmn_f_vma\n\
+             add chain inet mvmn mvmn_n_vma\n\
+             add rule inet mvmn forward iifname \"mvmnvma\" jump mvmn_f_vma\n\
+             add rule inet mvmn forward oifname \"mvmnvma\" jump mvmn_f_vma\n\
+             add rule inet mvmn postrouting iifname \"mvmnvma\" jump mvmn_n_vma\n\
+             add rule inet mvmn mvmn_f_vma iifname \"mvmnvma\" ip saddr 10.201.0.6/32 counter accept\n\
+             add rule inet mvmn mvmn_f_vma iifname \"mvmnvma\" drop\n\
+             add rule inet mvmn mvmn_f_vma oifname \"mvmnvma\" ip daddr 10.201.0.6/32 ct state established,related counter accept\n\
+             add rule inet mvmn mvmn_f_vma oifname \"mvmnvma\" drop\n\
+             add rule inet mvmn mvmn_n_vma iifname \"mvmnvma\" ip saddr 10.201.0.6/32 masquerade\n"
         );
     }
 

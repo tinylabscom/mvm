@@ -85,9 +85,11 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 - [x] policy application through `mvm-net::l3`
 - [x] DNS service on the synthetic resolver address
 - [x] `L3Datapath` / `DatapathHandle` platform seam
-- [x] Linux datapath: host TUN + per-machine netns + narrow routes +
-      nftables via the existing `NftApplier` seam; no bridge, no TAP,
-      no Firecracker net device
+- [x] Linux datapath: host TUN + narrow routes + a shared `inet mvmn`
+      nftables table with one host-wide default-drop forward hook and
+      per-machine filter/NAT chains; no bridge, no TAP, no Firecracker net
+      device. The machine chains pin the assigned IPv4 source and the
+      opt-in IPv6 source, with stateful return filtering and masquerade.
 - [x] macOS datapath: fails closed with a named error; admission
       refuses `l3-vsock` on macOS
 - [x] deterministic cleanup on stop and on failed startup
@@ -146,10 +148,11 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 - [x] unprivileged end-to-end over an in-memory transport: real
       protocol, real policy, real gateway, mock datapath — covers
       scenarios 1–8 of the brief
-- [x] privileged Linux end-to-end with real TUN/nftables, gated behind
-      `MVM_L3_PRIVILEGED_TESTS=1`; executed on a Linux/KVM host — 6/6 green,
-      including a live forwarding witness that reads the kernel's own RX
-      counter, and a verified-clean teardown
+- [~] privileged Linux end-to-end with real TUN/nftables, gated behind
+      `MVM_L3_PRIVILEGED_TESTS=1`; the lane now covers dual-stack address
+      assignment, IPv6 anti-spoofing, ULA isolation, shared-table teardown,
+      and two-machine forwarding. The 13-test acceptance run remains to be
+      executed on a Linux/KVM host before this item is marked complete.
 - [x] BDD suite `s25_l3_vsock` (23 scenarios)
 - [x] `UdsGuestChannelProvider` — the concrete per-port Unix-socket
       transport behind the backend-neutral abstraction, covering
@@ -257,16 +260,11 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 - [ ] **Native Windows.** No Windows VMM backend exists to attach to.
 - [ ] **Multi-queue.** The header field, the port base, and the
       negotiation slots exist in v1; the runtime opens one queue.
-- [~] **IPv6 datapath.** Designed in ADR-038, which corrects this entry's
-      original "blocked on `CONFIG_IPV6`" framing: the parser and the
-      validator already handled v6, and what was missing was the admission
-      family check plus an `embedded_v4` extraction ahead of every other
-      rule. **Both landed on the host side**, gated behind the datapath
-      ingress fuzz target as ADR-038 required. What remains is
-      `CONFIG_IPV6` in the workload kernel and the in-guest address
-      configuration beside it — deliberately unmeasured rather than landed
-      blind, since guest kernels are being shrunk to the virtual hardware
-      floor in parallel.
+- [~] **IPv6 datapath.** The parser, validator, lease, guest configuration,
+      host address assignment, capability declaration, and Linux nftables
+      source pinning are implemented. The remaining acceptance gate is the
+      Linux/KVM run of the dual-stack and shared-table privileged witnesses;
+      macOS remains on the userspace socket backend for full-packet IPv6.
 - [ ] **Zero-copy / batched transfer.** The v1 copy path
       (guest kernel → guest buffer → vsock → host buffer → host TUN) is
       deliberate; optimize only against measurements.
