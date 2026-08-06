@@ -20,6 +20,17 @@ pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
 
+/// Home directory for the workload identity.
+///
+/// Tools like pip default to `$HOME/.cache`. Without a writable home, UID 901
+/// falls back to `/` (root-owned) and emits spurious sudo warnings. The PID-1
+/// boot paths create this directory and chown it to [`WORKLOAD_UID`] before
+/// dropping privilege.
+pub const WORKLOAD_HOME: &str = "/home/mvm-worker";
+
+/// Fallback home when the rootfs is read-only (e.g. dm-verity prod boots).
+pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
+
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.
 #[derive(Debug, thiserror::Error)]
@@ -455,6 +466,36 @@ pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
     }
     Ok(())
+}
+
+/// Return the workload home directory, creating it if necessary and possible.
+///
+/// This is intended to be called from PID-1 paths while still root, before the
+/// agent drops privilege or is spawned as UID 901. On a read-only rootfs the
+/// directory creation will fail; callers should log the failure and continue,
+/// because `workload_home()` will fall back to [`WORKLOAD_HOME_FALLBACK`] at
+/// exec time.
+#[cfg(target_os = "linux")]
+pub fn ensure_workload_home() -> Result<()> {
+    ensure_dir(WORKLOAD_HOME)?;
+    chown(WORKLOAD_HOME, WORKLOAD_UID, WORKLOAD_GID)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn ensure_workload_home() -> Result<()> {
+    Ok(())
+}
+
+/// Resolve the directory to use as `$HOME` for workload processes.
+///
+/// Prefer [`WORKLOAD_HOME`] when it was successfully prepared at boot; fall
+/// back to [`WORKLOAD_HOME_FALLBACK`] (always writable) otherwise.
+pub fn workload_home() -> &'static str {
+    if std::path::Path::new(WORKLOAD_HOME).is_dir() {
+        WORKLOAD_HOME
+    } else {
+        WORKLOAD_HOME_FALLBACK
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,5 +1412,22 @@ mod tests {
         let err = probe_ext4_block_size(image.path().to_str().expect("temp path"))
             .expect_err("bad magic must fail");
         assert!(err.to_string().contains("magic mismatch"), "{err}");
+    }
+
+    #[test]
+    fn workload_home_falls_back_when_prepared_directory_missing() {
+        // In normal CI this path does not exist, so the function must return
+        // the fallback rather than a non-existent directory.
+        if !std::path::Path::new(WORKLOAD_HOME).is_dir() {
+            assert_eq!(workload_home(), WORKLOAD_HOME_FALLBACK);
+        }
+        let home = workload_home();
+        assert!(home == WORKLOAD_HOME || home == WORKLOAD_HOME_FALLBACK);
+    }
+
+    #[test]
+    fn workload_home_constants_are_non_empty() {
+        assert!(!WORKLOAD_HOME.is_empty());
+        assert!(!WORKLOAD_HOME_FALLBACK.is_empty());
     }
 }

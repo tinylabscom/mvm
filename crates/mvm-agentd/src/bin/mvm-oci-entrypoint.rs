@@ -37,6 +37,7 @@ mod linux {
         let mut command = Command::new(&config.argv[0]);
         command.args(&config.argv[1..]);
         command.env_clear();
+        command.env("HOME", mvm_agentd::guest_mount::workload_home());
         let mut has_path = false;
         for item in &config.env {
             if let Some((key, value)) = item.split_once('=') {
