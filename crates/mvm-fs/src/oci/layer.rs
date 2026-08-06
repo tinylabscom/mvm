@@ -475,7 +475,7 @@ impl OciLayerFetcher {
         let options = ctx.options.clone();
         let prior_layer_paths = ctx.prior_layer_paths.clone();
 
-        let mut unpack_task = tokio::task::spawn_blocking(move || {
+        let unpack_task = tokio::task::spawn_blocking(move || {
             let reader = CacheWriterReader::new(rx, &cache_path, cap)
                 .map_err(|e| OciError::Registry(format!("open cache blob: {e}")))?;
             let mut decoder: LayerDecoder<CacheWriterReader> = if gzip {
@@ -504,53 +504,34 @@ impl OciLayerFetcher {
         let cache_path_for_cleanup = ctx.cache_path.to_path_buf();
         let layer_digest_for_check = ctx.layer.digest.clone();
         let fetch_result: Result<(), OciError> = async {
-            let expected_digest = layer_digest_for_check.clone();
             let mut response = self
                 .client
                 .get_blob(ctx.reference, ctx.layer.digest.as_str())
                 .await?;
             loop {
-                tokio::select! {
-                    chunk = response.response.chunk() => {
-                        let chunk = chunk
-                            .map_err(|e| OciError::Registry(format!("read blob response chunk: {e}")))?;
-                        match chunk {
-                            Some(bytes) => {
-                                let len = bytes.len() as u64;
-                                let current = count.load(Ordering::SeqCst);
-                                if current.saturating_add(len) > cap {
-                                    cap_hit.store(true, Ordering::SeqCst);
-                                    return Err(OciError::LayerTooLarge {
-                                        declared: ctx.layer.size,
-                                        cap,
-                                    });
-                                }
-                                if tx.send(bytes.to_vec()).await.is_err() {
-                                    // The unpack task stopped reading; stop
-                                    // fetching and let the await on it surface
-                                    // the real error.
-                                    return Ok(());
-                                }
-                                count.fetch_add(len, Ordering::SeqCst);
-                            }
-                            None => return Ok(()),
-                        }
-                    }
-                    res = &mut unpack_task => {
-                        let (report, _total, computed) = res
-                            .map_err(|e| OciError::Registry(format!("unpack task join: {e}")))??;
-                        if computed != expected_digest {
-                            return Err(OciError::DigestMismatch {
-                                expected: expected_digest,
-                                computed,
+                let chunk =
+                    response.response.chunk().await.map_err(|e| {
+                        OciError::Registry(format!("read blob response chunk: {e}"))
+                    })?;
+                match chunk {
+                    Some(bytes) => {
+                        let len = bytes.len() as u64;
+                        let current = count.load(Ordering::SeqCst);
+                        if current.saturating_add(len) > cap {
+                            cap_hit.store(true, Ordering::SeqCst);
+                            return Err(OciError::LayerTooLarge {
+                                declared: ctx.layer.size,
+                                cap,
                             });
                         }
-                        // A successful unpack cannot finish before the tar
-                        // stream EOF, so reaching here is unexpected but not
-                        // fatal: return the report.
-                        let _ = report;
-                        return Ok(());
+                        if tx.send(bytes.to_vec()).await.is_err() {
+                            // The unpack task stopped reading; stop fetching
+                            // and let the await on it surface the real error.
+                            return Ok(());
+                        }
+                        count.fetch_add(len, Ordering::SeqCst);
                     }
+                    None => return Ok(()),
                 }
             }
         }
@@ -563,10 +544,10 @@ impl OciLayerFetcher {
             .await
             .map_err(|e| OciError::Registry(format!("unpack task join: {e}")))?;
 
-        if fetch_result.is_err() {
+        if let Err(e) = fetch_result {
             let _ = std::fs::remove_file(&cache_path_for_cleanup);
+            return Err(e);
         }
-        fetch_result?;
 
         let (report, _total, computed) = task_result?;
         if computed != layer_digest_for_check {
