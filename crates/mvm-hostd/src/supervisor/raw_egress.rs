@@ -11,6 +11,8 @@
 //! loopback echo server (the gate mandatory-denies loopback, so an admitted-target
 //! splice test cannot route through the real gate).
 
+#[cfg(target_os = "linux")]
+use std::io::Write;
 use std::net::IpAddr;
 #[cfg(target_os = "linux")]
 use std::net::{SocketAddr, UdpSocket};
