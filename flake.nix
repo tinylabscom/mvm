@@ -87,21 +87,17 @@
             PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev ];
 
             shellHook = ''
-              case "$-" in
-                *i*)
-                  if [ "''${MVM_PRESERVE_PERSONAL_SHELL:-1}" = 1 ] \
-                    && [ -z "''${MVM_PERSONAL_SHELL_ACTIVE:-}" ]; then
-                    case "''${SHELL##*/}" in
-                      bash|zsh)
-                        if personal_shell="$(command -v "''${SHELL##*/}" 2>/dev/null)"; then
-                          export MVM_PERSONAL_SHELL_ACTIVE=1
-                          exec "$personal_shell" -i
-                        fi
-                        ;;
-                    esac
-                  fi
-                  ;;
-              esac
+              # WASM target for the portable half of the workspace.
+              if command -v rustup >/dev/null 2>&1; then
+                rustup target add wasm32-unknown-unknown \
+                  >/dev/null 2>&1 || true
+              fi
+
+              # nix develop initially starts Bash. Replace only the
+              # interactive shell with the user's configured zsh.
+              if [[ "$-" == *i* ]]; then
+                exec /bin/zsh -il
+              fi
 
               echo "mvm development shell"
               echo "Rust toolchain: ${rustChannel}"
