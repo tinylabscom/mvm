@@ -419,12 +419,25 @@ fn fetch_or_unpack_layer(
     prior_layer_paths: &HashSet<PathBuf>,
 ) -> Result<UnpackReport> {
     let path = layer_blob_path(&layer.digest)?;
-    if let Some(bytes) = read_verified_cache_file(cache_root, &path, &layer.digest)? {
-        return unpack_layer_bytes(layer, &bytes, unpacked_root, prior_layer_paths)
-            .with_context(|| format!("unpack cached layer {}", layer.digest));
+    let cache_abs = safe_cache_path(cache_root, &path)?;
+
+    if cache_abs.exists() {
+        match runtime.block_on(mvm_fs::oci::layer::verify_and_unpack_layer_file(
+            layer,
+            &cache_abs,
+            unpacked_root,
+            &UnpackOptions::default(),
+            prior_layer_paths,
+        )) {
+            Ok(report) => return Ok(report),
+            Err(mvm_fs::oci::OciError::DigestMismatch { .. }) => {
+                // Corrupt cache: evict it and fall through to a fresh fetch.
+                let _ = std::fs::remove_file(&cache_abs);
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 
-    let cache_abs = safe_cache_path(cache_root, &path)?;
     runtime
         .block_on(fetcher.fetch_and_unpack_layer(
             image_ref,

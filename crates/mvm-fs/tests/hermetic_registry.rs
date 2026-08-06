@@ -8,6 +8,7 @@
 mod common;
 
 use common::{HermeticRegistry, client_config_for, minimal_image_manifest};
+use mvm_fs::oci::layer::verify_and_unpack_layer_file;
 use mvm_fs::oci::{
     LayerDescriptor, LayerFetchOptions, LinuxPlatform, ManifestFetcher, OciError, OciLayerFetcher,
     OciManifestFetcher, RegistryAuthConfig, UnpackOptions, verify_sha256_digest,
@@ -712,6 +713,78 @@ async fn fetch_and_unpack_layer_streams_and_caches_blob() {
 
     // The raw compressed blob was persisted concurrently.
     assert_eq!(std::fs::read(&cache).expect("read cache"), layer_bytes);
+}
+
+#[tokio::test]
+async fn verify_and_unpack_layer_file_streams_cache_hit() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = gzip_tar_layer(&[("cached.txt", b"from-cache")]);
+    let layer_digest = reg
+        .register_blob("library/test", LAYER_MEDIA, &layer_bytes)
+        .await;
+
+    let layer = LayerDescriptor {
+        digest: layer_digest,
+        size: layer_bytes.len() as u64,
+        media_type: LAYER_MEDIA.to_string(),
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let unpacked = tmp.path().join("unpacked");
+    std::fs::create_dir_all(&unpacked).expect("create unpacked root");
+    let cache = tmp.path().join("layer.tar.gz");
+    std::fs::write(&cache, &layer_bytes).expect("write cached blob");
+
+    let report = verify_and_unpack_layer_file(
+        &layer,
+        &cache,
+        &unpacked,
+        &UnpackOptions::default(),
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .expect("verify and unpack cached layer");
+
+    assert_eq!(report.files_written, 1);
+    assert!(report.refused.is_empty());
+    assert_eq!(
+        std::fs::read(unpacked.join("cached.txt")).expect("read"),
+        b"from-cache"
+    );
+}
+
+#[tokio::test]
+async fn verify_and_unpack_layer_file_rejects_corrupt_cache() {
+    let intended = gzip_tar_layer(&[("x.txt", b"x")]);
+    let tampered = gzip_tar_layer(&[("x.txt", b"y")]);
+    let claimed_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&intended)));
+
+    let layer = LayerDescriptor {
+        digest: claimed_digest,
+        size: intended.len() as u64,
+        media_type: LAYER_MEDIA.to_string(),
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let unpacked = tmp.path().join("unpacked");
+    std::fs::create_dir_all(&unpacked).expect("create unpacked root");
+    let cache = tmp.path().join("layer.tar.gz");
+    std::fs::write(&cache, &tampered).expect("write tampered cached blob");
+
+    let err = verify_and_unpack_layer_file(
+        &layer,
+        &cache,
+        &unpacked,
+        &UnpackOptions::default(),
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(err, OciError::DigestMismatch { .. }),
+        "expected DigestMismatch, got {err:?}"
+    );
 }
 
 #[tokio::test]

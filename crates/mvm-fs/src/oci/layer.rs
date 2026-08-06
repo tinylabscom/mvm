@@ -580,6 +580,63 @@ impl OciLayerFetcher {
     }
 }
 
+/// Stream-verify and unpack a layer that already lives on disk at
+/// `cache_path`. The file is read once, hashed incrementally, and fed to
+/// the same hardened unpack path used for network layers. On digest
+/// mismatch the cache file is left in place for the caller to decide
+/// whether to retry or reap; this function only reports the mismatch.
+///
+/// This is the cache-hit counterpart to
+/// [`OciLayerFetcher::fetch_and_unpack_layer`]: it avoids loading the
+/// entire compressed blob into memory just to verify and unpack it.
+pub async fn verify_and_unpack_layer_file(
+    layer: &LayerDescriptor,
+    cache_path: &Path,
+    unpacked_root: &Path,
+    options: &UnpackOptions,
+    prior_layer_paths: &HashSet<PathBuf>,
+) -> Result<UnpackReport, OciError> {
+    validate_layer_digest(&layer.digest)?;
+
+    let layer = layer.clone();
+    let cache_path = cache_path.to_path_buf();
+    let unpacked_root = unpacked_root.to_path_buf();
+    let options = options.clone();
+    let prior_layer_paths = prior_layer_paths.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&cache_path)
+            .map_err(|e| OciError::Registry(format!("open cached layer: {e}")))?;
+        let reader = HashingReader::new(file);
+        let gzip = is_gzip_layer(&layer.media_type);
+        let mut decoder: LayerDecoder<HashingReader<std::fs::File>> = if gzip {
+            LayerDecoder::Gzip(GzDecoder::new(reader))
+        } else {
+            LayerDecoder::Plain(reader)
+        };
+
+        let report = unpack_layer_with_prior_paths(
+            &mut decoder,
+            &unpacked_root,
+            &options,
+            &prior_layer_paths,
+        )
+        .map_err(|e| OciError::Unpack(e.to_string()))?;
+
+        let reader = decoder.into_inner();
+        let computed = format!("sha256:{}", hex::encode(reader.finalize()));
+        if computed != layer.digest {
+            return Err(OciError::DigestMismatch {
+                expected: layer.digest,
+                computed,
+            });
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(|e| OciError::Registry(format!("unpack task join: {e}")))?
+}
+
 /// Reads compressed layer chunks from an async channel, writes each chunk
 /// to the cache file, hashes the bytes, and exposes the stream as a sync
 /// `Read` so the `tar` crate can consume it in a blocking thread.
@@ -618,6 +675,36 @@ impl CacheWriterReader {
         let digest = self.hasher.finalize();
         let arr: [u8; 32] = digest.into();
         (self.total, arr)
+    }
+}
+
+/// Wraps a sync reader and computes a running SHA-256 over every byte
+/// that passes through. Used to verify a cached layer without loading it
+/// into memory first.
+struct HashingReader<R: Read> {
+    inner: R,
+    hasher: Sha256,
+}
+
+impl<R: Read> HashingReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finalize(self) -> [u8; 32] {
+        let digest = self.hasher.finalize();
+        digest.into()
+    }
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
     }
 }
 
