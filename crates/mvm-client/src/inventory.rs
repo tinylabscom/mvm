@@ -169,9 +169,9 @@ fn persistent_record(
         .created_at(spec.created_at)
         .last_started_at(spec.last_started_at)
         .volumes(volumes)
-        // No secret references are persisted on a machine definition today;
-        // the field exists in the contract so consumers get a count — never
-        // a value — the moment a secret-bearing source is wired in.
+        // The pure join carries no host reach; the local composition
+        // back-fills the real count from the machine's `secret-refs.json`
+        // sidecar via [`apply_secret_ref_counts`] — a count, never a value.
         .secret_ref_count(0);
 
     if let Some(live) = live {
@@ -249,8 +249,31 @@ pub fn apply_registry_readiness(records: &mut [MachineInventoryRecord]) {
     }
 }
 
+/// Count of secret references recorded in `name`'s metadata-only
+/// `secret-refs.json` sidecar under `machines_root`. Tolerant by design: an
+/// absent or unreadable sidecar reads as `0` — the listing must not fail on
+/// one bad sidecar (deletion decisions fail closed at the service seam, not
+/// here).
+pub fn secret_ref_count_of(machines_root: &std::path::Path, name: &str) -> u32 {
+    crate::secret::refs::load_refs(machines_root, name)
+        .ok()
+        .flatten()
+        .map(|record| record.references.len() as u32)
+        .unwrap_or(0)
+}
+
+/// Back-fill each record's `secret_ref_count` from the machine's persisted
+/// secret-reference sidecar — the count only, never a name-to-value reach.
+pub fn apply_secret_ref_counts(records: &mut [MachineInventoryRecord]) {
+    let root = mvm_core::config::machine_state_root();
+    for record in records {
+        record.secret_ref_count = secret_ref_count_of(&root, &record.name);
+    }
+}
+
 /// The full local inventory: every persisted machine definition joined with
-/// every live VM `client` can see, readiness back-filled from the registry.
+/// every live VM `client` can see, readiness back-filled from the registry
+/// and secret-reference counts from the per-machine sidecars.
 /// Read-only — no state dir, registry entry, or audit log is mutated.
 /// Filter with [`InventoryQuery::matches`]; the unfiltered stream includes
 /// stopped and expired machines so callers own visibility policy.
@@ -260,6 +283,7 @@ pub async fn list_local_inventory(client: &dyn MvmClient) -> Result<Vec<MachineI
     })?;
     let mut records = inventory_with_specs(client, specs).await?;
     apply_registry_readiness(&mut records);
+    apply_secret_ref_counts(&mut records);
     Ok(records)
 }
 
@@ -527,6 +551,66 @@ mod tests {
     fn secret_ref_count_is_zero_with_no_secret_source() {
         let records = join_inventory(vec![spec("web")], vec![], stub_posture);
         assert_eq!(records[0].secret_ref_count, 0);
+    }
+
+    /// Record a sidecar fixture for `machine` under `root`.
+    fn record_ref_fixture(root: &std::path::Path, machine: &str) {
+        std::fs::create_dir_all(root.join(machine)).unwrap();
+        std::fs::write(root.join(machine).join("machine.json"), b"{}").unwrap();
+        crate::secret::refs::record_refs(
+            root,
+            machine,
+            &[crate::secret::MachineSecretRef {
+                tenant: "local".into(),
+                name: "openai".into(),
+                placeholder_var: Some("API_KEY".into()),
+                destinations: vec!["api.openai.com".into()],
+            }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn secret_ref_count_reads_the_recorded_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        record_ref_fixture(tmp.path(), "web");
+        assert_eq!(secret_ref_count_of(tmp.path(), "web"), 1);
+        // Absent sidecar → 0; malformed sidecar degrades to 0 (listing
+        // tolerance — deletion decisions fail closed elsewhere).
+        assert_eq!(secret_ref_count_of(tmp.path(), "other"), 0);
+        std::fs::write(
+            tmp.path()
+                .join("web")
+                .join(crate::secret::refs::MACHINE_SECRET_REFS_FILENAME),
+            b"not-json",
+        )
+        .unwrap();
+        assert_eq!(secret_ref_count_of(tmp.path(), "web"), 0);
+    }
+
+    #[tokio::test]
+    async fn list_local_inventory_reports_recorded_secret_ref_counts() {
+        let _home = IsolatedHome::new();
+        persist::save_machine_spec(&spec("web"), false).expect("save spec");
+        crate::secret::refs::record_refs(
+            &mvm_core::config::machine_state_root(),
+            "web",
+            &[crate::secret::MachineSecretRef {
+                tenant: "local".into(),
+                name: "openai".into(),
+                placeholder_var: Some("API_KEY".into()),
+                destinations: vec!["api.openai.com".into()],
+            }],
+        )
+        .unwrap();
+
+        let mock = MockBackend::default();
+        let records = list_local_inventory(&mock).await.expect("inventory");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].secret_ref_count, 1, "count from the sidecar");
+        // The serialized record carries the count, never the reference names.
+        let json = serde_json::to_string(&records[0]).unwrap();
+        assert!(!json.contains("openai"), "no secret name in record: {json}");
     }
 
     #[test]

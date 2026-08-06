@@ -264,11 +264,13 @@ mod tests {
     }
 
     /// The Firecracker base: a verity boot (`has_disk == false`) carries only
-    /// the console, and the disk shape adds root/init.
+    /// the console, and the disk shape adds rootwait/init (never a `root=`
+    /// declaration — Firecracker appends the authoritative one from the root
+    /// drive's flags).
     fn fc_base(_virtiofs_root: bool, has_disk: bool) -> String {
         let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
         if has_disk {
-            format!("{console} root=/dev/vda rw rootwait init=/init")
+            format!("{console} rootwait init=/init")
         } else {
             console.to_string()
         }

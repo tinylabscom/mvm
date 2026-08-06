@@ -206,8 +206,20 @@ fn strip_test_modules(src: &str) -> String {
     out
 }
 
-/// Files that mention `symbol` outside `defining_file`, with test modules
-/// removed.
+/// Drop `pub use` lines.
+///
+/// A re-export moves a name, it does not call it. Counting one as a caller
+/// made every symbol its own module re-exported look reachable, which is the
+/// opposite of what this gate is for.
+fn strip_reexports(src: &str) -> String {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("pub use") && !l.trim_start().starts_with("use "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Files that mention `symbol` outside `defining_file`, with test modules and
+/// re-exports removed.
 fn callers(root: &Path, symbol: &str, defining_file: &str) -> Result<Vec<String>> {
     let defining = root.join(defining_file);
     let mut hits = Vec::new();
@@ -221,7 +233,7 @@ fn callers(root: &Path, symbol: &str, defining_file: &str) -> Result<Vec<String>
         if !src.contains(symbol) {
             continue;
         }
-        if strip_test_modules(&src).contains(symbol) {
+        if strip_reexports(&strip_test_modules(&src)).contains(symbol) {
             hits.push(
                 path.strip_prefix(root)
                     .unwrap_or(&path)
@@ -405,6 +417,23 @@ after_the_module();
         let stripped = strip_test_modules(src);
         assert!(!stripped.contains("the_control"), "{stripped}");
         assert!(stripped.contains("after_the_module"), "{stripped}");
+    }
+
+    #[test]
+    fn a_reexport_is_not_a_caller() {
+        let src = "pub use crate::stream::edge_connector::EdgeConnector;\nfn f() { other(); }\n";
+        let stripped = strip_reexports(src);
+        assert!(!stripped.contains("EdgeConnector"), "{stripped}");
+        assert!(stripped.contains("other"), "real code survives: {stripped}");
+    }
+
+    /// An `use` import is likewise not a call — the call is the line below it,
+    /// and that line is what should count.
+    #[test]
+    fn a_plain_import_is_not_a_caller_but_the_call_is() {
+        let src = "use crate::a::TheControl;\nfn f() { TheControl::go(); }\n";
+        let stripped = strip_reexports(src);
+        assert!(stripped.contains("TheControl::go"), "{stripped}");
     }
 
     /// The gate must pass on the tree as it stands, or it is not a gate.
