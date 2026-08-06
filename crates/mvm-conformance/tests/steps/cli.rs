@@ -454,3 +454,122 @@ fn collect_command_paths(
         collect_command_paths(subcommand, &child, command_paths);
     }
 }
+
+// --- Template registry steps ---
+
+/// Create a local `file://` registry with a single "demo" template that
+/// includes an `app.py` SDK source file.
+#[given(expr = "a local template registry with a demo template")]
+fn local_template_registry_with_demo(world: &mut CliWorld) {
+    let tmp = tempfile::tempdir().expect("create temp registry dir");
+    let tpl = tmp.path().join("templates/demo");
+    std::fs::create_dir_all(&tpl).expect("create template dir");
+
+    let index = serde_json::json!({
+        "schema_version": 1,
+        "templates": [{
+            "name": "demo",
+            "description": "demo remote template",
+            "path": "templates/demo",
+            "mvm_version": ">=0.1.0"
+        }]
+    });
+    std::fs::write(tmp.path().join("index.json"), index.to_string()).expect("write index.json");
+
+    std::fs::write(
+        tpl.join("template.toml"),
+        r#"name = "demo"
+description = "demo remote template"
+default_vcpus = 2
+default_memory_mib = 512
+tags = ["demo"]
+files = ["app.py"]
+"#,
+    )
+    .expect("write template.toml");
+
+    std::fs::write(
+        tpl.join("flake.nix"),
+        r#"{ pkgs }:
+{
+  mkGuest = { ... }: {
+    entrypoint = "hello";
+  };
+}
+"#,
+    )
+    .expect("write flake.nix");
+
+    std::fs::write(
+        tpl.join("app.py"),
+        r#"import mvm
+
+@mvm.app(
+    image=mvm.python_image(python="3.12"),
+    resources=mvm.resources(cpu=1, memory_mb=256),
+)
+def main() -> str:
+    return "hello"
+"#,
+    )
+    .expect("write app.py");
+
+    world.template_registry_dir = Some(tmp);
+}
+
+/// Run mvmctl against the local registry created by the `Given` step.
+#[when(expr = "I run mvmctl with {string} against the local template registry")]
+fn run_mvmctl_against_local_registry(world: &mut CliWorld, args: String) {
+    let reg = world
+        .template_registry_dir
+        .as_ref()
+        .expect("local template registry must be created first");
+    let registry_url = format!("file://{}", reg.path().display());
+
+    let output = mvmctl_command()
+        .args(args.split_whitespace())
+        .env("MVM_TEMPLATE_REGISTRY", registry_url)
+        .output()
+        .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
+/// Generate a project into a temp dir and remember the path.
+#[when(expr = "I generate a project from template {string}")]
+fn generate_project_from_template(world: &mut CliWorld, name: String) {
+    let reg = world
+        .template_registry_dir
+        .as_ref()
+        .expect("local template registry must be created first");
+    let registry_url = format!("file://{}", reg.path().display());
+
+    let out = tempfile::tempdir().expect("create generated project dir");
+    let project_dir = out.path().join(&name);
+    world.generated_project_dir = Some(project_dir.clone());
+    world.generated_project_dir_tmp = Some(out);
+
+    let output = mvmctl_command()
+        .args([
+            "generate",
+            "template",
+            &name,
+            &project_dir.to_string_lossy(),
+        ])
+        .env("MVM_TEMPLATE_REGISTRY", registry_url)
+        .output()
+        .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
+#[then(expr = "the generated project contains file {string}")]
+fn generated_project_contains_file(world: &mut CliWorld, file: String) {
+    let dir = world
+        .generated_project_dir
+        .as_ref()
+        .expect("a project must be generated first");
+    let path = dir.join(&file);
+    assert!(
+        path.is_file(),
+        "expected generated project to contain {file:?} at {path:?}"
+    );
+}
