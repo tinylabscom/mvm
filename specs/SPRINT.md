@@ -424,7 +424,7 @@ updates only its own entry below.
       tamper-refusal scenarios; 8,403 workspace tests, doctests, clippy/model
       gates, and all 76 BDD scenarios pass. Tracked in
       `specs/plans/280-transcript-root-audit-binding.md`.
-- [~] L3 TUN-over-vsock network mode (plan 285 / ADR-036): a workload that
+- [x] L3 TUN-over-vsock network mode (plan 285 / ADR-036): a workload that
       declares `raw_ip_stack` gets a real in-guest IP stack with no guest
       NIC. There is no operator-facing mode selector — the transport is
       derived from what the workload declares and recorded in the signed
@@ -439,9 +439,8 @@ updates only its own entry below.
       the launch path: synthesis derives the L3 spec from the admitted mode,
       the workload runner starts the gateway and waits for it to bind before
       the guest boots, and every stop path reaps it. The privileged Linux
-      lane now has 13 witnesses, including dual-stack anti-spoofing and
-      shared-table multi-machine teardown; the combined Linux/KVM rerun is
-      still pending. 23 hermetic BDD scenarios in `s25_l3_vsock`. macOS is
+      lane is 13/13 green, including dual-stack anti-spoofing and shared-table
+      multi-machine teardown. 23 hermetic BDD scenarios in `s25_l3_vsock`. macOS is
       capability-declared
       and refuses; native Windows is not claimed.
 

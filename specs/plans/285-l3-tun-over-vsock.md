@@ -148,11 +148,10 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 - [x] unprivileged end-to-end over an in-memory transport: real
       protocol, real policy, real gateway, mock datapath — covers
       scenarios 1–8 of the brief
-- [~] privileged Linux end-to-end with real TUN/nftables, gated behind
-      `MVM_L3_PRIVILEGED_TESTS=1`; the lane now covers dual-stack address
-      assignment, IPv6 anti-spoofing, ULA isolation, shared-table teardown,
-      and two-machine forwarding. The 13-test acceptance run remains to be
-      executed on a Linux/KVM host before this item is marked complete.
+- [x] privileged Linux end-to-end with real TUN/nftables, gated behind
+      `MVM_L3_PRIVILEGED_TESTS=1`; 13/13 green on the Linux/KVM builder,
+      covering dual-stack address assignment, IPv6 anti-spoofing, ULA
+      isolation, shared-table teardown, and two-machine forwarding.
 - [x] BDD suite `s25_l3_vsock` (23 scenarios)
 - [x] `UdsGuestChannelProvider` — the concrete per-port Unix-socket
       transport behind the backend-neutral abstraction, covering
@@ -260,11 +259,11 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 - [ ] **Native Windows.** No Windows VMM backend exists to attach to.
 - [ ] **Multi-queue.** The header field, the port base, and the
       negotiation slots exist in v1; the runtime opens one queue.
-- [~] **IPv6 datapath.** The parser, validator, lease, guest configuration,
+- [x] **IPv6 datapath.** The parser, validator, lease, guest configuration,
       host address assignment, capability declaration, and Linux nftables
-      source pinning are implemented. The remaining acceptance gate is the
-      Linux/KVM run of the dual-stack and shared-table privileged witnesses;
-      macOS remains on the userspace socket backend for full-packet IPv6.
+      source pinning are implemented and covered by 13/13 green Linux/KVM
+      privileged witnesses. macOS remains on the userspace socket backend
+      for full-packet IPv6.
 - [ ] **Zero-copy / batched transfer.** The v1 copy path
       (guest kernel → guest buffer → vsock → host buffer → host TUN) is
       deliberate; optimize only against measurements.
