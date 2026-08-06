@@ -744,7 +744,7 @@ pub enum AgentResponse {
         errors: Vec<String>,
     },
     /// Metrics snapshot.
-    Metrics(crate::observability::metrics::MetricsSnapshot),
+    Metrics(Box<crate::observability::metrics::MetricsSnapshot>),
     /// Audit log entries.
     AuditLog {
         entries: Vec<crate::audit::AuditEntry>,
@@ -1997,6 +1997,9 @@ mod tests {
             build_image_duration_ms: 0,
             vm_start_duration_ms: 0,
             vsock_handshake_rtt_ms: 0,
+            vsock_egress_packets_total: 0,
+            vsock_egress_bytes_total: 0,
+            vsock_egress_events_total: 0,
             dev_image_verify_ok: 0,
             dev_image_verify_sig_invalid: 0,
             dev_image_verify_digest_mismatch: 0,
@@ -2018,7 +2021,7 @@ mod tests {
             audit_icmp_total: 0,
             audit_workload_audit_total: 0,
         };
-        let resp = AgentResponse::Metrics(snapshot);
+        let resp = AgentResponse::Metrics(Box::new(snapshot));
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: AgentResponse = serde_json::from_str(&json).unwrap();
         match parsed {
@@ -2481,7 +2484,7 @@ mod tests {
                 instances_affected: 5,
                 errors: vec![],
             },
-            AgentResponse::Metrics(crate::observability::metrics::global().snapshot()),
+            AgentResponse::Metrics(Box::new(crate::observability::metrics::global().snapshot())),
             AgentResponse::AuditLog {
                 entries: vec![],
                 total_count: 0,

@@ -1,0 +1,34 @@
+[package]
+name = "mvm-ebpf-egress"
+version = "0.18.0"
+edition = "2021"
+authors = ["mvm contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tinylabscom/mvm"
+rust-version = "1.78"
+
+[features]
+default = []
+# Enable the procfs fallback telemetry collector on Linux even when the
+# eBPF object file is not available.
+procfs-fallback = []
+
+[dependencies]
+thiserror = "1"
+tracing = "0.1"
+
+[dependencies.mvm-core]
+path = "../mvm-core"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Aya userspace loader. The eBPF program itself lives in the `ebpf/`
+# subdirectory and is built separately with nightly + bpf-linker.
+aya = "0.13"
+aya-log = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -199,6 +199,8 @@ pub struct Supervisor {
     /// Transient index from an execution plan to its workload key, allowing
     /// the legacy stop API to withdraw the correct workload-scoped rules.
     firewall_plan_keys: BTreeMap<PlanId, WorkloadKey>,
+    /// Host-side vsock egress telemetry probe manager (eBPF/procfs).
+    ebpf_telemetry: crate::supervisor::ebpf_telemetry::EbpfTelemetryManager,
 }
 
 impl Default for Supervisor {
@@ -223,6 +225,7 @@ impl Default for Supervisor {
             firewall_proxy_iface: None,
             installed_firewalls: BTreeMap::new(),
             firewall_plan_keys: BTreeMap::new(),
+            ebpf_telemetry: crate::supervisor::ebpf_telemetry::EbpfTelemetryManager::new(),
         }
     }
 }
@@ -695,6 +698,14 @@ impl Supervisor {
         if let Err(e) = self.backend.stop(plan_id).await {
             self.transition_or_warn(PlanState::Failed);
             return Err(SupervisorError::from(e));
+        }
+
+        // Detach host-side egress telemetry, using the same vm_id that
+        // firewall enforcement keyed on.
+        if let Some(workload_key) = self.firewall_plan_keys.get(plan_id)
+            && let Some(spec) = self.installed_firewalls.get(workload_key)
+        {
+            self.ebpf_telemetry.detach(&spec.vm_id);
         }
 
         // Withdraw the host enforcement through the EgressEnforcer seam,
