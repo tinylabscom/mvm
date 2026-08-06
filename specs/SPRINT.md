@@ -514,11 +514,15 @@ updates only its own entry below.
       ingress), guest `mvm-net-agent`, machine-scoped host gateway, Linux
       host-TUN/nftables datapath, `CONFIG_TUN` in the workload kernel, and
       the amendment's backend-neutral guest channel, per-boot VM identity,
-      signed network lease, and capability-gated forwarding. Wired through
+      signed network lease, and capability-gated forwarding. The Linux
+      nftables datapath now uses one shared default-drop forward hook with
+      interface-scoped per-machine chains, so concurrent machines do not
+      drop each other's admitted traffic. Wired through
       the launch path: synthesis derives the L3 spec from the admitted mode,
       the workload runner starts the gateway and waits for it to bind before
       the guest boots, and every stop path reaps it. Privileged Linux lane
-      run on a KVM host (6/6, live forwarding witness, clean teardown); 23
+      run on a KVM host (nine tests, two-machine live forwarding witnesses,
+      clean teardown); 23
       hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
       and refuses; native Windows is not claimed. Follow-up issue #2186 now
       closes the remaining launch-shape seam: every standing channel in
