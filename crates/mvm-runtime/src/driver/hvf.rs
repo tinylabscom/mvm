@@ -264,9 +264,9 @@ impl VmmDriver for HvfDriver {
                 &req.child_dir.join("console.log"),
             )?;
 
-            let child_egress = channel_path(req, EGRESS_PORT)?;
+            let child_egress = channel_path(req, GuestService::Substitution)?;
             link_path(&child_egress, &parent_dir.join("standby-egress.sock"))?;
-            if let Some(child_broker) = channel_path_optional(req, BROKER_PORT) {
+            if let Some(child_broker) = channel_path_optional(req, GuestService::Broker) {
                 link_path(&child_broker, &parent_dir.join("standby-broker.sock"))?;
             }
             std::fs::write(req.child_dir.join("hvf-live-parent"), req.parent_vm_name)
@@ -411,17 +411,20 @@ fn wait_for_socket(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn channel_path(req: &ChildForkRequest<'_>, guest_port: u32) -> Result<PathBuf> {
-    channel_path_optional(req, guest_port).ok_or_else(|| {
-        anyhow!("live HVF child is missing its required guest-dialed channel {guest_port}")
+fn channel_path(req: &ChildForkRequest<'_>, service: GuestService) -> Result<PathBuf> {
+    channel_path_optional(req, service).ok_or_else(|| {
+        anyhow!(
+            "live HVF child is missing its required guest-dialed channel {}",
+            service.port()
+        )
     })
 }
 
-fn channel_path_optional(req: &ChildForkRequest<'_>, guest_port: u32) -> Option<PathBuf> {
+fn channel_path_optional(req: &ChildForkRequest<'_>, service: GuestService) -> Option<PathBuf> {
     req.channels
         .iter()
         .find(|channel| {
-            channel.guest_port == guest_port && channel.direction == VsockDirection::GuestDials
+            channel.service == service && channel.direction == VsockDirection::GuestDials
         })
         .map(|channel| channel.host_uds.clone())
 }
@@ -616,7 +619,7 @@ mod tests {
     #[test]
     fn live_handoff_only_accepts_guest_dialed_channels() {
         let channels = vec![VsockPort {
-            guest_port: EGRESS_PORT,
+            service: GuestService::Substitution,
             host_uds: "/run/egress.sock".into(),
             direction: VsockDirection::HostDials,
         }];
@@ -632,7 +635,7 @@ mod tests {
             channels: &channels,
         };
 
-        assert!(channel_path_optional(&req, EGRESS_PORT).is_none());
+        assert!(channel_path_optional(&req, GuestService::Substitution).is_none());
     }
 
     #[test]

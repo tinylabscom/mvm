@@ -259,6 +259,8 @@ fn factory_parent_spec_inner(
         egress_gateway: &egress,
         exit: &exit,
         broker: Some(&broker),
+        network_control: None,
+        network_data: None,
         console_data: Vec::new(),
     };
     VmmSpec {
@@ -276,6 +278,7 @@ mod tests {
 
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::{RuntimeSourcePolicy, VmVolume, VmVolumeKind};
+    use mvm_net::channel::GuestService;
 
     use crate::workload_runner::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
 
@@ -698,8 +701,8 @@ mod tests {
         assert!(
             parent.vsock.iter().all(|port| {
                 port.host_uds.to_string_lossy().contains("standby")
-                    || port.guest_port == mvm_agentd::vsock::GUEST_AGENT_PORT
-                    || port.guest_port == mvm_agentd::vsock::WORKLOAD_EXIT_PORT
+                    || port.service == GuestService::MachineControl
+                    || port.service == GuestService::WorkloadExit
             }),
             "a factory parent may only wire stable standby paths"
         );
@@ -727,25 +730,25 @@ mod tests {
         let ports: std::collections::HashMap<_, _> = parent
             .vsock
             .iter()
-            .map(|port| (port.guest_port, port.host_uds.clone()))
+            .map(|port| (port.service, port.host_uds.clone()))
             .collect();
         assert!(
-            ports[&mvm_agentd::vsock::GUEST_AGENT_PORT]
+            ports[&GuestService::MachineControl]
                 .to_string_lossy()
                 .contains("hvf-agent.sock")
         );
         assert!(
-            ports[&mvm_agentd::vsock::EGRESS_PORT]
+            ports[&GuestService::Substitution]
                 .to_string_lossy()
                 .ends_with("standby-egress.sock")
         );
         assert!(
-            ports[&mvm_agentd::vsock::BROKER_PORT]
+            ports[&GuestService::Broker]
                 .to_string_lossy()
                 .ends_with("standby-broker.sock")
         );
         assert!(
-            ports[&mvm_agentd::vsock::WORKLOAD_EXIT_PORT]
+            ports[&GuestService::WorkloadExit]
                 .to_string_lossy()
                 .ends_with("workload.exit")
         );
