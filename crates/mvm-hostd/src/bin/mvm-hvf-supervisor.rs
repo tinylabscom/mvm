@@ -39,6 +39,49 @@ fn exe_has_hypervisor_entitlement(exe: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn signed_marker_path(exe: &std::path::Path) -> std::path::PathBuf {
+    let mut marker = exe.as_os_str().to_os_string();
+    marker.push(".mvm-hvf-signed");
+    std::path::PathBuf::from(marker)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn executable_fingerprint(exe: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(exe).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!(
+        "{}:{}:{}:{}",
+        metadata.ino(),
+        metadata.len(),
+        modified.as_secs(),
+        modified.subsec_nanos()
+    ))
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn signed_marker_matches(exe: &std::path::Path) -> bool {
+    let Some(fingerprint) = executable_fingerprint(exe) else {
+        return false;
+    };
+    std::fs::read_to_string(signed_marker_path(exe))
+        .map(|cached| cached.trim() == fingerprint)
+        .unwrap_or(false)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn record_signed_marker(exe: &std::path::Path) {
+    if let Some(fingerprint) = executable_fingerprint(exe) {
+        let _ = std::fs::write(signed_marker_path(exe), fingerprint);
+    }
+}
+
 /// Self-sign ad-hoc with the hypervisor entitlement, then re-exec. We ship the
 /// bin unsigned and HVF rejects it otherwise. `MVM_HVF_SIGNED` breaks the exec
 /// loop; `exec()` preserves the pid + the stdin config pipe. A file lock
@@ -56,7 +99,15 @@ fn ensure_self_signed() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
+    // The helper is stable between builds. Avoid spawning `codesign` for every
+    // short-lived workload by caching only metadata observed after a successful
+    // entitlement check or signing operation. Hypervisor.framework remains the
+    // final authority and still rejects an unsigned helper.
+    if signed_marker_matches(&exe) {
+        return;
+    }
     if exe_has_hypervisor_entitlement(&exe) {
+        record_signed_marker(&exe);
         return;
     }
 
@@ -95,6 +146,7 @@ fn ensure_self_signed() {
             }
             return;
         }
+        record_signed_marker(&exe);
     }
     drop(lock);
 
@@ -104,6 +156,29 @@ fn ensure_self_signed() {
         .exec();
     eprintln!("mvm-hvf-supervisor: re-exec after signing failed: {err}");
     std::process::exit(1);
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod tests {
+    use super::{record_signed_marker, signed_marker_matches};
+    use std::io::Write;
+
+    #[test]
+    fn signed_marker_is_bound_to_the_executable_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("mvm-hvf-supervisor");
+        let mut file = std::fs::File::create(&exe).expect("create executable");
+        file.write_all(b"signed helper").expect("write executable");
+        file.flush().expect("flush executable");
+
+        assert!(!signed_marker_matches(&exe));
+        record_signed_marker(&exe);
+        assert!(signed_marker_matches(&exe));
+
+        std::fs::write(&exe, b"replacement helper with different size")
+            .expect("replace executable");
+        assert!(!signed_marker_matches(&exe));
+    }
 }
 
 /// Set by the SIGTERM/SIGINT handler; `boot_kernel_until`'s watchdog polls it and

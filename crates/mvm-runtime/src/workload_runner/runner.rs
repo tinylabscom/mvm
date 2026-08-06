@@ -29,8 +29,8 @@ use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_net::channel::GuestService;
 
 use crate::checkpoint::{
-    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, capture_vm_full, verify_content,
-    verify_lineage,
+    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, capture_fs_quick, capture_vm_full,
+    verify_content, verify_lineage,
 };
 use crate::driver::{ChildForkRequest, RunningVm, StandbyParentSpawn, VmmDriver};
 use crate::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
@@ -52,7 +52,9 @@ use crate::workload_runner::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_no_dir_share_volumes,
     workload_spec, workload_vsock_ports,
 };
-use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
+use crate::workload_runner::standby_boot::{
+    factory_parent_config, factory_parent_spec, factory_parent_spec_live,
+};
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
 pub struct EndpointSpawnRequest<'a> {
@@ -629,6 +631,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         let genid = fresh_generation_token(content_hash);
         let token = genid.token;
         self.driver.fork_standby_child(&ChildForkRequest {
+            parent_vm_name: &handle.id,
             child_vm_name: &child.0,
             child_dir: &child_dir,
             genid,
@@ -668,6 +671,22 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             self.force_stop(&child.0, "refused forked standby child");
             self.console_streamer.stop(&child.0);
             return Err(refusal);
+        }
+
+        // A universal initramfs keeps the factory parent behind its activation
+        // gate. A live HVF handoff has no boot callback in which to perform the
+        // cold path's activation, so do it after the child identity proof and
+        // before the claim commits. The endpoint and broker are already armed,
+        // which preserves the same host-service ordering as cold boot.
+        if let Some(config) = claim.start_config.as_ref()
+            && crate::microvm::booted_with_universal_initramfs(config)
+        {
+            let vm = self
+                .driver
+                .attach(&child)
+                .map_err(|e| StandbyError::ClaimFailed(format!("attach claimed child: {e}")))?;
+            crate::microvm::activate_workload(&*vm, config)
+                .map_err(|e| StandbyError::ClaimFailed(format!("activate claimed child: {e}")))?;
         }
 
         // The child booted and proved a fresh identity: disarm the endpoint and
@@ -750,9 +769,15 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             ))
         })?;
 
-        let boot = factory_parent_spec(&parent_config, &state_dir, |virtiofs_root, has_disk| {
-            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
-        });
+        let boot = if self.driver.standby_parent_is_live() {
+            factory_parent_spec_live(&parent_config, &state_dir, |virtiofs_root, has_disk| {
+                self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+            })
+        } else {
+            factory_parent_spec(&parent_config, &state_dir, |virtiofs_root, has_disk| {
+                self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+            })
+        };
         // The same truncation refusal a workload boot gets, for the same reason
         // and then some: a child inherits its parent's cmdline out of restored
         // memory rather than deriving its own, so a parent whose trailing tokens
@@ -767,41 +792,63 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             .driver
             .spawn_standby_parent(&StandbyParentSpawn { spec, boot: &boot })?;
 
-        let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
-            StandbyError::SpawnFailed(format!(
-                "backend cannot capture a warm parent's memory for standby '{}'",
-                spec.id
-            ))
-        })?;
+        let meta = if self.driver.standby_parent_is_live() {
+            // Native HVF cannot restore a fresh VMM from serialized device
+            // state yet. It therefore uses an explicit live handoff: the
+            // parent was paused by the driver, its rootfs is still sealed and
+            // captured for the same content/lineage gates, and the driver keeps
+            // the resident VM paused until a claim rewires its channels.
+            let captured = capture_fs_quick(
+                ctx.checkpoints,
+                crate::checkpoint::CaptureFsQuickParams {
+                    id: CheckpointId::new(format!("standby-{}", spec.id)),
+                    vm_name: spec.id.clone(),
+                    rootfs: PathBuf::from(parent_config.rootfs_path.clone()),
+                    supervisor_config_digest: String::new(),
+                    runtime_source_policy: None,
+                    runtime_overlay_version: None,
+                    tag: None,
+                    created_unix: crate::standby_pool::now_unix_secs(),
+                    quiesced: true,
+                },
+            );
+            captured.map_err(|e| {
+                self.force_stop(&spec.id, "failed live standby capture");
+                StandbyError::SpawnFailed(format!("capture live standby parent: {e}"))
+            })?
+        } else {
+            let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
+                StandbyError::SpawnFailed(format!(
+                    "backend cannot capture a warm parent's memory for standby '{}'",
+                    spec.id
+                ))
+            })?;
 
-        let captured = capture_vm_full(
-            ctx.checkpoints,
-            CaptureVmFullParams {
-                id: CheckpointId::new(format!("standby-{}", spec.id)),
-                vm_name: spec.id.clone(),
-                supervisor_config_digest: String::new(),
-                runtime_source_policy: None,
-                runtime_overlay_version: None,
-                // Firecracker keeps no supervisor-config blob; its presence is
-                // what marks a checkpoint as originating from a backend that does.
-                supervisor_config_src: None,
-                tag: None,
-                created_unix: crate::standby_pool::now_unix_secs(),
-            },
-            control.as_ref(),
-        );
+            let captured = capture_vm_full(
+                ctx.checkpoints,
+                CaptureVmFullParams {
+                    id: CheckpointId::new(format!("standby-{}", spec.id)),
+                    vm_name: spec.id.clone(),
+                    supervisor_config_digest: String::new(),
+                    runtime_source_policy: None,
+                    runtime_overlay_version: None,
+                    // Firecracker keeps no supervisor-config blob; its presence is
+                    // what marks a checkpoint as originating from a backend that does.
+                    supervisor_config_src: None,
+                    tag: None,
+                    created_unix: crate::standby_pool::now_unix_secs(),
+                },
+                control.as_ref(),
+            );
 
-        // Release either way: the checkpoint carries the parent's full state, so
-        // a pool slot costs disk rather than a resident VM, and a failed capture
-        // must not strand the guest.
-        self.force_stop(&spec.id, "captured standby parent");
+            // Release either way: the checkpoint carries the parent's full state, so
+            // a pool slot costs disk rather than a resident VM, and a failed capture
+            // must not strand the guest.
+            self.force_stop(&spec.id, "captured standby parent");
+            captured
+                .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e}")))?
+        };
 
-        let meta = captured
-            .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e}")))?;
-
-        // No live process backs the captured parent — zero is the sentinel
-        // `is_saved_state()` keys off, and it is now true.
-        handle.pid = 0;
         handle.parent_checkpoint = Some(meta.id.as_str().to_string());
         Ok(handle)
     }

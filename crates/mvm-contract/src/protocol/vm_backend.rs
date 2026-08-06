@@ -722,8 +722,8 @@ pub struct StandbySpec {
     pub control_socket: String,
     /// Per-VM state dir the standby writes its pid into.
     pub vm_state_dir: String,
-    /// Source rootfs image path for HVF saved-standbys. `None` for libkrun (no rootfs
-    /// is baked in at spawn; any workload rootfs attaches at claim time).
+    /// Source rootfs image path for image-bound standbys. `None` for libkrun
+    /// (no rootfs is baked in at spawn; any workload rootfs attaches at claim time).
     pub image_path: Option<String>,
     /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
     pub image_sha256: Option<String>,
@@ -778,10 +778,10 @@ pub struct StandbyCompat {
 
 /// A recorded standby (persisted as `~/.mvm/pool/<id>/standby.json`).
 ///
-/// `pid` is 0 for saved-state standbys (HVF): the supervisor that booted the seed VM was
-/// stopped at capture time; no process is running. `reap_stale` and the liveness checks
-/// treat pid=0 as "TTL-only" — the standby is never pruned for a dead process, only for
-/// expiry. No real process has pid 0.
+/// `pid` is 0 for saved-state standbys: the supervisor that booted the seed VM
+/// was stopped at capture time; no process is running. A live standby retains
+/// its supervisor PID and is parked until a claim hands it off. `reap_stale`
+/// treats pid=0 as "TTL-only"; no real process has pid 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandbyHandle {
     pub id: String,
@@ -796,7 +796,8 @@ pub struct StandbyHandle {
     pub binding_nonce: String,
     pub spawned_unix_secs: u64,
     pub state: StandbyState,
-    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for HVF saved-standbys.
+    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for image-bound
+    /// standbys.
     #[serde(default)]
     pub image_sha256: Option<String>,
     /// The content-addressed checkpoint this parent was captured as, set once
@@ -1229,8 +1230,8 @@ mod tests {
         );
     }
 
-    /// An HVF saved-standby uses pid=0 (no running supervisor) and must be treated
-    /// as TTL-only by the liveness path (is_saved_state()).
+    /// A saved-state standby uses pid=0 (no running supervisor) and must be
+    /// treated as TTL-only by the liveness path (is_saved_state()).
     #[test]
     fn standby_handle_saved_state_pid_zero_flag() {
         let saved = StandbyHandle {

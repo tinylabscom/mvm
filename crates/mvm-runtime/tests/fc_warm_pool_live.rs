@@ -197,6 +197,7 @@ fn fc_warm_pool_spawn_and_claim() {
 
     let t_claim = Instant::now();
     let fork_result = driver.fork_standby_child(&ChildForkRequest {
+        parent_vm_name: "standby-parent",
         child_vm_name: &child_id,
         child_dir: &child_dir,
         genid: GenerationToken {

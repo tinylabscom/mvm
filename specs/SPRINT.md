@@ -1404,11 +1404,13 @@ Then unify + retire the old paths:
       the boot-pinned host identity but receives no workload grant. A real
       host-key signature is verified in the hermetic warm-claim BDD, and a
       missing issuer or mismatched envelope refuses before fork with no orphan.
-      `standby_pool` stays **`false`**: the **claim** half has still never
-      completed live. It now reaches the signed-parent check and refuses because
-      the capture path does not emit `checkpoint.created` (#1962), so the
-      post-restore grant delivery and the child's egress/broker/exit channels
-      remain live-unproven. The flip is gated on that run.
+      The native macOS fast-start follow-up (#2174) now gives HVF an explicit
+      paused-parent live handoff: the parent is content/lineage anchored, the
+      claim materializes a child rootfs, wires child-owned egress and broker
+      endpoints before resume, and requires the fresh identity handshake before
+      activation. HVF advertises the standby capability only through that
+      driver path; serialized fresh-VMM restore remains unsupported. Live Apple
+      Silicon timing and security witnesses are still the merge gate.
   - [x] Ordinary persistent-machine Firecracker teardown now fails closed
         (#2007): non-interactive or declined confirmation exits non-zero, state
         is retained unless process exit is verified, and a restart cannot

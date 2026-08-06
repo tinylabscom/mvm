@@ -1123,14 +1123,14 @@ mod tests {
     /// `MockBackend` opts into it explicitly via `with_standby()` for the
     /// hermetic claim tests; the `MockDriver` seam here does not.)
     #[test]
-    fn no_selectable_driver_advertises_the_standby_pool() {
+    fn only_hvf_advertises_the_live_standby_pool() {
         use crate::driver::{HvfDriver, LibkrunDriver, MockDriver};
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
 
         assert!(!FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
-        assert!(!HvfDriver::new().capabilities().standby_pool);
+        assert!(HvfDriver::new().capabilities().standby_pool);
         assert!(!MockDriver::default().capabilities().standby_pool);
         assert!(!QemuBackend.capabilities().standby_pool);
         assert!(!WasmBackend::new().capabilities().standby_pool);
@@ -1952,6 +1952,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("never-materialized");
         let req = ChildForkRequest {
+            parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-1",
             child_dir: &missing,
             genid: sample_generation_token(),
@@ -1975,6 +1976,7 @@ mod tests {
         std::fs::create_dir_all(&child_dir).unwrap();
         std::fs::write(child_dir.join("rootfs.ext4"), b"rootfs").unwrap();
         let req = ChildForkRequest {
+            parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-2",
             child_dir: &child_dir,
             genid: sample_generation_token(),
@@ -2008,6 +2010,7 @@ mod tests {
 
         let channels = workload_channels();
         let req = ChildForkRequest {
+            parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-3",
             child_dir: &child_dir,
             genid: sample_generation_token(),

@@ -38,6 +38,9 @@ const SPAWN_LOCK: &str = "spawn.lock";
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Control-frame cap (replies are tiny).
 const CONTROL_MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Bound a single control exchange so a daemon that dies after accepting a
+/// request cannot hold the VM launch path indefinitely.
+const CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(1);
 /// Control reconnect attempts when the worker is restarting under the wrapper.
 const CONTROL_RETRIES: u32 = 4;
 /// Base delay for exponential control reconnect backoff.
@@ -381,6 +384,12 @@ fn send_control(
                     control_socket.display()
                 )
             })?;
+            stream
+                .set_read_timeout(Some(CONTROL_IO_TIMEOUT))
+                .context("set host-agent control read timeout")?;
+            stream
+                .set_write_timeout(Some(CONTROL_IO_TIMEOUT))
+                .context("set host-agent control write timeout")?;
             write_framed(&mut stream, &signed)?;
             match read_framed::<ControlResponse>(&mut stream)? {
                 ControlResponse::Ok => Ok(()),

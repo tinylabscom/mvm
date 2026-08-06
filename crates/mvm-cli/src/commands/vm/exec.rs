@@ -2,7 +2,8 @@
 //!
 //! The former bare `mvmctl exec` was folded into `run`: `run` was already a
 //! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
-//! `run --profile dev -- <argv>` covers its interactive case. The `Args`
+//! `run -- <argv>` covers its interactive case with the dev profile by
+//! default. The `Args`
 //! struct + internal request machinery stay — `run_secure` reuses them.
 
 use anyhow::{Context, Result};
@@ -163,7 +164,7 @@ pub(in crate::commands) struct RunArgs {
     #[arg(long, default_value = "512M")]
     pub memory: String,
     /// Security profile for the transient run.
-    #[arg(long, value_enum, default_value = "standard")]
+    #[arg(long, value_enum, default_value = "dev")]
     pub profile: RunProfile,
     /// Share a host directory into the guest. Format: `HOST_PATH:/GUEST_PATH[:MODE]`.
     /// MODE defaults to `ro`; `rw` is allowed only with `--profile dev` or `permissive`.
@@ -931,7 +932,7 @@ fn emit_oci_run_admission(
     timeout_secs: u64,
     network_mode: mvm_contract::plan::NetworkMode,
 ) -> Result<()> {
-    let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
+    let image_sha256 = mvm_core::crypto::image_verify::sha256_file_cached(&image.rootfs_path)
         .with_context(|| {
             format!(
                 "hashing OCI rootfs at {} for run --image admission",

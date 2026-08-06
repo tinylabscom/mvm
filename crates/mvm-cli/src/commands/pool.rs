@@ -509,6 +509,7 @@ where
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(standby = %handle.id, error = %e, "build claim failed; cold-booting");
+            stop_live_standby_best_effort(backend, &handle);
             let _ = pool.remove(&handle.id);
             return Ok(LaunchDecision::ColdBoot);
         }
@@ -519,6 +520,7 @@ where
         Ok(id) => id,
         Err(e) => {
             tracing::warn!(standby = %handle.id, error = %e, "cold-booting");
+            stop_live_standby_best_effort(backend, &handle);
             let _ = pool.remove(&handle.id);
             return Ok(LaunchDecision::ColdBoot);
         }
@@ -546,9 +548,18 @@ where
         }
         Err(e) => {
             tracing::warn!(standby = %handle.id, error = %e, "standby claim failed; cold-booting");
+            stop_live_standby_best_effort(backend, &handle);
             let _ = pool.remove(&handle.id); // spent/broken — never leave it idle
             Ok(LaunchDecision::ColdBoot)
         }
+    }
+}
+
+fn stop_live_standby_best_effort(backend: &AnyBackend, handle: &StandbyHandle) {
+    if handle.pid != 0
+        && let Err(e) = backend.stop_transient(&VmId(handle.id.clone()))
+    {
+        tracing::debug!(standby = %handle.id, error = %e, "failed to stop discarded live standby");
     }
 }
 
@@ -612,7 +623,7 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 /// child's own policy. A shared parent therefore holds nothing per-launch that
 /// could reach the next claim.
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
-    cfg.volumes.is_empty() && cfg.virtiofs_root.is_none()
+    cfg.volumes.is_empty() && cfg.virtiofs_root.is_none() && !cfg.dev_console
 }
 
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id

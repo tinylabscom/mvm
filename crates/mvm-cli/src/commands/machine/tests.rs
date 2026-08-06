@@ -383,7 +383,7 @@ fn run_defaults_match_the_lower_level_runner() {
     let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
     assert_eq!(args.cpus, 2);
     assert_eq!(args.memory, "512M");
-    assert_eq!(args.profile, RunProfile::Standard);
+    assert_eq!(args.profile, RunProfile::Dev);
     assert!(!args.json);
     assert!(!args.dry_run);
     assert!(args.volume.is_empty());
@@ -776,13 +776,31 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
 fn run_rw_volume_requires_dev_profile() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let host = dir.path().to_string_lossy().into_owned();
-    // Default profile is `standard` → :rw refused.
+    // CLI runs default to `dev`, so a writable share works without repeating
+    // the profile flag.
+    let default_args = parse_run(&[
+        "run",
+        "--image",
+        "x",
+        "--name",
+        "web",
+        "--volume",
+        &format!("{host}:/work:rw"),
+    ])
+    .expect("parse");
+    let default_spec = machine_run_spec(&default_args, "web".to_string(), None)
+        .expect("default dev profile allows :rw");
+    assert!(default_spec.volumes[0].ends_with(":/work:rw"));
+
+    // An explicitly stricter profile still refuses the writable share.
     let std_args = parse_run(&[
         "run",
         "--image",
         "x",
         "--name",
         "web",
+        "--profile",
+        "standard",
         "--volume",
         &format!("{host}:/work:rw"),
     ])
@@ -1517,6 +1535,7 @@ fn create_auto_generates_a_name_when_omitted() {
     // explicit one, so a subsequent `start`/`ls`/`rm` can reference it.
     assert!(!spec.name.is_empty());
     validate_machine_name(&spec.name).expect("generated name is valid");
+    assert_eq!(spec.profile, "dev");
 }
 
 #[test]
@@ -1598,14 +1617,14 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
 }
 
 #[test]
-fn create_requires_dev_profile_when_manifest_declares_dev_init() {
+fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("mvm.toml"),
         "image = \"alpine:latest\"\n[dev]\ninit = [\"echo hi\"]\n",
     )
     .expect("manifest");
-    let err = MachineCreateArgs {
+    let spec = MachineCreateArgs {
         name: Some("web".to_string()),
         manifest: Some(dir.path().join("mvm.toml").display().to_string()),
         image: None,
@@ -1619,7 +1638,24 @@ fn create_requires_dev_profile_when_manifest_declares_dev_init() {
         json: false,
     }
     .into_spec()
-    .expect_err("standard profile should refuse dev.init");
+    .expect("CLI-created machines default to dev");
+    assert_eq!(spec.profile, "dev");
+
+    let err = MachineCreateArgs {
+        name: Some("web".to_string()),
+        manifest: Some(dir.path().join("mvm.toml").display().to_string()),
+        image: None,
+        net: false,
+        allow_host: Vec::new(),
+        cpus: None,
+        memory: None,
+        mem_initial: None,
+        profile: Some(RunProfile::Standard),
+        force: false,
+        json: false,
+    }
+    .into_spec()
+    .expect_err("explicit standard profile should refuse dev.init");
     assert!(
         err.to_string()
             .contains("dev.init requires a dev-capable profile")

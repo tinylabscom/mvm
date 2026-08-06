@@ -36,6 +36,10 @@ pub(crate) const PID_FILE_NAME: &str = "hvf.pid";
 /// How long `start` waits for the supervisor to confirm boot (PID file). Shared
 /// with the hvf driver, which spawns the same supervisor binary.
 pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Readiness is signalled by a file written by the detached supervisor. Keep
+/// the poll interval below the launch latency budget; the file check is cheap,
+/// and a coarse interval otherwise adds visible tail latency to every run.
+pub(crate) const PID_FILE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Raw HVF (`Hypervisor.framework`) backend. macOS / Apple-silicon only.
 pub struct HvfBackend;
@@ -540,7 +544,7 @@ impl VmBackend for HvfBackend {
                     console_log.display()
                 );
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(PID_FILE_POLL_INTERVAL);
         }
 
         // Boot confirmed: the supervisor's device is wired to the endpoint, so it
