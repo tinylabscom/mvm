@@ -237,6 +237,11 @@ mod tests {
         meta.observability_target = Some(target);
         mvm_runtime::base::runtime_meta::write(vm_name, &meta).unwrap();
 
+        // Write a substitution PID file so the Linux attach path has a
+        // target process and falls through to the procfs fallback (the eBPF
+        // object is not built in this test).
+        std::fs::write(tmp.path().join("substitution.pid"), b"1234").unwrap();
+
         let mut manager = EbpfTelemetryManager::new();
         manager.attach(vm_name);
         assert!(manager.is_attached(vm_name));

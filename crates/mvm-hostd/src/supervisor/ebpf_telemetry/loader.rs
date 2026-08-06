@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 use std::time::Duration;
 
 use tracing::{info, warn};
@@ -22,11 +22,11 @@ pub struct ProbeConfig {
 /// A running telemetry probe for one VM.
 pub struct ProbeHandle {
     target: ObservabilityTarget,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
     events: std::sync::mpsc::Receiver<TelemetryEvent>,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
     detach: Option<std::sync::mpsc::Sender<()>>,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -34,14 +34,14 @@ impl ProbeHandle {
     pub(super) fn new(target: ObservabilityTarget) -> Self {
         Self {
             target,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
             events: {
                 let (_, rx) = std::sync::mpsc::channel();
                 rx
             },
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
             detach: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
             worker: None,
         }
     }
@@ -97,7 +97,7 @@ pub enum TelemetryError {
     LoadFailed(String),
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "ebpf-telemetry")))]
 fn inner_attach(
     _config: &ProbeConfig,
     target: ObservabilityTarget,
@@ -109,15 +109,15 @@ fn inner_attach(
     Ok(ProbeHandle::new(target))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "ebpf-telemetry")))]
 fn inner_detach(_handle: ProbeHandle) {}
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "ebpf-telemetry")))]
 fn inner_poll_events(_handle: &ProbeHandle) -> Vec<TelemetryEvent> {
     Vec::new()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn inner_attach(
     config: &ProbeConfig,
     target: ObservabilityTarget,
@@ -165,7 +165,7 @@ fn inner_attach(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn inner_detach(handle: ProbeHandle) {
     if let Some(tx) = handle.detach {
         let _ = tx.send(());
@@ -175,12 +175,12 @@ fn inner_detach(handle: ProbeHandle) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn inner_poll_events(handle: &ProbeHandle) -> Vec<TelemetryEvent> {
     handle.events.try_iter().collect()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn default_ebpf_object_path() -> Option<PathBuf> {
     // The eBPF program is built separately into the `ebpf/target` directory
     // by nightly + bpf-linker. This path is a convention, not a guarantee.
@@ -193,13 +193,13 @@ fn default_ebpf_object_path() -> Option<PathBuf> {
         .into()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn procfs_handle(target: ObservabilityTarget, _config: &ProbeConfig) -> ProbeHandle {
     info!(vm = %target.vm_name, "using procfs fallback for egress telemetry");
     ProbeHandle::new(target)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn ebpf_worker(
     path: PathBuf,
     vm_name: String,
@@ -283,13 +283,13 @@ mod tests {
         let telemetry = EgressTelemetry::new(ProbeConfig::default());
         let target = ObservabilityTarget::new("vm-no-pid");
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
         assert!(matches!(
             telemetry.attach(target),
             Err(TelemetryError::MissingSubstitutionPid(_))
         ));
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "ebpf-telemetry")))]
         assert!(telemetry.attach(target).is_ok());
     }
 }
