@@ -629,17 +629,23 @@ Contributions are welcome. The short version:
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
 just install-hooks        # pre-commit hook: auto-runs cargo fmt --all
 
-# Source-checkout builds cross-compile builder/bootstrap helpers; you need:
+# Recommended: enter the pinned contributor environment.
+nix develop
+
+# Or install the source-checkout tools manually:
 brew install zig          # or your distro's zig
 cargo install cargo-zigbuild cargo-nextest
 ```
 
-End users of released binaries need none of that — workload guest code comes
-from the universal initramfs and read-only runtime overlay, while
-builder/bootstrap helpers ship with `mvmctl`. You do **not** need host Nix:
-every Nix evaluation runs inside the builder VM. After building, run `mvmctl
-doctor` — it reports the resolved builder backend and emits install hints for
-anything missing.
+The root [`flake.nix`](flake.nix) is a development environment, not a
+workload image. `nix develop` provides the pinned Rust toolchain, Cargo tools,
+formatters, linters, Zig, and documentation tooling used by the contributor
+workflow. Host Nix remains optional for running `mvmctl`: workload Nix
+evaluation and image builds still run inside the managed builder VM. The
+microVM library and image-building flake lives separately under [`nix/`](nix/).
+
+After building, run `mvmctl doctor` — it reports the resolved builder backend
+and emits install hints for anything missing.
 
 ### Build, test, lint
 
