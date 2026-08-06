@@ -898,7 +898,11 @@ mod tests {
             jump_handles(listing, "mvmn_f_a", "mvmna").expect("handles"),
             vec![11, 13]
         );
-        assert!(jump_handles(listing, "mvmn_f_a", "mvmnb").is_empty());
+        assert!(
+            jump_handles(listing, "mvmn_f_a", "mvmnb")
+                .expect("matching interface has no malformed handles")
+                .is_empty()
+        );
     }
 
     #[test]
