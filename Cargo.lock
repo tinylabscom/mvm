@@ -2931,6 +2931,7 @@ dependencies = [
  "async-trait",
  "base64",
  "ext4-view",
+ "flate2",
  "hex",
  "libc",
  "mvm-contract",

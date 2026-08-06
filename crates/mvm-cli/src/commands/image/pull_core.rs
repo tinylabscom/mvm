@@ -268,11 +268,16 @@ fn pull_image_ref(
     let mut prior_layer_paths = std::collections::HashSet::new();
     let mut deferred_nodes = Vec::new();
     for layer in &layers {
-        let compressed =
-            fetch_or_read_layer(cache_root, &runtime, &layer_fetcher, &image_ref, layer)
-                .with_context(|| format!("fetch layer {}", layer.digest))?;
-        let report = unpack_layer_bytes(layer, &compressed, &unpacked_root, &prior_layer_paths)
-            .with_context(|| format!("unpack layer {}", layer.digest))?;
+        let report = fetch_or_unpack_layer(
+            cache_root,
+            &runtime,
+            &layer_fetcher,
+            &image_ref,
+            layer,
+            &unpacked_root,
+            &prior_layer_paths,
+        )
+        .with_context(|| format!("layer {}", layer.digest))?;
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
         cached_layers.push(CachedOciLayer {
@@ -404,21 +409,32 @@ fn manifest_config_descriptor(manifest_bytes: &[u8]) -> Result<Option<LayerDescr
     }))
 }
 
-fn fetch_or_read_layer(
+fn fetch_or_unpack_layer(
     cache_root: &Path,
     runtime: &tokio::runtime::Runtime,
     fetcher: &OciLayerFetcher,
     image_ref: &ImageReference,
     layer: &LayerDescriptor,
-) -> Result<Vec<u8>> {
+    unpacked_root: &Path,
+    prior_layer_paths: &HashSet<PathBuf>,
+) -> Result<UnpackReport> {
     let path = layer_blob_path(&layer.digest)?;
     if let Some(bytes) = read_verified_cache_file(cache_root, &path, &layer.digest)? {
-        return Ok(bytes);
+        return unpack_layer_bytes(layer, &bytes, unpacked_root, prior_layer_paths)
+            .with_context(|| format!("unpack cached layer {}", layer.digest));
     }
-    let mut bytes = Vec::new();
-    runtime.block_on(fetcher.fetch_layer(image_ref, layer, &mut bytes))?;
-    super::cache::write_cache_file(cache_root, &path, &bytes)?;
-    Ok(bytes)
+
+    let cache_abs = safe_cache_path(cache_root, &path)?;
+    runtime
+        .block_on(fetcher.fetch_and_unpack_layer(
+            image_ref,
+            layer,
+            &cache_abs,
+            unpacked_root,
+            &UnpackOptions::default(),
+            prior_layer_paths,
+        ))
+        .with_context(|| format!("fetch and unpack layer {}", layer.digest))
 }
 
 pub(super) fn unpack_layer_bytes(

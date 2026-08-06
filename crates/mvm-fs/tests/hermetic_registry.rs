@@ -10,9 +10,10 @@ mod common;
 use common::{HermeticRegistry, client_config_for, minimal_image_manifest};
 use mvm_fs::oci::{
     LayerDescriptor, LayerFetchOptions, LinuxPlatform, ManifestFetcher, OciError, OciLayerFetcher,
-    OciManifestFetcher, RegistryAuthConfig, verify_sha256_digest,
+    OciManifestFetcher, RegistryAuthConfig, UnpackOptions, verify_sha256_digest,
 };
 use sha2::Digest;
+use std::io::Write;
 use std::time::Duration;
 
 const LAYER_MEDIA: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
@@ -652,6 +653,160 @@ async fn layer_fetch_reuses_manifest_fetcher_bearer_auth() {
         .expect("authenticated layer fetch");
     assert_eq!(n, layer_bytes.len() as u64);
     assert_eq!(sink, layer_bytes);
+}
+
+fn gzip_tar_layer(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, bytes) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(*name).expect("valid tar path");
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, *bytes).expect("append tar entry");
+    }
+    let raw = builder.into_inner().expect("finish tar");
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&raw).expect("gzip input");
+    encoder.finish().expect("finish gzip")
+}
+
+#[tokio::test]
+async fn fetch_and_unpack_layer_streams_and_caches_blob() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = gzip_tar_layer(&[("hello.txt", b"world")]);
+    let layer_digest = reg
+        .register_blob("library/test", LAYER_MEDIA, &layer_bytes)
+        .await;
+
+    let layer = LayerDescriptor {
+        digest: layer_digest.clone(),
+        size: layer_bytes.len() as u64,
+        media_type: LAYER_MEDIA.to_string(),
+    };
+    let fetcher =
+        OciLayerFetcher::with_config(client_config_for(&reg), LayerFetchOptions::default());
+    let image = reg.image_ref("library/test", "v1");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let unpacked = tmp.path().join("unpacked");
+    std::fs::create_dir_all(&unpacked).expect("create unpacked root");
+    let cache = tmp.path().join("layer.tar.gz");
+
+    let report = fetcher
+        .fetch_and_unpack_layer(
+            &image,
+            &layer,
+            &cache,
+            &unpacked,
+            &UnpackOptions::default(),
+            &std::collections::HashSet::new(),
+        )
+        .await
+        .expect("fetch and unpack");
+
+    assert_eq!(report.files_written, 1);
+    assert!(report.refused.is_empty());
+    let out = unpacked.join("hello.txt");
+    assert_eq!(std::fs::read(&out).expect("read unpacked file"), b"world");
+
+    // The raw compressed blob was persisted concurrently.
+    assert_eq!(std::fs::read(&cache).expect("read cache"), layer_bytes);
+}
+
+#[tokio::test]
+async fn fetch_and_unpack_layer_rejects_tampered_blob_and_drops_cache() {
+    let reg = HermeticRegistry::start().await;
+    let intended = gzip_tar_layer(&[("hello.txt", b"world")]);
+    let tampered = gzip_tar_layer(&[("hello.txt", b"evil")]);
+    let claimed_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&intended)));
+    reg.register_tampered_blob("library/test", &claimed_digest, &tampered)
+        .await;
+
+    let layer = LayerDescriptor {
+        digest: claimed_digest.clone(),
+        size: intended.len() as u64,
+        media_type: LAYER_MEDIA.to_string(),
+    };
+    let fetcher =
+        OciLayerFetcher::with_config(client_config_for(&reg), LayerFetchOptions::default());
+    let image = reg.image_ref("library/test", "v1");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let unpacked = tmp.path().join("unpacked");
+    std::fs::create_dir_all(&unpacked).expect("create unpacked root");
+    let cache = tmp.path().join("layer.tar.gz");
+
+    let err = fetcher
+        .fetch_and_unpack_layer(
+            &image,
+            &layer,
+            &cache,
+            &unpacked,
+            &UnpackOptions::default(),
+            &std::collections::HashSet::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, OciError::DigestMismatch { .. }),
+        "expected DigestMismatch, got {err:?}"
+    );
+    assert!(
+        !cache.exists(),
+        "partial cache blob must be removed on digest mismatch"
+    );
+}
+
+#[tokio::test]
+async fn fetch_and_unpack_layer_handles_plain_tar_media_type() {
+    let reg = HermeticRegistry::start().await;
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_path("plain.txt").expect("valid tar path");
+    header.set_size(5);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder.append(&header, &b"howdy"[..]).expect("append");
+    let layer_bytes = builder.into_inner().expect("finish tar");
+    let media_type = "application/vnd.oci.image.layer.v1.tar";
+    let layer_digest = reg
+        .register_blob("library/test", media_type, &layer_bytes)
+        .await;
+
+    let layer = LayerDescriptor {
+        digest: layer_digest,
+        size: layer_bytes.len() as u64,
+        media_type: media_type.to_string(),
+    };
+    let fetcher =
+        OciLayerFetcher::with_config(client_config_for(&reg), LayerFetchOptions::default());
+    let image = reg.image_ref("library/test", "v1");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let unpacked = tmp.path().join("unpacked");
+    std::fs::create_dir_all(&unpacked).expect("create unpacked root");
+    let cache = tmp.path().join("layer.tar");
+
+    let report = fetcher
+        .fetch_and_unpack_layer(
+            &image,
+            &layer,
+            &cache,
+            &unpacked,
+            &UnpackOptions::default(),
+            &std::collections::HashSet::new(),
+        )
+        .await
+        .expect("fetch and unpack plain tar");
+
+    assert_eq!(report.files_written, 1);
+    assert_eq!(
+        std::fs::read(unpacked.join("plain.txt")).expect("read"),
+        b"howdy"
+    );
+    assert_eq!(std::fs::read(&cache).expect("read cache"), layer_bytes);
 }
 
 #[tokio::test]

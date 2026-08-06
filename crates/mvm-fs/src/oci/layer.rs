@@ -28,9 +28,15 @@ use crate::oci::manifest::OciManifestFetcher;
 use crate::oci::reference::ImageReference;
 use crate::oci::registry::{ClientConfig, RegistryAuthConfig, RegistryClient};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+use crate::oci::unpack::{UnpackOptions, UnpackReport, unpack_layer_with_prior_paths};
+use flate2::read::GzDecoder;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// Marker substring stored in the `io::Error` we return from the
@@ -255,6 +261,76 @@ impl OciLayerFetcher {
         }
     }
 
+    /// Stream `layer` from `reference`'s registry, persisting the raw
+    /// compressed bytes to `cache_path` while concurrently decompressing
+    /// and unpacking the tar stream into `unpacked_root`.
+    ///
+    /// This avoids the fetch-to-disk-then-read-back round trip: the gzip
+    /// decoder is fed directly from the network stream, and the cache file
+    /// is written by the same reader. The layer digest is verified over the
+    /// streamed bytes after the unpack completes, so a tampered blob leaves
+    /// a partial tree but never a verified cache entry.
+    ///
+    /// Returns the [`UnpackReport`] for the layer. Callers applying multiple
+    /// layers should accumulate `report.paths_written` and pass it as
+    /// `prior_layer_paths` for the next layer.
+    pub async fn fetch_and_unpack_layer(
+        &self,
+        reference: &ImageReference,
+        layer: &LayerDescriptor,
+        cache_path: &Path,
+        unpacked_root: &Path,
+        options: &UnpackOptions,
+        prior_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<UnpackReport, OciError> {
+        if layer.size > self.options.max_size {
+            return Err(OciError::LayerTooLarge {
+                declared: layer.size,
+                cap: self.options.max_size,
+            });
+        }
+        validate_layer_digest(&layer.digest)?;
+
+        let count = Arc::new(AtomicU64::new(0));
+        let cap_hit = Arc::new(AtomicBool::new(false));
+
+        let mut attempt: u32 = 0;
+        let mut delay = self.options.initial_backoff;
+        loop {
+            let attempt_started_at = count.load(Ordering::SeqCst);
+            let ctx = UnpackAttemptCtx {
+                reference,
+                layer,
+                cache_path,
+                unpacked_root,
+                options,
+                prior_layer_paths,
+            };
+            let res = self
+                .fetch_and_unpack_layer_once(ctx, Arc::clone(&count), Arc::clone(&cap_hit))
+                .await;
+            match res {
+                Ok(report) => return Ok(report),
+                Err(_) if cap_hit.load(Ordering::SeqCst) => {
+                    return Err(OciError::LayerTooLarge {
+                        declared: layer.size,
+                        cap: self.options.max_size,
+                    });
+                }
+                Err(e)
+                    if is_transient(&e)
+                        && attempt < self.options.max_retries
+                        && attempt_started_at == 0 =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     async fn fetch_layer_once(
         &self,
         reference: &ImageReference,
@@ -371,6 +447,238 @@ where
     }
 }
 
+/// Context captured for a single fetch-and-unpack attempt. Grouping these
+/// values keeps the attempt function under the argument-count lint and makes
+/// the retry loop readable.
+struct UnpackAttemptCtx<'a> {
+    reference: &'a ImageReference,
+    layer: &'a LayerDescriptor,
+    cache_path: &'a Path,
+    unpacked_root: &'a Path,
+    options: &'a UnpackOptions,
+    prior_layer_paths: &'a HashSet<PathBuf>,
+}
+
+impl OciLayerFetcher {
+    async fn fetch_and_unpack_layer_once(
+        &self,
+        ctx: UnpackAttemptCtx<'_>,
+        count: Arc<AtomicU64>,
+        cap_hit: Arc<AtomicBool>,
+    ) -> Result<UnpackReport, OciError> {
+        let cap = self.options.max_size;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let gzip = is_gzip_layer(&ctx.layer.media_type);
+
+        let cache_path = ctx.cache_path.to_path_buf();
+        let unpacked_root = ctx.unpacked_root.to_path_buf();
+        let options = ctx.options.clone();
+        let prior_layer_paths = ctx.prior_layer_paths.clone();
+
+        let mut unpack_task = tokio::task::spawn_blocking(move || {
+            let reader = CacheWriterReader::new(rx, &cache_path, cap)
+                .map_err(|e| OciError::Registry(format!("open cache blob: {e}")))?;
+            let mut decoder: LayerDecoder<CacheWriterReader> = if gzip {
+                LayerDecoder::Gzip(GzDecoder::new(reader))
+            } else {
+                LayerDecoder::Plain(reader)
+            };
+
+            let report = unpack_layer_with_prior_paths(
+                &mut decoder,
+                &unpacked_root,
+                &options,
+                &prior_layer_paths,
+            )
+            .map_err(|e| OciError::Unpack(e.to_string()))?;
+
+            let reader = decoder.into_inner();
+            let (total, digest) = reader.finalize();
+            Ok::<(UnpackReport, u64, String), OciError>((
+                report,
+                total,
+                format!("sha256:{}", hex::encode(digest)),
+            ))
+        });
+
+        let cache_path_for_cleanup = ctx.cache_path.to_path_buf();
+        let layer_digest_for_check = ctx.layer.digest.clone();
+        let fetch_result: Result<(), OciError> = async {
+            let expected_digest = layer_digest_for_check.clone();
+            let mut response = self
+                .client
+                .get_blob(ctx.reference, ctx.layer.digest.as_str())
+                .await?;
+            loop {
+                tokio::select! {
+                    chunk = response.response.chunk() => {
+                        let chunk = chunk
+                            .map_err(|e| OciError::Registry(format!("read blob response chunk: {e}")))?;
+                        match chunk {
+                            Some(bytes) => {
+                                let len = bytes.len() as u64;
+                                let current = count.load(Ordering::SeqCst);
+                                if current.saturating_add(len) > cap {
+                                    cap_hit.store(true, Ordering::SeqCst);
+                                    return Err(OciError::LayerTooLarge {
+                                        declared: ctx.layer.size,
+                                        cap,
+                                    });
+                                }
+                                if tx.send(bytes.to_vec()).await.is_err() {
+                                    // The unpack task stopped reading; stop
+                                    // fetching and let the await on it surface
+                                    // the real error.
+                                    return Ok(());
+                                }
+                                count.fetch_add(len, Ordering::SeqCst);
+                            }
+                            None => return Ok(()),
+                        }
+                    }
+                    res = &mut unpack_task => {
+                        let (report, _total, computed) = res
+                            .map_err(|e| OciError::Registry(format!("unpack task join: {e}")))??;
+                        if computed != expected_digest {
+                            return Err(OciError::DigestMismatch {
+                                expected: expected_digest,
+                                computed,
+                            });
+                        }
+                        // A successful unpack cannot finish before the tar
+                        // stream EOF, so reaching here is unexpected but not
+                        // fatal: return the report.
+                        let _ = report;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        .await;
+
+        // Close the channel so the blocking reader reaches EOF.
+        drop(tx);
+
+        let task_result = unpack_task
+            .await
+            .map_err(|e| OciError::Registry(format!("unpack task join: {e}")))?;
+
+        if fetch_result.is_err() {
+            let _ = std::fs::remove_file(&cache_path_for_cleanup);
+        }
+        fetch_result?;
+
+        let (report, _total, computed) = task_result?;
+        if computed != layer_digest_for_check {
+            let _ = std::fs::remove_file(&cache_path_for_cleanup);
+            return Err(OciError::DigestMismatch {
+                expected: layer_digest_for_check,
+                computed,
+            });
+        }
+        Ok(report)
+    }
+}
+
+/// Reads compressed layer chunks from an async channel, writes each chunk
+/// to the cache file, hashes the bytes, and exposes the stream as a sync
+/// `Read` so the `tar` crate can consume it in a blocking thread.
+struct CacheWriterReader {
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    buf: Vec<u8>,
+    pos: usize,
+    file: std::fs::File,
+    hasher: Sha256,
+    total: u64,
+    cap: u64,
+}
+
+impl CacheWriterReader {
+    fn new(
+        rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        path: &Path,
+        cap: u64,
+    ) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(path)?;
+        Ok(Self {
+            rx,
+            buf: Vec::new(),
+            pos: 0,
+            file,
+            hasher: Sha256::new(),
+            total: 0,
+            cap,
+        })
+    }
+
+    fn finalize(self) -> (u64, [u8; 32]) {
+        let digest = self.hasher.finalize();
+        let arr: [u8; 32] = digest.into();
+        (self.total, arr)
+    }
+}
+
+impl Read for CacheWriterReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.buf.len() {
+            match self.rx.blocking_recv() {
+                Some(chunk) => {
+                    if self.total.saturating_add(chunk.len() as u64) > self.cap {
+                        return Err(std::io::Error::other(CAP_EXCEEDED_MSG));
+                    }
+                    self.file.write_all(&chunk)?;
+                    self.hasher.update(&chunk);
+                    self.total += chunk.len() as u64;
+                    self.buf = chunk;
+                    self.pos = 0;
+                }
+                None => return Ok(0),
+            }
+        }
+        let remaining = self.buf.len() - self.pos;
+        let n = remaining.min(out.len());
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// Either a plain tar stream or a gzip-wrapped tar stream. Keeps the
+/// underlying [`CacheWriterReader`] accessible so we can finalize the
+/// digest after `unpack_layer_with_prior_paths` returns.
+enum LayerDecoder<R: Read> {
+    Plain(R),
+    Gzip(GzDecoder<R>),
+}
+
+impl<R: Read> Read for LayerDecoder<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(r) => r.read(buf),
+            Self::Gzip(d) => d.read(buf),
+        }
+    }
+}
+
+impl<R: Read> LayerDecoder<R> {
+    fn into_inner(self) -> R {
+        match self {
+            Self::Plain(r) => r,
+            Self::Gzip(d) => d.into_inner(),
+        }
+    }
+}
+
+/// True for media types that carry a gzip-wrapped tar stream.
+fn is_gzip_layer(media_type: &str) -> bool {
+    media_type.ends_with("+gzip")
+        || media_type.ends_with(".gzip")
+        || media_type.contains("tar.gzip")
+}
+
 fn validate_layer_digest(d: &str) -> Result<(), OciError> {
     let (alg, hex_part) = d
         .split_once(':')
@@ -407,7 +715,8 @@ fn is_transient(e: &OciError) -> bool {
         | OciError::InvalidReference(_)
         | OciError::MalformedDigest(_)
         | OciError::UnsupportedDigestAlgorithm(_)
-        | OciError::LayerTooLarge { .. } => false,
+        | OciError::LayerTooLarge { .. }
+        | OciError::Unpack(_) => false,
     }
 }
 
