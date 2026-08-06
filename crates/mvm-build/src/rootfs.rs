@@ -505,7 +505,7 @@ fn write_sidecar(path: &std::path::Path, body: &[u8]) -> Result<(), RootfsError>
     })
 }
 
-#[cfg(feature = "pure-mkfs")]
+#[cfg(all(feature = "pure-mkfs", feature = "builder-vm"))]
 fn maybe_emit_verity_sidecars(input: &MaterializeExt4Input) -> Result<Option<String>, RootfsError> {
     if !input.emit_verity {
         return Ok(None);
