@@ -268,7 +268,7 @@ mod tests {
             ("apple-container".to_string(), false),
             ("docker".to_string(), false),
             ("firecracker".to_string(), false),
-            ("hvf".to_string(), false),
+            ("hvf".to_string(), true),
             ("libkrun".to_string(), false),
             ("qemu".to_string(), false),
             ("wasm".to_string(), false),

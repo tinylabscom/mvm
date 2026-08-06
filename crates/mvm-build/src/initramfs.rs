@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use mvm_core::arch::GuestArch;
 use mvm_core::build_env::ShellEnvironment;
 use mvm_fs::initramfs::{InitramfsArtifact, InitramfsResolver};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -358,15 +359,17 @@ pub fn install_initramfs_into_cache(
     crate::cache_install::reap_stale_staging(parent, &arch_dir);
     std::fs::create_dir(&staging)?;
 
-    for file in [
+    let files = [
         mvm_fs::initramfs::INITRAMFS_IMAGE_FILE,
         mvm_fs::initramfs::INITRAMFS_HASH_FILE,
         mvm_fs::initramfs::INITRAMFS_SIZE_FILE,
         mvm_fs::initramfs::VERSION_FILE,
-    ] {
+    ];
+    files.into_par_iter().try_for_each(|file| {
         std::fs::copy(source_dir.join(file), staging.join(file))?;
         set_cache_perms(&staging.join(file))?;
-    }
+        Ok::<(), InitramfsBuildError>(())
+    })?;
 
     // Verify before the rename, so a corrupt artifact never becomes visible
     // to a resolver.

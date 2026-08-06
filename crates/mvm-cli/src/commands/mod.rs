@@ -32,7 +32,8 @@ pub(in crate::commands) use build::ir_input::load_ir_json_workload;
 mod tests;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::sync::Arc;
 
 use crate::logging::{self, LogFormat};
@@ -41,7 +42,12 @@ use dispatch::TopLevelCommand;
 use shared::{CHILD_PIDS, IN_CONSOLE_MODE, with_hints};
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "mvmctl", version, about = "Lightweight VM development tool")]
+#[command(
+    name = "mvmctl",
+    version,
+    about = "Lightweight VM development tool",
+    term_width = 80
+)]
 pub(in crate::commands) struct Cli {
     /// Output format
     #[arg(long, global = true)]
@@ -205,12 +211,25 @@ pub(in crate::commands) enum Commands {
 /// Used by the `xtask` crate to generate man pages without duplicating the
 /// command definition.
 pub fn cli_command() -> clap::Command {
-    Cli::command()
+    constrain_help_width(Cli::command())
 }
 
 pub fn run() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let cli = Cli::parse();
+    let cli = match cli_command().try_get_matches_from(std::env::args_os()) {
+        Ok(matches) => Cli::from_arg_matches(&matches)
+            .expect("generated CLI arguments must convert into the typed command"),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            print!("{}", constrain_help_output(&error.to_string()));
+            return Ok(());
+        }
+        Err(error) => error.exit(),
+    };
     apply_startup_env(&cli);
     register_inhouse_builder();
     register_stream_plane();
@@ -237,6 +256,109 @@ pub fn run() -> Result<()> {
     cmd_audit::emit_cmd_outcome(cmd_recorder.as_ref(), verb, &result);
 
     with_hints(result)
+}
+
+fn constrain_help_width(command: clap::Command) -> clap::Command {
+    let mut command = command.term_width(80).max_term_width(80);
+    if let Some(usage) = command
+        .clone()
+        .render_help()
+        .to_string()
+        .lines()
+        .find(|line| line.starts_with("Usage:"))
+        && usage.chars().count() > 80
+    {
+        command = command.override_usage(wrap_usage(usage));
+    }
+    command.mut_subcommands(constrain_help_width)
+}
+
+fn wrap_usage(usage: &str) -> String {
+    let body = usage.strip_prefix("Usage: ").unwrap_or(usage);
+    let continuation_indent = "       ";
+    let line_limit = 80 - continuation_indent.chars().count();
+    let mut wrapped = String::new();
+    let mut line_width = 0;
+
+    for word in body.split_whitespace() {
+        let word_width = word.chars().count();
+        let separator_width = usize::from(line_width > 0);
+        if line_width > 0 && line_width + separator_width + word_width > line_limit {
+            wrapped.push('\n');
+            wrapped.push_str(continuation_indent);
+            line_width = continuation_indent.chars().count();
+        }
+        if line_width > continuation_indent.chars().count() {
+            wrapped.push(' ');
+            line_width += 1;
+        }
+        wrapped.push_str(word);
+        line_width += word_width;
+    }
+    wrapped
+}
+
+fn constrain_help_output(help: &str) -> String {
+    let trailing_newline = help.ends_with('\n');
+    let mut constrained = help
+        .lines()
+        .map(|line| wrap_help_line(line, 80))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if trailing_newline {
+        constrained.push('\n');
+    }
+    constrained
+}
+
+fn wrap_help_line(line: &str, width: usize) -> String {
+    if line.chars().count() <= width {
+        return line.to_owned();
+    }
+
+    let indentation = line
+        .chars()
+        .take_while(|character| character.is_whitespace())
+        .count();
+    let prefix = &line[..line.len() - line.trim_start().len()];
+    let continuation = if line.trim_start().starts_with("Usage:") {
+        "       "
+    } else {
+        prefix
+    };
+    let mut current = String::new();
+    let mut current_limit = width.saturating_sub(indentation);
+    let mut wrapped = Vec::new();
+
+    for word in line.split_whitespace() {
+        let word_width = word.chars().count();
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word_width <= current_limit {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            wrapped.push(current);
+            current = word.to_owned();
+            current_limit = width.saturating_sub(continuation.chars().count());
+        }
+    }
+    if !current.is_empty() {
+        wrapped.push(current);
+    }
+
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            if index == 0 {
+                format!("{prefix}{text}")
+            } else {
+                format!("{continuation}{text}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Set a process-global environment variable from the CLI.

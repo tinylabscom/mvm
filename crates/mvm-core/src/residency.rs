@@ -126,11 +126,15 @@ fn parse_env_residency(raw: &str) -> Option<ResidencyPolicy> {
     }
 }
 
-fn host_default_for(_is_hvf_default_tier: bool) -> ResidencyPolicy {
-    // The default selectable macOS backend does not advertise a standby pool.
-    // Keep the automatic policy parked until a backend with that capability is
-    // selected; an explicit warm request must still fail with a typed error.
-    ResidencyPolicy::parked()
+fn host_default_for(is_hvf_default_tier: bool) -> ResidencyPolicy {
+    // Native HVF keeps one authority-free, paused standby parent so unnamed
+    // transient runs can take the live handoff path. Other hosts retain the
+    // parked default until their own backend advertises an equivalent path.
+    if is_hvf_default_tier {
+        ResidencyPolicy::always_warm()
+    } else {
+        ResidencyPolicy::parked()
+    }
 }
 
 /// The warm-pool size to use: an explicit request wins; otherwise the resolved
@@ -210,8 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn host_default_is_parked_until_a_standby_backend_is_selected() {
-        assert_eq!(host_default_for(true), ResidencyPolicy::parked());
+    fn host_default_warms_native_hvf_and_parks_other_hosts() {
+        assert_eq!(host_default_for(true), ResidencyPolicy::always_warm());
         assert_eq!(host_default_for(false), ResidencyPolicy::parked());
     }
 

@@ -88,6 +88,10 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 - [x] Linux datapath: host TUN + per-machine netns + narrow routes +
       nftables via the existing `NftApplier` seam; no bridge, no TAP,
       no Firecracker net device
+- [x] nftables isolation: all machines share one `inet mvmn` table and one
+      `forward` base chain with a host-wide default drop; each machine owns
+      interface-scoped jump chains for filtering and NAT, and serialized
+      updates/teardown remove only that machine's rules
 - [x] macOS datapath: fails closed with a named error; admission
       refuses `l3-vsock` on macOS
 - [x] deterministic cleanup on stop and on failed startup
@@ -147,9 +151,10 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       protocol, real policy, real gateway, mock datapath — covers
       scenarios 1–8 of the brief
 - [x] privileged Linux end-to-end with real TUN/nftables, gated behind
-      `MVM_L3_PRIVILEGED_TESTS=1`; executed on a Linux/KVM host — 6/6 green,
-      including a live forwarding witness that reads the kernel's own RX
-      counter, and a verified-clean teardown
+      `MVM_L3_PRIVILEGED_TESTS=1`; the lane now contains nine tests,
+      including live forwarding witnesses for two concurrent machines,
+      kernel counters, and verified-clean teardown; Linux/KVM execution is
+      the acceptance gate
 - [x] BDD suite `s25_l3_vsock` (23 scenarios)
 - [x] `UdsGuestChannelProvider` — the concrete per-port Unix-socket
       transport behind the backend-neutral abstraction, covering

@@ -35,6 +35,11 @@ const ALLOWLIST: &[&str] = &[
     // print nothing. 0.3.100 is upstream's own shim over 1.1, so even were a
     // defmt build ever enabled there would be one real copy behind the two.
     "defmt",
+    // `criterion` (the mvm-fs benchmark harness) pulls itertools 0.10, while
+    // cucumber / derive-more / indexmap / zerotrie already resolve itertools
+    // 0.14. Both majors are dev-only/test paths; criterion has no 0.14-compatible
+    // release.
+    "itertools",
     "getrandom",
     "hashbrown",
     // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;
@@ -50,21 +55,11 @@ const ALLOWLIST: &[&str] = &[
     // pins 0.12.1; the two rust-vmm families track different vmm-sys-util
     // majors until they converge.
     "vmm-sys-util",
-    // windows-sys 0.52 and 0.60/0.61 are already an accepted split. Those
-    // versions necessarily resolve matching windows-targets and per-architecture
-    // support crates at 0.52 and 0.53; none of these crates is independently
-    // selectable until the upstream windows-sys users converge.
+    // windows-sys 0.52 and 0.61 are an accepted split; the per-architecture
+    // support crates have since converged, leaving only windows-core/sys as
+    // known duplicates.
     "windows-core",
     "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

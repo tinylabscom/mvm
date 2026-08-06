@@ -490,9 +490,10 @@ setup-libkrun:
 
 # ── Utilities ────────────────────────────────────────────────────────────
 
-# Clean build artifacts
+# Clean build artifacts and the regenerable mvm cache
 clean:
     cargo clean
+    cargo run --quiet -- env cleanup --cache --yes
 
 # Reap leaked host-side helper subprocesses (broker/host-agent/signer/etc.)
 # older than N minutes (default 30). Backstop for the in-binary parent-death

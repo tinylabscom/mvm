@@ -162,6 +162,19 @@ impl From<&mvm_core::vm_backend::VmVolume> for RuntimeVolume {
     }
 }
 
+impl From<&RuntimeVolume> for mvm_core::vm_backend::VmVolume {
+    fn from(v: &RuntimeVolume) -> Self {
+        mvm_core::vm_backend::VmVolume {
+            host: v.host.clone(),
+            guest: v.guest.clone(),
+            size: v.size.clone(),
+            read_only: v.read_only,
+            kind: v.kind,
+            encrypted: v.encrypted,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Config discovery and parsing
 // ---------------------------------------------------------------------------
@@ -720,13 +733,13 @@ ls -lh "$IMAGES_DIR/{name}.$(uname -m).elf"
 }
 
 // ---------------------------------------------------------------------------
-// Read-only host-directory volume images (used by `mvmctl exec --add-dir`)
+// Read-only host-directory volume images (used by `mvmctl exec --mount`)
 // ---------------------------------------------------------------------------
 
 /// Build a read-only ext4 image populated with the contents of a host
 /// directory.
 ///
-/// Used by `mvmctl exec --add-dir host:guest` to share a host directory
+/// Used by `mvmctl exec --mount host:guest` to share a host directory
 /// into a transient microVM without virtio-fs. The image is built
 /// in-process with the memory-safe `mvm-ext4` writer — no builder/dev VM,
 /// no `mkfs`, no mount/copy/unmount — so `host_dir` is read directly by this
@@ -753,7 +766,7 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
     }
 
     if !std::path::Path::new(host_dir).is_dir() {
-        anyhow::bail!("--add-dir host path must be a directory: {host_dir}");
+        anyhow::bail!("--mount host path must be a directory: {host_dir}");
     }
 
     // Reject (rather than skip) unsupported inode kinds: silently dropping a
@@ -786,7 +799,7 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
 /// Mount an ext4 image read-only inside the Linux build environment and
 /// rsync its contents over a host directory.
 ///
-/// Used by `mvmctl exec --add-dir HOST:GUEST:rw` to deliver guest-side
+/// Used by `mvmctl exec --mount HOST:GUEST:rw` to deliver guest-side
 /// writes back to the host once the transient microVM has stopped.
 /// Uses `--delete` so the guest's view of the directory is the
 /// source of truth at sync time — added/modified files are copied over,
@@ -799,7 +812,7 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
 /// an image still attached to a running Firecracker.
 pub fn rsync_image_to_host(image_path: &str, host_dir: &str) -> Result<()> {
     crate::base::linux_env::require_guest_exec_available(
-        "writing '--add-dir :rw' changes back to the host needs an ext4 reader, which doesn't exist yet",
+        "writing '--mount :rw' changes back to the host needs an ext4 reader, which doesn't exist yet",
     )?;
 
     let script = format!(
@@ -853,6 +866,25 @@ mod tests {
     fn build_dir_image_ro_rejects_empty_label() {
         let err = build_dir_image_ro("/tmp/x", "", "/tmp/x.ext4").unwrap_err();
         assert!(err.to_string().contains("ext4 label"));
+    }
+
+    #[test]
+    fn build_dir_image_ro_rejects_a_non_directory_host_path() {
+        let err = build_dir_image_ro(
+            "/this/path/almost/certainly/does/not/exist",
+            "mvm-extra-0",
+            "/tmp/x.ext4",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--mount host path must be a directory"),
+            "expected a directory-check error, got: {msg}"
+        );
+        assert!(
+            msg.contains("/this/path/almost/certainly/does/not/exist"),
+            "{msg}"
+        );
     }
 
     /// `build_dir_image_ro` must materialize the ext4 image in-process (no

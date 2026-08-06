@@ -117,7 +117,12 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        self.runner.capabilities()
+        let mut capabilities = self.runner.capabilities();
+        // Apple Container is a separate opt-in wrapper; it does not route the
+        // context-aware standby claim seam, so it must not inherit HVF's live
+        // handoff capability accidentally.
+        capabilities.standby_pool = false;
+        capabilities
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
@@ -334,7 +339,8 @@ mod tests {
         let (mine, theirs) = (b.capabilities(), runner.capabilities());
         assert_eq!(mine.vsock, theirs.vsock);
         assert_eq!(mine.no_routable_guest_nic, theirs.no_routable_guest_nic);
-        assert_eq!(mine.standby_pool, theirs.standby_pool);
+        assert!(!mine.standby_pool);
+        assert!(theirs.standby_pool);
         assert_eq!(mine.snapshot_capability, theirs.snapshot_capability);
         assert_eq!(mine.pause_resume, theirs.pause_resume);
 
@@ -469,7 +475,8 @@ mod tests {
         );
         assert_eq!(mine.vsock, theirs.vsock);
         assert_eq!(mine.no_routable_guest_nic, theirs.no_routable_guest_nic);
-        assert_eq!(mine.standby_pool, theirs.standby_pool);
+        assert!(!mine.standby_pool);
+        assert!(theirs.standby_pool);
         assert_eq!(mine.snapshot_capability, theirs.snapshot_capability);
         assert_eq!(mine.pause_resume, theirs.pause_resume);
     }

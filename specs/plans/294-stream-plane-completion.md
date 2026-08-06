@@ -222,6 +222,33 @@ they are the most deferrable items here. WS2 is not — it is an open gap.
       two scanners; and redaction opt-out needs operator acknowledgement shaped
       like `MVM_ACK_UNRESTRICTED_NETWORK=1`.
 
+## Next task: plan 296 WS3–WS6
+
+`specs/plans/296-fleet-stream-fan-out.md` is the one substantive piece of the
+stream plane still unbuilt, and it is deliberately parked rather than
+forgotten.
+
+**Landed (#2187):** the edge binding (`StreamEdge`, the two postures,
+`ExecutionPlan.stream_edges`, `check_plan_edges`) and the DAG validator. Both
+are declared dormant in `xtask/dormant-controls.toml` — `mvmd` is their caller,
+and the gate now fails if that stops being true in either direction.
+
+**Not built:** WS3 the connector, WS4 backpressure modes, WS5 claim work,
+WS6 docs.
+
+**Why parked, and what would unpark it.** What landed is *contract*: its shape
+follows from the plan format and from graph theory, so it could be built
+without a caller. The connector is *lifecycle* — who owns the pump, when it
+starts relative to boot, how it is torn down, how a failure surfaces — and
+those answers come from how `mvmd` drives it. Guessing produces the
+abstraction that gets rewritten on first real use, and this one carries the
+guarantees plan 296 itself flags as easiest to lose: the gate's secret scan
+concatenates in acceptance order rather than reassembling by `seq`, and the
+withheld tail must be delivered before close.
+
+Build it when `mvmd` reaches for it, against a real caller. What is on `main`
+is enough for `mvmd` to start declaring edges today.
+
 ## Sequencing
 
 WS-A first — it unblocks CI on 60 commits of finished work, and nothing else on

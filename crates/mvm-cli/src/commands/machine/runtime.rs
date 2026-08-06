@@ -447,7 +447,7 @@ pub(in crate::commands) fn boot_persistent_by_name(
             allow_host: Vec::new(),
             cpus: 2,
             memory: "512M".to_string(),
-            profile: RunProfile::Standard,
+            profile: RunProfile::Dev,
             agent_verb: Vec::new(),
             volume: Vec::new(),
             env: Vec::new(),

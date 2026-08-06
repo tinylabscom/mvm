@@ -214,9 +214,39 @@ updates only its own entry below.
       pagination walk, serde/unknown-field pins, and seeded property loops
       over untrusted audit input.
 
-- [ ] #2079 — persistent + transient launch lifecycle through
-      `LocalBackend` (starts after #2078/#2080/#2081 land the shared
-      inventory/volume/secret types).
+- [x] #2079 — persistent + transient launch lifecycle through
+      `LocalBackend`. `mvm_client::launch` adds the typed `LaunchRequest`
+      (builder-validated at the client boundary: explicit
+      `Transient`/`Persistent` mode, image source, optional name —
+      required for persistent, generated for transient — cpu/memory,
+      backend override, profile, TTL, deny-all-only network policy,
+      typed volume attachments, typed secret references; command
+      overrides, env vars, and egress allow-lists are refused, never
+      dropped). Both modes route through the one admitted-boot seam:
+      `mvm_hostd::run::admit_and_boot_local` grew launch volumes (baked
+      into the signed plan's `shares`, claim-1 checked), a
+      `destroy_on_exit` intent, and optional chain emission
+      (`plan.admitted`/`launched`/`failed` now fire inside
+      `admit_and_start`). `LocalBackend` implements persistent
+      create/start/stop/restart/inspect/remove over the reused
+      `mvm-runtime::machine::persist` spec store (reconcile + force
+      recreate; stop never deletes the spec; removing a RUNNING
+      persistent machine is refused without the explicit force flow) and
+      transient run-to-completion (`wait_for_exit` + captured exit code +
+      `plan.exited`), TTL reaping, and idempotent cleanup
+      (`release_owner_leases`, `clear_machine_references`, registry
+      entries, state dirs). Closes both deferred hooks:
+      `SecretService::record_machine_references` at create/launch +
+      `validate_for_admission` on every admission with references +
+      `clear_machine_references` at remove, and inventory
+      `secret_ref_count` now reads the real `secret-refs.json` sidecar.
+      43 new tests (26 mock-backed lifecycle + 10 request-validation in
+      mvm-client, 4 seam/emitter tests in mvm-hostd — incl. sidecar-ref
+      re-validation on relaunch, deployment-source refusal, post-admission
+      gate refusals emitting terminal plan.failed, and plan.exited capture
+      fidelity — plus inventory count coverage); the Linux/KVM Firecracker E2E for both modes ships
+      `#[ignore]`-gated in `crates/mvm-client/tests/launch_lifecycle_live.rs`
+      (jailer-lite lane pattern; CI wiring deferred).
 
 - [x] #2091 — no workload runs as root. `mvm-oci-init` is pid 1 and spawned
       the agent as a root child, so `is_pid1()` was false, `apply_activation`
@@ -484,11 +514,15 @@ updates only its own entry below.
       ingress), guest `mvm-net-agent`, machine-scoped host gateway, Linux
       host-TUN/nftables datapath, `CONFIG_TUN` in the workload kernel, and
       the amendment's backend-neutral guest channel, per-boot VM identity,
-      signed network lease, and capability-gated forwarding. Wired through
+      signed network lease, and capability-gated forwarding. The Linux
+      nftables datapath now uses one shared default-drop forward hook with
+      interface-scoped per-machine chains, so concurrent machines do not
+      drop each other's admitted traffic. Wired through
       the launch path: synthesis derives the L3 spec from the admitted mode,
       the workload runner starts the gateway and waits for it to bind before
       the guest boots, and every stop path reaps it. Privileged Linux lane
-      run on a KVM host (6/6, live forwarding witness, clean teardown); 23
+      run on a KVM host (nine tests, two-machine live forwarding witnesses,
+      clean teardown); 23
       hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
       and refuses; native Windows is not claimed. Follow-up issue #2186 now
       closes the remaining launch-shape seam: every standing channel in
@@ -1380,6 +1414,9 @@ Then unify + retire the old paths:
 
 - [ ] Redesign to a small, discoverable verb set; `env` shown in `--help`.
 - [ ] Merge `setup`/`bootstrap` into one first-run `bootstrap`. Add the lifecycle verbs: **`upgrade`** (self-update `mvmctl`); **`uninstall`** (remove everything — the binary, `~/.mvm`, and installed host/guest artifacts); **`env cleanup`** (reclaim `~/.mvm` — caches + transient VM/build state, keeping config + keys); **`env reset`** (wipe `~/.mvm` back to a clean slate). These replace the fragmented `cache prune` / `pack prune` / `storage gc`. `env` becomes a visible top-level subcommand (today `hide = true`).
+- [x] `just clean` now removes build artifacts and the regenerable `~/.mvm/cache`
+      through `mvmctl env cleanup --cache`; cache cleanup shows progress, and
+      BDD coverage verifies every subcommand's help stays within 80 columns.
 - [ ] Replace the 31-arm dispatch `match` with a `Command` trait (`fn run(&self, ctx: &Cli) -> Result<()>`); one module per command; every command calls `mvm-client`.
 - [x] ~~`mvmctl serve` exposes the agent-facing server behind an `AgentProtocol` trait~~ — descoped. The MCP server was removed outright; no agent-protocol server surface remains.
 - [ ] Remove hidden/duplicate/dead verbs.
@@ -1440,11 +1477,13 @@ Then unify + retire the old paths:
       the boot-pinned host identity but receives no workload grant. A real
       host-key signature is verified in the hermetic warm-claim BDD, and a
       missing issuer or mismatched envelope refuses before fork with no orphan.
-      `standby_pool` stays **`false`**: the **claim** half has still never
-      completed live. It now reaches the signed-parent check and refuses because
-      the capture path does not emit `checkpoint.created` (#1962), so the
-      post-restore grant delivery and the child's egress/broker/exit channels
-      remain live-unproven. The flip is gated on that run.
+      The native macOS fast-start follow-up (#2174) now gives HVF an explicit
+      paused-parent live handoff: the parent is content/lineage anchored, the
+      claim materializes a child rootfs, wires child-owned egress and broker
+      endpoints before resume, and requires the fresh identity handshake before
+      activation. HVF advertises the standby capability only through that
+      driver path; serialized fresh-VMM restore remains unsupported. Live Apple
+      Silicon timing and security witnesses are still the merge gate.
   - [x] Ordinary persistent-machine Firecracker teardown now fails closed
         (#2007): non-interactive or declined confirmation exits non-zero, state
         is retained unless process exit is verified, and a restart cannot

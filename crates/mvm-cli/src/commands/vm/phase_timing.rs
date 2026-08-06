@@ -19,7 +19,7 @@ pub struct RunPhaseMarks {
     pub start: Instant,
     /// Kernel/rootfs artifacts resolved (template load or prebuilt pair).
     pub image_resolved: Instant,
-    /// `--add-dir` images built and the verity sidecar probed.
+    /// `--mount` images built and the verity sidecar probed.
     pub drives_ready: Instant,
     /// The transient workload's signed plan was admitted (or admission skipped).
     pub admitted: Instant,

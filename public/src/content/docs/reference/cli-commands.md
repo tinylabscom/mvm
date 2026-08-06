@@ -114,6 +114,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl env cleanup --all` | Remove all cached build revisions |
 | `mvmctl env cleanup --keep <N>` | Keep the N newest build revisions |
 | `mvmctl env cleanup --verbose` | Print each cached build path that gets removed |
+| `mvmctl env cleanup --cache` | Remove the regenerable `~/.mvm/cache` |
 
 ## Manifests
 

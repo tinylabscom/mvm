@@ -1,6 +1,6 @@
 # Plan 296 — fleet stream fan-out
 
-**Status:** WS1 + WS2 landed. WS3–WS6 outstanding.
+**Status:** WS1–WS4 landed. WS5 + WS6 outstanding.
 
 `mvm` ships the mechanism; `mvmd` declares the edges and resolves the bindings.
 That split is why the landed half has **no production caller in this
@@ -85,13 +85,32 @@ Two consequences worth stating plainly, because they will surprise someone:
   self-edge, the two-node cycle, a five-node cycle, a cycle in a second
   disjoint component, and a diamond that must *not* be mistaken for one.
 
-- [ ] **WS3 — the connector.** Pump A's `ReaderHandle` into B's `InputSession`
+- [x] **WS3 — the connector.** Landed as `EdgeConnector`, deliberately
+  **caller-driven**: `step()` moves what is available and returns, owning no
+  thread, no timer and no lifecycle. The caller is in another repository, and
+  a connector that had picked those answers here would have picked them blind.
+  What it does own is local: acceptance order (one pass, never reordered,
+  `seq` strictly increasing across the edge's life), lease upkeep on every
+  step including idle ones, and `close()` routing through
+  `InputSession::close` so the scanner's withheld tail is delivered rather
+  than dropped.
+
+  **E2 cannot be served from this reader, and that is a finding.** Redaction
+  runs before hashing, so a record reaching a `ReaderHandle` has already
+  crossed the seam and no raw copy survives. A `Raw` edge is therefore refused
+  at construction rather than handed masked bytes under a fidelity label —
+  serving it needs a pre-seam tap, which is a different design. Why it existed: Pump A's `ReaderHandle` into B's `InputSession`
   in acceptance order, honouring the lease and refreshing it. This is where
   plan 283's guarantees are easiest to lose: the gate's secret scan concatenates
   in acceptance order and does not reassemble by `seq`, and the withheld tail
   must be delivered before close. Both need a test that fails if dropped.
 
-- [ ] **WS4 — backpressure modes.** Implement `lossy` and `reliable` per E4, and
+- [x] **WS4 — backpressure modes.** Landed, and smaller than expected because
+  the ring already existed: the reader's queue is bounded and already evicts,
+  so the producer cannot be stalled by a slow consumer no matter what this
+  does. What the mode decides is the *reaction* to a gap the reader reports —
+  `Lossy` marks it and carries on, `Reliable` fails the edge. No second
+  buffer, which is one fewer place for records to go missing. Why it existed: Implement `lossy` and `reliable` per E4, and
   prove the distinction: a slow consumer on a `lossy` edge produces a marked gap;
   on a `reliable` edge it produces a loud edge failure. Neither stalls the
   producer — that invariant is inherited and must be re-verified here, not

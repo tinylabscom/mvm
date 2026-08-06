@@ -60,7 +60,7 @@ Feature: machine run request contract
     When I run mvmctl in the isolated mvm home with "machine run --image alpine --dry-run --name bdd-dry-run -- /bin/true"
     Then the command exits with code 0
     And the output contains "no VM will be booted"
-    And the output contains "profile: standard"
+    And the output contains "profile: dev"
     And the isolated mvm home does not contain directory "vms/bdd-dry-run"
 
   # Deny-all is the default posture, and a dry run is where an operator checks

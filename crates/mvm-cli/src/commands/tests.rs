@@ -6,6 +6,17 @@ use super::*;
 use clap::Parser;
 use std::path::Path;
 
+#[test]
+fn help_output_wraps_long_lines() {
+    let help =
+        "  command  A long description that must wrap before it exceeds the fixed output width";
+    let wrapped = constrain_help_output(help);
+
+    assert!(wrapped.lines().all(|line| line.chars().count() <= 80));
+    assert!(wrapped.lines().count() > 1);
+    assert!(wrapped.contains("\n  "));
+}
+
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
 use super::build::build;
@@ -1755,7 +1766,7 @@ fn test_run_command_is_recognized() {
     match cli.command {
         Commands::Machine(mg) => match mg.action {
             machine::MachineAction::Run(machine::MachineRunArgs { profile, argv, .. }) => {
-                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(profile, exec::RunProfile::Dev);
                 assert_eq!(argv, vec!["/bin/true".to_string()]);
             }
             _ => panic!("Expected machine run"),
@@ -3062,7 +3073,7 @@ fn run_default_profile_argv_only() {
                 assert!(allow_host.is_empty());
                 assert_eq!(cpus, 2);
                 assert_eq!(memory, "512M");
-                assert_eq!(profile, exec::RunProfile::Standard);
+                assert_eq!(profile, exec::RunProfile::Dev);
                 assert!(volume.is_empty());
                 assert!(env.is_empty());
                 assert_eq!(timeout, None);

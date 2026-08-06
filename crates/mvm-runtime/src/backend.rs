@@ -1682,7 +1682,7 @@ mod tests {
             ("apple-container", SnapshotCapability::Unsupported, false),
             ("docker", SnapshotCapability::Unsupported, false),
             ("firecracker", SnapshotCapability::Unsupported, false),
-            ("hvf", SnapshotCapability::Unsupported, false),
+            ("hvf", SnapshotCapability::Unsupported, true),
             ("libkrun", SnapshotCapability::Unsupported, false),
             ("qemu", SnapshotCapability::Unsupported, false),
             ("wasm", SnapshotCapability::Unsupported, false),

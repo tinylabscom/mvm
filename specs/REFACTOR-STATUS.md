@@ -602,7 +602,9 @@ for detailed scope and acceptance criteria.
         with a local standalone authority, capability-gated forwarding
         backends, and the launch-specification no-guest-NIC guard
   - [x] Privileged Linux lane executed on a Linux/KVM host: real host TUN,
-        real nftables, live forwarding witness, verified-clean teardown
+        real nftables, one shared default-drop forward hook with isolated
+        per-machine chains, live forwarding witnesses for two machines,
+        verified-clean teardown (nine privileged tests)
   - [x] BDD suite `s25_l3_vsock` (23 hermetic scenarios)
   - [x] Workload `VmmSpec` mapping carries the typed L3 control/data channels;
         netd socket layout follows the selected backend
@@ -676,7 +678,9 @@ for detailed scope and acceptance criteria.
   - [x] Persistent-machine Firecracker stop fails closed and preserves state
         until process exit is verified (#2007; live KVM recheck passed)
   - [~] Live warm-launch, fork-isolation, and restore-clock verification
-        — parent audit anchoring is fixed and live-proven (#1962); the claim
-        now restores a child and stops at post-restore identity/grant re-pin
+        — parent audit anchoring is fixed and live-proven (#1962); native HVF
+        now has a paused-parent handoff with child-owned channel wiring and
+        post-restore identity/grant re-pin (#2174). Serialized fresh-VMM
+        restore and live Apple Silicon witnesses remain open.
   - [ ] Typed-connector egress-policy enrichment
   - [ ] OCI-image template build path and CLI facade completion
