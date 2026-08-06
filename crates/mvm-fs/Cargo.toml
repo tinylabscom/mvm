@@ -33,8 +33,13 @@ xattr = { workspace = true }
 [dev-dependencies]
 am-fs-ext4 = "0.4"
 base64.workspace = true
+criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "rt-multi-thread", "test-util", "time"] }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "in_memory_build"
+harness = false
