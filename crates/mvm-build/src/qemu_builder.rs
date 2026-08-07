@@ -779,7 +779,16 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     for (tag, dir) in shares.iter().copied() {
         let sock = qemu_virtiofs_socket_path(&job_id, tag);
         virtiofsd
-            .spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir, false)
+            .spawn(
+                crate::virtiofsd::SpawnParams::new(
+                    &virtiofsd_bin,
+                    virtiofsd_flavor,
+                    tag,
+                    &sock,
+                    dir,
+                )
+                .read_only(false),
+            )
             .map_err(|e| BuilderVmError::VmmUnavailable {
                 requested: "virtiofsd".to_string(),
                 reason: format!("{e:#}"),
@@ -1032,7 +1041,16 @@ fn run_build_qemu(
     for (tag, dir) in shares.iter().copied() {
         let sock = qemu_virtiofs_socket_path(&job_id, tag);
         virtiofsd
-            .spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir, false)
+            .spawn(
+                crate::virtiofsd::SpawnParams::new(
+                    &virtiofsd_bin,
+                    virtiofsd_flavor,
+                    tag,
+                    &sock,
+                    dir,
+                )
+                .read_only(false),
+            )
             .map_err(|e| BuilderVmError::VmmUnavailable {
                 requested: "virtiofsd".to_string(),
                 reason: format!("{e:#}"),

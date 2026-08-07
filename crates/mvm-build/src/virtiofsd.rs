@@ -69,17 +69,61 @@ pub struct VirtiofsdGuard {
     procs: Vec<(Child, PathBuf)>,
 }
 
+/// Parameters for spawning a single `virtiofsd` instance.
+///
+/// Uses a builder so the call site stays readable as more options accrue.
+pub struct SpawnParams<'a> {
+    pub bin: &'a Path,
+    pub flavor: VirtiofsdFlavor,
+    pub tag: &'a str,
+    pub sock: &'a Path,
+    pub dir: &'a Path,
+    pub read_only: bool,
+    pub dax: bool,
+}
+
+impl<'a> SpawnParams<'a> {
+    pub fn new(
+        bin: &'a Path,
+        flavor: VirtiofsdFlavor,
+        tag: &'a str,
+        sock: &'a Path,
+        dir: &'a Path,
+    ) -> Self {
+        Self {
+            bin,
+            flavor,
+            tag,
+            sock,
+            dir,
+            read_only: false,
+            dax: false,
+        }
+    }
+
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    pub fn dax(mut self, dax: bool) -> Self {
+        self.dax = dax;
+        self
+    }
+}
+
 impl VirtiofsdGuard {
     /// Spawn a `virtiofsd` exporting `dir` on the unix socket `sock`.
-    pub fn spawn(
-        &mut self,
-        bin: &Path,
-        flavor: VirtiofsdFlavor,
-        tag: &str,
-        sock: &Path,
-        dir: &Path,
-        read_only: bool,
-    ) -> Result<()> {
+    pub fn spawn(&mut self, params: SpawnParams<'_>) -> Result<()> {
+        let SpawnParams {
+            bin,
+            flavor,
+            tag,
+            sock,
+            dir,
+            read_only,
+            dax,
+        } = params;
         let _ = std::fs::remove_file(sock);
         let mut cmd = Command::new(bin);
         cmd.arg(format!("--socket-path={}", sock.display()));
@@ -90,6 +134,11 @@ impl VirtiofsdGuard {
                 if read_only {
                     cmd.arg("--readonly");
                 }
+                if dax {
+                    // DAX acceleration requires the daemon to keep host pages
+                    // mapped and answer FUSE_SETUPMAPPING.
+                    cmd.args(["--cache", "always"]);
+                }
             }
             VirtiofsdFlavor::C => {
                 let mut opt = format!("source={}", dir.display());
@@ -97,6 +146,9 @@ impl VirtiofsdGuard {
                     opt.push_str(",readonly");
                 }
                 cmd.arg("-o").arg(opt);
+                if dax {
+                    cmd.arg("-o").arg("cache=always");
+                }
             }
         }
         let child = cmd

@@ -36,7 +36,7 @@ use crate::qemu::{
     self, QEMU_LOG_FILE, QEMU_PID_FILE, QemuBackend, QemuBridgeGuestDial, QemuBridgeHostDial,
     QemuBridgeSpec,
 };
-use mvm_build::virtiofsd::{VirtiofsdGuard, locate_virtiofsd};
+use mvm_build::virtiofsd::{SpawnParams, VirtiofsdGuard, locate_virtiofsd};
 
 /// The QEMU VMM driver: pure VMM mechanics, no policy and no admission. It
 /// boots what a `VmmSpec` describes and relays the guest's channels through
@@ -165,9 +165,14 @@ fn qemu_boot_argv(
             args.push("-chardev".into());
             args.push(format!("socket,id=vfs-{tag},path={}", sock.display()));
             args.push("-device".into());
-            args.push(format!(
-                "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
-            ));
+            let mut fs_dev =
+                format!("vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}");
+            if share.dax {
+                // DAX window size per share. 256 MiB matches the HVF/libkrun
+                // DAX window budget without ballooning the QEMU memory backend.
+                fs_dev.push_str(",cache-size=256M");
+            }
+            args.push(fs_dev);
         }
     }
 
@@ -358,12 +363,15 @@ impl VmmDriver for QemuDriver {
             for share in &spec.shares {
                 let sock = qemu_virtiofs_socket_path(&spec.name, &share.tag);
                 guard.spawn(
-                    &virtiofsd_bin,
-                    virtiofsd_flavor,
-                    &share.tag,
-                    &sock,
-                    &share.host_path,
-                    share.read_only,
+                    SpawnParams::new(
+                        &virtiofsd_bin,
+                        virtiofsd_flavor,
+                        &share.tag,
+                        &sock,
+                        &share.host_path,
+                    )
+                    .read_only(share.read_only)
+                    .dax(share.dax),
                 )?;
             }
             virtiofsd = Some(guard);
