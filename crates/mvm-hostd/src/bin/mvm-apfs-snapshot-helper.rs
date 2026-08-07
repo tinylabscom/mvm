@@ -77,13 +77,13 @@ mod tests {
             OsString::from("--socket"),
             OsString::from("/var/run/mvm/apfs.sock"),
             OsString::from("--root"),
-            OsString::from("/Users/test/.mvm"),
+            OsString::from("/tmp/mvm-test-state"),
             OsString::from("--uid"),
             OsString::from("501"),
         ];
         let (socket, root, uid) = parse_args(&args).expect("valid helper arguments");
         assert_eq!(socket, std::path::PathBuf::from("/var/run/mvm/apfs.sock"));
-        assert_eq!(root, std::path::PathBuf::from("/Users/test/.mvm"));
+        assert_eq!(root, std::path::PathBuf::from("/tmp/mvm-test-state"));
         assert_eq!(uid, 501);
     }
 
