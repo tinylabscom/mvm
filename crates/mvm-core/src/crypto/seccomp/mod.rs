@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+#[cfg(target_os = "linux")]
+pub mod syscall_table;
+
 /// Cumulative seccomp profile tiers. Each tier is a strict superset of the
 /// previous one, adding more syscall permissions for broader workload needs.
 ///

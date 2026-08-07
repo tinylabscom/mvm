@@ -492,6 +492,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
+    // Host-side developer tool: ptrace a command and report syscalls. No host
+    // audit-chain emission of its own; classified as interactive/control.
+    ("seccomp-audit", AuditPosture::InteractiveOrControl),
 ];
 
 // ──────────────────────────────────────────────────────────────────
