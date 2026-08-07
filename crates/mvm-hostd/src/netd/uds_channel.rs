@@ -50,6 +50,16 @@ impl UdsLayout {
             Self::HvfVsockDir => mvm_core::config::vm_hvf_vsock_port_socket(vm_id, service.port()),
         }
     }
+
+    fn socket_path_at(self, home: impl AsRef<Path>, vm_id: &str, service: GuestService) -> PathBuf {
+        let state_dir = mvm_core::config::vm_state_dir_at(home, vm_id);
+        match self {
+            Self::PerVmDir => mvm_core::config::vm_vsock_port_socket_at(&state_dir, service.port()),
+            Self::HvfVsockDir => {
+                mvm_core::config::vm_hvf_vsock_port_socket_at(&state_dir, service.port())
+            }
+        }
+    }
 }
 
 /// A [`GuestChannelProvider`] over per-port Unix sockets.
@@ -57,6 +67,7 @@ impl UdsLayout {
 pub struct UdsGuestChannelProvider {
     layout: UdsLayout,
     backend_name: &'static str,
+    root: Option<PathBuf>,
 }
 
 impl UdsGuestChannelProvider {
@@ -65,6 +76,7 @@ impl UdsGuestChannelProvider {
         Self {
             layout: UdsLayout::PerVmDir,
             backend_name,
+            root: None,
         }
     }
 
@@ -73,6 +85,25 @@ impl UdsGuestChannelProvider {
         Self {
             layout: UdsLayout::HvfVsockDir,
             backend_name: "hvf",
+            root: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn per_vm_dir_at(backend_name: &'static str, root: impl Into<PathBuf>) -> Self {
+        Self {
+            layout: UdsLayout::PerVmDir,
+            backend_name,
+            root: Some(root.into()),
+        }
+    }
+
+    #[cfg(test)]
+    fn hvf_at(root: impl Into<PathBuf>) -> Self {
+        Self {
+            layout: UdsLayout::HvfVsockDir,
+            backend_name: "hvf",
+            root: Some(root.into()),
         }
     }
 
@@ -82,7 +113,10 @@ impl UdsGuestChannelProvider {
 
     /// Where `service` for `instance` lives.
     pub fn socket_path(&self, instance: &VmInstanceIdentity, service: GuestService) -> PathBuf {
-        self.layout.socket_path(&instance.vm_id, service)
+        match &self.root {
+            Some(root) => self.layout.socket_path_at(root, &instance.vm_id, service),
+            None => self.layout.socket_path(&instance.vm_id, service),
+        }
     }
 }
 
@@ -239,38 +273,25 @@ mod tests {
         VmInstanceIdentity::new("node-1", "vm-uds-test", "boot-1", "sha256:plan")
     }
 
-    /// Point `MVM_HOME` at a scenario-local directory so the socket paths
-    /// are the real ones, resolved the real way, without touching a
-    /// developer's home.
+    /// Keep each test's socket tree isolated without mutating process-wide
+    /// environment variables, which would race with tests in other modules.
     struct HomeGuard {
         _dir: tempfile::TempDir,
-        previous: Option<std::ffi::OsString>,
     }
 
     impl HomeGuard {
         fn new() -> Self {
             let dir = tempfile::tempdir().expect("temp home");
-            let previous = std::env::var_os("MVM_HOME");
-            // SAFETY: these tests run serially within this module and
-            // restore the previous value on drop.
-            unsafe { std::env::set_var("MVM_HOME", dir.path()) };
-            Self {
-                _dir: dir,
-                previous,
-            }
+            Self { _dir: dir }
         }
     }
 
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: as above.
-            unsafe {
-                match &self.previous {
-                    Some(prev) => std::env::set_var("MVM_HOME", prev),
-                    None => std::env::remove_var("MVM_HOME"),
-                }
-            }
-        }
+    fn per_vm_provider(home: &HomeGuard) -> UdsGuestChannelProvider {
+        UdsGuestChannelProvider::per_vm_dir_at("libkrun", home._dir.path())
+    }
+
+    fn hvf_provider(home: &HomeGuard) -> UdsGuestChannelProvider {
+        UdsGuestChannelProvider::hvf_at(home._dir.path())
     }
 
     fn bound_listener_for_test() -> (Box<dyn GuestListener>, PathBuf) {
@@ -286,7 +307,7 @@ mod tests {
     #[test]
     fn each_service_gets_its_own_socket_path() {
         let _home = HomeGuard::new();
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let provider = per_vm_provider(&_home);
         let instance = instance();
         let control = provider.socket_path(&instance, GuestService::NetworkControl);
         let data = provider.socket_path(&instance, GuestService::NetworkData { queue: 0 });
@@ -301,10 +322,8 @@ mod tests {
     #[test]
     fn the_hvf_layout_lives_one_directory_deeper() {
         let _home = HomeGuard::new();
-        let per_vm = UdsGuestChannelProvider::per_vm_dir("libkrun")
-            .socket_path(&instance(), GuestService::NetworkControl);
-        let hvf =
-            UdsGuestChannelProvider::hvf().socket_path(&instance(), GuestService::NetworkControl);
+        let per_vm = per_vm_provider(&_home).socket_path(&instance(), GuestService::NetworkControl);
+        let hvf = hvf_provider(&_home).socket_path(&instance(), GuestService::NetworkControl);
         assert_ne!(per_vm, hvf);
         assert!(hvf.to_string_lossy().contains("vsock"), "{hvf:?}");
     }
@@ -312,7 +331,7 @@ mod tests {
     #[test]
     fn a_bound_service_accepts_a_connection_tagged_with_the_listeners_identity() {
         let _home = HomeGuard::new();
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let provider = per_vm_provider(&_home);
         let instance = instance();
         let mut listener = provider
             .bind_service(&instance, GuestService::NetworkControl)
@@ -350,7 +369,7 @@ mod tests {
     #[test]
     fn binding_over_a_stale_socket_from_a_previous_boot_succeeds() {
         let _home = HomeGuard::new();
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let provider = per_vm_provider(&_home);
         let instance = instance();
 
         let first = provider
@@ -373,7 +392,7 @@ mod tests {
     #[test]
     fn closing_a_listener_removes_its_socket() {
         let _home = HomeGuard::new();
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let provider = per_vm_provider(&_home);
         let instance = instance();
         let path = provider.socket_path(&instance, GuestService::NetworkControl);
         {
@@ -391,7 +410,7 @@ mod tests {
     #[test]
     fn revoking_an_instance_removes_every_service_socket() {
         let _home = HomeGuard::new();
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let provider = per_vm_provider(&_home);
         let instance = instance();
         let control = provider
             .bind_service(&instance, GuestService::NetworkControl)
@@ -420,7 +439,7 @@ mod tests {
     #[test]
     fn revoking_twice_is_not_an_error() {
         let _home = HomeGuard::new();
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let provider = per_vm_provider(&_home);
         let instance = instance();
         provider.revoke_instance(&instance).expect("first revoke");
         provider.revoke_instance(&instance).expect("second revoke");
@@ -429,7 +448,7 @@ mod tests {
     #[test]
     fn connecting_to_an_unbound_service_fails_rather_than_hanging() {
         let _home = HomeGuard::new();
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let provider = per_vm_provider(&_home);
         match provider.connect_service(&instance(), GuestService::NetworkData { queue: 0 }) {
             Err(ChannelError::Io { .. }) => {}
             Err(other) => panic!("expected an I/O refusal, got {other}"),
@@ -441,7 +460,7 @@ mod tests {
     fn the_socket_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let _home = HomeGuard::new();
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let provider = per_vm_provider(&_home);
         let instance = instance();
         let _listener = provider
             .bind_service(&instance, GuestService::NetworkControl)
