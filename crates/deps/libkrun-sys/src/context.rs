@@ -54,6 +54,16 @@ pub struct KrunVirtioFs {
     /// [`start_enter`](crate::start_enter) runs (libkrun's daemon
     /// resolves it eagerly).
     pub host_path: String,
+    /// DAX window size in bytes. `None` disables DAX for this share;
+    /// `Some(n)` maps host file pages directly into the guest address
+    /// space up to `n` bytes.
+    #[serde(default)]
+    pub shm_size: Option<u64>,
+    /// Force the host-side export read-only. Requires libkrun's
+    /// `krun_add_virtiofs3`; older wrappers fall back to v1 when this
+    /// is false and `shm_size` is `None`.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// A per-port override for the host-side unix socket a host-listen
@@ -542,6 +552,25 @@ impl KrunContext {
         self.virtio_fs_mounts.push(KrunVirtioFs {
             tag: tag.into(),
             host_path: host_path.into(),
+            shm_size: None,
+            read_only: false,
+        });
+        self
+    }
+
+    /// Declare a virtio-fs share with explicit DAX and read-only flags.
+    pub fn add_virtio_fs_full(
+        mut self,
+        tag: impl Into<String>,
+        host_path: impl Into<String>,
+        shm_size: Option<u64>,
+        read_only: bool,
+    ) -> Self {
+        self.virtio_fs_mounts.push(KrunVirtioFs {
+            tag: tag.into(),
+            host_path: host_path.into(),
+            shm_size,
+            read_only,
         });
         self
     }

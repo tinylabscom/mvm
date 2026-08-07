@@ -1,0 +1,36 @@
+[package]
+name = "mvm-vmm"
+version.workspace = true
+edition.workspace = true
+description = "Backend-agnostic VMM device model and hypervisor seam"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Egress policy types used by the vsock egress bridge.
+mvm-core = { workspace = true }
+# Well-known vsock port constants for the in-guest agent.
+mvm-agentd = { workspace = true }
+
+# Host event loop for the vsock host-side I/O thread.
+mio = { workspace = true, features = ["os-poll", "os-ext"] }
+
+# virtio split-virtqueue primitive used by virtio-mmio devices.
+virtio-queue = "0.18"
+# virtio-vsock packet layout for the vsock device.
+virtio-vsock = "0.12"
+# rust-vmm guest-memory primitive for safe guest DMA access.
+vm-memory = { version = "0.18", default-features = false, features = ["backend-mmap"] }
+
+# Entropy source for virtio-rng.
+rand.workspace = true
+# Unix sockets / file descriptors.
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

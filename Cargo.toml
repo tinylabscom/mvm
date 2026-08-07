@@ -11,6 +11,7 @@ members = [
     "crates/mvm-net",
     "crates/deps/libkrun-sys",
     "crates/mvm-runtime",
+    "crates/mvm-vmm",
     "crates/mvm-build",
     "crates/mvm-agentd",
     "crates/mvm-cli",
@@ -353,6 +354,7 @@ mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
+mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0" }
 mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
 mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }

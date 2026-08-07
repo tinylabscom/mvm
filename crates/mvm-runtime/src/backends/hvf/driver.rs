@@ -22,14 +22,14 @@ use mvm_core::vm_backend::{
 };
 use mvm_net::channel::GuestService;
 
+use super::backend::{
+    self as hvf_backend, HvfBackend, PID_FILE_NAME, PID_FILE_POLL_INTERVAL, PID_FILE_TIMEOUT,
+    resolve_supervisor_path,
+};
 use crate::driver::spec::KernelImage;
 use crate::driver::{
     ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver, VmmSpec,
     VsockDirection,
-};
-use crate::hvf_backend::{
-    self, HvfBackend, PID_FILE_NAME, PID_FILE_POLL_INTERVAL, PID_FILE_TIMEOUT,
-    resolve_supervisor_path,
 };
 
 /// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
@@ -144,7 +144,11 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         memory_mib: spec.memory_mib,
         initramfs: spec.initramfs.clone(),
         disks,
-        virtiofs_root: None,
+        virtiofs_root: spec
+            .shares
+            .iter()
+            .find(|s| s.tag == "mvmroot")
+            .map(|s| s.host_path.clone()),
         vsock: true,
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),
@@ -381,7 +385,7 @@ impl VmmDriver for HvfDriver {
     }
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+        crate::backends::hvf::workload_bootargs(virtiofs_root, has_disk)
     }
 }
 
@@ -580,6 +584,7 @@ mod tests {
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
+            shares: Vec::new(),
         }
     }
 
@@ -643,11 +648,11 @@ mod tests {
         let d = HvfDriver::new();
         assert_eq!(
             d.workload_base_bootargs(false, true),
-            crate::hvf_bootargs::workload_bootargs(false, true)
+            crate::backends::hvf::workload_bootargs(false, true)
         );
         assert_eq!(
             d.workload_base_bootargs(true, false),
-            crate::hvf_bootargs::workload_bootargs(true, false)
+            crate::backends::hvf::workload_bootargs(true, false)
         );
     }
 

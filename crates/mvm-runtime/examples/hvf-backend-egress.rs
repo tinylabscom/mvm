@@ -53,7 +53,7 @@ fn main() {
     {
         use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
         use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
-        use mvm_runtime::hvf_backend::HvfBackend;
+        use mvm_runtime::backends::hvf::HvfBackend;
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::time::Duration;

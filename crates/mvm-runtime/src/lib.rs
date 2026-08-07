@@ -10,7 +10,7 @@
 //
 // - **Firecracker** (`backend::FirecrackerBackend`) + the `AnyBackend`
 //   dispatch enum — the production Tier 1 path.
-// - **HVF** (`hvf_backend::HvfBackend`) — the in-house Hypervisor.framework
+// - **HVF** (`backends::hvf::HvfBackend`) — the in-house Hypervisor.framework
 //   VMM; the macOS-26 workload default.
 // - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
 //   (Linux KVM / macOS HVF).
@@ -37,6 +37,8 @@ pub mod audit_substrate;
 /// (supervisors + the substitution endpoint); one impl, no drift.
 pub(crate) mod aux_bin;
 pub mod backend;
+/// Per-hypervisor backend implementations (HVF, Firecracker, libkrun, QEMU, etc.).
+pub mod backends;
 pub mod base;
 /// Per-VM broker-services (`mvm-broker` / `mvm-audit-signer`) subprocess
 /// spawn/reap helpers, mirroring [`substitution_spawn`].
@@ -58,17 +60,7 @@ pub mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
 pub(crate) mod host_agent_spawn;
-/// Raw HVF (`Hypervisor.framework`) backend spike — drives [`vmm`] on macOS /
-/// Apple silicon. Links the system framework, so
-/// it is cfg-gated off every other target.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub mod hvf;
-/// `HvfBackend` — the `VmBackend` for the raw-HVF macOS path. Compiles
-/// on every target (lifecycle = spawn the detached `mvm-hvf-supervisor` + track
-/// PID files; only availability probing is macOS-specific), so it registers in
-/// `AnyBackend`/the catalog without cfg-gymnastics.
-pub mod hvf_backend;
-pub(crate) mod hvf_bootargs;
+
 pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification
 /// (the image analog of [`checkpoint`]). Reuses the shared `lineage` walk.
@@ -114,10 +106,8 @@ pub(crate) mod test_support;
 /// Portable, hypervisor-agnostic VMM device model (guest memory, FDT, kernel
 /// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform
 /// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam.
-pub mod vmm;
 /// Shared host-side vsock egress support. Backend-agnostic; every VMM path uses
 /// the same gate/relay substrate while policy remains in the host endpoint.
-pub mod vsock_egress_bridge;
 /// Plugs `mvm_fs`'s content-addressed `SnapshotStore` beneath the existing
 /// checkpoint lineage: stage a checkpoint's bytes into the snapshot store,
 /// then clone them only after the checkpoint's fail-closed lineage
@@ -138,6 +128,11 @@ pub mod wasm_backend;
 pub mod workload_backend;
 pub mod workload_runner;
 mod workload_wait;
+
+/// Re-export the backend-agnostic VMM device model from `mvm-vmm`.
+pub use mvm_vmm::vmm;
+/// Re-export the vsock egress bridge substrate from `mvm-vmm`.
+pub use mvm_vmm::vsock_egress_bridge;
 
 // Embedded-library surface for the warm-lease ergonomics.
 pub use vm::exec_builder::{ExecBuilder, ExecOutcome};

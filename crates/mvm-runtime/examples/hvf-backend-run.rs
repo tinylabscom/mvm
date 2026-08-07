@@ -14,7 +14,7 @@ fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
-        use mvm_runtime::hvf_backend::HvfBackend;
+        use mvm_runtime::backends::hvf::HvfBackend;
         use std::time::Duration;
 
         let backend = HvfBackend;

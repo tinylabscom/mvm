@@ -34,7 +34,7 @@ fn main() {
         let disks = std::env::var_os("MVM_HVF_DISK")
             .map(|p| {
                 vec![
-                    mvm_runtime::hvf::DiskImage::open(std::path::Path::new(&p), true)
+                    mvm_runtime::backends::hvf::DiskImage::open(std::path::Path::new(&p), true)
                         .expect("open disk"),
                 ]
             })
@@ -51,7 +51,7 @@ fn main() {
             if disks.is_empty() { "" } else { " + disk" }
         );
 
-        match mvm_runtime::hvf::boot_kernel(
+        match mvm_runtime::backends::hvf::boot_kernel(
             &image,
             initramfs.as_deref(),
             disks,

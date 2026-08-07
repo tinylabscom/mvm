@@ -270,6 +270,34 @@ impl Context {
         check(unsafe { bindings::krun_add_virtiofs(self.ctx_id, tag.as_ptr(), path.as_ptr()) })
     }
 
+    pub fn add_virtiofs2(&self, tag: &str, host_path: &Path, shm_size: u64) -> Result<(), Error> {
+        let tag = CString::new(tag).map_err(|_| Error::InvalidCString)?;
+        let path = cstring(host_path)?;
+        check(unsafe {
+            bindings::krun_add_virtiofs2(self.ctx_id, tag.as_ptr(), path.as_ptr(), shm_size)
+        })
+    }
+
+    pub fn add_virtiofs3(
+        &self,
+        tag: &str,
+        host_path: &Path,
+        shm_size: u64,
+        read_only: bool,
+    ) -> Result<(), Error> {
+        let tag = CString::new(tag).map_err(|_| Error::InvalidCString)?;
+        let path = cstring(host_path)?;
+        check(unsafe {
+            bindings::krun_add_virtiofs3(
+                self.ctx_id,
+                tag.as_ptr(),
+                path.as_ptr(),
+                shm_size,
+                read_only,
+            )
+        })
+    }
+
     pub fn add_disk(&self, block_id: &str, disk_path: &Path, read_only: bool) -> Result<(), Error> {
         let block = CString::new(block_id).map_err(|_| Error::InvalidCString)?;
         let path = cstring(disk_path)?;

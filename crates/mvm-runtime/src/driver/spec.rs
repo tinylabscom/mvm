@@ -75,6 +75,20 @@ pub struct ConsoleCapture {
     pub log_path: PathBuf,
 }
 
+/// One virtio-fs host directory share.
+///
+/// Backends that support virtio-fs attach this as a guest-visible filesystem
+/// tagged with `tag`. `dax` requests direct host-page access when both the
+/// backend and the guest kernel support it; backends without DAX support
+/// ignore the flag and serve the share through the normal FUSE path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtioFsShare {
+    pub tag: String,
+    pub host_path: PathBuf,
+    pub read_only: bool,
+    pub dax: bool,
+}
+
 /// The backend-agnostic physical recipe a [`VmmDriver`](crate::driver::VmmDriver)
 /// boots. No NIC: vsock is the only channel off the guest besides storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +107,10 @@ pub struct VmmSpec {
     pub blocks: Vec<BlockDev>,
     pub vsock: Vec<VsockPort>,
     pub console: ConsoleCapture,
+    /// virtio-fs host directory shares. A `virtiofs_root` boot supplies one
+    /// share tagged `mvmroot`; additional `DirShare` volumes add more tags.
+    /// Backends without virtio-fs support must reject a non-empty list.
+    pub shares: Vec<VirtioFsShare>,
 }
 
 impl VmmSpec {

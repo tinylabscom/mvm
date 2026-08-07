@@ -14,7 +14,7 @@
 fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        use mvm_runtime::hvf::{MAGIC, boot_smoke};
+        use mvm_runtime::backends::hvf::{MAGIC, boot_smoke};
         match boot_smoke() {
             Ok(p) => {
                 println!(

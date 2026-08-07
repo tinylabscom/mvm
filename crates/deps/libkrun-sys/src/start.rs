@@ -208,7 +208,12 @@ pub(super) fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error
         krun.add_disk(&disk.id, Path::new(&disk.path), disk.read_only)?;
     }
     for mount in &ctx.virtio_fs_mounts {
-        krun.add_virtiofs(&mount.tag, Path::new(&mount.host_path))?;
+        let path = Path::new(&mount.host_path);
+        match (mount.shm_size, mount.read_only) {
+            (Some(shm_size), true) => krun.add_virtiofs3(&mount.tag, path, shm_size, true)?,
+            (Some(shm_size), false) => krun.add_virtiofs2(&mount.tag, path, shm_size)?,
+            (None, _) => krun.add_virtiofs(&mount.tag, path)?,
+        }
     }
     if matches!(ctx.networking, NetworkingMode::VsockDirect) {
         krun.disable_implicit_vsock()?;

@@ -711,7 +711,11 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     validate_shell_job(job)?;
 
     let qemu_bin = locate_qemu()?;
-    let (virtiofsd_bin, virtiofsd_flavor) = locate_virtiofsd()?;
+    let (virtiofsd_bin, virtiofsd_flavor) =
+        crate::virtiofsd::locate_virtiofsd().map_err(|e| BuilderVmError::VmmUnavailable {
+            requested: "virtiofsd".to_string(),
+            reason: format!("{e:#}"),
+        })?;
     let (kernel, rootfs, image_cmdline) = match ensure_builder_vm_image()? {
         BuilderVmImage::Rootfs {
             kernel_path,
@@ -771,10 +775,15 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         ],
         closure_share_dir.as_deref(),
     );
-    let mut virtiofsd = VirtiofsdGuard::default();
+    let mut virtiofsd = crate::virtiofsd::VirtiofsdGuard::default();
     for (tag, dir) in shares.iter().copied() {
         let sock = qemu_virtiofs_socket_path(&job_id, tag);
-        virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
+        virtiofsd
+            .spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir, false)
+            .map_err(|e| BuilderVmError::VmmUnavailable {
+                requested: "virtiofsd".to_string(),
+                reason: format!("{e:#}"),
+            })?;
     }
 
     // The QEMU builder is always a lean Rootfs builder, so the runtime overlay
@@ -935,7 +944,11 @@ fn run_build_qemu(
 
     // 2. Locate the host tooling up front.
     let qemu_bin = locate_qemu()?;
-    let (virtiofsd_bin, virtiofsd_flavor) = locate_virtiofsd()?;
+    let (virtiofsd_bin, virtiofsd_flavor) =
+        crate::virtiofsd::locate_virtiofsd().map_err(|e| BuilderVmError::VmmUnavailable {
+            requested: "virtiofsd".to_string(),
+            reason: format!("{e:#}"),
+        })?;
 
     // 3. Resolve the cached builder image (kernel + rootfs + cmdline) the
     //    Stage 0 path promoted. `run_build` never takes the RootDir shape.
@@ -1015,10 +1028,15 @@ fn run_build_qemu(
         ],
         closure_share_dir.as_deref(),
     );
-    let mut virtiofsd = VirtiofsdGuard::default();
+    let mut virtiofsd = crate::virtiofsd::VirtiofsdGuard::default();
     for (tag, dir) in shares.iter().copied() {
         let sock = qemu_virtiofs_socket_path(&job_id, tag);
-        virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
+        virtiofsd
+            .spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir, false)
+            .map_err(|e| BuilderVmError::VmmUnavailable {
+                requested: "virtiofsd".to_string(),
+                reason: format!("{e:#}"),
+            })?;
     }
 
     // 9. Build the QEMU cmdline from the image's (swap hvc0→ttyS0, force
@@ -1203,155 +1221,6 @@ fn validate_build_job(job: &BuilderJob) -> Result<(), BuilderVmError> {
         }
     }
     Ok(())
-}
-
-/// Which `virtiofsd` implementation we found. The two share the
-/// `--socket-path` flag but nothing else: the QEMU-bundled **C** daemon
-/// (`/usr/lib/qemu/virtiofsd`, Debian's `qemu-system-*`) takes `-o
-/// source=DIR` and sandboxes with `-o sandbox=namespace|chroot`; the
-/// standalone **Rust** daemon (Debian's `virtiofsd` package, newer
-/// distros) takes `--shared-dir=DIR --sandbox none`. We detect once and
-/// build the right argv per flavour.
-#[cfg(feature = "builder-vm")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VirtiofsdFlavor {
-    /// QEMU-bundled C virtiofsd (`-o source=`).
-    C,
-    /// Standalone Rust virtiofsd (`--shared-dir=`).
-    Rust,
-}
-
-/// `virtiofsd` on the host + its flavour. Distro packages drop it outside
-/// `$PATH`, so probe the common locations before a PATH lookup, then sniff
-/// `--help` to tell the C and Rust daemons apart.
-#[cfg(feature = "builder-vm")]
-fn locate_virtiofsd() -> Result<(PathBuf, VirtiofsdFlavor), BuilderVmError> {
-    let bin = [
-        "/usr/lib/qemu/virtiofsd",
-        "/usr/libexec/virtiofsd",
-        "/usr/lib/virtiofsd",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|p| p.is_file())
-    .or_else(|| which::which("virtiofsd").ok())
-    .ok_or_else(|| BuilderVmError::VmmUnavailable {
-        requested: "virtiofsd".to_string(),
-        reason: "`virtiofsd` not found (looked in /usr/lib/qemu, /usr/libexec, /usr/lib, and \
-                     $PATH). Install it (`apt install virtiofsd`; it also ships alongside \
-                     qemu-system on many distros)."
-            .to_string(),
-    })?;
-    let flavor = detect_virtiofsd_flavor(&bin)?;
-    Ok((bin, flavor))
-}
-
-/// Sniff `<bin> --help` to classify the daemon. The Rust daemon advertises
-/// `--shared-dir`; the C daemon advertises `source=`. Default to C if the
-/// help is unexpectedly silent — its argv is the older, more common one.
-#[cfg(feature = "builder-vm")]
-fn detect_virtiofsd_flavor(bin: &Path) -> Result<VirtiofsdFlavor, BuilderVmError> {
-    let out =
-        Command::new(bin)
-            .arg("--help")
-            .output()
-            .map_err(|e| BuilderVmError::VmmUnavailable {
-                requested: "virtiofsd".to_string(),
-                reason: format!("probing {} --help: {e}", bin.display()),
-            })?;
-    let help = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if help.contains("--shared-dir") {
-        Ok(VirtiofsdFlavor::Rust)
-    } else {
-        Ok(VirtiofsdFlavor::C)
-    }
-}
-
-/// Owns the per-share `virtiofsd` child processes for one build and kills
-/// them (and removes their sockets) on drop, so a failed build never
-/// leaks daemons. Load-bearing: the guard must outlive the QEMU child.
-#[cfg(feature = "builder-vm")]
-#[derive(Default)]
-struct VirtiofsdGuard {
-    procs: Vec<(std::process::Child, PathBuf)>,
-}
-
-#[cfg(feature = "builder-vm")]
-impl VirtiofsdGuard {
-    /// Spawn a `virtiofsd` exporting `dir` on the unix socket `sock`, then
-    /// block until the socket exists (QEMU connects to it as a client at
-    /// launch). `flavor` selects the daemon's argv. Read-only enforcement
-    /// is the guest's job (`virtiofs_tag_is_read_only`), matching libkrun,
-    /// so neither flavour is asked to enforce it host-side.
-    fn spawn(
-        &mut self,
-        bin: &Path,
-        flavor: VirtiofsdFlavor,
-        tag: &str,
-        sock: &Path,
-        dir: &Path,
-    ) -> Result<(), BuilderVmError> {
-        let _ = std::fs::remove_file(sock);
-        let mut cmd = Command::new(bin);
-        cmd.arg(format!("--socket-path={}", sock.display()));
-        match flavor {
-            // Rust daemon: `--shared-dir` + `--sandbox none` (the builder
-            // VM is the isolation boundary; `none` skips the CAP_SYS_ADMIN
-            // pivot_root it would otherwise do).
-            VirtiofsdFlavor::Rust => {
-                cmd.arg(format!("--shared-dir={}", dir.display()))
-                    .args(["--sandbox", "none"]);
-            }
-            // C daemon (QEMU-bundled): `-o source=DIR`. It has no `sandbox
-            // =none`; the default `namespace` mode pivot_roots as root,
-            // which is fine here (we run as root on the dev/builder host).
-            VirtiofsdFlavor::C => {
-                cmd.arg("-o").arg(format!("source={}", dir.display()));
-            }
-        }
-        let child = cmd.spawn().map_err(|e| BuilderVmError::VmmUnavailable {
-            requested: "virtiofsd".to_string(),
-            reason: format!("spawning {} for tag {tag}: {e}", bin.display()),
-        })?;
-        self.procs.push((child, sock.to_path_buf()));
-        wait_for_socket(sock, std::time::Duration::from_secs(10)).map_err(|e| {
-            BuilderVmError::VmmUnavailable {
-                requested: "virtiofsd".to_string(),
-                reason: format!(
-                    "virtiofsd for tag {tag} never created its socket {}: {e}",
-                    sock.display()
-                ),
-            }
-        })
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-impl Drop for VirtiofsdGuard {
-    fn drop(&mut self) {
-        for (child, sock) in &mut self.procs {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = std::fs::remove_file(&*sock);
-        }
-    }
-}
-
-/// Poll until `sock` appears or `timeout` elapses.
-#[cfg(feature = "builder-vm")]
-fn wait_for_socket(sock: &Path, timeout: std::time::Duration) -> Result<(), String> {
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if sock.exists() {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    Err(format!("timed out after {timeout:?}"))
 }
 
 fn allocate_qemu_builder_guest_cid() -> u32 {

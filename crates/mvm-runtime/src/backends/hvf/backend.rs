@@ -480,7 +480,7 @@ impl VmBackend for HvfBackend {
             cmdline: cmdline::workload_cmdline(
                 config,
                 &state_dir,
-                crate::hvf_bootargs::workload_bootargs,
+                crate::backends::hvf::workload_bootargs,
             ),
             memory_mib: config.memory_mib,
             initramfs: cmdline::effective_initrd(config),
@@ -977,7 +977,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let assembled =
-            cmdline::workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+            cmdline::workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
                 .expect("cmdline");
         assert!(
             assembled.contains("mvm.runtime_data=/dev/vdb"),

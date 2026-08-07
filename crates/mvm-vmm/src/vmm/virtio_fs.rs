@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::dax::DaxMapper;
+
 // ---- FUSE protocol constants (uapi/linux/fuse.h) ---------------------------
 
 const FUSE_KERNEL_VERSION: u32 = 7;
@@ -53,6 +55,8 @@ const FUSE_RELEASEDIR: u32 = 29;
 const FUSE_FLUSH: u32 = 25;
 const FUSE_STATFS: u32 = 17;
 const FUSE_ACCESS: u32 = 34;
+const FUSE_SETUPMAPPING: u32 = 48;
+const FUSE_REMOVEMAPPING: u32 = 49;
 // Mutating opcodes — refused EROFS on a read-only root (the guest kernel won't
 // send these to a clean RO boot, but a hostile guest might).
 const FUSE_SETATTR: u32 = 4;
@@ -74,6 +78,15 @@ const ENOENT: i32 = 2;
 const EROFS: i32 = 30;
 const ENOSYS: i32 = 38;
 const ENOTDIR: i32 = 20;
+const EINVAL: i32 = 22;
+
+// fuse_init_out.flags: advertise DAX support.
+const FUSE_DAX: u32 = 1 << 30;
+// fuse_init_in.flags: the kernel can honour map_alignment.
+const FUSE_MAP_ALIGNMENT: u32 = 1 << 26;
+
+// fuse_setupmapping_in.flags.
+const FUSE_SETUPMAPPING_FLAG_WRITE: u64 = 1 << 0;
 
 // d_type for fuse_dirent (matches DT_*).
 const DT_DIR: u32 = 4;
@@ -150,10 +163,21 @@ pub struct FuseServer {
     /// the adversary, so a symlink in the tree must never let a lookup/read
     /// escape the root and disclose host files (claim 1).
     root_canon: PathBuf,
+    /// Optional DAX mapper. When present, the server advertises DAX support
+    /// and handles SETUPMAPPING / REMOVEMAPPING.
+    mapper: Option<Box<dyn DaxMapper>>,
 }
 
 impl FuseServer {
     pub fn new(root: impl Into<PathBuf>) -> FuseServer {
+        Self::new_with_mapper(root, None)
+    }
+
+    /// Create a FUSE server with an optional virtio-fs DAX mapper.
+    pub fn new_with_mapper(
+        root: impl Into<PathBuf>,
+        mapper: Option<Box<dyn DaxMapper>>,
+    ) -> FuseServer {
         let root = root.into();
         let root_canon = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
         let mut inodes = HashMap::new();
@@ -165,6 +189,7 @@ impl FuseServer {
             by_path,
             next_ino: 2,
             root_canon,
+            mapper,
         }
     }
 
@@ -212,6 +237,8 @@ impl FuseServer {
             // permission is the guest's own namespace concern. `execve` of /init
             // sends this, so refusing it (the old catch-all) failed the boot.
             FUSE_ACCESS => reply(h.unique, 0, &[]),
+            FUSE_SETUPMAPPING => self.op_setupmapping(h.unique, h.nodeid, body),
+            FUSE_REMOVEMAPPING => self.op_removemapping(h.unique, body),
             // Mutations are refused on the read-only root.
             FUSE_SETATTR | FUSE_MKNOD | FUSE_MKDIR | FUSE_UNLINK | FUSE_RMDIR | FUSE_RENAME
             | FUSE_LINK | FUSE_WRITE | FUSE_SETXATTR | FUSE_REMOVEXATTR | FUSE_CREATE
@@ -226,18 +253,38 @@ impl FuseServer {
         // fuse_init_in: major, minor, max_readahead, flags (we only need major).
         let their_minor = if body.len() >= 8 { rd_u32(body, 4) } else { 0 };
         let minor = their_minor.min(FUSE_KERNEL_MINOR_VERSION);
+        let their_flags = if body.len() >= 16 {
+            rd_u32(body, 12)
+        } else {
+            0
+        };
         // fuse_init_out (classic 64-byte layout, minor <= 35).
         let mut b = Vec::new();
         put_u32(&mut b, FUSE_KERNEL_VERSION); // major
         put_u32(&mut b, minor); // minor
         put_u32(&mut b, 0); // max_readahead (0 = accept kernel default)
-        put_u32(&mut b, 0); // flags (negotiate nothing extra)
+        let mut flags: u32 = 0;
+        let map_alignment = if let Some(mapper) = &self.mapper {
+            // Only enable DAX when the kernel explicitly asks for
+            // map_alignment; otherwise the negotiated layout is meaningless.
+            let dax_enabled = (their_flags & FUSE_MAP_ALIGNMENT) != 0;
+            if dax_enabled {
+                flags |= FUSE_DAX | FUSE_MAP_ALIGNMENT;
+            }
+            let alignment = mapper.alignment();
+            // map_alignment is encoded as log2(alignment); 0 means no alignment
+            // requirement. A 16 KiB Apple page gives log2(16384) = 14.
+            alignment.trailing_zeros() as u16
+        } else {
+            0
+        };
+        put_u32(&mut b, flags);
         b.extend_from_slice(&0u16.to_le_bytes()); // max_background
         b.extend_from_slice(&0u16.to_le_bytes()); // congestion_threshold
         put_u32(&mut b, MAX_IO_LEN as u32); // max_write
         put_u32(&mut b, 1); // time_gran (1 ns)
         b.extend_from_slice(&0u16.to_le_bytes()); // max_pages
-        b.extend_from_slice(&0u16.to_le_bytes()); // map_alignment
+        b.extend_from_slice(&map_alignment.to_le_bytes()); // map_alignment
         b.resize(64, 0); // unused tail
         reply(unique, 0, &b)
     }
@@ -357,6 +404,92 @@ impl FuseServer {
             b.extend_from_slice(&rec);
         }
         reply(unique, 0, &b)
+    }
+
+    fn op_setupmapping(&mut self, unique: u64, nodeid: u64, body: &[u8]) -> Vec<u8> {
+        // fuse_setupmapping_in: fh u64, foffset u64, len u64, flags u64,
+        // moffset u64 => 40 bytes. fh is unused; we resolve by nodeid.
+        if body.len() < 40 {
+            return reply(unique, -EINVAL, &[]);
+        }
+        let file_offset = rd_u64(body, 8);
+        let len = rd_u64(body, 16);
+        let flags = rd_u64(body, 24);
+        let moffset = rd_u64(body, 32);
+
+        // Resolve and confine the inode before borrowing the mapper mutably.
+        let Some(path) = self.path_of(nodeid).map(Path::to_path_buf) else {
+            return reply(unique, -ENOENT, &[]);
+        };
+        let Some(real) = self.real_path_under_root(&path) else {
+            return reply(unique, -ENOENT, &[]);
+        };
+
+        let Some(mapper) = self.mapper.as_mut() else {
+            return reply(unique, -ENOSYS, &[]);
+        };
+        let align = mapper.alignment();
+        let (_, win_size) = mapper.window();
+        if align == 0
+            || !file_offset.is_multiple_of(align)
+            || !moffset.is_multiple_of(align)
+            || len == 0
+            || !len.is_multiple_of(align)
+        {
+            return reply(unique, -EINVAL, &[]);
+        }
+        let Some(end) = moffset.checked_add(len) else {
+            return reply(unique, -EINVAL, &[]);
+        };
+        if end > win_size {
+            return reply(unique, -EINVAL, &[]);
+        }
+
+        let writable = (flags & FUSE_SETUPMAPPING_FLAG_WRITE) != 0;
+        match mapper.map(&real, file_offset, moffset, len, writable) {
+            Ok(()) => reply(unique, 0, &[]),
+            Err(e) => reply(unique, e, &[]),
+        }
+    }
+
+    fn op_removemapping(&mut self, unique: u64, body: &[u8]) -> Vec<u8> {
+        let Some(mapper) = self.mapper.as_mut() else {
+            return reply(unique, -ENOSYS, &[]);
+        };
+        // fuse_removemapping_in is just `count u32`; entries of
+        // fuse_removemapping_one (moffset u64, len u64) = 16 bytes each follow
+        // immediately with no padding.
+        if body.len() < 4 {
+            return reply(unique, -EINVAL, &[]);
+        }
+        let count = rd_u32(body, 0) as usize;
+        if body.len() < 4 + count * 16 {
+            return reply(unique, -EINVAL, &[]);
+        }
+        let align = mapper.alignment();
+        let (_, win_size) = mapper.window();
+        for i in 0..count {
+            let off = 4 + i * 16;
+            let moffset = rd_u64(body, off);
+            let len = rd_u64(body, off + 8);
+            if align == 0
+                || !moffset.is_multiple_of(align)
+                || len == 0
+                || !len.is_multiple_of(align)
+            {
+                return reply(unique, -EINVAL, &[]);
+            }
+            let Some(end) = moffset.checked_add(len) else {
+                return reply(unique, -EINVAL, &[]);
+            };
+            if end > win_size {
+                return reply(unique, -EINVAL, &[]);
+            }
+            if let Err(e) = mapper.unmap(moffset, len) {
+                return reply(unique, e, &[]);
+            }
+        }
+        reply(unique, 0, &[])
     }
 
     fn op_statfs(&mut self, unique: u64) -> Vec<u8> {
@@ -782,5 +915,194 @@ mod tests {
             let got = read_range(&path, 0, requested).unwrap();
             assert!(got.capacity() <= MAX_IO_LEN, "requested {requested}");
         }
+    }
+    use crate::dax::DaxMapper;
+
+    #[derive(Debug, Default)]
+    struct FakeMapper {
+        window_base: u64,
+        window_size: u64,
+        align: u64,
+        maps: Vec<(std::path::PathBuf, u64, u64, u64, bool)>,
+        unmaps: Vec<(u64, u64)>,
+    }
+
+    impl FakeMapper {
+        fn new(window_base: u64, window_size: u64, align: u64) -> Self {
+            Self {
+                window_base,
+                window_size,
+                align,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl DaxMapper for FakeMapper {
+        fn map(
+            &mut self,
+            path: &Path,
+            file_offset: u64,
+            window_offset: u64,
+            len: u64,
+            writable: bool,
+        ) -> Result<(), i32> {
+            self.maps.push((
+                path.to_path_buf(),
+                file_offset,
+                window_offset,
+                len,
+                writable,
+            ));
+            Ok(())
+        }
+
+        fn unmap(&mut self, window_offset: u64, len: u64) -> Result<(), i32> {
+            self.unmaps.push((window_offset, len));
+            Ok(())
+        }
+
+        fn window(&self) -> (u64, u64) {
+            (self.window_base, self.window_size)
+        }
+
+        fn alignment(&self) -> u64 {
+            self.align
+        }
+    }
+
+    fn setupmapping_in(file_offset: u64, len: u64, moffset: u64, flags: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        put_u64(&mut b, 0); // fh
+        put_u64(&mut b, file_offset);
+        put_u64(&mut b, len);
+        put_u64(&mut b, flags);
+        put_u64(&mut b, moffset);
+        b
+    }
+
+    fn removemapping_in(moffset: u64, len: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        put_u32(&mut b, 1); // count
+        put_u64(&mut b, moffset);
+        put_u64(&mut b, len);
+        b
+    }
+
+    #[test]
+    fn init_without_mapper_does_not_advertise_dax() {
+        let d = tempfile::tempdir().unwrap();
+        let mut fs = FuseServer::new(d.path());
+        let mut init_in = Vec::new();
+        put_u32(&mut init_in, 7);
+        put_u32(&mut init_in, 99);
+        put_u32(&mut init_in, 0);
+        put_u32(&mut init_in, 0);
+        let (err, body) = parse_reply(&fs.dispatch(&request(FUSE_INIT, 1, 0, &init_in)));
+        assert_eq!(err, 0);
+        assert_eq!(body.len(), 64);
+        assert_eq!(rd_u32(&body, 12) & FUSE_DAX, 0, "FUSE_DAX must not be set");
+        assert_eq!(
+            u16::from_le_bytes([body[30], body[31]]),
+            0,
+            "map_alignment zero"
+        );
+    }
+
+    #[test]
+    fn init_with_mapper_advertises_dax_and_map_alignment() {
+        let d = tempfile::tempdir().unwrap();
+        let mapper = Box::new(FakeMapper::new(0x0c00_0000, 0x1000_0000, 16 * 1024));
+        let mut fs = FuseServer::new_with_mapper(d.path(), Some(mapper));
+        let mut init_in = Vec::new();
+        put_u32(&mut init_in, 7);
+        put_u32(&mut init_in, 99);
+        put_u32(&mut init_in, 0);
+        put_u32(&mut init_in, FUSE_MAP_ALIGNMENT);
+        let (err, body) = parse_reply(&fs.dispatch(&request(FUSE_INIT, 1, 0, &init_in)));
+        assert_eq!(err, 0);
+        let flags = rd_u32(&body, 12);
+        assert_ne!(flags & FUSE_DAX, 0, "FUSE_DAX must be set");
+        assert_ne!(
+            flags & FUSE_MAP_ALIGNMENT,
+            0,
+            "FUSE_MAP_ALIGNMENT must be set"
+        );
+        // 16 KiB alignment => log2(16384) = 14.
+        let align = u16::from_le_bytes([body[30], body[31]]);
+        assert_eq!(align, 14, "map_alignment encodes log2(alignment)");
+    }
+
+    #[test]
+    fn init_with_mapper_does_not_advertise_dax_when_kernel_omits_alignment() {
+        let d = tempfile::tempdir().unwrap();
+        let mapper = Box::new(FakeMapper::new(0x0c00_0000, 0x1000_0000, 16 * 1024));
+        let mut fs = FuseServer::new_with_mapper(d.path(), Some(mapper));
+        let mut init_in = Vec::new();
+        put_u32(&mut init_in, 7);
+        put_u32(&mut init_in, 99);
+        put_u32(&mut init_in, 0);
+        put_u32(&mut init_in, 0);
+        let (err, body) = parse_reply(&fs.dispatch(&request(FUSE_INIT, 1, 0, &init_in)));
+        assert_eq!(err, 0);
+        assert_eq!(rd_u32(&body, 12) & FUSE_DAX, 0, "FUSE_DAX must not be set");
+    }
+
+    #[test]
+    fn setupmapping_maps_aligned_file_range() {
+        let d = tree();
+        let mapper = Box::new(FakeMapper::new(0x0c00_0000, 0x1000_0000, 4096));
+        let mut fs = FuseServer::new_with_mapper(d.path(), Some(mapper));
+        let (_, ent) = parse_reply(&fs.dispatch(&request(FUSE_LOOKUP, 2, ROOT_INO, b"hello\0")));
+        let ino = rd_u64(&ent, 0);
+
+        let body = setupmapping_in(0, 4096, 0, FUSE_SETUPMAPPING_FLAG_WRITE);
+        let (err, _) = parse_reply(&fs.dispatch(&request(FUSE_SETUPMAPPING, 3, ino, &body)));
+        assert_eq!(err, 0);
+    }
+
+    #[test]
+    fn setupmapping_rejects_unaligned_window_offset() {
+        let d = tree();
+        let mapper = Box::new(FakeMapper::new(0x0c00_0000, 0x1000_0000, 4096));
+        let mut fs = FuseServer::new_with_mapper(d.path(), Some(mapper));
+        let (_, ent) = parse_reply(&fs.dispatch(&request(FUSE_LOOKUP, 2, ROOT_INO, b"hello\0")));
+        let ino = rd_u64(&ent, 0);
+
+        let body = setupmapping_in(0, 4096, 1, 0);
+        let (err, _) = parse_reply(&fs.dispatch(&request(FUSE_SETUPMAPPING, 3, ino, &body)));
+        assert_eq!(err, -EINVAL);
+    }
+
+    #[test]
+    fn setupmapping_rejects_out_of_window_range() {
+        let d = tree();
+        let mapper = Box::new(FakeMapper::new(0x0c00_0000, 0x1000_0000, 4096));
+        let mut fs = FuseServer::new_with_mapper(d.path(), Some(mapper));
+        let (_, ent) = parse_reply(&fs.dispatch(&request(FUSE_LOOKUP, 2, ROOT_INO, b"hello\0")));
+        let ino = rd_u64(&ent, 0);
+
+        let body = setupmapping_in(0, 4096, 0x1000_0000, 0);
+        let (err, _) = parse_reply(&fs.dispatch(&request(FUSE_SETUPMAPPING, 3, ino, &body)));
+        assert_eq!(err, -EINVAL);
+    }
+
+    #[test]
+    fn removemapping_unmaps_aligned_range() {
+        let d = tree();
+        let mapper = Box::new(FakeMapper::new(0x0c00_0000, 0x1000_0000, 4096));
+        let mut fs = FuseServer::new_with_mapper(d.path(), Some(mapper));
+        let body = removemapping_in(0, 4096);
+        let (err, _) = parse_reply(&fs.dispatch(&request(FUSE_REMOVEMAPPING, 1, 0, &body)));
+        assert_eq!(err, 0);
+    }
+
+    #[test]
+    fn removemapping_without_mapper_is_enosys() {
+        let d = tempfile::tempdir().unwrap();
+        let mut fs = FuseServer::new(d.path());
+        let body = removemapping_in(0, 4096);
+        let (err, _) = parse_reply(&fs.dispatch(&request(FUSE_REMOVEMAPPING, 1, 0, &body)));
+        assert_eq!(err, -ENOSYS);
     }
 }

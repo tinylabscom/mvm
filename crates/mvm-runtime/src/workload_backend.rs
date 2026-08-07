@@ -3,7 +3,7 @@
 //! implement it; the admitted launch path accepts `&dyn WorkloadBackend`
 //! only, so a non-workload backend cannot reach it.
 use crate::backend::AnyBackend;
-use crate::hvf_backend::HvfBackend;
+use crate::backends::hvf::HvfBackend;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use anyhow::{Result, anyhow};

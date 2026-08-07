@@ -1346,7 +1346,7 @@ mod tests {
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
     use mvm_core::util::test_env::TestEnv;
 
-    use crate::driver::HvfDriver;
+    use crate::backends::hvf::driver::HvfDriver;
     use crate::driver::mock::MockDriver;
 
     /// An `EndpointSpawner` test double: records the request it was handed and

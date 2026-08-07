@@ -502,6 +502,7 @@ mod tests {
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
+            shares: Vec::new(),
         }
     }
 
