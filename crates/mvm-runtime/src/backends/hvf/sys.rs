@@ -245,6 +245,15 @@ pub unsafe fn hv_vcpu_set_sys_reg(
 }
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vcpu_get_sys_reg(
+    _vcpu: hv_vcpu_t,
+    _reg: hv_sys_reg_t,
+    _value: *mut u64,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe fn hv_vcpus_exit(_vcpus: *const hv_vcpu_t, _vcpu_count: u32) -> hv_return_t {
     HV_ERROR_UNSUPPORTED
 }
