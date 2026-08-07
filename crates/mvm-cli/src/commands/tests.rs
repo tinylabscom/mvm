@@ -4711,6 +4711,7 @@ fn machine_console_refused_on_sealed_image() {
             rootfs_path: None,
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             runtime_overlay_version: None,
+            observability_target: None,
         },
     )
     .expect("write");

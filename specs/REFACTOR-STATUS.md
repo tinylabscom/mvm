@@ -1,11 +1,34 @@
 # Refactor status
 
-Last updated: 2026-08-05
+Last updated: 2026-08-06
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
+      `feat/ebpf-vsock-egress-telemetry`
+  - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader
+        and eBPF program into `mvm-hostd` and the observability target
+        metadata into `mvm-runtime`
+  - [x] Add `VmObservabilityTarget` sidecar in `mode.json` and wire
+        `EbpfTelemetryManager` attach/detach hooks into
+        `Supervisor::launch`/`stop`
+  - [x] Add vsock egress counters to the global metrics snapshot and keep
+        macOS/Windows builds on no-op stubs
+  - [x] Host workspace `check`, `mvm-runtime`/`mvm-hostd` all-target Clippy,
+        `cargo fmt`, and focused telemetry unit tests pass
+  - [x] Build the real Aya eBPF object with nightly + `bpf-linker`
+        (`just build-ebpf` builds `bpfel-unknown-none` on any host)
+  - [x] End-to-end attach→detach integration test via `mode.json` sidecar
+  - [x] Full workspace test run on the host (cargo nextest: 10134 passed,
+        18 skipped; cargo test previously flaked on one netd test that
+        passes in isolation)
+  - [ ] Full workspace test run in CI / Linux builder VM
+  - [x] Implement Linux Aya load/attach/ring-buffer read path
+        (cross-compiles for x86_64-unknown-linux-gnu via cargo-zigbuild)
+  - [ ] Validate load/attach on a live Linux host
+
 - [~] Plan 287 — Userspace socket datapath
       (`specs/plans/287-userspace-socket-datapath.md`, ADR-037)
       Tracked end to end under epic #2111, which also carries plan 285's

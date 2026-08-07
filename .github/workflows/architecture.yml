@@ -281,3 +281,24 @@ jobs:
       - name: Skip message for docs-only changes
         if: steps.changed.outputs.rust == 'false'
         run: echo "No Rust paths changed; architecture invariant check skipped."
+
+  # Aggregate gate exposed to branch protection as the single required
+  # "Invariant" status check. Keeps the per-invariant job names descriptive
+  # while giving branch protection a stable context to require.
+  invariant:
+    name: Invariant
+    if: ${{ always() }}
+    needs: [no-orchestration-server-in-mvm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every invariant lane to pass
+        env:
+          RESULT: ${{ needs.no-orchestration-server-in-mvm.result }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" != success ]; then
+            echo "An invariant lane did not pass: $RESULT"
+            exit 1
+          fi
+

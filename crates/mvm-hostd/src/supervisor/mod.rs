@@ -41,6 +41,8 @@ pub mod destination;
 pub mod dns_audit;
 /// Policy-gated DNS service for NIC-less guests.
 pub mod dns_handler;
+/// Host-side vsock egress telemetry (eBPF/procfs).
+pub mod ebpf_telemetry;
 pub mod egress;
 pub mod entropy_scanner;
 pub mod event_bus;

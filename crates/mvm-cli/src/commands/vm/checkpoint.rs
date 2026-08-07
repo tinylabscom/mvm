@@ -1732,6 +1732,7 @@ mod tests {
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             runtime_overlay_version: None,
+            observability_target: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();
@@ -1762,6 +1763,7 @@ mod tests {
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             runtime_overlay_version: None,
+            observability_target: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();

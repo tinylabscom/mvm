@@ -47,6 +47,11 @@ pub struct Metrics {
     pub vm_start_duration_ms: AtomicU64,
     pub vsock_handshake_rtt_ms: AtomicU64,
 
+    // ── Host-side vsock egress telemetry (eBPF/procfs) ──────────────
+    pub vsock_egress_packets_total: AtomicU64,
+    pub vsock_egress_bytes_total: AtomicU64,
+    pub vsock_egress_events_total: AtomicU64,
+
     // ── Dev/builder image verification ──────────────────────────────
     // One counter per outcome of the cosign-signed manifest +
     // SHA-256 verification pipeline at builder_vm.rs::download_dev_image.
@@ -123,6 +128,9 @@ impl Metrics {
             build_image_duration_ms: AtomicU64::new(0),
             vm_start_duration_ms: AtomicU64::new(0),
             vsock_handshake_rtt_ms: AtomicU64::new(0),
+            vsock_egress_packets_total: AtomicU64::new(0),
+            vsock_egress_bytes_total: AtomicU64::new(0),
+            vsock_egress_events_total: AtomicU64::new(0),
             dev_image_verify_ok: AtomicU64::new(0),
             dev_image_verify_sig_invalid: AtomicU64::new(0),
             dev_image_verify_digest_mismatch: AtomicU64::new(0),
@@ -174,6 +182,9 @@ impl Metrics {
             build_image_duration_ms: self.build_image_duration_ms.load(Ordering::Relaxed),
             vm_start_duration_ms: self.vm_start_duration_ms.load(Ordering::Relaxed),
             vsock_handshake_rtt_ms: self.vsock_handshake_rtt_ms.load(Ordering::Relaxed),
+            vsock_egress_packets_total: self.vsock_egress_packets_total.load(Ordering::Relaxed),
+            vsock_egress_bytes_total: self.vsock_egress_bytes_total.load(Ordering::Relaxed),
+            vsock_egress_events_total: self.vsock_egress_events_total.load(Ordering::Relaxed),
             dev_image_verify_ok: self.dev_image_verify_ok.load(Ordering::Relaxed),
             dev_image_verify_sig_invalid: self.dev_image_verify_sig_invalid.load(Ordering::Relaxed),
             dev_image_verify_digest_mismatch: self
@@ -532,6 +543,12 @@ pub struct MetricsSnapshot {
     pub build_image_duration_ms: u64,
     pub vm_start_duration_ms: u64,
     pub vsock_handshake_rtt_ms: u64,
+    #[serde(default)]
+    pub vsock_egress_packets_total: u64,
+    #[serde(default)]
+    pub vsock_egress_bytes_total: u64,
+    #[serde(default)]
+    pub vsock_egress_events_total: u64,
     #[serde(default)]
     pub dev_image_verify_ok: u64,
     #[serde(default)]
