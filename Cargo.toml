@@ -201,6 +201,7 @@ leakguard = { version = "=0.8.0", default-features = false }
 # Crypto
 aes-gcm = "0.11"
 base64 = "0.22"
+bs58 = "0.5"
 ed25519-dalek = "3"
 hmac = "0.13"
 rand = "0.8"

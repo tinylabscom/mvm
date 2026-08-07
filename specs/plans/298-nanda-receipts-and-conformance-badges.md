@@ -1,8 +1,6 @@
 # NANDA-style execution receipts and conformance badges
 
-**Status:** RFC approved. Phase 0 / WS1 complete. WS2–WS6 are gated on
-scheduling into `specs/SPRINT.md` and creating a dedicated worktree per
-workstream.
+**Status:** In progress. WS1 (RFC) and WS2 (core types) complete. WS3–WS6 pending.
 
 **Date:** 2026-08-06
 **Owner:** mvm
@@ -249,14 +247,14 @@ and wire formats. This workstream gates all others.
 **Goal:** Implement the receipt and badge types in `mvm-core` with JCS
 canonicalization and Ed25519 signing/verification.
 
-- [ ] Add `ExecutionReceipt` and `ConformanceBadge` types in `mvm-core`.
-- [ ] Implement JCS canonicalization helpers constrained to the admissible value
-      space.
-- [ ] Implement Ed25519 signing/verification with `did:key` derivation and
-      parsing.
-- [ ] Add unit tests for canonicalization determinism, signature roundtrip,
-      tamper detection, and invalid value-space rejection.
-- [ ] Add golden vectors for both envelopes.
+- [x] Add `ExecutionReceipt` and `ConformanceBadge` types in `mvm-core`.
+- [x] Implement JCS canonicalization helpers constrained to the admissible value
+      space (ASCII strings, integers, booleans, null, nested objects/arrays).
+- [x] Implement Ed25519 signing/verification with `did:key` derivation and
+      parsing (new `did_key` module).
+- [x] Add unit tests for canonicalization determinism, signature roundtrip,
+      tamper detection, invalid value-space rejection, and chain continuity.
+- [ ] Add frozen golden-vector files for both envelopes (deferred to WS3/WS5).
 
 **Files likely touched:**
 

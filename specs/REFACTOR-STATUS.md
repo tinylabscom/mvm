@@ -301,7 +301,8 @@ for detailed scope and acceptance criteria.
   - [x] WS1 RFC approved: `ExecutionReceipt` and `ConformanceBadge` envelopes,
         JCS canonicalization, Ed25519/`did:key` signing, chain semantics, and
         mapping to existing `AuditEntry` events defined
-  - [ ] WS2 Core types and canonicalization
+  - [x] WS2 Core types and canonicalization: `receipt.rs`,
+        `conformance_badge.rs`, `did_key.rs`, unit tests, workspace clippy clean
   - [ ] WS3 Read-only receipt exporter
   - [ ] WS4 Runtime emission of receipts
   - [ ] WS5 Conformance badge generator

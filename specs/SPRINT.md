@@ -144,12 +144,12 @@
 
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
-      approved: defines `ExecutionReceipt` (signed, chainable proof of what ran,
-      by whom, under what authority) and `ConformanceBadge` (signed, corpus-pinned
-      export of the MVM-SEC claim/witness program), both built on existing
-      Ed25519/JCS/SHA-256 primitives with no new authority or external dependency.
-      WS2–WS6 (core types, read-only exporter, runtime emission, badge generator,
-      docs) are scheduled next.
+      approved and WS2 core types landed in `mvm-core`: `ExecutionReceipt` and
+      `ConformanceBadge` structs, JCS canonicalization with a constrained value
+      space, Ed25519 signing/verification, and a `did:key` codec. All
+      `mvm-core` unit tests and workspace `cargo check` / `cargo clippy` pass.
+      WS3–WS6 (read-only exporter, runtime emission, badge generator, docs) are
+      next.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
