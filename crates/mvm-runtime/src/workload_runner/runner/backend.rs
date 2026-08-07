@@ -1,0 +1,179 @@
+//! `VmBackend` and workload-role implementations for [`super::WorkloadRunner`].
+
+use super::*;
+
+/// The runner is the workload backend: lifecycle operations run through the
+/// `VmmDriver` seam rather than being copied into each backend. State is
+/// disk-backed under the per-VM `vm_state_dir`, so a stateless CLI invocation
+/// reconstructs a handle by id.
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static> VmBackend
+    for WorkloadRunner<D, S, B>
+{
+    fn name(&self) -> &str {
+        self.driver.name()
+    }
+
+    fn kind(&self) -> BackendKind {
+        self.driver.kind()
+    }
+
+    fn capabilities(&self) -> VmCapabilities {
+        self.driver.capabilities()
+    }
+
+    fn supports_resident_handoff(&self) -> bool {
+        self.driver.supports_resident_handoff()
+    }
+
+    fn security_profile(&self) -> BackendSecurityProfile {
+        self.driver.security_profile()
+    }
+
+    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
+        self.driver.guest_channel_info(id)
+    }
+
+    fn is_available(&self) -> Result<bool> {
+        self.driver.is_available()
+    }
+
+    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        let state_dir = vm_state_dir(&config.name);
+        std::fs::create_dir_all(&state_dir)
+            .with_context(|| format!("create state dir {}", state_dir.display()))?;
+
+        ClaimGuards::new(&self.spawner).admit_overlay_contract(config)?;
+        crate::base::runtime_meta::record_from_start_config(
+            &config.name,
+            StartMode::Detached,
+            config,
+        )?;
+        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
+
+        let default_redaction = RedactionPolicy::default();
+        let decoded = decode_plan_secrets_from_state(&state_dir)?;
+        let (secrets, redaction, tenant): (&[SecretBinding], &RedactionPolicy, &str) =
+            match &decoded {
+                Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
+                None => (
+                    &[],
+                    &default_redaction,
+                    config.tenant_id.as_deref().unwrap_or("local"),
+                ),
+            };
+
+        let cmdline = cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
+            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        });
+        if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
+            anyhow::bail!("refusing to start VM {}: {problem}", config.name);
+        }
+        tracing::debug!(vm = %config.name, %cmdline, "assembled workload kernel cmdline");
+
+        let inputs = WorkloadLaunchInputs {
+            config,
+            tenant,
+            secrets,
+            redaction,
+            network_policy: &config.network_policy,
+            cmdline,
+        };
+        match self.start_workload(&inputs) {
+            Ok(_vm) => Ok(VmId(config.name.clone())),
+            Err(e) => {
+                crate::netd_spawn::reap_netd(&state_dir);
+                Err(e)
+            }
+        }
+    }
+
+    fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
+        self.driver.attach(id)?.wait()
+    }
+
+    fn stop(&self, id: &VmId) -> Result<()> {
+        let vm = match self.driver.attach(id) {
+            Ok(vm) => vm,
+            Err(err) => {
+                self.console_streamer.stop(&id.0);
+                return Err(err);
+            }
+        };
+        reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        crate::netd_spawn::reap_netd(&vm_state_dir(&id.0));
+        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
+        crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
+        let killed = vm.kill();
+        self.console_streamer.stop(&id.0);
+        killed
+    }
+
+    fn stop_all(&self) -> Result<()> {
+        for vm in self.list()? {
+            let _ = self.stop(&vm.id);
+        }
+        Ok(())
+    }
+
+    fn pause(&self, id: &VmId) -> Result<()> {
+        self.driver.attach(id)?.pause()
+    }
+
+    fn resume(&self, id: &VmId) -> Result<()> {
+        self.driver.attach(id)?.resume()
+    }
+
+    fn status(&self, id: &VmId) -> Result<VmStatus> {
+        self.driver.attach(id)?.status()
+    }
+
+    fn logs(&self, id: &VmId, _lines: u32, _hypervisor: bool) -> Result<String> {
+        let log = vm_state_dir(&id.0).join("console.log");
+        std::fs::read_to_string(&log).with_context(|| format!("read {}", log.display()))
+    }
+
+    fn list(&self) -> Result<Vec<VmInfo>> {
+        let root = vms_dir();
+        let entries = match std::fs::read_dir(&root) {
+            Ok(it) => it,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(anyhow::anyhow!("read {}: {e}", root.display())),
+        };
+        let mut vms = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.path().join("console.log").exists() {
+                continue;
+            }
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let id = VmId(name.clone());
+            let status = self.status(&id).unwrap_or(VmStatus::Stopped);
+            vms.push(VmInfo {
+                id,
+                name,
+                status,
+                guest_ip: None,
+                cpus: 0,
+                memory_mib: 0,
+                profile: None,
+                revision: None,
+                flake_ref: None,
+                ports: Vec::new(),
+            });
+        }
+        Ok(vms)
+    }
+
+    fn install(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+    WorkloadBackend for WorkloadRunner<D, S, B>
+{
+    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
+        EgressSubstitutionTransport::VsockUdsChannel
+    }
+}

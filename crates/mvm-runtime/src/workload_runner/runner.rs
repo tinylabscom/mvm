@@ -57,6 +57,9 @@ use crate::workload_runner::spec_map::{
 };
 use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
 
+mod backend;
+mod warm_claim;
+
 /// What the workload runner needs to stand up the per-VM gating endpoint.
 pub struct EndpointSpawnRequest<'a> {
     pub vm_name: &'a str,
@@ -402,25 +405,6 @@ pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> 
     console_streamer: Arc<dyn ConsoleStreamer>,
 }
 
-fn record_warm_claim_phase(
-    claim_started: Instant,
-    claim_debug: &mut Option<std::fs::File>,
-    phase: &'static str,
-) {
-    let elapsed_us = claim_started.elapsed().as_micros();
-    tracing::debug!(
-        target: "mvm_runtime::warm_claim",
-        phase,
-        elapsed_us,
-        "warm claim phase"
-    );
-    if let Some(file) = claim_debug.as_mut() {
-        use std::io::Write;
-
-        let _ = writeln!(file, "[warm-claim] phase={phase} elapsed_us={elapsed_us}");
-    }
-}
-
 impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
     /// Build a runner over the process's registered console-streaming hook.
     ///
@@ -579,7 +563,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         });
         macro_rules! claim_phase {
             ($phase:expr) => {
-                record_warm_claim_phase(claim_started, &mut claim_debug, $phase);
+                warm_claim::record_phase(claim_started, &mut claim_debug, $phase);
             };
         }
         let resident_handoff = self.driver.supports_resident_handoff();
@@ -1498,251 +1482,6 @@ fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathB
             rootfs.display()
         ))
     })
-}
-
-/// The runner IS the workload backend: the lifecycle runs through the `VmmDriver`
-/// seam (`boot` on start, `attach` for stop/status/wait/pause/resume) instead of
-/// per-backend code. State is disk-backed under the per-VM `vm_state_dir`, so a
-/// stateless CLI invocation reconstructs a handle by id.
-impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static> VmBackend
-    for WorkloadRunner<D, S, B>
-{
-    fn name(&self) -> &str {
-        self.driver.name()
-    }
-
-    fn kind(&self) -> BackendKind {
-        self.driver.kind()
-    }
-
-    fn capabilities(&self) -> VmCapabilities {
-        self.driver.capabilities()
-    }
-
-    fn supports_resident_handoff(&self) -> bool {
-        self.driver.supports_resident_handoff()
-    }
-
-    fn security_profile(&self) -> BackendSecurityProfile {
-        self.driver.security_profile()
-    }
-
-    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
-        self.driver.guest_channel_info(id)
-    }
-
-    fn is_available(&self) -> Result<bool> {
-        self.driver.is_available()
-    }
-
-    // `spawn_standby` is deliberately NOT implemented: it takes a `StandbySpec`
-    // alone, and a factory parent cannot be assembled from one. A parent must
-    // boot the shape of the launch it will serve, and that launch reaches the
-    // runner only through [`spawn_standby_captured`]'s `SpawnContext`. Leaving
-    // the fail-closed trait default in place keeps a single way in — the one
-    // that carries the launch — instead of a second, context-free entry point
-    // that could only ever produce a parent shaped like nothing in particular.
-
-    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        let state_dir = vm_state_dir(&config.name);
-        std::fs::create_dir_all(&state_dir)
-            .with_context(|| format!("create state dir {}", state_dir.display()))?;
-
-        // Admission gate — refuse a rootfs whose parent dir carries no
-        // overlay-aware sidecar (no `/mvm/runtime` mount point). Runs before any
-        // endpoint/broker spawn or boot, so a refusal leaves no live process
-        // behind. Routed through the shared `ClaimGuards` so a warm claim runs
-        // the identical gate.
-        ClaimGuards::new(&self.spawner).admit_overlay_contract(config)?;
-        // Record per-VM runtime metadata (the sidecar accessibility bit + the
-        // boot contract) so the `mvmctl console` accessible/sealed gate holds on
-        // every runner-launched VM, matching the raw backend start paths.
-        crate::base::runtime_meta::record_from_start_config(
-            &config.name,
-            StartMode::Detached,
-            config,
-        )?;
-
-        // The L3 gateway must be listening before the guest boots and dials
-        // it: there is no retry and no fallback, so a guest that finds no
-        // listener has no network at all. A no-op for every plan that did
-        // not select the tunnel.
-        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
-
-        // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
-        // below, so bind them here rather than inline.
-        let default_redaction = RedactionPolicy::default();
-        let decoded = decode_plan_secrets_from_state(&state_dir)?;
-        let (secrets, redaction, tenant): (&[SecretBinding], &RedactionPolicy, &str) =
-            match &decoded {
-                Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
-                None => (
-                    &[],
-                    &default_redaction,
-                    config.tenant_id.as_deref().unwrap_or("local"),
-                ),
-            };
-
-        let cmdline = cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
-            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
-        });
-        if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
-            anyhow::bail!("refusing to start VM {}: {problem}", config.name);
-        }
-        tracing::debug!(vm = %config.name, %cmdline, "assembled workload kernel cmdline");
-
-        let inputs = WorkloadLaunchInputs {
-            config,
-            tenant,
-            secrets,
-            redaction,
-            network_policy: &config.network_policy,
-            cmdline,
-        };
-        // The supervisor + endpoint are detached/disk-backed; the live handle is
-        // reconstructed by id via `attach`, so the boot handle is dropped here.
-        //
-        // A failure past this point leaves no VM, so the gateway spawned
-        // above would hold a host TUN and an nft table for a guest that
-        // never existed. Reap before propagating.
-        match self.start_workload(&inputs) {
-            Ok(_vm) => Ok(VmId(config.name.clone())),
-            Err(e) => {
-                crate::netd_spawn::reap_netd(&state_dir);
-                Err(e)
-            }
-        }
-    }
-
-    fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
-        self.driver.attach(id)?.wait()
-    }
-
-    fn stop(&self, id: &VmId) -> Result<()> {
-        // Capture the VMM's disk-backed process identity before reaping any
-        // sidecars. A teardown helper may remove marker files as part of its own
-        // cleanup; the live handle must already own everything needed to stop
-        // and verify the VMM independently of those mutable markers.
-        let vm = match self.driver.attach(id) {
-            Ok(vm) => vm,
-            Err(err) => {
-                // A VM the driver cannot attach to still has a follower
-                // registered here. Propagating straight out strands that
-                // thread and leaves the transcript unsealed — so the capture
-                // is released on the way past, the same unconditional release
-                // the kill path performs, on the path that never reaches it.
-                self.console_streamer.stop(&id.0);
-                return Err(err);
-            }
-        };
-        // Reap the per-VM secrets endpoint first, so a crashed VM's
-        // decrypted-secret process can't outlive the guest. Idempotent + a no-op
-        // when the VM spawned none.
-        reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
-        // The gateway holds the host TUN and this VM's nft table; both must
-        // die with the guest rather than outlive it.
-        crate::netd_spawn::reap_netd(&vm_state_dir(&id.0));
-        // Reap the per-VM broker + audit-signer (fork path) and deregister from
-        // the per-tenant host-agent daemon (daemon path), so neither can outlive
-        // the guest. Each is an idempotent no-op for the other path and for a VM
-        // that registered none.
-        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
-        crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
-        // Kill first, release the capture second. A guest writes its last
-        // words during the kill — a shutdown trace, a panic, whatever the
-        // kernel prints on the way down — and a follower stopped before it
-        // captures none of them: they land in the write-only console file and
-        // never in the chain, which is exactly the output an operator opens
-        // the transcript to find.
-        //
-        // The order costs nothing the other one had. The release is
-        // unconditional and runs whether or not the kill worked, so a VM that
-        // will not die still gets its capture sealed rather than stranding
-        // the follower; and for a VM whose console was never followed here it
-        // is the idempotent no-op it always was. `vm` is the handle taken
-        // before any sidecar reaping, so the kill does not depend on marker
-        // files a teardown helper may already have removed.
-        let killed = vm.kill();
-        self.console_streamer.stop(&id.0);
-        killed
-    }
-
-    fn stop_all(&self) -> Result<()> {
-        for vm in self.list()? {
-            let _ = self.stop(&vm.id);
-        }
-        Ok(())
-    }
-
-    fn pause(&self, id: &VmId) -> Result<()> {
-        self.driver.attach(id)?.pause()
-    }
-
-    fn resume(&self, id: &VmId) -> Result<()> {
-        self.driver.attach(id)?.resume()
-    }
-
-    fn status(&self, id: &VmId) -> Result<VmStatus> {
-        self.driver.attach(id)?.status()
-    }
-
-    fn logs(&self, id: &VmId, _lines: u32, _hypervisor: bool) -> Result<String> {
-        // Capture-only console; one log (no separate hypervisor stream).
-        let log = vm_state_dir(&id.0).join("console.log");
-        std::fs::read_to_string(&log).with_context(|| format!("read {}", log.display()))
-    }
-
-    fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = vms_dir();
-        let entries = match std::fs::read_dir(&root) {
-            Ok(it) => it,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(anyhow::anyhow!("read {}: {e}", root.display())),
-        };
-        let mut vms = Vec::new();
-        for entry in entries.flatten() {
-            // console.log is the generic marker that a workload booted in this
-            // state dir (every backend captures it). A driver-provided marker
-            // could replace this later.
-            if !entry.path().join("console.log").exists() {
-                continue;
-            }
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            let id = VmId(name.clone());
-            let status = self.status(&id).unwrap_or(VmStatus::Stopped);
-            vms.push(VmInfo {
-                id,
-                name,
-                status,
-                guest_ip: None,
-                cpus: 0,
-                memory_mib: 0,
-                profile: None,
-                revision: None,
-                flake_ref: None,
-                ports: Vec::new(),
-            });
-        }
-        Ok(vms)
-    }
-
-    fn install(&self) -> Result<()> {
-        // The hvf VMM needs no host install.
-        Ok(())
-    }
-}
-
-impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static>
-    WorkloadBackend for WorkloadRunner<D, S, B>
-{
-    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        // When egress is admitted, route it through the per-VM vsock UDS
-        // endpoint — the sole gate off the box. No transparent :80/:443
-        // terminator. Deny-all workloads carry no egress channel at all.
-        EgressSubstitutionTransport::VsockUdsChannel
-    }
 }
 
 #[cfg(test)]
