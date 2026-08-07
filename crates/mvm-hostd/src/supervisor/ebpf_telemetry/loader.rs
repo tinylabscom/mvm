@@ -247,7 +247,7 @@ fn ebpf_worker(
         if let Some(ref mut rb) = ring_buf {
             match rb.next() {
                 Some(item) => {
-                    let bytes = item.as_slice();
+                    let bytes: &[u8] = &item;
                     if bytes.len() >= core::mem::size_of::<RawEgressEvent>() {
                         // SAFETY: the kernel wrote the full RawEgressEvent.
                         let raw = unsafe { &*(bytes.as_ptr() as *const RawEgressEvent) };
