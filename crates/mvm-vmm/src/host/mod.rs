@@ -4,5 +4,7 @@
 //! without creating a dependency cycle with `mvm-runtime` or `mvm-build`.
 
 pub mod aux_bin;
+pub mod egress_shared;
+pub mod netd_spawn;
 pub mod virtiofsd;
 pub mod workload_wait;

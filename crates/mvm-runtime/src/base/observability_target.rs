@@ -181,11 +181,11 @@ pub fn build_from_start_config(
         pid: None,
     }];
 
-    if crate::egress_shared::l3_cmdline_token(start_config).is_some() {
+    if mvm_vmm::host::egress_shared::l3_cmdline_token(start_config).is_some() {
         helpers.push(ProcessTarget {
             role: "netd".to_string(),
             process_name: "mvm-netd".to_string(),
-            pid_file: state_dir.join(crate::netd_spawn::NETD_PID_FILE),
+            pid_file: state_dir.join(mvm_vmm::host::netd_spawn::NETD_PID_FILE),
             pid: None,
         });
     }
@@ -208,7 +208,7 @@ pub fn build_from_start_config(
             socket_dir,
         },
         network: NetworkTarget {
-            has_netd: crate::egress_shared::l3_cmdline_token(start_config).is_some(),
+            has_netd: mvm_vmm::host::egress_shared::l3_cmdline_token(start_config).is_some(),
             substitution_socket,
         },
         cgroup_path: None,

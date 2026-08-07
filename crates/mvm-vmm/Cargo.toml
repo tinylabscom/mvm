@@ -16,8 +16,16 @@ anyhow.workspace = true
 # Egress policy types used by the vsock egress bridge.
 mvm-core = { workspace = true }
 # Well-known vsock port constants for the in-guest agent.
-mvm-agentd = { workspace = true }
 mvm-net = { workspace = true }
+# Backend-agnostic error handling used by the driver seam.
+mvm-agentd = { workspace = true }
+# Egress-substitution plan decode shared by backends.
+mvm-contract = { workspace = true }
+# Structured logging used by host helpers.
+tracing = { workspace = true }
+# JSON serialization for host-service configs.
+serde_json = { workspace = true }
+serde = { workspace = true }
 # Host event loop for the vsock host-side I/O thread.
 mio = { workspace = true, features = ["os-poll", "os-ext"] }
 
@@ -34,8 +42,6 @@ rand.workspace = true
 libc.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
-serde_json.workspace = true
-serde.workspace = true
 # Binary lookup for host-side helpers (virtiofsd).
 which.workspace = true
 
@@ -45,3 +51,7 @@ mvm-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+test-support = []

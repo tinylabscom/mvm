@@ -58,7 +58,6 @@ pub mod driver;
 pub mod egress_redirect;
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by
 /// the libkrun + Firecracker substitution-endpoint spawn paths.
-pub mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
 pub(crate) mod host_agent_spawn;
@@ -90,7 +89,6 @@ pub mod mock_guest_agent;
 /// Starting and reaping the per-VM `mvm-netd` gateway. The gateway must be
 /// listening before the VM starts, so the spawn waits for it to report both
 /// guest channels bound.
-pub(crate) mod netd_spawn;
 pub mod netinit_audit;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;

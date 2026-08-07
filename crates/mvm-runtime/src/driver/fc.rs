@@ -1875,7 +1875,7 @@ mod tests {
             vm_state_dir: tmp.path().join("standby-parent-1").display().to_string(),
             image_path: Some(image.display().to_string()),
             image_sha256: Some("c".repeat(64)),
-            vsock_egress: crate::egress_shared::effective_vsock_egress(&launch),
+            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(&launch),
         };
 
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
@@ -1944,7 +1944,7 @@ mod tests {
                 .to_string(),
             image_path: Some(image.display().to_string()),
             image_sha256: Some("c".repeat(64)),
-            vsock_egress: crate::egress_shared::effective_vsock_egress(launch),
+            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
         };
         let parent_boot = |launch: &VmStartConfig| {
             let spec = spec_for(launch);

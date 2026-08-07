@@ -306,7 +306,7 @@ fn docker_endpoint_plan(
     run_dir: &Path,
 ) -> Result<Option<DockerEndpointPlan>> {
     let default_redaction = mvm_core::policy::RedactionPolicy::default();
-    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let decoded = mvm_vmm::host::egress_shared::decode_plan_secrets_from_state(state_dir)?;
     let (secrets, redaction, tenant) = match decoded {
         Some((secrets, redaction, tenant)) => (secrets, redaction, tenant),
         None => (

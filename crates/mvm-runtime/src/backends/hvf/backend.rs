@@ -173,7 +173,7 @@ fn hvf_endpoint_needed(
     state_dir: &Path,
 ) -> bool {
     network_policy.allows_egress()
-        || crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false)
+        || mvm_vmm::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false)
 }
 
 /// Spawn the per-VM gating endpoint carrying the resolved `NetworkPolicy` when the
@@ -202,7 +202,7 @@ fn spawn_hvf_gating_endpoint_if_needed(
     // Owned defaults + the decoded plan outlive the params below so the borrows
     // stay valid across both branches.
     let default_redaction = RedactionPolicy::default();
-    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let decoded = mvm_vmm::host::egress_shared::decode_plan_secrets_from_state(state_dir)?;
     let (secrets, redaction, tenant): (&[_], &RedactionPolicy, &str) = match &decoded {
         Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
         None => (
@@ -678,7 +678,7 @@ impl VmBackend for HvfBackend {
         // check), so a crashed VM's decrypted-secret process can't outlive the
         // guest. Idempotent + no-op when the VM spawned none (no secrets).
         crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
-        crate::netd_spawn::reap_netd(&state_dir);
+        mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         // Deregister from the per-tenant host-agent daemon (no-op if this VM
         // never registered — an unadmitted dev VM, or a failed registration
         // that was already logged). The daemon itself stays warm.
@@ -941,7 +941,7 @@ mod tests {
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         assert!(!deny_all.allows_egress());
         assert!(
-            crate::egress_shared::state_has_bound_secrets(dir.path()).unwrap(),
+            mvm_vmm::host::egress_shared::state_has_bound_secrets(dir.path()).unwrap(),
             "planted plan must decode a bound secret"
         );
         assert!(hvf_endpoint_needed(&deny_all, dir.path()));

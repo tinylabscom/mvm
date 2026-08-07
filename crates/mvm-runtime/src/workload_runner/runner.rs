@@ -7,13 +7,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use mvm_agentd::vsock::BROKER_PORT;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
-use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
+use mvm_core::config::{
+    vm_hvf_vsock_port_socket_at, vm_state_dir, vm_substitution_endpoint_socket,
+    vm_vsock_port_socket_at, vms_dir,
+};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
@@ -24,17 +25,14 @@ use mvm_core::vm_backend::{
     StandbyHandle, StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
     VmStartConfig, VmStatus,
 };
-use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
+use mvm_fs::snapshot_store::FsSnapshotStore;
+use mvm_net::channel::GuestService;
 
 use crate::checkpoint::{
-    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore,
-    capture_vm_full_with_snapshot_store, capture_vm_full_with_trusted_snapshot_backend,
+    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, capture_fs_quick, capture_vm_full,
     verify_content, verify_lineage,
 };
-use crate::driver::{
-    ChildForkRequest, PreloadChildRequest, RunningVm, StandbyParentSpawn, VmmDriver,
-};
-use crate::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
+use crate::driver::{ChildForkRequest, RunningVm, StandbyParentSpawn, VmmDriver};
 use crate::standby_pool::SupervisorStandbyPool;
 use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
@@ -42,9 +40,7 @@ use crate::substitution_spawn::{
 };
 use crate::vm::instance_snapshot::PostRestoreOutcome;
 use crate::vm::name_registry::{VmNameRegistry, acquire_registry_lock, generate_vm_name};
-use crate::warm_snapshot::{
-    is_trusted_snapshot_id, materialize_child_from_parent, materialize_child_from_trusted_parent,
-};
+use crate::warm_snapshot::materialize_child_from_parent;
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::child_grant::{ChildGrantIssuer, issue_child_grant};
 use crate::workload_runner::claim::{
@@ -52,13 +48,13 @@ use crate::workload_runner::claim::{
 };
 use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::{
-    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_dir_share_support,
+    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_no_dir_share_volumes,
     workload_spec, workload_vsock_ports,
 };
-use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
-
-mod backend;
-mod warm_claim;
+use crate::workload_runner::standby_boot::{
+    factory_parent_config, factory_parent_spec, factory_parent_spec_live,
+};
+use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
 pub struct EndpointSpawnRequest<'a> {
@@ -282,8 +278,7 @@ pub struct WorkloadLaunchInputs<'a> {
 
 /// The standing host sockets a workload's vsock channels bind to, resolved
 /// under its per-VM state dir. The egress gateway is the endpoint UDS the
-/// spawner returns, not a state-dir path — it is the one gate off the box. A
-/// deny-all, secret-free workload carries no egress path at all.
+/// spawner returns, not a state-dir path — it is the one gate off the box.
 struct StandingSockets {
     agent: PathBuf,
     exit: PathBuf,
@@ -292,6 +287,8 @@ struct StandingSockets {
     /// broker channel at all. The one path threaded into both the spec and the
     /// `BrokerRegistrar::register` call so the relay target and bind path match.
     broker: Option<PathBuf>,
+    network_control: Option<PathBuf>,
+    network_data: Option<PathBuf>,
     console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
@@ -301,28 +298,36 @@ struct StandingSockets {
 impl StandingSockets {
     /// Bind these resolved sockets to `egress_uds` — the gating endpoint the
     /// guest's `EGRESS_PORT` relays to — yielding the channel description both
-    /// start paths map through [`workload_vsock_ports`]. `None` is the explicit
-    /// fail-closed shape for a deny-all, secret-free workload.
+    /// start paths map through [`workload_vsock_ports`].
     ///
     /// The one place a workload's channel description is built. A cold boot
     /// composes the mapped channels into the spec it boots; a warm claim hands
     /// the same mapped channels to the fork, which wires them before the
     /// restored child resumes. Adding a channel to the mapper therefore reaches
     /// both, and neither path can grow one the other lacks.
-    fn with_egress<'a>(&'a self, egress_uds: Option<&'a Path>) -> WorkloadSockets<'a> {
+    fn with_egress<'a>(&'a self, egress_uds: &'a Path) -> WorkloadSockets<'a> {
         WorkloadSockets {
             agent: &self.agent,
             egress_gateway: egress_uds,
             exit: &self.exit,
             broker: self.broker.as_deref(),
-            network_control: None,
-            network_data: None,
+            network_control: self.network_control.as_deref(),
+            network_data: self.network_data.as_deref(),
             console_data: self.console_data.clone(),
         }
     }
 }
 
-fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets {
+fn standing_sockets(
+    state_dir: &Path,
+    config: &VmStartConfig,
+    backend_kind: BackendKind,
+) -> StandingSockets {
+    let l3_channels = mvm_vmm::host::egress_shared::l3_cmdline_token(config).is_some();
+    let l3_socket = |service: GuestService| match backend_kind {
+        BackendKind::Hvf => vm_hvf_vsock_port_socket_at(state_dir, service.port()),
+        _ => vm_vsock_port_socket_at(state_dir, service.port()),
+    };
     StandingSockets {
         // Single source of truth shared with the host-side resolver so the
         // guest agent bridge can't drift out of the host's reach.
@@ -333,7 +338,9 @@ fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets
         broker: config
             .tenant_id
             .is_some()
-            .then(|| mvm_core::config::vm_vsock_port_socket_at(state_dir, BROKER_PORT)),
+            .then(|| vm_vsock_port_socket_at(state_dir, GuestService::Broker.port())),
+        network_control: l3_channels.then(|| l3_socket(GuestService::NetworkControl)),
+        network_data: l3_channels.then(|| l3_socket(GuestService::NetworkData { queue: 0 })),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, config.dev_console),
     }
@@ -352,9 +359,8 @@ pub struct ClaimContext<'a> {
     pub checkpoints: &'a CheckpointStore,
     /// Snapshot store backing the O(1) copy-on-write child materialize.
     pub snapshots: &'a FsSnapshotStore,
-    /// Resolves each checkpoint's signature-verified creation digest for saved-
-    /// state claims. Resident HVF claims use their signed snapshot manifest and
-    /// do not load the growing audit chain on the launch path.
+    /// Resolves each checkpoint's signature-verified creation digest — the
+    /// lineage gate that refuses an un-audited or re-forged parent.
     pub anchor: &'a dyn CheckpointChainAnchor,
     /// The content-addressed checkpoint the standby parent was captured as.
     pub parent_checkpoint: &'a CheckpointId,
@@ -380,20 +386,6 @@ pub struct SpawnContext<'a> {
     /// pool ahead of any launch, which the spawn refuses: a parent has no boot
     /// shape of its own to fall back on.
     pub launch: Option<&'a VmStartConfig>,
-}
-
-/// Verified publication inputs used to prepare a paused child during pool
-/// refill. The parent has already been audited by the caller, so this context
-/// can perform the same content and lineage checks as a claim before cloning.
-pub struct PreloadContext<'a> {
-    /// Content-addressed checkpoint store containing the captured parent.
-    pub checkpoints: &'a CheckpointStore,
-    /// Snapshot store backing the copy-on-write child materialization.
-    pub snapshots: &'a FsSnapshotStore,
-    /// Signed audit anchor for the parent's creation entry.
-    pub anchor: &'a dyn CheckpointChainAnchor,
-    /// VM-name registry lock source used to avoid colliding with user VMs.
-    pub registry_path: &'a Path,
 }
 
 /// Starts workloads over the `VmmDriver` seam: spawn the per-VM gating endpoint,
@@ -431,30 +423,24 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         self
     }
 
-    /// Whether this runner can keep a saved child VMM paused across claims.
-    #[must_use]
-    pub fn supports_preloaded_standby(&self) -> bool {
-        self.driver.supports_preloaded_standby()
-    }
-
-    /// Spawn the optional gating endpoint, compose the spec, and boot. A
-    /// secret-free deny-all workload has no egress capability and therefore
-    /// carries no endpoint process or guest egress channel.
+    /// Spawn the gating endpoint, compose the spec, and boot. The endpoint is
+    /// ALWAYS spawned — it is the sole egress gate now, even for the no-secret
+    /// raw path.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
         // Fail closed before any side effect (endpoint spawn) runs: a
         // `DirShare` volume has no `VmmSpec` representation on this driver
         // seam, so refuse it here rather than silently dropping it later in
         // `workload_blocks`.
-        ensure_dir_share_support(inputs.config, self.driver.supports_directory_shares())?;
+        ensure_no_dir_share_volumes(inputs.config)?;
 
         let state_dir = vm_state_dir(&inputs.config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
 
-        // Spawn the per-child substitution endpoint through the shared
-        // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
-        // a cold boot does, keyed on this VM's own id. A deny-all, secret-free
-        // workload receives no egress channel and therefore needs no process.
+        // Spawn the per-child substitution endpoint (the sole egress gate, ALWAYS
+        // spawned — even the no-secret raw path) through the shared `ClaimGuards`,
+        // so a warm claim stands up the identical guarded endpoint a cold boot
+        // does, keyed on this VM's own id.
         let guards = ClaimGuards::new(&self.spawner);
         let mut endpoint = guards.spawn_endpoint(
             &VmId(inputs.config.name.clone()),
@@ -467,7 +453,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             },
         )?;
 
-        let socks = standing_sockets(&state_dir, inputs.config);
+        let socks = standing_sockets(&state_dir, inputs.config, self.driver.kind());
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
             sockets: socks.with_egress(endpoint.egress_uds()),
@@ -551,34 +537,15 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<VmId, StandbyError> {
-        use std::io::Write;
-
-        let claim_started = Instant::now();
-        let mut claim_debug = std::env::var_os("MVM_HVF_AGENT_DEBUG").and_then(|path| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-        });
-        macro_rules! claim_phase {
-            ($phase:expr) => {
-                warm_claim::record_phase(claim_started, &mut claim_debug, $phase);
-            };
-        }
-        let resident_handoff = self.driver.supports_resident_handoff();
-        // (1) Reserve the parent atomically, then verify it — before any clone.
-        // Resident HVF claims use the signed bundle manifest as their O(1)
-        // publication witness; saved-state claims retain full content hashing.
-        let parent = reserve_and_verify_parent(ctx, handle, resident_handoff)?;
-        claim_phase!("parent_verified");
+        // (1) Reserve the parent atomically, then verify it — before any clone. A
+        // verification failure quarantines the parent inside this call.
+        let parent = reserve_and_verify_parent(ctx, handle)?;
 
         // The parent is now reserved (`Claimed`) and verified healthy. Arm the
         // release-unless-committed guard: any early return past this point returns
         // the good parent to claimable (so a failed claim never strands warm
         // capacity) and removes a partial child dir. Only a booted child commits.
-        let preloaded_child_name = handle.preloaded_child_vm_name.clone();
-        let mut cleanup = WarmClaimLease::new(ctx.pool, handle.id.as_str(), &self.driver);
+        let mut cleanup = ClaimCleanup::new(ctx.pool, handle.id.as_str());
 
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
@@ -586,70 +553,26 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         bind_plan_to_parent(&plan.image.sha256, &parent).map_err(refuse)?;
 
         // (6a) Fresh, registry-unique identity for the child.
-        let child = match preloaded_child_name.clone() {
-            Some(name) => {
-                verify_preloaded_child_name_is_available(ctx, &name)?;
-                VmId(name)
-            }
-            None => fresh_child_id(ctx)?,
-        };
+        let child = fresh_child_id(ctx)?;
         let child_dir = vm_state_dir(&child.0);
-        // Track it before creating or materializing anything so even a partial
-        // claim is cleaned up.
+        // Track it before materialize so even a partial clone is cleaned up.
         cleanup.track_child_dir(child_dir.clone());
-        if preloaded_child_name.is_some() {
-            cleanup.track_preloaded_child(child.0.clone());
-        }
 
-        // (3) A resident handoff transfers the already-paused HVF machine and
-        // creates only the fresh child state directory. Saved-state backends
-        // still materialize the verified parent content before restoring.
-        let child_rootfs_dir = if resident_handoff {
-            std::fs::create_dir_all(&child_dir).map_err(|e| {
-                StandbyError::ClaimFailed(format!(
-                    "create resident HVF child state {}: {e}",
-                    child_dir.display()
-                ))
-            })?;
-            resident_parent_rootfs_dir(handle.id.as_str())?
-        } else if preloaded_child_name.is_some() {
-            child_dir.clone()
-        } else {
-            let materialize =
-                if is_trusted_snapshot_id(parent.snapshot_id.as_deref().unwrap_or_default()) {
-                    let backend = mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root())
-                        .map_err(|e| {
-                            StandbyError::ClaimFailed(format!("open trusted snapshot backend: {e}"))
-                        })?;
-                    materialize_child_from_trusted_parent(
-                        ctx.checkpoints,
-                        backend.as_ref(),
-                        ctx.parent_checkpoint,
-                        ctx.anchor,
-                        &child_dir,
-                    )
-                } else {
-                    materialize_child_from_parent(
-                        ctx.checkpoints,
-                        ctx.snapshots,
-                        ctx.parent_checkpoint,
-                        ctx.anchor,
-                        &child_dir,
-                    )
-                };
-            materialize
-                .map_err(|e| StandbyError::ClaimFailed(format!("materialize child rootfs: {e}")))?;
-            claim_phase!("child_materialized");
-            child_dir.clone()
-        };
-        if resident_handoff {
-            claim_phase!("resident_handoff_ready");
-        }
+        // (3) Materialize the child's rootfs from the verified parent's own
+        // content (self-binding, lineage-anchored copy-on-write clone).
+        materialize_child_from_parent(
+            ctx.checkpoints,
+            ctx.snapshots,
+            ctx.parent_checkpoint,
+            ctx.anchor,
+            &child_dir,
+        )
+        .map_err(|e| StandbyError::ClaimFailed(format!("materialize child rootfs: {e}")))?;
 
         // (8) The runner-side host gates a cold boot runs, before the child boots:
         // the overlay contract, then the child's own 0700 substitution endpoint
         // keyed on its fresh id (never a sibling's; the factory parent has none).
-        let child_cfg = child_start_config(claim, &child, &child_rootfs_dir);
+        let child_cfg = child_start_config(claim, &child, &child_dir);
         let guards = ClaimGuards::new(&self.spawner);
         guards
             .admit_overlay_contract(&child_cfg)
@@ -662,14 +585,6 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             mvm_core::plan::secrets_from_signed_json(&claim.plan_json).unwrap_or_default();
         let redaction =
             mvm_core::plan::redaction_from_signed_json(&claim.plan_json).unwrap_or_default();
-        if let Some(file) = claim_debug.as_mut() {
-            let _ = writeln!(
-                file,
-                "[warm-claim] inputs allows_egress={} secrets={}",
-                claim.network_policy.allows_egress(),
-                secrets.len()
-            );
-        }
         let mut endpoint = guards
             .spawn_endpoint(
                 &child,
@@ -682,13 +597,12 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 },
             )
             .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e}")))?;
-        claim_phase!("endpoint_ready");
 
         // The child's host channel set, resolved under its own state dir and
         // mapped through the one mapper a cold boot's set comes from. The fork
         // wires these before it resumes the child; a restored guest is already
         // booted, so it dials the instant its vCPUs run.
-        let socks = standing_sockets(&child_dir, &child_cfg);
+        let socks = standing_sockets(&child_dir, &child_cfg, self.driver.kind());
         let channels = workload_vsock_ports(&socks.with_egress(endpoint.egress_uds()));
 
         // Register the child's host-services broker (host.audit.v1 /
@@ -708,7 +622,6 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 broker_listen_socket: socks.broker.as_deref(),
             })
             .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e}")))?;
-        claim_phase!("broker_registered");
 
         // (6b) Mint a fresh VMGenID bound to the child's content-address and fork
         // the VMM. A fork restores a running guest out of the parent's saved
@@ -717,22 +630,13 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         let content_hash = parent_rootfs_digest(&parent).map_err(refuse)?.to_string();
         let genid = fresh_generation_token(content_hash);
         let token = genid.token;
-        let fork_request = ChildForkRequest {
+        self.driver.fork_standby_child(&ChildForkRequest {
+            parent_vm_name: &handle.id,
             child_vm_name: &child.0,
             child_dir: &child_dir,
-            // A resident HVF claim addresses the paused parent by its stable
-            // pool identity. Saved-state drivers receive no parent name and
-            // restore from the materialized child directory instead.
-            parent_vm_name: resident_handoff.then_some(handle.id.as_str()),
             genid,
             channels: &channels,
-        };
-        if preloaded_child_name.is_some() {
-            self.driver.resume_preloaded_child(&fork_request)?;
-        } else {
-            self.driver.fork_standby_child(&fork_request)?;
-        }
-        claim_phase!("child_forked");
+        })?;
 
         // Unconditional and best-effort, mirroring `start_workload`: started
         // the moment the restored guest is live, before the fallible
@@ -768,7 +672,22 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             self.console_streamer.stop(&child.0);
             return Err(refusal);
         }
-        claim_phase!("identity_verified");
+
+        // A universal initramfs keeps the factory parent behind its activation
+        // gate. A live HVF handoff has no boot callback in which to perform the
+        // cold path's activation, so do it after the child identity proof and
+        // before the claim commits. The endpoint and broker are already armed,
+        // which preserves the same host-service ordering as cold boot.
+        if let Some(config) = claim.start_config.as_ref()
+            && crate::microvm::booted_with_universal_initramfs(config)
+        {
+            let vm = self
+                .driver
+                .attach(&child)
+                .map_err(|e| StandbyError::ClaimFailed(format!("attach claimed child: {e}")))?;
+            crate::microvm::activate_workload(&*vm, config)
+                .map_err(|e| StandbyError::ClaimFailed(format!("activate claimed child: {e}")))?;
+        }
 
         // The child booted and proved a fresh identity: disarm the endpoint and
         // broker reapers (the stop path owns them now) and commit — the parent
@@ -776,9 +695,6 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         endpoint.defuse();
         broker_guard.defuse();
         cleanup.commit();
-        if resident_handoff {
-            schedule_resident_checkpoint_reclaim(ctx, &parent);
-        }
         Ok(child)
     }
 
@@ -853,9 +769,15 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             ))
         })?;
 
-        let boot = factory_parent_spec(&parent_config, &state_dir, |virtiofs_root, has_disk| {
-            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
-        });
+        let boot = if self.driver.standby_parent_is_live() {
+            factory_parent_spec_live(&parent_config, &state_dir, |virtiofs_root, has_disk| {
+                self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+            })
+        } else {
+            factory_parent_spec(&parent_config, &state_dir, |virtiofs_root, has_disk| {
+                self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+            })
+        };
         // The same truncation refusal a workload boot gets, for the same reason
         // and then some: a child inherits its parent's cmdline out of restored
         // memory rather than deriving its own, so a parent whose trailing tokens
@@ -870,166 +792,65 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             .driver
             .spawn_standby_parent(&StandbyParentSpawn { spec, boot: &boot })?;
 
-        let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
-            StandbyError::SpawnFailed(format!(
-                "backend cannot capture a warm parent's memory for standby '{}'",
-                spec.id
-            ))
-        })?;
-        let retain_parent = control.retain_paused_after_capture();
-        let snapshots = FsSnapshotStore::new(mvm_core::config::snapshots_dir())
-            .map_err(|e| StandbyError::SpawnFailed(format!("open snapshot store: {e}")))?;
-
-        let capture_params = CaptureVmFullParams {
-            id: CheckpointId::new(format!("standby-{}", spec.id)),
-            vm_name: spec.id.clone(),
-            supervisor_config_digest: String::new(),
-            runtime_source_policy: None,
-            runtime_overlay_version: None,
-            // Firecracker keeps no supervisor-config blob; its presence is
-            // what marks a checkpoint as originating from a backend that does.
-            supervisor_config_src: control.supervisor_config_path().map_err(|e| {
-                StandbyError::SpawnFailed(format!("resolve standby supervisor config: {e}"))
-            })?,
-            tag: None,
-            created_unix: mvm_core::time::now_unix_secs(),
-        };
-        let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))
-            && std::env::var("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT").as_deref() == Ok("1")
-        {
-            Some(
-                mvm_fs::trusted_snapshot::platform_backend(snapshots.root()).map_err(|e| {
-                    StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e}"))
-                })?,
-            )
-        } else {
-            None
-        };
-        let captured = if let Some(backend) = trusted_backend.as_deref() {
-            capture_vm_full_with_trusted_snapshot_backend(
+        let meta = if self.driver.standby_parent_is_live() {
+            // Native HVF cannot restore a fresh VMM from serialized device
+            // state yet. It therefore uses an explicit live handoff: the
+            // parent was paused by the driver, its rootfs is still sealed and
+            // captured for the same content/lineage gates, and the driver keeps
+            // the resident VM paused until a claim rewires its channels.
+            let captured = capture_fs_quick(
                 ctx.checkpoints,
-                capture_params,
-                control.as_ref(),
-                backend,
-            )
+                crate::checkpoint::CaptureFsQuickParams {
+                    id: CheckpointId::new(format!("standby-{}", spec.id)),
+                    vm_name: spec.id.clone(),
+                    rootfs: PathBuf::from(parent_config.rootfs_path.clone()),
+                    supervisor_config_digest: String::new(),
+                    runtime_source_policy: None,
+                    runtime_overlay_version: None,
+                    tag: None,
+                    created_unix: mvm_core::time::now_unix_secs(),
+                    quiesced: true,
+                },
+            );
+            captured.map_err(|e| {
+                self.force_stop(&spec.id, "failed live standby capture");
+                StandbyError::SpawnFailed(format!("capture live standby parent: {e}"))
+            })?
         } else {
-            capture_vm_full_with_snapshot_store(
-                ctx.checkpoints,
-                capture_params,
-                control.as_ref(),
-                &snapshots,
-            )
-        };
-
-        // Saved-state backends release the source after capture because the
-        // checkpoint is their claim resource. The HVF live-handoff backend
-        // deliberately retains its paused supervisor: the checkpoint is an
-        // integrity witness, while the resident parent remains the sole owner
-        // of the HVF machine and its interrupt-controller state. A failed
-        // capture never leaves that source resident.
-        if captured.is_err() || !retain_parent {
-            self.force_stop(&spec.id, "captured standby parent");
-        }
-
-        let meta = captured
-            .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e}")))?;
-
-        // Saved-state backends have no live process after capture and use pid=0
-        // as their persisted sentinel. A retained HVF parent keeps its real pid
-        // so claims can verify and address the resident supervisor.
-        if !retain_parent {
-            handle.pid = 0;
-        }
-        handle.parent_checkpoint = Some(meta.id.as_str().to_string());
-        Ok(handle)
-    }
-
-    /// Materialize and load one saved-state child while the pool is being
-    /// refilled, leaving its VMM paused for a later claim. The child is not
-    /// reachable by a workload yet: claim-time endpoint, broker, identity,
-    /// and authenticated-vsock gates still run before resume.
-    pub fn preload_standby_child(
-        &self,
-        ctx: &PreloadContext<'_>,
-        handle: &mut StandbyHandle,
-    ) -> std::result::Result<(), StandbyError> {
-        if !self.driver.supports_preloaded_standby() {
-            return Err(StandbyError::Unsupported {
-                backend: self.driver.name().to_string(),
-            });
-        }
-        if handle.preloaded_child_vm_name.is_some() {
-            return Err(StandbyError::SpawnFailed(format!(
-                "standby '{}' already owns a preloaded child",
-                handle.id
-            )));
-        }
-        let checkpoint = handle.parent_checkpoint.as_deref().ok_or_else(|| {
-            StandbyError::SpawnFailed(format!(
-                "standby '{}' has no checkpoint for child preload",
-                handle.id
-            ))
-        })?;
-        let checkpoint_id = CheckpointId::new(checkpoint.to_string());
-        let _registry_lock = acquire_registry_lock(ctx.registry_path)
-            .map_err(|e| StandbyError::SpawnFailed(format!("acquire VM name registry: {e}")))?;
-        let registry = VmNameRegistry::load(ctx.registry_path)
-            .map_err(|e| StandbyError::SpawnFailed(format!("load VM name registry: {e}")))?;
-        let (child_name, child_dir) = (0..MAX_CHILD_NAME_ATTEMPTS)
-            .map(|_| generate_vm_name())
-            .find_map(|name| {
-                let dir = vm_state_dir(&name);
-                (registry.lookup(&name).is_none() && !dir.exists()).then_some((name, dir))
-            })
-            .ok_or_else(|| {
-                StandbyError::SpawnFailed("could not reserve a unique preloaded child name".into())
+            let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
+                StandbyError::SpawnFailed(format!(
+                    "backend cannot capture a warm parent's memory for standby '{}'",
+                    spec.id
+                ))
             })?;
 
-        let materialized = if is_trusted_snapshot_id(checkpoint) {
-            let backend = mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root())
-                .map_err(|e| {
-                    StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e}"))
-                })?;
-            materialize_child_from_trusted_parent(
+            let captured = capture_vm_full(
                 ctx.checkpoints,
-                backend.as_ref(),
-                &checkpoint_id,
-                ctx.anchor,
-                &child_dir,
-            )
-        } else {
-            materialize_child_from_parent(
-                ctx.checkpoints,
-                ctx.snapshots,
-                &checkpoint_id,
-                ctx.anchor,
-                &child_dir,
-            )
-        };
-        if let Err(error) = materialized {
-            let _ = std::fs::remove_dir_all(&child_dir);
-            return Err(StandbyError::SpawnFailed(format!(
-                "materialize preloaded child '{}': {error}",
-                child_name
-            )));
-        }
+                CaptureVmFullParams {
+                    id: CheckpointId::new(format!("standby-{}", spec.id)),
+                    vm_name: spec.id.clone(),
+                    supervisor_config_digest: String::new(),
+                    runtime_source_policy: None,
+                    runtime_overlay_version: None,
+                    // Firecracker keeps no supervisor-config blob; its presence is
+                    // what marks a checkpoint as originating from a backend that does.
+                    supervisor_config_src: None,
+                    tag: None,
+                    created_unix: mvm_core::time::now_unix_secs(),
+                },
+                control.as_ref(),
+            );
 
-        let loaded = self.driver.preload_standby_child(&PreloadChildRequest {
-            child_vm_name: &child_name,
-            child_dir: &child_dir,
-        });
-        let loaded = match loaded {
-            Ok(value) => value,
-            Err(error) => {
-                self.force_stop(&child_name, "failed preloaded standby child");
-                let _ = std::fs::remove_dir_all(&child_dir);
-                return Err(error);
-            }
+            // Release either way: the checkpoint carries the parent's full state, so
+            // a pool slot costs disk rather than a resident VM, and a failed capture
+            // must not strand the guest.
+            self.force_stop(&spec.id, "captured standby parent");
+            captured
+                .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e}")))?
         };
-        handle.preloaded_child_vm_name = Some(child_name);
-        handle.pid = loaded.pid;
-        handle.control_socket = loaded.control_socket;
-        Ok(())
+
+        handle.parent_checkpoint = Some(meta.id.as_str().to_string());
+        Ok(handle)
     }
 
     /// Force-stop a VM the warm-pool path is done with, naming its `role` for the
@@ -1050,7 +871,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     }
 }
 
-/// Release-unless-committed lease for a reserved parent and a partially-built
+/// Release-unless-committed cleanup for a reserved parent and a partially-built
 /// child. A claim reserves the parent (`mark_claimed`) and then materializes a
 /// child dir; if any later step fails, this guard returns the (verified, healthy)
 /// parent to claimable — so a failed claim never strands warm capacity — and
@@ -1058,23 +879,19 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
 /// [`commit`](Self::commit), disarming both. A parent that failed VERIFICATION is
 /// quarantined by removal upstream and never reaches this guard, so releasing
 /// here only ever returns a parent that verified healthy.
-struct WarmClaimLease<'a> {
+struct ClaimCleanup<'a> {
     pool: &'a SupervisorStandbyPool,
-    driver: &'a dyn VmmDriver,
     parent_id: &'a str,
     child_dir: Option<PathBuf>,
-    preloaded_child: Option<String>,
     committed: bool,
 }
 
-impl<'a> WarmClaimLease<'a> {
-    fn new(pool: &'a SupervisorStandbyPool, parent_id: &'a str, driver: &'a dyn VmmDriver) -> Self {
+impl<'a> ClaimCleanup<'a> {
+    fn new(pool: &'a SupervisorStandbyPool, parent_id: &'a str) -> Self {
         Self {
             pool,
-            driver,
             parent_id,
             child_dir: None,
-            preloaded_child: None,
             committed: false,
         }
     }
@@ -1084,12 +901,6 @@ impl<'a> WarmClaimLease<'a> {
         self.child_dir = Some(dir);
     }
 
-    /// Track a paused child process so an early claim refusal cannot leave a
-    /// VMM alive after its pool reservation is returned.
-    fn track_preloaded_child(&mut self, vm_name: String) {
-        self.preloaded_child = Some(vm_name);
-    }
-
     /// The child booted: disarm. The parent stays `Claimed` (the stop/reaper path
     /// owns it) and the child dir is real state, not an orphan.
     fn commit(&mut self) {
@@ -1097,7 +908,7 @@ impl<'a> WarmClaimLease<'a> {
     }
 }
 
-impl Drop for WarmClaimLease<'_> {
+impl Drop for ClaimCleanup<'_> {
     fn drop(&mut self) {
         if self.committed {
             return;
@@ -1108,16 +919,6 @@ impl Drop for WarmClaimLease<'_> {
                 error = %e,
                 "returning reserved standby parent to claimable after a failed claim"
             );
-        }
-        if let Some(vm_name) = &self.preloaded_child {
-            let id = VmId(vm_name.clone());
-            if let Err(error) = self.driver.attach(&id).and_then(|vm| vm.kill()) {
-                tracing::warn!(
-                    vm = %vm_name,
-                    %error,
-                    "stopping preloaded standby child after failed claim"
-                );
-            }
         }
         if let Some(dir) = &self.child_dir {
             match std::fs::remove_dir_all(dir) {
@@ -1182,22 +983,19 @@ fn map_lineage_refusal(err: &anyhow::Error) -> ClaimRefusal {
 }
 
 /// Reserve the passed parent atomically under the registry lock (the no-double-
-/// claim guard), then verify its sealed content and its content-address. Saved-
-/// state claims additionally verify the metadata lineage against the signed
-/// audit chain; resident HVF claims use their signed snapshot manifest as the
-/// O(1) publication witness. Returns the verified parent meta. Runs before any
-/// clone or boot: an unclaimable or tampered parent fails closed.
+/// claim guard), then verify its sealed content and its content-address against
+/// the signed audit chain. Returns the verified parent meta. Runs before any
+/// clone or boot: an unclaimable, un-audited, or tampered parent fails closed.
 ///
 /// A parent that fails verification (or whose sealed record is unreadable) is
 /// **quarantined by removal** — a parent that cannot be verified must never be
 /// reused, so it is dropped from the pool rather than returned to claimable.
 /// Replenish spawns a fresh one in its place. This is the deliberate exception to
-/// the release-on-failure rule the caller's [`WarmClaimLease`] applies to a healthy
+/// the release-on-failure rule the caller's [`ClaimCleanup`] applies to a healthy
 /// reserved parent.
 fn reserve_and_verify_parent(
     ctx: &ClaimContext<'_>,
     handle: &StandbyHandle,
-    resident_handoff: bool,
 ) -> std::result::Result<CheckpointMeta, StandbyError> {
     {
         let _lock = acquire_registry_lock(ctx.registry_path)
@@ -1235,146 +1033,11 @@ fn reserve_and_verify_parent(
                 "read parent checkpoint: {e}"
             )))
         })?;
-    if resident_handoff
-        && !is_trusted_snapshot_id(parent.snapshot_id.as_deref().unwrap_or_default())
-    {
-        verify_resident_snapshot_manifest(ctx, &parent)
-            .map_err(|_| quarantine(refuse(ClaimRefusal::ParentTampered)))?;
-    } else if let Some(snapshot_id) = parent
-        .snapshot_id
-        .as_deref()
-        .filter(|id| is_trusted_snapshot_id(id))
-    {
-        let backend =
-            mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root()).map_err(|e| {
-                quarantine(StandbyError::ClaimFailed(format!(
-                    "open trusted snapshot backend: {e}"
-                )))
-            })?;
-        let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity().map_err(|e| {
-            quarantine(StandbyError::ClaimFailed(format!(
-                "load trusted snapshot signer: {e}"
-            )))
-        })?;
-        let manifest_digest = mvm_core::checkpoint::content_manifest_digest(&parent.content);
-        let manifest_digest_text = manifest_digest.to_string();
-        let signer = identity.verifying_key().to_bytes();
-        backend
-            .validate(
-                &mvm_fs::snapshot_store::SnapshotId::with_digest(
-                    snapshot_id,
-                    manifest_digest_text.clone(),
-                ),
-                &manifest_digest_text,
-                &signer,
-            )
-            .map_err(|_| quarantine(refuse(ClaimRefusal::ParentTampered)))?;
-    } else {
-        verify_content(ctx.checkpoints, &parent)
-            .map_err(|_| quarantine(refuse(ClaimRefusal::ParentTampered)))?;
-    }
-    if !resident_handoff {
-        verify_lineage(ctx.checkpoints, ctx.parent_checkpoint, ctx.anchor)
-            .map_err(|e| quarantine(refuse(map_lineage_refusal(&e))))?;
-    }
+    verify_content(ctx.checkpoints, &parent)
+        .map_err(|_| quarantine(refuse(ClaimRefusal::ParentTampered)))?;
+    verify_lineage(ctx.checkpoints, ctx.parent_checkpoint, ctx.anchor)
+        .map_err(|e| quarantine(refuse(map_lineage_refusal(&e))))?;
     Ok(parent)
-}
-
-/// Verify the signed publication witness for a resident parent without reading
-/// the bundle's large content files. The live, paused HVF parent is the machine
-/// that will be transferred; the ordinary snapshot is retained as a signed,
-/// user-owned publication record and remains fully verified for saved restores.
-fn verify_resident_snapshot_manifest(
-    ctx: &ClaimContext<'_>,
-    parent: &CheckpointMeta,
-) -> anyhow::Result<()> {
-    let snapshot_id = parent
-        .snapshot_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("resident parent has no staged snapshot"))?;
-    if snapshot_id.is_empty()
-        || snapshot_id.contains('/')
-        || snapshot_id.contains('\\')
-        || snapshot_id.contains('\0')
-    {
-        anyhow::bail!("resident parent snapshot id is not a safe store entry")
-    }
-    let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()?;
-    let digest = mvm_core::checkpoint::content_manifest_digest(&parent.content);
-    mvm_core::crypto::snapshot_sign::verify_manifest(
-        &ctx.snapshots.root().join(snapshot_id),
-        &digest.to_string(),
-        &[identity.verifying_key()],
-    )?;
-    Ok(())
-}
-
-/// Reclaim the bulky publication payload after a resident parent has become a
-/// committed child. The signed manifest has already authorized the handoff,
-/// and the resident parent is no longer claimable, so retaining its checkpoint
-/// bytes would make every warm claim add another large saved-state artifact.
-/// Saved-state claims do not use this path because their checkpoint remains the
-/// restore resource and its lineage record.
-fn schedule_resident_checkpoint_reclaim(ctx: &ClaimContext<'_>, parent: &CheckpointMeta) {
-    let checkpoints_root = ctx.checkpoints.root().to_path_buf();
-    let snapshots_root = ctx.snapshots.root().to_path_buf();
-    let parent_id = parent.id.clone();
-    let snapshot_id = parent.snapshot_id.clone();
-    let result = std::thread::Builder::new()
-        .name("mvm-resident-reclaim".to_string())
-        .spawn(move || {
-            if let Err(error) = reclaim_consumed_resident_checkpoint_at(
-                &checkpoints_root,
-                &snapshots_root,
-                &parent_id,
-                snapshot_id.as_deref(),
-            ) {
-                tracing::warn!(
-                    checkpoint = %parent_id,
-                    error = %error,
-                    "resident parent publication cleanup failed; warm handoff remains committed"
-                );
-            }
-        });
-    if let Err(error) = result {
-        tracing::warn!(
-            checkpoint = %parent.id,
-            error = %error,
-            "could not schedule resident parent publication cleanup"
-        );
-    }
-}
-
-fn reclaim_consumed_resident_checkpoint_at(
-    checkpoints_root: &Path,
-    snapshots_root: &Path,
-    parent_id: &CheckpointId,
-    snapshot_id: Option<&str>,
-) -> anyhow::Result<()> {
-    let checkpoints = CheckpointStore::at(checkpoints_root);
-    let snapshots = FsSnapshotStore::new(snapshots_root)
-        .context("open resident snapshot store for deferred cleanup")?;
-    let Some(snapshot_id) = snapshot_id else {
-        return checkpoints
-            .remove(parent_id)
-            .context("remove resident checkpoint without snapshot");
-    };
-
-    if is_trusted_snapshot_id(snapshot_id) {
-        // The platform snapshot provider owns trusted-snapshot reclamation;
-        // ordinary filesystem snapshots are the resident publication path here.
-        return Ok(());
-    }
-
-    let snapshot = mvm_fs::snapshot_store::SnapshotId::new(snapshot_id);
-    match snapshots.remove(&snapshot) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("remove resident snapshot payload"),
-    }
-    checkpoints
-        .remove(parent_id)
-        .context("remove resident checkpoint payload")
 }
 
 /// The admitted plan from the claim.
@@ -1417,37 +1080,14 @@ fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyEr
     ))
 }
 
-/// Recheck a preloaded child's registry identity immediately before claim-side
-/// authority is created. The preload name was collision-checked when the pool
-/// record was written, but another VM may have registered the same random name
-/// before a later process claimed the persisted record.
-fn verify_preloaded_child_name_is_available(
-    ctx: &ClaimContext<'_>,
-    child_name: &str,
-) -> std::result::Result<(), StandbyError> {
-    let _lock = acquire_registry_lock(ctx.registry_path)
-        .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e}")))?;
-    let registry = VmNameRegistry::load(ctx.registry_path)
-        .map_err(|e| StandbyError::ClaimFailed(format!("load vm registry: {e}")))?;
-    if registry.lookup(child_name).is_some() {
-        return Err(StandbyError::ClaimFailed(format!(
-            "preloaded child name '{child_name}' is already registered"
-        )));
-    }
-    Ok(())
-}
-
 /// The child's launch config: the CLI-populated claim config (carrying the
 /// verity fields the CLI already resolved on the cloned rootfs) rekeyed onto the
 /// fresh child identity and its materialized rootfs. The runner consumes verity;
 /// it never derives it.
-fn child_start_config(claim: &StandbyClaim, child: &VmId, rootfs_dir: &Path) -> VmStartConfig {
+fn child_start_config(claim: &StandbyClaim, child: &VmId, child_dir: &Path) -> VmStartConfig {
     let mut cfg = claim.start_config.clone().unwrap_or_default();
     cfg.name = child.0.clone();
-    cfg.rootfs_path = rootfs_dir
-        .join("rootfs.ext4")
-        .to_string_lossy()
-        .into_owned();
+    cfg.rootfs_path = child_dir.join("rootfs.ext4").to_string_lossy().into_owned();
     cfg.tenant_id = Some(claim.tenant_id.clone());
     cfg.network_policy = claim.network_policy.clone();
     cfg.plan_json = Some(claim.plan_json.clone());
@@ -1455,33 +1095,256 @@ fn child_start_config(claim: &StandbyClaim, child: &VmId, rootfs_dir: &Path) -> 
     cfg
 }
 
-/// Resolve the launch source recorded for a resident standby parent. The live
-/// HVF supervisor already has this image attached; the path is used only for
-/// the same host-side overlay admission gate a cold workload boot performs.
-fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathBuf, StandbyError> {
-    let metadata = crate::base::runtime_meta::read(parent_vm_name)
-        .map_err(|e| StandbyError::ClaimFailed(format!("read resident parent metadata: {e}")))?
-        .ok_or_else(|| {
-            StandbyError::ClaimFailed(format!(
-                "resident parent '{parent_vm_name}' has no runtime metadata"
-            ))
-        })?;
-    let rootfs = metadata
-        .rootfs_path
-        .ok_or_else(|| StandbyError::ClaimFailed("resident parent has no rootfs path".into()))?;
-    let rootfs = PathBuf::from(rootfs);
-    if !rootfs.is_file() {
-        return Err(StandbyError::ClaimFailed(format!(
-            "resident parent rootfs {} is not a regular file",
-            rootfs.display()
-        )));
+/// The runner IS the workload backend: the lifecycle runs through the `VmmDriver`
+/// seam (`boot` on start, `attach` for stop/status/wait/pause/resume) instead of
+/// per-backend code. State is disk-backed under the per-VM `vm_state_dir`, so a
+/// stateless CLI invocation reconstructs a handle by id.
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static> VmBackend
+    for WorkloadRunner<D, S, B>
+{
+    fn name(&self) -> &str {
+        self.driver.name()
     }
-    rootfs.parent().map(Path::to_path_buf).ok_or_else(|| {
-        StandbyError::ClaimFailed(format!(
-            "resident parent rootfs {} has no containing directory",
-            rootfs.display()
-        ))
-    })
+
+    fn kind(&self) -> BackendKind {
+        self.driver.kind()
+    }
+
+    fn capabilities(&self) -> VmCapabilities {
+        self.driver.capabilities()
+    }
+
+    fn security_profile(&self) -> BackendSecurityProfile {
+        self.driver.security_profile()
+    }
+
+    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
+        self.driver.guest_channel_info(id)
+    }
+
+    fn is_available(&self) -> Result<bool> {
+        self.driver.is_available()
+    }
+
+    // `spawn_standby` is deliberately NOT implemented: it takes a `StandbySpec`
+    // alone, and a factory parent cannot be assembled from one. A parent must
+    // boot the shape of the launch it will serve, and that launch reaches the
+    // runner only through [`spawn_standby_captured`]'s `SpawnContext`. Leaving
+    // the fail-closed trait default in place keeps a single way in — the one
+    // that carries the launch — instead of a second, context-free entry point
+    // that could only ever produce a parent shaped like nothing in particular.
+
+    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        let state_dir = vm_state_dir(&config.name);
+        std::fs::create_dir_all(&state_dir)
+            .with_context(|| format!("create state dir {}", state_dir.display()))?;
+
+        // Admission gate — refuse a rootfs whose parent dir carries no
+        // overlay-aware sidecar (no `/mvm/runtime` mount point). Runs before any
+        // endpoint/broker spawn or boot, so a refusal leaves no live process
+        // behind. Routed through the shared `ClaimGuards` so a warm claim runs
+        // the identical gate.
+        ClaimGuards::new(&self.spawner).admit_overlay_contract(config)?;
+        // Record per-VM runtime metadata (the sidecar accessibility bit + the
+        // boot contract) so the `mvmctl console` accessible/sealed gate holds on
+        // every runner-launched VM, matching the raw backend start paths.
+        crate::base::runtime_meta::record_from_start_config(
+            &config.name,
+            StartMode::Detached,
+            config,
+        )?;
+
+        // The L3 gateway must be listening before the guest boots and dials
+        // it: there is no retry and no fallback, so a guest that finds no
+        // listener has no network at all. A no-op for every plan that did
+        // not select the tunnel.
+        mvm_vmm::host::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
+
+        // Record the host-side observability target so eBPF/procfs collectors
+        // can attach to the right processes without hard-coding backend layouts.
+        // VMM/helper PIDs are filled in after the processes start.
+        let observability_target =
+            crate::base::observability_target::build_from_start_config(self.driver.kind(), config);
+        if let Err(e) = crate::base::runtime_meta::update_observability_target(
+            &config.name,
+            &observability_target,
+        ) {
+            tracing::warn!(error = %e, vm = %config.name, "failed to write observability target");
+        }
+
+        // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
+        // below, so bind them here rather than inline.
+        let default_redaction = RedactionPolicy::default();
+        let decoded = decode_plan_secrets_from_state(&state_dir)?;
+        let (secrets, redaction, tenant): (&[SecretBinding], &RedactionPolicy, &str) =
+            match &decoded {
+                Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
+                None => (
+                    &[],
+                    &default_redaction,
+                    config.tenant_id.as_deref().unwrap_or("local"),
+                ),
+            };
+
+        let cmdline = cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
+            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        });
+        if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
+            anyhow::bail!("refusing to start VM {}: {problem}", config.name);
+        }
+        tracing::debug!(vm = %config.name, %cmdline, "assembled workload kernel cmdline");
+
+        let inputs = WorkloadLaunchInputs {
+            config,
+            tenant,
+            secrets,
+            redaction,
+            network_policy: &config.network_policy,
+            cmdline,
+        };
+        // The supervisor + endpoint are detached/disk-backed; the live handle is
+        // reconstructed by id via `attach`, so the boot handle is dropped here.
+        //
+        // A failure past this point leaves no VM, so the gateway spawned
+        // above would hold a host TUN and an nft table for a guest that
+        // never existed. Reap before propagating.
+        match self.start_workload(&inputs) {
+            Ok(_vm) => Ok(VmId(config.name.clone())),
+            Err(e) => {
+                mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
+                Err(e)
+            }
+        }
+    }
+
+    fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
+        self.driver.attach(id)?.wait()
+    }
+
+    fn stop(&self, id: &VmId) -> Result<()> {
+        // Capture the VMM's disk-backed process identity before reaping any
+        // sidecars. A teardown helper may remove marker files as part of its own
+        // cleanup; the live handle must already own everything needed to stop
+        // and verify the VMM independently of those mutable markers.
+        let vm = match self.driver.attach(id) {
+            Ok(vm) => vm,
+            Err(err) => {
+                // A VM the driver cannot attach to still has a follower
+                // registered here. Propagating straight out strands that
+                // thread and leaves the transcript unsealed — so the capture
+                // is released on the way past, the same unconditional release
+                // the kill path performs, on the path that never reaches it.
+                self.console_streamer.stop(&id.0);
+                return Err(err);
+            }
+        };
+        // Reap the per-VM secrets endpoint first, so a crashed VM's
+        // decrypted-secret process can't outlive the guest. Idempotent + a no-op
+        // when the VM spawned none.
+        reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        // The gateway holds the host TUN and this VM's nft table; both must
+        // die with the guest rather than outlive it.
+        mvm_vmm::host::netd_spawn::reap_netd(&vm_state_dir(&id.0));
+        // Reap the per-VM broker + audit-signer (fork path) and deregister from
+        // the per-tenant host-agent daemon (daemon path), so neither can outlive
+        // the guest. Each is an idempotent no-op for the other path and for a VM
+        // that registered none.
+        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
+        crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
+        // Kill first, release the capture second. A guest writes its last
+        // words during the kill — a shutdown trace, a panic, whatever the
+        // kernel prints on the way down — and a follower stopped before it
+        // captures none of them: they land in the write-only console file and
+        // never in the chain, which is exactly the output an operator opens
+        // the transcript to find.
+        //
+        // The order costs nothing the other one had. The release is
+        // unconditional and runs whether or not the kill worked, so a VM that
+        // will not die still gets its capture sealed rather than stranding
+        // the follower; and for a VM whose console was never followed here it
+        // is the idempotent no-op it always was. `vm` is the handle taken
+        // before any sidecar reaping, so the kill does not depend on marker
+        // files a teardown helper may already have removed.
+        let killed = vm.kill();
+        self.console_streamer.stop(&id.0);
+        killed
+    }
+
+    fn stop_all(&self) -> Result<()> {
+        for vm in self.list()? {
+            let _ = self.stop(&vm.id);
+        }
+        Ok(())
+    }
+
+    fn pause(&self, id: &VmId) -> Result<()> {
+        self.driver.attach(id)?.pause()
+    }
+
+    fn resume(&self, id: &VmId) -> Result<()> {
+        self.driver.attach(id)?.resume()
+    }
+
+    fn status(&self, id: &VmId) -> Result<VmStatus> {
+        self.driver.attach(id)?.status()
+    }
+
+    fn logs(&self, id: &VmId, _lines: u32, _hypervisor: bool) -> Result<String> {
+        // Capture-only console; one log (no separate hypervisor stream).
+        let log = vm_state_dir(&id.0).join("console.log");
+        std::fs::read_to_string(&log).with_context(|| format!("read {}", log.display()))
+    }
+
+    fn list(&self) -> Result<Vec<VmInfo>> {
+        let root = vms_dir();
+        let entries = match std::fs::read_dir(&root) {
+            Ok(it) => it,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(anyhow::anyhow!("read {}: {e}", root.display())),
+        };
+        let mut vms = Vec::new();
+        for entry in entries.flatten() {
+            // console.log is the generic marker that a workload booted in this
+            // state dir (every backend captures it). A driver-provided marker
+            // could replace this later.
+            if !entry.path().join("console.log").exists() {
+                continue;
+            }
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let id = VmId(name.clone());
+            let status = self.status(&id).unwrap_or(VmStatus::Stopped);
+            vms.push(VmInfo {
+                id,
+                name,
+                status,
+                guest_ip: None,
+                cpus: 0,
+                memory_mib: 0,
+                profile: None,
+                revision: None,
+                flake_ref: None,
+                ports: Vec::new(),
+            });
+        }
+        Ok(vms)
+    }
+
+    fn install(&self) -> Result<()> {
+        // The hvf VMM needs no host install.
+        Ok(())
+    }
+}
+
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+    WorkloadBackend for WorkloadRunner<D, S, B>
+{
+    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
+        // The runner always routes egress through the per-VM vsock UDS endpoint —
+        // the sole gate off the box. No transparent :80/:443 terminator.
+        EgressSubstitutionTransport::VsockUdsChannel
+    }
 }
 
 #[cfg(test)]
@@ -1490,14 +1353,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
+    use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, GUEST_AGENT_PORT};
     use mvm_core::plan::{Nonce, SecretBinding, SecretSource, VerbGrant, VerbId};
-    use mvm_core::policy::network_policy::HostPort;
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_fs::snapshot_store::SnapshotStore;
 
-    use crate::backends::hvf::HvfDriver;
+    use crate::backends::hvf::driver::HvfDriver;
     use crate::driver::MockDriver;
 
     /// An `EndpointSpawner` test double: records the request it was handed and
@@ -1619,10 +1480,6 @@ mod tests {
         }
     }
 
-    fn egress_allowing_policy() -> NetworkPolicy {
-        NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)])
-    }
-
     /// Seed an overlay-aware `mvm-meta.json` sidecar next to a rootfs file in a
     /// fresh tempdir and return `(dir, rootfs_path)`. `VmBackend::start`'s
     /// admission gate refuses a rootfs whose parent dir carries no overlay-aware
@@ -1652,20 +1509,14 @@ mod tests {
     fn egress_host_uds(spec: &crate::driver::VmmSpec) -> &Path {
         spec.vsock
             .iter()
-            .find(|p| p.service.port() == EGRESS_PORT)
+            .find(|p| p.service == GuestService::Substitution)
             .map(|p| p.host_uds.as_path())
             .expect("spec carries an EGRESS_PORT vsock channel")
     }
 
     #[test]
     fn start_workload_threads_endpoint_uds_into_egress_port() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", home.path());
-        let policy = egress_allowing_policy();
+        let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
             MockDriver::default(),
@@ -1702,13 +1553,11 @@ mod tests {
 
     #[test]
     fn start_workload_starts_console_streaming_and_stop_tears_it_down_without_losing_bytes() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", home.path());
-        let policy = egress_allowing_policy();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(tmp.path());
+
+        let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let streamer = Arc::new(RecordingConsoleStreamer::default());
         let runner = WorkloadRunner::new(
@@ -1839,7 +1688,7 @@ mod tests {
 
     #[test]
     fn start_workload_uses_raw_egress_when_no_secrets_and_wire_when_secrets() {
-        let policy = egress_allowing_policy();
+        let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
 
         // No secrets ⇒ raw TCP egress.
@@ -1896,7 +1745,7 @@ mod tests {
 
     #[test]
     fn start_workload_passes_the_network_policy_and_tenant_to_the_spawner() {
-        let policy = egress_allowing_policy();
+        let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
             MockDriver::default(),
@@ -1919,7 +1768,7 @@ mod tests {
         let recorded = runner.spawner.seen.lock().unwrap();
         let recorded = recorded.as_ref().unwrap();
         assert_eq!(recorded.tenant, "acme");
-        assert_eq!(recorded.policy, egress_allowing_policy());
+        assert_eq!(recorded.policy, NetworkPolicy::deny_all());
     }
 
     fn admitted_config(name: &str) -> VmStartConfig {
@@ -1971,7 +1820,7 @@ mod tests {
         let broker = specs[0]
             .vsock
             .iter()
-            .find(|p| p.service.port() == BROKER_PORT)
+            .find(|p| p.service == GuestService::Broker)
             .expect("admitted spec carries a BROKER_PORT channel");
         assert_eq!(broker.direction, crate::driver::VsockDirection::GuestDials);
         assert_eq!(broker.host_uds, expected_socket);
@@ -2013,7 +1862,7 @@ mod tests {
             specs[0]
                 .vsock
                 .iter()
-                .all(|p| p.service.port() != BROKER_PORT),
+                .all(|p| p.service != GuestService::Broker),
             "unadmitted VM must carry no broker port"
         );
     }
@@ -2701,8 +2550,7 @@ mod tests {
 
     #[test]
     fn start_workload_with_dev_console_threads_128_console_ports_into_spec() {
-        use mvm_agentd::vsock::CONSOLE_PORT_BASE;
-        let policy = egress_allowing_policy();
+        let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
             MockDriver::default(),
@@ -2735,7 +2583,7 @@ mod tests {
         let console: Vec<_> = spec
             .vsock
             .iter()
-            .filter(|p| p.service.port() > CONSOLE_PORT_BASE)
+            .filter(|p| matches!(p.service, GuestService::ConsoleData { .. }))
             .collect();
         assert_eq!(console.len(), 128);
         assert!(
@@ -2756,7 +2604,7 @@ mod tests {
 
     #[test]
     fn start_workload_without_dev_console_carries_only_three_vsock_entries() {
-        let policy = egress_allowing_policy();
+        let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
             MockDriver::default(),
@@ -2894,7 +2742,7 @@ mod tests {
         launch: &VmStartConfig,
     ) -> mvm_core::vm_backend::StandbySpec {
         mvm_core::vm_backend::StandbySpec {
-            vsock_egress: crate::egress_shared::effective_vsock_egress(launch),
+            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
             ..sample_standby_spec(id, vm_state_dir, Path::new(&launch.rootfs_path))
         }
     }
@@ -2957,7 +2805,7 @@ mod tests {
             booted[0]
                 .vsock
                 .iter()
-                .map(|p| p.service.port())
+                .map(crate::driver::VsockPort::port)
                 .collect::<Vec<_>>()
         );
 
@@ -3260,7 +3108,6 @@ mod tests {
             parent.vsock.is_empty(),
             "an egress-enabled parent still wires no egress channel to dial"
         );
-        assert!(!parent.trusted_builder);
     }
 
     // ── Warm claim: the guarded fork of a clean parent into a fresh child ──────
@@ -3363,168 +3210,7 @@ mod tests {
             },
         )
         .unwrap();
-        let snapshot_id = format!(
-            "checkpoint-{parent_id}-content-{}",
-            mvm_core::checkpoint::content_manifest_digest(&parent_meta.content)
-        );
-        snapshots
-            .create(
-                &mvm_fs::snapshot_store::SnapshotId::with_digest(
-                    snapshot_id.clone(),
-                    mvm_core::checkpoint::content_manifest_digest(&parent_meta.content).to_string(),
-                ),
-                &checkpoints.content_dir(&parent_id),
-            )
-            .unwrap();
-        let parent_meta = parent_meta.with_snapshot_id(snapshot_id);
-        checkpoints.write_meta(&parent_meta).unwrap();
         (checkpoints, snapshots, parent_id, parent_meta)
-    }
-
-    #[test]
-    fn resident_claim_accepts_a_valid_signed_bundle_manifest_without_hashing_blobs() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", home.path());
-
-        let store_root = tempfile::tempdir().unwrap();
-        let src = tempfile::tempdir().unwrap();
-        let (checkpoints, snapshots, parent_id, parent_meta) =
-            seed_audited_parent(store_root.path(), src.path(), true);
-        let manifest_digest =
-            mvm_core::checkpoint::content_manifest_digest(&parent_meta.content).to_string();
-        let snapshot_id = parent_meta.snapshot_id.as_deref().unwrap();
-        let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity().unwrap();
-        mvm_core::crypto::snapshot_sign::sign_manifest(
-            &snapshots.root().join(snapshot_id),
-            &manifest_digest,
-            &identity.signing,
-        )
-        .unwrap();
-        let parent = parent_meta.clone();
-
-        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
-        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
-        pool.record(&handle).unwrap();
-        let registry_path = store_root.path().join("vm-names.json");
-        let anchor = ClaimTestAnchor::audited(&parent);
-        let ctx = ClaimContext {
-            pool: &pool,
-            checkpoints: &checkpoints,
-            snapshots: &snapshots,
-            anchor: &anchor,
-            parent_checkpoint: &parent_id,
-            registry_path: &registry_path,
-            grant_issuer: None,
-        };
-
-        verify_resident_snapshot_manifest(&ctx, &parent)
-            .expect("a host-signed resident bundle manifest must verify");
-
-        std::fs::write(
-            snapshots
-                .root()
-                .join(snapshot_id)
-                .join(mvm_core::crypto::snapshot_sign::MANIFEST_SIGNATURE_FILENAME),
-            b"tampered",
-        )
-        .unwrap();
-        assert!(
-            verify_resident_snapshot_manifest(&ctx, &parent).is_err(),
-            "a tampered signed manifest must fail closed"
-        );
-        drop(env);
-    }
-
-    #[test]
-    fn resident_claim_creates_no_child_restore_bundle() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", home.path());
-
-        let store_root = tempfile::tempdir().unwrap();
-        let src = tempfile::tempdir().unwrap();
-        let (checkpoints, snapshots, parent_id, parent_meta) =
-            seed_audited_parent(store_root.path(), src.path(), true);
-        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
-        let snapshot_id = parent_meta.snapshot_id.as_deref().unwrap();
-        let manifest_digest =
-            mvm_core::checkpoint::content_manifest_digest(&parent_meta.content).to_string();
-        let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity().unwrap();
-        mvm_core::crypto::snapshot_sign::sign_manifest(
-            &snapshots.root().join(snapshot_id),
-            &manifest_digest,
-            &identity.signing,
-        )
-        .unwrap();
-
-        crate::base::runtime_meta::record_from_start_config(
-            "warm-parent",
-            StartMode::Detached,
-            &VmStartConfig {
-                name: "warm-parent".into(),
-                rootfs_path: src.path().join("rootfs.ext4").display().to_string(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
-        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
-        pool.record(&handle).unwrap();
-        let registry_path = store_root.path().join("vm-names.json");
-        let anchor = ClaimTestAnchor::unaudited();
-        let claim = admitted_child_claim(
-            &src.path().join("rootfs.ext4"),
-            signed_child_plan_json(&parent_digest),
-        );
-        let runner = WorkloadRunner::new(
-            MockDriver::default().with_resident_handoff(),
-            KeyingSpawner::default(),
-            RecordingBrokerRegistrar::new(),
-        );
-        let ctx = ClaimContext {
-            pool: &pool,
-            checkpoints: &checkpoints,
-            snapshots: &snapshots,
-            anchor: &anchor,
-            parent_checkpoint: &parent_id,
-            registry_path: &registry_path,
-            grant_issuer: None,
-        };
-
-        let child = runner
-            .claim_standby(&ctx, &handle, &claim)
-            .expect("resident claim");
-        let child_dir = vm_state_dir(&child.0);
-        assert!(child_dir.is_dir());
-        assert!(
-            !child_dir.join("rootfs.ext4").exists(),
-            "resident claims must not materialize a child restore bundle"
-        );
-        assert_eq!(runner.driver.forked_children().len(), 1);
-        reclaim_consumed_resident_checkpoint_at(
-            checkpoints.root(),
-            snapshots.root(),
-            &parent_meta.id,
-            parent_meta.snapshot_id.as_deref(),
-        )
-        .expect("resident checkpoint cleanup is idempotent");
-        assert!(
-            !checkpoints.dir_for(&parent_id).exists(),
-            "committed resident claims must reclaim the consumed checkpoint payload"
-        );
-        assert!(
-            !snapshots.root().join(snapshot_id).exists(),
-            "committed resident claims must reclaim the consumed snapshot payload"
-        );
-        drop(env);
     }
 
     /// Build a signed, admitted child plan whose bound image digest is the
@@ -3590,7 +3276,6 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: None,
             parent_checkpoint: None,
-            preloaded_child_vm_name: None,
             vsock_egress: false,
         }
     }
@@ -3610,7 +3295,7 @@ mod tests {
             gateway_events_socket: None,
             plan_json,
             bundle_json: None,
-            network_policy: egress_allowing_policy(),
+            network_policy: NetworkPolicy::deny_all(),
         }
     }
 
@@ -3847,7 +3532,7 @@ mod tests {
                             .map(|rest| format!("<vm>/{}", rest.display()))
                     })
                     .unwrap_or_else(|| p.host_uds.display().to_string());
-                (p.service.port(), p.direction, where_)
+                (p.port(), p.direction, where_)
             })
             .collect()
     }
@@ -3904,7 +3589,6 @@ mod tests {
                 rootfs_path: rootfs.display().to_string(),
                 kernel_path: Some("/img/kernel".into()),
                 tenant_id: Some("tenant-x".into()),
-                network_policy: egress_allowing_policy(),
                 cpus: 2,
                 memory_mib: 512,
                 ..Default::default()
@@ -3963,7 +3647,7 @@ mod tests {
         // Non-vacuity: the fixture must actually exercise all four standing
         // channels, or "the two match" would say nothing. These are the three
         // the fork used to drop, plus the agent RPC.
-        let ports: Vec<u32> = cold.iter().map(|p| p.service.port()).collect();
+        let ports: Vec<u32> = cold.iter().map(crate::driver::VsockPort::port).collect();
         for (port, what) in [
             (EGRESS_PORT, "the gated egress endpoint"),
             (BROKER_PORT, "host.audit.v1 / host.secrets.v1"),
@@ -4006,7 +3690,7 @@ mod tests {
         let wired = run.driver.forked_children()[0]
             .channels
             .iter()
-            .find(|p| p.service.port() == BROKER_PORT)
+            .find(|p| p.service == GuestService::Broker)
             .map(|p| p.host_uds.clone())
             .expect("the child carries a broker channel");
         assert_eq!(
