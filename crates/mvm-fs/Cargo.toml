@@ -11,6 +11,7 @@ description = "Image → mountable rootfs for mvm: OCI distribution client (regi
 
 [dependencies]
 async-trait = "0.1"
+ed25519-dalek.workspace = true
 ext4-view.workspace = true
 flate2.workspace = true
 hex.workspace = true
@@ -36,6 +37,13 @@ base64.workspace = true
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "rt-multi-thread", "test-util", "time"] }
+
+[features]
+default = []
+# Opt-in Apple APFS read-only snapshot provider. The provider is deliberately
+# not part of the default build until its host privilege and live mount tests
+# are run on the target machine.
+trusted-apfs = []
 
 [lints]
 workspace = true

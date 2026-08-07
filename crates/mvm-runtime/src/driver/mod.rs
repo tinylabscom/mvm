@@ -15,5 +15,7 @@ pub use hvf::HvfDriver;
 pub use libkrun::LibkrunDriver;
 pub use mock::{MockDriver, MockRunningVm};
 pub use qemu::QemuDriver;
-pub use spec::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
+pub use spec::{
+    BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
+};
 pub use traits::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};

@@ -1006,6 +1006,7 @@ mod tests {
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,
+            virtiofs_shares: vec![],
             vsock,
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
@@ -1955,6 +1956,7 @@ mod tests {
             parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-1",
             child_dir: &missing,
+            parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &workload_channels(),
         };
@@ -1979,6 +1981,7 @@ mod tests {
             parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-2",
             child_dir: &child_dir,
+            parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &workload_channels(),
         };
@@ -2013,6 +2016,7 @@ mod tests {
             parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-3",
             child_dir: &child_dir,
+            parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &channels,
         };

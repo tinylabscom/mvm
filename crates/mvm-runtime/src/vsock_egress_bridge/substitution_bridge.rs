@@ -212,6 +212,10 @@ impl SubstitutionBridge {
         self.active = Some(counter);
     }
 
+    pub(crate) fn has_binding(&self) -> bool {
+        self.endpoint.is_some()
+    }
+
     fn bump(&self, delta: i32) {
         if let Some(c) = &self.active {
             if delta >= 0 {

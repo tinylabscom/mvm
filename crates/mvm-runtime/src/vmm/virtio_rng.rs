@@ -10,6 +10,9 @@ use rand::RngCore;
 use virtio_queue::desc::split::Descriptor;
 use virtio_queue::{QueueOwnedT, QueueT};
 
+use super::device_state::{
+    DeviceKind, DeviceStateError, SnapshotDeviceState, StateReader, StateWriter,
+};
 use super::guest_mem::GuestMem;
 use super::{RingGeometry, build_split_queue};
 
@@ -309,6 +312,78 @@ impl VirtioRng {
     }
 }
 
+impl SnapshotDeviceState for VirtioRng {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::VirtioRng
+    }
+
+    fn snapshot_state(&self) -> Result<Vec<u8>, DeviceStateError> {
+        let mut writer = StateWriter::new(1);
+        writer.u32(self.device_features_sel);
+        writer.u32(self.status);
+        writer.u32(self.queue_num);
+        writer.u32(self.queue_ready);
+        writer.u64(self.desc);
+        writer.u64(self.avail);
+        writer.u64(self.used);
+        writer.u16(self.last_avail);
+        writer.u16(self.next_used);
+        writer.u32(self.interrupt_status);
+        Ok(writer.finish())
+    }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceStateError> {
+        let kind = DeviceKind::VirtioRng;
+        let mut reader = StateReader::new(bytes);
+        let version = reader.version(kind)?;
+        if version != 1 {
+            return Err(DeviceStateError::UnsupportedVersion(version));
+        }
+        let device_features_sel = reader.u32(kind, "device_features_sel")?;
+        let status = reader.u32(kind, "status")?;
+        let queue_num = reader.u32(kind, "queue_num")?;
+        let queue_ready = reader.u32(kind, "queue_ready")?;
+        let desc = reader.u64(kind, "desc")?;
+        let avail = reader.u64(kind, "avail")?;
+        let used = reader.u64(kind, "used")?;
+        let last_avail = reader.u16(kind, "last_avail")?;
+        let next_used = reader.u16(kind, "next_used")?;
+        let interrupt_status = reader.u32(kind, "interrupt_status")?;
+        reader.finish()?;
+
+        if device_features_sel > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "device_features_sel",
+            });
+        }
+        if queue_ready > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_ready",
+            });
+        }
+        if queue_num != 0 && super::validated_queue_size(queue_num).is_none() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_num",
+            });
+        }
+
+        self.device_features_sel = device_features_sel;
+        self.status = status;
+        self.queue_num = queue_num;
+        self.queue_ready = queue_ready;
+        self.desc = desc;
+        self.avail = avail;
+        self.used = used;
+        self.last_avail = last_avail;
+        self.next_used = next_used;
+        self.interrupt_status = interrupt_status;
+        Ok(())
+    }
+}
+
 fn set_lo(word: &mut u64, value: u32) {
     *word = (*word & 0xffff_ffff_0000_0000) | u64::from(value);
 }
@@ -531,5 +606,34 @@ mod tests {
         device.write(R_STATUS, 0);
         assert_eq!(device.last_avail, 0);
         assert_eq!(device.next_used, 0);
+    }
+
+    #[test]
+    fn rng_device_state_roundtrips_without_entropy_bytes() {
+        let mut source = device(Box::new(CountingEntropy(1)));
+        source.device_features_sel = 1;
+        source.status = 4;
+        source.queue_num = 8;
+        source.queue_ready = 1;
+        source.desc = DESC;
+        source.avail = AVAIL;
+        source.used = USED;
+        source.last_avail = 5;
+        source.next_used = 6;
+        source.interrupt_status = 1;
+        let state = source.snapshot_state().unwrap();
+
+        let mut target = device(Box::new(CountingEntropy(200)));
+        target.restore_state(&state).unwrap();
+        assert_eq!(target.device_features_sel, 1);
+        assert_eq!(target.status, 4);
+        assert_eq!(target.queue_num, 8);
+        assert_eq!(target.queue_ready, 1);
+        assert_eq!(
+            (target.desc, target.avail, target.used),
+            (DESC, AVAIL, USED)
+        );
+        assert_eq!((target.last_avail, target.next_used), (5, 6));
+        assert_eq!(target.interrupt_status, 1);
     }
 }

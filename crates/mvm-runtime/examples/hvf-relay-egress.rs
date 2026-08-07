@@ -168,6 +168,7 @@ fn main() {
             memory_mib: 512,
             mem_initial_mib: None,
             blocks: vec![],
+            virtiofs_shares: vec![],
             // The one channel off the box: the guest dials EGRESS_PORT, the host
             // relays it to the gating endpoint's UDS.
             vsock: vec![VsockPort {

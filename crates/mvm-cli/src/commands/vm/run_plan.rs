@@ -557,7 +557,7 @@ mod tests {
             memory: "512M".to_string(),
             profile: RunProfile::Standard,
             agent_verb: Vec::new(),
-            add_dir: Vec::new(),
+            mounts: Vec::new(),
             env: Vec::new(),
             timeout: Some(60),
             receipt: None,

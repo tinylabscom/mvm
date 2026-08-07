@@ -1766,6 +1766,11 @@ mod tests {
             fc.capabilities().pause_resume,
             "firecracker: capability flag must say pause_resume=true (matches the real impl)"
         );
+        let hvf = AnyBackend::from_hypervisor("hvf");
+        assert!(
+            hvf.capabilities().pause_resume,
+            "hvf: capability flag must say pause_resume=true (matches signal-backed pause/resume)"
+        );
     }
 
     // BackendTier coverage.

@@ -103,6 +103,7 @@ fn map_elf_kernel(world: &mut CliWorld) {
         memory_mib: 128,
         mem_initial_mib: None,
         blocks: vec![],
+        virtiofs_shares: vec![],
         vsock: vec![],
         console: ConsoleCapture {
             log_path: state.path().join("console.log"),

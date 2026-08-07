@@ -2,8 +2,7 @@
 //!
 //! The former bare `mvmctl exec` was folded into `run`: `run` was already a
 //! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
-//! `run -- <argv>` covers its interactive case with the dev profile by
-//! default. The `Args`
+//! `run --profile dev -- <argv>` covers its interactive case. The `Args`
 //! struct + internal request machinery stay — `run_secure` reuses them.
 
 use anyhow::{Context, Result};
@@ -52,11 +51,10 @@ pub(in crate::commands) struct Args {
     /// Memory (supports human-readable: 512M, 1G, …)
     #[arg(long, default_value = "512M")]
     pub memory: String,
-    /// Share a host directory into the guest. Format: `HOST_PATH:/GUEST_PATH[:MODE]`
-    /// where MODE is `ro` (default, writes are discarded) or `rw` (writes are
-    /// rsynced back to the host directory after the command exits). Repeatable
-    #[arg(short = 'd', long)]
-    pub add_dir: Vec<String>,
+    /// Internal (not a CLI flag): live directory shares forwarded from
+    /// `machine run --mount` or the public `run --mount` surface.
+    #[arg(skip)]
+    pub mounts: Vec<String>,
     /// Environment variable to inject (KEY=VALUE). Repeatable. Overrides any env vars
     /// carried by `--launch-plan`.
     #[arg(short, long)]
@@ -164,12 +162,12 @@ pub(in crate::commands) struct RunArgs {
     #[arg(long, default_value = "512M")]
     pub memory: String,
     /// Security profile for the transient run.
-    #[arg(long, value_enum, default_value = "dev")]
+    #[arg(long, value_enum, default_value = "standard")]
     pub profile: RunProfile,
-    /// Share a host directory into the guest. Format: `HOST_PATH:/GUEST_PATH[:MODE]`.
-    /// MODE defaults to `ro`; `rw` is allowed only with `--profile dev` or `permissive`.
-    #[arg(short = 'd', long)]
-    pub add_dir: Vec<String>,
+    /// Attach a live read-only host directory at a guest path.
+    /// Format: `HOST_PATH:/GUEST_PATH:ro`. Repeatable.
+    #[arg(long = "mount", value_name = "HOST:GUEST:ro")]
+    pub mounts: Vec<String>,
     /// Explicit environment variable to inject (KEY=VALUE). Repeatable.
     /// Disabled by `--profile restrictive`.
     #[arg(short, long)]
@@ -311,7 +309,7 @@ impl RunArgs {
             vm_name: self.vm_name,
             cpus: self.cpus,
             memory: self.memory,
-            add_dir: self.add_dir,
+            mounts: self.mounts,
             env: self.env,
             timeout: self.timeout,
             launch_plan: self.launch_plan,
@@ -634,18 +632,15 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
         if !args.env.is_empty() {
             anyhow::bail!("--profile restrictive does not allow --env");
         }
-        if !args.add_dir.is_empty() {
+        if !args.mounts.is_empty() {
             anyhow::bail!("--profile restrictive does not allow --mount");
         }
     }
 
-    if matches!(args.profile, RunProfile::Restrictive | RunProfile::Standard) {
-        for spec in &args.add_dir {
-            if !crate::exec::AddDir::parse(spec)?.read_only {
-                anyhow::bail!(
-                    "--mount '{spec}' requests rw; use --profile dev for writable host shares"
-                );
-            }
+    for spec in &args.mounts {
+        let share = crate::commands::parse_dir_share_spec(spec)?;
+        if !share.read_only {
+            anyhow::bail!("--mount '{spec}' requests rw, but transient live shares are read-only");
         }
     }
 
@@ -743,9 +738,13 @@ fn build_exec_request(
         (None, false) => crate::exec::ExecTarget::Inline { argv: args.argv },
     };
     let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
-    let mut add_dirs = Vec::with_capacity(args.add_dir.len());
-    for spec in &args.add_dir {
-        add_dirs.push(crate::exec::AddDir::parse(spec)?);
+    let mut dir_shares = Vec::with_capacity(args.mounts.len());
+    for spec in &args.mounts {
+        let share = crate::commands::parse_dir_share_spec(spec)?;
+        if !share.read_only {
+            anyhow::bail!("--mount '{spec}' requests rw, but transient live shares are read-only");
+        }
+        dir_shares.push(share);
     }
     let mut env_pairs = Vec::with_capacity(args.env.len());
     for kv in &args.env {
@@ -911,7 +910,7 @@ fn build_exec_request(
         // here yet. The manifest-driven path on mvmctl up is where
         // mem_initial gets sourced for long-running workloads.
         mem_initial_mib: None,
-        add_dirs,
+        dir_shares,
         env: effective_env,
         target,
         timeout_secs: args.timeout,
@@ -932,7 +931,7 @@ fn emit_oci_run_admission(
     timeout_secs: u64,
     network_mode: mvm_contract::plan::NetworkMode,
 ) -> Result<()> {
-    let image_sha256 = mvm_core::crypto::image_verify::sha256_file_cached(&image.rootfs_path)
+    let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
         .with_context(|| {
             format!(
                 "hashing OCI rootfs at {} for run --image admission",
@@ -941,7 +940,6 @@ fn emit_oci_run_admission(
         })?;
     let exec_timeout_secs = u32::try_from(timeout_secs).unwrap_or(u32::MAX);
     let input = SynthesisInput {
-        stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode,
         l3_network: None,
@@ -1019,7 +1017,7 @@ struct ReceiptInput {
     egress_enforcement: String,
     command: ReceiptCommand,
     env_keys: Vec<String>,
-    add_dirs: Vec<ReceiptAddDir>,
+    mounts: Vec<ReceiptMount>,
     timeout_secs: u64,
 }
 
@@ -1036,7 +1034,7 @@ enum ReceiptCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReceiptAddDir {
+struct ReceiptMount {
     host_path_sha256: String,
     guest_path: String,
     read_only: bool,
@@ -1104,12 +1102,12 @@ impl ReceiptInput {
         env_keys.sort();
         env_keys.dedup();
 
-        let mut add_dirs = Vec::with_capacity(args.add_dir.len());
-        for spec in &args.add_dir {
-            let parsed = crate::exec::AddDir::parse(spec)?;
-            add_dirs.push(ReceiptAddDir {
-                host_path_sha256: sha256_hex(parsed.host_path.as_bytes()),
-                guest_path: parsed.guest_path,
+        let mut mounts = Vec::with_capacity(args.mounts.len());
+        for spec in &args.mounts {
+            let parsed = crate::commands::parse_dir_share_spec(spec)?;
+            mounts.push(ReceiptMount {
+                host_path_sha256: sha256_hex(parsed.host_dir.as_bytes()),
+                guest_path: parsed.guest_mount,
                 read_only: parsed.read_only,
             });
         }
@@ -1129,7 +1127,7 @@ impl ReceiptInput {
             egress_enforcement: super::shared::egress_enforcement_label(backend, &policy),
             command,
             env_keys,
-            add_dirs,
+            mounts,
             timeout_secs: args.timeout.unwrap_or(60),
         })
     }
@@ -1315,23 +1313,23 @@ pub(in crate::commands) struct RunSecuritySummary {
     pub receipt_command: String,
     pub preflight_env_keys: Vec<String>,
     pub receipt_env_keys: Vec<String>,
-    pub preflight_add_dirs: Vec<RunSecurityAddDir>,
-    pub receipt_add_dirs: Vec<RunSecurityAddDir>,
+    pub preflight_mounts: Vec<RunSecurityMount>,
+    pub receipt_mounts: Vec<RunSecurityMount>,
     pub preflight_timeout_secs: u64,
     pub receipt_timeout_secs: u64,
 }
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) struct RunSecurityAddDir {
+pub(in crate::commands) struct RunSecurityMount {
     pub host_path_sha256: String,
     pub guest_path: String,
     pub read_only: bool,
 }
 
 #[cfg(test)]
-impl From<ReceiptAddDir> for RunSecurityAddDir {
-    fn from(dir: ReceiptAddDir) -> Self {
+impl From<ReceiptMount> for RunSecurityMount {
+    fn from(dir: ReceiptMount) -> Self {
         Self {
             host_path_sha256: dir.host_path_sha256,
             guest_path: dir.guest_path,
@@ -1390,13 +1388,13 @@ fn test_run_security_summary_from_parts(
         receipt_command: receipt.command.describe(),
         preflight_env_keys: preflight.invocation.env_keys,
         receipt_env_keys: receipt.env_keys,
-        preflight_add_dirs: preflight
+        preflight_mounts: preflight
             .invocation
-            .add_dirs
+            .mounts
             .into_iter()
             .map(Into::into)
             .collect(),
-        receipt_add_dirs: receipt.add_dirs.into_iter().map(Into::into).collect(),
+        receipt_mounts: receipt.mounts.into_iter().map(Into::into).collect(),
         preflight_timeout_secs: preflight.invocation.timeout_secs,
         receipt_timeout_secs: receipt.timeout_secs,
     })
@@ -1617,7 +1615,7 @@ mod tests {
             memory: "512M".to_string(),
             profile,
             agent_verb: Vec::new(),
-            add_dir: Vec::new(),
+            mounts: Vec::new(),
             env: Vec::new(),
             timeout: Some(60),
             receipt: None,
@@ -1704,7 +1702,7 @@ mod tests {
     #[test]
     fn standard_profile_rejects_writable_host_share() {
         let mut args = run_args(RunProfile::Standard);
-        args.add_dir.push(".:/work:rw".to_string());
+        args.mounts.push(".:/work:rw".to_string());
 
         let err = validate_run_profile(&args).expect_err("standard rejects rw share");
         assert!(err.to_string().contains("requests rw"));
@@ -1722,18 +1720,19 @@ mod tests {
     #[test]
     fn restrictive_profile_rejects_host_share() {
         let mut args = run_args(RunProfile::Restrictive);
-        args.add_dir.push(".:/work".to_string());
+        args.mounts.push(".:/work".to_string());
 
         let err = validate_run_profile(&args).expect_err("restrictive rejects shares");
         assert!(err.to_string().contains("does not allow --mount"));
     }
 
     #[test]
-    fn dev_profile_allows_writable_host_share() {
+    fn dev_profile_rejects_writable_host_share() {
         let mut args = run_args(RunProfile::Dev);
-        args.add_dir.push(".:/work:rw".to_string());
+        args.mounts.push(".:/work:rw".to_string());
 
-        validate_run_profile(&args).expect("dev allows rw share");
+        let err = validate_run_profile(&args).expect_err("transient shares are always read-only");
+        assert!(err.to_string().contains("requests rw"));
     }
 
     #[test]
@@ -1741,7 +1740,7 @@ mod tests {
         let mut args = run_args(RunProfile::Dev);
         args.argv = vec!["curl".to_string(), "token-secret".to_string()];
         args.env.push("API_TOKEN=secret-value".to_string());
-        args.add_dir.push("/private/project:/work:ro".to_string());
+        args.mounts.push("/private/project:/work:ro".to_string());
 
         let receipt = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
         let json = serde_json::to_string(&receipt).expect("json");
@@ -1800,7 +1799,7 @@ mod tests {
         args.manifest = Some("/private/manifest/mvm.toml".to_string());
         args.argv = vec!["curl".to_string(), "token-secret".to_string()];
         args.env.push("API_TOKEN=secret-value".to_string());
-        args.add_dir.push("/private/project:/work:ro".to_string());
+        args.mounts.push("/private/project:/work:ro".to_string());
         args.receipt = Some(PathBuf::from("/tmp/run-receipt.json"));
 
         let summary = RunPreflightSummary::from_args(&args).expect("preflight summary");

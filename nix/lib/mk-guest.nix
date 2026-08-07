@@ -870,6 +870,7 @@ let
     /bin/busybox setsid ${setpriv} \
       --reuid=${toString agentUid} --regid=${toString agentUid} \
       --clear-groups --securebits=keep-caps \
+      --inh-caps=+kill --ambient-caps=+kill \
       --inh-caps=+sys_time --ambient-caps=+sys_time --no-new-privs \
       -- "$MVM_AGENT_BIN" &
 

@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use mvm_core::checkpoint::{
     CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
 };
+use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
+use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
@@ -613,6 +615,11 @@ pub trait VmFullControl {
     fn save_memory(&self, memory_path: &Path) -> Result<()>;
     /// Resume vCPUs.
     fn resume(&self) -> Result<()>;
+    /// Keep the paused VMM resident after a successful capture so a driver can
+    /// hand its machine instance directly to the next claim.
+    fn retain_paused_after_capture(&self) -> bool {
+        false
+    }
     /// Absolute path to the VM's live rootfs image.
     fn rootfs_path(&self) -> Result<PathBuf>;
     /// Optional extra content blobs written alongside `save_memory` that this
@@ -627,6 +634,12 @@ pub trait VmFullControl {
 
     /// Absolute host paths the snapshot embeds and a fork restore must remap.
     fn device_anchors(&self) -> Result<DeviceAnchors>;
+
+    /// Optional backend launch configuration required to recreate a fresh VMM
+    /// around a captured machine state.
+    fn supervisor_config_path(&self) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
 }
 
 pub struct CaptureVmFullParams {
@@ -651,6 +664,41 @@ pub fn capture_vm_full(
     store: &CheckpointStore,
     params: CaptureVmFullParams,
     control: &dyn VmFullControl,
+) -> Result<CheckpointMeta> {
+    capture_vm_full_inner(store, params, control, None, None)
+}
+
+/// Capture a vm_full checkpoint and stage its immutable bytes in the supplied
+/// snapshot store before writing metadata. The resulting snapshot ID is part
+/// of the checkpoint's load-bearing digest, so later claims can materialize it
+/// without rereading the captured memory image.
+pub fn capture_vm_full_with_snapshot_store(
+    store: &CheckpointStore,
+    params: CaptureVmFullParams,
+    control: &dyn VmFullControl,
+    snapshot_store: &FsSnapshotStore,
+) -> Result<CheckpointMeta> {
+    capture_vm_full_inner(store, params, control, Some(snapshot_store), None)
+}
+
+/// Capture a vm_full checkpoint and publish its bytes through an immutable
+/// trusted-snapshot backend. The backend owns the publication proof, allowing
+/// a later claim to materialize without hashing the captured blobs again.
+pub fn capture_vm_full_with_trusted_snapshot_backend(
+    store: &CheckpointStore,
+    params: CaptureVmFullParams,
+    control: &dyn VmFullControl,
+    backend: &dyn TrustedSnapshotBackend,
+) -> Result<CheckpointMeta> {
+    capture_vm_full_inner(store, params, control, None, Some(backend))
+}
+
+fn capture_vm_full_inner(
+    store: &CheckpointStore,
+    params: CaptureVmFullParams,
+    control: &dyn VmFullControl,
+    snapshot_store: Option<&FsSnapshotStore>,
+    trusted_backend: Option<&dyn TrustedSnapshotBackend>,
 ) -> Result<CheckpointMeta> {
     let content_dir = store.content_dir(&params.id);
     std::fs::create_dir_all(&content_dir)
@@ -681,7 +729,11 @@ pub fn capture_vm_full(
         }
         Ok::<(), anyhow::Error>(())
     })();
-    let resumed = control.resume();
+    let resumed = if control.retain_paused_after_capture() && captured.is_ok() {
+        Ok(())
+    } else {
+        control.resume()
+    };
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
 
@@ -768,6 +820,12 @@ pub fn capture_vm_full(
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("anchor path has no file name: {}", src.display()))?
             .to_string_lossy();
+        // A verity anchor is also a guest sidecar when it sits beside the
+        // captured rootfs. Keep one manifest entry for the shared bytes; the
+        // checkpoint content directory is already the canonical copy.
+        if content.iter().any(|blob| blob.name == name) {
+            continue;
+        }
         let dst = content_dir.join(name.as_ref());
         std::fs::copy(src, &dst)
             .with_context(|| format!("copying anchor {} to checkpoint", src.display()))?;
@@ -777,6 +835,66 @@ pub fn capture_vm_full(
         });
     }
 
+    let snapshot_id = if let Some(backend) = trusted_backend {
+        if snapshot_store.is_some() {
+            anyhow::bail!("capture configured with both snapshot backends");
+        }
+        let id = format!(
+            "trusted-checkpoint-{}-content-{}",
+            params.id,
+            mvm_core::checkpoint::content_manifest_digest(&content)
+        );
+        let manifest_digest = mvm_core::checkpoint::content_manifest_digest(&content).to_string();
+        let snapshot_id = SnapshotId::with_digest(id.clone(), manifest_digest.clone());
+        let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+            .context("load host identity for checkpoint snapshot manifest")?;
+        mvm_core::crypto::snapshot_sign::sign_manifest(
+            &content_dir,
+            &manifest_digest,
+            &identity.signing,
+        )
+        .with_context(|| format!("sign trusted checkpoint snapshot manifest {id}"))?;
+        backend
+            .stage(&snapshot_id, &content_dir)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("staging trusted checkpoint snapshot {id}"))?;
+        if let Err(error) = backend
+            .seal(&snapshot_id)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("sealing trusted checkpoint snapshot {id}"))
+        {
+            let _ = backend.remove(&snapshot_id);
+            return Err(error);
+        }
+        Some(id)
+    } else {
+        snapshot_store
+            .map(|snapshots| {
+                let id = format!(
+                    "checkpoint-{}-content-{}",
+                    params.id,
+                    mvm_core::checkpoint::content_manifest_digest(&content)
+                );
+                let manifest_digest =
+                    mvm_core::checkpoint::content_manifest_digest(&content).to_string();
+                let snapshot_id = SnapshotId::with_digest(id.clone(), manifest_digest.clone());
+                snapshots
+                    .create(&snapshot_id, &content_dir)
+                    .with_context(|| format!("staging checkpoint snapshot {id}"))?;
+                let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+                    .context("load host identity for checkpoint snapshot manifest")?;
+                mvm_core::crypto::snapshot_sign::sign_manifest(
+                    &snapshots.root().join(&id),
+                    &manifest_digest,
+                    &identity.signing,
+                )
+                .with_context(|| format!("sign checkpoint snapshot manifest {id}"))?;
+                Ok::<_, anyhow::Error>(Some(id))
+            })
+            .transpose()?
+            .flatten()
+    };
+
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
         .tag(params.tag)
         .created_unix(params.created_unix)
@@ -784,6 +902,7 @@ pub fn capture_vm_full(
         .supervisor_config_digest(params.supervisor_config_digest)
         .runtime_source_policy(params.runtime_source_policy)
         .runtime_overlay_version(params.runtime_overlay_version)
+        .snapshot_id(snapshot_id)
         .build();
     store.write_meta(&meta)?;
     Ok(meta)
@@ -1480,7 +1599,10 @@ mod tests {
             let dir = self.rootfs.parent().unwrap_or(Path::new("."));
             Ok(DeviceAnchors {
                 rootfs: self.rootfs.clone(),
-                rootfs_verity: None,
+                rootfs_verity: dir
+                    .join("rootfs.verity")
+                    .is_file()
+                    .then(|| dir.join("rootfs.verity")),
                 config: None,
                 secrets: None,
                 vsock: dir.join("v.sock"),
@@ -1544,6 +1666,7 @@ mod tests {
             br#"{"accessible":true,"overlay_aware":false}"#,
         )
         .unwrap();
+        std::fs::write(rootfs_dir.join("rootfs.verity"), b"verity").unwrap();
         let ctl = MockControl {
             rootfs,
             events: RefCell::new(vec![]),
@@ -1569,6 +1692,14 @@ mod tests {
         assert!(
             names.contains(&mvm_build::builder_vm::SIDECAR_FILENAME),
             "expected sidecar blob in vm_full content; got {names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "rootfs.verity")
+                .count(),
+            1,
+            "a shared verity sidecar/anchor must appear once: {names:?}"
         );
         let sidecar_blob = meta
             .content

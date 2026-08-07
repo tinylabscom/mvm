@@ -129,7 +129,7 @@ crates/mvm-cli/src/commands/build/build.rs::build_flake()
 crates/mvm-cli/src/commands/machine/runtime.rs::run_dispatch()
   └─ crates/mvm-cli/src/exec.rs::run_inner()
        ├─ resolve image artifacts (OCI cache / pull)
-       ├─ stage_add_dir_volumes()
+       ├─ attach_live_directory_shares()
        ├─ resolve_boot_strategy()        // snapshot, verity, virtiofs
        ├─ build_start_config()
        ├─ admit plan (mvm-hostd::plan_admission)

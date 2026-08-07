@@ -49,6 +49,15 @@ fn anchor_key(namespace: &str, id: &str) -> String {
 }
 
 impl SignedChainAnchor {
+    /// Construct an intentionally empty anchor for resident claims whose
+    /// signed snapshot manifest is the publication witness. Saved-state
+    /// restores must use [`Self::load`] and verify the full audit chain.
+    pub fn empty() -> Self {
+        Self {
+            recorded: std::collections::HashMap::new(),
+        }
+    }
+
     pub fn load() -> Result<Self> {
         use mvm_hostd::audit::emitter::default_audit_dir;
 

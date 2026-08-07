@@ -13,8 +13,8 @@ explicit before the sandbox starts.
 | Need | Use | Security posture |
 | --- | --- | --- |
 | One input file or result file | `mvmctl cp` or `mvmctl machine fs` | Narrowest boundary; preferred for generated-code tasks. |
-| Read-only fixtures | `mvmctl run --add-dir ...:ro` | Host data is exposed but not writable by the guest. |
-| Local dev edits | `mvmctl run --profile dev --add-dir ...:rw` | Writable host share; use only for trusted dev workflows. |
+| Read-only fixtures | `mvmctl run --mount ...:ro` | Host data is exposed but not writable by the guest. |
+| Local dev edits | `mvmctl cp` or managed volume | Explicit copy or encrypted persistent state; no writable transient host share. |
 | Stateful app data | managed encrypted volume | Encrypted at rest when locked; plaintext exists while unlocked. |
 | Fast retry or recovery | snapshot or cold mode | Can contain memory, files, processes, prompts, and credentials. |
 

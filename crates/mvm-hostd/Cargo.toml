@@ -79,6 +79,14 @@ path = "src/bin/mvm-bridge.rs"
 name = "mvm-hvf-supervisor"
 path = "src/bin/mvm-hvf-supervisor.rs"
 
+# Root-owned macOS APFS snapshot boundary. The client never elevates itself;
+# this binary is installed and launched by the host service manager with an
+# explicit state-root and client UID allowlist.
+[[bin]]
+name = "mvm-apfs-snapshot-helper"
+path = "src/bin/mvm-apfs-snapshot-helper.rs"
+required-features = ["trusted-apfs"]
+
 [dependencies]
 # `egress-ca`: the https terminator mints per-SNI leaves
 # under the per-VM intermediate (`mvm_core::crypto::egress_ca`).
@@ -100,6 +108,7 @@ mvm-runtime.workspace = true
 # guest vsock exec protocol (`send_exec_streaming`, `GUEST_AGENT_PORT`) —
 # the healthcheck probe's host->guest exec leg.
 mvm-agentd.workspace = true
+mvm-fs.workspace = true
 # builder-vm: pulls libkrun_network_provider::vsock_egress_opt_in (Phase A egress
 # server wiring in mvm-libkrun-supervisor); gated here so it only activates in the
 # per-VM supervisor process, not in library users.
@@ -229,6 +238,9 @@ wasm-backend = ["mvm-runtime/wasm-backend"]
 libkrun-sys = ["libkrun-sys/libkrun-sys"]
 # Live-boot integration tests (dev host with libkrun). Never in CI's no-VM lanes.
 libkrun-live = ["libkrun-sys"]
+# Propagate the debug-only HVF warm-restore validation lane to the supervisor.
+hvf-live-validation = ["mvm-runtime/hvf-live-validation"]
+trusted-apfs = ["mvm-runtime/trusted-apfs"]
 
 [lints]
 workspace = true

@@ -48,6 +48,20 @@ const CONTROL_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Cap for exponential control reconnect backoff.
 const CONTROL_RETRY_CAP_DELAY_MS: u64 = 500;
 
+fn warm_claim_debug(message: &str) {
+    let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "[host-agent-registration] {message}");
+}
+
 fn control_retry_delay(attempt: u32) -> Duration {
     let scaled = CONTROL_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(16));
     Duration::from_millis(scaled.min(CONTROL_RETRY_CAP_DELAY_MS))
@@ -114,6 +128,7 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     let dir = mvm_core::config::host_agent_dir(tenant);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create host-agent dir {}", dir.display()))?;
+    warm_claim_debug("daemon_dir_ready");
     let control_socket = mvm_core::config::host_agent_control_socket(tenant);
 
     // Serialise spawn decisions per tenant.
@@ -128,21 +143,27 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     if rc != 0 {
         return Err(std::io::Error::last_os_error()).context("flock host-agent spawn lock");
     }
+    warm_claim_debug("spawn_lock_acquired");
 
     // Already up? (live pid + connectable socket).
     let pid_file = dir.join(DAEMON_PID_FILE);
     if let Some(pid) = read_pid(&pid_file)
         && pid_alive(pid)
     {
+        warm_claim_debug("pid_live");
         if control_socket_is_ready(&control_socket) {
+            warm_claim_debug("control_ready");
             return Ok(control_socket);
         }
+        warm_claim_debug("wait_existing_control");
         wait_for_control_socket(&control_socket, pid as u32, DAEMON_READY_TIMEOUT)?;
+        warm_claim_debug("existing_control_ready");
         return Ok(control_socket);
     }
 
     // Stale socket from a dead daemon would block the rebind.
     let _ = std::fs::remove_file(&control_socket);
+    warm_claim_debug("resolve_daemon_binary");
     let bin = resolve_subprocess_bin("mvm-host-agent", "MVM_HOST_AGENT_PATH")?;
     let cfg = serde_json::json!({
         "tenant_id": tenant,
@@ -152,9 +173,12 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
         "software_chain_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY),
     });
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-host-agent")?;
+    warm_claim_debug("daemon_spawned");
     wait_for_control_socket(&control_socket, child.id(), DAEMON_READY_TIMEOUT)?;
+    warm_claim_debug("new_control_ready");
     std::fs::write(&pid_file, child.id().to_string())
         .with_context(|| format!("write {}", pid_file.display()))?;
+    warm_claim_debug("daemon_pid_written");
     Ok(control_socket)
     // lock_file drops here → flock released.
 }
@@ -223,9 +247,13 @@ pub fn register_host_agent_services_if_admitted(
     // Arm before any spawn so a failure below reaps what already started.
     let guard = HostAgentServicesGuard::armed(state_dir, tenant, vm_name);
 
+    warm_claim_debug("ensure_daemon_begin");
     let control_socket = ensure_host_agent_daemon(tenant)?;
+    warm_claim_debug("ensure_daemon_done");
     let key = load_host_signing_key()?;
+    warm_claim_debug("load_key_done");
     write_host_agent_owner_ref(state_dir)?;
+    warm_claim_debug("owner_ref_done");
     register_vm(
         &control_socket,
         &key,
@@ -247,9 +275,11 @@ pub fn register_host_agent_services_if_admitted(
             services_bindings: vec![],
         },
     )?;
+    warm_claim_debug("register_vm_done");
     // Record the tenant so the stop path can deregister without a flag.
     std::fs::write(state_dir.join(HOST_AGENT_TENANT_REF), tenant)
         .with_context(|| format!("write host-agent tenant ref in {}", state_dir.display()))?;
+    warm_claim_debug("tenant_ref_done");
     Ok(guard)
 }
 

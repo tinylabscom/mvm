@@ -142,6 +142,9 @@ template-registry-s3 = ["mvm-runtime/template-registry-s3"]
 # test double with none of the security claims — never ships in a production
 # `mvmctl` binary; the test suite and the `verification_loop` example turn it on.
 test-support = ["mvm-runtime/test-support", "mvm-client/test-support"]
+# Propagate the debug-only HVF warm-restore validation lane to the runtime.
+hvf-live-validation = ["mvm-runtime/hvf-live-validation"]
+trusted-apfs = ["mvm-runtime/trusted-apfs"]
 
 [lints]
 workspace = true

@@ -16,9 +16,16 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_fs::clone::CloneStrategy;
-use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
+use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
+use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_content, verify_lineage};
+
+/// Trusted publications use a distinct ID namespace so claim can select the
+/// immutable backend without trusting a mutable sidecar or configuration flag.
+pub(crate) fn is_trusted_snapshot_id(id: &str) -> bool {
+    id.starts_with("trusted-checkpoint-")
+}
 
 /// Materialize `parent_id`'s content at `dst`, but only after it clears the
 /// same fail-closed lineage gate `fork_checkpoint` / `fork_vm_full_fc` use:
@@ -26,14 +33,9 @@ use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_content, 
 /// all three succeed — a missing, un-audited, or hash-mismatched parent
 /// leaves `dst` uncreated and the error propagates.
 ///
-/// The snapshot id materialized is derived from the JUST-VERIFIED parent's
-/// own content dir (`create_content_addressed` is idempotent — it stages on
-/// first call, dedups on every later one), never taken from a caller-supplied
-/// id. Accepting an arbitrary `SnapshotId` parameter here would let a caller
-/// pass lineage verification against an audited parent and then materialize
-/// unrelated, unaudited bytes at `dst` — a claim-8 authority-substitution
-/// hole. Deriving it internally makes the materialized bytes provably the
-/// verified parent's content.
+/// The staged snapshot ID is load-bearing checkpoint metadata, covered by the
+/// parent's verified digest and audit lineage. A checkpoint without this
+/// binding is refused rather than falling back to a latency-expensive restage.
 pub fn materialize_child_from_parent(
     checkpoint_store: &CheckpointStore,
     snapshot_store: &FsSnapshotStore,
@@ -45,14 +47,44 @@ pub fn materialize_child_from_parent(
     verify_content(checkpoint_store, &parent)?;
     verify_lineage(checkpoint_store, parent_id, anchor)?;
 
-    let content_dir = checkpoint_store.content_dir(parent_id);
-    let staged = snapshot_store
-        .create_content_addressed(&content_dir)
-        .with_context(|| format!("staging verified parent '{parent_id}' content"))?;
+    let snapshot_id = parent.snapshot_id.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("checkpoint '{parent_id}' has no staged snapshot binding")
+    })?;
 
     snapshot_store
-        .materialize(&staged, dst)
+        .materialize(&SnapshotId::new(snapshot_id), dst)
         .with_context(|| format!("materializing staged snapshot at {}", dst.display()))
+}
+
+/// Materialize from a platform-backed immutable publication.
+///
+/// This is the only claim path that may omit blob hashing. The backend owns
+/// the publication proof: it must seal the bytes before the checkpoint is
+/// admitted and must materialize from a read view that cannot be modified by a
+/// later writer. The ordinary [`materialize_child_from_parent`] path remains
+/// available for unsealed backends and retains full verification.
+pub fn materialize_child_from_trusted_parent(
+    checkpoint_store: &CheckpointStore,
+    backend: &dyn TrustedSnapshotBackend,
+    parent_id: &CheckpointId,
+    anchor: &dyn CheckpointChainAnchor,
+    dst: &Path,
+) -> Result<CloneStrategy> {
+    let parent = checkpoint_store.read_meta(parent_id)?;
+    verify_lineage(checkpoint_store, parent_id, anchor)?;
+    let snapshot_id = parent.snapshot_id.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("checkpoint '{parent_id}' has no trusted snapshot binding")
+    })?;
+
+    backend
+        .materialize(&SnapshotId::new(snapshot_id), dst)
+        .with_context(|| {
+            format!(
+                "materializing trusted snapshot {snapshot_id} at {} using {}",
+                dst.display(),
+                backend.name()
+            )
+        })
 }
 
 #[cfg(test)]
@@ -124,13 +156,38 @@ mod tests {
         .unwrap()
     }
 
+    fn stage_parent(
+        store: &CheckpointStore,
+        snapshots: &FsSnapshotStore,
+        parent: CheckpointMeta,
+    ) -> CheckpointMeta {
+        let snapshot_id = format!(
+            "checkpoint-{}-content-{}",
+            parent.id,
+            parent.compute_content_digest()
+        );
+        snapshots
+            .create(
+                &SnapshotId::new(snapshot_id.clone()),
+                &store.content_dir(&parent.id),
+            )
+            .unwrap();
+        let sealed = parent.with_snapshot_id(snapshot_id);
+        store.write_meta(&sealed).unwrap();
+        sealed
+    }
+
     #[test]
     fn positive_control_audited_parent_materializes_via_snapshot_store() {
         let tmp = tempfile::tempdir().unwrap();
         let checkpoint_store = CheckpointStore::at(tmp.path().join("checkpoints"));
         let snapshot_store = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
 
-        let parent = seed_parent(&checkpoint_store, tmp.path(), "warm-1");
+        let parent = stage_parent(
+            &checkpoint_store,
+            &snapshot_store,
+            seed_parent(&checkpoint_store, tmp.path(), "warm-1"),
+        );
 
         let anchor = MockAnchor::default().audited(&parent);
         let dst = tmp.path().join("instance-rootfs-dir");
@@ -211,7 +268,11 @@ mod tests {
         let checkpoint_store = CheckpointStore::at(tmp.path().join("checkpoints"));
         let snapshot_store = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
 
-        let parent = seed_parent(&checkpoint_store, tmp.path(), "warm-3");
+        let parent = stage_parent(
+            &checkpoint_store,
+            &snapshot_store,
+            seed_parent(&checkpoint_store, tmp.path(), "warm-3"),
+        );
 
         // The anchor still agrees with the ORIGINAL sealed digest — modeling a
         // signed chain that was never re-signed for the tampered record — but
@@ -259,7 +320,11 @@ mod tests {
         std::fs::write(evil_dir.join("rootfs.ext4"), b"attacker-controlled-bytes").unwrap();
         snapshot_store.create_content_addressed(&evil_dir).unwrap();
 
-        let parent = seed_parent(&checkpoint_store, tmp.path(), "warm-4");
+        let parent = stage_parent(
+            &checkpoint_store,
+            &snapshot_store,
+            seed_parent(&checkpoint_store, tmp.path(), "warm-4"),
+        );
         let anchor = MockAnchor::default().audited(&parent);
         let dst = tmp.path().join("instance-dir");
 
@@ -277,5 +342,26 @@ mod tests {
             b"warm-parent-rootfs-bytes",
             "materialized bytes must be the verified parent's content, never the staged evil blob"
         );
+    }
+
+    #[test]
+    fn trusted_materialization_fails_closed_without_a_platform_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkpoint_store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let parent = seed_parent(&checkpoint_store, tmp.path(), "warm-trusted");
+        let anchor = MockAnchor::default().audited(&parent);
+        let backend = mvm_fs::trusted_snapshot::UnsupportedTrustedSnapshotBackend;
+        let dst = tmp.path().join("instance-dir");
+
+        let error = materialize_child_from_trusted_parent(
+            &checkpoint_store,
+            &backend,
+            &parent.id,
+            &anchor,
+            &dst,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no trusted snapshot binding"));
+        assert!(!dst.exists());
     }
 }

@@ -17,8 +17,8 @@ use mvm_core::vm_backend::{
 use crate::driver::spec::{VmmSpec, VsockPort};
 use crate::vm::instance_snapshot::PostRestoreOutcome;
 
-/// What a driver needs to fork a materialized standby parent into a fresh child
-/// VMM. Grouped so the seam takes one value instead of a positional list.
+/// What a driver needs to fork a standby parent into a fresh child VMM. Grouped
+/// so the seam takes one value instead of a positional list.
 pub struct ChildForkRequest<'a> {
     /// The verified standby parent that is being handed off to this child.
     /// Saved-state drivers use the checkpoint in `child_dir`; live standby
@@ -26,9 +26,13 @@ pub struct ChildForkRequest<'a> {
     pub parent_vm_name: &'a str,
     /// The child's fresh, registry-unique name (its `~/.mvm/vms/<name>` key).
     pub child_vm_name: &'a str,
-    /// The child's state dir, already holding the copy-on-write clone of the
-    /// verified parent's own content.
+    /// The child's fresh host-side state dir. Saved-state restores populate it
+    /// with a copy-on-write clone; resident handoffs populate only the runtime
+    /// sockets and markers needed by the transferred supervisor.
     pub child_dir: &'a Path,
+    /// The resident parent name for an in-process handoff. `None` selects the
+    /// saved-state restore path used by drivers that launch a fresh VMM.
+    pub parent_vm_name: Option<&'a str>,
     /// Fresh VMGenID token, bound to the child's content-address, that the
     /// child must adopt so its CSPRNG diverges from the parent's.
     ///
@@ -94,6 +98,16 @@ pub trait VmmDriver: Send + Sync {
     }
     /// Which of the CI-enforced security claims this VMM's boot path holds.
     fn security_profile(&self) -> BackendSecurityProfile;
+    /// Whether this driver can attach live read-only host-directory shares.
+    /// Unsupported drivers must fail closed before boot.
+    fn supports_directory_shares(&self) -> bool {
+        false
+    }
+    /// Whether a standby claim can hand a resident VMM directly to the child
+    /// identity without starting a separate saved-state restore.
+    fn supports_resident_handoff(&self) -> bool {
+        false
+    }
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
 

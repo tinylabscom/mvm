@@ -17,6 +17,9 @@ use std::sync::OnceLock;
 use virtio_queue::desc::split::Descriptor;
 use virtio_queue::{QueueOwnedT, QueueT};
 
+use super::device_state::{
+    DeviceKind, DeviceStateError, SnapshotDeviceState, StateReader, StateWriter,
+};
 use super::guest_mem::GuestMem;
 use super::{RingGeometry, build_split_queue};
 
@@ -518,6 +521,87 @@ impl VirtioBlk {
     }
 }
 
+impl SnapshotDeviceState for VirtioBlk {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::VirtioBlk
+    }
+
+    fn snapshot_state(&self) -> Result<Vec<u8>, DeviceStateError> {
+        let mut writer = StateWriter::new(1);
+        writer.u32(self.device_features_sel);
+        writer.u32(self.driver_features_sel);
+        writer.u32(self.status);
+        writer.u32(self.queue_num);
+        writer.u32(self.queue_ready);
+        writer.u64(self.desc);
+        writer.u64(self.avail);
+        writer.u64(self.used);
+        writer.u16(self.last_avail);
+        writer.u16(self.next_used);
+        writer.u32(self.interrupt_status);
+        Ok(writer.finish())
+    }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceStateError> {
+        let kind = DeviceKind::VirtioBlk;
+        let mut reader = StateReader::new(bytes);
+        let version = reader.version(kind)?;
+        if version != 1 {
+            return Err(DeviceStateError::UnsupportedVersion(version));
+        }
+        let device_features_sel = reader.u32(kind, "device_features_sel")?;
+        let driver_features_sel = reader.u32(kind, "driver_features_sel")?;
+        let status = reader.u32(kind, "status")?;
+        let queue_num = reader.u32(kind, "queue_num")?;
+        let queue_ready = reader.u32(kind, "queue_ready")?;
+        let desc = reader.u64(kind, "desc")?;
+        let avail = reader.u64(kind, "avail")?;
+        let used = reader.u64(kind, "used")?;
+        let last_avail = reader.u16(kind, "last_avail")?;
+        let next_used = reader.u16(kind, "next_used")?;
+        let interrupt_status = reader.u32(kind, "interrupt_status")?;
+        reader.finish()?;
+
+        if device_features_sel > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "device_features_sel",
+            });
+        }
+        if driver_features_sel > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "driver_features_sel",
+            });
+        }
+        if queue_ready > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_ready",
+            });
+        }
+        if queue_num != 0 && super::validated_queue_size(queue_num).is_none() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_num",
+            });
+        }
+
+        self.device_features_sel = device_features_sel;
+        self.driver_features_sel = driver_features_sel;
+        self.status = status;
+        self.queue_num = queue_num;
+        self.queue_ready = queue_ready;
+        self.desc = desc;
+        self.avail = avail;
+        self.used = used;
+        self.last_avail = last_avail;
+        self.next_used = next_used;
+        self.interrupt_status = interrupt_status;
+        Ok(())
+    }
+}
+
 // ---- virtio-fs (read-only root) --------------------------------------------
 
 const VIRTIO_ID_FS: u32 = 26;
@@ -527,7 +611,7 @@ const FS_NUM_QUEUES: usize = 2;
 const FS_TAG: &str = "mvmroot";
 
 /// Per-queue virtqueue state (virtio-fs has multiple queues, unlike blk).
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 struct FsQueue {
     num: u32,
     ready: u32,
@@ -589,9 +673,32 @@ impl VirtioFs {
         ram_size: usize,
         root: std::path::PathBuf,
     ) -> Self {
+        // The root device keeps the historical `mvmroot` tag.
+        // SAFETY: the caller supplies the same guest-RAM lifetime contract as
+        // `with_tag`; this wrapper only supplies the historical root tag.
+        unsafe { Self::with_tag(base, irq, ram, ram_base, ram_size, root, FS_TAG.to_string()) }
+    }
+
+    /// Construct a read-only virtio-fs device with an explicit guest tag.
+    /// Tags are supplied by the host-side volume manifest and must fit the
+    /// 36-byte virtio-fs config field.
+    ///
+    /// # Safety
+    /// `ram`/`ram_base`/`ram_size` must describe the mapped guest RAM region for
+    /// the lifetime of this device.
+    pub unsafe fn with_tag(
+        base: u64,
+        irq: u32,
+        ram: *mut u8,
+        ram_base: u64,
+        ram_size: usize,
+        root: std::path::PathBuf,
+        tag: String,
+    ) -> Self {
         let mut config = [0u8; 40];
-        let tag = FS_TAG.as_bytes();
-        config[..tag.len()].copy_from_slice(tag); // tag[36], NUL-padded
+        let tag = tag.as_bytes();
+        let tag_len = tag.len().min(36);
+        config[..tag_len].copy_from_slice(&tag[..tag_len]);
         config[36..40].copy_from_slice(&1u32.to_le_bytes()); // num_request_queues
         VirtioFs {
             base,
@@ -785,6 +892,88 @@ impl VirtioFs {
             off += wrote;
         }
         written
+    }
+}
+
+impl SnapshotDeviceState for VirtioFs {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::VirtioFs
+    }
+
+    fn snapshot_state(&self) -> Result<Vec<u8>, DeviceStateError> {
+        let mut writer = StateWriter::new(1);
+        writer.u32(self.device_features_sel);
+        writer.u32(self.status);
+        writer.u32(self.queue_sel);
+        writer.u32(self.interrupt_status);
+        for queue in self.queues {
+            writer.u32(queue.num);
+            writer.u32(queue.ready);
+            writer.u64(queue.desc);
+            writer.u64(queue.avail);
+            writer.u64(queue.used);
+            writer.u16(queue.last_avail);
+            writer.u16(queue.next_used);
+        }
+        Ok(writer.finish())
+    }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceStateError> {
+        let kind = DeviceKind::VirtioFs;
+        let mut reader = StateReader::new(bytes);
+        let version = reader.version(kind)?;
+        if version != 1 {
+            return Err(DeviceStateError::UnsupportedVersion(version));
+        }
+        let device_features_sel = reader.u32(kind, "device_features_sel")?;
+        let status = reader.u32(kind, "status")?;
+        let queue_sel = reader.u32(kind, "queue_sel")?;
+        let interrupt_status = reader.u32(kind, "interrupt_status")?;
+        let mut queues = [FsQueue::default(); FS_NUM_QUEUES];
+        for queue in &mut queues {
+            queue.num = reader.u32(kind, "queue_num")?;
+            queue.ready = reader.u32(kind, "queue_ready")?;
+            queue.desc = reader.u64(kind, "desc")?;
+            queue.avail = reader.u64(kind, "avail")?;
+            queue.used = reader.u64(kind, "used")?;
+            queue.last_avail = reader.u16(kind, "last_avail")?;
+            queue.next_used = reader.u16(kind, "next_used")?;
+        }
+        reader.finish()?;
+
+        if device_features_sel > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "device_features_sel",
+            });
+        }
+        if usize::try_from(queue_sel).map_or(true, |index| index >= FS_NUM_QUEUES) {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_sel",
+            });
+        }
+        for queue in &queues {
+            if queue.ready > 1 {
+                return Err(DeviceStateError::InvalidValue {
+                    kind,
+                    field: "queue_ready",
+                });
+            }
+            if queue.num != 0 && super::validated_queue_size(queue.num).is_none() {
+                return Err(DeviceStateError::InvalidValue {
+                    kind,
+                    field: "queue_num",
+                });
+            }
+        }
+
+        self.device_features_sel = device_features_sel;
+        self.status = status;
+        self.queue_sel = queue_sel;
+        self.queues = queues;
+        self.interrupt_status = interrupt_status;
+        Ok(())
     }
 }
 
@@ -2171,5 +2360,82 @@ mod tests {
             2,
             "slot 1 records the second chain's head"
         );
+    }
+
+    #[test]
+    fn blk_device_state_roundtrips_control_plane_without_backing_disk() {
+        let mut source = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        source.device_features_sel = 1;
+        source.driver_features_sel = 1;
+        source.status = 7;
+        source.queue_num = 8;
+        source.queue_ready = 1;
+        source.desc = BLK_BASE + 0x1000;
+        source.avail = BLK_BASE + 0x2000;
+        source.used = BLK_BASE + 0x3000;
+        source.last_avail = 9;
+        source.next_used = 11;
+        source.interrupt_status = 1;
+        let state = source.snapshot_state().unwrap();
+
+        let mut target = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        target.restore_state(&state).unwrap();
+        assert_eq!(target.device_features_sel, 1);
+        assert_eq!(target.driver_features_sel, 1);
+        assert_eq!(target.status, 7);
+        assert_eq!(target.queue_num, 8);
+        assert_eq!(target.queue_ready, 1);
+        assert_eq!(
+            (target.desc, target.avail, target.used),
+            (BLK_BASE + 0x1000, BLK_BASE + 0x2000, BLK_BASE + 0x3000)
+        );
+        assert_eq!((target.last_avail, target.next_used), (9, 11));
+        assert_eq!(target.interrupt_status, 1);
+    }
+
+    #[test]
+    fn blk_device_state_rejects_an_illegal_queue_size_before_mutation() {
+        let mut source = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        source.queue_num = 8;
+        let mut state = source.snapshot_state().unwrap();
+        state[14..18].copy_from_slice(&3u32.to_le_bytes());
+
+        let mut target = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        assert!(matches!(
+            target.restore_state(&state),
+            Err(DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioBlk,
+                field: "queue_num"
+            })
+        ));
+        assert_eq!(target.queue_num, 0);
+    }
+
+    #[test]
+    fn fs_device_state_roundtrips_all_queue_control_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = fs_dev(dir.path());
+        source.device_features_sel = 1;
+        source.status = 7;
+        source.queue_sel = 1;
+        source.interrupt_status = 1;
+        source.queues[0] = FsQueue {
+            num: 4,
+            ready: 1,
+            desc: 0x1000,
+            avail: 0x2000,
+            used: 0x3000,
+            last_avail: 2,
+            next_used: 3,
+        };
+        let state = source.snapshot_state().unwrap();
+
+        let mut target = fs_dev(dir.path());
+        target.restore_state(&state).unwrap();
+        assert_eq!(target.device_features_sel, 1);
+        assert_eq!(target.status, 7);
+        assert_eq!(target.queue_sel, 1);
+        assert_eq!(target.interrupt_status, 1);
+        assert_eq!(target.queues[0], source.queues[0]);
     }
 }

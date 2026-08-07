@@ -10,7 +10,9 @@ use mvm_core::config::vm_hvf_vsock_port_socket_at;
 use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 use mvm_net::channel::GuestService;
 
-use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
+use crate::driver::{
+    BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
+};
 
 /// The ordered virtio-blk list for a sealed workload: the read-only rootfs at
 /// `/dev/vda` (slot 0), its dm-verity Merkle sidecar at `/dev/vdb` (slot 1) when
@@ -149,6 +151,27 @@ pub fn ensure_no_dir_share_volumes(config: &VmStartConfig) -> Result<()> {
              virtio-fs device yet, so a live host-directory share can't be expressed. Use a \
              disk-image volume instead (host:/guest:SIZE), or run this workload on a backend \
              with virtio-fs support.",
+            v.host,
+            v.guest
+        );
+    }
+    Ok(())
+}
+
+/// Refuse live directory shares when the selected driver cannot express them.
+/// The config-to-spec mapper still carries the shares explicitly so a capable
+/// driver cannot accidentally forget one.
+pub fn ensure_dir_share_support(config: &VmStartConfig, supported: bool) -> Result<()> {
+    if !supported {
+        return ensure_no_dir_share_volumes(config);
+    }
+    if let Some(v) = config
+        .volumes
+        .iter()
+        .find(|v| matches!(v.kind, VmVolumeKind::DirShare) && !v.read_only)
+    {
+        bail!(
+            "directory-share volume '{}' -> '{}' requests read-write access, but this backend only supports read-only virtio-fs shares",
             v.host,
             v.guest
         );
@@ -295,6 +318,16 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
         memory_mib: config.memory_mib,
         mem_initial_mib: config.mem_initial_mib,
         blocks: workload_blocks(config),
+        virtiofs_shares: config
+            .volumes
+            .iter()
+            .enumerate()
+            .filter(|(_, volume)| matches!(volume.kind, VmVolumeKind::DirShare))
+            .map(|(index, volume)| VirtioFsShare {
+                host: volume.host.clone().into(),
+                tag: format!("uvol{index}"),
+            })
+            .collect(),
         // The caller's role decides which host channels it may wire.
         vsock: Vec::new(),
         console: ConsoleCapture {
@@ -594,6 +627,25 @@ mod tests {
             ..base()
         };
         assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda"]);
+    }
+
+    #[test]
+    fn a_dir_share_maps_to_a_tagged_virtiofs_device() {
+        let cfg = VmStartConfig {
+            volumes: vec![
+                disk_volume("/vol/data.img", "/data", true),
+                dir_share_volume("/host/dir", "/mnt/share"),
+            ],
+            ..base()
+        };
+        let spec = workload_device_spec(&cfg, "init=/init", Path::new("/tmp/console.log"));
+        assert_eq!(
+            spec.virtiofs_shares,
+            vec![VirtioFsShare {
+                host: PathBuf::from("/host/dir"),
+                tag: "uvol1".to_string(),
+            }]
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@
 use std::cell::Cell;
 
 use super::HvfError;
+use super::snapshot::{HvfVcpuState, SNAPSHOT_SYS_REGS};
 use super::sys::*;
 use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
 use crate::vmm::fdt;
@@ -49,6 +50,42 @@ impl HvfVcpu {
             exit,
             pending_read: Cell::new(None),
         }
+    }
+
+    /// Capture the architecturally visible core registers exposed by HVF.
+    pub fn capture_state(&self) -> Result<HvfVcpuState, HvfError> {
+        let mut x = [0u64; 31];
+        for (index, slot) in x.iter_mut().enumerate() {
+            let register = u8::try_from(index)
+                .map_err(|_| HvfError::SnapshotState("general-purpose register index"))?;
+            *slot = self.get_core(CoreReg::X(register))?;
+        }
+        Ok(HvfVcpuState {
+            x,
+            pc: self.get_core(CoreReg::Pc)?,
+            cpsr: self.get_core(CoreReg::Cpsr)?,
+            sys: SNAPSHOT_SYS_REGS
+                .iter()
+                .map(|reg| self.get_sys(*reg))
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .map_err(|_| HvfError::SnapshotState("system register state length"))?,
+        })
+    }
+
+    /// Restore the architecturally visible core registers exposed by HVF.
+    pub fn restore_state(&self, state: &HvfVcpuState) -> Result<(), HvfError> {
+        for (index, value) in state.x.iter().copied().enumerate() {
+            let register = u8::try_from(index)
+                .map_err(|_| HvfError::SnapshotState("general-purpose register index"))?;
+            self.set_core(CoreReg::X(register), value)?;
+        }
+        self.set_core(CoreReg::Pc, state.pc)?;
+        self.set_core(CoreReg::Cpsr, state.cpsr)?;
+        for (reg, value) in SNAPSHOT_SYS_REGS.iter().zip(state.sys) {
+            self.set_sys(*reg, value)?;
+        }
+        Ok(())
     }
 }
 
@@ -101,15 +138,19 @@ impl HypervisorVcpu for HvfVcpu {
         Ok(())
     }
 
-    fn get_sys(&self, _reg: SysReg) -> Result<u64, HvfError> {
-        // Only MpidrEl1 is modeled; HVF exposes it via the sys-reg path.
-        Err(HvfError::GetReg(0))
+    fn get_sys(&self, reg: SysReg) -> Result<u64, HvfError> {
+        let mut value = 0u64;
+        // SAFETY: live vCPU; valid system-register id.
+        let rc = unsafe { hv_vcpu_get_sys_reg(self.vcpu, sys_id(reg), &mut value) };
+        if rc != HV_SUCCESS {
+            return Err(HvfError::GetReg(rc));
+        }
+        Ok(value)
     }
 
     fn set_sys(&self, reg: SysReg, value: u64) -> Result<(), HvfError> {
-        let SysReg::MpidrEl1 = reg;
         // SAFETY: live vCPU; valid sys-reg id.
-        let rc = unsafe { hv_vcpu_set_sys_reg(self.vcpu, HV_SYS_REG_MPIDR_EL1, value) };
+        let rc = unsafe { hv_vcpu_set_sys_reg(self.vcpu, sys_id(reg), value) };
         if rc != HV_SUCCESS {
             return Err(HvfError::SetReg(rc));
         }
@@ -182,6 +223,26 @@ impl HypervisorVcpu for HvfVcpu {
             }
         }
         Ok(())
+    }
+}
+
+fn sys_id(reg: SysReg) -> hv_sys_reg_t {
+    match reg {
+        SysReg::MpidrEl1 => HV_SYS_REG_MPIDR_EL1,
+        SysReg::SctlrEl1 => HV_SYS_REG_SCTLR_EL1,
+        SysReg::Ttbr0El1 => HV_SYS_REG_TTBR0_EL1,
+        SysReg::Ttbr1El1 => HV_SYS_REG_TTBR1_EL1,
+        SysReg::TcrEl1 => HV_SYS_REG_TCR_EL1,
+        SysReg::MairEl1 => HV_SYS_REG_MAIR_EL1,
+        SysReg::VbarEl1 => HV_SYS_REG_VBAR_EL1,
+        SysReg::EsrEl1 => HV_SYS_REG_ESR_EL1,
+        SysReg::FarEl1 => HV_SYS_REG_FAR_EL1,
+        SysReg::ElrEl1 => HV_SYS_REG_ELR_EL1,
+        SysReg::SpEl1 => HV_SYS_REG_SP_EL1,
+        SysReg::SpsrEl1 => HV_SYS_REG_SPSR_EL1,
+        SysReg::CntkctlEl1 => HV_SYS_REG_CNTKCTL_EL1,
+        SysReg::CntvCtlEl0 => HV_SYS_REG_CNTV_CTL_EL0,
+        SysReg::CntvCvalEl0 => HV_SYS_REG_CNTV_CVAL_EL0,
     }
 }
 

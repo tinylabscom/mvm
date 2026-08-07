@@ -5,6 +5,10 @@
 //! here. Today that is just enough of a PL011 UART for a kernel's `earlycon` to
 //! emit bytes — the first guest output beyond the boot proof.
 
+use super::device_state::{
+    DeviceKind, DeviceStateError, SnapshotDeviceState, StateReader, StateWriter,
+};
+
 /// A memory-mapped device occupying `[base, base+len)` in guest-physical space.
 pub trait MmioDevice {
     fn base(&self) -> u64;
@@ -80,9 +84,34 @@ impl MmioDevice for Pl011 {
     }
 }
 
+impl SnapshotDeviceState for Pl011 {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Pl011
+    }
+
+    fn snapshot_state(&self) -> Result<Vec<u8>, DeviceStateError> {
+        // The UART has no guest-visible mutable register state in this model.
+        // Its output is a host transcript and must not be replayed into a child.
+        Ok(StateWriter::new(1).finish())
+    }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceStateError> {
+        let kind = DeviceKind::Pl011;
+        let mut reader = StateReader::new(bytes);
+        let version = reader.version(kind)?;
+        if version != 1 {
+            return Err(DeviceStateError::UnsupportedVersion(version));
+        }
+        reader.finish()?;
+        self.output.clear();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vmm::device_state::SnapshotDeviceState;
 
     #[test]
     fn data_register_writes_accumulate_as_bytes() {
@@ -113,5 +142,16 @@ mod tests {
         assert!(uart.contains(0x0900_0fff));
         assert!(!uart.contains(0x0900_1000));
         assert!(!uart.contains(0x08ff_ffff));
+    }
+
+    #[test]
+    fn snapshot_state_does_not_replay_host_console_transcript() {
+        let mut uart = Pl011::new(0x0900_0000);
+        uart.output.extend_from_slice(b"parent output");
+        let state = uart.snapshot_state().unwrap();
+        uart.output.clear();
+        uart.output.extend_from_slice(b"child output");
+        uart.restore_state(&state).unwrap();
+        assert!(uart.output.is_empty());
     }
 }

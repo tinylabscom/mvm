@@ -50,6 +50,8 @@ pub enum FrameError {
         len: u64,
         file_len: u64,
     },
+    /// Encoding arithmetic overflowed before a frame could be emitted.
+    EncodeOverflow { what: &'static str },
 }
 
 impl fmt::Display for FrameError {
@@ -77,6 +79,12 @@ impl fmt::Display for FrameError {
                 f,
                 "snapshot frame region [{offset}, +{len}) out of bounds (len {file_len})"
             ),
+            FrameError::EncodeOverflow { what } => {
+                write!(
+                    f,
+                    "snapshot frame encoding overflowed while calculating {what}"
+                )
+            }
         }
     }
 }
@@ -191,6 +199,92 @@ impl SectionKind {
             other => SectionKind::Unknown(other),
         }
     }
+
+    const fn to_u16(self) -> u16 {
+        match self {
+            SectionKind::Ram => 1,
+            SectionKind::Devices => 2,
+            SectionKind::Vcpu => 3,
+            SectionKind::ArtifactDigests => 4,
+            SectionKind::Unknown(value) => value,
+        }
+    }
+}
+
+/// A section supplied to [`encode_frame`]. The encoder copies the borrowed
+/// bytes into the resulting self-contained frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotSection<'a> {
+    /// Section discriminator.
+    pub kind: SectionKind,
+    /// Serialized section payload.
+    pub data: &'a [u8],
+}
+
+/// Encode a complete snapshot frame with a validated fixed header, section
+/// table, and concatenated section payloads.
+pub fn encode_frame(
+    arch: GuestArch,
+    backend_kind: u8,
+    flags: u32,
+    sections: &[SnapshotSection<'_>],
+) -> Result<Vec<u8>, FrameError> {
+    let section_count = u64::try_from(sections.len()).map_err(|_| FrameError::EncodeOverflow {
+        what: "section count",
+    })?;
+    let section_count_usize = cap_count("sections", section_count, MAX_SECTIONS)?;
+    let section_count_u16 =
+        u16::try_from(section_count_usize).map_err(|_| FrameError::EncodeOverflow {
+            what: "section count",
+        })?;
+    let table_len =
+        section_count_usize
+            .checked_mul(SECTION_ENTRY_LEN)
+            .ok_or(FrameError::EncodeOverflow {
+                what: "section table length",
+            })?;
+    let data_base = HEADER_LEN
+        .checked_add(table_len)
+        .ok_or(FrameError::EncodeOverflow {
+            what: "section data offset",
+        })?;
+    let total_len = sections.iter().try_fold(data_base, |total, section| {
+        total
+            .checked_add(section.data.len())
+            .ok_or(FrameError::EncodeOverflow {
+                what: "frame length",
+            })
+    })?;
+
+    let mut frame = Vec::with_capacity(total_len);
+    frame.extend_from_slice(&FRAME_MAGIC);
+    frame.extend_from_slice(&FRAME_VERSION.to_le_bytes());
+    frame.push(match arch {
+        GuestArch::X86_64 => 0,
+        GuestArch::Aarch64 => 1,
+    });
+    frame.push(backend_kind);
+    frame.extend_from_slice(&flags.to_le_bytes());
+    frame.extend_from_slice(&section_count_u16.to_le_bytes());
+
+    let mut offset = u64::try_from(data_base).map_err(|_| FrameError::EncodeOverflow {
+        what: "section offset",
+    })?;
+    for section in sections {
+        let len = u64::try_from(section.data.len()).map_err(|_| FrameError::EncodeOverflow {
+            what: "section length",
+        })?;
+        frame.extend_from_slice(&section.kind.to_u16().to_le_bytes());
+        frame.extend_from_slice(&offset.to_le_bytes());
+        frame.extend_from_slice(&len.to_le_bytes());
+        offset = offset.checked_add(len).ok_or(FrameError::EncodeOverflow {
+            what: "section offset",
+        })?;
+    }
+    for section in sections {
+        frame.extend_from_slice(section.data);
+    }
+    Ok(frame)
 }
 
 /// One parsed section: its kind and the validated byte range of its data.
@@ -404,5 +498,79 @@ mod tests {
         let frame = frame_with_sections(&[(4242, b"x")]);
         let sections = parse_sections(&frame).unwrap();
         assert_eq!(sections[0].kind, SectionKind::Unknown(4242));
+    }
+
+    #[test]
+    fn encode_frame_roundtrips_metadata_and_sections() {
+        let frame = encode_frame(
+            GuestArch::Aarch64,
+            11,
+            0x8040,
+            &[
+                SnapshotSection {
+                    kind: SectionKind::Ram,
+                    data: b"ram",
+                },
+                SnapshotSection {
+                    kind: SectionKind::Devices,
+                    data: b"devices",
+                },
+                SnapshotSection {
+                    kind: SectionKind::Vcpu,
+                    data: b"vcpu",
+                },
+                SnapshotSection {
+                    kind: SectionKind::ArtifactDigests,
+                    data: b"digests",
+                },
+            ],
+        )
+        .unwrap();
+
+        let header = parse_header(&frame).unwrap();
+        assert_eq!(header.arch, GuestArch::Aarch64);
+        assert_eq!(header.backend_kind, 11);
+        assert_eq!(header.flags, 0x8040);
+        let entries = parse_sections(&frame).unwrap();
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].data(&frame), b"ram");
+        assert_eq!(entries[1].data(&frame), b"devices");
+        assert_eq!(entries[2].data(&frame), b"vcpu");
+        assert_eq!(entries[3].data(&frame), b"digests");
+    }
+
+    #[test]
+    fn encode_frame_preserves_unknown_section_kind() {
+        let frame = encode_frame(
+            GuestArch::X86_64,
+            3,
+            0,
+            &[SnapshotSection {
+                kind: SectionKind::Unknown(4242),
+                data: b"future",
+            }],
+        )
+        .unwrap();
+        let entries = parse_sections(&frame).unwrap();
+        assert_eq!(entries[0].kind, SectionKind::Unknown(4242));
+        assert_eq!(entries[0].data(&frame), b"future");
+    }
+
+    #[test]
+    fn encode_frame_rejects_too_many_sections() {
+        let sections = vec![
+            SnapshotSection {
+                kind: SectionKind::Ram,
+                data: &[],
+            };
+            (MAX_SECTIONS as usize) + 1
+        ];
+        assert!(matches!(
+            encode_frame(GuestArch::Aarch64, 0, 0, &sections),
+            Err(FrameError::CountExceedsCap {
+                name: "sections",
+                ..
+            })
+        ));
     }
 }

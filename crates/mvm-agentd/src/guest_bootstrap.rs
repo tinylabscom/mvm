@@ -450,9 +450,9 @@ pub fn spawn_one_as(path: &Path, label: &str, uid: u32, gid: u32) {
         .stderr(Stdio::inherit());
     // SAFETY: the hook runs in the forked child before exec. It calls only
     // async-signal-safe syscalls and allocates nothing, which is what
-    // `drop_privilege_raw` exists to guarantee.
+    // `drop_guest_agent_privilege_raw` exists to guarantee.
     unsafe {
-        cmd.pre_exec(move || crate::guest_mount::drop_privilege_raw(uid, gid));
+        cmd.pre_exec(move || crate::guest_mount::drop_guest_agent_privilege_raw(uid, gid));
     }
     match cmd.spawn() {
         Ok(child) => eprintln!(

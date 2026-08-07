@@ -245,6 +245,9 @@ fn main() -> anyhow::Result<()> {
     // reads it to stop/status the VM.
     std::fs::write(&cfg.pid_file, std::process::id().to_string())
         .with_context(|| format!("write pid file {}", cfg.pid_file.display()))?;
+    if let Some(path) = &cfg.pause_state {
+        let _ = std::fs::remove_file(path);
+    }
 
     if !cfg.kernel.is_file() {
         anyhow::bail!("kernel {} is not a readable file", cfg.kernel.display());
@@ -310,6 +313,20 @@ fn main() -> anyhow::Result<()> {
                 virtiofs_root: cfg.virtiofs_root.clone().or_else(|| {
                     std::env::var_os("MVM_HVF_VIRTIOFS_ROOT").map(std::path::PathBuf::from)
                 }),
+                virtiofs_shares: cfg
+                    .virtiofs_shares
+                    .iter()
+                    .map(|share| (share.tag.clone(), share.path.clone()))
+                    .collect(),
+                pause_state: cfg.pause_state.clone(),
+                snapshot_request: cfg.snapshot_request.clone(),
+                snapshot_ram: cfg.snapshot_ram.clone(),
+                snapshot_frame: cfg.snapshot_frame.clone(),
+                restore_ram: cfg.restore_ram.clone(),
+                restore_frame: cfg.restore_frame.clone(),
+                handoff_socket: cfg.handoff_socket.clone(),
+                handoff_root: cfg.handoff_root.clone(),
+                handoff_verify_key: cfg.handoff_verify_key.clone(),
             })
             .build(),
     );

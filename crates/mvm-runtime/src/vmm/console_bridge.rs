@@ -128,6 +128,10 @@ impl ConsoleBridge {
         self.active = Some(counter);
     }
 
+    pub fn has_binding(&self) -> bool {
+        !self.listeners.is_empty()
+    }
+
     /// Is `conn_id` a host-initiated console stream (so guest packets addressed to
     /// it route here, not to the agent / workload-exit / egress / capture paths)?
     pub fn is_console_stream(&self, conn_id: u32) -> bool {

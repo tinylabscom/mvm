@@ -80,6 +80,7 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
             ephemeral: true,
             slot: 0,
         }],
+        virtiofs_shares: vec![],
         vsock: vec![],
         console: ConsoleCapture {
             log_path: state_dir.join("console.log"),
@@ -200,6 +201,7 @@ fn fc_warm_pool_spawn_and_claim() {
         parent_vm_name: "standby-parent",
         child_vm_name: &child_id,
         child_dir: &child_dir,
+        parent_vm_name: None,
         genid: GenerationToken {
             token: [0u8; GENID_BYTES],
             content_hash: parent_checkpoint.as_str().to_string(),

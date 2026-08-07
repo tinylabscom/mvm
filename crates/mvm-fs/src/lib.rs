@@ -38,3 +38,4 @@ pub mod overlay;
 pub mod rootfs;
 pub mod sdk_sidecar;
 pub mod snapshot_store;
+pub mod trusted_snapshot;

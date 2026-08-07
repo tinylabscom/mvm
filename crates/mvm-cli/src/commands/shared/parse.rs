@@ -101,6 +101,17 @@ pub enum VolumeSpec {
     },
 }
 
+/// A live host-directory share accepted by transient `machine run`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirShareSpec {
+    /// Host directory served by virtio-fs.
+    pub host_dir: String,
+    /// Absolute guest mount point.
+    pub guest_mount: String,
+    /// Whether the guest must see the share read-only.
+    pub read_only: bool,
+}
+
 const VOLUME_GRAMMAR_HINT: &str = "expected host:/guest[:ro|rw] (dir share) \
      or host:/guest:SIZE[:ro|rw][:enc] (disk image)";
 
@@ -193,6 +204,24 @@ pub fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
                 read_only,
             })
         }
+    }
+}
+
+/// Parse a transient live directory share and reject disk-image syntax.
+pub fn parse_dir_share_spec(spec: &str) -> Result<DirShareSpec> {
+    match parse_volume_spec(spec)? {
+        VolumeSpec::DirShare {
+            host_dir,
+            guest_mount,
+            read_only,
+        } => Ok(DirShareSpec {
+            host_dir,
+            guest_mount,
+            read_only,
+        }),
+        VolumeSpec::Disk { .. } => anyhow::bail!(
+            "mount '{spec}' includes a disk size; transient machine run accepts only live host-directory shares"
+        ),
     }
 }
 

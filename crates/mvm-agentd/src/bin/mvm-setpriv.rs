@@ -2,8 +2,8 @@
 //!
 //! The helper implements the small flag surface emitted by mkGuest:
 //! numeric real/effective/saved uid and gid replacement, supplementary-group
-//! clearing, no-new-privileges, and the optional CAP_NET_BIND_SERVICE
-//! inheritable/ambient capability used by the loopback DNS and egress helpers.
+//! clearing, no-new-privileges, and the allowlisted inheritable/ambient
+//! capabilities used by the loopback DNS, egress, and restore-time agent.
 //! It intentionally has no shell, NSS lookup, or configuration-file parser.
 
 use std::ffi::{OsStr, OsString};
@@ -16,7 +16,8 @@ struct Invocation {
     regid: u32,
     clear_groups: bool,
     no_new_privs: bool,
-    net_bind_service: bool,
+    capabilities: u32,
+    securebits_keep_caps: bool,
     command: OsString,
     command_args: Vec<OsString>,
 }
@@ -29,7 +30,8 @@ where
     let mut regid = None;
     let mut clear_groups = false;
     let mut no_new_privs = false;
-    let mut net_bind_service = false;
+    let mut capabilities = 0;
+    let mut securebits_keep_caps = false;
     let mut command = None;
     let mut command_args = Vec::new();
     let mut after_separator = false;
@@ -72,10 +74,16 @@ where
                 return Err("duplicate --no-new-privs option".to_string());
             }
             no_new_privs = true;
-        } else if text == "--inh-caps=+net_bind_service"
-            || text == "--ambient-caps=+net_bind_service"
+        } else if text == "--securebits=keep-caps" {
+            if securebits_keep_caps {
+                return Err("duplicate --securebits option".to_string());
+            }
+            securebits_keep_caps = true;
+        } else if let Some(value) = text
+            .strip_prefix("--inh-caps=+")
+            .or_else(|| text.strip_prefix("--ambient-caps=+"))
         {
-            net_bind_service = true;
+            capabilities |= parse_capability(value)?;
         } else {
             return Err(format!("unsupported option {text:?}"));
         }
@@ -99,10 +107,21 @@ where
         regid,
         clear_groups,
         no_new_privs,
-        net_bind_service,
+        capabilities,
+        securebits_keep_caps,
         command,
         command_args,
     })
+}
+
+fn parse_capability(value: &str) -> Result<u32, String> {
+    let number = match value {
+        "kill" => Ok(CAP_KILL),
+        "net_bind_service" => Ok(CAP_NET_BIND_SERVICE),
+        "sys_time" => Ok(CAP_SYS_TIME),
+        _ => Err(format!("unsupported capability {value:?}")),
+    }?;
+    Ok(1u32 << number)
 }
 
 fn parse_uid(name: &str, value: &str) -> Result<u32, String> {
@@ -116,7 +135,7 @@ fn parse_uid(name: &str, value: &str) -> Result<u32, String> {
 
 #[cfg(target_os = "linux")]
 fn apply_privileges(invocation: &Invocation) -> Result<(), String> {
-    if invocation.net_bind_service && invocation.reuid != 0 {
+    if (invocation.capabilities != 0 || invocation.securebits_keep_caps) && invocation.reuid != 0 {
         prctl(PR_SET_KEEPCAPS, 1, "prctl(PR_SET_KEEPCAPS) failed")?;
     }
     if invocation.clear_groups {
@@ -138,9 +157,9 @@ fn apply_privileges(invocation: &Invocation) -> Result<(), String> {
         return last_error("setresuid failed");
     }
 
-    if invocation.net_bind_service {
-        set_only_net_bind_service_capability()?;
-        raise_net_bind_service_ambient()?;
+    if invocation.capabilities != 0 {
+        set_capabilities(invocation.capabilities)?;
+        raise_ambient_capabilities(invocation.capabilities)?;
     } else {
         drop_all_capabilities()?;
     }
@@ -158,21 +177,25 @@ fn prctl(option: libc::c_int, arg: libc::c_ulong, message: &str) -> Result<(), S
 }
 
 #[cfg(target_os = "linux")]
-fn raise_net_bind_service_ambient() -> Result<(), String> {
-    let rc = unsafe {
-        libc::prctl(
-            PR_CAP_AMBIENT,
-            PR_CAP_AMBIENT_RAISE,
-            CAP_NET_BIND_SERVICE as libc::c_ulong,
-            0,
-            0,
-        )
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        last_error("prctl(PR_CAP_AMBIENT_RAISE) failed")
+fn raise_ambient_capabilities(capabilities: u32) -> Result<(), String> {
+    for capability in [CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SYS_TIME] {
+        if capabilities & (1u32 << capability) == 0 {
+            continue;
+        }
+        let rc = unsafe {
+            libc::prctl(
+                PR_CAP_AMBIENT,
+                PR_CAP_AMBIENT_RAISE,
+                capability as libc::c_ulong,
+                0,
+                0,
+            )
+        };
+        if rc != 0 {
+            return last_error("prctl(PR_CAP_AMBIENT_RAISE) failed");
+        }
     }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -181,7 +204,7 @@ fn last_error(message: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn set_only_net_bind_service_capability() -> Result<(), String> {
+fn set_capabilities(capabilities: u32) -> Result<(), String> {
     let mut header = CapHeader {
         version: LINUX_CAPABILITY_VERSION_3,
         pid: 0,
@@ -198,16 +221,15 @@ fn set_only_net_bind_service_capability() -> Result<(), String> {
         return last_error("capget failed");
     }
 
-    let net_bind_service = 1u32 << CAP_NET_BIND_SERVICE;
     data[0] = CapData {
-        effective: net_bind_service,
-        permitted: net_bind_service,
-        inheritable: net_bind_service,
+        effective: capabilities,
+        permitted: capabilities,
+        inheritable: capabilities,
     };
     data[1] = CapData::default();
     let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
     if rc != 0 {
-        return last_error("capset(CAP_NET_BIND_SERVICE) failed");
+        return last_error("capset(requested capabilities) failed");
     }
     Ok(())
 }
@@ -270,8 +292,9 @@ const _: () = {
 
 #[cfg(target_os = "linux")]
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-#[cfg(target_os = "linux")]
+const CAP_KILL: u32 = 5;
 const CAP_NET_BIND_SERVICE: u32 = 10;
+const CAP_SYS_TIME: u32 = 25;
 #[cfg(target_os = "linux")]
 const PR_SET_KEEPCAPS: libc::c_int = 8;
 #[cfg(target_os = "linux")]
@@ -332,7 +355,7 @@ mod tests {
         .expect("valid invocation");
         assert_eq!(invocation.reuid, 990);
         assert_eq!(invocation.regid, 990);
-        assert!(!invocation.net_bind_service);
+        assert_eq!(invocation.capabilities, 0);
         assert_eq!(invocation.command, OsString::from("/mvm/runtime/agent"));
     }
 
@@ -351,8 +374,29 @@ mod tests {
             "/run/mvm/zone.json",
         ]))
         .expect("valid invocation");
-        assert!(invocation.net_bind_service);
+        assert_ne!(invocation.capabilities & (1u32 << CAP_NET_BIND_SERVICE), 0);
         assert_eq!(invocation.command_args.len(), 2);
+    }
+
+    #[test]
+    fn parses_restore_capabilities_and_keep_caps() {
+        let invocation = parse_args(args(&[
+            "--reuid=990",
+            "--regid=990",
+            "--clear-groups",
+            "--securebits=keep-caps",
+            "--no-new-privs",
+            "--inh-caps=+kill",
+            "--ambient-caps=+kill",
+            "--inh-caps=+sys_time",
+            "--ambient-caps=+sys_time",
+            "--",
+            "/mvm/runtime/agent",
+        ]))
+        .expect("valid restore invocation");
+        assert!(invocation.securebits_keep_caps);
+        assert_ne!(invocation.capabilities & (1u32 << CAP_KILL), 0);
+        assert_ne!(invocation.capabilities & (1u32 << CAP_SYS_TIME), 0);
     }
 
     #[test]

@@ -48,6 +48,20 @@ pub const HV_REG_CPSR: hv_reg_t = 34;
 pub type hv_sys_reg_t = u32;
 /// `MPIDR_EL1` — must hold the vCPU's affinity so the GIC redistributor matches.
 pub const HV_SYS_REG_MPIDR_EL1: hv_sys_reg_t = 0xc005;
+pub const HV_SYS_REG_SCTLR_EL1: hv_sys_reg_t = 0xc080;
+pub const HV_SYS_REG_TTBR0_EL1: hv_sys_reg_t = 0xc100;
+pub const HV_SYS_REG_TTBR1_EL1: hv_sys_reg_t = 0xc101;
+pub const HV_SYS_REG_TCR_EL1: hv_sys_reg_t = 0xc102;
+pub const HV_SYS_REG_SPSR_EL1: hv_sys_reg_t = 0xc200;
+pub const HV_SYS_REG_ELR_EL1: hv_sys_reg_t = 0xc201;
+pub const HV_SYS_REG_ESR_EL1: hv_sys_reg_t = 0xc290;
+pub const HV_SYS_REG_FAR_EL1: hv_sys_reg_t = 0xc300;
+pub const HV_SYS_REG_MAIR_EL1: hv_sys_reg_t = 0xc510;
+pub const HV_SYS_REG_VBAR_EL1: hv_sys_reg_t = 0xc600;
+pub const HV_SYS_REG_CNTKCTL_EL1: hv_sys_reg_t = 0xc708;
+pub const HV_SYS_REG_CNTV_CTL_EL0: hv_sys_reg_t = 0xdf19;
+pub const HV_SYS_REG_CNTV_CVAL_EL0: hv_sys_reg_t = 0xdf1a;
+pub const HV_SYS_REG_SP_EL1: hv_sys_reg_t = 0xe208;
 
 /// Exception class (ESR `EC`, bits 31:26) values the run loop dispatches on.
 pub const EC_HVC_AARCH64: u32 = 0x16;
@@ -133,6 +147,7 @@ unsafe extern "C" {
     pub fn hv_vcpu_set_reg(vcpu: hv_vcpu_t, reg: hv_reg_t, value: u64) -> hv_return_t;
     pub fn hv_vcpu_get_reg(vcpu: hv_vcpu_t, reg: hv_reg_t, value: *mut u64) -> hv_return_t;
     pub fn hv_vcpu_set_sys_reg(vcpu: hv_vcpu_t, reg: hv_sys_reg_t, value: u64) -> hv_return_t;
+    pub fn hv_vcpu_get_sys_reg(vcpu: hv_vcpu_t, reg: hv_sys_reg_t, value: *mut u64) -> hv_return_t;
     /// Force the listed vCPUs out of `hv_vcpu_run` (they exit with
     /// `HV_EXIT_REASON_CANCELED`). Safe to call from another thread — used as a
     /// run watchdog.

@@ -543,9 +543,11 @@ fn resolve_agent_binary(
 /// Build the `setpriv` command that forks the guest agent under the agent
 /// uid. Mirrors the workload `/init` invocation in `nix/lib/mk-guest.nix`:
 /// `setpriv --reuid --regid --clear-groups --securebits=keep-caps
-/// --inh-caps=+sys_time --ambient-caps=+sys_time --no-new-privs -- <agent>`.
-/// The agent receives only `CAP_SYS_TIME` so PostRestore can correct a
-/// restored wall clock; no workload process inherits this capability.
+/// --inh-caps=+kill --ambient-caps=+kill --inh-caps=+sys_time
+/// --ambient-caps=+sys_time --no-new-privs -- <agent>`.
+/// The agent receives only `CAP_KILL` and `CAP_SYS_TIME`: the former permits
+/// the authenticated agent to signal PID 1, and the latter corrects a
+/// restored wall clock. No workload process inherits either capability.
 #[cfg(any(target_os = "linux", test))]
 fn agent_spawn_command(agent_bin: &Path) -> Command {
     let mut c = Command::new("setpriv");
@@ -553,6 +555,8 @@ fn agent_spawn_command(agent_bin: &Path) -> Command {
         .arg(format!("--regid={AGENT_UID}"))
         .arg("--clear-groups")
         .arg("--securebits=keep-caps")
+        .arg("--inh-caps=+kill")
+        .arg("--ambient-caps=+kill")
         .arg("--inh-caps=+sys_time")
         .arg("--ambient-caps=+sys_time")
         .arg("--no-new-privs")
@@ -613,6 +617,8 @@ mod tests {
                 "--regid=990",
                 "--clear-groups",
                 "--securebits=keep-caps",
+                "--inh-caps=+kill",
+                "--ambient-caps=+kill",
                 "--inh-caps=+sys_time",
                 "--ambient-caps=+sys_time",
                 "--no-new-privs",

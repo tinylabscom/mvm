@@ -179,12 +179,12 @@ fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecurityS
         sdk_fixture_env_keys(&summary.receipt_env_keys),
         ["MODE", "TOKEN"]
     );
-    assert_eq!(summary.preflight_add_dirs, summary.receipt_add_dirs);
-    assert_eq!(summary.preflight_add_dirs.len(), 1);
-    let add_dir = &summary.preflight_add_dirs[0];
-    assert_eq!(add_dir.guest_path, "/workspace");
-    assert!(add_dir.read_only);
-    assert!(!add_dir.host_path_sha256.contains("/tmp/mvm-sdk-src"));
+    assert_eq!(summary.preflight_mounts, summary.receipt_mounts);
+    assert_eq!(summary.preflight_mounts.len(), 1);
+    let mount = &summary.preflight_mounts[0];
+    assert_eq!(mount.guest_path, "/workspace");
+    assert!(mount.read_only);
+    assert!(!mount.host_path_sha256.contains("/tmp/mvm-sdk-src"));
     assert_eq!(summary.preflight_timeout_secs, 30);
     assert_eq!(summary.receipt_timeout_secs, 30);
 }
@@ -431,7 +431,7 @@ fn run_accepts_passthrough_flags() {
 }
 
 #[test]
-fn volume_flag_carries_dir_share_and_d_is_no_longer_a_share() {
+fn volume_flag_carries_live_mount_and_d_is_detach() {
     let args = parse_run(&[
         "run",
         "--image",
@@ -443,6 +443,8 @@ fn volume_flag_carries_dir_share_and_d_is_no_longer_a_share() {
     ])
     .expect("parse");
     assert_eq!(args.volume, vec!["/host:/work:rw"]);
+    let forwarded = args.clone().into_run_args_for_test();
+    assert_eq!(forwarded.mounts, vec!["/host:/work:rw"]);
     // `-d` now means --detach, so it must NOT consume the following value as
     // a dir share.
     let detached = parse_run(&["run", "--image", "alpine", "-d"]).expect("parse");

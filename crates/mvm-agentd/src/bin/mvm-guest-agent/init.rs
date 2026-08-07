@@ -112,14 +112,7 @@ pub(crate) fn apply_activation(
     // It has to land after the pivot (it writes into the workload's root) and
     // before the privilege drop (mounts and interface changes need root).
     bootstrap_guest_environment()?;
-    if let Err(error) = guest_mount::ensure_workload_home() {
-        eprintln!(
-            "mvm-guest-agent: failed to create workload home ({}): {error}; falling back to {}",
-            guest_mount::WORKLOAD_HOME,
-            guest_mount::WORKLOAD_HOME_FALLBACK
-        );
-    }
-    guest_mount::drop_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
+    guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
     eprintln!("mvm-guest-agent: activation complete, serving operational RPCs");

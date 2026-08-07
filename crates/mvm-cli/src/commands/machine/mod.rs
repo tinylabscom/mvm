@@ -18,6 +18,7 @@ mod checkpoint;
 mod lifecycle;
 mod list;
 mod portable;
+pub(crate) mod prewarm;
 mod receipt;
 mod runtime;
 mod spec_ops;
@@ -421,7 +422,7 @@ impl MachineRunArgs {
             memory: self.memory,
             profile: self.profile,
             agent_verb: self.agent_verb,
-            add_dir: self.volume,
+            mounts: self.volume,
             env: self.env,
             timeout: self.timeout,
             receipt: self.receipt,

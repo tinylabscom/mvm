@@ -105,6 +105,9 @@ pub struct MockDriver {
     /// whose supervisor is already gone by the time a `stop` reaches it — so
     /// a test can prove the teardown steps that must run regardless still do.
     refuse_attach: bool,
+    /// Whether claims should use the resident-handoff path instead of the
+    /// saved-state materialization path.
+    resident_handoff: bool,
 }
 
 impl Default for MockDriver {
@@ -129,6 +132,7 @@ impl MockDriver {
             killed: Arc::new(Mutex::new(Vec::new())),
             dying_console_output: Vec::new(),
             refuse_attach: false,
+            resident_handoff: false,
         }
     }
 
@@ -136,6 +140,13 @@ impl MockDriver {
     #[must_use]
     pub fn refusing_attach(mut self) -> Self {
         self.refuse_attach = true;
+        self
+    }
+
+    /// Make claims use the resident-handoff path without requiring a
+    /// hypervisor, so the runner's no-materialization contract can be tested.
+    pub fn with_resident_handoff(mut self) -> Self {
+        self.resident_handoff = true;
         self
     }
 
@@ -244,6 +255,10 @@ impl VmmDriver for MockDriver {
                 "No guest, no rootfs, no isolation; never use in production.",
             ],
         }
+    }
+
+    fn supports_resident_handoff(&self) -> bool {
+        self.resident_handoff
     }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         self.booted.lock().unwrap().push(spec.clone());
@@ -498,6 +513,7 @@ mod tests {
             memory_mib: 256,
             mem_initial_mib: None,
             blocks: vec![],
+            virtiofs_shares: vec![],
             vsock: vec![],
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),

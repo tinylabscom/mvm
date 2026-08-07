@@ -111,6 +111,7 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         memory_mib: inputs.memory_mib,
         mem_initial_mib: None,
         blocks,
+        virtiofs_shares: vec![],
         vsock,
         console: ConsoleCapture {
             log_path: inputs.console_log.clone(),

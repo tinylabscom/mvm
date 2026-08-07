@@ -157,6 +157,11 @@ pub struct CheckpointMeta {
     pub runtime_source_policy: Option<RuntimeSourcePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_overlay_version: Option<String>,
+    /// Content-addressed snapshot-store entry containing this checkpoint's
+    /// immutable bytes. It is part of the load-bearing digest so a claim
+    /// cannot redirect materialization to an unrelated staged snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
     /// Content-address of the load-bearing fields above. Required with no serde
     /// default: a record that carries no content-address cannot be
     /// lineage-verified, so a pre-lineage meta.json must fail closed rather than
@@ -182,6 +187,7 @@ impl CheckpointMeta {
             supervisor_config_digest: String::new(),
             runtime_source_policy: None,
             runtime_overlay_version: None,
+            snapshot_id: None,
             audit_ref: None,
         }
     }
@@ -203,9 +209,47 @@ impl CheckpointMeta {
             supervisor_config_digest: &self.supervisor_config_digest,
             runtime_source_policy: &self.runtime_source_policy,
             runtime_overlay_version: &self.runtime_overlay_version,
+            snapshot_id: &self.snapshot_id,
         }
         .digest()
     }
+
+    /// Content-address the verified blob manifest independently of the
+    /// checkpoint metadata. This is the stable ID for the immutable snapshot
+    /// store entry and does not include mutable audit bookkeeping.
+    pub fn compute_content_digest(&self) -> CheckpointDigest {
+        content_manifest_digest(&self.content)
+    }
+
+    /// Return the same sealed record with its staged snapshot binding set.
+    /// Rebuilding through the normal builder recomputes the load-bearing digest
+    /// so the binding is covered by lineage verification.
+    pub fn with_snapshot_id(&self, snapshot_id: impl Into<String>) -> Self {
+        CheckpointMeta::builder(self.id.clone(), self.class, self.vm_name.clone())
+            .tag(self.tag.clone())
+            .parent(self.parent.clone())
+            .created_unix(self.created_unix)
+            .content(self.content.clone())
+            .supervisor_config_digest(self.supervisor_config_digest.clone())
+            .runtime_source_policy(self.runtime_source_policy)
+            .runtime_overlay_version(self.runtime_overlay_version.clone())
+            .snapshot_id(Some(snapshot_id.into()))
+            .audit_ref(self.audit_ref.clone())
+            .build()
+    }
+}
+
+/// Content-address a checkpoint blob manifest independently of checkpoint
+/// metadata. Blob names and their already-computed SHA-256 values are the
+/// complete input, so deriving this ID never rereads the captured files.
+pub fn content_manifest_digest(content: &[ContentBlob]) -> CheckpointDigest {
+    let bytes = serde_json::to_vec(&sorted_content(content))
+        .expect("checkpoint content manifest is always JSON-serializable");
+    CheckpointDigest(format!(
+        "{}{}",
+        CheckpointDigest::PREFIX,
+        hex::encode(Sha256::digest(bytes))
+    ))
 }
 
 /// The load-bearing fields of a [`CheckpointMeta`], borrowed in fixed
@@ -227,6 +271,7 @@ struct CheckpointDigestInput<'a> {
     supervisor_config_digest: &'a str,
     runtime_source_policy: &'a Option<RuntimeSourcePolicy>,
     runtime_overlay_version: &'a Option<String>,
+    snapshot_id: &'a Option<String>,
 }
 
 impl CheckpointDigestInput<'_> {
@@ -275,6 +320,7 @@ pub struct CheckpointMetaBuilder {
     supervisor_config_digest: String,
     runtime_source_policy: Option<RuntimeSourcePolicy>,
     runtime_overlay_version: Option<String>,
+    snapshot_id: Option<String>,
     audit_ref: Option<String>,
 }
 
@@ -309,6 +355,10 @@ impl CheckpointMetaBuilder {
         self.runtime_overlay_version = version;
         self
     }
+    pub fn snapshot_id(mut self, id: Option<String>) -> Self {
+        self.snapshot_id = id;
+        self
+    }
     pub fn audit_ref(mut self, r: Option<String>) -> Self {
         self.audit_ref = r;
         self
@@ -329,6 +379,7 @@ impl CheckpointMetaBuilder {
             supervisor_config_digest: &self.supervisor_config_digest,
             runtime_source_policy: &self.runtime_source_policy,
             runtime_overlay_version: &self.runtime_overlay_version,
+            snapshot_id: &self.snapshot_id,
         }
         .digest();
         CheckpointMeta {
@@ -342,6 +393,7 @@ impl CheckpointMetaBuilder {
             supervisor_config_digest: self.supervisor_config_digest,
             runtime_source_policy: self.runtime_source_policy,
             runtime_overlay_version: self.runtime_overlay_version,
+            snapshot_id: self.snapshot_id,
             meta_digest,
             audit_ref: self.audit_ref,
         }

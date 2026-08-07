@@ -3621,8 +3621,8 @@ fn run_transient_with_manifest_and_resources() {
 }
 
 #[test]
-fn run_transient_with_add_dir_and_env() {
-    // `machine run` uses `--mount` for directory shares (not `--add-dir`) and
+fn run_transient_with_mount_and_env() {
+    // `machine run` uses `--mount` for directory shares and
     // `--env` for environment variables.
     let cli = Cli::try_parse_from([
         "mvmctl",
@@ -3658,6 +3658,27 @@ fn run_transient_with_add_dir_and_env() {
             _ => panic!("Expected machine run"),
         },
         _ => panic!("Expected Machine command"),
+    }
+}
+
+#[test]
+fn direct_run_accepts_a_read_only_mount() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "run",
+        "--mount",
+        "/tmp:/work:ro",
+        "--",
+        "ls",
+        "/work",
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Run(exec::RunArgs { mounts, argv, .. }) => {
+            assert_eq!(mounts, vec!["/tmp:/work:ro"]);
+            assert_eq!(argv, vec!["ls", "/work"]);
+        }
+        _ => panic!("Expected Run command"),
     }
 }
 

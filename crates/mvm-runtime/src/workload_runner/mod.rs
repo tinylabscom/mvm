@@ -22,8 +22,9 @@ pub use runner::{
     RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs, WorkloadRunner,
 };
 pub use spec_map::{
-    WorkloadSockets, WorkloadSpecInputs, ensure_no_dir_share_volumes, workload_blocks,
-    workload_device_spec, workload_spec, workload_volume_devices, workload_vsock_ports,
+    WorkloadSockets, WorkloadSpecInputs, ensure_dir_share_support, ensure_no_dir_share_volumes,
+    workload_blocks, workload_device_spec, workload_spec, workload_volume_devices,
+    workload_vsock_ports,
 };
 pub use standby_boot::{factory_parent_config, factory_parent_spec};
 
