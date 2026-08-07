@@ -2,7 +2,7 @@ Feature: s21_host_services
 
   Conformance scenario for MVM-SEC-12.
 
-  @MVM-SEC-12 @build @wip
+  @MVM-SEC-12 @build 
   Scenario: Host-side service bindings are plan-gated and audited
     Given the scenario is registered for MVM-SEC-12
     When the suite for MVM-SEC-12 is implemented

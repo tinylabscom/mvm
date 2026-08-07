@@ -2,7 +2,7 @@
 //! concrete VMM drivers. These exercise pure assembly/mapping seams and never
 //! start a VM, so they run in the normal hermetic BDD gate.
 
-use cucumber::{then, when};
+use cucumber::{given, then, when};
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
 use mvm_runtime::driver::{
@@ -130,4 +130,79 @@ fn kernel_format_matches_host(world: &mut CliWorld) {
         KernelFormat::Raw
     };
     assert_eq!(format, expected);
+}
+
+// ---------------------------------------------------------------------------
+// Sealed-rootfs tamper refusal (MVM-SEC-03)
+// ---------------------------------------------------------------------------
+
+/// Build a minimal deterministic ext4 rootfs containing `/sbin/init`.
+///
+/// The image is produced by the same pure-Rust writer the OCI materializer
+/// uses, so the witness exercises the real content-addressed bytes that
+/// dm-verity would seal.
+fn build_minimal_rootfs() -> Vec<u8> {
+    let nodes = vec![
+        mvm_fs::ext4::Node::Dir {
+            path: "/sbin".to_string(),
+            mode: 0o755,
+            xattrs: vec![],
+        },
+        mvm_fs::ext4::Node::File {
+            path: "/sbin/init".to_string(),
+            mode: 0o755,
+            data: b"#!/bin/sh\nexec /bin/sh\n".to_vec(),
+            xattrs: vec![],
+        },
+    ];
+    mvm_fs::ext4::build_image(&nodes).expect("build minimal ext4 rootfs")
+}
+
+fn verity_root_hash(image: &[u8]) -> String {
+    let salt = [0u8; 32];
+    let hash = mvm_fs::ext4::verity::root_hash(image, &salt, 4096, 4096);
+    mvm_fs::ext4::verity::to_hex(&hash)
+}
+
+#[given("a sealed ext4 rootfs with /sbin/init")]
+fn given_sealed_rootfs(world: &mut CliWorld) {
+    world.sealed_rootfs = Some(build_minimal_rootfs());
+}
+
+#[given("the rootfs verity root hash is recorded")]
+fn record_rootfs_roothash(world: &mut CliWorld) {
+    let image = world
+        .sealed_rootfs
+        .as_ref()
+        .expect("rootfs must be built first");
+    world.sealed_rootfs_roothash = Some(verity_root_hash(image));
+}
+
+#[when("a single byte in the rootfs data area is flipped")]
+fn flip_rootfs_byte(world: &mut CliWorld) {
+    let image = world
+        .sealed_rootfs
+        .as_mut()
+        .expect("rootfs must be built first");
+    // Flip a byte well inside the image, past the superblock, so the
+    // tamper is in the data blocks dm-verity covers.
+    let offset = image.len() / 2;
+    image[offset] ^= 0xFF;
+}
+
+#[then("the tampered rootfs does not match the recorded verity root hash")]
+fn tampered_rootfs_hash_mismatch(world: &mut CliWorld) {
+    let image = world
+        .sealed_rootfs
+        .as_ref()
+        .expect("rootfs must be built first");
+    let recorded = world
+        .sealed_rootfs_roothash
+        .as_ref()
+        .expect("root hash must be recorded first");
+    let new_hash = verity_root_hash(image);
+    assert_ne!(
+        &new_hash, recorded,
+        "tampered rootfs must have a different dm-verity root hash"
+    );
 }

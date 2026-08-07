@@ -104,6 +104,8 @@ impl Drop for ScenarioEnvGuard {
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
+    /// Id of the conformance claim currently being exercised by a claim scenario.
+    pub current_claim_id: Option<String>,
     /// Output from the SDK fixture or code-generation command used by the
     /// cross-language SDK scenarios.
     pub sdk_output: Option<Output>,
@@ -285,6 +287,29 @@ pub struct CliWorld {
     /// The isolated `MVM_HOME` backing the warm-restore guard scenarios;
     /// kept alive so the sealed snapshot files survive the `Given` step.
     pub warm_restore_home: Option<tempfile::TempDir>,
+
+    /// Bytes of a sealed ext4 rootfs built by a verified-boot scenario.
+    pub sealed_rootfs: Option<Vec<u8>>,
+    /// dm-verity root hash recorded for `sealed_rootfs`.
+    pub sealed_rootfs_roothash: Option<String>,
+    /// Tempdir backing a secrets/PII scenario's isolated secret store.
+    pub secret_tmp: Option<tempfile::TempDir>,
+    /// Raw value stored for the current secret scenario.
+    pub secret_value: Option<String>,
+    /// Name of the secret stored in the current scenario.
+    pub secret_name: Option<String>,
+    /// Tenant of the secret stored in the current scenario.
+    pub secret_tenant: Option<String>,
+    /// JSON serialization of the metadata returned by SecretService.
+    pub secret_metadata_json: Option<String>,
+    /// Original outbound body for a PII-redaction scenario.
+    pub pii_body: Option<String>,
+    /// Body after the PII redactor processed it.
+    pub pii_redacted: Option<String>,
+    /// Rule names that fired during PII redaction.
+    pub pii_fired_rules: Option<Vec<String>>,
+    /// Outcome of the most recent runtime-overlay resolver probe.
+    pub runtime_overlay_result: Option<Result<mvm_fs::overlay::RuntimeOverlayArtifact, String>>,
 
     /// Outcome of the most recent plan-verification step.
     pub warm_restore_verify_result: Option<Result<String, String>>,
