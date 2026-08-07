@@ -142,6 +142,7 @@ export default defineConfig({
             { label: "Audit and Receipts", slug: "guides/audit-and-receipts" },
             { label: "Workload Output Streaming", slug: "guides/workload-output-streaming" },
             { label: "Workload Input", slug: "guides/workload-input" },
+            { label: "Fleet Stream Edges", slug: "guides/fleet-stream-edges" },
             { label: "Observability and Results", slug: "guides/observability-and-results" },
             { label: "Manifests", slug: "guides/manifests" },
             { label: "Networking", slug: "guides/networking" },

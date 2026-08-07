@@ -487,6 +487,54 @@ increasing loss markers keeps re-anchor control. That is fine and in scope —
 ADR-001 puts a malicious host outside the threat model — but it should not be
 read as a defence it is not.
 
+## Stream edges: what they guarantee, and what they do not
+
+An edge connects one workload's output to another's stdin. It is a different
+authorization shape from the per-plan input grant, so it is deliberately **not
+claim 17 with more rows**, and it carries no numbered claim of its own.
+
+### Holds by construction, and is tested
+
+- **A guest never addresses another guest.** The consumer's plan names a
+  binding; the host resolves it. Neither workload learns the other's identity,
+  and neither can enumerate the fleet by guessing names — an ungranted binding
+  and a nonexistent one give the same refusal.
+- **No new path out of a guest.** Bytes cross inside the host between two
+  independent vsock channels. No workload path gains a NIC, a tap or a gateway,
+  and both `xtask` vsock gates cover the code that would.
+- **Refused before boot:** a duplicate binding, fan-in, a cycle of any length,
+  and an edge on a workload that also takes operator stdin.
+- **A raw edge is refused, not downgraded.** Redaction runs before hashing, so
+  no unmasked copy survives to a reader. Serving masked bytes under a fidelity
+  label would leave a consumer computing on the mask while believing it had the
+  value.
+- **Defaults are safe and cannot be lost by omission.** Both postures are
+  serde-defaulted, so a plan written before the field existed deserializes to
+  redacted and lossy.
+- **The producer cannot be stalled by a consumer.** Inherited from the reader's
+  bounded queue rather than re-implemented, and re-verified at the edge.
+
+### Not claimed
+
+- **That any of it fires in production.** None of these refusals has a caller
+  in this repository, and will not: `mvmd` declares the edges. They are
+  declared dormant in `xtask/dormant-controls.toml`, and the gate fails if that
+  stops being true in either direction. A refusal with no caller is a refusal
+  that has never refused anything.
+- **Anything about what a consumer does with the bytes.** An edge delivers to
+  stdin. Downstream handling is the consumer workload's business and is covered
+  by whatever claims apply to that workload.
+- **Exactly-once delivery.** `lossy` marks gaps, `reliable` fails the edge;
+  neither replays.
+
+### Claim 17 stays at `Preview`
+
+An edge would be the input plane's second production caller, and the question
+of whether that is enough to promote claim 17 is deferred until one exists.
+Promoting on the strength of a caller nobody has written is exactly the drift
+the ledger gates exist to catch — the claim would be true of code, and false of
+the system.
+
 ## Alternatives rejected
 
 **Route stdio through `tracing`.** Rejected: framing, and inventing metadata
