@@ -2276,6 +2276,35 @@ fn test_audit_verify_inclusion_defaults_optional_paths() {
 }
 
 #[test]
+fn test_audit_receipts_export_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "trust", "audit", "receipts", "export", "--tenant", "acme", "--json",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Receipts {
+                    action:
+                        audit::ReceiptsAction::Export {
+                            tenant,
+                            plan_id,
+                            json,
+                        },
+                },
+        }) => {
+            assert_eq!(tenant, "acme");
+            assert_eq!(plan_id, None);
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Receipts::Export"),
+    }
+}
+
+#[test]
 fn test_audit_tail_no_log_prints_message() {
     // When no audit log exists, the command should succeed with a
     // helpful message rather than an error.

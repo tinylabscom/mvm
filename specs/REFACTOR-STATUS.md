@@ -303,7 +303,9 @@ for detailed scope and acceptance criteria.
         mapping to existing `AuditEntry` events defined
   - [x] WS2 Core types and canonicalization: `receipt.rs`,
         `conformance_badge.rs`, `did_key.rs`, unit tests, workspace clippy clean
-  - [ ] WS3 Read-only receipt exporter
+  - [x] WS3 Read-only receipt exporter: `mvmctl trust audit receipts export`
+        derives signed `ExecutionReceipt`s from verified chain-signed
+        `AuditEntry` events; unit + integration tests pass
   - [ ] WS4 Runtime emission of receipts
   - [ ] WS5 Conformance badge generator
   - [ ] WS6 Documentation and registry conventions

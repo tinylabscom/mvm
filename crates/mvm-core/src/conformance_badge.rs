@@ -457,16 +457,20 @@ mod tests {
     #[test]
     fn suite_digest_mismatch_rejected() {
         let signed = signed_sample();
-        let mut admission = BadgeAdmission::default();
-        admission.expected_suite_digest = Some("sha256:deadbeef".into());
+        let admission = BadgeAdmission {
+            expected_suite_digest: Some("sha256:deadbeef".into()),
+            ..Default::default()
+        };
         assert!(signed.verify_with_admission(&admission).is_err());
     }
 
     #[test]
     fn build_mismatch_rejected() {
         let signed = signed_sample();
-        let mut admission = BadgeAdmission::default();
-        admission.expected_build = Some("wrong".into());
+        let admission = BadgeAdmission {
+            expected_build: Some("wrong".into()),
+            ..Default::default()
+        };
         assert!(signed.verify_with_admission(&admission).is_err());
     }
 
@@ -479,8 +483,10 @@ mod tests {
         badge.skipped_vectors.insert("hard-vector".into());
         let signed =
             SignedConformanceBadge::sign(badge, &signing_key, "2026-08-06T00:00:00+00:00").unwrap();
-        let mut admission = BadgeAdmission::default();
-        admission.forbid_skip.insert("hard-vector".into());
+        let admission = BadgeAdmission {
+            forbid_skip: ["hard-vector".into()].into_iter().collect(),
+            ..Default::default()
+        };
         assert!(signed.verify_with_admission(&admission).is_err());
     }
 

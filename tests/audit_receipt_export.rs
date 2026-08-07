@@ -1,0 +1,247 @@
+//! End-to-end test of the read-only receipt exporter.
+//!
+//! Builds a synthetic chain-signed audit log directly, then drives the
+//! real `mvmctl trust audit receipts export` binary and asserts the
+//! exported receipts verify offline.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use assert_cmd::Command;
+use ed25519_dalek::SigningKey;
+use mvm_core::plan::{PlanId, TenantId};
+use mvm_core::receipt::{ReceiptOutcome, receipt_type};
+use mvm_hostd::supervisor::audit::AuditEntry;
+use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use tempfile::TempDir;
+
+struct ExportSandbox {
+    home: TempDir,
+}
+
+impl ExportSandbox {
+    fn new() -> Self {
+        Self {
+            home: tempfile::tempdir().expect("tempdir"),
+        }
+    }
+
+    fn home_path(&self) -> &std::path::Path {
+        self.home.path()
+    }
+
+    fn mvm_root(&self) -> PathBuf {
+        self.home_path().join("mvm-home")
+    }
+
+    fn audit_dir(&self) -> PathBuf {
+        self.mvm_root().join("audit")
+    }
+
+    fn keys_dir(&self) -> PathBuf {
+        self.mvm_root().join("keys")
+    }
+
+    fn mvmctl(&self) -> Command {
+        let mut c = Command::cargo_bin("mvmctl").expect("cargo_bin mvmctl");
+        c.env("HOME", self.home_path())
+            .env("MVM_HOME", self.mvm_root());
+        c
+    }
+}
+
+fn sample_plan_id() -> PlanId {
+    PlanId("sha256:0000000000000000000000000000000000000000000000000000000000000001".into())
+}
+
+fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> AuditEntry {
+    AuditEntry {
+        timestamp: chrono::Utc::now(),
+        tenant: TenantId("local".into()),
+        plan_id: sample_plan_id(),
+        plan_version: 1,
+        bundle_id: None,
+        bundle_version: None,
+        image_name: "test-image".into(),
+        image_sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+            .into(),
+        event: event.into(),
+        labels,
+    }
+}
+
+fn set_secret_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+}
+
+fn write_test_chain(sandbox: &ExportSandbox) -> SigningKey {
+    let keys_dir = sandbox.keys_dir();
+    std::fs::create_dir_all(&keys_dir).unwrap();
+    let audit_dir = sandbox.audit_dir();
+    std::fs::create_dir_all(&audit_dir).unwrap();
+
+    let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+    let signer = FileAuditSigner::open(signing_key.clone(), &audit_dir).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let entries = vec![
+        sample_audit_entry("plan.admitted", BTreeMap::new()),
+        {
+            let mut labels = BTreeMap::new();
+            labels.insert("backend".into(), "mock".into());
+            sample_audit_entry("plan.launched", labels)
+        },
+        {
+            let mut labels = BTreeMap::new();
+            labels.insert("backend".into(), "mock".into());
+            labels.insert("exit_code".into(), "0".into());
+            sample_audit_entry("plan.exited", labels)
+        },
+    ];
+
+    for entry in &entries {
+        rt.block_on(signer.sign_and_emit(entry)).unwrap();
+    }
+
+    // Copy the signer pubkey to where `mvmctl` expects it.
+    std::fs::write(
+        keys_dir.join("host-signer.pub"),
+        signing_key.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    std::fs::write(keys_dir.join("host-signer.ed25519"), signing_key.to_bytes()).unwrap();
+    set_secret_permissions(&keys_dir.join("host-signer.ed25519"));
+
+    signing_key
+}
+
+#[test]
+fn receipts_export_json_verifies_offline() {
+    let sandbox = ExportSandbox::new();
+    let signing_key = write_test_chain(&sandbox);
+
+    let mut cmd = sandbox.mvmctl();
+    cmd.args([
+        "trust", "audit", "receipts", "export", "--tenant", "local", "--json",
+    ]);
+    let output = cmd.assert().success();
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+
+    let receipts: Vec<mvm_core::receipt::SignedExecutionReceipt> =
+        serde_json::from_str(&stdout).expect("parsing exported receipts");
+    assert_eq!(receipts.len(), 3);
+
+    let expected_types = [
+        receipt_type::PLAN_ADMITTED,
+        receipt_type::PLAN_LAUNCHED,
+        receipt_type::PLAN_EXITED,
+    ];
+    for (i, signed) in receipts.iter().enumerate() {
+        signed
+            .verify()
+            .expect("exported receipt signature must verify");
+        assert_eq!(signed.payload.receipt_type, expected_types[i]);
+        assert_eq!(
+            signed.payload.host_did,
+            mvm_core::did_key::DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key()
+        );
+    }
+    assert_eq!(receipts[0].payload.outcome, ReceiptOutcome::Authorized);
+    assert_eq!(receipts[1].payload.outcome, ReceiptOutcome::Running);
+    assert_eq!(receipts[2].payload.outcome, ReceiptOutcome::Succeeded);
+}
+
+#[test]
+fn receipts_export_with_plan_id_filter() {
+    let sandbox = ExportSandbox::new();
+    let keys_dir = sandbox.keys_dir();
+    std::fs::create_dir_all(&keys_dir).unwrap();
+    let audit_dir = sandbox.audit_dir();
+    std::fs::create_dir_all(&audit_dir).unwrap();
+
+    let signing_key = SigningKey::from_bytes(&[10u8; 32]);
+    let signer = FileAuditSigner::open(signing_key.clone(), &audit_dir).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let plan_a = sample_plan_id();
+    let plan_b =
+        PlanId("sha256:0000000000000000000000000000000000000000000000000000000000000002".into());
+
+    let mut entry_a = sample_audit_entry("plan.admitted", BTreeMap::new());
+    entry_a.plan_id = plan_a.clone();
+    let mut entry_b = sample_audit_entry("plan.admitted", BTreeMap::new());
+    entry_b.plan_id = plan_b.clone();
+
+    rt.block_on(signer.sign_and_emit(&entry_a)).unwrap();
+    rt.block_on(signer.sign_and_emit(&entry_b)).unwrap();
+
+    std::fs::write(
+        keys_dir.join("host-signer.pub"),
+        signing_key.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    std::fs::write(keys_dir.join("host-signer.ed25519"), signing_key.to_bytes()).unwrap();
+    set_secret_permissions(&keys_dir.join("host-signer.ed25519"));
+
+    let mut cmd = sandbox.mvmctl();
+    cmd.args([
+        "trust",
+        "audit",
+        "receipts",
+        "export",
+        "--tenant",
+        "local",
+        "--plan-id",
+        &plan_a.0,
+        "--json",
+    ]);
+    let output = cmd.assert().success();
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+
+    let receipts: Vec<mvm_core::receipt::SignedExecutionReceipt> =
+        serde_json::from_str(&stdout).expect("parsing filtered receipts");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].payload.plan_id, plan_a.0);
+}
+
+#[test]
+fn receipts_export_empty_chain_reports_no_receipts() {
+    let sandbox = ExportSandbox::new();
+    let keys_dir = sandbox.keys_dir();
+    std::fs::create_dir_all(&keys_dir).unwrap();
+    let audit_dir = sandbox.audit_dir();
+    std::fs::create_dir_all(&audit_dir).unwrap();
+
+    let signing_key = SigningKey::from_bytes(&[11u8; 32]);
+    std::fs::write(
+        keys_dir.join("host-signer.pub"),
+        signing_key.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    std::fs::write(keys_dir.join("host-signer.ed25519"), signing_key.to_bytes()).unwrap();
+    set_secret_permissions(&keys_dir.join("host-signer.ed25519"));
+
+    let mut cmd = sandbox.mvmctl();
+    cmd.args([
+        "trust", "audit", "receipts", "export", "--tenant", "local", "--json",
+    ]);
+    let output = cmd.assert().success();
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+
+    let receipts: Vec<mvm_core::receipt::SignedExecutionReceipt> =
+        serde_json::from_str(&stdout).expect("parsing empty receipt array");
+    assert!(receipts.is_empty());
+}
