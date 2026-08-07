@@ -374,10 +374,17 @@ fn telemetry_probe_observes_ipv4_destination() {
     let events: Vec<_> = telemetry.poll_events(&handle);
     telemetry.detach(handle);
 
+    let loaded = std::process::Command::new("bpftool")
+        .args(["prog", "list"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("mvm_hostd_egress_tcp_connect"))
+        .unwrap_or(false);
+
     assert!(
         events.iter().any(|e| match e {
             TelemetryEvent::Egress(ev) => ev.destination == expected,
         }),
-        "expected an egress event for {expected}; got {events:?}"
+        "expected an egress event for {expected}; got {events:?}; eBPF program loaded={loaded}"
     );
 }
