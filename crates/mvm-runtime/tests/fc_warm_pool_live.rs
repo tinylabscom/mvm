@@ -27,7 +27,7 @@ use std::time::Instant;
 use mvm_agentd::vsock::connect_to;
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
-use mvm_core::vm_backend::{StandbySpec, StandbyState};
+use mvm_core::vm_backend::{StandbySpec, StandbyState, StartMode};
 use mvm_runtime::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
 use mvm_runtime::driver::fc::FcDriver;
 use mvm_runtime::driver::{
@@ -144,6 +144,12 @@ fn fc_warm_pool_spawn_and_claim() {
     let spec = standby_spec(&parent_id, &images, home.path());
     let parent_state_dir = mvm_core::config::vm_state_dir(&parent_id);
     std::fs::create_dir_all(&parent_state_dir).expect("create parent state dir");
+    mvm_runtime::base::runtime_meta::record_from_rootfs(
+        &parent_id,
+        StartMode::Detached,
+        &images.rootfs,
+    )
+    .expect("record the parent rootfs metadata");
     let boot = parent_boot_spec(&parent_id, &images, &parent_state_dir);
 
     let t_spawn = Instant::now();
