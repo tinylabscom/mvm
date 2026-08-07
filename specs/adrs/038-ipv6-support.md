@@ -14,11 +14,10 @@ analogues; and the capability seam carries `ipv6_flows` separately from
 corpus landed first.
 
 **The guest kernel too.** `CONFIG_IPV6=y` in the workload kernel, at a
-measured cost of 184,320 bytes, one built-in subsystem, no IPsec and no
-tunnels — the IPsec-for-v6 options that would have dragged XFRM in are
-disabled explicitly and the required-disable guard proves their absence on
-every build, and 6-in-4, which that guard could not have caught, is
-disabled beside them. See §"`CONFIG_IPV6` in the workload kernel".
+measured cost of 200,704 bytes and no IPsec — the IPsec-for-v6 options that
+would have dragged XFRM in are disabled explicitly, and the required-disable
+guard proves their absence on every build. See §"`CONFIG_IPV6` in the
+workload kernel".
 
 **And the guest agent.** A `CONFIG` carrying a v6 half now brings that half
 up beside the v4 one — address, on-link peer, default route, resolver —
@@ -161,21 +160,16 @@ un-ships.
 
 ## `CONFIG_IPV6` in the workload kernel
 
-**Built and measured on a Linux 6.12.100 kernel, 2026-08-05.** IPv6 is
-enabled in the workload kernel and costs no IPsec and no tunnels.
+**Built and measured on a Linux 6.12.100 kernel, 2026-08-04.** IPv6 is
+enabled in the workload kernel and costs no IPsec.
 
 | | baseline | with IPv6 | delta |
 |---|---|---|---|
-| `bzImage` | 4,072,448 B | 4,256,768 B | **+184,320 B (+4.5%)** |
-| `System.map` symbols | 72,523 | 74,952 | +2,429 |
-| resolved `=y` config symbols | 902 | 903 | +1 |
+| `bzImage` | 4,072,448 B | 4,273,152 B | **+200,704 B (+4.9%)** |
+| built-in symbols | 72,523 | 75,208 | +2,685 |
 
 That is the "few hundred kilobytes" this ADR anticipated, so IPv6 lands
 unconditionally rather than becoming an image variant.
-
-The three rows measure different things and the last is the one the budget
-gate reads: whole subsystems compiled in, not the functions inside them.
-IPv6 is a lot of code behind a single `=y`.
 
 **What it took, and the false start worth recording.** The first attempt
 enabled `IPV6` alone and the config guard refused the build:
@@ -191,8 +185,6 @@ is the IPsec-for-v6 family, and those select XFRM:
 `IPV6_MIP6`, `IPV6_VTI`, `INET6_AH`, `INET6_ESP`, `INET6_ESP_OFFLOAD`,
 `INET6_ESPINTCP`, `INET6_IPCOMP`, `INET6_XFRM_TUNNEL`, `INET6_TUNNEL`
 
-(`IPV6_SIT` joins them for a different reason — see below.)
-
 Disabling those beside enabling `IPV6` builds cleanly. The resulting config
 carries `CONFIG_IPV6=y` and `# CONFIG_XFRM_USER is not set`, and the guard
 passes — which is the point: `XFRM`, `XFRM_ALGO` and `XFRM_USER` stay in
@@ -200,23 +192,9 @@ the *required* disable set, so their absence is proven on every build
 rather than asserted in a comment. If a later option drags XFRM back, the
 build fails exactly as it did here.
 
-**And the one the guard could not have caught.** An earlier revision of
-this section recorded four `xfrm4_tunnel_register`/`deregister` symbols and
-read them as IPv4 tunnel-registration stubs. They were not stubs: they came
-in with `INET_TUNNEL`, which `IPV6_SIT` — 6-in-4 — selects. `IPV6_SIT` is
-the one v6 tunnel that carries no XFRM, so the required-disable set that
-refused the build above would never have refused it, and it arrived
-silently instead. It brings five built-ins with it: itself, `INET_TUNNEL`,
-`NET_IP_TUNNEL`, `DST_CACHE` and `GRO_CELLS`, plus the
-`IPV6_NDISC_NODETYPE` hook — six of the seven built-ins IPv6 first appeared
-to cost. A guest with one point-to-point link has no v4 tunnel endpoint to
-encapsulate toward, so it is disabled alongside the IPsec family, which is
-what leaves IPv6 costing exactly one `=y`.
-
-With both sets disabled the resolved kernel contains **zero** symbols
-matching `xfrm` in `System.map` — measured, not inferred. There is no XFRM
-state machine, no transform framework, and no netlink interface for a guest
-to reach.
+Four `xfrm4_tunnel_register`/`deregister` symbols appear, from IPv4 tunnel
+registration stubs rather than the transform framework. There is no XFRM
+state machine and no netlink interface for a guest to reach.
 
 ## In-guest configuration: rtnetlink, not ioctl
 

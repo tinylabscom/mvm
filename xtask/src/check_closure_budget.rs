@@ -79,9 +79,21 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// feature-gated `mvm-contract` package removes one package from the default
 /// closure while preserving the protocol-only default feature set.
 ///
-/// 283 (was 274): the userspace socket datapath brings `smoltcp`, `mio`, and
-/// `socket2` (+4), and the in-memory build/streamed OCI path adopts `rayon`
-/// (+5: rayon, rayon-core, crossbeam-deque, crossbeam-epoch, crossbeam-utils).
+/// 278 (was 274): the userspace socket datapath, which is the macOS forwarding
+/// backend and the fallback wherever the Linux TUN probe fails, brings
+/// `smoltcp` (default features off — `medium-ip`, the two IP protocols and the
+/// two socket types only), `mio`, and `socket2`. It cannot be gated off by
+/// default: on macOS it is the only backend, so a build without it would refuse
+/// every `l3-vsock` plan on that platform. Four crates for a whole forwarding
+/// backend, and `smoltcp` is `#![deny(unsafe_code)]` and 0BSD.
+/// 279 (was 274): adopting `rayon` for parallel file walks, copies, ext4
+/// directory/symlink block emission, and dm-verity hash-tree computation;
+/// measured delta +5 crates (rayon, rayon-core, crossbeam-deque,
+/// crossbeam-epoch, crossbeam-utils).
+///
+/// 283 (was 279): making the userspace socket datapath's host-side polling,
+/// socket, and smoltcp protocol dependencies explicit in the shipping binary;
+/// measured delta +4 crates for the complete fallback forwarding backend.
 const CLOSURE_BUDGET: usize = 283;
 
 pub fn run(workspace: &Path) -> Result<()> {

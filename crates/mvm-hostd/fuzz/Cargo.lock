@@ -1346,8 +1346,8 @@ dependencies = [
  "ed25519-dalek",
  "ipnet",
  "libc",
+ "mvm-contract",
  "mvm-core",
- "mvm-protocol",
  "nix",
  "rand 0.8.6",
  "seccompiler",
@@ -1396,6 +1396,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-contract"
+version = "0.18.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "chrono",
+ "ed25519-dalek",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "mvm-core"
 version = "0.18.0"
 dependencies = [
@@ -1410,8 +1427,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "keyring",
- "mvm-protocol",
- "mvm-volume-contract",
+ "mvm-contract",
  "rand 0.8.6",
  "rcgen",
  "regex",
@@ -1439,7 +1455,7 @@ dependencies = [
  "ext4-view",
  "hex",
  "libc",
- "mvm-protocol",
+ "mvm-contract",
  "reqwest",
  "rustix",
  "rustls",
@@ -1475,9 +1491,9 @@ dependencies = [
  "mio",
  "mvm-agentd",
  "mvm-build",
+ "mvm-contract",
  "mvm-core",
  "mvm-net",
- "mvm-protocol",
  "mvm-runtime",
  "mvm-sdk",
  "rand 0.8.6",
@@ -1509,10 +1525,10 @@ version = "0.0.0"
 dependencies = [
  "ipnet",
  "libfuzzer-sys",
+ "mvm-contract",
  "mvm-core",
  "mvm-hostd",
  "mvm-net",
- "mvm-protocol",
  "time",
 ]
 
@@ -1521,23 +1537,9 @@ name = "mvm-net"
 version = "0.18.0"
 dependencies = [
  "ipnet",
+ "mvm-contract",
  "mvm-core",
- "mvm-protocol",
  "serde",
- "sha2",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "mvm-protocol"
-version = "0.18.0"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "schemars",
- "serde",
- "serde_json",
  "sha2",
  "thiserror 2.0.18",
 ]
@@ -1563,11 +1565,10 @@ dependencies = [
  "mio",
  "mvm-agentd",
  "mvm-build",
+ "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-net",
- "mvm-protocol",
- "mvm-volume-contract",
  "nix",
  "rand 0.8.6",
  "secrecy",
@@ -1592,11 +1593,14 @@ name = "mvm-sdk"
 version = "0.18.0"
 dependencies = [
  "base64",
+ "blake3",
  "flate2",
  "globset",
  "hex",
+ "mvm-contract",
  "mvm-core",
- "mvm-protocol",
+ "reqwest",
+ "rustls",
  "schemars",
  "serde",
  "serde_json",
@@ -1610,18 +1614,6 @@ dependencies = [
  "tree-sitter-nix",
  "tree-sitter-python",
  "tree-sitter-typescript",
-]
-
-[[package]]
-name = "mvm-volume-contract"
-version = "0.18.0"
-dependencies = [
- "anyhow",
- "bytes",
- "chrono",
- "serde",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]

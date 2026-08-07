@@ -221,8 +221,11 @@ impl Drop for NetdGuard {
 /// A launch that is not on the tunnel is a no-op, so backends call this
 /// unconditionally rather than each re-deriving the condition.
 ///
-/// The backend kind selects the socket convention at the physical boundary;
-/// the gateway itself remains backend-neutral.
+/// `layout` is the socket convention the caller's own supervisor serves.
+/// It is a parameter rather than a constant because the two conventions
+/// differ by a directory level, and a gateway that binds the other one
+/// listens where nothing dials: the guest gets no network, with both
+/// halves individually correct and nothing comparing them.
 pub fn spawn_netd_if_needed(
     config: &mvm_core::vm_backend::VmStartConfig,
     state_dir: &Path,
@@ -566,7 +569,7 @@ mod wiring_tests {
         assert!(err.to_string().contains("feature"), "{err}");
     }
 
-    /// The gateway binds where the selected backend's supervisor listens.
+    /// The gateway binds where the guest's own supervisor listens.
     ///
     /// The two conventions differ by a `vsock/` directory level, and both
     /// halves are individually correct — nothing compared them, which is
@@ -574,7 +577,7 @@ mod wiring_tests {
     /// not serve. On that tier the guest reached no network at all, with
     /// every component behaving as written.
     ///
-    /// Asserting the lowering per backend is what makes the pairing a fact
+    /// Asserting the lowering per layout is what makes the pairing a fact
     /// rather than a convention two call sites happen to share.
     #[test]
     fn each_layout_lowers_to_the_socket_convention_its_supervisor_serves() {
@@ -588,7 +591,7 @@ mod wiring_tests {
             let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
             assert_eq!(
                 lowered["uds_layout"], expected,
-                "the backend's layout has to survive into the config the \
+                "the layout the caller chose has to survive into the config the \
                  gateway reads, or it binds somewhere nothing dials"
             );
         }

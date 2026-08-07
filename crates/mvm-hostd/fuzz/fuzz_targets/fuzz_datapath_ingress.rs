@@ -32,10 +32,9 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use libfuzzer_sys::fuzz_target;
 use mvm_core::policy::projection::CanonicalEgress;
-use mvm_hostd::netd::userspace::UserspaceSocketDatapath;
+use mvm_hostd::netd::userspace::{GuestAddressing, UserspaceSocketDatapath};
 use mvm_hostd::netd::userspace::readiness::ReadinessSet;
 use mvm_hostd::netd::userspace::tcp::{EstablishedFlow, HalfOpenTable};
-use mvm_hostd::netd::userspace::GuestAddressing;
 use mvm_hostd::netd::{DatapathHandle, DatapathRequest, GatewayMetrics};
 use mvm_net::l3::alloc::AddressLease;
 use mvm_net::l3::{

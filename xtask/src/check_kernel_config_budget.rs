@@ -42,15 +42,12 @@ use std::path::Path;
 /// time, and x86 ACPI core remain because supported backends exercise them.
 ///
 /// Both figures rose by exactly one when the workload kernel gained IPv6, so
-/// the guest can hold the v6 half of the pair its plan leases. IPv6 arrives
-/// with six more built-ins than that — the 6-in-4 tunnel driver, its
-/// NDISC node-type hook, and the INET_TUNNEL / NET_IP_TUNNEL / DST_CACHE /
-/// GRO_CELLS plumbing under it — and all six are dropped in `workload.nix`
-/// rather than absorbed here: a guest with one point-to-point link has no
-/// tunnel endpoint to encapsulate toward. The v6 IPsec families go the same
-/// way, which is why XFRM stays in the required-disable set. Measured on
-/// resolved configs, not derived: x86_64 902 → 903 locally, aarch64 936 → 937
-/// on CI's native runner.
+/// the guest can hold the v6 half of the pair its plan leases. The additional
+/// IPv6-only tunnel plumbing is dropped in `workload.nix`; the guest has one
+/// point-to-point link and no tunnel endpoint to encapsulate toward. The v6
+/// IPsec families remain in the required-disable set, so XFRM is not absorbed
+/// into this budget. These values are measured from resolved configs on the
+/// native CI architectures.
 const BUDGET_AARCH64: usize = 937;
 const BUDGET_X86_64: usize = 903;
 
