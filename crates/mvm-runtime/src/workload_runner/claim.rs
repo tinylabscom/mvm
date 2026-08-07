@@ -90,15 +90,18 @@ pub struct EndpointSpawnInputs<'a> {
 /// A spawned per-VM substitution endpoint: the host UDS the guest's `EGRESS_PORT`
 /// relays to (the sole gate off the box), plus the RAII reaper that tears the
 /// endpoint down on an early return until the VM is fully up ([`Self::defuse`]).
+/// A deny-all, secret-free workload has no egress channel at all and carries
+/// `None`; the guest-side connect then fails closed without starting a process.
 pub struct EndpointHandle {
-    egress_uds: PathBuf,
+    egress_uds: Option<PathBuf>,
     guard: EndpointGuard,
 }
 
 impl EndpointHandle {
     /// The host-side egress UDS, wired into the spec's `EGRESS_PORT` channel.
-    pub fn egress_uds(&self) -> &Path {
-        &self.egress_uds
+    /// `None` means the workload has no admitted egress capability.
+    pub fn egress_uds(&self) -> Option<&Path> {
+        self.egress_uds.as_deref()
     }
 
     /// Disarm the reaper: the VM is up and the `stop` path now owns teardown.
@@ -136,14 +139,20 @@ impl<'a> ClaimGuards<'a> {
     }
 
     /// Spawn the per-child substitution endpoint keyed on `vm`'s own id — 0700,
-    /// never a sibling's socket — and return its egress UDS plus the reaper. The
-    /// endpoint is ALWAYS spawned (even the no-secret raw path); it is the sole
-    /// egress gate.
+    /// never a sibling's socket — and return its egress UDS plus the reaper.
+    /// A secret-free deny-all policy has no egress capability to mediate, so it
+    /// omits the channel entirely and fails closed without process startup.
     pub fn spawn_endpoint(
         &self,
         vm: &VmId,
         inputs: &EndpointSpawnInputs<'_>,
     ) -> Result<EndpointHandle> {
+        if inputs.secrets.is_empty() && !inputs.network_policy.allows_egress() {
+            return Ok(EndpointHandle {
+                egress_uds: None,
+                guard: EndpointGuard::defused(),
+            });
+        }
         let raw_egress = inputs.secrets.is_empty();
         let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {
             vm_name: &vm.0,
@@ -155,7 +164,7 @@ impl<'a> ClaimGuards<'a> {
             raw_egress,
         })?;
         Ok(EndpointHandle {
-            egress_uds,
+            egress_uds: Some(egress_uds),
             guard: EndpointGuard::new(&vm.0),
         })
     }
@@ -274,7 +283,11 @@ mod tests {
         let spawner = FakeSpawner::default();
         let guards = ClaimGuards::new(&spawner);
         let redaction = RedactionPolicy::default();
-        let policy = NetworkPolicy::deny_all();
+        let policy =
+            NetworkPolicy::allow_list(vec![mvm_core::policy::network_policy::HostPort::new(
+                "example.com",
+                443,
+            )]);
         let state = tempfile::tempdir().unwrap();
 
         let mut child = guards
@@ -288,17 +301,36 @@ mod tests {
         // provably not a sibling's socket (no cross-workload reuse).
         assert_eq!(
             child.egress_uds(),
-            mvm_core::config::vm_substitution_endpoint_socket("child-a")
+            Some(mvm_core::config::vm_substitution_endpoint_socket("child-a").as_path())
         );
         assert_ne!(
             child.egress_uds(),
-            mvm_core::config::vm_substitution_endpoint_socket("child-b")
+            Some(mvm_core::config::vm_substitution_endpoint_socket("child-b").as_path())
         );
         // The fresh id was threaded to the spawner, not a parent/shared name.
         assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), Some("child-a"));
 
         // Disarm the reaper so drop doesn't chase a nonexistent endpoint.
         child.defuse();
+    }
+
+    #[test]
+    fn deny_all_secret_free_claims_omit_the_egress_process_and_channel() {
+        let spawner = FakeSpawner::default();
+        let guards = ClaimGuards::new(&spawner);
+        let redaction = RedactionPolicy::default();
+        let policy = NetworkPolicy::deny_all();
+        let state = tempfile::tempdir().unwrap();
+
+        let child = guards
+            .spawn_endpoint(
+                &VmId("child-deny-all".into()),
+                &endpoint_inputs(state.path(), &redaction, &policy),
+            )
+            .expect("deny-all fast path succeeds");
+
+        assert_eq!(child.egress_uds(), None);
+        assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), None);
     }
 
     #[test]

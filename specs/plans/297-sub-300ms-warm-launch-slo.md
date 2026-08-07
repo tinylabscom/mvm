@@ -94,15 +94,21 @@ and no claim silently falls back after being labeled warm.
       transient host directories use only live read-only shares.
 - [x] Pin the strict `<300ms` warm-window boundary in phase timing.
 - [x] Add cold/warm launch-mode and SLO status to the runtime timing record.
+- [x] Remove the secret-free deny-all egress endpoint from the warm claim hot
+      path and defer broad orphan-state maintenance until after the guest
+      command; the security posture remains fail-closed while launch timing
+      excludes unrelated filesystem cleanup.
 - [ ] Add `pool_wait_ms`, `claim_ms`, and `warm_window_ms` to the runtime timing
       record.
 - [ ] Make pool compatibility and late-bound share attachment explicit in the
       backend capability contract.
 - [ ] Add a hermetic benchmark harness with deterministic claim/refusal cases.
 - [~] Run the live 1,000-claim matrix on every supported backend and record
-      the results in a dated validation note. Darwin arm64 completed 1,000
-      resident HVF claims with p50=42.4ms, p95=74.5ms, p99=111.6ms, and
-      max=201.0ms; all claims were warm and below 300ms. Linux and other
+      the results in a dated validation note. Darwin arm64 previously
+      completed 1,000 resident HVF claims below 300ms; after removing the
+      deny-all endpoint startup and orphan sweep from the hot path, a fresh
+      30-claim release matrix measured p50=20.2ms, p95=32.2ms, p99=34.5ms,
+      and max=34.5ms, with every claim warm and below 300ms. Linux and other
       backend/share-shape matrices remain open.
 - [ ] Enforce the hard maximum and aggregate p50/p99 thresholds in CI.
 
@@ -110,8 +116,8 @@ The host-side live acceptance harness is now available as
 `just hvf-warm-restore`. It records the bootstrap separately, then requires a
 configurable matrix of real HVF claims to report warm mode, `warm_slo=ok`, and
 the strict `<300ms` ceiling before checking the p50/p99 targets. The Darwin
-arm64 continuity matrix is complete for the hard ceiling; its stronger
-aggregate targets remain open.
+arm64 30-claim continuity matrix now passes both aggregate targets; the full
+1,000-claim rerun and Linux/backend matrices remain open.
 
 ## Non-goals
 

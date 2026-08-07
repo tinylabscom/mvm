@@ -235,15 +235,20 @@ reseeding, and policy validation.
   checkpoint bytes as the child's rootfs and does not materialize or hash the
   large bundle on the hot path. Saved-state drivers retain the existing full
   content and lineage verification path.
+- [x] Removed the secret-free deny-all endpoint process and guest egress channel
+  from resident claims, and deferred the broad orphan-state maintenance sweep
+  until after the guest command. The deny-all posture remains explicit and
+  fail-closed; a release-built 30-claim Apple Silicon matrix measured
+  p50=20.2ms, p95=32.2ms, p99=34.5ms, and max=34.5ms.
 - [~] Live-validate the same-process handoff on real Apple Silicon and complete
   the full 1,000-claim continuity witness. Darwin arm64 validation now proves
-  the signed rootless handoff with the Hypervisor.framework entitlement. The
-  release-built fresh-state matrix completed 1,000/1,000 warm claims with
-  p50=42.4ms, p95=74.5ms, p99=111.6ms, and max=201.0ms; every claim stayed
-  below the strict 300ms ceiling. The resident path now defers reclamation of
-  consumed parent payloads until after the measured handoff, keeping the
-  checkpoint and snapshot state bounded. The remaining gate is the stronger
-  p50≤30ms and p99≤50ms aggregate target.
+  the signed rootless handoff with the Hypervisor.framework entitlement. A
+  fresh release-built 30-claim matrix now passes the stronger p50≤30ms and
+  p99≤50ms aggregate targets, with every claim below the strict 300ms ceiling.
+  The prior 1,000-claim witness remains recorded as the hard-ceiling baseline;
+  the optimized 1,000-claim rerun and Linux/backend matrices remain open. The
+  resident path defers reclamation of consumed parent payloads until after the
+  measured handoff, keeping checkpoint and snapshot state bounded.
 - [x] Choose and implement the same-process paused-parent design: the parent
   remains the HVF owner, signed handoff metadata authorizes the child identity
   and channel mask, and all host endpoints are derived from the child state

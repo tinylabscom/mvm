@@ -185,7 +185,9 @@ pub struct WorkloadSockets<'a> {
     pub agent: &'a Path,
     /// Egress gateway: the guest dials `EGRESS_PORT`; the host-side bridge
     /// (claim-10 gate + substitution) listens here — the sole path off the box.
-    pub egress_gateway: &'a Path,
+    /// `None` means the admitted policy grants no egress and the guest carries
+    /// no host egress channel, which is fail-closed.
+    pub egress_gateway: Option<&'a Path>,
     /// Workload exit: the guest dials `WORKLOAD_EXIT_PORT` to report its exit code.
     pub exit: &'a Path,
     /// Host-services broker: the guest dials `BROKER_PORT`; the per-VM broker (or
@@ -218,16 +220,18 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
             direction: VsockDirection::HostDials,
         },
         VsockPort {
-            service: GuestService::Substitution,
-            host_uds: socks.egress_gateway.into(),
-            direction: VsockDirection::GuestDials,
-        },
-        VsockPort {
             service: GuestService::WorkloadExit,
             host_uds: socks.exit.into(),
             direction: VsockDirection::GuestDials,
         },
     ];
+    if let Some(egress_gateway) = socks.egress_gateway {
+        ports.push(VsockPort {
+            service: GuestService::Substitution,
+            host_uds: egress_gateway.into(),
+            direction: VsockDirection::GuestDials,
+        });
+    }
     // Only an admitted workload carries the broker channel; an unadmitted VM
     // gets none, so a stray guest dial to BROKER_PORT stays ECONNREFUSED.
     if let Some(broker) = socks.broker {
@@ -677,7 +681,7 @@ mod tests {
     fn workload_vsock_ports_wire_the_three_standing_channels_with_correct_direction() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
             network_control: None,
@@ -707,7 +711,7 @@ mod tests {
     fn workload_vsock_ports_wire_l3_control_and_data_channels_when_present() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
             network_control: Some(Path::new("/run/network-control.sock")),
@@ -731,10 +735,40 @@ mod tests {
         assert_eq!(data.host_uds, PathBuf::from("/run/network-data-0.sock"));
     }
 
+    #[test]
+    fn workload_vsock_ports_omit_egress_when_the_policy_grants_none() {
+        let socks = WorkloadSockets {
+            agent: Path::new("/run/agent.sock"),
+            egress_gateway: None,
+            exit: Path::new("/run/workload.exit"),
+            broker: None,
+            network_control: None,
+            network_data: None,
+            console_data: Vec::new(),
+        };
+        let ports = workload_vsock_ports(&socks);
+        assert_eq!(ports.len(), 2);
+        assert!(
+            ports
+                .iter()
+                .all(|port| port.service != GuestService::Substitution)
+        );
+        assert!(
+            ports
+                .iter()
+                .any(|port| port.service == GuestService::MachineControl)
+        );
+        assert!(
+            ports
+                .iter()
+                .any(|port| port.service == GuestService::WorkloadExit)
+        );
+    }
+
     fn sample_sockets() -> WorkloadSockets<'static> {
         WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
             network_control: None,
@@ -748,7 +782,7 @@ mod tests {
         // Admitted (broker socket present) ⇒ a BROKER_PORT GuestDials channel.
         let admitted = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: Some(Path::new("/run/broker.sock")),
             network_control: None,
@@ -888,7 +922,7 @@ mod tests {
         let console_data = console_data_sockets(state_dir, true);
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
             network_control: None,
@@ -918,7 +952,7 @@ mod tests {
     fn workload_vsock_ports_without_dev_console_carries_only_three_ports() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            egress_gateway: Some(Path::new("/run/egress.sock")),
             exit: Path::new("/run/workload.exit"),
             broker: None,
             network_control: None,
@@ -941,7 +975,7 @@ mod tests {
             config: &cfg,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),
-                egress_gateway: Path::new("/run/egress.sock"),
+                egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
                 network_control: None,

@@ -369,7 +369,7 @@ mod tests {
             config: launch,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),
-                egress_gateway: Path::new("/run/egress.sock"),
+                egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
                 network_control: None,

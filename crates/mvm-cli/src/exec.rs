@@ -982,6 +982,13 @@ fn run_inner(
         Err(e) => (Err(e), None),
     };
 
+    // Reap state dirs a killed or crashed prior transient run left behind: a
+    // SIGKILL or a closed terminal skips teardown, so `~/.mvm/vms/<name>` leaks.
+    // Keep this broad orphan-only sweep off the launch path; transient names
+    // are unique and the current VM has already completed its command, so the
+    // maintenance pass cannot delay admission or the first guest operation.
+    let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
+
     teardown_transient_vm(&backend, &vm_name, &start_config, &requested_vm_name);
     let t_torn_down = timing.then(std::time::Instant::now);
 
@@ -1259,18 +1266,22 @@ fn boot_transient_vm(
     use_snapshot: bool,
     attempt: &BootAttempt<'_>,
 ) -> Result<(String, crate::commands::vm::phase_timing::LaunchMode)> {
+    let phase_timing = crate::commands::vm::phase_timing::enabled();
+    let boot_started = phase_timing.then(std::time::Instant::now);
+    let report_phase = |phase: &'static str| {
+        if let Some(started) = boot_started {
+            eprintln!(
+                "[mvm] warm-claim-phase: {phase}={:.1}ms",
+                started.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
+    };
     // Reap dead/expired standbys before claiming/booting. There is no daemon, so
     // this on-use reap is what enforces the standby TTL between invocations —
     // without it a one-off run (or runs against different images) leaves warm
     // spares resident until a manual `cache prune`. Best-effort; never blocks.
     crate::commands::pool::reap_stale_standbys_best_effort();
-
-    // Reap state dirs a killed or crashed prior transient run left behind: a
-    // SIGKILL or a closed terminal skips teardown, so `~/.mvm/vms/<name>` leaks.
-    // Narrow orphan-only reap — no registry convergence or resume — so a
-    // throwaway launch stays side-effect free; shields this run's own name,
-    // whose dir may exist before its supervisor comes up.
-    let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
+    report_phase("standby_reap");
 
     // Try a warm-pool claim before snapshot/cold-boot. A claimed standby is
     // pre-booted to agent-ready and runs under its own standby-id, so the
@@ -1293,6 +1304,7 @@ fn boot_transient_vm(
             Ok(None) => (vm_name, false),
             Err(e) => return Err(e).context("claiming configured warm standby"),
         };
+    report_phase("warm_claim");
 
     let booted = warm_claimed
         || if use_snapshot {

@@ -137,6 +137,11 @@ fn relay_supervisor_config_with_handoff(
     let egress_relay_socket = match spec.host_socket_for_port(EGRESS_PORT) {
         Some(socket) => Some(socket),
         None if spec.vsock.is_empty() => None,
+        // A sealed workload with no EGRESS_PORT has an explicit deny-all,
+        // secret-free posture. There is no host listener to wire because the
+        // guest has no admitted egress capability; its attempted dial fails
+        // closed in the vsock device.
+        None if !spec.vsock.iter().any(|port| port.guest_port == EGRESS_PORT) => None,
         None if spec.trusted_builder => None,
         None => {
             return Err(anyhow!(

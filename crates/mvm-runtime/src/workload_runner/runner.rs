@@ -277,7 +277,8 @@ pub struct WorkloadLaunchInputs<'a> {
 
 /// The standing host sockets a workload's vsock channels bind to, resolved
 /// under its per-VM state dir. The egress gateway is the endpoint UDS the
-/// spawner returns, not a state-dir path — it is the one gate off the box.
+/// spawner returns, not a state-dir path — it is the one gate off the box. A
+/// deny-all, secret-free workload carries no egress path at all.
 struct StandingSockets {
     agent: PathBuf,
     exit: PathBuf,
@@ -295,14 +296,15 @@ struct StandingSockets {
 impl StandingSockets {
     /// Bind these resolved sockets to `egress_uds` — the gating endpoint the
     /// guest's `EGRESS_PORT` relays to — yielding the channel description both
-    /// start paths map through [`workload_vsock_ports`].
+    /// start paths map through [`workload_vsock_ports`]. `None` is the explicit
+    /// fail-closed shape for a deny-all, secret-free workload.
     ///
     /// The one place a workload's channel description is built. A cold boot
     /// composes the mapped channels into the spec it boots; a warm claim hands
     /// the same mapped channels to the fork, which wires them before the
     /// restored child resumes. Adding a channel to the mapper therefore reaches
     /// both, and neither path can grow one the other lacks.
-    fn with_egress<'a>(&'a self, egress_uds: &'a Path) -> WorkloadSockets<'a> {
+    fn with_egress<'a>(&'a self, egress_uds: Option<&'a Path>) -> WorkloadSockets<'a> {
         WorkloadSockets {
             agent: &self.agent,
             egress_gateway: egress_uds,
@@ -382,6 +384,25 @@ pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> 
     console_streamer: Arc<dyn ConsoleStreamer>,
 }
 
+fn record_warm_claim_phase(
+    claim_started: Instant,
+    claim_debug: &mut Option<std::fs::File>,
+    phase: &'static str,
+) {
+    let elapsed_us = claim_started.elapsed().as_micros();
+    tracing::debug!(
+        target: "mvm_runtime::warm_claim",
+        phase,
+        elapsed_us,
+        "warm claim phase"
+    );
+    if let Some(file) = claim_debug.as_mut() {
+        use std::io::Write;
+
+        let _ = writeln!(file, "[warm-claim] phase={phase} elapsed_us={elapsed_us}");
+    }
+}
+
 impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
     /// Build a runner over the process's registered console-streaming hook.
     ///
@@ -408,9 +429,9 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         self
     }
 
-    /// Spawn the gating endpoint, compose the spec, and boot. The endpoint is
-    /// ALWAYS spawned — it is the sole egress gate now, even for the no-secret
-    /// raw path.
+    /// Spawn the optional gating endpoint, compose the spec, and boot. A
+    /// secret-free deny-all workload has no egress capability and therefore
+    /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
         // Fail closed before any side effect (endpoint spawn) runs: a
         // `DirShare` volume has no `VmmSpec` representation on this driver
@@ -422,10 +443,10 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
 
-        // Spawn the per-child substitution endpoint (the sole egress gate, ALWAYS
-        // spawned — even the no-secret raw path) through the shared `ClaimGuards`,
-        // so a warm claim stands up the identical guarded endpoint a cold boot
-        // does, keyed on this VM's own id.
+        // Spawn the per-child substitution endpoint through the shared
+        // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
+        // a cold boot does, keyed on this VM's own id. A deny-all, secret-free
+        // workload receives no egress channel and therefore needs no process.
         let guards = ClaimGuards::new(&self.spawner);
         let mut endpoint = guards.spawn_endpoint(
             &VmId(inputs.config.name.clone()),
@@ -532,24 +553,17 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 .open(path)
                 .ok()
         });
-        let mut claim_phase = |phase: &'static str| {
-            let elapsed_us = claim_started.elapsed().as_micros();
-            tracing::debug!(
-                target: "mvm_runtime::warm_claim",
-                phase,
-                elapsed_us,
-                "warm claim phase"
-            );
-            if let Some(file) = claim_debug.as_mut() {
-                let _ = writeln!(file, "[warm-claim] phase={phase} elapsed_us={elapsed_us}");
-            }
-        };
+        macro_rules! claim_phase {
+            ($phase:expr) => {
+                record_warm_claim_phase(claim_started, &mut claim_debug, $phase);
+            };
+        }
         let resident_handoff = self.driver.supports_resident_handoff();
         // (1) Reserve the parent atomically, then verify it — before any clone.
         // Resident HVF claims use the signed bundle manifest as their O(1)
         // publication witness; saved-state claims retain full content hashing.
         let parent = reserve_and_verify_parent(ctx, handle, resident_handoff)?;
-        claim_phase("parent_verified");
+        claim_phase!("parent_verified");
 
         // The parent is now reserved (`Claimed`) and verified healthy. Arm the
         // release-unless-committed guard: any early return past this point returns
@@ -605,11 +619,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 };
             materialize
                 .map_err(|e| StandbyError::ClaimFailed(format!("materialize child rootfs: {e}")))?;
-            claim_phase("child_materialized");
+            claim_phase!("child_materialized");
             child_dir.clone()
         };
         if resident_handoff {
-            claim_phase("resident_handoff_ready");
+            claim_phase!("resident_handoff_ready");
         }
 
         // (8) The runner-side host gates a cold boot runs, before the child boots:
@@ -628,6 +642,14 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             mvm_core::plan::secrets_from_signed_json(&claim.plan_json).unwrap_or_default();
         let redaction =
             mvm_core::plan::redaction_from_signed_json(&claim.plan_json).unwrap_or_default();
+        if let Some(file) = claim_debug.as_mut() {
+            let _ = writeln!(
+                file,
+                "[warm-claim] inputs allows_egress={} secrets={}",
+                claim.network_policy.allows_egress(),
+                secrets.len()
+            );
+        }
         let mut endpoint = guards
             .spawn_endpoint(
                 &child,
@@ -640,7 +662,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 },
             )
             .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e}")))?;
-        claim_phase("endpoint_ready");
+        claim_phase!("endpoint_ready");
 
         // The child's host channel set, resolved under its own state dir and
         // mapped through the one mapper a cold boot's set comes from. The fork
@@ -666,7 +688,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 broker_listen_socket: socks.broker.as_deref(),
             })
             .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e}")))?;
-        claim_phase("broker_registered");
+        claim_phase!("broker_registered");
 
         // (6b) Mint a fresh VMGenID bound to the child's content-address and fork
         // the VMM. A fork restores a running guest out of the parent's saved
@@ -685,7 +707,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             genid,
             channels: &channels,
         })?;
-        claim_phase("child_forked");
+        claim_phase!("child_forked");
 
         // Unconditional and best-effort, mirroring `start_workload`: started
         // the moment the restored guest is live, before the fallible
@@ -721,7 +743,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             self.console_streamer.stop(&child.0);
             return Err(refusal);
         }
-        claim_phase("identity_verified");
+        claim_phase!("identity_verified");
 
         // The child booted and proved a fresh identity: disarm the endpoint and
         // broker reapers (the stop path owns them now) and commit — the parent
@@ -1547,8 +1569,9 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
     WorkloadBackend for WorkloadRunner<D, S, B>
 {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        // The runner always routes egress through the per-VM vsock UDS endpoint —
-        // the sole gate off the box. No transparent :80/:443 terminator.
+        // When egress is admitted, route it through the per-VM vsock UDS
+        // endpoint — the sole gate off the box. No transparent :80/:443
+        // terminator. Deny-all workloads carry no egress channel at all.
         EgressSubstitutionTransport::VsockUdsChannel
     }
 }
@@ -1561,6 +1584,7 @@ mod tests {
 
     use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
     use mvm_core::plan::{Nonce, SecretBinding, SecretSource, VerbGrant, VerbId};
+    use mvm_core::policy::network_policy::HostPort;
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
     use mvm_core::util::test_env::TestEnv;
     use mvm_fs::snapshot_store::SnapshotStore;
@@ -1687,6 +1711,10 @@ mod tests {
         }
     }
 
+    fn egress_allowing_policy() -> NetworkPolicy {
+        NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)])
+    }
+
     /// Seed an overlay-aware `mvm-meta.json` sidecar next to a rootfs file in a
     /// fresh tempdir and return `(dir, rootfs_path)`. `VmBackend::start`'s
     /// admission gate refuses a rootfs whose parent dir carries no overlay-aware
@@ -1723,7 +1751,13 @@ mod tests {
 
     #[test]
     fn start_workload_threads_endpoint_uds_into_egress_port() {
-        let policy = NetworkPolicy::deny_all();
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
             MockDriver::default(),
@@ -1760,7 +1794,13 @@ mod tests {
 
     #[test]
     fn start_workload_starts_console_streaming_and_stop_tears_it_down_without_losing_bytes() {
-        let policy = NetworkPolicy::deny_all();
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let streamer = Arc::new(RecordingConsoleStreamer::default());
         let runner = WorkloadRunner::new(
@@ -1891,7 +1931,7 @@ mod tests {
 
     #[test]
     fn start_workload_uses_raw_egress_when_no_secrets_and_wire_when_secrets() {
-        let policy = NetworkPolicy::deny_all();
+        let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
 
         // No secrets ⇒ raw TCP egress.
@@ -1948,7 +1988,7 @@ mod tests {
 
     #[test]
     fn start_workload_passes_the_network_policy_and_tenant_to_the_spawner() {
-        let policy = NetworkPolicy::deny_all();
+        let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
             MockDriver::default(),
@@ -1971,7 +2011,7 @@ mod tests {
         let recorded = runner.spawner.seen.lock().unwrap();
         let recorded = recorded.as_ref().unwrap();
         assert_eq!(recorded.tenant, "acme");
-        assert_eq!(recorded.policy, NetworkPolicy::deny_all());
+        assert_eq!(recorded.policy, egress_allowing_policy());
     }
 
     fn admitted_config(name: &str) -> VmStartConfig {
@@ -2751,7 +2791,7 @@ mod tests {
     #[test]
     fn start_workload_with_dev_console_threads_128_console_ports_into_spec() {
         use mvm_agentd::vsock::CONSOLE_PORT_BASE;
-        let policy = NetworkPolicy::deny_all();
+        let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
             MockDriver::default(),
@@ -2805,7 +2845,7 @@ mod tests {
 
     #[test]
     fn start_workload_without_dev_console_carries_only_three_vsock_entries() {
-        let policy = NetworkPolicy::deny_all();
+        let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
             MockDriver::default(),
@@ -3658,7 +3698,7 @@ mod tests {
             gateway_events_socket: None,
             plan_json,
             bundle_json: None,
-            network_policy: NetworkPolicy::deny_all(),
+            network_policy: egress_allowing_policy(),
         }
     }
 
@@ -3952,6 +3992,7 @@ mod tests {
                 rootfs_path: rootfs.display().to_string(),
                 kernel_path: Some("/img/kernel".into()),
                 tenant_id: Some("tenant-x".into()),
+                network_policy: egress_allowing_policy(),
                 cpus: 2,
                 memory_mib: 512,
                 ..Default::default()
