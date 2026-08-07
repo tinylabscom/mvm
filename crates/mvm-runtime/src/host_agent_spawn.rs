@@ -591,16 +591,21 @@ mod tests {
     fn register_vm_retries_across_control_socket_restart() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("control.sock");
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::spawn({
             let socket = socket.clone();
             let dir = dir.path().to_path_buf();
             move || -> bool {
-                std::thread::sleep(Duration::from_millis(150));
-
                 let Some(listener) = bind_unix_listener(&socket) else {
+                    let _ = ready_tx.send(false);
                     return false;
                 };
-                let (mut stream, _) = listener.accept().unwrap();
+                if ready_tx.send(true).is_err() {
+                    return false;
+                }
+                let Some((mut stream, _)) = accept_with_timeout(&listener) else {
+                    return false;
+                };
                 let signed = read_framed::<SignedControl>(&mut stream).unwrap();
                 match &signed.request {
                     ControlRequest::Register(r) => assert_eq!(r.vm_id, "vm-1"),
@@ -614,7 +619,9 @@ mod tests {
                 let Some(listener) = bind_unix_listener(&socket) else {
                     return false;
                 };
-                let (mut stream, _) = listener.accept().unwrap();
+                let Some((mut stream, _)) = accept_with_timeout(&listener) else {
+                    return false;
+                };
                 let signed = read_framed::<SignedControl>(&mut stream).unwrap();
                 match &signed.request {
                     ControlRequest::Register(r) => {
@@ -631,6 +638,14 @@ mod tests {
             }
         });
 
+        match ready_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                assert!(!worker.join().unwrap(), "the control endpoint must bind");
+                return;
+            }
+        }
+
         if let Err(err) = register_vm(&socket, &key(), sample_register(dir.path())) {
             let helper_ready = worker.join().unwrap();
             if !helper_ready {
@@ -643,6 +658,25 @@ mod tests {
             panic!("register retries across daemon restart: {err}");
         }
         assert!(worker.join().unwrap());
+    }
+
+    fn accept_with_timeout(
+        listener: &std::os::unix::net::UnixListener,
+    ) -> Option<(UnixStream, std::os::unix::net::SocketAddr)> {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok(connection) => return Some(connection),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return None,
+            }
+        }
     }
 
     #[test]
