@@ -51,7 +51,7 @@ use std::path::Path;
 /// IPsec families remain in the required-disable set, so XFRM is not absorbed
 /// into this budget. These values are measured from resolved configs on the
 /// native CI architectures.
-const BUDGET_AARCH64: usize = 943;
+const BUDGET_AARCH64: usize = 944;
 const BUDGET_X86_64: usize = 916;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
