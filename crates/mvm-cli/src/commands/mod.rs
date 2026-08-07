@@ -20,6 +20,7 @@ mod pack;
 pub(crate) mod pool;
 mod qemu_bridge;
 mod runtime_overlay;
+mod seccomp_audit;
 mod shared;
 mod storage;
 mod trust;
@@ -191,6 +192,9 @@ pub(in crate::commands) enum Commands {
     /// Pack or verify signed `.mvm` artifacts
     #[command(hide = true)]
     Artifact(vm::artifact::Args),
+    /// Host-side seccomp syscall audit (developer tooling).
+    #[command(name = "seccomp-audit", hide = true)]
+    SeccompAudit(seccomp_audit::Args),
     /// Manage the persistent builder VM
     #[cfg(feature = "builder-vm")]
     #[command(name = "persistent-builder", hide = true)]

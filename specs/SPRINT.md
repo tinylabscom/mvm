@@ -9,6 +9,7 @@
 > **No legacy paths, no compatibility shims, no aliases.** Hard renames only.
 
 ## Current issue delivery
+- [x] `mvmctl seccomp-audit` — host-side seccomp syscall ledger. Refactored the duplicated syscall name↔number lookup into `mvm-core::crypto::seccomp::syscall_table`, added a Linux-only ptrace-based audit command that reports syscalls missing from a chosen tier, and wired it through CLI dispatch and the audit-posture coverage test. Workspace tests and Clippy pass on macOS; Linux end-to-end verification passed on x86_64.
 
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned

@@ -88,6 +88,10 @@ reqwest = { workspace = true, optional = true }
 # (`mvmctl/hostd-transport`); `manifest-verify` pulls it independently.
 # `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core
 # -e no-dev` carries no `tokio` so this can't silently regress.
+[target.'cfg(target_os = "linux")'.dependencies]
+# The shared seccomp syscall table needs libc constants on Linux.
+libc.workspace = true
+
 [features]
 default = []
 # The per-VM name-constrained egress CA

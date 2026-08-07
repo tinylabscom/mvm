@@ -68,6 +68,9 @@ name = "verification_loop"
 # backend so the example runs on any host; needs the mock compiled in.
 required-features = ["test-support"]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.29", features = ["process", "signal", "ptrace"] }
+
 [build-dependencies]
 hex.workspace = true
 toml.workspace = true
