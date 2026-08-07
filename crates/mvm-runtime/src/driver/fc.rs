@@ -953,7 +953,7 @@ impl RunningVm for FcRunningVm {
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
-        Ok(crate::workload_wait::wait_for_workload_exit(
+        Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
             &self.state_dir,
         ))
     }
@@ -1456,7 +1456,7 @@ mod tests {
         let _ = client.read_exact(&mut ack);
 
         // wait_for_workload_exit reads the persisted code from the state dir.
-        let status = crate::workload_wait::wait_for_workload_exit(state_dir.path());
+        let status = mvm_vmm::host::workload_wait::wait_for_workload_exit(state_dir.path());
         assert_eq!(status.code, Some(3));
         assert!(!status.success);
     }

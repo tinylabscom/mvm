@@ -4,3 +4,4 @@
 //! without creating a dependency cycle with `mvm-runtime` or `mvm-build`.
 
 pub mod virtiofsd;
+pub mod workload_wait;

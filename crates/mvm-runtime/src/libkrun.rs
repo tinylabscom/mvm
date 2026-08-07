@@ -1294,9 +1294,9 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
-        Ok(crate::workload_wait::wait_for_workload_exit(&vm_state_dir(
-            &id.0,
-        )))
+        Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
+            &vm_state_dir(&id.0),
+        ))
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {

@@ -135,7 +135,6 @@ pub mod wasm_backend;
 /// only, so a non-workload backend (QEMU dev/test, mock) cannot reach it.
 pub mod workload_backend;
 pub mod workload_runner;
-mod workload_wait;
 
 /// Re-export the backend-agnostic VMM device model from `mvm-vmm`.
 pub use mvm_vmm::vmm;

@@ -667,9 +667,9 @@ impl VmBackend for HvfBackend {
         // Transient run-to-exit: block until the supervisor persists the guest's
         // workload exit code to `<state>/workload.exit` (shared helper, same file
         // every backend writes).
-        Ok(crate::workload_wait::wait_for_workload_exit(&vm_state_dir(
-            &id.0,
-        )))
+        Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
+            &vm_state_dir(&id.0),
+        ))
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
