@@ -122,6 +122,11 @@ Darwin arm64 1,000-claim matrix passes both aggregate targets. The direct
 Linux Firecracker/KVM witness is green; production standby admission and the
 remaining backend/share-shape matrices remain open.
 
+The macOS host-vsock test hang was traced to parallel tests mutating the
+process-wide `MVM_HOME` while another test was connecting to its socket. The
+UDS-channel tests now use explicit isolated roots, and the complete
+`mvm-hostd` package suite passes without the hang.
+
 ## Non-goals
 
 - This plan does not promise a cold boot below 300ms on every backend.

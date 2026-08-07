@@ -1371,7 +1371,10 @@ Then unify + retire the old paths:
       bounded. A real Linux x86_64 Firecracker/KVM direct-driver matrix also
       completed 30/30 claims at p50=39ms, p95=39ms, and max=40ms. Production
       standby capability admission, Linux libkrun, and remaining
-      backend/share-shape matrices remain open.
+      backend/share-shape matrices remain open. The prior macOS host-vsock
+      test hang was a parallel-test race caused by process-wide `MVM_HOME`
+      mutation; UDS-channel tests now use explicit isolated roots, and the
+      complete `mvm-hostd` package suite passes.
       A host-only Apple Silicon acceptance harness is now
       available as `just hvf-warm-restore`; it records the cold bootstrap
       separately and refuses any measured cold fallback or warm-SLO violation;

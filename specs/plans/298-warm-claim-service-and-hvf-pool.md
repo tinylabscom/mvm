@@ -252,6 +252,9 @@ reseeding, and policy validation.
   libkrun, and the remaining backend/share-shape matrices remain open. The
   resident path defers reclamation of consumed parent payloads until after the
   measured handoff, keeping checkpoint and snapshot state bounded.
+- [x] Removed the process-wide `MVM_HOME` mutation from the UDS-channel test
+  harness. Parallel host tests now use explicit isolated socket roots; the
+  complete `mvm-hostd` package suite passes without the prior macOS hang.
 - [x] Choose and implement the same-process paused-parent design: the parent
   remains the HVF owner, signed handoff metadata authorizes the child identity
   and channel mask, and all host endpoints are derived from the child state
