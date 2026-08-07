@@ -26,7 +26,7 @@ const SURFACES: [&str; 2] = ["host", "user"];
 /// forwards are inlined in the root Cargo.toml); what remains here is `default`
 /// plus platform/storage opt-ins that genuinely cannot always be on. Keep this
 /// list tiny — a new entry is a conscious "this cannot live in a surface".
-const INTERNAL: [&str; 6] = [
+const INTERNAL: [&str; 8] = [
     "default",
     // Platform: link the libkrun C VMM (absent on a macOS-26 HVF host).
     "libkrun-sys",
@@ -36,6 +36,10 @@ const INTERNAL: [&str; 6] = [
     // Lean library knob: mvm-core's gated hostd IPC transport, flipped through
     // the facade by a downstream host-side daemon without pulling all of `host`.
     "hostd-transport",
+    // Platform/dev-only: live Apple Silicon warm-handoff validation and the
+    // opt-in immutable APFS snapshot provider. Neither adds a product surface.
+    "hvf-live-validation",
+    "trusted-apfs",
     // Dev/test-only: the hermetic in-memory mock VM backend. Never part of a
     // shipped binary; only this workspace's own test suite turns it on.
     "test-support",
