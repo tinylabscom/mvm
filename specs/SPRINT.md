@@ -60,24 +60,24 @@
       merge-group Test, Lint, and Nix gates and merged into main.
 - [x] `mvmctl deps install` runs the lockfile-pinned development install in the
       builder boundary and publishes its sealed volume. `mvmctl deps
-      capture-live` exports bounded guest content and sidecars before handing
+  capture-live` exports bounded guest content and sidecars before handing
       them to the atomic reseal path, and requires a running development VM;
       implementation is merged through PR #2132, whose branch and merge-group
       Test, Lint, and Nix gates passed.
 
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
-      a validated byte-span detector contract and supplements the curated
-      scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
-      Azure connection-string, Telegram-token and Discord-token detectors.
-      Arbitrary payloads are scanned as bounded UTF-8 islands without losing
-      byte offsets; invalid or overlapping detector spans fail closed and no
-      finding carries matched bytes. The same detector feeds one-way masking
-      and request-scoped reversible replacement. Default curated secret/PII
-      protection now arms compressed and over-cap refusal before forwarding.
-      The serial workspace test suite, workspace check, host workspace
-      all-target Clippy, cargo-deny and RustSec gates pass. Linux builder-VM
-      all-target Clippy remains before WS1 acceptance; streaming bodies, policy
-      lowering, admission posture and claim witnesses remain in WS2-WS4.
+  a validated byte-span detector contract and supplements the curated
+  scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
+  Azure connection-string, Telegram-token and Discord-token detectors.
+  Arbitrary payloads are scanned as bounded UTF-8 islands without losing
+  byte offsets; invalid or overlapping detector spans fail closed and no
+  finding carries matched bytes. The same detector feeds one-way masking
+  and request-scoped reversible replacement. Default curated secret/PII
+  protection now arms compressed and over-cap refusal before forwarding.
+  The serial workspace test suite, workspace check, host workspace
+  all-target Clippy, cargo-deny and RustSec gates pass. Linux builder-VM
+  all-target Clippy remains before WS1 acceptance; streaming bodies, policy
+  lowering, admission posture and claim witnesses remain in WS2-WS4.
 
 - [x] Host-side machine logs — **plan 289**. `machine logs` now reads backend
       console captures directly from the isolated host VM state directory, so
@@ -126,6 +126,15 @@
       over-budget chunk, preserving large HTTPS payloads and their hashes;
       short reads, EOF, and nonblocking errors refund unused reservations.
       Regression coverage proves an exhausted budget keeps the stream alive.
+
+- [~] NANDA-style execution receipts and conformance badges — **plan 298**
+      (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
+      approved: defines `ExecutionReceipt` (signed, chainable proof of what ran,
+      by whom, under what authority) and `ConformanceBadge` (signed, corpus-pinned
+      export of the MVM-SEC claim/witness program), both built on existing
+      Ed25519/JCS/SHA-256 primitives with no new authority or external dependency.
+      WS2–WS6 (core types, read-only exporter, runtime emission, badge generator,
+      docs) are scheduled next.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
@@ -180,14 +189,14 @@ updates only its own entry below.
       `BindingStore` egress bindings, a new per-machine secret-reference
       sidecar (`secret-refs.json`, metadata only), and JSONL +
       chain-signed audit (`secret.create/replace/bind/unbind/remove/
-      remove_refused`). Inputs are `SecretValueInput` (zeroize-on-drop,
+  remove_refused`). Inputs are `SecretValueInput` (zeroize-on-drop,
       redacted Debug, crate-private accessor); no reveal method or
       value-carrying response type exists. `remove` refuses while an
       existing persistent machine references the secret (no force path);
       `validate_for_admission` fails closed on missing secrets,
       missing/malformed bindings, unauthorized destinations (via
       `host_matches`), and cross-scope references. `mvmctl secret
-      put/set/get/ls/rm` now consumes the service (`get` is a pure
+  put/set/get/ls/rm` now consumes the service (`get` is a pure
       presence check — no decryption). 53 new/ported tests (36 in
       mvm-client, 17 in mvm-cli) including no-leak assertions across
       responses, serialization, Debug, errors, audit records, and
@@ -355,23 +364,23 @@ updates only its own entry below.
       linking either repository's unrelated crypto/VMM dependency graph; the
       leaf's four contract, symlink-refusal, listing, and serde tests pass, and
       its default closure remains async-runtime-free. The isolated full `cargo
-      test --workspace --no-fail-fast` gate passes with zero failures after the
+test --workspace --no-fail-fast` gate passes with zero failures after the
       audit posture and process-global test-isolation fixes.
   - [x] WS2: live attachment is complete. Portable encrypted ext4 images,
-      launch-time typed resolution, admitted VMM/guest handoff, crash recovery,
-      durable exclusive attachment leases, and canonical immutable local
-      snapshot/restore with tamper refusal and interrupted-restore convergence
-      are covered by focused tests. The local CLI lifecycle and runtime registry
-      suites pass 19 and 21 tests respectively. Five new hermetic volume BDD
-      scenarios pass in the 88-scenario/442-step suite. Live KVM proves
-      failed-start lease cleanup, writable restart persistence (23/23 steps),
-      and guest read-only refusal (17/17 steps). The restart uses the driver's
-      authenticated stop-time filesystem flush; PID monitoring proves every
-      observed Firecracker is reaped. The run also fixed root-owned process
-      reconciliation incorrectly treating `kill(pid, 0)` `EPERM` as a dead PID.
-      On the final integrated Linux tree, 24 guest-mount tests, 9 OCI-init tests,
-      and workspace all-target clippy pass with warnings denied; the host
-      all-target commit gate is also green.
+        launch-time typed resolution, admitted VMM/guest handoff, crash recovery,
+        durable exclusive attachment leases, and canonical immutable local
+        snapshot/restore with tamper refusal and interrupted-restore convergence
+        are covered by focused tests. The local CLI lifecycle and runtime registry
+        suites pass 19 and 21 tests respectively. Five new hermetic volume BDD
+        scenarios pass in the 88-scenario/442-step suite. Live KVM proves
+        failed-start lease cleanup, writable restart persistence (23/23 steps),
+        and guest read-only refusal (17/17 steps). The restart uses the driver's
+        authenticated stop-time filesystem flush; PID monitoring proves every
+        observed Firecracker is reaped. The run also fixed root-owned process
+        reconciliation incorrectly treating `kill(pid, 0)` `EPERM` as a dead PID.
+        On the final integrated Linux tree, 24 guest-mount tests, 9 OCI-init tests,
+        and workspace all-target clippy pass with warnings denied; the host
+        all-target commit gate is also green.
   - [x] WS3: mvmd now consumes the canonical mvm leaf contract and implements
         it over Apache Arrow `object_store` 0.14.1 for S3-compatible, GCS,
         Azure, and R2 providers. Remote data and names remain mandatorily
@@ -387,7 +396,7 @@ updates only its own entry below.
         HTTPS-or-loopback `GatewayBackend` now carries tenant volume create,
         list, attach, detach, checkpoint, restore, and delete operations with
         typed failures and percent-encoded resource IDs. `mvmctl volume
-        --remote` reads its URL, in-memory-only bearer token, and tenant from
+--remote` reads its URL, in-memory-only bearer token, and tenant from
         dedicated environment variables while local behavior stays unchanged.
         Twenty-one gateway client tests, including one real loopback HTTP request, nine CLI
         lifecycle parser tests, touched-crate checks, all-target Clippy, and the
@@ -437,7 +446,7 @@ updates only its own entry below.
       change, forced a full guest-agent rebuild. 416 of 1872 files (22%) stop
       being cache keys, including all 111 spec files and 167 doc-site pages.
       The soundness binding inverts with the list (the fingerprint's walked
-      entries must now be a *superset* of the filter's, not a subset), so both
+      entries must now be a _superset_ of the filter's, not a subset), so both
       directions are enforced by tests that parse the specific named nix list;
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
@@ -450,14 +459,14 @@ updates only its own entry below.
       a compile oracle — bare metal has no test harness.
 
 - [~] Content-address replay vectors — **plan 276 WS3**. Frozen
-      input→address vectors for `ir_hash`, the RFC-6962 leaf/interior/root
-      helpers, `compute_plan_id` and `bundle_sha256`. The tests that covered
-      these were relational only: hashing the canonical form with a trailing
-      newline moved every address and all four `ir_hash` unit tests stayed
-      green. `compute_plan_id` matters most — it does not use JCS, relying on
-      serde_json's default key ordering, so the gate pinned the feature flag
-      while nothing pinned the address it protects. Remaining: the audit
-      `prev_hash` spine, which needs a fixed keypair and belongs with WS4.
+  input→address vectors for `ir_hash`, the RFC-6962 leaf/interior/root
+  helpers, `compute_plan_id` and `bundle_sha256`. The tests that covered
+  these were relational only: hashing the canonical form with a trailing
+  newline moved every address and all four `ir_hash` unit tests stayed
+  green. `compute_plan_id` matters most — it does not use JCS, relying on
+  serde_json's default key ordering, so the gate pinned the feature flag
+  while nothing pinned the address it protects. Remaining: the audit
+  `prev_hash` spine, which needs a fixed keypair and belongs with WS4.
 
 - [x] Claim evidence pinned — **plan 276 WS1**. Each claim in
       `model/claims.toml` now declares the `witness_kinds` it rests on, and
@@ -469,10 +478,10 @@ updates only its own entry below.
       reported `clean (16 claims, 48 witnesses verified)`.
 
 - [~] Build cache verify-on-read — **plan 276 WS6**. `~/.mvm/dev/builds/
-      <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
-      digest, no signature, so content substitution went undetected and the
-      provenance recorder then signed whatever bytes were on disk — the audit
-      log faithfully recording a substituted image as legitimate.
+  <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
+  digest, no signature, so content substitution went undetected and the
+  provenance recorder then signed whatever bytes were on disk — the audit
+  log faithfully recording a substituted image as legitimate.
   - [x] Dev-build artifact cache closed in #2053: `mvm_core::action` +
         `verify_artifacts_on_disk`, verified on read, failing closed to a cold
         miss, and evicting both the record and the build directory. Evicting
@@ -533,51 +542,51 @@ updates only its own entry below.
       substitution channel and no longer carry a `trusted_builder` flag.
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
-      dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and
-      `specs/adrs/035-workload-stream-plane.md`.
-      Phase 1 (output, T1–T10 plus T5b/T6b/T9b–T9d) ships: the guest pump emits
-      as produced instead of buffering to exit, the 1 MiB cap that *killed* a
-      chatty workload is replaced by ring retention with recorded gap markers,
-      records are redacted at one seam then hash-chained and sealed to an
-      RFC-6962 root, and `mvmctl machine logs`/`machine run` attach/`mvm-client`
-      read the same verified stream from broker, transcript, or console. Three
-      limits are stated rather than deferred: the console fallback is
-      unredacted, a detached VM's later output reaches no recorder, and a
-      spliced read repeats its adopted prefix.
-      Phase 2 (input, T11–T16) builds the host→guest stdin channel — grant in
-      the signed plan (`host.stream.v1`), single-writer lease, cross-frame
-      secret scan, explicit EOF, chain-signed refusals, and a sealed-tier
-      refusal of the grant for a shell-shaped entrypoint. ADR-001 reworded
-      claim 15 from enforced-by-absence to enforced-by-policy and added claim
-      17 at `Preview`; ADR-035 records why the trade was worth making. T16
-      documented the channel (`guides/workload-input.md`) and reconciled the
-      user-facing prose that still asserted claim 15 in its absence form.
-      T17 made it reachable and did so with a live entrypoint resolver in the
-      same change, which the plan required: `machine run --entrypoint --stdin
-      -` opens the route under the plan that boot was admitted under, pumps the
-      caller's stdin through the gate in acceptance order on its own thread,
-      keeps the lease alive on a ticker, and closes the workload's stdin on the
-      caller's EOF; the grant is minted only for a call that asked. The
-      entrypoint now comes from the image's own `mvm-meta.json` sidecar (a new
-      `entrypointArgv` field, written by the `mkGuest` and OCI build paths,
-      because the host cannot read inside a materialized ext4), and admission
-      **fails closed** when it cannot resolve one — so the shell refusal cannot
-      go dormant again by a caller forgetting to resolve.
-      Plan 293 WS1 then closed the last dormant leg: the per-VM substitution
-      endpoint — the one process holding a workload's credentials in the clear
-      — fingerprints each secret it resolves and reports `(length, rolling
-      hash, category)` on its ready handshake, and `StreamPlane::open_input`
-      installs that set on the gate. No plaintext crosses into `mvmctl`.
-      Holding fingerprints instead of values costs the scan its live-prefix
-      precision, so it withholds a blanket `longest_secret - 1` tail — a
-      *precise* carry would make withhold-or-deliver depend on content, which
-      is a prefix oracle — and the gate releases that tail after 50ms of writer
-      silence, on elapsed time alone, which is what lets a workload reading one
-      request line at a time ever receive one.
-      Claim 17 stays `Preview`, now for what the enforcement *is* rather than
-      whether it runs: a fingerprint match is a length-and-hash match, not an
-      identity, and encoding, derivation, a window-straddling split and a split
-      the sender separated by a deliberate pause defeat the scan permanently.
+  dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and
+  `specs/adrs/035-workload-stream-plane.md`.
+  Phase 1 (output, T1–T10 plus T5b/T6b/T9b–T9d) ships: the guest pump emits
+  as produced instead of buffering to exit, the 1 MiB cap that _killed_ a
+  chatty workload is replaced by ring retention with recorded gap markers,
+  records are redacted at one seam then hash-chained and sealed to an
+  RFC-6962 root, and `mvmctl machine logs`/`machine run` attach/`mvm-client`
+  read the same verified stream from broker, transcript, or console. Three
+  limits are stated rather than deferred: the console fallback is
+  unredacted, a detached VM's later output reaches no recorder, and a
+  spliced read repeats its adopted prefix.
+  Phase 2 (input, T11–T16) builds the host→guest stdin channel — grant in
+  the signed plan (`host.stream.v1`), single-writer lease, cross-frame
+  secret scan, explicit EOF, chain-signed refusals, and a sealed-tier
+  refusal of the grant for a shell-shaped entrypoint. ADR-001 reworded
+  claim 15 from enforced-by-absence to enforced-by-policy and added claim
+  17 at `Preview`; ADR-035 records why the trade was worth making. T16
+  documented the channel (`guides/workload-input.md`) and reconciled the
+  user-facing prose that still asserted claim 15 in its absence form.
+  T17 made it reachable and did so with a live entrypoint resolver in the
+  same change, which the plan required: `machine run --entrypoint --stdin
+  -` opens the route under the plan that boot was admitted under, pumps the
+  caller's stdin through the gate in acceptance order on its own thread,
+  keeps the lease alive on a ticker, and closes the workload's stdin on the
+  caller's EOF; the grant is minted only for a call that asked. The
+  entrypoint now comes from the image's own `mvm-meta.json` sidecar (a new
+  `entrypointArgv` field, written by the `mkGuest` and OCI build paths,
+  because the host cannot read inside a materialized ext4), and admission
+  **fails closed** when it cannot resolve one — so the shell refusal cannot
+  go dormant again by a caller forgetting to resolve.
+  Plan 293 WS1 then closed the last dormant leg: the per-VM substitution
+  endpoint — the one process holding a workload's credentials in the clear
+  — fingerprints each secret it resolves and reports `(length, rolling
+  hash, category)` on its ready handshake, and `StreamPlane::open_input`
+  installs that set on the gate. No plaintext crosses into `mvmctl`.
+  Holding fingerprints instead of values costs the scan its live-prefix
+  precision, so it withholds a blanket `longest_secret - 1` tail — a
+  _precise_ carry would make withhold-or-deliver depend on content, which
+  is a prefix oracle — and the gate releases that tail after 50ms of writer
+  silence, on elapsed time alone, which is what lets a workload reading one
+  request line at a time ever receive one.
+  Claim 17 stays `Preview`, now for what the enforcement _is_ rather than
+  whether it runs: a fingerprint match is a length-and-hash match, not an
+  identity, and encoding, derivation, a window-straddling split and a split
+  the sender separated by a deliberate pause defeat the scan permanently.
 
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added
@@ -622,7 +631,7 @@ updates only its own entry below.
       workspace tests, check, clippy, and formatting pass. Published as PR
       #1845 for review.
 - [x] #1813 workload-lifetime firewall state: key installs by `(tenant,
-      workload)` so hot plan revisions replace prior rules without orphaning
+  workload)` so hot plan revisions replace prior rules without orphaning
       firewalls. Focused regression coverage, workspace check, full tests,
       clippy, and formatting pass; published as PR #1847 for review.
 - [x] #1827 vsock overload hardening is complete: guest-selected connection
@@ -635,14 +644,14 @@ updates only its own entry below.
 - [x] Claim witnesses are now mutation-tested, not merely present.
       `check-claim-catalog` proves a witness exists; nothing proved it can
       fail. Added `xtask check-mutation-witnesses`, which derives the
-      mutation surface *from the claims ledger* (each `fn:` witness resolves
+      mutation surface _from the claims ledger_ (each `fn:` witness resolves
       to its declaring file — this repo keeps `#[cfg(test)] mod tests`
       beside the implementation, so a witness lands on the code it guards)
       and pins it to `xtask/mutation-witness-baseline.json`: 26 files across
       8 packages. The cheap default mode runs on every PR and fails when the
       surface moves, so a claim quietly leaving mutation coverage is a
       reviewable diff; `--run` mutates the surface nightly in `security.yml`
-      and ratchets survivors, failing only on a *new* hole. Claims that reach
+      and ratchets survivors, failing only on a _new_ hole. Claims that reach
       no mutable file are reported and pinned rather than silently absent:
       4, 5 and 7 are witnessed only by CI lanes, and claim 16's three
       witnesses all live in an integration test, which cargo-mutants does not
@@ -657,22 +666,23 @@ updates only its own entry below.
       307/307 xtask nextest.
 
       **Now also owns the witnesses this gate cannot reach,** folded in from
-      plan 274 whose WS3/WS4 are struck. That plan's prose named three such
-      claims; the gate derives four. The fourth, MVM-SEC-16, is qualitatively
-      different — its witnesses are ordinary Rust functions skipped only for
-      living in `crates/mvm-hostd/tests/`, so it needs a planted defect in the
-      enforcement code rather than a CI-lane falsification. Keeping the sweep
-      beside the gate that computes the list is what stops the two diverging
-      again. #1946 was closed by #1958, which exports `HOME`/`MVM_HOME` to a
-      runner temp dir in the nightly job and carries `CARGO_HOME`/
-      `RUSTUP_HOME` across. That covers the CI lane; `just
-      mutation-witnesses` still runs against a developer's real `~/.mvm`,
-      which is the entry point #1946 called the sharper of the two.
+              plan 274 whose WS3/WS4 are struck. That plan's prose named three such
+              claims; the gate derives four. The fourth, MVM-SEC-16, is qualitatively
+              different — its witnesses are ordinary Rust functions skipped only for
+              living in `crates/mvm-hostd/tests/`, so it needs a planted defect in the
+              enforcement code rather than a CI-lane falsification. Keeping the sweep
+              beside the gate that computes the list is what stops the two diverging
+              again. #1946 was closed by #1958, which exports `HOME`/`MVM_HOME` to a
+              runner temp dir in the nightly job and carries `CARGO_HOME`/
+              `RUSTUP_HOME` across. That covers the CI lane; `just
+              mutation-witnesses` still runs against a developer's real `~/.mvm`,
+              which is the entry point #1946 called the sharper of the two.
+
 - [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
       only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
       builder image / runtime overlay from the host's shared cache), so a test
       that moved only `MVM_HOME` still read the developer's real cache — an
-      assertion that an artifact is *absent* then passed only on a machine that
+      assertion that an artifact is _absent_ then passed only on a machine that
       had never built one. Added `TestEnv::isolate_mvm_home` (sets both roots),
       migrated the 25 tests in files that provably reach a seed site, and added
       the `check-test-home-isolation` xtask gate: `default_mvm_cache_dir` is now
@@ -681,7 +691,7 @@ updates only its own entry below.
       empty vs. a populated fixture `$HOME` rather than inferred from the call
       graph. 8021/8021 nextest on a host with a populated `~/.mvm`.
       **Deferred → closed.** `mvmctl::audit_emissions_live
-      update_check_does_not_emit_audit_entry` failed intermittently under full
+  update_check_does_not_emit_audit_entry` failed intermittently under full
       workspace concurrency and was correctly ruled out of the `$HOME` class.
       Triaged in the nextest-profile work: not a concurrency flake but a bug in
       the shared `serve_release_latest_fixture` helper it and its sibling use.
@@ -700,7 +710,7 @@ updates only its own entry below.
       `check-test-home-isolation` allowlist shrank from four entries to two.
       `install_initramfs_into_cache` now verifies the staged image against its
       `initramfs.hash` sidecar before the rename, closing the one real
-      integrity asymmetry: the hash is SHA-256 of the *uncompressed* cpio (the
+      integrity asymmetry: the hash is SHA-256 of the _uncompressed_ cpio (the
       size sidecar is the compressed length), so this gunzips rather than
       hashing the file, and it runs at cache-root admission rather than on
       every resolve to keep a decompress off the boot path. Abandoned
@@ -712,7 +722,7 @@ updates only its own entry below.
 
 - [x] Builder-image seed verified at admission (#1932). The cross-root seed
       copied four artifacts and left the integrity sidecars behind, so the
-      seeded cache could not be verified afterwards *and* read as
+      seeded cache could not be verified afterwards _and_ read as
       `MissingArtifactDigestManifest` to a later bootstrap — which then
       rebuilt the ~775 MB it had just copied. The seed now carries the
       sidecars and checks `.mvm-artifacts.sha256` before admitting bytes,
@@ -734,53 +744,53 @@ updates only its own entry below.
       time, not merely noisy.
 
       **MVM-SEC-05's only witness ran nothing at all.** The fuzz lane's
-      first step still declared `working-directory: crates/mvm-guest`, a
-      crate the consolidation deleted; the step failed to *start*, and
-      because the fourteen targets were sequential steps in one job, every
-      later target was skipped too. Four of the nine directories were stale
-      (`mvm-guest`, `mvm-oci`, `mvm-vm-host`, `mvm-ext4`); the corpus-upload
-      block had been updated to the new paths, so the rename was done
-      halfway. Fixed independently and first in #1958, which corrected the
-      fourteen `working-directory` values in place; this branch's matrix
-      rebuild was dropped in favour of it.
-      **Residual:** the targets remain sequential steps in one job at the
-      nightly `secs=1800` budget, and the job sets no `timeout-minutes`, so
-      14 x 1800s is 7 hours of fuzzing against GitHub's 6-hour default
-      ceiling — before per-target sanitizer builds. The lane should be
-      expected to time out rather than pass, and a matrix (one cell per
-      target, `fail-fast: false`) is the shape that both fits the ceiling
-      and stops one stale entry skipping every target after it.
+              first step still declared `working-directory: crates/mvm-guest`, a
+              crate the consolidation deleted; the step failed to *start*, and
+              because the fourteen targets were sequential steps in one job, every
+              later target was skipped too. Four of the nine directories were stale
+              (`mvm-guest`, `mvm-oci`, `mvm-vm-host`, `mvm-ext4`); the corpus-upload
+              block had been updated to the new paths, so the rename was done
+              halfway. Fixed independently and first in #1958, which corrected the
+              fourteen `working-directory` values in place; this branch's matrix
+              rebuild was dropped in favour of it.
+              **Residual:** the targets remain sequential steps in one job at the
+              nightly `secs=1800` budget, and the job sets no `timeout-minutes`, so
+              14 x 1800s is 7 hours of fuzzing against GitHub's 6-hour default
+              ceiling — before per-target sanitizer builds. The lane should be
+              expected to time out rather than pass, and a matrix (one cell per
+              target, `fail-fast: false`) is the shape that both fits the ceiling
+              and stops one stale entry skipping every target after it.
 
-      **MVM-SEC-07's two witnesses failed for unrelated reasons.**
-      `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
-      7.5) via `object_store 0.11`; bumped to `object_store 0.14`, the first
-      release requiring `quick-xml >= 0.41`. Fixed, not ignored — and the
-      step's ten `--ignore` flags, whose comment claimed to mirror
-      `deny.toml`'s `ignore = []`, were removed after confirming none still
-      matched anything in the graph. `cargo-deny`'s duplicate-dalek failure
-      was diagnosed independently and fixed first in #1952; `deny.toml` had
-      never carried those entries while `check-duplicate-majors` had — the
-      two-gate drift that let the PR-visible gate stay green while the
-      nightly stayed red.
+              **MVM-SEC-07's two witnesses failed for unrelated reasons.**
+              `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
+              7.5) via `object_store 0.11`; bumped to `object_store 0.14`, the first
+              release requiring `quick-xml >= 0.41`. Fixed, not ignored — and the
+              step's ten `--ignore` flags, whose comment claimed to mirror
+              `deny.toml`'s `ignore = []`, were removed after confirming none still
+              matched anything in the graph. `cargo-deny`'s duplicate-dalek failure
+              was diagnosed independently and fixed first in #1952; `deny.toml` had
+              never carried those entries while `check-duplicate-majors` had — the
+              two-gate drift that let the PR-visible gate stay green while the
+              nightly stayed red.
 
-      Also restored: the flake-lock gate (two probe examples pinning
-      `inputs.mvm` to this repo were missing from a hardcoded exclusion list
-      — replaced with a check for the property itself, anchored so
-      `nix/flake.nix`'s documentation comment does not match) and
-      builder-VM reproducibility (`mvm-builderd` joined the host-binary
-      manifest but not the cross-compile step).
+              Also restored: the flake-lock gate (two probe examples pinning
+              `inputs.mvm` to this repo were missing from a hardcoded exclusion list
+              — replaced with a check for the property itself, anchored so
+              `nix/flake.nix`'s documentation comment does not match) and
+              builder-VM reproducibility (`mvm-builderd` joined the host-binary
+              manifest but not the cross-compile step).
 
-      Two new gates make both rot classes PR-visible, each with a planted
-      defect recorded in `specs/VERIFICATION.md`:
-      `check-workflow-paths` resolves every workflow `working-directory`
-      and `cargo fuzz run` target against the tree, and
-      `check-mvm-host-binaries-sync` now treats the cross-compile step as a
-      third mirror of the binary manifest. Claim 5's witness was retyped
-      from `ci:fuzz` — which matched the job key and stayed green through
-      all ten dead nightlies — to the three fuzz targets it actually names.
+              Two new gates make both rot classes PR-visible, each with a planted
+              defect recorded in `specs/VERIFICATION.md`:
+              `check-workflow-paths` resolves every workflow `working-directory`
+              and `cargo fuzz run` target against the tree, and
+              `check-mvm-host-binaries-sync` now treats the cross-compile step as a
+              third mirror of the binary manifest. Claim 5's witness was retyped
+              from `ci:fuzz` — which matched the job key and stayed green through
+              all ten dead nightlies — to the three fuzz targets it actually names.
 
 - [x] A claim-bearing CI lane can stop backing its claim two ways, and only
-      one was watched. #1970 reports a *red* Security lane, but it triggers on
+      one was watched. #1970 reports a _red_ Security lane, but it triggers on
       `workflow_run: completed`, so it fires only when Security finishes —
       when the schedule itself stops firing, nothing completes, nothing
       reports, and silence reads as health. That is not hypothetical: Security
@@ -789,23 +799,23 @@ updates only its own entry below.
       them, and no watcher could have said so.
 
       `xtask check-claim-witness-freshness` covers absence, on its own
-      schedule rather than on `workflow_run`, because the whole point is to
-      notice a lane that never ran. It maps each `ci:` witness onto the
-      workflow anchoring it (reusing #1980's resolver, lifted into
-      `claims_ledger` so one implementation serves both gates), derives the
-      allowance from the cron, and fails when the newest run is older than
-      three missed firings. It deliberately does *not* re-check conclusions —
-      that is #1970's job, and two gates on one property would eventually
-      disagree. Lanes with no daily-or-better cron are reported as notes, not
-      judged: a pull-request lane is legitimately idle. Falsified by making
-      Security's cron hourly, which reported it 14h stale and named all eight
-      claims it backs.
+              schedule rather than on `workflow_run`, because the whole point is to
+              notice a lane that never ran. It maps each `ci:` witness onto the
+              workflow anchoring it (reusing #1980's resolver, lifted into
+              `claims_ledger` so one implementation serves both gates), derives the
+              allowance from the cron, and fails when the newest run is older than
+              three missed firings. It deliberately does *not* re-check conclusions —
+              that is #1970's job, and two gates on one property would eventually
+              disagree. Lanes with no daily-or-better cron are reported as notes, not
+              judged: a pull-request lane is legitimately idle. Falsified by making
+              Security's cron hourly, which reported it 14h stale and named all eight
+              claims it backs.
 
-      Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
-      are workspace-excluded, so no lane compiled them and the nightly aborts
-      on its first failure — which is how a syntactically invalid harness
-      survived eleven days. Run against main the step rediscovered both real
-      defects in seconds.
+              Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
+              are workspace-excluded, so no lane compiled them and the nightly aborts
+              on its first failure — which is how a syntactically invalid harness
+              survived eleven days. Run against main the step rediscovered both real
+              defects in seconds.
 
 - [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
       (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
@@ -831,7 +841,7 @@ updates only its own entry below.
       `specs/plans/272-mutation-tested-claim-witnesses.md` §WS-3. The
       deciding argument was a live drift: WS3 hand-copied the list of
       claims mutation testing cannot reach and recorded **three**
-      (MVM-SEC-04/05/07), while the gate *derives* that list from the
+      (MVM-SEC-04/05/07), while the gate _derives_ that list from the
       ledger and reports **four** — it also names MVM-SEC-16, whose three
       witnesses are ordinary Rust functions cargo-mutants skips only
       because they live in `crates/mvm-hostd/tests/`. Claim 16 therefore
@@ -849,51 +859,51 @@ updates only its own entry below.
       Most of the finding is not the survivors.
 
       **Eight of the twenty-six files could not be measured at all.** The
-      lane is package-scoped, and three packages were green under
-      `--workspace` and red alone: `mvm-sdk` never enabled
-      `mvm-core/test-support`, so its tests did not compile; `mvm-cli` has
-      42 tests driving the root package's `mvmctl`, so
-      `CARGO_BIN_EXE_mvmctl` is unset; `mvm-runtime` had a test spawning
-      an `mvm-hostd` binary. Claims 1, 3, 10, 11, 14 and 15 were affected.
-      Two of the eight reported `total=0 missed=0 caught=0` — what a
-      fully-covered file reports — because `ensure_mutants_actually_ran`
-      enumerated the one baseline verdict it had seen (`Failure`) and a
-      timed-out baseline reports `Timeout`. It now requires `Success` and
-      a nonzero count.
+              lane is package-scoped, and three packages were green under
+              `--workspace` and red alone: `mvm-sdk` never enabled
+              `mvm-core/test-support`, so its tests did not compile; `mvm-cli` has
+              42 tests driving the root package's `mvmctl`, so
+              `CARGO_BIN_EXE_mvmctl` is unset; `mvm-runtime` had a test spawning
+              an `mvm-hostd` binary. Claims 1, 3, 10, 11, 14 and 15 were affected.
+              Two of the eight reported `total=0 missed=0 caught=0` — what a
+              fully-covered file reports — because `ensure_mutants_actually_ran`
+              enumerated the one baseline verdict it had seen (`Failure`) and a
+              timed-out baseline reports `Timeout`. It now requires `Success` and
+              a nonzero count.
 
-      **Two files carry 242 of the 359 survivors**, both the same shape: a
-      witness resolving to a large multi-purpose file. `mvm-host-vm-init.rs`
-      (claim 2, 164) and `console.rs` (claim 15, 78) each have their own
-      witness fully caught while the rest of the file answers to no claim.
-      Both are scoped through the new `SurfaceScope`, which cannot be
-      produced by resolution, demands a written reason and a tracking
-      issue, and survives a re-pin — so narrowing a claim's surface costs
-      an argued diff. Filed as #2006 and #2021 with the measurements.
+              **Two files carry 242 of the 359 survivors**, both the same shape: a
+              witness resolving to a large multi-purpose file. `mvm-host-vm-init.rs`
+              (claim 2, 164) and `console.rs` (claim 15, 78) each have their own
+              witness fully caught while the rest of the file answers to no claim.
+              Both are scoped through the new `SurfaceScope`, which cannot be
+              produced by resolution, demands a written reason and a tracking
+              issue, and survives a re-pin — so narrowing a claim's surface costs
+              an argued diff. Filed as #2006 and #2021 with the measurements.
 
-      **The in-claim survivors were nearly all real holes**, closed with
-      tests and each verified by planting its mutant. The sharpest:
-      `validate_guest_mount` and `denied_host_roots` — claim 1's Tier-0
-      host-filesystem guard, which would have admitted any guest mount
-      path and made the host signer key, the audit chain and `~/.ssh`
-      shareable into a guest — and `set_no_new_privs`, claim 2's own named
-      `fn:` witness, which had no test at all. Also two fail-open egress
-      mutants in `stages.rs` (the L4 allow-list's DNS carve-out widened to
-      pass every UDP packet; the SSH banner detector silently ceasing to
-      detect) and two in `plan_admission.rs` (a size cap that admits
-      everything above it, and a stale verb-grant that survives into a
-      reused VM name).
+              **The in-claim survivors were nearly all real holes**, closed with
+              tests and each verified by planting its mutant. The sharpest:
+              `validate_guest_mount` and `denied_host_roots` — claim 1's Tier-0
+              host-filesystem guard, which would have admitted any guest mount
+              path and made the host signer key, the audit chain and `~/.ssh`
+              shareable into a guest — and `set_no_new_privs`, claim 2's own named
+              `fn:` witness, which had no test at all. Also two fail-open egress
+              mutants in `stages.rs` (the L4 allow-list's DNS carve-out widened to
+              pass every UDP packet; the SSH banner detector silently ceasing to
+              detect) and two in `plan_admission.rs` (a size cap that admits
+              everything above it, and a stale verb-grant that survives into a
+              reused VM name).
 
-      Three affordability defects fixed alongside: the flat 300s
-      per-mutant timeout (too short for three packages, 5× too long for
-      another — now derived from each package's baseline);
-      `seed_guest_runtime_cache` seeding the guest-binary cache under a
-      key the resolver never reads, so three `pull_core` tests
-      cross-compiled the guest agent at 55s each (mvm-cli's suite 86s →
-      2s); and `just mutation-witnesses` running `--run` against the
-      developer's real `~/.mvm` — the isolation now lives at the single
-      cargo-mutants spawn site, which is what the entry above already
-      claimed. Detail in `specs/VERIFICATION.md` §"Mutation-tested
-      witnesses".
+              Three affordability defects fixed alongside: the flat 300s
+              per-mutant timeout (too short for three packages, 5× too long for
+              another — now derived from each package's baseline);
+              `seed_guest_runtime_cache` seeding the guest-binary cache under a
+              key the resolver never reads, so three `pull_core` tests
+              cross-compiled the guest agent at 55s each (mvm-cli's suite 86s →
+              2s); and `just mutation-witnesses` running `--run` against the
+              developer's real `~/.mvm` — the isolation now lives at the single
+              cargo-mutants spawn site, which is what the entry above already
+              claimed. Detail in `specs/VERIFICATION.md` §"Mutation-tested
+              witnesses".
 
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
@@ -946,7 +956,7 @@ updates only its own entry below.
       hash-verifies the archive, safe-extracts it through the runtime overlay's
       now-generalized entry validator, re-checks the archive's own manifest
       against the extracted bytes, installs stage-then-rename, and ends with a
-      `SdkSidecarResolver::resolve` against the *installed* entry so a transport
+      `SdkSidecarResolver::resolve` against the _installed_ entry so a transport
       bug cannot cache something that only fails at boot. The launch path
       consults the overlay's own build-vs-download resolver, so a contributor
       never silently downloads; a source checkout keeps the fail-closed refusal
@@ -961,7 +971,7 @@ updates only its own entry below.
       through `mvm_core::crypto::image_verify` and the existing
       `release_trust` root — no new dependency. Two findings shaped it: the
       published `*.tar.gz.bundle` files are in the legacy cosign format the
-      in-binary Rust verifier *rejects*, so `release.yml`'s signing step is
+      in-binary Rust verifier _rejects_, so `release.yml`'s signing step is
       split (binary tarballs keep legacy for the cosign-CLI consumers,
       image tarballs move to `--new-bundle-format`); and no released version has
       ever shipped a runtime-overlay tarball, so mandatory verification costs
@@ -990,7 +1000,7 @@ updates only its own entry below.
       choice: same-uid alone is denied under `DUMPABLE=0`, and `DUMPABLE=1`
       alone is denied across a uid boundary. Exactly one configuration reads.
       Separately, a privilege drop leaves the process at `dumpable = 2`
-      (`SUID_DUMP_ROOT`), so "relax `DUMPABLE`" means *affirmatively raising* it
+      (`SUID_DUMP_ROOT`), so "relax `DUMPABLE`" means _affirmatively raising_ it
       after the drop in the launch path, not deleting a `prctl` in
       `hardening.rs`. `CAP_SYS_PTRACE` was considered and rejected against the
       emptied bounding set. One maintainer decision remains — accept the
@@ -1122,19 +1132,19 @@ The bar: a codebase an **expert human can read and navigate**, fully tested, fol
 
 ### 2.1 Crate map (~19 → ~11, named by domain area)
 
-| New crate        | Absorbs                                                                  | Role                                                                                                                                                          | `no_std`?                    |
-| ---------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| **mvm-contract** | `mvm-sdk::ir` + protocol wire types + policy types + `mvm-verify`        | Workload IR, wire protocol, policy/audit types, audit-log verifier. The wasm/browser-capable core.                                                            | **yes** (`no_std` + `alloc`) |
-| **mvm-core**     | `mvm-core` (std parts)                                                   | Single-dir config/paths, crypto (keystore/attestation/signing), catalog.                                                                                      | no (std)                     |
-| **mvm-fs**       | `mvm-ext4` + `mvm-oci` + build's rootfs/overlay/unpack                   | Turn any image (OCI **or** nix) into a mountable rootfs + `vmlinux`; ext4 writer/reader; runtime overlay; mount ordering/policy; OCI registry fetch + unpack. | no                           |
-| **mvm-net**      | `mvm-network` + hostd gateway/dns + guest net/netinit                  | vsock/UDS transport, host-mediated egress, DNS, network-policy enforcement, secret-substitution + PII-redaction seam.                                      | no                           |
-| **mvm-runtime**  | `mvm` + `mvm-backend`                                                    | `VmBackend` trait + libkrun/hvf/firecracker impls (mock behind `test-support`); VM lifecycle, templates, pool, warm-start.                                    | no                           |
-| **mvm-build**    | `mvm-build`                                                              | Nix builder-VM pipeline (the nix-execution engine).                                                                                                           | no                           |
-| **mvm-hostd**    | `mvm-hostd` + `mvm-vm-host` + host-side builder bins                     | **The single host binary.** Resident single-process daemon; all host roles as in-process tasks.                                                               | no                           |
-| **mvm-agentd**   | `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi`              | **The single guest binary.** Shipped in the runtime-overlay volume.                                                                                           | no                           |
-| **mvm-sdk**      | `mvm-sdk` (minus `ir`)                                                   | Decorator + runtime authoring + the **tree-sitter → Workload IR → nix template** pipeline.                                                                    | no                           |
-| **mvm-client**   | `mvm-client`                                                             | Facade (`MvmClient`). **Every CLI command routes through it.** The stable surface mvmd consumes.                                                              | no                           |
-| **mvm-cli**      | `mvm-cli`                                                                | `mvmctl`. Thin; delegates to `mvm-client`.                                                                                                                    | no                           |
+| New crate        | Absorbs                                                           | Role                                                                                                                                                          | `no_std`?                    |
+| ---------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| **mvm-contract** | `mvm-sdk::ir` + protocol wire types + policy types + `mvm-verify` | Workload IR, wire protocol, policy/audit types, audit-log verifier. The wasm/browser-capable core.                                                            | **yes** (`no_std` + `alloc`) |
+| **mvm-core**     | `mvm-core` (std parts)                                            | Single-dir config/paths, crypto (keystore/attestation/signing), catalog.                                                                                      | no (std)                     |
+| **mvm-fs**       | `mvm-ext4` + `mvm-oci` + build's rootfs/overlay/unpack            | Turn any image (OCI **or** nix) into a mountable rootfs + `vmlinux`; ext4 writer/reader; runtime overlay; mount ordering/policy; OCI registry fetch + unpack. | no                           |
+| **mvm-net**      | `mvm-network` + hostd gateway/dns + guest net/netinit             | vsock/UDS transport, host-mediated egress, DNS, network-policy enforcement, secret-substitution + PII-redaction seam.                                         | no                           |
+| **mvm-runtime**  | `mvm` + `mvm-backend`                                             | `VmBackend` trait + libkrun/hvf/firecracker impls (mock behind `test-support`); VM lifecycle, templates, pool, warm-start.                                    | no                           |
+| **mvm-build**    | `mvm-build`                                                       | Nix builder-VM pipeline (the nix-execution engine).                                                                                                           | no                           |
+| **mvm-hostd**    | `mvm-hostd` + `mvm-vm-host` + host-side builder bins              | **The single host binary.** Resident single-process daemon; all host roles as in-process tasks.                                                               | no                           |
+| **mvm-agentd**   | `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi`       | **The single guest binary.** Shipped in the runtime-overlay volume.                                                                                           | no                           |
+| **mvm-sdk**      | `mvm-sdk` (minus `ir`)                                            | Decorator + runtime authoring + the **tree-sitter → Workload IR → nix template** pipeline.                                                                    | no                           |
+| **mvm-client**   | `mvm-client`                                                      | Facade (`MvmClient`). **Every CLI command routes through it.** The stable surface mvmd consumes.                                                              | no                           |
+| **mvm-cli**      | `mvm-cli`                                                         | `mvmctl`. Thin; delegates to `mvm-client`.                                                                                                                    | no                           |
 
 Kept as-is: `crates/deps/libkrun-sys` (FFI), `xtask`. **Dropped/folded:** `mvm-ext4`, `mvm-network`, `mvm-verify`, `mvm-guest-helpers`, `mvm-vm-host`, `mvm-host-services-ffi`, `mvm-mcp` (folded into `mvmctl serve` behind an `AgentProtocol` trait — MCP now, ACP later, no per-protocol crate; see WS7), orphan Swift `mvm-vz-supervisor`, `qemu` backend, dead deps (`colored`, `names`, `hickory-server`, stale `mvm-egress-proxy` path).
 
@@ -1427,11 +1437,11 @@ Then unify + retire the old paths:
 
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
 - [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured
-  1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The
-  capability-negotiated `ResourceUsage` RPC uses the existing `/proc` sampler,
-  and `xtask perf footprint --guest-rss-bytes` enforces and reports the limit.
+      1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The
+      capability-negotiated `ResourceUsage` RPC uses the existing `/proc` sampler,
+      and `xtask perf footprint --guest-rss-bytes` enforces and reports the limit.
 - [x] Complete sealed guest ≤ **50 MB**: the Nix-built rootfs, static runtime
-  overlay, both dm-verity sidecars, and workload kernel total 33,917,960 bytes.
+      overlay, both dm-verity sidecars, and workload kernel total 33,917,960 bytes.
 - [ ] Host daemon ≈ **64 MB**: minimal runtime, evaluate `mimalloc`, strip deps.
 - [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
 - [ ] Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "abort"` for bins.
@@ -1463,7 +1473,7 @@ Then unify + retire the old paths:
       Since then the recorded reductions have closed: a claimed child is wired
       the host channels a cold boot gets (#1917); an egress-allowing launch is
       **keyed** into the pool rather than excluded from it —
-      `StandbyCompat::vsock_egress` (the launch's *effective* enablement: the
+      `StandbyCompat::vsock_egress` (the launch's _effective_ enablement: the
       policy allows egress **and** the admitted plan binds no secret) partitions
       the warm set, the parent boots that boolean and no destination, and the
       allow-list stays host-side on the claimed child's own egress endpoint; and
@@ -1495,13 +1505,13 @@ Then unify + retire the old paths:
         marker ownership, exact-PID teardown, cleanup ordering, and
         reconciliation. The analogous warm-pool claim-refusal cleanup remains
         a separate open gate.
-      Factory parents now receive an authority-free admitted plan and a signed
-      `checkpoint.created` anchor before entering the pool (#1962). Live KVM
-      validation proves a production-replenished parent is anchored and the
-      next claim passes the former `ParentUnaudited` gate, restores a child, and
-      reaches post-restore signaling. It then fails closed because the child's
-      identity/grant re-pin does not complete; that handshake remains the hard
-      blocker, with egress/broker/exit channel parity still behind it.
+        Factory parents now receive an authority-free admitted plan and a signed
+        `checkpoint.created` anchor before entering the pool (#1962). Live KVM
+        validation proves a production-replenished parent is anchored and the
+        next claim passes the former `ParentUnaudited` gate, restores a child, and
+        reaches post-restore signaling. It then fails closed because the child's
+        identity/grant re-pin does not complete; that handshake remains the hard
+        blocker, with egress/broker/exit channel parity still behind it.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.
@@ -1565,122 +1575,123 @@ Shipped in #1914 (core), #1931 (QEMU unified runner), #1933 (Docker dev-tier), #
 **Prerequisites:** satisfied. `feat/vsock-control-conformance` and `feat/firecracker-vsock-only-final` are already merged to `main`; `feat/hvf-converge-vsock` cleanup is in PR #1905.
 
 **Execution order:**
+
 1. [x] Initramfs Nix derivation + content-addressed build. Created
-   `nix/packages/mvm-guest-agent-static.nix`, `nix/images/initramfs/flake.nix`,
-   and exposed `packages.<system>.initramfs` producing `initramfs.cpio.gz`,
-   `initramfs.hash`, `initramfs.size`, and `VERSION`. **Replaced (#1996):**
-   the Linux build path is now `build_initramfs_with_cargo` in
-   `mvm-build/src/initramfs.rs` — the pinned agent source is cross-compiled
-   via the shared `guest_agent_build::resolve_or_build_guest_binaries` cache
-   and packed as an epoch-zero, stably-ordered newc cpio (same sidecar
-   contract). The flake remains only as the optional publish-path build.
+       `nix/packages/mvm-guest-agent-static.nix`, `nix/images/initramfs/flake.nix`,
+       and exposed `packages.<system>.initramfs` producing `initramfs.cpio.gz`,
+       `initramfs.hash`, `initramfs.size`, and `VERSION`. **Replaced (#1996):**
+       the Linux build path is now `build_initramfs_with_cargo` in
+       `mvm-build/src/initramfs.rs` — the pinned agent source is cross-compiled
+       via the shared `guest_agent_build::resolve_or_build_guest_binaries` cache
+       and packed as an epoch-zero, stably-ordered newc cpio (same sidecar
+       contract). The flake remains only as the optional publish-path build.
 2. [x] PID-1 signal handling and zombie reaping in `mvm-agentd`. Added
-   `init.rs` with PID-1 detection, early filesystem mounts, and a SIGCHLD
-   reaper. Wired into `mvm-guest-agent.rs` before the vsock bind.
+       `init.rs` with PID-1 detection, early filesystem mounts, and a SIGCHLD
+       reaper. Wired into `mvm-guest-agent.rs` before the vsock bind.
 3. [x] `ActivateEnvironment` protocol types and boot state machine. Added
-   `ActivateEnvironment`/`RootfsConfig`/`RuntimeOverlayConfig`/`VolumeConfig`
-   to the vsock protocol, plus `ActivationState` in `AgentBootState` and a
-   fail-closed dispatch gate that rejects everything except activation until
-   activated.
+       `ActivateEnvironment`/`RootfsConfig`/`RuntimeOverlayConfig`/`VolumeConfig`
+       to the vsock protocol, plus `ActivationState` in `AgentBootState` and a
+       fail-closed dispatch gate that rejects everything except activation until
+       activated.
 4. [x] Guest-side mount library (dm-verity + overlayfs). Filled
-   `guest_mount.rs` with real dm-verity ioctl setup, pivot_root/switch_root,
-   overlayfs runtime overlay, and virtio-fs volume mounting ported from
-   `mvm-verity-init.rs`. Includes policy guards (no shadowing of `/`, `/mvm`,
-   `/mvm/runtime`, `/dev`, `/dev/vda`, `/dev/vdc`), privilege drop with
-   supplementary-group clearance, and ext4 block-size probe. Focused tests and
-   workspace clippy pass; `cargo test -p mvm-agentd` green.
+       `guest_mount.rs` with real dm-verity ioctl setup, pivot_root/switch_root,
+       overlayfs runtime overlay, and virtio-fs volume mounting ported from
+       `mvm-verity-init.rs`. Includes policy guards (no shadowing of `/`, `/mvm`,
+       `/mvm/runtime`, `/dev`, `/dev/vda`, `/dev/vdc`), privilege drop with
+       supplementary-group clearance, and ext4 block-size probe. Focused tests and
+       workspace clippy pass; `cargo test -p mvm-agentd` green.
 
 5. [x] Host-side activation for the universal initramfs. Added
-   `mvm-runtime/src/microvm/activation.rs`, which builds
-   `ActivateEnvironment` from the admitted `VmStartConfig` (fixed virtio-blk
-   slots `/dev/vda`..`/dev/vdd`, rootfs roothash from config or sidecar,
-   runtime-overlay roothash, virtio-fs volume mapping, and verb-grant
-   envelope) and sends it over `RunningVm::vsock_connect(GUEST_AGENT_PORT)`.
-   `WorkloadRunner::start_workload` now activates after boot when both
-   `initrd_path` and `roothash` are present. `MockGuestAgent` answers
-   `ActivateEnvironment` with `ActivateEnvironmentAck` so hermetic tests stay
-   green. `cargo nextest run -p mvm-runtime` (1091 passed) and
-   `cargo nextest run -p mvm-agentd` (498 passed) confirm no regressions.
+       `mvm-runtime/src/microvm/activation.rs`, which builds
+       `ActivateEnvironment` from the admitted `VmStartConfig` (fixed virtio-blk
+       slots `/dev/vda`..`/dev/vdd`, rootfs roothash from config or sidecar,
+       runtime-overlay roothash, virtio-fs volume mapping, and verb-grant
+       envelope) and sends it over `RunningVm::vsock_connect(GUEST_AGENT_PORT)`.
+       `WorkloadRunner::start_workload` now activates after boot when both
+       `initrd_path` and `roothash` are present. `MockGuestAgent` answers
+       `ActivateEnvironment` with `ActivateEnvironmentAck` so hermetic tests stay
+       green. `cargo nextest run -p mvm-runtime` (1091 passed) and
+       `cargo nextest run -p mvm-agentd` (498 passed) confirm no regressions.
 
 6. [x] VmmDriver cmdline shrink for universal initramfs. Removed the
-   legacy `mvm.roothash`, `mvm.data`, `mvm.hash`, and runtime-overlay
-   device tokens from `workload_cmdline` for verity/initramfs boots; they
-   now travel over vsock via `ActivateEnvironment`. The driver base
-   bootargs already emitted only console/panic for the `!has_disk`
-   initramfs branch, so FC/libkrun/HVF/Mock drivers needed no signature
-   change. Updated `workload_runner::cmdline` and runner tests to assert
-   the new token-free cmdline shape. `cargo nextest run -p mvm-runtime`
-   (1091 passed) and `cargo nextest run -p mvm-agentd` (498 passed).
-   **Corrected — the shrink was unconditional and broke every host that
-   cannot resolve the universal artifact.**
-   `attach_universal_initramfs_if_cached` is non-fatal by design, and on
-   macOS it always fails (no local build for a Linux initramfs on macOS, and
-   the published `initramfs-<arch>.tar.gz` 404s), so the boot falls back to the
-   legacy per-rootfs `rootfs.initrd` whose PID 1 is `mvm-verity-init` — which
-   reads those exact tokens off the cmdline and is never sent
-   `ActivateEnvironment`. Result on every macOS `machine run --image`:
-   `mvm-verity-init: FATAL: no mvm.roothash= on kernel cmdline` → `Kernel
-   panic - Attempted to kill init!` before userspace, no guest agent, and a
-   host-side `Failed to read frame length` out of the first RPC.
-   `workload_cmdline` now emits the tokens whenever
-   `microvm::booted_with_universal_initramfs(config)` is false, so each boot
-   protocol gets the channel its PID 1 actually reads. The unit tests and the
-   `s4_verified_boot` feature that asserted the tokens were absent were
-   themselves keyed to a legacy `rootfs.initrd` fixture, so they encoded the
-   panic; each now carries a universal-flavour case (tokens absent) and a
-   legacy-flavour case (tokens present).
-8. [x] Guest-agent readiness proven on the wire. `wait_for_agent` /
-   `wait_for_guest_agent` both documented "reachable means it speaks the
-   protocol, not just that the socket is open", but reached that verdict
-   through `negotiate_protocol`, which in a non-test build takes the
-   `negotiate_protocol_authenticated` arm and never touches the stream — so
-   in every shipped binary the probe degenerated to "did `connect()` succeed".
-   The VMM binds the agent port before the guest kernel starts, so that
-   succeeds throughout the guest's boot and equally for a guest that panicked
-   before userspace; both callers then issued their real RPC into a dead
-   socket and surfaced `Failed to read frame length` from the framing layer.
-   Added `mvm_agentd::vsock::probe_agent_ready` — authenticated handshake plus
-   one `Ping`, real I/O with no cfg-gated shortcut, any answer (including a
-   refusal) counting as ready and only a transport failure as not-yet — and
-   routed both waiters through it.
-9. [x] Initramfs cache resolver/builder and CLI attachment. Added
-   `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs`
-   builder + cache installer, and `attach_universal_initramfs_if_cached` in
-   `mvm-cli/src/commands/vm/up/runtime_source.rs`, wired from `exec.rs` and
-   `oci_persist.rs` and `checkpoint.rs` right after the runtime-overlay attachment. The resolver
-   validates `initramfs.cpio.gz`, `initramfs.hash`, `initramfs.size`, and
-   `VERSION`; the builder supports worktree-isolated caches by seeding from
-   the default cache, falls back to a published-release download on non-Linux
-   hosts, produces the artifact on Linux via the deterministic cargo build
-   (`build_initramfs_with_cargo` — previously `nix build`, replaced in
-   #1996), and installs
-   atomically. `cargo fmt --all`, `cargo clippy --workspace --all-targets --
-   -D warnings`, the spec-ref lint, targeted nextest for the modified crates
-   (mvm-fs, mvm-build, mvm-runtime, mvm-agentd, mvm-cli initramfs tests),
-   and the pre-commit hook all pass. Full workspace nextest on the Linux
-   builder VM now passes (8136 passed, 12 skipped) after also fixing the
-   runtime-overlay flake's `__pycache__` cleanup in the Nix sandbox. Full
-   workspace nextest on macOS still shows four pre-existing mvm-build
-   failures unrelated to Plan 270. The end-to-end Nix build of the initramfs
-   flake succeeded on the Linux builder VM after removing the
-   sandbox-incompatible `mknod` calls (device nodes are provided by devtmpfs
-   at guest boot).  The `universal_initramfs_attach_tests` cold-cache
-   assertion was relaxed so the test stays green on Linux, where the Nix build
-   fallback can warm the cache automatically.  Added a BDD scenario for the
-   cold-cache non-fatal fallback under `features/suites/s14_universal_initramfs`,
-   and updated the verified-boot cmdline feature to assert that the legacy
-   `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots
-   — narrowed by item 6's correction to *universal*-initramfs boots only.
-10. [x] Retired the obsolete CLI workload-guest payload. `mvm-cli/build.rs`
-    now embeds only the host and seed builder/bootstrap manifests; the six
-    workload helpers are supplied by the universal initramfs and runtime
-    overlay. Removed the dead skip-embedding environment switch and fast-test
-    recipe, deleted the embedded-byte OCI plumbing, retained a content-keyed
-    source fallback for legacy rootfs-only development, and added `xtask` plus
-    integration assertions that prevent workload binaries from returning to
-    the CLI payload. Focused tests, workspace clippy, formatting, and the full
-    workspace test suite pass; the latter was run serially because unrelated
-    tests mutate process-global environment variables under parallel execution.
+       legacy `mvm.roothash`, `mvm.data`, `mvm.hash`, and runtime-overlay
+       device tokens from `workload_cmdline` for verity/initramfs boots; they
+       now travel over vsock via `ActivateEnvironment`. The driver base
+       bootargs already emitted only console/panic for the `!has_disk`
+       initramfs branch, so FC/libkrun/HVF/Mock drivers needed no signature
+       change. Updated `workload_runner::cmdline` and runner tests to assert
+       the new token-free cmdline shape. `cargo nextest run -p mvm-runtime`
+       (1091 passed) and `cargo nextest run -p mvm-agentd` (498 passed).
+       **Corrected — the shrink was unconditional and broke every host that
+       cannot resolve the universal artifact.**
+       `attach_universal_initramfs_if_cached` is non-fatal by design, and on
+       macOS it always fails (no local build for a Linux initramfs on macOS, and
+       the published `initramfs-<arch>.tar.gz` 404s), so the boot falls back to the
+       legacy per-rootfs `rootfs.initrd` whose PID 1 is `mvm-verity-init` — which
+       reads those exact tokens off the cmdline and is never sent
+       `ActivateEnvironment`. Result on every macOS `machine run --image`:
+       `mvm-verity-init: FATAL: no mvm.roothash= on kernel cmdline` → `Kernel
+panic - Attempted to kill init!` before userspace, no guest agent, and a
+       host-side `Failed to read frame length` out of the first RPC.
+       `workload_cmdline` now emits the tokens whenever
+       `microvm::booted_with_universal_initramfs(config)` is false, so each boot
+       protocol gets the channel its PID 1 actually reads. The unit tests and the
+       `s4_verified_boot` feature that asserted the tokens were absent were
+       themselves keyed to a legacy `rootfs.initrd` fixture, so they encoded the
+       panic; each now carries a universal-flavour case (tokens absent) and a
+       legacy-flavour case (tokens present).
+7. [x] Guest-agent readiness proven on the wire. `wait_for_agent` /
+       `wait_for_guest_agent` both documented "reachable means it speaks the
+       protocol, not just that the socket is open", but reached that verdict
+       through `negotiate_protocol`, which in a non-test build takes the
+       `negotiate_protocol_authenticated` arm and never touches the stream — so
+       in every shipped binary the probe degenerated to "did `connect()` succeed".
+       The VMM binds the agent port before the guest kernel starts, so that
+       succeeds throughout the guest's boot and equally for a guest that panicked
+       before userspace; both callers then issued their real RPC into a dead
+       socket and surfaced `Failed to read frame length` from the framing layer.
+       Added `mvm_agentd::vsock::probe_agent_ready` — authenticated handshake plus
+       one `Ping`, real I/O with no cfg-gated shortcut, any answer (including a
+       refusal) counting as ready and only a transport failure as not-yet — and
+       routed both waiters through it.
+8. [x] Initramfs cache resolver/builder and CLI attachment. Added
+       `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs`
+       builder + cache installer, and `attach_universal_initramfs_if_cached` in
+       `mvm-cli/src/commands/vm/up/runtime_source.rs`, wired from `exec.rs` and
+       `oci_persist.rs` and `checkpoint.rs` right after the runtime-overlay attachment. The resolver
+       validates `initramfs.cpio.gz`, `initramfs.hash`, `initramfs.size`, and
+       `VERSION`; the builder supports worktree-isolated caches by seeding from
+       the default cache, falls back to a published-release download on non-Linux
+       hosts, produces the artifact on Linux via the deterministic cargo build
+       (`build_initramfs_with_cargo` — previously `nix build`, replaced in
+       #1996), and installs
+       atomically. `cargo fmt --all`, `cargo clippy --workspace --all-targets --
+-D warnings`, the spec-ref lint, targeted nextest for the modified crates
+       (mvm-fs, mvm-build, mvm-runtime, mvm-agentd, mvm-cli initramfs tests),
+       and the pre-commit hook all pass. Full workspace nextest on the Linux
+       builder VM now passes (8136 passed, 12 skipped) after also fixing the
+       runtime-overlay flake's `__pycache__` cleanup in the Nix sandbox. Full
+       workspace nextest on macOS still shows four pre-existing mvm-build
+       failures unrelated to Plan 270. The end-to-end Nix build of the initramfs
+       flake succeeded on the Linux builder VM after removing the
+       sandbox-incompatible `mknod` calls (device nodes are provided by devtmpfs
+       at guest boot). The `universal_initramfs_attach_tests` cold-cache
+       assertion was relaxed so the test stays green on Linux, where the Nix build
+       fallback can warm the cache automatically. Added a BDD scenario for the
+       cold-cache non-fatal fallback under `features/suites/s14_universal_initramfs`,
+       and updated the verified-boot cmdline feature to assert that the legacy
+       `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots
+       — narrowed by item 6's correction to _universal_-initramfs boots only.
+9. [x] Retired the obsolete CLI workload-guest payload. `mvm-cli/build.rs`
+       now embeds only the host and seed builder/bootstrap manifests; the six
+       workload helpers are supplied by the universal initramfs and runtime
+       overlay. Removed the dead skip-embedding environment switch and fast-test
+       recipe, deleted the embedded-byte OCI plumbing, retained a content-keyed
+       source fallback for legacy rootfs-only development, and added `xtask` plus
+       integration assertions that prevent workload binaries from returning to
+       the CLI payload. Focused tests, workspace clippy, formatting, and the full
+       workspace test suite pass; the latter was run serially because unrelated
+       tests mutate process-global environment variables under parallel execution.
 
 Live witness for items 6 and 8 on macOS 26.5.2 / arm64, HVF backend, after the
 corrections: `machine run --image alpine -- /bin/sh -c "echo TRANSIENT-OK; cat
@@ -1734,7 +1745,7 @@ nothing for ICMP — not a misconfiguration, an absent transport.
 
 The host now echoes on the guest's behalf behind an `MVM_ICMP/1` frame on the
 shared egress stream, decided by the same claim-10 gate every other verb uses.
-`EgressGate::decide_icmp_request` admits a host the allow-list named on *any*
+`EgressGate::decide_icmp_request` admits a host the allow-list named on _any_
 port (ICMP has none), refuses one it did not, and keeps mandatory-deny above the
 allow-list so a pinned loopback address cannot turn ping into a probe of the
 host's own networks. The socket is the unprivileged `SOCK_DGRAM`/`IPPROTO_ICMP`
@@ -1828,7 +1839,7 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan
 ### Deferred: a dry run should not require a bootable backend
 
 `machine run --dry-run` with egress enabled (`--allow-host` / `--net`) resolves an
-*available* egress-capable backend before printing the plan, so it exits 1 on a
+_available_ egress-capable backend before printing the plan, so it exits 1 on a
 host with no usable VMM. That makes the command's outcome a fact about the host
 rather than about the request, and it is why two otherwise-valuable hermetic
 scenarios — that a bare `--allow-host <host>` resolves to `<host>:443`, and that
