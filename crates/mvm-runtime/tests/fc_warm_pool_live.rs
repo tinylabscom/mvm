@@ -135,6 +135,10 @@ fn fc_warm_pool_spawn_and_claim() {
             .to_path_buf()
     });
     std::fs::create_dir_all(&home).expect("create live-test home");
+    let keys = home.join("keys");
+    std::fs::create_dir_all(&keys).expect("create live-test keys");
+    std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32])
+        .expect("write live-test host signer");
     // SAFETY: this harness is `#[ignore]` and runs single-threaded by hand, so
     // no other thread is reading the environment concurrently.
     unsafe { std::env::set_var("MVM_HOME", &home) };
