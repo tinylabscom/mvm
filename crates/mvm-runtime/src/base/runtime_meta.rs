@@ -27,6 +27,10 @@ use anyhow::{Context, Result};
 use mvm_core::vm_backend::{RuntimeSourcePolicy, StartMode, VmStartConfig};
 use serde::{Deserialize, Serialize};
 
+pub use crate::base::observability_target::{
+    ProcessTarget, VmObservabilityTarget, VmmTarget, VsockTarget,
+};
+
 /// Workspace-wide test serialization for tests that mutate `HOME`
 /// (or any other process-global env var). Multiple modules across
 /// `mvm` and `mvm-backend` need this; sharing one lock
@@ -79,6 +83,12 @@ pub struct VmRuntimeMeta {
     /// Older mode.json files and rootfs-only boots read as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_overlay_version: Option<String>,
+
+    /// Host-side observability target for eBPF/procfs telemetry collectors.
+    ///
+    /// Best-effort: if the file cannot be written the VM still starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability_target: Option<VmObservabilityTarget>,
 }
 
 fn default_accessible() -> bool {
@@ -157,6 +167,22 @@ pub fn write(name: &str, meta: &VmRuntimeMeta) -> Result<()> {
     Ok(())
 }
 
+/// Update just the `observability_target` field of an existing metadata file.
+///
+/// Best-effort: logs a warning and returns `Ok(())` if the file cannot be
+/// read or written. This keeps observability metadata from failing VM start.
+pub fn update_observability_target(name: &str, target: &VmObservabilityTarget) -> Result<()> {
+    let mut meta = match read(name)? {
+        Some(m) => m,
+        None => {
+            tracing::warn!(vm = %name, "runtime_meta: no existing mode.json to update observability target");
+            return Ok(());
+        }
+    };
+    meta.observability_target = Some(target.clone());
+    write(name, &meta)
+}
+
 /// Read the metadata file. Returns `Ok(None)` if the file is missing
 /// (the VM was never started, or the writer skipped due to a
 /// best-effort failure). Errors only on malformed JSON that has
@@ -182,6 +208,7 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
         rootfs_path: None,
         runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
         runtime_overlay_version: None,
+        observability_target: None,
     }
 }
 
@@ -201,6 +228,7 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
         rootfs_path: None,
         runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
         runtime_overlay_version: None,
+        observability_target: None,
     })
 }
 
@@ -267,6 +295,7 @@ mod tests {
                 rootfs_path: None,
                 runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
+                observability_target: None,
             };
             write("rt-test-1", &meta).expect("write");
             let read_back = read("rt-test-1").expect("read").expect("present");
@@ -283,6 +312,7 @@ mod tests {
                 rootfs_path: None,
                 runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
+                observability_target: None,
             };
             write("rt-test-2", &meta).expect("write");
             let read_back = read("rt-test-2").expect("read").expect("present");
@@ -420,6 +450,7 @@ mod tests {
                 rootfs_path: Some("/abs/path/rootfs.ext4".to_string()),
                 runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
                 runtime_overlay_version: Some("0.17.0".to_string()),
+                observability_target: None,
             };
             write("rp-with", &with_path).expect("write");
             let back = read("rp-with").expect("read").expect("present");
@@ -436,6 +467,7 @@ mod tests {
                 rootfs_path: None,
                 runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
+                observability_target: None,
             };
             write("rp-without", &without_path).expect("write");
             let back2 = read("rp-without").expect("read").expect("present");

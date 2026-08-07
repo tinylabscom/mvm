@@ -6,11 +6,12 @@
 //!
 //! ## What lives here
 //!
-//! | Module          | Purpose                                                |
-//! |-----------------|--------------------------------------------------------|
-//! | `ui`            | `[mvm]` printing + spinners + interactive prompts      |
-//! | `runtime_meta`  | Per-VM `~/.mvm/vms/<name>/mode.json` (console gate) |
-//! | `cow`           | Reflink (CoW) file cloning + `clone_rootfs_for_instance` |
+//! | Module                 | Purpose                                                |
+//! |------------------------|--------------------------------------------------------|
+//! | `ui`                   | `[mvm]` printing + spinners + interactive prompts      |
+//! | `runtime_meta`         | Per-VM `~/.mvm/vms/<name>/mode.json` (console gate)    |
+//! | `observability_target` | Per-VM host-side probe metadata (eBPF/procfs)          |
+//! | `cow`                  | Reflink (CoW) file cloning + `clone_rootfs_for_instance` |
 //! | `config`        | Builder VM name, FC network/path constants, wire types |
 //! | `shell`         | Host + Linux-env command execution helpers             |
 //! | `linux_env`     | Dispatch trait impls (NativeEnv, DevVmEnv)             |
@@ -25,6 +26,7 @@
 pub mod config;
 pub mod cow;
 pub mod linux_env;
+pub mod observability_target;
 pub mod runtime_meta;
 pub mod shell;
 pub mod snapshot_integrity;

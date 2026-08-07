@@ -5,9 +5,11 @@
 //! closed when the machine stops — so no listener exists that the plan did
 //! not declare, and a restart cannot inherit one.
 //!
-//! Version 1 implements TCP. UDP ingress needs a per-mapping datagram
-//! association table with its own bounds; declaring one is refused here
-//! rather than accepted and quietly ignored.
+//! TCP and UDP are both declarable. Whether a mapping is *served* is a
+//! property of the selected forwarding backend, not of this table: a
+//! backend that forwards whole packets needs nothing bound, while one that
+//! translates flows into host sockets has to open a listener per mapping
+//! and reports so through its capabilities.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -79,10 +81,6 @@ pub enum IngressError {
     /// The mapping table is full.
     #[error("ingress table full ({limit} mappings)")]
     TableFull { limit: usize },
-    /// UDP ingress is not implemented: it needs a per-mapping datagram
-    /// association table with its own bounds, which version 1 does not have.
-    #[error("UDP ingress is not implemented in protocol version 1")]
-    UdpNotImplemented,
     /// Port zero is not a listener.
     #[error("port 0 is not a valid ingress port")]
     ZeroPort,
@@ -123,9 +121,6 @@ impl IngressTable {
 
     /// Declare a mapping.
     pub fn declare(&mut self, mapping: IngressMapping) -> Result<(), IngressError> {
-        if mapping.proto == Proto::Udp {
-            return Err(IngressError::UdpNotImplemented);
-        }
         if mapping.host_port == 0 || mapping.guest_port == 0 {
             return Err(IngressError::ZeroPort);
         }
@@ -272,14 +267,18 @@ mod tests {
         assert!(!IngressMapping::tcp(addr(127, 0, 0, 1), 1, 1).is_wildcard());
     }
 
+    /// A datagram mapping is a declaration like any other, and admission
+    /// keys on the protocol as well as the port: a UDP mapping opens no
+    /// TCP port and vice versa.
     #[test]
-    fn udp_ingress_is_refused_rather_than_silently_ignored() {
+    fn a_declared_udp_mapping_admits_its_guest_port_and_only_its_protocol() {
         let mut table = IngressTable::with_defaults();
-        assert!(matches!(
-            table.declare(IngressMapping::udp(addr(127, 0, 0, 1), 5353, 53)),
-            Err(IngressError::UdpNotImplemented)
-        ));
-        assert!(table.is_empty());
+        table
+            .declare(IngressMapping::udp(addr(127, 0, 0, 1), 5353, 53))
+            .unwrap();
+        assert!(table.admits(proto::UDP, 53));
+        assert!(!table.admits(proto::TCP, 53), "protocol must match");
+        assert!(!table.admits(proto::UDP, 54), "no mapping, no admission");
     }
 
     #[test]

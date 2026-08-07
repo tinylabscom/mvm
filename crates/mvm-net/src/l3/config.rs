@@ -7,7 +7,7 @@
 //! already-admitted contract, which is what keeps the admission decision in
 //! one place.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,11 @@ pub struct NetdConfig {
     pub vm_id: String,
     pub boot_id: String,
     pub plan_digest: String,
+    /// Whose audit chain this machine's gateway decisions belong on. Taken
+    /// from the signed plan so a refusal lands beside the admission that
+    /// authorized the workload, rather than in a stream of its own.
+    #[serde(default = "default_tenant")]
+    pub tenant: String,
 
     /// Which socket-directory convention this backend uses.
     pub uds_layout: NetdUdsLayout,
@@ -41,6 +46,13 @@ pub struct NetdConfig {
     /// The assigned point-to-point addressing.
     pub gateway_ipv4: Ipv4Addr,
     pub guest_ipv4: Ipv4Addr,
+    /// The same pair in IPv6, for a machine issued one. Absent means the
+    /// machine has no IPv6 address at all, and admission refuses the family
+    /// rather than checking a source against nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_ipv6: Option<Ipv6Addr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_ipv6: Option<Ipv6Addr>,
     pub mtu: u16,
 
     /// The canonical egress projection, already resolved. Serialized as the
@@ -62,9 +74,13 @@ pub struct NetdConfig {
     #[serde(default = "default_dns_qps")]
     pub dns_qps: u32,
 
-    /// Declared ingress mappings. TCP only.
+    /// Declared ingress mappings, `"tcp"` or `"udp"`.
     #[serde(default)]
     pub ingress: Vec<NetdIngress>,
+}
+
+fn default_tenant() -> String {
+    "local".to_string()
 }
 
 fn default_max_flows() -> usize {
@@ -140,8 +156,6 @@ pub enum NetdConfigError {
     Unparseable { field: &'static str, value: String },
     #[error("unknown protocol {0:?} (expected \"tcp\" or \"udp\")")]
     UnknownProto(String),
-    #[error("UDP ingress is not implemented in protocol version 1")]
-    UdpIngressUnsupported,
     #[error("{0}")]
     Ingress(#[from] crate::l3::IngressError),
 }
@@ -216,14 +230,11 @@ impl NetdConfig {
         })
     }
 
-    /// Lower the declared ingress mappings, refusing UDP rather than
-    /// silently ignoring it.
+    /// Lower the declared ingress mappings, refusing a protocol nobody
+    /// named rather than guessing one.
     pub fn to_ingress_table(&self) -> Result<crate::l3::IngressTable, NetdConfigError> {
         let mut table = crate::l3::IngressTable::with_defaults();
         for mapping in &self.ingress {
-            if mapping.proto != "tcp" {
-                return Err(NetdConfigError::UdpIngressUnsupported);
-            }
             let host_addr =
                 mapping
                     .host_addr
@@ -232,18 +243,30 @@ impl NetdConfig {
                         field: "ingress host address",
                         value: mapping.host_addr.clone(),
                     })?;
-            table.declare(crate::l3::IngressMapping::tcp(
-                host_addr,
-                mapping.host_port,
-                mapping.guest_port,
-            ))?;
+            let declared = match mapping.proto.as_str() {
+                "tcp" => {
+                    crate::l3::IngressMapping::tcp(host_addr, mapping.host_port, mapping.guest_port)
+                }
+                "udp" => {
+                    crate::l3::IngressMapping::udp(host_addr, mapping.host_port, mapping.guest_port)
+                }
+                other => return Err(NetdConfigError::UnknownProto(other.to_string())),
+            };
+            table.declare(declared)?;
         }
         Ok(table)
     }
 
     /// The address lease this configuration assigns.
     pub fn lease(&self) -> crate::l3::AddressLease {
-        crate::l3::AddressLease::for_test(self.gateway_ipv4, self.guest_ipv4)
+        let lease = crate::l3::AddressLease::for_test(self.gateway_ipv4, self.guest_ipv4);
+        match (self.gateway_ipv6, self.guest_ipv6) {
+            (Some(gateway), Some(guest)) => lease.with_v6(gateway, guest),
+            // A half-configured pair grants nothing: a guest address with no
+            // gateway has no resolver to reach, and a gateway with no guest
+            // address has nothing anti-spoofing could accept.
+            _ => lease,
+        }
     }
 }
 
@@ -257,9 +280,12 @@ mod tests {
             vm_id: "vm-a".into(),
             boot_id: "boot-1".into(),
             plan_digest: "sha256:plan".into(),
+            tenant: "local".into(),
             uds_layout: NetdUdsLayout::PerVmDir,
             gateway_ipv4: Ipv4Addr::new(10, 201, 0, 5),
             guest_ipv4: Ipv4Addr::new(10, 201, 0, 6),
+            gateway_ipv6: None,
+            guest_ipv6: None,
             mtu: 1500,
             egress: NetdEgress::Rules(vec![NetdRule {
                 proto: "tcp".into(),
@@ -347,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_ingress_is_refused_rather_than_dropped() {
+    fn declared_udp_ingress_lowers_into_the_table() {
         let mut cfg = config();
         cfg.ingress = vec![NetdIngress {
             proto: "udp".into(),
@@ -355,9 +381,27 @@ mod tests {
             host_port: 5353,
             guest_port: 53,
         }];
+        let table = cfg.to_ingress_table().unwrap();
+        assert!(table.admits(mvm_contract::l3::proto::UDP, 53));
+        assert!(
+            !table.admits(mvm_contract::l3::proto::TCP, 53),
+            "a datagram mapping opens no stream port"
+        );
+    }
+
+    /// A protocol nobody named is refused rather than defaulted to one.
+    #[test]
+    fn an_unknown_ingress_protocol_is_refused() {
+        let mut cfg = config();
+        cfg.ingress = vec![NetdIngress {
+            proto: "sctp".into(),
+            host_addr: "127.0.0.1".into(),
+            host_port: 5353,
+            guest_port: 53,
+        }];
         assert!(matches!(
             cfg.to_ingress_table(),
-            Err(NetdConfigError::UdpIngressUnsupported)
+            Err(NetdConfigError::UnknownProto(_))
         ));
     }
 

@@ -237,6 +237,7 @@ impl Commands {
             Commands::Trust(a) => a.action.verb_name(),
             Commands::Deps(_) => "deps",
             Commands::Artifact(_) => "artifact",
+            Commands::SeccompAudit(_) => "seccomp-audit",
             #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(_) => "persistent-builder",
             Commands::QemuVsockBridge(_) => "__qemu-vsock-bridge",

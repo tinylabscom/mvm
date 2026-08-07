@@ -54,6 +54,10 @@ pub mod keyholder;
 /// host-owned session, and passing frame, IP, and signed-plan policy
 /// validation.
 pub mod netd;
+/// The node-control surface a fleet control plane calls to ask this host
+/// about its own networking. Node-local by construction: it answers only
+/// from state this node owns, scoped to the caller the kernel identifies.
+pub mod nodectl;
 /// Child-side parent-death watchdog: each subprocess-moat bin exits the
 /// instant its supervisor dies, closing the macOS / abnormal-death gap the
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.

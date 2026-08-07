@@ -672,7 +672,8 @@ where
             env.push(c);
         }
     }
-    env.push(std::ffi::CString::new("HOME=/root").expect("no interior NUL"));
+    let home = format!("HOME={}", crate::guest_mount::workload_home());
+    env.push(std::ffi::CString::new(home).expect("no interior NUL"));
     env.push(std::ffi::CString::new("TERM=xterm-256color").expect("no interior NUL"));
     env
 }
@@ -727,7 +728,8 @@ mod tests {
         );
         assert_eq!(strs.iter().filter(|s| s.starts_with("HOME=")).count(), 1);
         assert_eq!(strs.iter().filter(|s| s.starts_with("TERM=")).count(), 1);
-        assert!(strs.contains(&"HOME=/root"), "{strs:?}");
+        let expected_home = format!("HOME={}", crate::guest_mount::workload_home());
+        assert!(strs.contains(&expected_home.as_str()), "{strs:?}");
         assert!(strs.contains(&"TERM=xterm-256color"), "{strs:?}");
         assert!(!strs.contains(&"HOME=/somewhere/else"));
     }
@@ -741,7 +743,8 @@ mod tests {
         let out = build_shell_env_from([(oss("WEIRD"), bad)], &[]);
         let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
         assert!(!strs.iter().any(|s| s.starts_with("WEIRD=")), "{strs:?}");
-        assert!(strs.contains(&"HOME=/root"));
+        let expected_home = format!("HOME={}", crate::guest_mount::workload_home());
+        assert!(strs.contains(&expected_home.as_str()));
         assert!(strs.contains(&"TERM=xterm-256color"));
     }
 

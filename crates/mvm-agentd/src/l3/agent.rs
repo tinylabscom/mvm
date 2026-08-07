@@ -15,7 +15,7 @@ use mvm_contract::l3::{
     ShutdownReason, frame, limits, message,
 };
 
-use super::netcfg::{InterfaceConfigurator, InterfacePlan};
+use super::netcfg::{InterfaceConfigurator, InterfacePlan, Ipv6Plan};
 use super::privdrop::{PrivilegeDropper, SystemPrivilegeDropper};
 use super::tun::{TunDevice, TunError};
 
@@ -199,8 +199,17 @@ impl<T: TunDevice, C: InterfaceConfigurator> NetAgent<T, C> {
             ));
         }
         let config = Config::decode(&payload)?;
+        // IPv6 is additive here, never a substitute. A v6-only assignment is
+        // refused rather than half-applied: the MTU, the link state, and the
+        // default route all hang off the v4 sequence, so a guest handed one
+        // would come up looking configured with no route off the link. The
+        // host allocator assigns a v4 pair with every lease, so this is a
+        // contradiction to name, not a case to serve.
         let v4 = config.v4.ok_or_else(|| {
-            AgentError::Protocol("this build carries IPv4 only; CONFIG assigned none".into())
+            AgentError::Protocol(
+                "CONFIG assigned no IPv4; this build treats IPv6 as additive to a v4 assignment"
+                    .into(),
+            )
         })?;
         if config.queue_count != limits::QUEUE_COUNT_V1 {
             return Err(AgentError::Protocol(format!(
@@ -220,6 +229,12 @@ impl<T: TunDevice, C: InterfaceConfigurator> NetAgent<T, C> {
             prefix_len: v4.prefix_len,
             mtu: config.mtu,
             dns: v4.dns.into(),
+            v6: config.v6.map(|v6| Ipv6Plan {
+                address: v6.address.into(),
+                peer: v6.peer.into(),
+                prefix_len: v6.prefix_len,
+                dns: v6.dns.into(),
+            }),
         };
         self.configurator.apply(&plan)?;
         self.resolver_configured = self.configurator.write_resolv_conf(&plan);
@@ -492,6 +507,7 @@ mod tests {
     use crate::l3::tun::MemoryTun;
     use mvm_contract::l3::{Ipv4Config, features};
     use std::io::Cursor;
+    use std::str::FromStr;
 
     const SESSION: u64 = 0xABCD_EF01_2345_6789;
 
@@ -513,8 +529,20 @@ mod tests {
             v6: None,
             mtu: limits::MTU_V1,
             queue_count: 1,
-            features: features::GRANTED_V1,
+            features: 0,
             policy_epoch: 7,
+        }
+    }
+
+    /// The v6 half of a dual-stack assignment: a /126 whose peer is the
+    /// gateway and the resolver, mirroring the v4 lease's shape.
+    fn v6_config() -> mvm_contract::l3::Ipv6Config {
+        let addr = |s: &str| std::net::Ipv6Addr::from_str(s).unwrap().octets();
+        mvm_contract::l3::Ipv6Config {
+            address: addr("2001:db8::6"),
+            prefix_len: 126,
+            peer: addr("2001:db8::5"),
+            dns: addr("2001:db8::5"),
         }
     }
 
@@ -740,17 +768,14 @@ mod tests {
     }
 
     #[test]
-    fn a_config_with_no_v4_assignment_is_refused() {
-        // Encode a v6-only CONFIG directly: `Config::decode` accepts it, and
-        // the refusal must come from the agent knowing it carries v4 only.
+    fn a_config_with_no_v4_assignment_is_refused_rather_than_half_applied() {
+        // Encode a v6-only CONFIG directly: `Config::decode` accepts it, so
+        // the refusal must come from the agent. Applying the v6 half alone
+        // would leave a guest with an interface, no MTU negotiation, and no
+        // route off the link — configured-looking and unusable.
         let cfg = Config {
             v4: None,
-            v6: Some(mvm_contract::l3::Ipv6Config {
-                address: [0x20; 16],
-                prefix_len: 127,
-                peer: [0x21; 16],
-                dns: [0x22; 16],
-            }),
+            v6: Some(v6_config()),
             features: features::IPV6,
             ..config()
         };
@@ -758,8 +783,57 @@ mod tests {
         let mut agent = agent();
         assert!(matches!(
             agent.handshake(&mut control),
-            Err(AgentError::Protocol(msg)) if msg.contains("IPv4 only")
+            Err(AgentError::Protocol(msg)) if msg.contains("no IPv4")
         ));
+        assert_eq!(agent.state(), AgentState::Unavailable);
+        assert!(
+            agent.configurator().applied.is_empty(),
+            "nothing may be applied when the assignment is refused"
+        );
+    }
+
+    #[test]
+    fn a_dual_stack_config_configures_both_families() {
+        let cfg = Config {
+            v6: Some(v6_config()),
+            features: features::IPV6,
+            ..config()
+        };
+        let mut control = ScriptedControl::with_config(&cfg, SESSION);
+        let mut agent = agent();
+        agent.handshake(&mut control).unwrap();
+
+        let plan = agent.interface_plan().unwrap();
+        // The v4 half is untouched by the presence of a v6 one.
+        assert_eq!(plan.address, std::net::Ipv4Addr::new(10, 201, 0, 6));
+        assert_eq!(
+            plan.v6,
+            Some(Ipv6Plan {
+                address: "2001:db8::6".parse().unwrap(),
+                peer: "2001:db8::5".parse().unwrap(),
+                prefix_len: 126,
+                dns: "2001:db8::5".parse().unwrap(),
+            }),
+            "the host's v6 assignment must reach the configurator verbatim"
+        );
+        assert_eq!(
+            &agent.configurator().applied[0],
+            plan,
+            "what was applied is what was assigned"
+        );
+        let body = String::from_utf8(plan.resolv_conf()).unwrap();
+        assert!(body.contains("nameserver 2001:db8::5"), "{body}");
+    }
+
+    #[test]
+    fn a_v4_only_config_still_carries_no_v6_half() {
+        // The whole change is additive: a host that assigns no v6 must
+        // produce exactly the plan it produced before v6 existed here.
+        let mut agent = agent();
+        let mut control = ScriptedControl::with_config(&config(), SESSION);
+        agent.handshake(&mut control).unwrap();
+        assert_eq!(agent.interface_plan().unwrap().v6, None);
+        assert_eq!(agent.configurator().applied[0].v6, None);
     }
 
     #[test]

@@ -12,6 +12,7 @@ authors.workspace = true
 mvm-contract = { workspace = true, default-features = false, features = ["protocol", "volume"] }
 anyhow.workspace = true
 base64.workspace = true
+bs58.workspace = true
 serde_jcs = "0.1"
 unicode-normalization = "0.1"
 chrono.workspace = true
@@ -88,6 +89,10 @@ reqwest = { workspace = true, optional = true }
 # (`mvmctl/hostd-transport`); `manifest-verify` pulls it independently.
 # `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core
 # -e no-dev` carries no `tokio` so this can't silently regress.
+[target.'cfg(target_os = "linux")'.dependencies]
+# The shared seccomp syscall table needs libc constants on Linux.
+libc.workspace = true
+
 [features]
 default = []
 # The per-VM name-constrained egress CA

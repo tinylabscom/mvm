@@ -223,7 +223,9 @@ fn measure_end_to_end_host_side() {
             gateway: admitter.lease().gateway,
             guest,
             prefix_len: 30,
+            v6: None,
             mtu: limits::MTU_V1,
+            ingress: Vec::new(),
         })
         .expect("open the datapath");
 

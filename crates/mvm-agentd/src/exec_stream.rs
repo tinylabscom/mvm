@@ -103,6 +103,7 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
     builder
         .arg("-c")
         .arg(command)
+        .env("HOME", crate::guest_mount::workload_home())
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
         } else {
@@ -317,5 +318,23 @@ mod tests {
         let mut events = Vec::new();
         let term = stream_exec("printf done", None, None, |e| events.push(e));
         assert!(matches!(term, ExecEvent::Exit { code: 0 }), "got {term:?}");
+    }
+
+    #[test]
+    fn sets_home_to_workload_home() {
+        let mut events = Vec::new();
+        let term = stream_exec("printf '%s' \"$HOME\"", None, None, |e| events.push(e));
+        assert!(matches!(term, ExecEvent::Exit { code: 0 }), "got {term:?}");
+        let out: Vec<u8> = events
+            .iter()
+            .filter_map(|e| match e {
+                ExecEvent::Stdout { chunk } => Some(chunk.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let home = std::str::from_utf8(&out).expect("utf-8 home");
+        assert_eq!(home, crate::guest_mount::workload_home());
+        assert!(!home.is_empty());
     }
 }

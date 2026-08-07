@@ -45,9 +45,12 @@ fn config(vm_id: &str) -> NetdConfig {
         vm_id: vm_id.into(),
         boot_id: "boot-1".into(),
         plan_digest: "sha256:plan".into(),
+        tenant: "local".into(),
         uds_layout: NetdUdsLayout::PerVmDir,
         gateway_ipv4: "10.201.0.5".parse().unwrap(),
         guest_ipv4: "10.201.0.6".parse().unwrap(),
+        gateway_ipv6: None,
+        guest_ipv6: None,
         mtu: 1500,
         egress: NetdEgress::Rules(vec![NetdRule {
             proto: "tcp".into(),
@@ -269,6 +272,34 @@ fn the_netd_process_refuses_a_config_whose_rules_do_not_parse() {
     );
 }
 
+fn test_flow_key() -> mvm_net::l3::FlowKey {
+    mvm_net::l3::FlowKey {
+        protocol: proto::TCP,
+        guest_port: 50000,
+        remote: "93.184.216.34".parse().unwrap(),
+        remote_port: 443,
+    }
+}
+
+/// A flow must expire on wall-clock time, not on how many frames the
+/// guest happened to send. The counter this replaced made a 5-minute
+/// idle timeout mean 300,000 frames.
+#[test]
+fn flows_expire_on_wall_clock_time_not_frame_count() {
+    let mut table = mvm_net::l3::FlowTable::new(mvm_net::l3::FlowLimits::default());
+    let key = test_flow_key();
+    table.observe_outbound(key, 100, 1_000);
+
+    // Two frames later in counter terms, but five minutes later in real
+    // time: the flow must be gone.
+    let expired = table.expire_idle(1_000 + mvm_net::l3::flow::DEFAULT_TCP_IDLE_MILLIS);
+    assert_eq!(
+        expired.len(),
+        1,
+        "an idle TCP flow must expire on elapsed milliseconds"
+    );
+}
+
 fn wait_for_exit(child: &mut Child, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -281,4 +312,176 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> bool {
     let _ = child.kill();
     let _ = child.wait();
     false
+}
+
+/// A TCP segment carrying `payload` after its header, so a test can put a
+/// recognizable pattern in the one place a packet body lives.
+fn v4_tcp_with_payload(
+    src: std::net::Ipv4Addr,
+    dst: std::net::Ipv4Addr,
+    dst_port: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut tcp = vec![0u8; 20];
+    tcp[0..2].copy_from_slice(&50000u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    tcp[12] = 0x50;
+    tcp[13] = ip::TCP_SYN;
+    tcp.extend_from_slice(payload);
+    let total = 20 + tcp.len();
+    let mut p = vec![0u8; 20];
+    p[0] = 0x45;
+    p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+    p[8] = 64;
+    p[9] = proto::TCP;
+    p[12..16].copy_from_slice(&src.octets());
+    p[16..20].copy_from_slice(&dst.octets());
+    p.extend_from_slice(&tcp);
+    p
+}
+
+/// Placed in a refused packet's body; must never appear on the chain.
+const PAYLOAD_MARKER: &str = "PACKETBODYMUSTNEVERBEAUDITED";
+
+/// Fixed signer seed. The chain's own signature is what this asserts, so the
+/// key only has to be the same on both sides of the process boundary.
+const SIGNER_SEED: [u8; 32] = [42u8; 32];
+
+/// Plant the host signer key where the gateway process looks for it.
+fn plant_signer_key(home: &HomeGuard) -> ed25519_dalek::VerifyingKey {
+    let key = ed25519_dalek::SigningKey::from_bytes(&SIGNER_SEED);
+    let keys = home.path().join("keys");
+    std::fs::create_dir_all(&keys).expect("keys dir");
+    std::fs::write(keys.join("host-signer.ed25519"), SIGNER_SEED).expect("write the signer key");
+    key.verifying_key()
+}
+
+/// **The witness, against the shipping binary.** A refused packet
+/// must leave a verifiable entry on the tamper-evident chain — not a stderr
+/// line, not a counter. A denial nobody recorded is a decision nobody can
+/// afterwards prove the host made.
+#[test]
+fn a_refused_packet_leaves_a_verifiable_entry_on_the_real_processs_chain() {
+    let home = HomeGuard::new();
+    let verifying_key = plant_signer_key(&home);
+    let cfg = config("netd-bin-audit");
+    let Some((mut child, _session)) = start_netd(&home, &cfg) else {
+        return;
+    };
+
+    let control = connect(&home, &cfg.vm_id, GuestService::NetworkControl);
+    let mut data = connect(&home, &cfg.vm_id, GuestService::NetworkData { queue: 0 });
+
+    let mut agent = NetAgent::new(MemoryTun::new("mvm0"), RecordingConfigurator::default())
+        .with_privilege_dropper(Box::new(RecordingPrivilegeDropper::default()));
+    let mut control = control;
+    agent.handshake(&mut control).expect("handshake");
+
+    // The policy admits 93.184.216.34:443 and nothing else, so this is a
+    // refusal the gateway makes rather than one the test asserts into being.
+    // Its neighbour rather than a documentation range, so the refusal is the
+    // allow-list saying no and not an address class doing it first.
+    //
+    // The body carries a marker: a packet the host refused is the one case
+    // where its bytes are most tempting to record, and they must not be.
+    agent.tun_mut().push_outbound(v4_tcp_with_payload(
+        cfg.guest_ipv4,
+        "93.184.216.35".parse().unwrap(),
+        443,
+        PAYLOAD_MARKER.as_bytes(),
+    ));
+    let mut wire = Vec::new();
+    assert_eq!(agent.pump_tun_to_transport(&mut wire).unwrap(), 1);
+    data.write_all(&wire).expect("write the refused packet");
+    data.flush().ok();
+
+    // End the session so the process writes its teardown entry and exits.
+    drop(data);
+    drop(control);
+    assert!(
+        wait_for_exit(&mut child, Duration::from_secs(10)),
+        "mvm-netd must exit when its guest channels close"
+    );
+
+    let chain = home.path().join("audit").join("local.jsonl");
+    assert!(
+        chain.exists(),
+        "the gateway wrote no chain at all: {}",
+        chain.display()
+    );
+    let entries = mvm_hostd::supervisor::verify_audit_chain_entries(&chain, &verifying_key)
+        .expect("the chain the gateway wrote must verify under the host signer key");
+
+    let denial = entries
+        .iter()
+        .find(|e| e.event == "l3.flow_denied")
+        .unwrap_or_else(|| {
+            panic!(
+                "no refusal on the chain; got {:?}",
+                entries.iter().map(|e| &e.event).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        denial.labels.get("reason").map(String::as_str),
+        Some("destination_not_admitted"),
+        "the entry must say why"
+    );
+    assert_eq!(
+        denial.labels.get("dst").map(String::as_str),
+        Some("93.184.216.35")
+    );
+    assert_eq!(
+        denial.labels.get("machine_id").map(String::as_str),
+        Some(cfg.vm_id.as_str())
+    );
+    assert!(
+        entries.iter().any(|e| e.event == "l3.tunnel_disconnected"),
+        "teardown must state what never reached the chain"
+    );
+
+    // The bytes the guest put in the packet must be nowhere on the record.
+    let raw = std::fs::read_to_string(&chain).unwrap();
+    assert!(
+        !raw.contains(PAYLOAD_MARKER),
+        "the refused packet's body reached the audit chain"
+    );
+}
+
+/// Tampering with any entry must break the chain. Without this the test
+/// above proves only that a line was appended, not that it is evidence.
+#[test]
+fn a_tampered_gateway_entry_breaks_the_chain() {
+    let home = HomeGuard::new();
+    let verifying_key = plant_signer_key(&home);
+    let cfg = config("netd-bin-tamper");
+    let Some((mut child, _session)) = start_netd(&home, &cfg) else {
+        return;
+    };
+
+    let control = connect(&home, &cfg.vm_id, GuestService::NetworkControl);
+    let data = connect(&home, &cfg.vm_id, GuestService::NetworkData { queue: 0 });
+    let mut agent = NetAgent::new(MemoryTun::new("mvm0"), RecordingConfigurator::default())
+        .with_privilege_dropper(Box::new(RecordingPrivilegeDropper::default()));
+    let mut control = control;
+    agent.handshake(&mut control).expect("handshake");
+    drop(data);
+    drop(control);
+    assert!(wait_for_exit(&mut child, Duration::from_secs(10)));
+
+    let chain = home.path().join("audit").join("local.jsonl");
+    let body = std::fs::read_to_string(&chain).expect("a chain to tamper with");
+    assert!(
+        mvm_hostd::supervisor::verify_audit_chain_entries(&chain, &verifying_key).is_ok(),
+        "the untampered chain must verify first, or the tamper proves nothing"
+    );
+
+    // Rewrite one label in place. The envelope's signature covers the entry,
+    // so any edit at all must be caught.
+    let tampered = body.replace("\"machine_id\":\"", "\"machine_id\":\"x");
+    assert_ne!(tampered, body, "the tamper must actually change something");
+    std::fs::write(&chain, tampered).unwrap();
+    assert!(
+        mvm_hostd::supervisor::verify_audit_chain_entries(&chain, &verifying_key).is_err(),
+        "a tampered gateway entry must break the chain"
+    );
 }

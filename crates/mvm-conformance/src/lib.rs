@@ -8,6 +8,8 @@
 //! unit-tested independent of the cucumber runner. Not a dependency of any
 //! shipped crate.
 
+pub mod claims;
+
 /// Cucumber tag for a scenario whose steps aren't implemented yet; always skipped.
 pub const PENDING_TAG: &str = "wip";
 

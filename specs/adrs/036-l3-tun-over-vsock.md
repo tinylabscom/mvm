@@ -320,23 +320,39 @@ DNS, flow state, ingress, audit — is shared unchanged. The Linux
 TUN/netns/nftables mechanics are **not** portable to macOS and are not
 pretended to be.
 
-The intended first macOS backend is a **userspace socket gateway**: admitted
-guest flows are translated into host sockets. That needs no privileges at
-all — no `utun`, no routes, no PF anchor, no helper — and covers ordinary
+The macOS backend is a **userspace socket gateway**: admitted guest flows
+are translated into host sockets. That needs no privileges at all — no
+`utun`, no routes, no PF anchor, no helper — and covers ordinary
 application TCP, UDP, and host-terminated DNS. It does not cover raw
 sockets, arbitrary IP protocols, arbitrary ICMP, or multicast, and it does
 not claim to.
 
-**Status: not implemented.** What ships is `MacosUserspaceGateway`: the
-capability declaration (`tcp`, `udp`, `controlled_dns`, `declared_ingress`,
-`userspace_socket_translation`; **not** `full_packet_forwarding`, `icmp`,
-`arbitrary_ipv4`, or `raw_ip_protocols`) plus a refusal at
-`is_available()`. So on macOS today `l3-vsock` is refused at admission with
-a stated reason. It is never degraded, and it is never routed through
-`gvproxy` or any other proxy runtime as an interim.
+**Status: superseded in part by [ADR-037](037-userspace-socket-datapath.md),
+which designs the translator and widens it from a macOS-only backend to a
+platform-neutral unprivileged one.** What shipped with *this* ADR was a
+placeholder, `MacosUserspaceGateway` — a capability declaration plus a
+refusal at `is_available()`, so that `l3-vsock` on macOS was refused at
+admission with a stated reason rather than degraded or routed through
+`gvproxy`.
 
-The later full-packet backend needs privileged operations mvm has no helper
-for:
+That placeholder is **deleted**. `host_datapath()` now returns
+`UserspaceSocketDatapath`, which serves the flows the declaration always
+described: it reports `tcp`, `udp`, `controlled_dns`, `declared_ingress`
+and `userspace_socket_translation`, and **not** `full_packet_forwarding`,
+`icmp`, `arbitrary_ipv4`, `arbitrary_ipv6` or `raw_ip_protocols`. A plan
+needing one of those is still refused at admission, and now permanently: it
+would take the privileged helper enumerated below, and
+[ADR-039](039-macos-network-helper.md), which proposed that helper, is
+**Rejected** — mvm adds no root-capable component. Two things the
+declaration claims are not yet true of the datapath behind it: declared
+ingress is advertised with no listening socket serving it, and the
+readiness descriptor it exposes has nothing registered on it, so
+host-originated traffic moves on the drive loop's 50 ms tick rather than on
+the event that made it ready. Both are recorded in ADR-037 §"Known defects
+in what shipped".
+
+The later full-packet backend would need privileged operations mvm has no
+helper for, and — per ADR-039 — will not be getting one:
 
 1. `utun` creation — `socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` +
    `connect()` with `ctl_info` for `com.apple.net.utun_control`. Root; no
@@ -474,6 +490,18 @@ authorization, hop identity, and flow audit correlation all survive the
 hop. The node-to-node transport is a separate abstraction and is **not
 implemented**; the local implementation does not depend on it.
 
+[ADR-040](040-node-to-node-transport.md) designs that transport and
+records why it stays unimplemented. Three of the paragraph above's
+promises are not currently keepable, and none of the three is fixable
+inside a transport: "the guest cannot tell whether a destination is local
+or remote" is unachievable while `PoolAllocator` gives two nodes the same
+addresses, since the two cases are then indistinguishable from the packet;
+destination-side authorization needs a policy language that can name a
+peer workload, which `CanonicalRule` cannot and `IngressTable` has no
+source for; and "flow audit correlation" presumes a local audit record
+that `netd` does not yet produce. ADR-040 carries the design, the
+alternatives it rejects, and the four conditions that unblock it.
+
 ## Launch-path convergence
 
 Audited paths and their status:
@@ -591,18 +619,87 @@ classes* and their counters, never a line per packet.
 
 ## Audit and observability
 
-Events go into the existing chain-signed log via the supervisor's
-recorder. New `LocalAuditKind` variants cover: tunnel requested,
-connected, configured, ready, disconnected; DNS admitted/denied; flow
-admitted/denied/closed; ingress opened/closed; malformed frame; spoofed
-packet; queue overflow; rate-limit action; and resource cleanup.
+Decisions go onto the existing chain-signed per-tenant log through the
+supervisor's `Recorder`, under a new `EventCategory::L3` — the same
+plan-less route `icmp` and `dns` take, and for the same reason: the
+gateway is a per-machine process holding a plan *digest* rather than an
+`ExecutionPlan`, and the `flow` category is mandatorily plan-bound.
 
-Entries carry machine ID, session ID, plan digest, policy rule ID,
-policy epoch, protocol version, the address/port tuple, direction,
-reason code, and byte/packet counts.
+The `LocalAuditKind::L3*` variants are **not** this path. They belong to
+the unsigned local operations log at `<mvm_home>/log/audit.jsonl`; the
+tamper-evident record is `<mvm_home>/audit/<tenant>.jsonl`, and that is
+the one this gateway writes.
+
+Served today, one event name each:
+
+| Event | From |
+|---|---|
+| `l3.tunnel_ready` | the handshake completing |
+| `l3.tunnel_disconnected` | teardown, carrying what never reached the chain |
+| `l3.flow_admitted` | the first packet of a flow to a destination |
+| `l3.flow_denied` | a refused guest packet, with its reason code |
+| `l3.ingress_delivered` | the first return packet admitted from a remote |
+| `l3.ingress_denied` | a refused inbound packet, with its reason code |
+| `l3.dns_admitted` | an answered question, with the answer *count* |
+| `l3.dns_denied` | a refused question, with its reason |
+| `l3.malformed_frame` | a framing violation that ends the tunnel |
+| `l3.stale_session` | a frame carrying a session that is not the live one |
+| `l3.queue_overflow` | a packet dropped because a queue was full |
+| `l3.rate_limited` | the DNS rate limiter refusing a query |
+
+A spoofed-source packet is `l3.flow_denied` with `reason=spoofed_source`
+rather than an event of its own — the deny code already names it.
+
+**Not served, and why.** Tunnel *requested*, *connected*, and *configured*
+have no call site: the handshake produces a single `GatewayEvent`, at
+`ready`. Flow *closed* has none either — idle flows are reaped on a timer
+that returns a count rather than events. Ingress *opened* and *closed*
+likewise: the declared-ingress table is fixed at configuration time and
+its lifetime produces no event. Each would need a gateway change to
+surface, and inventing an entry with no decision behind it would put a
+fact on the chain that nothing observed.
+
+Every entry carries machine ID, session ID, plan digest, policy epoch,
+and protocol version. Decision entries add the address/port tuple,
+direction, verdict, and reason code. **No policy rule ID and no
+byte/packet counts** — neither is on a `GatewayEvent`, and volume is a
+counter rather than an audit fact.
+
+### One entry per decision, never one per packet
+
+`GatewayEvent` is per packet. An entry per packet would be a write
+amplifier into the host's audit log that a guest drives at line rate, so
+repeats fold into the first entry for their bucket and the fold is
+counted. Two dedup tables: one keyed only on host-defined enumerations
+(deny reason, direction), one on guest-chosen values (destination, DNS
+name) and capped. A decision that cannot get a bucket in the capped table
+degrades to its class key rather than going unrecorded — **granularity
+gives way under pressure, the record does not**.
+
+Those caps are the whole rate bound: a bucket emits at most once per
+window, so a guest that never repeats a destination can cause at most
+`2 × (256 + 128) = 768` entries per 30-second window. A separate emission
+budget was considered and dropped — above the caps it can never fire, below
+them it fires first and makes the degrade-to-class path unreachable, so it
+is a knob that either does nothing or silently loses refusals. What the
+tables fold is counted and written to the chain at teardown, so the log
+states its own completeness.
+
+### Failure policy
+
+Emission is **fail-open and counted**. This process is the only way a
+workload reaches the network; failing closed on a signer fault would turn
+a full disk into a network outage for every machine on the host, and the
+decision an entry describes has already been enforced whether or not it
+was recorded. Failures increment a counter the teardown entry carries. An
+absent host signer key leaves the gateway serving un-audited rather than
+refusing to serve, matching the substitution endpoint at the same seam.
 
 Entries never carry packet payloads, DNS payloads beyond normalized
-metadata, authorization headers, secrets, or application content.
+metadata, authorization headers, secrets, or application content. A DNS
+name is the one guest-chosen string kept, as the metadata the policy
+decision was made against, and every guest-derived label is clamped.
+
 
 ## Security guarantees
 
@@ -787,7 +884,8 @@ only against measurements like these, not against intuition.
   driver and is required for the mode; it stays out of the builder
   kernel.
 - macOS gains no L3 support in this change, and says so explicitly
-  rather than degrading.
+  rather than degrading. (Since closed: the userspace socket datapath of
+  ADR-037 now serves macOS, within the limits §macOS states.)
 
 ## Future work
 
@@ -797,5 +895,28 @@ only against measurements like these, not against intuition.
   preserved. The header field and negotiation slots exist in v1.
 - UDP ingress.
 - macOS `utun` + PF datapath, behind a narrowly-scoped privileged helper.
-- IPv6 datapath, once the workload kernel enables it.
+  **Closed, not pending:** [ADR-039](039-macos-network-helper.md) proposed
+  that helper and is Rejected. ICMP, raw IP protocols and arbitrary
+  IPv4/IPv6 stay refused at admission on macOS.
+- IPv6 datapath, designed in [ADR-038](038-ipv6-support.md). **Landed**:
+  the host assigns the gateway's `/126` on the TUN and the `inet` ruleset
+  pins the guest's v6 source beside its v4 one, so the backend declares
+  the whole `FULL_L3` set.
 - Zero-copy or batched packet transfer, if measurement justifies it.
+- **Known defect: one machine's forward chain drops another machine's
+  traffic.** Each machine's table anchors a `filter`-priority forward base
+  chain with `policy drop`, and a base chain's policy applies to every
+  packet that reaches it, not only to the machine that installed it. Two
+  chains at the same priority both run, so with two machines open each
+  one's policy refuses the other's admitted traffic. Measured on Linux
+  with nftables 1.0.9: a probe chain at `filter + 10` counts one machine's
+  admitted packet with a single table loaded and stops counting it the
+  moment a second machine's table is added. The shape is family-agnostic
+  and predates IPv6 — it is not what the v6 rules introduced. The fix is
+  for the chain to refuse only what it owns (`policy accept` with an
+  explicit `iifname`/`oifname` drop pair) rather than to default-drop the
+  host's whole forward path, which changes a security-sensitive ruleset
+  and belongs in its own change with its own witness. Until then a host
+  serves one L3 machine at a time, and the privileged lane's forward-hook
+  witness measures only in a window where no other machine's table is
+  loaded.

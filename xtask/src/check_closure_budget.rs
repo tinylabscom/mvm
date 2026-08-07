@@ -68,15 +68,37 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// for streamed multi-hundred-megabyte kernel verification. Its `blake3`
 /// package and three small support crates are part of the default host binary.
 ///
+/// 274 (was 273): the canonical `mvm-volume-contract` leaf is now the single
+/// volume contract consumed by both mvm and fleet orchestrators; the leaf
+/// itself is the only new crate in the default closure.
+///
+/// 275 (was 274): the exact-pinned, zero-dependency `leakguard` detector adds
+/// one crate to enforce default-on credential masking on protected egress.
+///
 /// 274 (was 275): consolidating the protocol and volume contracts into the
 /// feature-gated `mvm-contract` package removes one package from the default
 /// closure while preserving the protocol-only default feature set.
 ///
+/// 278 (was 274): the userspace socket datapath, which is the macOS forwarding
+/// backend and the fallback wherever the Linux TUN probe fails, brings
+/// `smoltcp` (default features off — `medium-ip`, the two IP protocols and the
+/// two socket types only), `mio`, and `socket2`. It cannot be gated off by
+/// default: on macOS it is the only backend, so a build without it would refuse
+/// every `l3-vsock` plan on that platform. Four crates for a whole forwarding
+/// backend, and `smoltcp` is `#![deny(unsafe_code)]` and 0BSD.
 /// 279 (was 274): adopting `rayon` for parallel file walks, copies, ext4
 /// directory/symlink block emission, and dm-verity hash-tree computation;
 /// measured delta +5 crates (rayon, rayon-core, crossbeam-deque,
 /// crossbeam-epoch, crossbeam-utils).
-const CLOSURE_BUDGET: usize = 279;
+///
+/// 283 (was 279): making the userspace socket datapath's host-side polling,
+/// socket, and smoltcp protocol dependencies explicit in the shipping binary;
+/// measured delta +4 crates for the complete fallback forwarding backend.
+///
+/// 284 (was 283): the `did:key` codec for receipt/conformance identity uses
+/// the audited `bs58` crate; it is zero-dependency and the only new crate in
+/// the default closure.
+const CLOSURE_BUDGET: usize = 284;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

@@ -16,10 +16,6 @@ members = [
     "crates/mvm-agentd",
     "crates/mvm-cli",
     "crates/mvm-hostd",
-    # C-ABI veneer over the in-guest host-services broker clients. One
-    # JSON-in/JSON-out cdylib every language SDK loads through a thin FFI
-    # shim, so adding a language carries no new Rust binding code.
-    "crates/mvm-host-services-ffi",
     "crates/mvm-client",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
@@ -206,6 +202,7 @@ leakguard = { version = "=0.8.0", default-features = false }
 # Crypto
 aes-gcm = "0.11"
 base64 = "0.22"
+bs58 = "0.5"
 ed25519-dalek = "3"
 hmac = "0.13"
 rand = "0.8"
@@ -256,6 +253,11 @@ libc = "0.2"
 # Readiness-driven event loop for the in-house VMM's host↔guest vsock I/O thread
 # (os-poll = kqueue/epoll + Waker; os-ext = SourceFd to register std sockets).
 mio = { version = "1", features = ["os-poll", "os-ext"] }
+# Non-blocking `connect()` on a socket the userspace datapath still owns as a
+# `std::net::TcpStream`. std has no non-blocking connect, and the alternative is
+# hand-marshalling `sockaddr_in`/`sockaddr_in6` through `unsafe`. Already in the
+# lockfile via tokio and mio, so this adds a name, not a build.
+socket2 = "0.6"
 
 # Seccomp BPF compilation (W2.4 — per-service syscall filtering inside
 # guests, applied via the `mvm-seccomp-apply` shim before execve into
@@ -460,6 +462,9 @@ toml.workspace = true
 # Plan 73 Followup H — `tests/run_plan_mode.rs` resolves python3 from
 # PATH to drive the SDK record-mode auto-exec end-to-end.
 which.workspace = true
+# `tests/audit_receipt_export.rs` builds a synthetic chain-signed audit log
+# directly with the same primitives the host uses.
+mvm-hostd = { workspace = true, default-features = false }
 
 [features]
 # ── The two product surfaces — the only two things this project ships ─────────

@@ -390,6 +390,8 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
 // their own: `publish-root` writes a signed-root sidecar derived from the chain
 // (not a new chain event), and `prove` / `verify-inclusion` are pure reads —
 // the same audit posture as `verify-cert`.
+const RECEIPTS_SUB: &[(&str, AuditPosture)] = &[("export", AuditPosture::ReadOnly)];
+
 const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
@@ -399,6 +401,7 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("publish-root", AuditPosture::ReadOnly),
     ("prove", AuditPosture::ReadOnly),
     ("verify-inclusion", AuditPosture::ReadOnly),
+    ("receipts", AuditPosture::DelegatesToSub(RECEIPTS_SUB)),
     ("transcript", AuditPosture::DelegatesToSub(TRANSCRIPT_SUB)),
 ];
 
@@ -492,6 +495,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
+    // Host-side developer tool: ptrace a command and report syscalls. No host
+    // audit-chain emission of its own; classified as interactive/control.
+    ("seccomp-audit", AuditPosture::InteractiveOrControl),
 ];
 
 // ──────────────────────────────────────────────────────────────────

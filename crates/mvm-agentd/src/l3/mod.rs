@@ -14,7 +14,7 @@ pub mod privdrop;
 pub mod tun;
 
 pub use agent::{AgentCounters, AgentError, AgentState, NetAgent};
-pub use netcfg::{InterfaceConfigurator, InterfacePlan, RecordingConfigurator};
+pub use netcfg::{InterfaceConfigurator, InterfacePlan, Ipv6Plan, RecordingConfigurator};
 pub use privdrop::{
     DropReport, PrivilegeDropper, RecordingPrivilegeDropper, SystemPrivilegeDropper,
     drop_privileges,

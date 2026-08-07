@@ -1160,6 +1160,18 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // not select the tunnel.
         crate::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
 
+        // Record the host-side observability target so eBPF/procfs collectors
+        // can attach to the right processes without hard-coding backend layouts.
+        // VMM/helper PIDs are filled in after the processes start.
+        let observability_target =
+            crate::base::observability_target::build_from_start_config(self.driver.kind(), config);
+        if let Err(e) = crate::base::runtime_meta::update_observability_target(
+            &config.name,
+            &observability_target,
+        ) {
+            tracing::warn!(error = %e, vm = %config.name, "failed to write observability target");
+        }
+
         // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
         // below, so bind them here rather than inline.
         let default_redaction = RedactionPolicy::default();

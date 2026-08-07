@@ -46,6 +46,7 @@ impl TopLevelCommand for Commands {
             Commands::Trust(a) => trust::run(cli, a, cfg),
             Commands::Deps(a) => deps::run(cli, a, cfg),
             Commands::Artifact(a) => vm::artifact::run(cli, a, cfg),
+            Commands::SeccompAudit(a) => seccomp_audit::run(cli, a),
             #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(a) => build::persistent_builder::run(cli, a),
             Commands::QemuVsockBridge(_) => {

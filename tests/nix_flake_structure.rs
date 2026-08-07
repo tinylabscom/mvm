@@ -1385,7 +1385,7 @@ fn workspace_sourced_packages_normalize_the_workspace_source() {
         "mvm-egress-client.nix",
         "mvm-addon-dns.nix",
         "mvm-exit-report.nix",
-        "mvm-host-services-ffi.nix",
+        "mvm-sdk-cdylib.nix",
     ] {
         let path = nix_dir().join("packages").join(recipe);
         let content =

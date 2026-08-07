@@ -2,7 +2,7 @@ Feature: s19_supply_chain
 
   Conformance scenario for MVM-SEC-07.
 
-  @MVM-SEC-07 @some-true @wip
+  @MVM-SEC-07 @some-true 
   Scenario: Cargo dependencies are audited on every PR
     Given the scenario is registered for MVM-SEC-07
     When the suite for MVM-SEC-07 is implemented

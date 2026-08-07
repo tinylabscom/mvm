@@ -876,6 +876,7 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
             rootfs_path: None,
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             runtime_overlay_version: None,
+            observability_target: None,
         },
     )
     .expect("write sealed runtime meta");
@@ -912,6 +913,7 @@ fn resolve_machine_build_mode_is_fail_closed_and_reads_accessible() {
                 rootfs_path: None,
                 runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
+                observability_target: None,
             },
         )
         .expect("write runtime meta");

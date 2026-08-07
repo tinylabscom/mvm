@@ -85,6 +85,11 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 - [x] policy application through `mvm-net::l3`
 - [x] DNS service on the synthetic resolver address
 - [x] `L3Datapath` / `DatapathHandle` platform seam
+- [x] Linux datapath: host TUN + narrow routes + a shared `inet mvmn`
+      nftables table with one host-wide default-drop forward hook and
+      per-machine filter/NAT chains; no bridge, no TAP, no Firecracker net
+      device. The machine chains pin the assigned IPv4 source and the
+      opt-in IPv6 source, with stateful return filtering and masquerade.
 - [x] Linux datapath: host TUN + per-machine netns + narrow routes +
       nftables via the existing `NftApplier` seam; no bridge, no TAP,
       no Firecracker net device
@@ -151,6 +156,9 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       protocol, real policy, real gateway, mock datapath — covers
       scenarios 1–8 of the brief
 - [x] privileged Linux end-to-end with real TUN/nftables, gated behind
+      `MVM_L3_PRIVILEGED_TESTS=1`; 13/13 green on the Linux/KVM builder,
+      covering dual-stack address assignment, IPv6 anti-spoofing, ULA
+      isolation, shared-table teardown, and two-machine forwarding.
       `MVM_L3_PRIVILEGED_TESTS=1`; the lane now contains nine tests,
       including live forwarding witnesses for two concurrent machines,
       kernel counters, and verified-clean teardown; Linux/KVM execution is
@@ -208,6 +216,9 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       any backend that does not advertise both `l3_vsock` and
       `no_routable_guest_nic`
 - [x] launch-path audit recorded in ADR-036 §"Launch-path convergence"
+- [x] macOS: a capability declaration plus a refusal until implemented.
+      (The `MacosUserspaceGateway` type that carried it is now deleted —
+      see the deferred set below.)
 - [x] workload launch mapping carries `GuestService::NetworkControl` and
       `GuestService::NetworkData { queue: 0 }` into the backend-neutral
       `VmmSpec`; `mvm-netd` selects the matching Firecracker/libkrun or HVF
@@ -223,34 +234,60 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       refuses until implemented
 - [x] platform matrix (Linux / macOS / WSL2 / native Windows) documented
       without overclaiming
-- [ ] node-to-node transport for cross-host VM traffic — interface
-      described in the ADR, not implemented; the local path does not
-      depend on it
+- [~] node-to-node transport for cross-host VM traffic — **designed in
+      ADR-040 and deliberately not implemented**; the local path does not
+      depend on it. Three of the hop's four invariants are unpreservable
+      today and none of the three is fixable inside a transport: there is
+      no cross-node trust root and adding one here would be a second root
+      beside plan signing; `PoolAllocator` has no node discriminator, so a
+      peer's address collides with a local machine's and the two are not
+      distinguishable from the packet; `CanonicalRule` cannot name a peer
+      workload and `IngressTable::admits` takes only a protocol and a
+      guest port, so admitting a peer admits the host network too; and the
+      chain-signed audit log does not reach `netd`, so the hop has no
+      local record to preserve. ADR-040 carries the unblock checklist
 - [ ] `mvmd`-facing node-control API — the responsibility split is
       documented and the lease is the contract, but no RPC surface exists
 
 ## Deferred (explicitly not in this change)
 
-- [ ] **UDP ingress.** TCP ingress ships; UDP ingress needs a
-      per-mapping datagram association table with its own bounds and is
-      not implemented. Declaring a UDP ingress mapping is rejected at
-      admission rather than silently ignored.
-- [ ] **macOS userspace socket gateway.** The intended first macOS
-      backend: TCP, UDP, and controlled DNS translated into host sockets,
-      needing no privileges at all. Capability declaration and refusal
-      ship; the flow translator does not.
+- [x] **UDP ingress.** Delivered by
+      `specs/plans/287-userspace-socket-datapath.md` WS2. A UDP mapping is
+      declarable end to end — plan, lease, netd config, `IngressTable` —
+      and the userspace socket datapath binds a host listener per mapping,
+      with a bounded per-listener peer table for the reply path. Delivery
+      still goes through `admit_inbound`, so a withdrawn declaration stops
+      it. **TCP** ingress remains unserved on the socket backend: it needs
+      a listener whose accepted connections are originated toward the
+      guest, which that backend does not build. The packet backend serves
+      both.
+- [x] **macOS userspace socket gateway.** Delivered by
+      `specs/plans/287-userspace-socket-datapath.md` (ADR-037), and widened
+      on the way: `UserspaceSocketDatapath` is platform-neutral, so it also
+      serves a Linux host that holds no `CAP_NET_ADMIN`. The
+      `MacosUserspaceGateway` placeholder — declaration plus refusal — is
+      deleted. ICMP, raw IP protocols and arbitrary IPv4/IPv6 stay refused
+      at admission on it, and two gaps are open rather than closed:
+      declared ingress is advertised with nothing listening behind it, and
+      the readiness descriptor has nothing registered on it, so every
+      host-driven step waits for a 50 ms tick. Both are recorded in ADR-037
+      §"Known defects in what shipped".
 - [ ] **macOS `utun` + PF datapath.** The later full-packet backend.
       Requires a privileged host helper mvm does not have. ADR-036 §macOS
-      names the exact four privileged operations. Follow-up must add a
-      helper whose API is only those operations plus status and cleanup —
-      no arbitrary exec, no arbitrary PF rules, no file access.
+      names the exact four privileged operations. **Closed rather than
+      queued:** ADR-039 proposed exactly that helper and is Rejected — mvm
+      adds no root-capable component — so this stays undone unless a
+      workload with a demonstrated need reopens the decision.
 - [ ] **WSL2 validation.** Architecturally supported; no runner has
       executed the suite there, so it is not claimed as tested.
 - [ ] **Native Windows.** No Windows VMM backend exists to attach to.
 - [ ] **Multi-queue.** The header field, the port base, and the
       negotiation slots exist in v1; the runtime opens one queue.
-- [ ] **IPv6 datapath.** Blocked on `CONFIG_IPV6` in the workload
-      kernel. The protocol and the host validator already handle v6.
+- [x] **IPv6 datapath.** The parser, validator, lease, guest configuration,
+      host address assignment, capability declaration, and Linux nftables
+      source pinning are implemented and covered by 13/13 green Linux/KVM
+      privileged witnesses. macOS remains on the userspace socket backend
+      for full-packet IPv6.
 - [ ] **Zero-copy / batched transfer.** The v1 copy path
       (guest kernel → guest buffer → vsock → host buffer → host TUN) is
       deliberate; optimize only against measurements.

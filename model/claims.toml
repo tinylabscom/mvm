@@ -91,15 +91,23 @@ id = "MVM-SEC-05"
 level = "build"
 witness_kinds = ["ci"]
 suite = "fuzz_surface"
-statement = "Vsock framing + supervisor-config JSON are fuzzed"
+statement = "Vsock framing, supervisor-config JSON, and the userspace datapath's guest-facing ingress are fuzzed"
 # Named per fuzz target rather than by the lane, so each witness points at
 # something check-workflow-paths resolves to a real fuzz_targets/<name>.rs.
 # A bare lane name matched the job key and stayed green through ten
 # nightlies in which the lane ran no target at all.
+#
+# `fuzz_datapath_ingress` covers the userspace socket datapath: admission
+# (`ip::parse`, IPv4 and IPv6, including the bounded extension-header walk),
+# the datapath's own re-read of an admitted packet in `send_to_network`, and
+# the per-flow smoltcp stack guest bytes reach through `deliver_from_guest`.
+# It does not cover the privileged Linux TUN datapath, which hands whole
+# packets to the kernel rather than parsing them here.
 witnesses = [
     "ci:fuzz_guest_request",
     "ci:fuzz_authenticated_frame",
     "ci:fuzz_supervisor_config",
+    "ci:fuzz_datapath_ingress",
     "ci:fuzz_input_frame",
 ]
 
