@@ -224,7 +224,7 @@ fn fc_warm_pool_spawn_and_claim() {
             // Firecracker keeps no supervisor-config blob.
             supervisor_config_src: None,
             tag: None,
-            created_unix: mvm_runtime::standby_pool::now_unix_secs(),
+            created_unix: mvm_core::time::now_unix_secs(),
         },
         control.as_ref(),
     )

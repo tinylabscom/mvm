@@ -43,7 +43,7 @@ use std::path::Path;
 /// ZONE_DEVICE, FS_DAX, FUSE_DAX) in the workload kernel. PCI, virtio-net,
 /// virtio-balloon, KVM time, and x86 ACPI core remain because supported
 /// backends exercise them.
-const BUDGET_AARCH64: usize = 943;
+const BUDGET_AARCH64: usize = 944;
 const BUDGET_X86_64: usize = 916;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →

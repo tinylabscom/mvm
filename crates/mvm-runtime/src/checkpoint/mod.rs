@@ -582,65 +582,8 @@ fn vm_is_running(vm_name: &str) -> bool {
     })
 }
 
-/// Host-side control over a running VM's memory + disk, abstracted so the
-/// capture orchestration is testable without a live hypervisor.
-/// Absolute host paths to resources a vm_full snapshot embeds by path.
-/// Captured at checkpoint time so a forked child can make those paths
-/// resolve to its own copies without editing the snapshot bitcode.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct DeviceAnchors {
-    /// Live rootfs block device path.
-    pub rootfs: PathBuf,
-    /// dm-verity hash tree sidecar, if the rootfs is verity-sealed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rootfs_verity: Option<PathBuf>,
-    /// Config drive (config.json + role.toml), if attached.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<PathBuf>,
-    /// Secrets drive, if attached.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secrets: Option<PathBuf>,
-    /// vsock UDS path.
-    pub vsock: PathBuf,
-}
-
-pub trait VmFullControl {
-    /// Pause vCPUs (idempotent if already paused).
-    fn pause(&self) -> Result<()>;
-    /// Save machine memory state to `memory_path` while paused; also writes a
-    /// `<memory_path>.machine-id` sidecar when the backend has a machine
-    /// identifier (e.g. Vz). Backends that do not have a separate machine-id
-    /// concept (e.g. Firecracker) may skip the sidecar — the caller only
-    /// promotes it to a content blob when the file exists.
-    fn save_memory(&self, memory_path: &Path) -> Result<()>;
-    /// Resume vCPUs.
-    fn resume(&self) -> Result<()>;
-    /// Keep the paused VMM resident after a successful capture so a driver can
-    /// hand its machine instance directly to the next claim.
-    fn retain_paused_after_capture(&self) -> bool {
-        false
-    }
-    /// Absolute path to the VM's live rootfs image.
-    fn rootfs_path(&self) -> Result<PathBuf>;
-    /// Optional extra content blobs written alongside `save_memory` that this
-    /// backend's capture produces. The default returns nothing; backends that
-    /// write additional files (e.g. Firecracker's `vmstate.bin`) override this
-    /// to hash and return them so they are included in the checkpoint manifest.
-    /// Called after `save_memory` has been called and the files are on disk.
-    fn extra_content(&self, content_dir: &Path) -> Result<Vec<mvm_core::checkpoint::ContentBlob>> {
-        let _ = content_dir;
-        Ok(vec![])
-    }
-
-    /// Absolute host paths the snapshot embeds and a fork restore must remap.
-    fn device_anchors(&self) -> Result<DeviceAnchors>;
-
-    /// Optional backend launch configuration required to recreate a fresh VMM
-    /// around a captured machine state.
-    fn supervisor_config_path(&self) -> Result<Option<PathBuf>> {
-        Ok(None)
-    }
-}
+pub use mvm_core::checkpoint::DeviceAnchors;
+pub use mvm_vmm::checkpoint::VmFullControl;
 
 pub struct CaptureVmFullParams {
     pub id: CheckpointId,

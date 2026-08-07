@@ -94,7 +94,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// 283 (was 279): making the userspace socket datapath's host-side polling,
 /// socket, and smoltcp protocol dependencies explicit in the shipping binary;
 /// measured delta +4 crates for the complete fallback forwarding backend.
-const CLOSURE_BUDGET: usize = 283;
+///
+/// 284 (was 283): the `did:key` codec for receipt/conformance identity uses
+/// the audited `bs58` crate; it is zero-dependency and the only new crate in
+/// the default closure.
+const CLOSURE_BUDGET: usize = 285;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

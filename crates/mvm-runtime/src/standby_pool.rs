@@ -263,15 +263,6 @@ impl SupervisorStandbyPool {
     }
 }
 
-/// Seconds since the Unix epoch (best-effort; clamps a pre-epoch clock to 0). The reaper's
-/// `now` argument so callers can inject a fixed clock in tests.
-pub fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// `kill(pid, 0)` liveness — 0 ⇒ the process exists.
 fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
@@ -555,7 +546,7 @@ mod tests {
     fn reap_removes_dead_and_expired_keeps_live_recent() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
-        let now = now_unix_secs();
+        let now = mvm_core::time::now_unix_secs();
         // Live + recent (spawned now) → kept.
         let mut keep = handle("keep", "aa", StandbyState::Idle);
         keep.spawned_unix_secs = now;
@@ -757,7 +748,7 @@ mod tests {
     fn reap_keeps_recent_saved_standby_and_demotes_expired_one() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
-        let now = now_unix_secs();
+        let now = mvm_core::time::now_unix_secs();
 
         let mut recent = saved_handle("hvf-keep", "kk", "img", StandbyState::Idle);
         recent.spawned_unix_secs = now;

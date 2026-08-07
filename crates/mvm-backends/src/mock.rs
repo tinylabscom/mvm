@@ -18,12 +18,9 @@ use mvm_core::vm_backend::{
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
-use crate::driver::spec::{VmmSpec, VsockPort};
-use crate::driver::traits::{
-    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
-};
-use crate::standby_pool::now_unix_secs;
-use crate::vm::instance_snapshot::PostRestoreOutcome;
+use mvm_vmm::driver::spec::{VmmSpec, VsockPort};
+use mvm_vmm::driver::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
+use mvm_vmm::post_restore::PostRestoreOutcome;
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
 
@@ -296,7 +293,7 @@ impl VmmDriver for MockDriver {
             vcpus: spec.vcpus,
             mem_mib: spec.mem_mib,
             binding_nonce: spec.binding_nonce.clone(),
-            spawned_unix_secs: now_unix_secs(),
+            spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: spec.image_sha256.clone(),
             vsock_egress: spec.vsock_egress,
@@ -364,7 +361,10 @@ impl VmmDriver for MockDriver {
         })
     }
 
-    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+    fn vm_full_control(
+        &self,
+        vm_name: &str,
+    ) -> Option<Box<dyn mvm_vmm::checkpoint::VmFullControl>> {
         let _ = vm_name;
         Some(Box::new(MockVmFullControl {
             rootfs: self.vm_full_rootfs.clone(),
@@ -455,7 +455,7 @@ impl RunningVm for MockRunningVm {
     }
 }
 
-/// Hypervisor-free [`crate::checkpoint::VmFullControl`] test double: no real
+/// Hypervisor-free [`mvm_vmm::checkpoint::VmFullControl`] test double: no real
 /// pause/resume happens, `save_memory` writes a small deterministic file
 /// instead of a real machine-memory image, and `rootfs_path`/`device_anchors`
 /// report the path a test seeded on the owning `MockDriver`. Every call is
@@ -466,7 +466,7 @@ struct MockVmFullControl {
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
-impl crate::checkpoint::VmFullControl for MockVmFullControl {
+impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
     fn pause(&self) -> Result<()> {
         self.calls.lock().unwrap().push("pause");
         Ok(())
@@ -487,8 +487,8 @@ impl crate::checkpoint::VmFullControl for MockVmFullControl {
         Ok(self.rootfs.clone())
     }
 
-    fn device_anchors(&self) -> Result<crate::checkpoint::DeviceAnchors> {
-        Ok(crate::checkpoint::DeviceAnchors {
+    fn device_anchors(&self) -> Result<mvm_core::checkpoint::DeviceAnchors> {
+        Ok(mvm_core::checkpoint::DeviceAnchors {
             rootfs: self.rootfs.clone(),
             rootfs_verity: None,
             config: None,
@@ -502,7 +502,7 @@ impl crate::checkpoint::VmFullControl for MockVmFullControl {
 mod tests {
     use super::*;
 
-    use crate::driver::spec::{ConsoleCapture, KernelImage};
+    use mvm_vmm::driver::spec::{ConsoleCapture, KernelImage};
 
     fn sample_spec(name: &str) -> VmmSpec {
         VmmSpec {

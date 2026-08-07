@@ -74,14 +74,14 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 - Produces: a written boundary note (`MIGRATION-298.md`) listing every type that must move and where it lands.
 - Consumes: the current `VmmDriver` trait and `VmmSpec` definition.
 
-- [ ] **Step 1: Inventory the driver seam**
+- [x] **Step 1: Inventory the driver seam**
 
   List every type referenced by `VmmDriver` and its default methods:
   `VmmSpec`, `VsockPort`, `KernelImage`, `BlockDev`, `VirtioFsShare`,
   `ConsoleCapture`, `ChildForkRequest`, `StandbyParentSpawn`, `RunningVm`,
   `DuplexStream`, `PostRestoreOutcome`, `VmFullControl`.
 
-- [ ] **Step 2: Inventory the legacy backend impls**
+- [x] **Step 2: Inventory the legacy backend impls**
 
   List `FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`,
   and every caller (drivers, tests, examples, builder VM). Note which
@@ -117,19 +117,19 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 - Produces: `mvm-vmm` owns `VmmDriver`, `VmmSpec`, `RunningVm`, and related types.
 - Consumes: `mvm_core::vm_backend::*`, `mvm_core::crypto::vmgenid::*`, `mvm_net::channel::GuestService`.
 
-- [ ] **Step 1: Create `mvm-vmm::driver` and `mvm-vmm::spec` modules**
+- [x] **Step 1: Create `mvm-vmm::driver` and `mvm-vmm::spec` modules**
 
   Move `VmmSpec` + types into `mvm-vmm::spec` and the `VmmDriver`/`RunningVm`
   traits + request structs into `mvm-vmm::driver`. Add `mvm_net` to
   `mvm-vmm/Cargo.toml`.
 
-- [ ] **Step 2: Move shared snapshot/checkpoint types**
+- [x] **Step 2: Move shared snapshot/checkpoint types**
 
   Move `PostRestoreOutcome` (from `mvm-runtime::vm::instance_snapshot`) and
   the `VmFullControl` trait (from `mvm-runtime::checkpoint`) into `mvm-vmm`.
   These are backend-agnostic seam types and belong with the driver contract.
 
-- [ ] **Step 3: Resolve `deliver_child_identity` default impl**
+- [x] **Step 3: Resolve `deliver_child_identity` default impl**
 
   The default implementation calls `mvm-runtime::vm::instance_snapshot::signal_post_restore`,
   which is a runtime helper. Options:
@@ -139,20 +139,20 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
     or wrapper that fills it in.
   Record the chosen shape in `MIGRATION-298.md`.
 
-- [ ] **Step 4: Keep `mvm-runtime` compiling with re-exports**
+- [x] **Step 4: Keep `mvm-runtime` compiling with re-exports**
 
   Re-export the moved types from `mvm-runtime::driver` so callers inside
   `mvm-runtime` can be updated incrementally. These re-exports are deleted in
   Task 5.
 
-- [ ] **Step 5: Run tests and clippy**
+- [x] **Step 5: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-runtime -p mvm-vmm
   cargo clippy -p mvm-runtime -p mvm-vmm -- -D warnings
   ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   ```bash
   git -C <wt> commit -m "refactor(vmm): move VmmDriver seam and VmmSpec into mvm-vmm"
@@ -172,24 +172,24 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 - Produces: `mvm-vmm` provides the host `virtiofsd` spawn helper; `mvm-build`
   re-exports or wraps it for builder-VM use.
 
-- [ ] **Step 1: Move the module into `mvm-vmm`**
+- [x] **Step 1: Move the module into `mvm-vmm`**
 
   Move `crates/mvm-build/src/virtiofsd.rs` to `crates/mvm-vmm/src/host/virtiofsd.rs`
   (or `mvm-vmm/src/virtiofsd.rs` if a `host` module does not yet exist).
 
-- [ ] **Step 2: Update `mvm-build` callers**
+- [x] **Step 2: Update `mvm-build` callers**
 
   `mvm-build/src/qemu_builder.rs` and any other builder callers should import
   from `mvm_vmm::virtiofsd` instead of `crate::virtiofsd`.
 
-- [ ] **Step 3: Run tests and clippy**
+- [x] **Step 3: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-build -p mvm-vmm
   cargo clippy -p mvm-build -p mvm-vmm -- -D warnings
   ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
   ```bash
   git -C <wt> commit -m "refactor(vmm): move virtiofsd host helper into mvm-vmm"
@@ -214,7 +214,7 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 - Produces: `mvm-backends` crate with the concrete backend implementations.
 - Consumes: `mvm-vmm` (driver seam + device model), `mvm-core`, `mvm-net`, `mvm-build` is no longer needed.
 
-- [ ] **Step 1: Scaffold `mvm-backends`**
+- [x] **Step 1: Scaffold `mvm-backends`**
 
   Create `crates/mvm-backends/Cargo.toml` with dependencies on `mvm-vmm`,
   `mvm-core`, `mvm-net`, `mvm-agentd`, and whatever small third-party crates
@@ -244,14 +244,14 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
   `mvm-runtime`; the per-backend constructors move to `mvm-backends`. Add a
   small `mvm-backends::registry` module if it makes the dispatch cleaner.
 
-- [ ] **Step 5: Run tests and clippy**
+- [x] **Step 5: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-backends -p mvm-vmm
   cargo clippy -p mvm-backends -p mvm-vmm -- -D warnings
   ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   ```bash
   git -C <wt> commit -m "refactor(backends): create mvm-backends crate and move drivers + legacy backends"
@@ -335,7 +335,7 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
   cargo clippy --workspace --all-targets -- -D warnings
   ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
   ```bash
   git -C <wt> commit -m "refactor(workspace): update consumers for mvm-backends and mvm-vmm virtiofsd"

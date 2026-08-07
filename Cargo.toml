@@ -12,6 +12,7 @@ members = [
     "crates/deps/libkrun-sys",
     "crates/mvm-runtime",
     "crates/mvm-vmm",
+    "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
     "crates/mvm-cli",
@@ -202,6 +203,7 @@ leakguard = { version = "=0.8.0", default-features = false }
 # Crypto
 aes-gcm = "0.11"
 base64 = "0.22"
+bs58 = "0.5"
 ed25519-dalek = "3"
 hmac = "0.13"
 rand = "0.8"
@@ -356,6 +358,7 @@ mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0" }
+mvm-backends = { path = "crates/mvm-backends", version = "0.18.0" }
 mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
 mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
@@ -461,6 +464,9 @@ toml.workspace = true
 # Plan 73 Followup H — `tests/run_plan_mode.rs` resolves python3 from
 # PATH to drive the SDK record-mode auto-exec end-to-end.
 which.workspace = true
+# `tests/audit_receipt_export.rs` builds a synthetic chain-signed audit log
+# directly with the same primitives the host uses.
+mvm-hostd = { workspace = true, default-features = false }
 
 [features]
 # ── The two product surfaces — the only two things this project ships ─────────

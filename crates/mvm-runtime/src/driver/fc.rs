@@ -37,7 +37,6 @@ use crate::microvm::{
     firecracker_vsock_uds_path, logger_body, machine_config_body, read_firecracker_pid,
     start_vm_firecracker, vsock_body,
 };
-use crate::standby_pool::now_unix_secs;
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
 /// `connect_to_port` retries the CONNECT handshake internally within this bound.
@@ -626,7 +625,7 @@ impl VmmDriver for FcDriver {
             vcpus: spec.vcpus,
             mem_mib: spec.mem_mib,
             binding_nonce: spec.binding_nonce.clone(),
-            spawned_unix_secs: now_unix_secs(),
+            spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: spec.image_sha256.clone(),
             vsock_egress: spec.vsock_egress,

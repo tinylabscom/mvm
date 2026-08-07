@@ -327,6 +327,16 @@ pub fn vm_state_dir_at(mvm_home: impl AsRef<std::path::Path>, name: &str) -> std
     vms_dir_at(mvm_home).join(name)
 }
 
+/// Absolute path string to the per-VM runtime directory for a running VM.
+///
+/// This is the canonical `<mvm_home>/vms/<name>` path that every backend's
+/// host-side state (pid files, console logs, vsock sockets) lives under. It is
+/// kept in `mvm-core` so backend-agnostic transport code can resolve it without
+/// depending on `mvm-runtime`.
+pub fn running_vm_dir(name: &str) -> String {
+    vm_state_dir(name).display().to_string()
+}
+
 /// Per-instance state root: `<mvm_home>/instances/<name>/`. Distinct from
 /// `vms/` (the VMM runtime dir) — this holds instance-snapshot artifacts that
 /// must outlive a VMM restart. Shared by the mvm-layer pause/resume

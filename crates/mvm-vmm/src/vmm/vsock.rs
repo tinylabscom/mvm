@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::hvf_handoff::HvfHandoffRequest;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use mvm_build::hvf_supervisor::HvfHandoffRequest;
 
 use super::device_state::{
     DeviceKind, DeviceStateError, SnapshotDeviceState, StateReader, StateWriter,

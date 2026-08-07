@@ -165,11 +165,35 @@ pub(in crate::commands) enum AuditAction {
         #[arg(long, default_value = "local")]
         tenant: String,
     },
+    /// Export chain-signed audit entries as offline-verifiable
+    /// ExecutionReceipts. Read-only: does not emit new audit events.
+    Receipts {
+        #[command(subcommand)]
+        action: ReceiptsAction,
+    },
     /// Opt-in forensic network transcript capture: arm / disarm / list /
     /// export. Off by default; separate from the metadata-only flow audit.
     Transcript {
         #[command(subcommand)]
         action: super::transcript::TranscriptAction,
+    },
+}
+
+/// Subcommands under `mvmctl trust audit receipts`.
+#[derive(Subcommand, Debug, Clone)]
+pub(in crate::commands) enum ReceiptsAction {
+    /// Export signed ExecutionReceipts from the chain-signed audit log.
+    Export {
+        /// Tenant whose chain to read. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Optional plan_id (`sha256:<hex>`) filter; only entries for this
+        /// plan are exported.
+        #[arg(long)]
+        plan_id: Option<String>,
+        /// Emit receipts as a JSON array to stdout.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -194,6 +218,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             json,
         } => audit_show(&tenant, &plan_id, json),
         AuditAction::Posture { json } => super::audit_posture::run(json),
+        AuditAction::Receipts { action } => match action {
+            ReceiptsAction::Export {
+                tenant,
+                plan_id,
+                json,
+            } => audit_receipts_export(&tenant, plan_id.as_deref(), json),
+        },
         AuditAction::Transcript { action } => super::transcript::run(action),
         AuditAction::VerifyCert {
             cert,
@@ -214,6 +245,50 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             tenant,
         } => audit_verify_inclusion(&proof, root.as_deref(), pubkey.as_deref(), &tenant),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+
+/// Export signed [`ExecutionReceipt`]s from the tenant's chain-signed
+/// audit log and render them.
+///
+/// This is a read-only operation: it verifies the existing chain under
+/// the host signer's public key, converts each mappable `AuditEntry`
+/// into a receipt payload, signs it with the same host key, and prints
+/// the result. No new audit entries are written.
+fn audit_receipts_export(tenant: &str, plan_id: Option<&str>, json: bool) -> Result<()> {
+    let signer = host_signer::load_or_init().context("loading host signer to export receipts")?;
+    let dir = default_audit_dir().context("resolving audit directory")?;
+    let receipts =
+        mvm_hostd::audit::receipt_export::export_receipts(&dir, tenant, plan_id, &signer.signing)
+            .with_context(|| format!("exporting receipts for tenant '{tenant}'"))?;
+
+    if json {
+        crate::json_out::emit_json(&receipts)?;
+    } else {
+        if receipts.is_empty() {
+            ui::info(&format!(
+                "No exportable receipts found for tenant '{tenant}'."
+            ));
+        } else {
+            ui::success(&format!(
+                "exported {n} receipt(s) for tenant '{tenant}'",
+                n = receipts.len()
+            ));
+            for signed in &receipts {
+                eprintln!(
+                    "  {type} {outcome} {id}",
+                    type = signed.payload.receipt_type,
+                    outcome = serde_json::to_string(&signed.payload.outcome)
+                        .unwrap_or_default()
+                        .trim_matches('"'),
+                    id = signed.payload.receipt_id,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────

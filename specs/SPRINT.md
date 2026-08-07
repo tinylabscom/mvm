@@ -76,6 +76,20 @@
       hosts. The follow-up extraction of an `mvm-backends` crate is captured in
       `specs/plans/298-extract-mvm-backends-crate.md`.
 
+- [~] Extract `mvm-backends` crate — **plan 298**, branch
+      `feat/298-extract-mvm-backends`. Moved the `VmmDriver`/`RunningVm`
+      seam, post-restore signal/primed-barrier helpers, `VmFullControl`, and
+      the host `virtiofsd` helper into `mvm-vmm`; `mvm-runtime` and
+      `mvm-build` keep compiling via re-exports. Also moved `DeviceAnchors`
+      to `mvm-core::checkpoint` so the seam stays substrate-clean.
+      `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and
+      per-crate `cargo test --lib` (single-threaded for `mvm-runtime` to avoid
+      a pre-existing cross-crate `MVM_HOME` env race) are green on macOS.
+      The `mvm-backends` crate is scaffolded and the test-only `MockDriver` has
+      moved under a `test-support` feature; the remaining concrete drivers
+      (Fc, Hvf, Libkrun, QEMU) and legacy `VmBackend` shells are still in
+      `mvm-runtime`. Tracked in `specs/plans/298-extract-mvm-backends-crate.md`.
+
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
       scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
@@ -129,6 +143,17 @@
       while `MVM_KERNEL_SOURCE=download|auto` remains explicit. The landing
       page and security docs now state the warm-millisecond promise alongside
       first-run behavior and the default-deny trust model.
+
+- [~] NANDA-style execution receipts and conformance badges — **plan 298**
+      (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
+      approved, WS2 core types landed in `mvm-core`, WS3 read-only receipt
+      exporter landed, and WS4 runtime emission landed: `AuditEmitter` now
+      optionally persists signed `ExecutionReceipt`s under
+      `<audit_dir>/receipts/<tenant>/` with `prev_receipt_id` chain continuity
+      for `plan.admitted` / `plan.launched` / `plan.exited` and checkpoint
+      events. All `mvm-core` / `mvm-hostd` / `mvm-cli` / `mvm-client` unit
+      tests and integration tests pass; workspace `cargo check` / `cargo clippy`
+      are clean. WS5–WS6 (conformance badge generator, docs) are next.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 

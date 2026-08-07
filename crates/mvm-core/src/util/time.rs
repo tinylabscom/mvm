@@ -42,6 +42,15 @@ pub fn utc_plus_duration(dur: Duration) -> String {
 /// `utc_plus_duration`. Returns `None` if the string can't be parsed,
 /// so callers (e.g. the supervisor reaper) can treat malformed
 /// expirations as "no TTL" rather than panicking on disk-format drift.
+/// Return the current wall-clock time as whole seconds since the Unix epoch.
+/// Saturates at zero if the system clock is before 1970-01-01.
+pub fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub fn parse_iso8601(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .ok()

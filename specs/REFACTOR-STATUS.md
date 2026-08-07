@@ -294,6 +294,22 @@ for detailed scope and acceptance criteria.
         for a stated reason. ADR-039 status Rejected; reopening requires a
         workload with a demonstrated need
 
+- [ ] Plan 298 — NANDA-style execution receipts and conformance badges
+      (`specs/plans/298-nanda-receipts-and-conformance-badges.md`)
+  - [x] WS1 RFC approved: `ExecutionReceipt` and `ConformanceBadge` envelopes,
+        JCS canonicalization, Ed25519/`did:key` signing, chain semantics, and
+        mapping to existing `AuditEntry` events defined
+  - [x] WS2 Core types and canonicalization: `receipt.rs`,
+        `conformance_badge.rs`, `did_key.rs`, unit tests, workspace clippy clean
+  - [x] WS3 Read-only receipt exporter: `mvmctl trust audit receipts export`
+        derives signed `ExecutionReceipt`s from verified chain-signed
+        `AuditEntry` events; unit + integration tests pass
+  - [x] WS4 Runtime emission of receipts: `AuditEmitter::with_receipts()`
+        persists signed `ExecutionReceipt`s alongside chain-signed audit
+        events; per-tenant receipt store with `prev_receipt_id` continuity
+  - [ ] WS5 Conformance badge generator
+  - [ ] WS6 Documentation and registry conventions
+
 - [x] Plan 291 — Develop → build → deploy an attested workload image
       (`specs/plans/291-develop-build-deploy-attested.md`)
   - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy

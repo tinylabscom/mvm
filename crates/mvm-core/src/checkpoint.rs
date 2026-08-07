@@ -131,6 +131,26 @@ pub struct ContentBlob {
     pub sha256: String,
 }
 
+/// Absolute host paths to resources a vm_full snapshot embeds by path.
+/// Captured at checkpoint time so a forked child can make those paths
+/// resolve to its own copies without editing the snapshot bitcode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceAnchors {
+    /// Live rootfs block device path.
+    pub rootfs: std::path::PathBuf,
+    /// dm-verity hash tree sidecar, if the rootfs is verity-sealed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs_verity: Option<std::path::PathBuf>,
+    /// Config drive (config.json + role.toml), if attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<std::path::PathBuf>,
+    /// Secrets drive, if attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<std::path::PathBuf>,
+    /// vsock UDS path.
+    pub vsock: std::path::PathBuf,
+}
+
 /// On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
 ///
 /// `parent` hash-links to the parent checkpoint's `meta_digest` (its

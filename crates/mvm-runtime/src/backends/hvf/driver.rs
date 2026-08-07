@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_build::hvf_supervisor::{
-    ConsoleDataSocket, HvfDisk, HvfHandoffRequest, HvfSupervisorConfig, HvfVirtioFsShare,
+    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
 };
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
@@ -24,6 +24,7 @@ use mvm_core::vm_backend::{
     StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
+use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
 use super::backend::{
     self as hvf_backend, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
@@ -380,7 +381,7 @@ impl VmmDriver for HvfDriver {
             vcpus: req.spec.vcpus,
             mem_mib: req.spec.mem_mib,
             binding_nonce: req.spec.binding_nonce.clone(),
-            spawned_unix_secs: crate::standby_pool::now_unix_secs(),
+            spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: req.spec.image_sha256.clone(),
             parent_checkpoint: None,

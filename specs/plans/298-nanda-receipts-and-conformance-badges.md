@@ -1,8 +1,6 @@
 # NANDA-style execution receipts and conformance badges
 
-**Status:** RFC approved. Phase 0 / WS1 complete. WS2–WS6 are gated on
-scheduling into `specs/SPRINT.md` and creating a dedicated worktree per
-workstream.
+**Status:** In progress. WS1–WS4 complete. WS5–WS6 pending.
 
 **Date:** 2026-08-06
 **Owner:** mvm
@@ -249,14 +247,14 @@ and wire formats. This workstream gates all others.
 **Goal:** Implement the receipt and badge types in `mvm-core` with JCS
 canonicalization and Ed25519 signing/verification.
 
-- [ ] Add `ExecutionReceipt` and `ConformanceBadge` types in `mvm-core`.
-- [ ] Implement JCS canonicalization helpers constrained to the admissible value
-      space.
-- [ ] Implement Ed25519 signing/verification with `did:key` derivation and
-      parsing.
-- [ ] Add unit tests for canonicalization determinism, signature roundtrip,
-      tamper detection, and invalid value-space rejection.
-- [ ] Add golden vectors for both envelopes.
+- [x] Add `ExecutionReceipt` and `ConformanceBadge` types in `mvm-core`.
+- [x] Implement JCS canonicalization helpers constrained to the admissible value
+      space (ASCII strings, integers, booleans, null, nested objects/arrays).
+- [x] Implement Ed25519 signing/verification with `did:key` derivation and
+      parsing (new `did_key` module).
+- [x] Add unit tests for canonicalization determinism, signature roundtrip,
+      tamper detection, invalid value-space rejection, and chain continuity.
+- [ ] Add frozen golden-vector files for both envelopes (deferred to WS3/WS5).
 
 **Files likely touched:**
 
@@ -270,33 +268,41 @@ canonicalization and Ed25519 signing/verification.
 **Goal:** Add a tool/CLI command that converts existing chain-signed audit
 entries into signed `ExecutionReceipt`s.
 
-- [ ] Add `mvmctl trust audit receipts export` (or similar) command.
-- [ ] Implement derivation from `AuditEntry` to `ExecutionReceipt`.
-- [ ] Ensure exported receipts verify offline end-to-end.
-- [ ] Add integration tests using the frozen audit corpus.
+- [x] Add `mvmctl trust audit receipts export` (or similar) command.
+- [x] Implement derivation from `AuditEntry` to `ExecutionReceipt`.
+- [x] Ensure exported receipts verify offline end-to-end.
+- [x] Add integration tests using the frozen audit corpus.
 
-**Files likely touched:**
+**Files touched:**
 
-- `crates/mvm-cli/src/commands/cmd_audit.rs`
-- `crates/mvm-hostd/src/audit/emitter.rs` (read path)
+- `crates/mvm-hostd/src/audit/receipt_export.rs` (new)
+- `crates/mvm-hostd/src/audit/mod.rs`
+- `crates/mvm-cli/src/commands/ops/audit.rs`
+- `crates/mvm-cli/src/commands/tests.rs`
 - `tests/audit_total_coverage.rs`
+- `tests/audit_receipt_export.rs` (new)
+- `Cargo.toml` (dev-dependency for integration test)
 
 ### WS4 — Runtime emission of receipts
 
 **Goal:** Emit `ExecutionReceipt`s alongside `AuditEmitter` for
 admission/launch/exit/checkpoint events.
 
-- [ ] Extend `AuditEmitter` to optionally emit receipts.
-- [ ] Wire receipt emission into `plan.admitted`, `plan.launched`, `plan.exited`,
+- [x] Extend `AuditEmitter` to optionally emit receipts.
+- [x] Wire receipt emission into `plan.admitted`, `plan.launched`, `plan.exited`,
       and checkpoint events.
-- [ ] Ensure existing audit tests still pass.
-- [ ] Add receipt chain continuity tests.
+- [x] Ensure existing audit tests still pass.
+- [x] Add receipt chain continuity tests.
 
-**Files likely touched:**
+**Files touched:**
 
+- `crates/mvm-hostd/src/audit/receipt_store.rs` (new)
+- `crates/mvm-hostd/src/audit/mod.rs`
 - `crates/mvm-hostd/src/audit/emitter.rs`
-- `crates/mvm-runtime/src/workload_runner/runner.rs`
-- `crates/mvm-cli/src/commands/machine/runtime.rs`
+- `crates/mvm-cli/src/commands/vm/up/admission.rs`
+- `crates/mvm-cli/src/commands/vm/checkpoint.rs`
+- `crates/mvm-cli/src/commands/vm/checkpoint/revert.rs`
+- `crates/mvm-client/src/launch/mod.rs`
 
 ### WS5 — Conformance badge generator
 

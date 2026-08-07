@@ -21,7 +21,9 @@ pub mod checkpoint;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod config;
+pub mod conformance_badge;
 pub mod dev_network;
+pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed
 /// content-address newtype in this crate shares (crate-private).
 pub(crate) mod digest_shape;
@@ -109,6 +111,7 @@ pub mod platform;
 pub mod policy;
 pub mod protocol;
 pub mod rate_limit;
+pub mod receipt;
 pub mod residency;
 /// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
 /// snapshot container mvm controls (eager-CoW / raw-hypervisor path).

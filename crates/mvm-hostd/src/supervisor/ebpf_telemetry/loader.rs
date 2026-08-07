@@ -199,6 +199,22 @@ fn procfs_handle(target: ObservabilityTarget, _config: &ProbeConfig) -> ProbeHan
     ProbeHandle::new(target)
 }
 
+/// Raw record produced by the kernel-side eBPF program.
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+#[repr(C)]
+struct RawEgressEvent {
+    family: u16,
+    dport: u16,
+    daddr: u32,
+}
+
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+const _: () = {
+    use std::mem::{align_of, size_of};
+    assert!(size_of::<RawEgressEvent>() == 8);
+    assert!(align_of::<RawEgressEvent>() == 4);
+};
+
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn ebpf_worker(
     path: PathBuf,
@@ -237,18 +253,21 @@ fn ebpf_worker(
 
         if let Some(ref mut rb) = ring_buf {
             match rb.next() {
-                Some(_item) => {
-                    // Placeholder: each ring-buffer record counts as one
-                    // observed egress packet. Future iterations will parse
-                    // the destination out of the record bytes.
-                    let _ = events.send(TelemetryEvent::Egress(super::events::EgressEvent {
-                        destination: std::net::SocketAddr::from((
-                            std::net::Ipv4Addr::UNSPECIFIED,
-                            0,
-                        )),
-                        bytes: 0,
-                        latency_us: None,
-                    }));
+                Some(item) => {
+                    let bytes: &[u8] = &item;
+                    if bytes.len() >= core::mem::size_of::<RawEgressEvent>() {
+                        // SAFETY: the kernel wrote the full RawEgressEvent.
+                        let raw = unsafe { &*(bytes.as_ptr() as *const RawEgressEvent) };
+                        let destination = std::net::SocketAddr::from((
+                            std::net::Ipv4Addr::from(u32::from_be(raw.daddr)),
+                            u16::from_be(raw.dport),
+                        ));
+                        let _ = events.send(TelemetryEvent::Egress(super::events::EgressEvent {
+                            destination,
+                            bytes: 0,
+                            latency_us: None,
+                        }));
+                    }
                 }
                 None => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -297,6 +316,11 @@ mod tests {
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 #[test]
 fn telemetry_probe_loads_and_attaches_real_ebpf_object() {
+    if std::env::var("MVM_EBPF_LIVE_TESTS").is_err() {
+        eprintln!("skipping: MVM_EBPF_LIVE_TESTS not set");
+        return;
+    }
+
     let path = default_ebpf_object_path();
     let Some(path) = path else {
         eprintln!("skipping: no default eBPF object path");
@@ -323,4 +347,54 @@ fn telemetry_probe_loads_and_attaches_real_ebpf_object() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     telemetry.detach(handle);
+}
+
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+#[test]
+fn telemetry_probe_observes_ipv4_destination() {
+    if std::env::var("MVM_EBPF_LIVE_TESTS").is_err() {
+        eprintln!("skipping: MVM_EBPF_LIVE_TESTS not set");
+        return;
+    }
+    let path = default_ebpf_object_path().expect("default path");
+    assert!(path.exists(), "eBPF object not built at {}", path.display());
+
+    let mut ebpf = aya::Ebpf::load_file(&path).expect("eBPF load_file failed");
+    let program: &mut aya::programs::KProbe = ebpf
+        .program_mut("mvm_hostd_egress_tcp_connect")
+        .expect("program not found")
+        .try_into()
+        .expect("program is not a kprobe");
+    program.load().expect("eBPF program load failed");
+    program
+        .attach("tcp_connect", 0)
+        .expect("eBPF attach failed");
+
+    let expected = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 61_987));
+    std::thread::spawn(move || {
+        let _ = std::net::TcpStream::connect_timeout(&expected, std::time::Duration::from_secs(1));
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let mut ring_buf: aya::maps::RingBuf<&mut aya::maps::MapData> = ebpf
+        .map_mut("EVENTS")
+        .expect("EVENTS map not found")
+        .try_into()
+        .expect("EVENTS is not a ring buffer");
+
+    let mut found = false;
+    while let Some(item) = ring_buf.next() {
+        let bytes: &[u8] = &item;
+        if bytes.len() >= 8 {
+            let dport = u16::from_be(u16::from_le_bytes([bytes[2], bytes[3]]));
+            let daddr = u32::from_be(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]));
+            let dest = std::net::SocketAddr::from((std::net::Ipv4Addr::from(daddr), dport));
+            eprintln!("observed destination: {dest}");
+            if dest == expected {
+                found = true;
+            }
+        }
+    }
+    assert!(found, "expected event for {expected}");
 }

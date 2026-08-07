@@ -409,6 +409,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bs58"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
+dependencies = [
+ "tinyvec",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2942,6 +2951,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-backends"
+version = "0.18.0"
+dependencies = [
+ "anyhow",
+ "mvm-agentd",
+ "mvm-core",
+ "mvm-net",
+ "mvm-vmm",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "mvm-build"
 version = "0.18.0"
 dependencies = [
@@ -2961,6 +2983,7 @@ dependencies = [
  "mvm-fs",
  "mvm-net",
  "mvm-sdk",
+ "mvm-vmm",
  "nix 0.29.0",
  "rand 0.8.6",
  "rayon",
@@ -3116,6 +3139,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "bs58",
  "chrono",
  "ed25519-dalek",
  "fs2",
@@ -3271,6 +3295,7 @@ dependencies = [
  "libkrun-sys",
  "mio",
  "mvm-agentd",
+ "mvm-backends",
  "mvm-build",
  "mvm-contract",
  "mvm-core",
@@ -3334,19 +3359,22 @@ dependencies = [
 name = "mvm-vmm"
 version = "0.18.0"
 dependencies = [
+ "anyhow",
  "ed25519-dalek",
  "hex",
  "libc",
  "mio",
  "mvm-agentd",
- "mvm-build",
  "mvm-core",
+ "mvm-net",
  "rand 0.8.6",
+ "serde",
  "serde_json",
  "tempfile",
  "virtio-queue",
  "virtio-vsock",
  "vm-memory",
+ "which",
 ]
 
 [[package]]
@@ -3365,6 +3393,7 @@ dependencies = [
  "mvm-cli",
  "mvm-core",
  "mvm-fs",
+ "mvm-hostd",
  "mvm-runtime",
  "objc2-foundation",
  "predicates",

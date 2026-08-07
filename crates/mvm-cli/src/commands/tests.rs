@@ -2276,6 +2276,35 @@ fn test_audit_verify_inclusion_defaults_optional_paths() {
 }
 
 #[test]
+fn test_audit_receipts_export_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "trust", "audit", "receipts", "export", "--tenant", "acme", "--json",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Receipts {
+                    action:
+                        audit::ReceiptsAction::Export {
+                            tenant,
+                            plan_id,
+                            json,
+                        },
+                },
+        }) => {
+            assert_eq!(tenant, "acme");
+            assert_eq!(plan_id, None);
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Receipts::Export"),
+    }
+}
+
+#[test]
 fn test_audit_tail_no_log_prints_message() {
     // When no audit log exists, the command should succeed with a
     // helpful message rather than an error.
@@ -2868,8 +2897,6 @@ fn test_catalog_info_parses() {
         _ => panic!("Expected Catalog Info command"),
     }
 }
-
-// --- Console CLI tests (now under `machine console`) ---
 
 #[test]
 fn test_console_help() {
@@ -3734,6 +3761,91 @@ fn test_init_catalog_conflicts_with_preset() {
         result.is_err(),
         "--catalog and --preset are mutually exclusive"
     );
+}
+
+// --- Generate CLI tests ---
+
+#[test]
+fn test_generate_sdk_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "generate", "sdk", "app.py", "-o", "./my-app"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Generate(generate::Args {
+            action: generate::GenerateAction::Sdk { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_generate_template_parses() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "generate", "template", "python", "./my-app"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Generate(generate::Args {
+            action: generate::GenerateAction::Template { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_generate_prompt_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "generate",
+        "prompt",
+        "python api with postgres",
+        "./my-app",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Generate(generate::Args {
+            action: generate::GenerateAction::Prompt { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_generate_sdk_default_out() {
+    let cli = Cli::try_parse_from(["mvmctl", "generate", "sdk", "app.py"]).unwrap();
+    match cli.command {
+        Commands::Generate(generate::Args {
+            action: generate::GenerateAction::Sdk { out, .. },
+        }) => assert_eq!(out, std::path::PathBuf::from("./out")),
+        _ => panic!("expected generate sdk"),
+    }
+}
+
+// --- Template CLI tests ---
+
+#[test]
+fn test_template_list_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "template", "list"]);
+    assert!(cli.is_ok());
+}
+
+#[test]
+fn test_template_search_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "template", "search", "python"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Template(template::Args {
+            action: template::TemplateAction::Search { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_template_info_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "template", "info", "python-pandas"]).unwrap();
+    match cli.command {
+        Commands::Template(template::Args {
+            action: template::TemplateAction::Info { name },
+        }) => assert_eq!(name, "python-pandas"),
+        _ => panic!("expected template info"),
+    }
 }
 
 // --- Cache CLI tests ---

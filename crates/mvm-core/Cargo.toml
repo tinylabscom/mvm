@@ -12,6 +12,7 @@ authors.workspace = true
 mvm-contract = { workspace = true, default-features = false, features = ["protocol", "volume"] }
 anyhow.workspace = true
 base64.workspace = true
+bs58.workspace = true
 serde_jcs = "0.1"
 unicode-normalization = "0.1"
 chrono.workspace = true

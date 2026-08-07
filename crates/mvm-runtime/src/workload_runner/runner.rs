@@ -908,7 +908,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 StandbyError::SpawnFailed(format!("resolve standby supervisor config: {e}"))
             })?,
             tag: None,
-            created_unix: crate::standby_pool::now_unix_secs(),
+            created_unix: mvm_core::time::now_unix_secs(),
         };
         let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))
             && std::env::var("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT").as_deref() == Ok("1")
@@ -1759,7 +1759,7 @@ mod tests {
     use mvm_fs::snapshot_store::SnapshotStore;
 
     use crate::backends::hvf::HvfDriver;
-    use crate::driver::mock::MockDriver;
+    use crate::driver::MockDriver;
 
     /// An `EndpointSpawner` test double: records the request it was handed and
     /// returns a canned UDS without spawning any process. `Mutex` (not `RefCell`)

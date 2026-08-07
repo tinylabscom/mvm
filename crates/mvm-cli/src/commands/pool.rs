@@ -27,7 +27,7 @@ use mvm_core::vm_backend::{
 use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::CheckpointStore;
-use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
+use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool};
 use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, PreloadContext, SpawnContext};
 use sha2::{Digest, Sha256};
 
@@ -845,7 +845,7 @@ fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<
 /// reapers agree on what "stale" means.
 pub fn reap_stale_standbys_best_effort() {
     match SupervisorStandbyPool::open()
-        .and_then(|pool| pool.reap_stale(STANDBY_POOL_TTL, now_unix_secs()))
+        .and_then(|pool| pool.reap_stale(STANDBY_POOL_TTL, mvm_core::time::now_unix_secs()))
     {
         Ok(reaped) if !reaped.is_empty() => {
             tracing::debug!(count = reaped.len(), "reaped stale standbys on launch");

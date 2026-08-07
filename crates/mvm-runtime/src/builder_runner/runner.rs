@@ -177,7 +177,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::mock::MockDriver;
+    use crate::driver::MockDriver;
     use mvm_core::util::test_env::TestEnv;
 
     /// The on-disk inputs a builder run reads, materialized under one
