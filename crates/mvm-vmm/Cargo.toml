@@ -8,6 +8,9 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM provider plumbing (host agent, console, handoff, and backend-local vsock listeners)"
+
 [dependencies]
 anyhow.workspace = true
 # Egress policy types used by the vsock egress bridge.

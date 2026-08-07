@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 description = "Image → mountable rootfs for mvm: OCI distribution client (registry/manifest/layer fetch + allow-listed unpack) and a pure-Rust, memory-safe, deterministic ext4 writer (no mkfs, no subprocess)."
 
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-workload immutable snapshot helper (privileged APFS sealing and materialization)"
+
 [dependencies]
 async-trait = "0.1"
 ed25519-dalek.workspace = true
