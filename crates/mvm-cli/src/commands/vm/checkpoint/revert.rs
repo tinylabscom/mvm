@@ -461,6 +461,7 @@ fn emit_image_revert_audit(node: &ImageNode, via: RevertVia, reference: &str) ->
         }
     };
     let emitter = crate::commands::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .map(|e| e.with_receipts())
         .context("refusing an unaudited image restore: audit emitter unavailable")?;
     // The node's content-address is always a valid 64-hex digest — bind the
     // event plan's image to it so synthesis can never reject a genuine node.
@@ -643,6 +644,7 @@ fn emit_revert_audit(
         }
     };
     let emitter = crate::commands::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .map(|e| e.with_receipts())
         .context("refusing an unaudited restore: audit emitter unavailable")?;
     mvm_hostd::audit::bind::bind_checkpoint_restored(
         &emitter,

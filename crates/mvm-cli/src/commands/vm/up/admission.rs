@@ -448,7 +448,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         p.audit_dir,
         resolved.audit.as_ref(),
     ) {
-        Ok(emitter) => emitter,
+        Ok(emitter) => emitter.with_receipts(),
         Err(err) => {
             let err = err.context("opening audit chain emitter");
             match build_default_audit_emitter(signer.signing, p.audit_dir) {
