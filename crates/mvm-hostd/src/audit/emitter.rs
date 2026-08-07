@@ -38,6 +38,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::audit::receipt_export::audit_entry_to_receipt;
+use crate::audit::receipt_store::ReceiptStore;
 use crate::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -45,6 +47,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
 use mvm_contract::merkle::{SignedAuditRoot, root_signing_bytes};
 use mvm_core::plan::ExecutionPlan;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Wire-stable event names and label keys for the checkpoint audit entries.
 /// Shared so the emitter (writer) and the lineage chain-anchor (reader) can't
@@ -314,6 +318,8 @@ pub struct AuditEmitter {
     signers: Vec<FileAuditSigner>,
     signing_key: SigningKey,
     audit_dir: PathBuf,
+    receipts_enabled: bool,
+    receipt_stores: Mutex<HashMap<String, ReceiptStore>>,
 }
 
 impl AuditEmitter {
@@ -350,6 +356,8 @@ impl AuditEmitter {
             signers: vec![signer],
             signing_key,
             audit_dir: audit_dir.to_path_buf(),
+            receipts_enabled: false,
+            receipt_stores: Mutex::new(HashMap::new()),
         })
     }
 
@@ -389,6 +397,14 @@ impl AuditEmitter {
             emitter.signers.push(signer);
         }
         Ok(emitter)
+    }
+
+    /// Enable runtime emission of signed [`ExecutionReceipt`]s alongside
+    /// audit events. Receipts are stored under
+    /// `<audit_dir>/receipts/<tenant>/` and chained via `prev_receipt_id`.
+    pub fn with_receipts(mut self) -> Self {
+        self.receipts_enabled = true;
+        self
     }
 
     /// Emit `plan.admitted` — fires immediately after `admit_for_run`
@@ -873,7 +889,82 @@ impl AuditEmitter {
             rt.block_on(signer.sign_and_emit(entry))
                 .with_context(|| format!("signing-and-emitting audit event {}", entry.event))?;
         }
+        self.emit_receipt_for_entry(entry);
         Ok(())
+    }
+
+    /// Best-effort emission of a signed [`ExecutionReceipt`] for an audit
+    /// entry. Errors are logged and swallowed: receipts are a derived cache
+    /// and must never block the primary audit emit.
+    fn emit_receipt_for_entry(&self, entry: &AuditEntry) {
+        if !self.receipts_enabled {
+            return;
+        }
+        let tenant = entry.tenant.0.clone();
+        let store = match self.receipt_store_for_tenant(&tenant) {
+            Some(s) => s,
+            None => return,
+        };
+        let host_did =
+            mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
+                .to_did_key();
+        let mut receipt = match audit_entry_to_receipt(entry, &host_did) {
+            Some(r) => r,
+            None => return,
+        };
+        let head = match store.head() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(event = entry.event, error = %e, "failed to read receipt store head");
+                return;
+            }
+        };
+        receipt.prev_receipt_id = head.last_receipt_id;
+        receipt.receipt_id = match receipt.compute_id() {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(event = entry.event, error = %e, "failed to compute receipt id");
+                return;
+            }
+        };
+        let signed_at = chrono::Utc::now().to_rfc3339();
+        let signed = match mvm_core::receipt::SignedExecutionReceipt::sign(
+            receipt,
+            &self.signing_key,
+            signed_at,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(event = entry.event, error = %e, "failed to sign execution receipt");
+                return;
+            }
+        };
+        if let Err(e) = store.append(&signed) {
+            tracing::warn!(event = entry.event, error = %e, "failed to append execution receipt");
+        }
+    }
+
+    /// Return the cached receipt store for `tenant`, creating it on first
+    /// use. Returns `None` if the store cannot be opened.
+    fn receipt_store_for_tenant(&self, tenant: &str) -> Option<ReceiptStore> {
+        {
+            let stores = self.receipt_stores.lock().ok()?;
+            if let Some(store) = stores.get(tenant) {
+                return Some(store.clone());
+            }
+        }
+        let store = match ReceiptStore::open(&self.audit_dir, tenant) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(tenant, error = %e, "failed to open receipt store");
+                return None;
+            }
+        };
+        {
+            let mut stores = self.receipt_stores.lock().ok()?;
+            stores.insert(tenant.to_string(), store.clone());
+        }
+        Some(store)
     }
 }
 
@@ -1804,5 +1895,135 @@ mod tests {
         assert!(emitter.publish_root("local").is_err());
         // And no partial sidecar was left behind.
         assert!(!dir.path().join("local.root.json").exists());
+    }
+
+    #[test]
+    fn receipts_disabled_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-no-receipts");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+
+        assert!(!dir.path().join("receipts").exists());
+    }
+
+    #[test]
+    fn receipts_emitted_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path())
+            .unwrap()
+            .with_receipts();
+        let plan = fixture_plan("local", "plan-with-receipts");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter.emit_launched(&plan, "firecracker").unwrap();
+
+        let receipt_dir = dir.path().join("receipts").join("local");
+        assert!(receipt_dir.exists());
+        let entries: Vec<_> = std::fs::read_dir(&receipt_dir)
+            .unwrap()
+            .filter_map(|e| {
+                let e = e.ok()?;
+                let name = e.file_name().into_string().ok()?;
+                if name.ends_with(".json") && !name.starts_with("head") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(entries.len(), 2, "two receipt files expected: {entries:?}");
+
+        let head_path = receipt_dir.join("head.json");
+        assert!(head_path.exists());
+    }
+
+    #[test]
+    fn receipt_chain_continuity_across_emits() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path())
+            .unwrap()
+            .with_receipts();
+        let plan = fixture_plan("local", "plan-chain");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter.emit_launched(&plan, "firecracker").unwrap();
+
+        let receipt_dir = dir.path().join("receipts").join("local");
+        let mut files: Vec<_> = std::fs::read_dir(&receipt_dir)
+            .unwrap()
+            .filter_map(|e| {
+                let e = e.ok()?;
+                let name = e.file_name().into_string().ok()?;
+                if name.ends_with(".json") && !name.starts_with("head") {
+                    Some((name, e.path()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(files.len(), 2);
+
+        let first: mvm_core::receipt::SignedExecutionReceipt =
+            serde_json::from_slice(&std::fs::read(&files[0].1).unwrap()).unwrap();
+        let second: mvm_core::receipt::SignedExecutionReceipt =
+            serde_json::from_slice(&std::fs::read(&files[1].1).unwrap()).unwrap();
+
+        first.verify().expect("first receipt verifies");
+        second.verify().expect("second receipt verifies");
+        assert_eq!(
+            second.payload.prev_receipt_id,
+            Some(first.payload.receipt_id.clone()),
+            "second receipt must link to first"
+        );
+    }
+
+    #[test]
+    fn checkpoint_receipts_emitted_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path())
+            .unwrap()
+            .with_receipts();
+        let plan = fixture_plan("local", "plan-chk");
+        emitter
+            .emit_checkpoint_created(&plan, "chk-1", "vm_full", "sha256:abc123", "vm-1")
+            .unwrap();
+
+        let receipt_dir = dir.path().join("receipts").join("local");
+        let files: Vec<_> = std::fs::read_dir(&receipt_dir)
+            .unwrap()
+            .filter_map(|e| {
+                let e = e.ok()?;
+                let name = e.file_name().into_string().ok()?;
+                if name.ends_with(".json") && name.contains("checkpoint.created") {
+                    Some(e.path())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(files.len(), 1);
+        let signed: mvm_core::receipt::SignedExecutionReceipt =
+            serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+        signed.verify().expect("checkpoint receipt verifies");
     }
 }

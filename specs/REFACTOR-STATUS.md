@@ -306,7 +306,9 @@ for detailed scope and acceptance criteria.
   - [x] WS3 Read-only receipt exporter: `mvmctl trust audit receipts export`
         derives signed `ExecutionReceipt`s from verified chain-signed
         `AuditEntry` events; unit + integration tests pass
-  - [ ] WS4 Runtime emission of receipts
+  - [x] WS4 Runtime emission of receipts: `AuditEmitter::with_receipts()`
+        persists signed `ExecutionReceipt`s alongside chain-signed audit
+        events; per-tenant receipt store with `prev_receipt_id` continuity
   - [ ] WS5 Conformance badge generator
   - [ ] WS6 Documentation and registry conventions
 >>>>>>> 9e46d0c4e (docs: RFC for NANDA-style execution receipts and conformance badges)

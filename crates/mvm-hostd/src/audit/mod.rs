@@ -12,3 +12,5 @@ pub mod plan_persist;
 /// Read-only exporter from chain-signed audit entries to signed
 /// ExecutionReceipts.
 pub mod receipt_export;
+/// Persistent store for runtime-emitted signed ExecutionReceipts.
+pub mod receipt_store;

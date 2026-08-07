@@ -1,6 +1,6 @@
 # NANDA-style execution receipts and conformance badges
 
-**Status:** In progress. WS1–WS3 complete. WS4–WS6 pending.
+**Status:** In progress. WS1–WS4 complete. WS5–WS6 pending.
 
 **Date:** 2026-08-06
 **Owner:** mvm
@@ -288,17 +288,21 @@ entries into signed `ExecutionReceipt`s.
 **Goal:** Emit `ExecutionReceipt`s alongside `AuditEmitter` for
 admission/launch/exit/checkpoint events.
 
-- [ ] Extend `AuditEmitter` to optionally emit receipts.
-- [ ] Wire receipt emission into `plan.admitted`, `plan.launched`, `plan.exited`,
+- [x] Extend `AuditEmitter` to optionally emit receipts.
+- [x] Wire receipt emission into `plan.admitted`, `plan.launched`, `plan.exited`,
       and checkpoint events.
-- [ ] Ensure existing audit tests still pass.
-- [ ] Add receipt chain continuity tests.
+- [x] Ensure existing audit tests still pass.
+- [x] Add receipt chain continuity tests.
 
-**Files likely touched:**
+**Files touched:**
 
+- `crates/mvm-hostd/src/audit/receipt_store.rs` (new)
+- `crates/mvm-hostd/src/audit/mod.rs`
 - `crates/mvm-hostd/src/audit/emitter.rs`
-- `crates/mvm-runtime/src/workload_runner/runner.rs`
-- `crates/mvm-cli/src/commands/machine/runtime.rs`
+- `crates/mvm-cli/src/commands/vm/up/admission.rs`
+- `crates/mvm-cli/src/commands/vm/checkpoint.rs`
+- `crates/mvm-cli/src/commands/vm/checkpoint/revert.rs`
+- `crates/mvm-client/src/launch/mod.rs`
 
 ### WS5 — Conformance badge generator
 
