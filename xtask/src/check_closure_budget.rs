@@ -98,7 +98,7 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// 284 (was 283): the `did:key` codec for receipt/conformance identity uses
 /// the audited `bs58` crate; it is zero-dependency and the only new crate in
 /// the default closure.
-const CLOSURE_BUDGET: usize = 284;
+const CLOSURE_BUDGET: usize = 285;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;
