@@ -293,3 +293,34 @@ mod tests {
         assert!(telemetry.attach(target).is_ok());
     }
 }
+
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+#[test]
+fn telemetry_probe_loads_and_attaches_real_ebpf_object() {
+    let path = default_ebpf_object_path();
+    let Some(path) = path else {
+        eprintln!("skipping: no default eBPF object path");
+        return;
+    };
+    if !path.exists() {
+        eprintln!("skipping: eBPF object not built at {}", path.display());
+        return;
+    }
+
+    let telemetry = EgressTelemetry::new(ProbeConfig {
+        ebpf_object_path: Some(path),
+        enable_procfs_fallback: false,
+    });
+    let target =
+        ObservabilityTarget::new("ebpf-live-test").with_substitution_pid(std::process::id());
+
+    let handle = telemetry
+        .attach(target)
+        .expect("eBPF object should load and tcp_connect kprobe should attach");
+
+    // Give the kprobe a moment to settle; we do not require an actual
+    // TCP connect event to fire in this test.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    telemetry.detach(handle);
+}

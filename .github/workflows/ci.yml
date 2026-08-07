@@ -448,6 +448,42 @@ jobs:
       - name: Run Linux, no_std, filesystem, and conformance coverage
         run: bash scripts/ci-linux-coverage.sh
 
+  test-ebpf-telemetry:
+    name: Test eBPF telemetry load/attach
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly Rust toolchain for eBPF build
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install system build deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
+          sudo apt-get install -y libcap-ng-dev lld
+
+      - name: Install bpf-linker
+        run: cargo +nightly install --locked bpf-linker
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Build the eBPF object
+        run: just build-ebpf
+
+      - name: Run mvm-hostd eBPF telemetry load/attach test
+        run: cargo test -p mvm-hostd --features ebpf-telemetry --lib
+
   nix-flake-check:
     name: Nix flake check (Linux eval)
     # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
