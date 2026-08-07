@@ -1410,8 +1410,15 @@ Then unify + retire the old paths:
       Saved-state claims retain full lineage verification. The root-only APFS
       helper remains optional for background publication and is not required by
       the rootless hot path. The 1,000-claim Darwin matrix passes the aggregate
-      targets and the direct Linux Firecracker/KVM witness is green; production
-      Linux standby admission and the remaining backend matrices remain open.
+      targets. On the FC host, the source-matched Linux build passes the runtime
+      and guest-agent unit suites plus full workspace all-target clippy, and the
+      live Firecracker path reaches parent boot, paused-child preload, and child
+      resume. The authenticated witness then fails because the supplied baked
+      guest image rejects post-restore clock resynchronization with
+      `settimeofday: EPERM`; no launch timing is accepted from that run.
+      Production Linux standby admission and the remaining backend matrices
+      remain open pending a production-compatible guest image/runtime contract
+      and a rerun of the authenticated KVM matrix.
       #2195 adds fixed virtio-fs share slots; #2196 completes Linux
       Firecracker warm claims; #2197 hardens the VMM/share processes; #2198
       finalizes warm-required CLI semantics and timing; and #2199 adds the

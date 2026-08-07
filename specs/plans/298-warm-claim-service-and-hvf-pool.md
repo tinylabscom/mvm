@@ -261,10 +261,18 @@ reseeding, and policy validation.
   620ms while the identity RPC remained 24–35ms. The strict Linux maximum is
   therefore not green yet. The Firecracker implementation now pre-loads paused
   child VMMs during pool refill so process/snapshot restore work is outside the
-  measured launch window; real Linux KVM validation of the new path is next.
-  Linux libkrun and the remaining backend/share-shape matrices remain open. The
-  resident path defers reclamation of consumed parent payloads until after the
-  measured handoff, keeping checkpoint and snapshot state bounded.
+  measured launch window. On the FC host, the source-matched build passes the
+  Linux runtime unit suite (1,214 tests), the guest-agent suite (654 tests),
+  the Linux Firecracker witness target's clippy check, and full workspace
+  all-target clippy. The live witness reaches parent boot, paused-child
+  preload, and child resume, but the supplied baked guest image rejects the
+  required post-restore clock resynchronization with `settimeofday: EPERM`, so
+  the authenticated claim and its timing are not accepted. A
+  production-compatible guest image/runtime contract and a rerun of the
+  authenticated KVM matrix remain required. Linux libkrun and the remaining
+  backend/share-shape matrices remain open. The resident path defers
+  reclamation of consumed parent payloads until after the measured handoff,
+  keeping checkpoint and snapshot state bounded.
 - [x] Removed the process-wide `MVM_HOME` mutation from the UDS-channel test
   harness. Parallel host tests now use explicit isolated socket roots; the
   complete `mvm-hostd` package suite passes without the prior macOS hang.
