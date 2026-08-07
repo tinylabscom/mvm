@@ -534,7 +534,7 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
         }
     };
     let emitter = match super::audit_chain::AuditEmitter::new(signer.signing) {
-        Ok(e) => e,
+        Ok(e) => e.with_receipts(),
         Err(e) => {
             tracing::warn!(error = %e, "audit emitter unavailable; chain entry skipped");
             return;
@@ -1461,6 +1461,7 @@ pub(crate) fn bind_checkpoint_forked(
         }
     };
     let emitter = super::audit_chain::AuditEmitter::new(signer.signing)
+        .map(|e| e.with_receipts())
         .context("refusing an unaudited fork: audit emitter unavailable")?;
     mvm_hostd::audit::bind::bind_checkpoint_forked(&emitter, &plan, parent, child, child_vm_name)
         .context("refusing an unaudited fork")?;

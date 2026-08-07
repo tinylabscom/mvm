@@ -96,7 +96,7 @@ fn build_audit_emitter() -> Option<AuditEmitter> {
         }
     };
     match AuditEmitter::new(signer.signing) {
-        Ok(emitter) => Some(emitter),
+        Ok(emitter) => Some(emitter.with_receipts()),
         Err(e) => {
             tracing::warn!(error = %e, "audit emitter unavailable; skipping chain audit emission");
             None
