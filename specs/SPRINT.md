@@ -116,8 +116,8 @@
       `just build-ebpf` (nightly + `bpf-linker`), added an attach→detach
       integration test that reads the sidecar, implemented the Linux Aya
       load/attach/ring-buffer read path, and ran the full workspace nextest
-      suite (10134 passed, 18 skipped). Validating load/attach on a live
-      Linux host remains for the builder VM.
+      suite (10134 passed, 18 skipped). Live Linux load/attach validation
+      merged in #2221.
 
 - [x] Source-checkout kernel bootstrap reliability. `just kernel-workload` and
       `mvmctl kernel build --which workload` now embed the Stage 0 egress client

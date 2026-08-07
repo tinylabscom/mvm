@@ -24,10 +24,10 @@ for detailed scope and acceptance criteria.
   - [x] Full workspace test run on the host (cargo nextest: 10134 passed,
         18 skipped; cargo test previously flaked on one netd test that
         passes in isolation)
-  - [ ] Full workspace test run in CI / Linux builder VM
+  - [x] Full workspace test run in CI / Linux builder VM (PR #2214)
   - [x] Implement Linux Aya load/attach/ring-buffer read path
         (cross-compiles for x86_64-unknown-linux-gnu via cargo-zigbuild)
-  - [ ] Validate load/attach on a live Linux host
+  - [x] Validate load/attach on a live Linux host (PR #2221)
 
 - [~] Plan 287 — Userspace socket datapath
       (`specs/plans/287-userspace-socket-datapath.md`, ADR-037)
