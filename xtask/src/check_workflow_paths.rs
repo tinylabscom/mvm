@@ -317,6 +317,7 @@ mod tests {
         assert!(lint_policy.contains("cargo run -p xtask -- check-conformance"));
         let lint_features = job_block(&workflow, "lint-features");
         for expected in [
+            "cargo nextest run -p mvm-backends --features test-support --lib",
             "cargo nextest run -p mvm-runtime --features test-support --lib",
             "cargo nextest run -p mvm-client --features test-support --lib",
             "cargo nextest run -p mvm-cli --features test-support --lib",
@@ -440,6 +441,7 @@ mod tests {
                 .strip_prefix(&workspace)
                 .expect("workspace-relative path");
             let owned = [
+                "crates/mvm-backends/",
                 "crates/mvm-cli/",
                 "crates/mvm-client/",
                 "crates/mvm-core/",

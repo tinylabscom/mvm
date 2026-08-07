@@ -40,7 +40,7 @@ fn main() -> Result<()> {
     // transport().connect, no backend.stop, no replenish — the lease owns all
     // of it.
     // ======================================================================
-    let lease = WarmLease::acquire(backend, &pool, &spec, None)?;
+    let mut lease = WarmLease::acquire(backend, &pool, &spec, None)?;
     println!("acquired warm VM: {}", lease.id());
 
     // Stage a verification script, then run it and a follow-up check on one

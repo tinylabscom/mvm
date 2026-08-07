@@ -22,7 +22,7 @@ use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::checkpoint::{
     CaptureFsQuickParams, CheckpointChainAnchor, CheckpointStore, capture_fs_quick,
 };
-use mvm_runtime::driver::mock::MockDriver;
+use mvm_runtime::driver::MockDriver;
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 use mvm_runtime::workload_runner::claim::parent_rootfs_digest;
 use mvm_runtime::workload_runner::{

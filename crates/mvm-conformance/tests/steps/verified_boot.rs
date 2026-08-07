@@ -102,12 +102,12 @@ fn map_elf_kernel(world: &mut CliWorld) {
         memory_mib: 128,
         mem_initial_mib: None,
         blocks: vec![],
-        virtiofs_shares: vec![],
         vsock: vec![],
         console: ConsoleCapture {
             log_path: state.path().join("console.log"),
         },
         shares: Vec::new(),
+        trusted_builder: false,
     };
     let (mapped_path, format) =
         mvm_runtime::driver::libkrun::map_kernel_for_test(&spec, state.path())
