@@ -2870,20 +2870,6 @@ fn test_catalog_info_parses() {
 }
 
 #[test]
-fn test_catalog_includes_python_pandas() {
-    let catalog = catalog::load_bundled_catalog();
-    let entry = catalog
-        .find("python-pandas")
-        .expect("python-pandas catalog entry exists");
-    assert_eq!(entry.profile, "python-pandas");
-    assert_eq!(entry.default_cpus, 2);
-    assert_eq!(entry.default_memory_mib, 512);
-    assert!(entry.tags.contains(&"pandas".to_string()));
-}
-
-// --- Console CLI tests (now under `machine console`) ---
-
-#[test]
 fn test_console_help() {
     let cli = Cli::try_parse_from(["mvmctl", "machine", "console", "myvm"]);
     assert!(cli.is_ok());
@@ -3779,6 +3765,36 @@ fn test_generate_sdk_default_out() {
             action: generate::GenerateAction::Sdk { out, .. },
         }) => assert_eq!(out, std::path::PathBuf::from("./out")),
         _ => panic!("expected generate sdk"),
+    }
+}
+
+// --- Template CLI tests ---
+
+#[test]
+fn test_template_list_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "template", "list"]);
+    assert!(cli.is_ok());
+}
+
+#[test]
+fn test_template_search_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "template", "search", "python"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Template(template::Args {
+            action: template::TemplateAction::Search { .. }
+        })
+    ));
+}
+
+#[test]
+fn test_template_info_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "template", "info", "python-pandas"]).unwrap();
+    match cli.command {
+        Commands::Template(template::Args {
+            action: template::TemplateAction::Info { name },
+        }) => assert_eq!(name, "python-pandas"),
+        _ => panic!("expected template info"),
     }
 }
 

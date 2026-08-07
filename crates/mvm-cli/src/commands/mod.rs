@@ -1,7 +1,7 @@
 mod bootstrap;
 mod build;
 mod bundle;
-mod catalog;
+pub mod catalog;
 mod cmd_audit;
 mod deploy;
 mod deps;
@@ -24,6 +24,7 @@ mod runtime_overlay;
 mod seccomp_audit;
 mod shared;
 mod storage;
+mod template;
 mod trust;
 pub(crate) mod vm;
 mod watch;
@@ -109,6 +110,9 @@ pub(in crate::commands) enum Commands {
     /// Generate a runnable microVM project from SDK, template, or prompt
     #[command(display_order = 4)]
     Generate(generate::Args),
+    /// Browse bundled and remote microVM templates
+    #[command(display_order = 5)]
+    Template(template::Args),
     /// Scaffold a new project
     #[command(display_order = 5)]
     Init(env::init::Args),
