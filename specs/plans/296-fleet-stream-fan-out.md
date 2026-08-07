@@ -1,6 +1,6 @@
 # Plan 296 — fleet stream fan-out
 
-**Status:** WS1–WS4 landed. WS5 + WS6 outstanding.
+**Status:** Complete. WS1–WS6 landed.
 
 `mvm` ships the mechanism; `mvmd` declares the edges and resolves the bindings.
 That split is why the landed half has **no production caller in this
@@ -116,12 +116,30 @@ Two consequences worth stating plainly, because they will surprise someone:
   producer — that invariant is inherited and must be re-verified here, not
   assumed.
 
-- [ ] **WS5 — claim work.** An edge is a different authorization shape than a
+- [x] **WS5 — claim work.** Landed. ADR-035 gains a section stating what an
+  edge guarantees by construction (no guest addresses another, no new path out
+  of a guest, the four pre-boot refusals, raw refused rather than downgraded,
+  safe defaults that cannot be lost by omission, producer never stalled) and
+  what it does not — chiefly that **none of those refusals has fired in
+  production**, because none has a caller here. They are dormant by
+  declaration, and the gate now enforces that in both directions.
+
+  Claim 17 stays `Preview`. An edge would be the input plane's second
+  production caller and the promotion question is deferred until one exists;
+  promoting on a caller nobody has written would make the claim true of code
+  and false of the system. Why it existed: An edge is a different authorization shape than a
   per-plan grant, so this is not claim 17 with more rows. State what an edge
   guarantees, what it does not, and witness it. Reassess whether the input plane
   can leave `Preview` once it has a second production caller.
 
-- [ ] **WS6 — docs.** How a fleet declares edges, what redaction does to data in
+- [x] **WS6 — docs.** Landed as `guides/fleet-stream-edges`, wired into the
+  sidebar: how a consumer names a binding rather than a VM, what the two
+  redaction postures mean and why `raw` needs an operator acknowledgement it
+  cannot get from a plan signature, why fan-in is a merge stage, why the
+  topology is a DAG, what each backpressure mode does when a consumer falls
+  behind, and why a broken edge fails the workflow instead of reconnecting. It
+  opens by saying the surface has no CLI driver yet, so a reader is not left
+  hunting for a command that does not exist. Why it existed: How a fleet declares edges, what redaction does to data in
   flight, why fan-in is a merge node, and what happens when a consumer falls
   behind under each mode.
 
