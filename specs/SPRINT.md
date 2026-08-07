@@ -142,6 +142,15 @@
       short reads, EOF, and nonblocking errors refund unused reservations.
       Regression coverage proves an exhausted budget keeps the stream alive.
 
+- [~] NANDA-style execution receipts and conformance badges — **plan 298**
+      (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
+      approved: defines `ExecutionReceipt` (signed, chainable proof of what ran,
+      by whom, under what authority) and `ConformanceBadge` (signed, corpus-pinned
+      export of the MVM-SEC claim/witness program), both built on existing
+      Ed25519/JCS/SHA-256 primitives with no new authority or external dependency.
+      WS2–WS6 (core types, read-only exporter, runtime emission, badge generator,
+      docs) are scheduled next.
+
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
 Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,
