@@ -209,6 +209,13 @@ struct RawEgressEvent {
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+const _: () = {
+    use std::mem::{align_of, size_of};
+    assert!(size_of::<RawEgressEvent>() == 8);
+    assert!(align_of::<RawEgressEvent>() == 4);
+};
+
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn ebpf_worker(
     path: PathBuf,
     vm_name: String,

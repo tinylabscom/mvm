@@ -9,9 +9,10 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::info;
 
-/// Local layout mirror of `struct sock_common`.  The order and sizes match
-/// the in-kernel layout on x86_64 so that reads resolve to the right offsets
-/// when the object is loaded without BTF CO-RE relocations for these types.
+/// Prefix mirror of `struct sock_common`.  The order and sizes match the
+/// in-kernel layout on x86_64 up to and including `skc_family`, which is
+/// enough for the fields this probe reads.  The contract below locks the
+/// prefix size and alignment to the kernel header.
 #[repr(C)]
 pub struct sock_common {
     pub skc_daddr: u32,
@@ -22,11 +23,13 @@ pub struct sock_common {
     pub skc_family: u16,
 }
 
-/// Local layout mirror of `struct sock`.  Only `__sk_common` is needed.
-#[repr(C)]
-pub struct sock {
-    pub __sk_common: sock_common,
-}
+const _: () = {
+    use core::mem::{align_of, size_of};
+    // Prefix size/alignment derived from the kernel struct sock_common layout
+    // (daddr 0, rcv_saddr 4, hash 8, dport 12, num 14, family 16).
+    assert!(size_of::<sock_common>() == 20);
+    assert!(align_of::<sock_common>() == 4);
+};
 
 /// Network-byte-order record written to the ring buffer for every
 /// `tcp_connect` kprobe hit. Userspace converts to host order.
@@ -36,6 +39,12 @@ pub struct EgressEvent {
     pub dport: u16,
     pub daddr: u32,
 }
+
+const _: () = {
+    use core::mem::{align_of, size_of};
+    assert!(size_of::<EgressEvent>() == 8);
+    assert!(align_of::<EgressEvent>() == 4);
+};
 
 /// Ring buffer used to notify userspace that the egress kprobe fired.
 #[map]
@@ -52,21 +61,20 @@ pub fn mvm_hostd_egress_tcp_connect(ctx: ProbeContext) -> u32 {
 const AF_INET: u16 = 2;
 
 fn try_mvm_hostd_egress_tcp_connect(ctx: ProbeContext) -> Result<u32, u32> {
-    // `tcp_connect(struct sock *sk, ...)` — sk is the first argument.
-    let sk: *mut sock = ctx.arg(0).ok_or(1u32)?;
+    // `tcp_connect(struct sock *sk, ...)` — the first member of `struct sock`
+    // is `struct sock_common __sk_common`, so the argument pointer can be
+    // treated as a `*mut sock_common` for the fields we read.
+    let sk: *mut sock_common = ctx.arg(0).ok_or(1u32)?;
 
-    let family: u16 =
-        unsafe { bpf_probe_read_kernel(&(*sk).__sk_common.skc_family) }.map_err(|_| 1u32)?;
+    let family: u16 = unsafe { bpf_probe_read_kernel(&(*sk).skc_family) }.map_err(|_| 1u32)?;
 
     if family != AF_INET {
         // IPv6 and other families are out of scope for this spike.
         return Ok(0);
     }
 
-    let daddr: u32 =
-        unsafe { bpf_probe_read_kernel(&(*sk).__sk_common.skc_daddr) }.map_err(|_| 1u32)?;
-    let dport: u16 =
-        unsafe { bpf_probe_read_kernel(&(*sk).__sk_common.skc_dport) }.map_err(|_| 1u32)?;
+    let daddr: u32 = unsafe { bpf_probe_read_kernel(&(*sk).skc_daddr) }.map_err(|_| 1u32)?;
+    let dport: u16 = unsafe { bpf_probe_read_kernel(&(*sk).skc_dport) }.map_err(|_| 1u32)?;
 
     info!(
         &ctx,
