@@ -24,6 +24,24 @@ pub struct GatewayMetrics {
     pub stale_session_frames: u64,
     pub queue_drops_ingress: u64,
     pub queue_drops_egress: u64,
+    /// Resets the datapath could not put in front of the guest.
+    ///
+    /// Its own counter rather than a share of `queue_drops_egress`, because
+    /// the two mean opposite things to whoever reads them: a dropped data
+    /// segment costs a retransmission and recovers on its own, while a
+    /// dropped reset is a guest that waits on a dead connection until its
+    /// own timeout — the exact failure the reset exists to prevent. A
+    /// number that mixes a recoverable symptom with an unrecoverable one
+    /// tells an operator nothing.
+    pub resets_undelivered: u64,
+    /// Guest TCP segments for a connection the datapath has no state for.
+    ///
+    /// Its own counter rather than a deny or a datapath error, because the
+    /// ordinary cause is neither: a guest's last ACK arriving just after
+    /// its flow was reaped is routine, and folding it into an error counter
+    /// would make that counter climb on every healthy connection close. A
+    /// sustained rise here is still worth seeing, so it is not swallowed.
+    pub segments_without_flow: u64,
     pub dns_admitted: u64,
     pub dns_denied: u64,
     pub dns_rate_limited: u64,
@@ -43,7 +61,22 @@ pub struct GatewayMetrics {
 impl GatewayMetrics {
     /// Count one policy refusal.
     pub fn record_deny(&mut self, code: DenyCode) {
-        *self.denies.entry(code.as_str()).or_insert(0) += 1;
+        self.record_denies(code, 1);
+    }
+
+    /// Count `count` refusals of one reason at once.
+    ///
+    /// For callers that batch: a datapath pass reports how many datagrams
+    /// it refused, not one call per datagram, so the counter does not
+    /// depend on a loop somebody has to remember to write. A zero count
+    /// still creates no label — a reason nothing has happened for must not
+    /// appear in the deny map.
+    pub fn record_denies(&mut self, code: DenyCode, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let entry = self.denies.entry(code.as_str()).or_insert(0);
+        *entry = entry.saturating_add(count);
     }
 
     /// Refusals for one reason.
@@ -114,15 +147,17 @@ mod tests {
             DenyCode::IcmpDenied,
             DenyCode::GatewayServiceDenied,
             DenyCode::FlowTableFull,
+            DenyCode::HostSocketUnavailable,
             DenyCode::UnsolicitedInbound,
             DenyCode::WrongDestination,
+            DenyCode::PeerDestinationMismatch,
             DenyCode::SessionNotReady,
         ] {
             m.record_deny(code);
             m.record_deny(code);
         }
         // Recording the same closed set twice cannot grow the label set.
-        assert_eq!(m.denies().count(), 21);
-        assert_eq!(m.total_denies(), 42);
+        assert_eq!(m.denies().count(), 23);
+        assert_eq!(m.total_denies(), 46);
     }
 }

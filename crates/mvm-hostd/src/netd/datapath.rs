@@ -13,9 +13,9 @@
 //!
 //! [`send_to_network`]: DatapathHandle::send_to_network
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use mvm_net::l3::AdmittedPacket;
+use mvm_net::l3::{AdmittedPacket, IngressMapping};
 
 /// What a forwarding backend can actually carry.
 ///
@@ -24,15 +24,22 @@ use mvm_net::l3::AdmittedPacket;
 /// only translate the transports it knows how to open sockets for. A plan
 /// that needs something the selected backend lacks is refused at admission
 /// — there is no degrade, and no "mostly works".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForwardingCapabilities {
     pub tcp: bool,
     pub udp: bool,
     /// Host-terminated DNS. Required for domain rules to mean anything.
     pub controlled_dns: bool,
     pub icmp: bool,
+    /// Whether the backend can put an *arbitrary* packet of that family on
+    /// the wire. A socket gateway cannot, in either family.
     pub arbitrary_ipv4: bool,
     pub arbitrary_ipv6: bool,
+    /// Whether TCP and UDP flows are carried over IPv6 at all — a different
+    /// question from `arbitrary_ipv6`, and the one a dual-stack workload is
+    /// actually asking.
+    pub ipv6_flows: bool,
     /// IP protocols other than TCP/UDP/ICMP.
     pub raw_ip_protocols: bool,
     pub declared_ingress: bool,
@@ -55,6 +62,7 @@ impl ForwardingCapabilities {
         icmp: false,
         arbitrary_ipv4: false,
         arbitrary_ipv6: false,
+        ipv6_flows: false,
         raw_ip_protocols: false,
         declared_ingress: false,
         multi_queue: false,
@@ -62,14 +70,16 @@ impl ForwardingCapabilities {
         userspace_socket_translation: false,
     };
 
-    /// A full L3 packet path: whole IPv4 packets, every transport.
-    pub const FULL_L3_V4: Self = Self {
+    /// A full L3 packet path: whole packets of either family, every
+    /// transport.
+    pub const FULL_L3: Self = Self {
         tcp: true,
         udp: true,
         controlled_dns: true,
         icmp: true,
         arbitrary_ipv4: true,
-        arbitrary_ipv6: false,
+        arbitrary_ipv6: true,
+        ipv6_flows: true,
         raw_ip_protocols: true,
         declared_ingress: true,
         multi_queue: false,
@@ -77,8 +87,8 @@ impl ForwardingCapabilities {
         userspace_socket_translation: false,
     };
 
-    /// A userspace socket gateway: ordinary application traffic, nothing
-    /// that needs to put an arbitrary IP packet on the wire.
+    /// A userspace socket gateway: ordinary application traffic in either
+    /// family, nothing that needs to put an arbitrary IP packet on the wire.
     pub const USERSPACE_SOCKETS: Self = Self {
         tcp: true,
         udp: true,
@@ -86,6 +96,7 @@ impl ForwardingCapabilities {
         icmp: false,
         arbitrary_ipv4: false,
         arbitrary_ipv6: false,
+        ipv6_flows: true,
         raw_ip_protocols: false,
         declared_ingress: true,
         multi_queue: false,
@@ -95,7 +106,7 @@ impl ForwardingCapabilities {
 
     /// Capabilities a plan needs that this backend does not have.
     pub fn shortfall(&self, required: &Self) -> Vec<&'static str> {
-        let checks: [(bool, bool, &'static str); 9] = [
+        let checks: [(bool, bool, &'static str); 10] = [
             (required.tcp, self.tcp, "tcp"),
             (required.udp, self.udp, "udp"),
             (
@@ -114,6 +125,7 @@ impl ForwardingCapabilities {
                 self.arbitrary_ipv6,
                 "arbitrary_ipv6",
             ),
+            (required.ipv6_flows, self.ipv6_flows, "ipv6_flows"),
             (
                 required.raw_ip_protocols,
                 self.raw_ip_protocols,
@@ -138,6 +150,23 @@ impl ForwardingCapabilities {
     }
 }
 
+/// The IPv6 half of a machine's point-to-point link.
+///
+/// One value rather than a set of parallel fields: a gateway without its
+/// peer, or a pair without the prefix length that makes them on-link, is
+/// not a state any lease can produce, and a backend that has to interpret
+/// one is a backend that can get it wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V6Link {
+    /// Host side of the link, and the guest's default route.
+    pub gateway: Ipv6Addr,
+    /// The address assigned to the guest. Anti-spoofing compares every
+    /// outbound v6 packet's source against exactly this.
+    pub guest: Ipv6Addr,
+    /// Prefix length the pair sits in, so only the peer is on-link.
+    pub prefix_len: u8,
+}
+
 /// What the gateway asks a platform to set up for one machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatapathRequest {
@@ -151,7 +180,21 @@ pub struct DatapathRequest {
     pub guest: Ipv4Addr,
     /// Prefix length of the /30.
     pub prefix_len: u8,
+    /// The same link in IPv6, when the session was issued one. `None` means
+    /// this machine has no IPv6 address, and admission refuses the family
+    /// before a packet ever reaches a backend.
+    pub v6: Option<V6Link>,
     pub mtu: u16,
+    /// Ingress mappings the plan declared.
+    ///
+    /// Here rather than left to admission because the two backends need
+    /// different things from a declaration: one that forwards whole packets
+    /// needs nothing bound — an inbound packet reaches its device on its
+    /// own — while one that translates flows into host sockets has to open
+    /// a listener for each mapping, and can only do that if it is told what
+    /// was declared. Admission still decides delivery either way; this is
+    /// what makes the packet exist to be decided about.
+    pub ingress: Vec<IngressMapping>,
 }
 
 /// Why a datapath could not be opened or used.
@@ -187,6 +230,26 @@ pub enum DatapathError {
     Io(#[from] std::io::Error),
 }
 
+/// What one bounded pass of host-to-guest work concluded.
+///
+/// Every such pass here takes a budget and stops at it, so each one has to
+/// say which of the two things stopped it. A caller that waits on readiness
+/// has already spent the edge that woke it, and a bound is not an edge:
+/// nothing will report the remainder, so a pass cut off by its budget must
+/// say so or what it left sits until the next tick.
+///
+/// One type for every such pass rather than one per site — the drain of the
+/// host network in [`crate::netd::Gateway::poll_inbound`] and the pump of
+/// each established flow in [`DatapathHandle::service`] ask the same
+/// question and their answers are folded together by the same driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundDrain {
+    /// Nothing more was waiting.
+    Idle,
+    /// The budget ran out with more still there.
+    Backlogged,
+}
+
 /// An open per-machine datapath.
 pub trait DatapathHandle: Send {
     /// Forward one admitted guest packet to the host network.
@@ -201,6 +264,25 @@ pub trait DatapathHandle: Send {
     /// admission before any of them reach the guest.
     fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError>;
 
+    /// Advance whatever this backend can only advance when driven.
+    ///
+    /// A backend that forwards whole packets moves them inside the two
+    /// calls above and needs nothing here, which is why the default is a
+    /// no-op. A backend that translates flows into host sockets does not:
+    /// a connect the guest asked for completes in the kernel, and until
+    /// something reads that decision the guest is waiting on a handshake no
+    /// one is finishing. That is the difference between "not yet" and a
+    /// hang, so the driver calls this on the same tick it ages everything
+    /// else, with the same clock.
+    ///
+    /// Reports [`InboundDrain::Backlogged`] when a bound inside this pass —
+    /// not the far side going quiet — is what ended it, so the driver comes
+    /// straight back rather than waiting on an edge already spent. A backend
+    /// with nothing to advance has no bound to hit and says `Idle`.
+    fn service(&mut self, _now_millis: u64) -> Result<InboundDrain, DatapathError> {
+        Ok(InboundDrain::Idle)
+    }
+
     /// Tear down every device, namespace, route, and rule this handle
     /// created. Idempotent: it runs on the normal stop path and on the
     /// failed-startup path, and must not care which got there first.
@@ -208,6 +290,23 @@ pub trait DatapathHandle: Send {
 
     /// Human-readable name, for audit and diagnostics.
     fn description(&self) -> String;
+
+    /// A descriptor that becomes readable when this datapath has work.
+    ///
+    /// `None` means the datapath makes progress only when called, so the
+    /// driver polls it on its timer tick rather than on readiness.
+    ///
+    /// **The descriptor is valid only while this handle is open, and a
+    /// registered one must be deregistered before the handle is closed.**
+    /// Closing releases the number, and the next `open` anywhere in the
+    /// process may be handed it — a poll set still holding the registration
+    /// would then be reacting to an unrelated resource. A caller must read
+    /// this once while the handle is open and register exactly that value;
+    /// it must never re-read it around a close, and after a close this
+    /// returns `None` rather than a number that no longer means anything.
+    fn readiness_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
 }
 
 /// Opens per-machine datapaths.
@@ -271,7 +370,7 @@ impl L3Datapath for LoopbackDatapath {
     }
 
     fn capabilities(&self) -> ForwardingCapabilities {
-        ForwardingCapabilities::FULL_L3_V4
+        ForwardingCapabilities::FULL_L3
     }
 }
 
@@ -339,13 +438,12 @@ impl DatapathHandle for LoopbackHandle {
     }
 }
 
-/// The macOS datapath.
+/// A datapath that refuses, naming the platform it refuses for.
 ///
-/// Not shipped: a `utun` device, its addresses, its routes, and an mvm-owned
-/// PF anchor all require root, and mvm has no privileged host helper to ask.
-/// Rather than degrade — and specifically rather than route macOS through a
-/// general-purpose proxy runtime — the mode is refused at admission with the
-/// reason stated.
+/// Kept for a platform that can serve no forwarding at all, and for the
+/// tests that need a backend whose availability check fails. It is not what
+/// a host without a tunnel device gets — that host forwards through
+/// userspace sockets and is told so.
 #[derive(Debug, Default)]
 pub struct UnsupportedDatapath {
     pub platform: &'static str,
@@ -380,60 +478,6 @@ impl L3Datapath for UnsupportedDatapath {
     }
 }
 
-/// The staged macOS forwarding backend: a userspace socket gateway.
-///
-/// The intended first macOS implementation translates admitted guest flows
-/// into host sockets, which needs no privileges at all — no `utun`, no
-/// routes, no PF anchor. That buys ordinary application TCP, UDP, and
-/// host-terminated DNS, which is what almost every workload wants, without
-/// a privileged helper.
-///
-/// It is **not implemented in this change**. What exists here is the
-/// capability declaration and the refusal, so that:
-///
-/// - `l3-vsock` on macOS fails at admission with a stated reason rather
-///   than booting and dropping every packet;
-/// - a plan that needs ICMP, raw IP protocols, or arbitrary-IPv4 forwarding
-///   is refused by the capability check even once the gateway lands, rather
-///   than appearing to work for TCP and silently failing elsewhere;
-/// - macOS is never quietly routed through a general-purpose proxy runtime.
-///
-/// The remaining work is a userspace TCP/UDP flow translator; the full
-/// packet backend (`utun` + scoped routes + an mvm-owned PF anchor) is a
-/// later, privileged-helper-bearing step and is a separate decision.
-#[derive(Debug, Default)]
-pub struct MacosUserspaceGateway;
-
-impl MacosUserspaceGateway {
-    fn refusal(&self) -> DatapathError {
-        DatapathError::Unsupported {
-            platform: "macos",
-            detail: "the userspace socket gateway is not implemented yet; \
-                     no privileged utun/PF backend is shipped either, so l3-vsock \
-                     is refused rather than degraded"
-                .to_string(),
-        }
-    }
-}
-
-impl L3Datapath for MacosUserspaceGateway {
-    fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
-        Err(self.refusal())
-    }
-
-    fn is_available(&self) -> Result<(), DatapathError> {
-        Err(self.refusal())
-    }
-
-    fn capabilities(&self) -> ForwardingCapabilities {
-        // What the backend *will* offer once implemented. Declared now so
-        // the admission check against it is already the real one, and so a
-        // plan needing packet-level forwarding is refused for the right
-        // reason rather than for "macOS".
-        ForwardingCapabilities::USERSPACE_SOCKETS
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,7 +488,9 @@ mod tests {
             gateway: Ipv4Addr::new(10, 201, 0, 5),
             guest: Ipv4Addr::new(10, 201, 0, 6),
             prefix_len: 30,
+            v6: None,
             mtu: 1500,
+            ingress: Vec::new(),
         }
     }
 
@@ -492,8 +538,7 @@ mod tests {
     #[test]
     fn a_full_l3_backend_satisfies_a_userspace_workload() {
         assert!(
-            ForwardingCapabilities::FULL_L3_V4
-                .satisfies(&ForwardingCapabilities::USERSPACE_SOCKETS)
+            ForwardingCapabilities::FULL_L3.satisfies(&ForwardingCapabilities::USERSPACE_SOCKETS)
         );
     }
 
@@ -510,6 +555,54 @@ mod tests {
         assert!(!ForwardingCapabilities::USERSPACE_SOCKETS.satisfies(&required));
     }
 
+    /// The two IPv6 questions are different questions, and the capability
+    /// seam has to be able to answer them differently: this backend carries
+    /// v6 flows, and cannot put an arbitrary v6 packet on the wire any more
+    /// than it can an arbitrary v4 one.
+    #[test]
+    fn a_userspace_gateway_carries_v6_flows_without_claiming_arbitrary_v6() {
+        let caps = ForwardingCapabilities::USERSPACE_SOCKETS;
+        assert!(caps.ipv6_flows);
+        assert!(!caps.arbitrary_ipv6);
+
+        let required = ForwardingCapabilities {
+            arbitrary_ipv6: true,
+            ..ForwardingCapabilities::USERSPACE_SOCKETS
+        };
+        assert_eq!(caps.shortfall(&required), vec!["arbitrary_ipv6"]);
+        assert!(!caps.satisfies(&required));
+    }
+
+    #[test]
+    fn a_plan_that_only_needs_v6_flows_is_served_by_the_userspace_gateway() {
+        let required = ForwardingCapabilities {
+            tcp: true,
+            udp: true,
+            ipv6_flows: true,
+            ..ForwardingCapabilities::NONE
+        };
+        assert!(ForwardingCapabilities::USERSPACE_SOCKETS.satisfies(&required));
+        assert_eq!(
+            ForwardingCapabilities::NONE.shortfall(&required),
+            vec!["tcp", "udp", "ipv6_flows"]
+        );
+    }
+
+    #[test]
+    fn a_full_packet_path_carries_both_families() {
+        let needs_v6_packets = ForwardingCapabilities {
+            arbitrary_ipv6: true,
+            ipv6_flows: true,
+            ..ForwardingCapabilities::NONE
+        };
+        assert!(ForwardingCapabilities::FULL_L3.satisfies(&needs_v6_packets));
+        assert_eq!(
+            ForwardingCapabilities::USERSPACE_SOCKETS.shortfall(&needs_v6_packets),
+            vec!["arbitrary_ipv6"],
+            "a socket gateway carries the flows but cannot emit the packets"
+        );
+    }
+
     #[test]
     fn the_empty_capability_set_serves_nothing() {
         let required = ForwardingCapabilities {
@@ -522,27 +615,23 @@ mod tests {
         );
     }
 
+    /// A backend that moves packets inside its send and receive calls has
+    /// nothing to advance on a tick, and must not have to say so.
     #[test]
-    fn the_macos_gateway_declares_its_intended_capabilities_but_refuses_to_open() {
-        let dp = MacosUserspaceGateway;
-        assert_eq!(dp.capabilities(), ForwardingCapabilities::USERSPACE_SOCKETS);
-        assert!(dp.capabilities().tcp && dp.capabilities().udp && dp.capabilities().controlled_dns);
-        assert!(
-            !dp.capabilities().full_packet_forwarding,
-            "a socket gateway must not claim to forward arbitrary packets"
-        );
-        // Declaring capabilities is not claiming support.
-        assert!(dp.is_available().is_err());
-        assert!(dp.open(&request()).is_err());
+    fn a_backend_with_nothing_to_drive_is_serviced_without_implementing_it() {
+        let dp = LoopbackDatapath::sink();
+        let mut handle = dp.open(&request()).expect("open");
+        assert!(handle.service(0).is_ok());
+        assert!(handle.service(10_000).is_ok());
     }
 
     #[test]
-    fn an_unimplemented_backend_states_why_rather_than_naming_the_platform_alone() {
-        let msg = MacosUserspaceGateway
-            .is_available()
-            .unwrap_err()
-            .to_string();
-        assert!(msg.contains("not implemented"), "{msg}");
-        assert!(msg.contains("refused rather than degraded"), "{msg}");
+    fn a_loopback_handle_has_no_readiness_descriptor() {
+        let dp = LoopbackDatapath::sink();
+        let handle = dp.open(&request()).expect("open");
+        assert!(
+            handle.readiness_fd().is_none(),
+            "an in-memory datapath is driven synchronously and has nothing to poll"
+        );
     }
 }

@@ -214,6 +214,13 @@ jobs:
           # workflow's header. File-level exceptions are limited to the
           # long-standing non-crate cases; crate-owned server
           # exceptions must be declared structurally via Cargo metadata.
+          #
+          # `fuzz/` joins tests/benches/examples for the same reason the
+          # `#[cfg(test)] mod` filter below exists: a listener a harness
+          # binds as its own sink is not a server. Fuzz crates are excluded
+          # from the workspace and build only under cargo-fuzz, so nothing
+          # they contain reaches a shipped binary. They are `#![no_main]`
+          # rather than `#[cfg(test)]`, so that filter does not reach them.
           CANDIDATES=$(rg \
               --type rust \
               --files-with-matches \
@@ -223,6 +230,7 @@ jobs:
               --glob '!**/tests/**' \
               --glob '!**/benches/**' \
               --glob '!**/examples/**' \
+              --glob '!**/fuzz/**' \
               --glob '!crates/mvm-build/src/egress_proxy/**' \
               --glob '!crates/mvm-cli/src/commands/shared/vsock.rs' \
               --glob '!crates/mvm-cli/src/metrics_server.rs' \

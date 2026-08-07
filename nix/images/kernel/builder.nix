@@ -62,5 +62,15 @@ base.mkKernel {
     "NF_CONNTRACK" "NF_DEFRAG_IPV4"
     "NETFILTER_XT_MATCH_STATE" "NETFILTER_XT_MATCH_CONNTRACK"
     "NETFILTER_XT_MARK"
+
+    # IPv6 is a workload-kernel feature, not a shared one: the guest's
+    # point-to-point link gets a v6 pair when its plan asks for one, and the
+    # builder VM reaches the network over an IPv4 virtio-net gateway that
+    # never carries v6. It is force-dropped here (rather than left absent)
+    # because defconfig enables it, and defconfig's IPsec-for-v6 options come
+    # with it and select the XFRM transform framework — which base.nix holds
+    # in the required-disable set, so leaving it on fails the config guard
+    # rather than silently growing the builder.
+    "IPV6"
   ];
 }

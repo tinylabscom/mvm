@@ -99,7 +99,10 @@ impl fmt::Display for GuestService {
 /// Every field is assigned by the host. A guest cannot select, assert, or
 /// influence any of them, which is why this — and not a CID, a socket path,
 /// or a header field — is what authorization binds to.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct VmInstanceIdentity {
     /// The node this VM is running on.
     pub node_id: String,
@@ -181,6 +184,10 @@ pub struct GuestConnection<S> {
     pub instance: VmInstanceIdentity,
     pub service: GuestService,
     pub stream: S,
+    /// The descriptor a poll loop can register, when the transport has
+    /// one. `None` for in-memory streams, which are only ever driven
+    /// synchronously.
+    pub pollable_fd: Option<std::os::fd::RawFd>,
 }
 
 impl<S> GuestConnection<S> {
@@ -189,7 +196,14 @@ impl<S> GuestConnection<S> {
             instance,
             service,
             stream,
+            pollable_fd: None,
         }
+    }
+
+    /// Record the descriptor this connection can be polled on.
+    pub fn with_pollable_fd(mut self, fd: std::os::fd::RawFd) -> Self {
+        self.pollable_fd = Some(fd);
+        self
     }
 }
 

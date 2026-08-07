@@ -13,7 +13,7 @@
 //! refuse the same packets.
 
 use std::io::{Read, Write};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -144,6 +144,7 @@ impl L3Datapath for LinuxDatapath {
             table: table.clone(),
             machine_id: req.machine_id.clone(),
             guest: req.guest,
+            guest_v6: req.v6.map(|v6| v6.guest),
             nft_applied: false,
             closed: false,
             dry_run: self.dry_run,
@@ -183,10 +184,14 @@ impl L3Datapath for LinuxDatapath {
 
     fn capabilities(&self) -> ForwardingCapabilities {
         // A host TUN carries whole IP packets, so every transport the
-        // policy layer understands works. IPv6 stays off until the workload
-        // kernel enables it — claiming it would be claiming a datapath that
-        // has no guest address to talk to.
-        ForwardingCapabilities::FULL_L3_V4
+        // policy layer understands works, in either family: `configure`
+        // assigns the v6 pair whenever the lease carries one — which is
+        // what puts the guest's address in a connected prefix — and the
+        // ruleset pins the v6 source exactly as it pins the v4 one. The
+        // device itself never cared which family it was handed, so the two
+        // v6 flags answer the same question as their v4 counterparts and
+        // get the same answer.
+        ForwardingCapabilities::FULL_L3
     }
 }
 
@@ -201,6 +206,10 @@ pub struct LinuxHandle {
     table: String,
     machine_id: String,
     guest: Ipv4Addr,
+    /// The guest's v6 address, when the lease carried one. The ruleset is
+    /// regenerated from it, so what `ruleset()` reports and what was loaded
+    /// cannot drift apart.
+    guest_v6: Option<Ipv6Addr>,
     nft_applied: bool,
     closed: bool,
     dry_run: bool,
@@ -215,8 +224,17 @@ impl LinuxHandle {
             return Ok(());
         }
         set_point_to_point(&self.iface, req.gateway, req.guest, req.mtu)?;
+        if let Some(v6) = req.v6 {
+            set_v6_address(&self.iface, v6.gateway, v6.prefix_len)?;
+        }
         let _lock = nft_lock()?;
-        if let Err(error) = install_nft(&self.table, &self.iface, &self.machine_id, req.guest) {
+        if let Err(error) = install_nft(
+            &self.table,
+            &self.iface,
+            &self.machine_id,
+            req.guest,
+            self.guest_v6,
+        ) {
             let _ = remove_shared_table_if_empty(&self.table);
             return Err(error);
         }
@@ -227,11 +245,18 @@ impl LinuxHandle {
     /// The nftables ruleset this handle installed. Exposed so the shape is
     /// assertable without root.
     pub fn ruleset(&self) -> String {
-        nft_ruleset(&self.table, &self.iface, self.guest)
+        nft_ruleset(&self.table, &self.iface, self.guest, self.guest_v6)
     }
 
     pub fn iface(&self) -> &str {
         &self.iface
+    }
+
+    /// A descriptor that becomes readable when a packet arrives on the host
+    /// TUN. Exposed so the gateway can register it in its poll set rather
+    /// than waking on a timer tick.
+    pub fn readiness_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.file.as_ref().map(std::fs::File::as_raw_fd)
     }
 }
 
@@ -305,6 +330,10 @@ impl DatapathHandle for LinuxHandle {
             self.iface, self.table, self.machine_id
         )
     }
+
+    fn readiness_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.file.as_ref().map(std::fs::File::as_raw_fd)
+    }
 }
 
 impl Drop for LinuxHandle {
@@ -370,7 +399,12 @@ fn slug(input: &str, budget: usize) -> String {
 /// The shared forward base chain owns the host-wide default drop. Each
 /// machine gets regular chains reached only by interface-scoped jumps, so a
 /// machine's rules cannot drop packets belonging to another machine.
-fn nft_ruleset(table: &str, iface: &str, guest: Ipv4Addr) -> String {
+///
+/// The `inet` table covers both families, and the v6 source is pinned by the
+/// same mechanism as the v4 one. A machine with no v6 address emits no v6
+/// rule at all — it has no source to pin, and the closing `drop` already
+/// refuses the family.
+fn nft_ruleset(table: &str, iface: &str, guest: Ipv4Addr, guest_v6: Option<Ipv6Addr>) -> String {
     let forward_chain = forward_chain_name(iface);
     let nat_chain = nat_chain_name(iface);
     format!(
@@ -378,7 +412,7 @@ fn nft_ruleset(table: &str, iface: &str, guest: Ipv4Addr) -> String {
          add chain inet {table} {NFT_POSTROUTING_CHAIN} {{ type nat hook postrouting priority srcnat; policy accept; }}\n\
          add chain inet {table} {NFT_FORWARD_CHAIN} {{ type filter hook forward priority filter; policy drop; }}\n\
          {machine_rules}",
-        machine_rules = machine_ruleset(table, iface, guest, &forward_chain, &nat_chain,)
+        machine_rules = machine_ruleset(table, iface, guest, guest_v6, &forward_chain, &nat_chain)
     )
 }
 
@@ -394,9 +428,24 @@ fn machine_ruleset(
     table: &str,
     iface: &str,
     guest: Ipv4Addr,
+    guest_v6: Option<Ipv6Addr>,
     forward_chain: &str,
     nat_chain: &str,
 ) -> String {
+    let (v6_masquerade, v6_forward_in, v6_forward_out) = match guest_v6 {
+        Some(guest) => (
+            format!(
+                "add rule inet {table} {nat_chain} iifname \"{iface}\" ip6 saddr {guest}/128 masquerade"
+            ),
+            format!(
+                "add rule inet {table} {forward_chain} iifname \"{iface}\" ip6 saddr {guest}/128 counter accept"
+            ),
+            format!(
+                "add rule inet {table} {forward_chain} oifname \"{iface}\" ip6 daddr {guest}/128 ct state established,related counter accept"
+            ),
+        ),
+        None => (String::new(), String::new(), String::new()),
+    };
     format!(
         "add chain inet {table} {forward_chain}\n\
          add chain inet {table} {nat_chain}\n\
@@ -404,10 +453,13 @@ fn machine_ruleset(
          add rule inet {table} {NFT_FORWARD_CHAIN} oifname \"{iface}\" jump {forward_chain}\n\
          add rule inet {table} {NFT_POSTROUTING_CHAIN} iifname \"{iface}\" jump {nat_chain}\n\
          add rule inet {table} {forward_chain} iifname \"{iface}\" ip saddr {guest}/32 counter accept\n\
+         {v6_forward_in}\n\
          add rule inet {table} {forward_chain} iifname \"{iface}\" drop\n\
          add rule inet {table} {forward_chain} oifname \"{iface}\" ip daddr {guest}/32 ct state established,related counter accept\n\
+         {v6_forward_out}\n\
          add rule inet {table} {forward_chain} oifname \"{iface}\" drop\n\
-         add rule inet {table} {nat_chain} iifname \"{iface}\" ip saddr {guest}/32 masquerade\n"
+         add rule inet {table} {nat_chain} iifname \"{iface}\" ip saddr {guest}/32 masquerade\n\
+         {v6_masquerade}\n"
     )
 }
 
@@ -416,6 +468,7 @@ fn install_nft(
     iface: &str,
     machine_id: &str,
     guest: Ipv4Addr,
+    guest_v6: Option<Ipv6Addr>,
 ) -> Result<(), DatapathError> {
     ensure_shared_table(table)?;
     let forward_chain = forward_chain_name(machine_id);
@@ -424,6 +477,7 @@ fn install_nft(
         table,
         iface,
         guest,
+        guest_v6,
         &forward_chain,
         &nat_chain,
     ))
@@ -663,12 +717,9 @@ fn set_point_to_point(
     result.map_err(DatapathError::Io)
 }
 
-/// SAFETY: caller passes a valid, owned `ifreq` for the named request.
-unsafe fn ioctl_checked(
-    sock: libc::c_int,
-    request: u64,
-    ifr: &libc::ifreq,
-) -> Result<(), std::io::Error> {
+/// SAFETY: caller passes a valid, owned request struct of the type the
+/// named ioctl reads.
+unsafe fn ioctl_checked<T>(sock: libc::c_int, request: u64, ifr: &T) -> Result<(), std::io::Error> {
     // SAFETY: forwarded from the caller's contract.
     if unsafe { libc::ioctl(sock, ioctl_request(request), ifr) } < 0 {
         return Err(std::io::Error::last_os_error());
@@ -704,6 +755,52 @@ fn write_sockaddr(dst: *mut libc::sockaddr, addr: Ipv4Addr) {
             std::mem::size_of::<libc::sockaddr_in>(),
         );
     }
+}
+
+/// Assign the host side of the IPv6 half of the link.
+///
+/// The host-side mirror of what the guest agent configures on `mvm0`, and
+/// deliberately the same mechanism the v4 half above uses rather than a
+/// second one: `SIOCSIFADDR` on an `AF_INET6` socket takes an `in6_ifreq`
+/// instead of an `ifreq`, and that is the whole difference.
+///
+/// Assigning the gateway's prefix is also what installs the route: the
+/// kernel adds the connected route for it, and the guest's address sits
+/// inside that prefix, so the peer becomes reachable for exactly the
+/// reason the /30's peer is. There is no second route to install and none
+/// to tear down — dropping the device takes both with it.
+///
+/// No duplicate-address detection runs: a TUN device is `IFF_NOARP`, so
+/// the kernel marks the address usable immediately rather than leaving it
+/// tentative while it waits for a neighbour that a point-to-point link
+/// cannot have.
+fn set_v6_address(iface: &str, gateway: Ipv6Addr, prefix_len: u8) -> Result<(), DatapathError> {
+    let name = ifreq(iface);
+    // SAFETY: `ifr_name` is a NUL-padded C string this call just built, and
+    // `if_nametoindex` only reads it.
+    let ifindex = unsafe { libc::if_nametoindex(name.ifr_name.as_ptr()) };
+    if ifindex == 0 {
+        return Err(DatapathError::Io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: socket(2) returns -1 on error (checked) or an fd we own and
+    // close on every path.
+    let sock = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
+    if sock < 0 {
+        return Err(DatapathError::Io(std::io::Error::last_os_error()));
+    }
+    let ifr = libc::in6_ifreq {
+        ifr6_addr: libc::in6_addr {
+            s6_addr: gateway.octets(),
+        },
+        ifr6_prefixlen: u32::from(prefix_len),
+        ifr6_ifindex: ifindex as libc::c_int,
+    };
+    // SAFETY: `ifr` is owned here and matches the layout `SIOCSIFADDR` on an
+    // `AF_INET6` socket expects.
+    let result = unsafe { ioctl_checked(sock, libc::SIOCSIFADDR, &ifr) };
+    // SAFETY: `sock` is the fd we opened and still own.
+    unsafe { libc::close(sock) };
+    result.map_err(DatapathError::Io)
 }
 
 /// Put a file descriptor in non-blocking mode.
@@ -770,6 +867,18 @@ fn has_net_admin() -> bool {
     rc == 0 && data[0].effective & (1 << CAP_NET_ADMIN) != 0
 }
 
+/// Layout contract for `struct in6_ifreq` <linux/ipv6.h>. The definition
+/// comes from a crate rather than from this file, so the shape the
+/// `AF_INET6` `SIOCSIFADDR` call depends on is pinned here.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<libc::in6_ifreq>() == 24);
+    assert!(align_of::<libc::in6_ifreq>() == 4);
+    assert!(offset_of!(libc::in6_ifreq, ifr6_addr) == 0);
+    assert!(offset_of!(libc::in6_ifreq, ifr6_prefixlen) == 16);
+    assert!(offset_of!(libc::in6_ifreq, ifr6_ifindex) == 20);
+};
+
 /// Layout contract with `linux/if.h`'s `ifreq` for TUNSETIFF.
 const _: () = {
     use core::mem::{offset_of, size_of};
@@ -817,8 +926,13 @@ mod tests {
         // and injection is what would *add* statements, so compare the
         // counts against a benign id instead.
         let guest = Ipv4Addr::new(10, 201, 0, 6);
-        let hostile_rules = nft_ruleset(&table_name(hostile), &device, guest);
-        let benign_rules = nft_ruleset(&table_name("vm-a"), &device_name("vm-a"), guest);
+        let hostile_rules = nft_ruleset(&table_name(hostile), &device, guest, Some(GUEST_V6));
+        let benign_rules = nft_ruleset(
+            &table_name("vm-a"),
+            &device_name("vm-a"),
+            guest,
+            Some(GUEST_V6),
+        );
         for syntax in [';', '{', '}', '\n'] {
             assert_eq!(
                 hostile_rules.matches(syntax).count(),
@@ -847,9 +961,13 @@ mod tests {
         }
     }
 
+    /// A guest address out of the unique-local pool the allocator carves
+    /// the v6 half from.
+    const GUEST_V6: Ipv6Addr = Ipv6Addr::new(0xfd6d, 0x766d, 1, 0, 0, 0, 0, 2);
+
     #[test]
     fn the_ruleset_keeps_one_shared_default_drop_and_pins_the_guest_source() {
-        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6));
+        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6), None);
         assert!(rules.contains("policy drop"), "{rules}");
         assert!(
             rules.contains("ip saddr 10.201.0.6/32 counter accept"),
@@ -878,7 +996,7 @@ mod tests {
 
     #[test]
     fn the_ruleset_has_no_bridge_and_no_tap() {
-        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6));
+        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6), None);
         for forbidden in ["bridge", "tap", "br0", "virbr"] {
             assert!(
                 !rules.contains(forbidden),
@@ -909,6 +1027,63 @@ mod tests {
     fn jump_handles_reject_a_matching_rule_without_a_kernel_handle() {
         let listing = r#"iifname "mvmna" jump mvmn_f_a"#;
         assert!(jump_handles(listing, "mvmn_f_a", "mvmna").is_err());
+    }
+
+    /// The v6 source is pinned by the same mechanism as the v4 one, in the
+    /// same `inet` table: a masquerade so replies come back, an inbound
+    /// accept for exactly the assigned address, and a stateful return path.
+    #[test]
+    fn the_ruleset_pins_the_v6_source_when_the_lease_carries_one() {
+        let rules = nft_ruleset(
+            "mvmn_vma",
+            "mvmnvma",
+            Ipv4Addr::new(10, 201, 0, 6),
+            Some(GUEST_V6),
+        );
+        assert!(
+            rules.contains("ip6 saddr fd6d:766d:1::2/128 counter accept"),
+            "{rules}"
+        );
+        assert!(
+            rules.contains("ip6 saddr fd6d:766d:1::2/128 masquerade"),
+            "{rules}"
+        );
+        assert!(
+            rules.contains(
+                "ip6 daddr fd6d:766d:1::2/128 ct state established,related counter accept"
+            ),
+            "v6 return traffic must be stateful too: {rules}"
+        );
+    }
+
+    /// A source-pinning rule that the fail-closed `drop` precedes would
+    /// never be reached, so the order is the property, not the presence.
+    #[test]
+    fn the_v6_accept_precedes_the_fail_closed_drop() {
+        let rules = nft_ruleset(
+            "mvmn_vma",
+            "mvmnvma",
+            Ipv4Addr::new(10, 201, 0, 6),
+            Some(GUEST_V6),
+        );
+        let accept = rules
+            .find("ip6 saddr fd6d:766d:1::2/128 counter accept")
+            .expect("the v6 accept must be present");
+        let drop = rules
+            .find("iifname \"mvmnvma\" drop")
+            .expect("the fail-closed drop must be present");
+        assert!(accept < drop, "{rules}");
+    }
+
+    /// The two IPv6 questions the capability seam asks are both yes here,
+    /// for the same reason the v4 pair is: the device carries whole
+    /// packets, whatever family they are in.
+    #[test]
+    fn the_linux_datapath_declares_both_families() {
+        let caps = LinuxDatapath::new().capabilities();
+        assert_eq!(caps, ForwardingCapabilities::FULL_L3);
+        assert!(caps.ipv6_flows);
+        assert!(caps.arbitrary_ipv6);
     }
 
     #[test]
