@@ -441,16 +441,17 @@ pub fn drop_privilege(uid: u32, gid: u32) -> Result<()> {
 
 /// Drop the PID-1 guest agent to its fixed identity while retaining its
 /// narrowly scoped restore capabilities.
+#[cfg(target_os = "linux")]
 pub fn drop_guest_agent_privilege(uid: u32, gid: u32) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        return drop_guest_agent_privilege_raw(uid, gid)
-            .map_err(|source| MountError::syscall("guest-agent privilege drop", source));
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        drop_privilege(uid, gid)
-    }
+    drop_guest_agent_privilege_raw(uid, gid)
+        .map_err(|source| MountError::syscall("guest-agent privilege drop", source))
+}
+
+/// Drop the PID-1 guest agent to its fixed identity on hosts without Linux
+/// guest-agent capability syscalls.
+#[cfg(not(target_os = "linux"))]
+pub fn drop_guest_agent_privilege(uid: u32, gid: u32) -> Result<()> {
+    drop_privilege(uid, gid)
 }
 
 /// Ensure the preferred workload home exists before the agent drops privilege.
