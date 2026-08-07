@@ -122,6 +122,7 @@ fn generate_template_fetches_and_scaffolds_remote_template() {
     #[allow(deprecated)]
     let out = Command::cargo_bin("mvmctl")
         .unwrap()
+        // Some CLI cache paths resolve through HOME, so isolate both roots.
         .env("MVM_TEMPLATE_REGISTRY", &registry_url)
         .env("MVM_HOME", mvm_home.path())
         .env("HOME", mvm_home.path())
