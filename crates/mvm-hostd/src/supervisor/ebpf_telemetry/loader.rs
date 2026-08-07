@@ -316,6 +316,11 @@ mod tests {
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 #[test]
 fn telemetry_probe_loads_and_attaches_real_ebpf_object() {
+    if std::env::var("MVM_EBPF_LIVE_TESTS").is_err() {
+        eprintln!("skipping: MVM_EBPF_LIVE_TESTS not set");
+        return;
+    }
+
     let path = default_ebpf_object_path();
     let Some(path) = path else {
         eprintln!("skipping: no default eBPF object path");
