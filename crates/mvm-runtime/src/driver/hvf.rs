@@ -7,7 +7,7 @@
 //! driver only wires that socket through as the supervisor's egress relay — it
 //! carries no policy and never sees a `NetworkPolicy`.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -454,9 +454,6 @@ impl VmmDriver for HvfDriver {
                 socket.display()
             ))
         })?;
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-            .map_err(|e| StandbyError::ClaimFailed(format!("set handoff timeout: {e}")))?;
         let mut payload = serde_json::to_vec(&request).map_err(|e| {
             StandbyError::ClaimFailed(format!("serialize HVF handoff request: {e}"))
         })?;
@@ -464,8 +461,7 @@ impl VmmDriver for HvfDriver {
         stream
             .write_all(&payload)
             .map_err(|e| StandbyError::ClaimFailed(format!("send HVF handoff request: {e}")))?;
-        let mut response = [0_u8; 3];
-        std::io::Read::read_exact(&mut stream, &mut response)
+        let response = read_handoff_response(&mut stream)
             .map_err(|e| StandbyError::ClaimFailed(format!("read HVF handoff response: {e}")))?;
         if &response != b"OK\n" {
             return Err(StandbyError::ClaimFailed(format!(
@@ -505,6 +501,35 @@ impl VmmDriver for HvfDriver {
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
         crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
     }
+}
+
+fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<[u8; 3]> {
+    stream.set_nonblocking(true)?;
+    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    let mut response = [0_u8; 3];
+    let mut received = 0;
+    while received < response.len() {
+        match stream.read(&mut response[received..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "HVF handoff peer closed before its response was complete",
+                ));
+            }
+            Ok(count) => received += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "HVF handoff response timed out",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(response)
 }
 
 fn link_child_state(child_dir: &Path, parent_dir: &Path) -> std::io::Result<()> {
@@ -786,6 +811,18 @@ mod tests {
     use super::*;
     use crate::driver::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
     use mvm_core::vm_backend::SnapshotCapability;
+
+    #[test]
+    fn handoff_response_reader_handles_a_ready_unix_stream() {
+        let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
+        let writer = std::thread::spawn(move || {
+            peer.write_all(b"OK\n").expect("write handoff response");
+        });
+
+        let response = read_handoff_response(&mut stream).expect("read handoff response");
+        writer.join().expect("join handoff writer");
+        assert_eq!(&response, b"OK\n");
+    }
 
     fn egress_port(uds: &str) -> VsockPort {
         VsockPort {
