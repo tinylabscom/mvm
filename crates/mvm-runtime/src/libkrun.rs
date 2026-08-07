@@ -1414,9 +1414,9 @@ impl VmBackend for LibkrunBackend {
 // ─── helpers ───────────────────────────────────────────────────────
 
 /// Resolve the absolute path to the `mvm-libkrun-supervisor` binary. Compiled
-/// by mvmctl's build script; see [`crate::aux_bin`] for the search order.
+/// by mvmctl's build script; see [`mvm_vmm::host::aux_bin`] for the search order.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
+    mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvm-libkrun-supervisor",
         env_var: "MVM_LIBKRUN_SUPERVISOR_PATH",
     })

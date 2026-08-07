@@ -183,9 +183,9 @@ pub const SUBST_PID_FILE: &str = "substitution.pid";
 pub const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Locate the `mvm-substitution-endpoint` binary. Compiled by mvmctl's build
-/// script; see [`crate::aux_bin`] for the search order.
+/// script; see [`mvm_vmm::host::aux_bin`] for the search order.
 fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
+    mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvm-substitution-endpoint",
         env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
     })

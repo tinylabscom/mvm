@@ -33,7 +33,7 @@ const READY_MARKER: &str = "MVM_NETD_READY";
 /// Locate the `mvm-netd` binary. Compiled by mvmctl's build script
 /// alongside the other per-VM helpers.
 fn resolve_netd_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
+    mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvm-netd",
         env_var: "MVM_NETD_PATH",
     })

@@ -38,7 +38,6 @@ pub mod artifacts;
 pub mod audit_substrate;
 /// Shared resolve-or-build for the per-VM helper binaries `mvmctl` spawns
 /// (supervisors + the substitution endpoint); one impl, no drift.
-pub(crate) mod aux_bin;
 pub mod backend;
 /// Concrete hypervisor backend implementations.
 pub mod backends;

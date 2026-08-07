@@ -149,9 +149,9 @@ pub(crate) fn wait_for_pause_state(path: &Path, paused: bool) -> Result<()> {
 }
 
 /// Locate the per-VM HVF supervisor binary. Compiled by mvmctl's build script;
-/// see [`crate::aux_bin`] for the search order.
+/// see [`mvm_vmm::host::aux_bin`] for the search order.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
+    mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvm-hvf-supervisor",
         env_var: "MVM_HVF_SUPERVISOR_PATH",
     })
