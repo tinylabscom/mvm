@@ -384,6 +384,7 @@ impl VmmDriver for HvfDriver {
             state: StandbyState::Idle,
             image_sha256: req.spec.image_sha256.clone(),
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
             vsock_egress: req.spec.vsock_egress,
         })
     }

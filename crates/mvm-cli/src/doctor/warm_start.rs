@@ -267,7 +267,7 @@ mod tests {
         let mut expected_standby_pool = vec![
             ("apple-container".to_string(), false),
             ("docker".to_string(), false),
-            ("firecracker".to_string(), false),
+            ("firecracker".to_string(), true),
             ("hvf".to_string(), true),
             ("libkrun".to_string(), false),
             ("qemu".to_string(), false),
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        assert_eq!(r.standby_pool.get("firecracker"), Some(&false));
+        assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
         assert_eq!(r.standby_pool.get("libkrun"), Some(&false));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
@@ -324,12 +324,12 @@ mod tests {
         assert_eq!(libkrun.snapshot_tier, "unsupported");
         assert!(!libkrun.standby_pool);
 
-        // No backend advertises the warm pool: the doctor table must report
-        // what a host can actually service. Firecracker has the spawn, capture
-        // and fork halves and a live run has driven a parent through capture,
-        // but nothing has yet claimed one, so the pool reports off.
+        // The doctor table reports what a host can actually service. The
+        // runner-backed Firecracker path now advertises the saved-state pool
+        // because refill preloads a paused child and claim resumes it only
+        // after fresh channels and identity gates are armed.
         let firecracker = by("firecracker").unwrap();
-        assert!(!firecracker.standby_pool);
+        assert!(firecracker.standby_pool);
     }
 
     #[test]

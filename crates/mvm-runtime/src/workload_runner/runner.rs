@@ -31,7 +31,9 @@ use crate::checkpoint::{
     capture_vm_full_with_snapshot_store, capture_vm_full_with_trusted_snapshot_backend,
     verify_content, verify_lineage,
 };
-use crate::driver::{ChildForkRequest, RunningVm, StandbyParentSpawn, VmmDriver};
+use crate::driver::{
+    ChildForkRequest, PreloadChildRequest, RunningVm, StandbyParentSpawn, VmmDriver,
+};
 use crate::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 use crate::standby_pool::SupervisorStandbyPool;
 use crate::substitution_spawn::{
@@ -377,6 +379,20 @@ pub struct SpawnContext<'a> {
     pub launch: Option<&'a VmStartConfig>,
 }
 
+/// Verified publication inputs used to prepare a paused child during pool
+/// refill. The parent has already been audited by the caller, so this context
+/// can perform the same content and lineage checks as a claim before cloning.
+pub struct PreloadContext<'a> {
+    /// Content-addressed checkpoint store containing the captured parent.
+    pub checkpoints: &'a CheckpointStore,
+    /// Snapshot store backing the copy-on-write child materialization.
+    pub snapshots: &'a FsSnapshotStore,
+    /// Signed audit anchor for the parent's creation entry.
+    pub anchor: &'a dyn CheckpointChainAnchor,
+    /// VM-name registry lock source used to avoid colliding with user VMs.
+    pub registry_path: &'a Path,
+}
+
 /// Starts workloads over the `VmmDriver` seam: spawn the per-VM gating endpoint,
 /// map the config to a `VmmSpec`, boot via the driver.
 pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> {
@@ -429,6 +445,12 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     pub fn with_console_streamer(mut self, streamer: Arc<dyn ConsoleStreamer>) -> Self {
         self.console_streamer = streamer;
         self
+    }
+
+    /// Whether this runner can keep a saved child VMM paused across claims.
+    #[must_use]
+    pub fn supports_preloaded_standby(&self) -> bool {
+        self.driver.supports_preloaded_standby()
     }
 
     /// Spawn the optional gating endpoint, compose the spec, and boot. A
@@ -571,7 +593,8 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // release-unless-committed guard: any early return past this point returns
         // the good parent to claimable (so a failed claim never strands warm
         // capacity) and removes a partial child dir. Only a booted child commits.
-        let mut cleanup = WarmClaimLease::new(ctx.pool, handle.id.as_str());
+        let preloaded_child_name = handle.preloaded_child_vm_name.clone();
+        let mut cleanup = WarmClaimLease::new(ctx.pool, handle.id.as_str(), &self.driver);
 
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
@@ -579,11 +602,20 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         bind_plan_to_parent(&plan.image.sha256, &parent).map_err(refuse)?;
 
         // (6a) Fresh, registry-unique identity for the child.
-        let child = fresh_child_id(ctx)?;
+        let child = match preloaded_child_name.clone() {
+            Some(name) => {
+                verify_preloaded_child_name_is_available(ctx, &name)?;
+                VmId(name)
+            }
+            None => fresh_child_id(ctx)?,
+        };
         let child_dir = vm_state_dir(&child.0);
         // Track it before creating or materializing anything so even a partial
         // claim is cleaned up.
         cleanup.track_child_dir(child_dir.clone());
+        if preloaded_child_name.is_some() {
+            cleanup.track_preloaded_child(child.0.clone());
+        }
 
         // (3) A resident handoff transfers the already-paused HVF machine and
         // creates only the fresh child state directory. Saved-state backends
@@ -596,6 +628,8 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 ))
             })?;
             resident_parent_rootfs_dir(handle.id.as_str())?
+        } else if preloaded_child_name.is_some() {
+            child_dir.clone()
         } else {
             let materialize =
                 if is_trusted_snapshot_id(parent.snapshot_id.as_deref().unwrap_or_default()) {
@@ -699,7 +733,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         let content_hash = parent_rootfs_digest(&parent).map_err(refuse)?.to_string();
         let genid = fresh_generation_token(content_hash);
         let token = genid.token;
-        self.driver.fork_standby_child(&ChildForkRequest {
+        let fork_request = ChildForkRequest {
             child_vm_name: &child.0,
             child_dir: &child_dir,
             // A resident HVF claim addresses the paused parent by its stable
@@ -708,7 +742,12 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             parent_vm_name: resident_handoff.then_some(handle.id.as_str()),
             genid,
             channels: &channels,
-        })?;
+        };
+        if preloaded_child_name.is_some() {
+            self.driver.resume_preloaded_child(&fork_request)?;
+        } else {
+            self.driver.fork_standby_child(&fork_request)?;
+        }
         claim_phase!("child_forked");
 
         // Unconditional and best-effort, mirroring `start_workload`: started
@@ -921,6 +960,94 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         Ok(handle)
     }
 
+    /// Materialize and load one saved-state child while the pool is being
+    /// refilled, leaving its VMM paused for a later claim. The child is not
+    /// reachable by a workload yet: claim-time endpoint, broker, identity,
+    /// and authenticated-vsock gates still run before resume.
+    pub fn preload_standby_child(
+        &self,
+        ctx: &PreloadContext<'_>,
+        handle: &mut StandbyHandle,
+    ) -> std::result::Result<(), StandbyError> {
+        if !self.driver.supports_preloaded_standby() {
+            return Err(StandbyError::Unsupported {
+                backend: self.driver.name().to_string(),
+            });
+        }
+        if handle.preloaded_child_vm_name.is_some() {
+            return Err(StandbyError::SpawnFailed(format!(
+                "standby '{}' already owns a preloaded child",
+                handle.id
+            )));
+        }
+        let checkpoint = handle.parent_checkpoint.as_deref().ok_or_else(|| {
+            StandbyError::SpawnFailed(format!(
+                "standby '{}' has no checkpoint for child preload",
+                handle.id
+            ))
+        })?;
+        let checkpoint_id = CheckpointId::new(checkpoint.to_string());
+        let _registry_lock = acquire_registry_lock(ctx.registry_path)
+            .map_err(|e| StandbyError::SpawnFailed(format!("acquire VM name registry: {e}")))?;
+        let registry = VmNameRegistry::load(ctx.registry_path)
+            .map_err(|e| StandbyError::SpawnFailed(format!("load VM name registry: {e}")))?;
+        let (child_name, child_dir) = (0..MAX_CHILD_NAME_ATTEMPTS)
+            .map(|_| generate_vm_name())
+            .find_map(|name| {
+                let dir = vm_state_dir(&name);
+                (registry.lookup(&name).is_none() && !dir.exists()).then_some((name, dir))
+            })
+            .ok_or_else(|| {
+                StandbyError::SpawnFailed("could not reserve a unique preloaded child name".into())
+            })?;
+
+        let materialized = if is_trusted_snapshot_id(checkpoint) {
+            let backend = mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root())
+                .map_err(|e| {
+                    StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e}"))
+                })?;
+            materialize_child_from_trusted_parent(
+                ctx.checkpoints,
+                backend.as_ref(),
+                &checkpoint_id,
+                ctx.anchor,
+                &child_dir,
+            )
+        } else {
+            materialize_child_from_parent(
+                ctx.checkpoints,
+                ctx.snapshots,
+                &checkpoint_id,
+                ctx.anchor,
+                &child_dir,
+            )
+        };
+        if let Err(error) = materialized {
+            let _ = std::fs::remove_dir_all(&child_dir);
+            return Err(StandbyError::SpawnFailed(format!(
+                "materialize preloaded child '{}': {error}",
+                child_name
+            )));
+        }
+
+        let loaded = self.driver.preload_standby_child(&PreloadChildRequest {
+            child_vm_name: &child_name,
+            child_dir: &child_dir,
+        });
+        let loaded = match loaded {
+            Ok(value) => value,
+            Err(error) => {
+                self.force_stop(&child_name, "failed preloaded standby child");
+                let _ = std::fs::remove_dir_all(&child_dir);
+                return Err(error);
+            }
+        };
+        handle.preloaded_child_vm_name = Some(child_name);
+        handle.pid = loaded.pid;
+        handle.control_socket = loaded.control_socket;
+        Ok(())
+    }
+
     /// Force-stop a VM the warm-pool path is done with, naming its `role` for the
     /// log. Failure is logged, never propagated: the callers are already on their
     /// way out (a captured parent, a refused child) and have nothing better to do
@@ -949,17 +1076,21 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
 /// here only ever returns a parent that verified healthy.
 struct WarmClaimLease<'a> {
     pool: &'a SupervisorStandbyPool,
+    driver: &'a dyn VmmDriver,
     parent_id: &'a str,
     child_dir: Option<PathBuf>,
+    preloaded_child: Option<String>,
     committed: bool,
 }
 
 impl<'a> WarmClaimLease<'a> {
-    fn new(pool: &'a SupervisorStandbyPool, parent_id: &'a str) -> Self {
+    fn new(pool: &'a SupervisorStandbyPool, parent_id: &'a str, driver: &'a dyn VmmDriver) -> Self {
         Self {
             pool,
+            driver,
             parent_id,
             child_dir: None,
+            preloaded_child: None,
             committed: false,
         }
     }
@@ -967,6 +1098,12 @@ impl<'a> WarmClaimLease<'a> {
     /// Track the child dir so an early return after materialize removes it.
     fn track_child_dir(&mut self, dir: PathBuf) {
         self.child_dir = Some(dir);
+    }
+
+    /// Track a paused child process so an early claim refusal cannot leave a
+    /// VMM alive after its pool reservation is returned.
+    fn track_preloaded_child(&mut self, vm_name: String) {
+        self.preloaded_child = Some(vm_name);
     }
 
     /// The child booted: disarm. The parent stays `Claimed` (the stop/reaper path
@@ -987,6 +1124,16 @@ impl Drop for WarmClaimLease<'_> {
                 error = %e,
                 "returning reserved standby parent to claimable after a failed claim"
             );
+        }
+        if let Some(vm_name) = &self.preloaded_child {
+            let id = VmId(vm_name.clone());
+            if let Err(error) = self.driver.attach(&id).and_then(|vm| vm.kill()) {
+                tracing::warn!(
+                    vm = %vm_name,
+                    %error,
+                    "stopping preloaded standby child after failed claim"
+                );
+            }
         }
         if let Some(dir) = &self.child_dir {
             match std::fs::remove_dir_all(dir) {
@@ -1284,6 +1431,26 @@ fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyEr
     Err(StandbyError::ClaimFailed(
         "could not mint a registry-unique child name".into(),
     ))
+}
+
+/// Recheck a preloaded child's registry identity immediately before claim-side
+/// authority is created. The preload name was collision-checked when the pool
+/// record was written, but another VM may have registered the same random name
+/// before a later process claimed the persisted record.
+fn verify_preloaded_child_name_is_available(
+    ctx: &ClaimContext<'_>,
+    child_name: &str,
+) -> std::result::Result<(), StandbyError> {
+    let _lock = acquire_registry_lock(ctx.registry_path)
+        .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e}")))?;
+    let registry = VmNameRegistry::load(ctx.registry_path)
+        .map_err(|e| StandbyError::ClaimFailed(format!("load vm registry: {e}")))?;
+    if registry.lookup(child_name).is_some() {
+        return Err(StandbyError::ClaimFailed(format!(
+            "preloaded child name '{child_name}' is already registered"
+        )));
+    }
+    Ok(())
 }
 
 /// The child's launch config: the CLI-populated claim config (carrying the
@@ -3684,6 +3851,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: None,
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
             vsock_egress: false,
         }
     }

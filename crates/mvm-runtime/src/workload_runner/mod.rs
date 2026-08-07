@@ -18,7 +18,7 @@ pub use console_stream::{
 };
 pub use runner::{
     BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, ClaimContext, ConsoleCapture,
-    ConsoleStreamer, EndpointSpawnRequest, EndpointSpawner, NoopConsoleStreamer,
+    ConsoleStreamer, EndpointSpawnRequest, EndpointSpawner, NoopConsoleStreamer, PreloadContext,
     RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs, WorkloadRunner,
 };
 pub use spec_map::{

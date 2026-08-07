@@ -314,12 +314,34 @@ pub(crate) fn guarded_fork_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &P
     guard_and_resume(io)
 }
 
+/// Load a fork snapshot, run the no-NIC guard, and leave the VMM paused.
+///
+/// Pool refill uses this form so process creation and snapshot loading happen
+/// before a workload is admitted. The claim later wires its fresh channels and
+/// resumes the guarded VMM; no guest code runs before both steps complete.
+pub(crate) fn guarded_fork_load_paused<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
+    if let Err(e) = io.load_snapshot_for_fork_paused(dir) {
+        let _ = io.teardown_paused();
+        return Err(e).context(format!("load_snapshot_for_fork_paused({})", dir.display()));
+    }
+    if let Err(e) = guard_loaded_device_model(io) {
+        let _ = io.teardown_paused();
+        return Err(e).context("restore refused by device-model guard");
+    }
+    Ok(())
+}
+
 /// Shared tail: read the restored device model, refuse anything carrying a NIC
 /// (tearing down the paused VMM on refusal), and only then resume vCPUs.
 ///
 /// Every load path funnels through here, so adding a new way to load a snapshot
 /// cannot silently bypass the guard.
 fn guard_and_resume<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
+    guard_loaded_device_model(io)?;
+    io.resume().with_context(|| "resume after restore")
+}
+
+fn guard_loaded_device_model<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
     let model = match io
         .restored_device_model()
         .with_context(|| "reading restored device model")
@@ -336,8 +358,7 @@ fn guard_and_resume<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
         let _ = io.teardown_paused();
         return Err(e).context("restore refused by device-model guard");
     }
-
-    io.resume().with_context(|| "resume after restore")
+    Ok(())
 }
 
 // ============================================================================
@@ -1351,6 +1372,18 @@ mod tests {
             calls,
             vec!["load_fork_paused", "restored_device_model", "resume"],
             "fork load, guard, then resume — in order"
+        );
+    }
+
+    #[test]
+    fn guarded_fork_load_paused_leaves_clean_child_paused() {
+        let spy = SpyIO::new(false);
+        let dir = tempfile::tempdir().unwrap();
+        guarded_fork_load_paused(&spy, dir.path()).expect("a no-NIC fork must stay paused");
+        assert_eq!(
+            spy.calls(),
+            vec!["load_fork_paused", "restored_device_model"],
+            "preload must guard the child without resuming it"
         );
     }
 

@@ -317,6 +317,7 @@ mod tests {
             state,
             image_sha256: None,
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
             vsock_egress: false,
         }
     }
@@ -337,6 +338,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: None,
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
             vsock_egress: false,
         }
     }
@@ -626,6 +628,7 @@ mod tests {
             state,
             image_sha256: Some(image.into()),
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
             vsock_egress: false,
         }
     }

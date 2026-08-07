@@ -16,4 +16,7 @@ pub use qemu::QemuDriver;
 pub use spec::{
     BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
 };
-pub use traits::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
+pub use traits::{
+    ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
+    StandbyParentSpawn, VmmDriver,
+};

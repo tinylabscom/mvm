@@ -461,8 +461,13 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
 ///    after `restore_fork` returns.
 pub struct FcForkRestorer;
 
-impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
-    fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> anyhow::Result<()> {
+impl FcForkRestorer {
+    /// Prepare a forked child and return its paused Firecracker API handle.
+    fn prepare_fork_load(
+        &self,
+        child_vm_name: &str,
+        child_dir: &std::path::Path,
+    ) -> anyhow::Result<crate::vm::instance_snapshot::FirecrackerIO> {
         use anyhow::Context as _;
         // FC saves memory as `memory.bin`; the snapshot loader expects
         // `mem.bin`, Firecracker's canonical load filename.
@@ -527,10 +532,30 @@ impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
         // becomes reachable.
         //
         // The load leaves vCPUs paused, so the no-NIC device-model guard runs
-        // before the child executes anything and the resume happens here — a
-        // fork inherits its parent's device model and gets the same check every
-        // other restore does.
-        let io = crate::vm::instance_snapshot::FirecrackerIO::new(child_dir.join("fc.socket"));
+        // before the child executes anything. The claim resumes it only after
+        // fresh host channels have been wired.
+        Ok(crate::vm::instance_snapshot::FirecrackerIO::new(
+            child_dir.join("fc.socket"),
+        ))
+    }
+
+    /// Load and guard a forked child without resuming it. Pool refill uses this
+    /// to keep Firecracker and the restored device model outside the claim
+    /// latency window.
+    pub(crate) fn restore_fork_paused(
+        &self,
+        child_vm_name: &str,
+        child_dir: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let io = self.prepare_fork_load(child_vm_name, child_dir)?;
+        crate::vm::instance_snapshot::guarded_fork_load_paused(&io, child_dir)
+            .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+    }
+}
+
+impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
+    fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> anyhow::Result<()> {
+        let io = self.prepare_fork_load(child_vm_name, child_dir)?;
         crate::vm::instance_snapshot::guarded_fork_load_resume(&io, child_dir)
             .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
     }

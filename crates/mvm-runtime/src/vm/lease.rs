@@ -231,6 +231,7 @@ mod tests {
             image_sha256: c.image_sha256,
             parent_checkpoint: None,
             vsock_egress: c.vsock_egress,
+            preloaded_child_vm_name: None,
         }
     }
 

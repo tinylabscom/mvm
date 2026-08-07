@@ -431,6 +431,7 @@ mod integration_tests {
             image_sha256: None,
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         })
         .expect("record standby");
         let backend: Arc<dyn VmBackend> = Arc::new(crate::MockBackend::new().with_standby());

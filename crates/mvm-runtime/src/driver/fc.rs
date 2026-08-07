@@ -29,8 +29,8 @@ use mvm_net::channel::GuestService;
 use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
 use crate::driver::{
-    BlockDev, ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver, VmmSpec,
-    VsockDirection, VsockPort,
+    BlockDev, ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
+    StandbyParentSpawn, VmmDriver, VmmSpec, VsockDirection, VsockPort,
 };
 use crate::microvm::{
     FirecrackerGuard, api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
@@ -548,28 +548,18 @@ impl VmmDriver for FcDriver {
         // wired through this driver's boot + running-VM handle); live-memory
         // snapshots are dropped, since the runner path is cold-boot only.
         //
-        // `standby_pool` stays off. The spawn/capture/fork/handshake code is
-        // all here — `spawn_standby_parent` boots a clean factory parent and
-        // `vm_full_control` captures its whole {rootfs, memory, vmstate} — and
-        // validation on real KVM hardware has since shown that half working:
-        // the parent boots the workload's verified shape, reaches its guest
-        // agent, and the capture writes a memory-carrying checkpoint. The
-        // authenticated direct-driver claim witness also works, but its
-        // on-demand restore has shown host-scheduling outliers above the
-        // strict warm window, and it does not yet exercise the production
-        // runner's endpoint, grant, and share wiring. Advertising it would
-        // make every launch depend on a claim path that has not passed the
-        // production and worst-case timing gates, so it stays false until
-        // those gates are green. That capture/restore pair is a
-        // distinct seam from the coarse `snapshots`/`snapshot_capability` tier
-        // below — it captures one specific parent shape for the standby pool,
-        // not an arbitrary named VM's live memory on demand, so those two
-        // fields stay unchanged either way.
+        // `standby_pool` is the saved-state/preloaded-child path, not arbitrary
+        // named-VM snapshot support. Refill captures a clean factory parent,
+        // materializes one child, loads Firecracker paused, and runs the
+        // no-NIC guard before publishing the pool record. Claims then wire
+        // their own channels and resume that already-loaded child. The
+        // authenticated identity handshake still gates admission after
+        // resume, so preloading changes placement of VMM work, not authority.
         VmCapabilities {
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: false,
+            standby_pool: true,
             vsock: true,
             tap_networking: false,
             no_routable_guest_nic: true,
@@ -642,11 +632,74 @@ impl VmmDriver for FcDriver {
             vsock_egress: spec.vsock_egress,
             // The caller captures the parent and stamps this.
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
         })
     }
 
     fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
         Some(Box::new(crate::firecracker::FcVmFullControl::new(vm_name)))
+    }
+
+    fn supports_preloaded_standby(&self) -> bool {
+        true
+    }
+
+    fn preload_standby_child(
+        &self,
+        req: &PreloadChildRequest<'_>,
+    ) -> std::result::Result<PreloadedChild, StandbyError> {
+        if !req.child_dir.is_dir() {
+            return Err(StandbyError::SpawnFailed(format!(
+                "preload child '{}': state dir {} is missing",
+                req.child_vm_name,
+                req.child_dir.display()
+            )));
+        }
+        if !req.child_dir.join("memory.bin").exists() && !req.child_dir.join("mem.bin").exists() {
+            return Err(StandbyError::SpawnFailed(format!(
+                "preload child '{}': materialized state has no saved memory image",
+                req.child_vm_name
+            )));
+        }
+        crate::firecracker::FcForkRestorer
+            .restore_fork_paused(req.child_vm_name, req.child_dir)
+            .map_err(|e| StandbyError::SpawnFailed(format!("load paused child: {e}")))?;
+        let pid = read_firecracker_pid(&req.child_dir.to_string_lossy())
+            .map_err(|e| StandbyError::SpawnFailed(format!("read paused child pid: {e}")))?;
+        Ok(PreloadedChild {
+            pid,
+            control_socket: req.child_dir.join("fc.socket").display().to_string(),
+        })
+    }
+
+    fn resume_preloaded_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        if !req.child_dir.is_dir() {
+            return Err(StandbyError::ClaimFailed(format!(
+                "resume preloaded child '{}': state dir {} is missing",
+                req.child_vm_name,
+                req.child_dir.display()
+            )));
+        }
+        let runtime_dir = req.child_dir.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "resume preloaded child '{}': create runtime dir {}: {e}",
+                req.child_vm_name,
+                runtime_dir.display()
+            ))
+        })?;
+        arm_host_channels(req.channels, req.child_dir, &runtime_dir).map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "resume preloaded child '{}': wiring host channels: {e}",
+                req.child_vm_name
+            ))
+        })?;
+        let io = crate::vm::instance_snapshot::FirecrackerIO::new(req.child_dir.join("fc.socket"));
+        <crate::vm::instance_snapshot::FirecrackerIO as crate::vm::instance_snapshot::SnapshotIO>::resume(&io)
+            .map_err(|e| StandbyError::ClaimFailed(format!("resume preloaded child: {e}")))
     }
 
     fn fork_standby_child(
@@ -1146,22 +1199,18 @@ mod tests {
         );
     }
 
-    /// No selectable driver advertises the standby (warm) pool. The capability
-    /// means "can actually spawn AND claim a warm parent on this host", so it
-    /// flips per-backend only once a live run proves that backend's spawn and
-    /// claim both work — a capability nobody can service costs every launch a
-    /// parent boot for nothing. Firecracker's spawn+capture half is live-proven;
-    /// its claim half is not, so it stays off with the rest. (The in-memory
-    /// `MockBackend` opts into it explicitly via `with_standby()` for the
-    /// hermetic claim tests; the `MockDriver` seam here does not.)
+    /// The selectable driver matrix distinguishes saved-state support from
+    /// arbitrary snapshot support. Firecracker advertises the pool because its
+    /// refill path now publishes a paused, no-NIC child and its claim path
+    /// resumes that child only after fresh channel wiring.
     #[test]
-    fn only_hvf_advertises_the_live_standby_pool() {
+    fn firecracker_and_hvf_advertise_the_live_standby_pool() {
         use crate::backends::hvf::driver::HvfDriver;
         use crate::driver::{LibkrunDriver, MockDriver};
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
 
-        assert!(!FcDriver::new().capabilities().standby_pool);
+        assert!(FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
         assert!(HvfDriver::new().capabilities().standby_pool);
         assert!(!MockDriver::default().capabilities().standby_pool);

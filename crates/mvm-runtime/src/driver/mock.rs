@@ -301,6 +301,7 @@ impl VmmDriver for MockDriver {
             image_sha256: spec.image_sha256.clone(),
             vsock_egress: spec.vsock_egress,
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
         })
     }
 

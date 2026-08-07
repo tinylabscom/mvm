@@ -100,6 +100,9 @@ and no claim silently falls back after being labeled warm.
       excludes unrelated filesystem cleanup.
 - [x] Add `pool_wait_ms`, `claim_ms`, and `warm_window_ms` to the runtime timing
       record.
+- [x] Preload paused Firecracker child VMMs during pool refill, run the
+      no-NIC device-model guard before publication, and resume only after the
+      claim wires fresh host channels and completes the child identity gates.
 - [ ] Make pool compatibility and late-bound share attachment explicit in the
       backend capability contract.
 - [ ] Add a hermetic benchmark harness with deterministic claim/refusal cases.
@@ -112,9 +115,10 @@ and no claim silently falls back after being labeled warm.
       authenticated witness completed 15/15 claims, with normal claims at
       63–76ms but restore-start outliers at 513ms and 620ms; the identity RPC
       itself stayed at 24–35ms. The strict Linux maximum is not green yet; the
-      next Linux slice must pre-load paused child VMMs during pool refill so
-      restore/process-start variance is outside the measured window. Production
-      standby capability admission, Linux libkrun, and the
+      Firecracker implementation now pre-loads paused child VMMs during pool
+      refill so restore/process-start variance is outside the measured launch
+      window, with real Linux validation of that path remaining open. Linux
+      libkrun and the
       remaining backend/share-shape matrices remain open.
 - [ ] Enforce the hard maximum and aggregate p50/p99 thresholds in CI.
 

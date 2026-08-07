@@ -677,6 +677,7 @@ mod tests {
                 image_sha256: None,
                 parent_checkpoint: None,
                 vsock_egress: false,
+                preloaded_child_vm_name: None,
             },
             &sample_standby_claim(),
         ) {

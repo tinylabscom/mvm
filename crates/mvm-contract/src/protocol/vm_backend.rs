@@ -1011,6 +1011,14 @@ pub struct StandbyHandle {
     /// lives a layer up; the runtime converts at its boundary.
     #[serde(default)]
     pub parent_checkpoint: Option<String>,
+    /// An already-loaded, paused child VMM prepared from `parent_checkpoint`.
+    ///
+    /// When present, the pool owns this child process instead of a saved-only
+    /// parent. The child name becomes the final workload VM identity at claim
+    /// time; it is never exposed to a workload before fresh admission,
+    /// channel wiring, and post-restore identity reseeding complete.
+    #[serde(default)]
+    pub preloaded_child_vm_name: Option<String>,
     /// Whether this parent booted its guest's vsock egress client on
     /// (see [`StandbyCompat::vsock_egress`]).
     ///
@@ -1438,11 +1446,13 @@ mod tests {
             image_sha256: None,
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         };
         let json = serde_json::to_string(&h).unwrap();
         let back: StandbyHandle = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "standby-abc");
         assert_eq!(back.state, StandbyState::Idle);
+        assert_eq!(back.preloaded_child_vm_name, None);
         let want = StandbyCompat {
             template_id: None,
             kernel_sha256: "a".repeat(64),
@@ -1544,6 +1554,10 @@ mod tests {
             !h.vsock_egress,
             "a record from before the field existed booted no egress client"
         );
+        assert_eq!(
+            h.preloaded_child_vm_name, None,
+            "a record from before the field existed has no preloaded child"
+        );
         assert!(!h.is_saved_state(), "pid != 0 → live standby");
         // An old libkrun standby is compatible with a libkrun launch (both None).
         let want = StandbyCompat {
@@ -1582,6 +1596,7 @@ mod tests {
             image_sha256: Some("dd".repeat(32)),
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         };
         assert!(saved.is_saved_state());
         // serde roundtrip preserves the image sha and pid=0.

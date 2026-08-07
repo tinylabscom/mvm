@@ -67,8 +67,9 @@ backend cannot provide this operation, the claim is refused as cold-only.
 4. [ ] [#2195](https://github.com/tinylabscom/mvm/issues/2195) — Implement fixed
    virtio-fs share slots and claim-time read-only host binding.
 5. [~] [#2196](https://github.com/tinylabscom/mvm/issues/2196) — Complete and
-   validate the Linux KVM/Firecracker warm-pool backend. The direct
-   Firecracker/KVM witness is green; production standby admission remains.
+   validate the Linux KVM/Firecracker warm-pool backend. The paused-child
+   preload/resume path and production standby admission are implemented; the
+   real Linux KVM acceptance matrix remains.
 6. [ ] [#2197](https://github.com/tinylabscom/mvm/issues/2197) — Harden the VMM
    and share-control processes with least privilege and platform-specific
    defense in depth.
@@ -242,6 +243,12 @@ reseeding, and policy validation.
   until after the guest command. The deny-all posture remains explicit and
   fail-closed; the fresh release-built 1,000-claim Apple Silicon matrix
   measured p50=17.9ms, p95=22.1ms, p99=27.4ms, and max=33.3ms.
+- [x] Added the Linux saved-state latency seam: pool refill materializes and
+  restores a Firecracker child into a guarded paused state, records its live
+  VMM identity in the standby handle, and claim-time resume wires fresh host
+  channels before the guest identity handshake. Failed claims stop the
+  preloaded child and remove its state directory; claim-time registry checks
+  reject a name collision before authority-bearing endpoints are created.
 - [~] Live-validate the same-process handoff on real Apple Silicon and complete
   the full 1,000-claim continuity witness. Darwin arm64 validation now proves
   the signed rootless handoff with the Hypervisor.framework entitlement, with
@@ -252,10 +259,10 @@ reseeding, and policy validation.
   image, the stricter witness completed 15/15 authenticated claims; normal
   claims measured 63–76ms, but two restore-start outliers measured 513ms and
   620ms while the identity RPC remained 24–35ms. The strict Linux maximum is
-  therefore not green yet. The Linux design follow-up is to pre-load paused
-  child VMMs during pool refill so Firecracker process/snapshot restore work is
-  outside the measured launch window. Production standby capability admission,
-  Linux libkrun, and the remaining backend/share-shape matrices remain open. The
+  therefore not green yet. The Firecracker implementation now pre-loads paused
+  child VMMs during pool refill so process/snapshot restore work is outside the
+  measured launch window; real Linux KVM validation of the new path is next.
+  Linux libkrun and the remaining backend/share-shape matrices remain open. The
   resident path defers reclamation of consumed parent payloads until after the
   measured handoff, keeping checkpoint and snapshot state bounded.
 - [x] Removed the process-wide `MVM_HOME` mutation from the UDS-channel test

@@ -28,7 +28,7 @@ use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::CheckpointStore;
 use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
-use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, SpawnContext};
+use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, PreloadContext, SpawnContext};
 use sha2::{Digest, Sha256};
 
 use super::Cli;
@@ -315,6 +315,33 @@ fn discard_unauditable_parent(checkpoints: &CheckpointStore, handle: &StandbyHan
     }
 }
 
+/// Reap a paused child if the pool record cannot be published after preload.
+/// The child is not yet a user VM, so leaving it behind would leak a VMM that
+/// no persisted reaper can discover.
+fn discard_preloaded_child(backend: &AnyBackend, handle: &StandbyHandle) {
+    let Some(child_name) = handle.preloaded_child_vm_name.as_deref() else {
+        return;
+    };
+    if let Err(error) = backend.stop_transient(&VmId(child_name.to_string())) {
+        tracing::warn!(
+            child = child_name,
+            %error,
+            "could not stop unpublished preloaded standby child"
+        );
+    }
+    let child_dir = mvm_core::config::vm_state_dir(child_name);
+    if let Err(error) = std::fs::remove_dir_all(&child_dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            child = child_name,
+            path = %child_dir.display(),
+            %error,
+            "could not remove unpublished preloaded child state"
+        );
+    }
+}
+
 pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
     if p.target == 0 {
         return Ok(WarmResult {
@@ -392,7 +419,35 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                     .unwrap_or(STANDBY_PARENT_TENANT);
                 match audit_captured_parent(&checkpoints, &handle, p.backend.name(), tenant) {
                     Ok(()) => {
-                        pool.record(&handle)?;
+                        let mut handle = handle;
+                        if p.backend.supports_preloaded_standby() {
+                            let snapshots =
+                                FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
+                            let anchor = SignedChainAnchor::load()?;
+                            let registry_path = mvm_runtime::vm::name_registry::registry_path();
+                            let preload = PreloadContext {
+                                checkpoints: &checkpoints,
+                                snapshots: &snapshots,
+                                anchor: &anchor,
+                                registry_path: &registry_path,
+                            };
+                            if let Err(error) =
+                                p.backend.preload_standby_via_runner(&preload, &mut handle)
+                            {
+                                tracing::warn!(
+                                    standby = %handle.id,
+                                    %error,
+                                    "could not preload paused child; discarding standby"
+                                );
+                                discard_preloaded_child(p.backend, &handle);
+                                failed += 1;
+                                continue;
+                            }
+                        }
+                        if let Err(error) = pool.record(&handle) {
+                            discard_preloaded_child(p.backend, &handle);
+                            return Err(error);
+                        }
                         spawned += 1;
                     }
                     Err(e) => {
@@ -935,6 +990,7 @@ mod tests {
             kernel_sha256: "a".repeat(64),
             image_sha256: Some("b".repeat(64)),
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         }
     }
 
@@ -1476,6 +1532,7 @@ mod tests {
             image_sha256: None,
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         }
     }
 
@@ -1494,6 +1551,7 @@ mod tests {
             image_sha256: Some(image.into()),
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         }
     }
 

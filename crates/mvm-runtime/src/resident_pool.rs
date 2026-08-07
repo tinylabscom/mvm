@@ -287,6 +287,7 @@ mod tests {
             state,
             image_sha256: compat.image_sha256,
             parent_checkpoint: Some(format!("checkpoint-{id}")),
+            preloaded_child_vm_name: None,
             vsock_egress: compat.vsock_egress,
         }
     }

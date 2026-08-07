@@ -74,6 +74,25 @@ pub struct StandbyParentSpawn<'a> {
     pub boot: &'a VmmSpec,
 }
 
+/// A verified checkpoint materialized into a child state directory before a
+/// warm claim. The driver loads it and leaves the child VMM paused; no guest
+/// code may execute until the claim wires its fresh host channels.
+pub struct PreloadChildRequest<'a> {
+    /// Fresh VM identity reserved for this one-shot preloaded child.
+    pub child_vm_name: &'a str,
+    /// Canonical child state directory containing the materialized snapshot.
+    pub child_dir: &'a Path,
+}
+
+/// The process identity and control endpoint of a paused preloaded child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreloadedChild {
+    /// The VMM process that remains paused in the pool.
+    pub pid: u32,
+    /// Backend control socket used for diagnostics and teardown.
+    pub control_socket: String,
+}
+
 /// A bidirectional, owned guest channel (a connected vsock stream).
 pub trait DuplexStream: std::io::Read + std::io::Write + Send {}
 impl<T: std::io::Read + std::io::Write + Send> DuplexStream for T {}
@@ -103,6 +122,11 @@ pub trait VmmDriver: Send + Sync {
     /// Whether a standby claim can hand a resident VMM directly to the child
     /// identity without starting a separate saved-state restore.
     fn supports_resident_handoff(&self) -> bool {
+        false
+    }
+    /// Whether pool refill may load a saved child VMM and keep it paused until
+    /// the claim wires its authority-bearing channels.
+    fn supports_preloaded_standby(&self) -> bool {
         false
     }
     /// Boot the VM described by `spec`, returning a live handle.
@@ -155,6 +179,31 @@ pub trait VmmDriver: Send + Sync {
     /// Fail-closed default: a driver opts in explicitly, mirroring
     /// [`spawn_standby_parent`](Self::spawn_standby_parent).
     fn fork_standby_child(
+        &self,
+        _req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        Err(StandbyError::Unsupported {
+            backend: self.name().to_string(),
+        })
+    }
+
+    /// Load a materialized standby child into a fresh VMM and leave it paused.
+    ///
+    /// This is intentionally separate from [`fork_standby_child`](Self::fork_standby_child):
+    /// the preload runs during pool refill, while the claim path only wires
+    /// authority-bearing channels and resumes an already-guarded VMM.
+    fn preload_standby_child(
+        &self,
+        _req: &PreloadChildRequest<'_>,
+    ) -> std::result::Result<PreloadedChild, StandbyError> {
+        Err(StandbyError::Unsupported {
+            backend: self.name().to_string(),
+        })
+    }
+
+    /// Resume a child previously returned by [`preload_standby_child`](Self::preload_standby_child).
+    /// The caller wires all claim-specific channels before invoking this method.
+    fn resume_preloaded_child(
         &self,
         _req: &ChildForkRequest<'_>,
     ) -> std::result::Result<(), StandbyError> {

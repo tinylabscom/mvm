@@ -1269,6 +1269,7 @@ impl VmBackend for LibkrunBackend {
             image_sha256: None, // libkrun standbys are image-agnostic
             vsock_egress: spec.vsock_egress,
             parent_checkpoint: None, // this spawn path does not capture a checkpoint yet
+            preloaded_child_vm_name: None,
         })
     }
 

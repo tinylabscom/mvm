@@ -800,6 +800,46 @@ impl AnyBackend {
         }
     }
 
+    /// Whether refill can load a child VMM and keep it paused until claim.
+    pub fn supports_preloaded_standby(&self) -> bool {
+        match self {
+            AnyBackend::Firecracker(runner) => runner.supports_preloaded_standby(),
+            AnyBackend::Libkrun(runner) => runner.supports_preloaded_standby(),
+            AnyBackend::Hvf(runner) => runner.supports_preloaded_standby(),
+            #[cfg(feature = "test-support")]
+            AnyBackend::Mock(_) => false,
+            AnyBackend::Qemu(_)
+            | AnyBackend::Wasm(_)
+            | AnyBackend::AppleContainer(_)
+            | AnyBackend::Docker(_) => false,
+        }
+    }
+
+    /// Prepare one paused child for a saved-state standby after its checkpoint
+    /// has been audited. Unsupported backends leave the existing saved-state
+    /// pool path intact.
+    pub fn preload_standby_via_runner(
+        &self,
+        ctx: &crate::workload_runner::PreloadContext<'_>,
+        handle: &mut mvm_core::vm_backend::StandbyHandle,
+    ) -> std::result::Result<(), mvm_core::vm_backend::StandbyError> {
+        match self {
+            AnyBackend::Firecracker(runner) => runner.preload_standby_child(ctx, handle),
+            AnyBackend::Libkrun(runner) => runner.preload_standby_child(ctx, handle),
+            AnyBackend::Hvf(runner) => runner.preload_standby_child(ctx, handle),
+            #[cfg(feature = "test-support")]
+            AnyBackend::Mock(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
+                backend: self.inner().name().to_string(),
+            }),
+            AnyBackend::Qemu(_)
+            | AnyBackend::Wasm(_)
+            | AnyBackend::AppleContainer(_)
+            | AnyBackend::Docker(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
+                backend: self.inner().name().to_string(),
+            }),
+        }
+    }
+
     /// Drive a warm-pool claim through the backend's real, context-aware claim
     /// path — the entry the CLI warm-claim layer assembles a [`ClaimContext`]
     /// for. The runner-backed workload backends (Firecracker, libkrun, hvf)
@@ -1682,7 +1722,7 @@ mod tests {
         let mut expected = vec![
             ("apple-container", SnapshotCapability::Unsupported, false),
             ("docker", SnapshotCapability::Unsupported, false),
-            ("firecracker", SnapshotCapability::Unsupported, false),
+            ("firecracker", SnapshotCapability::Unsupported, true),
             ("hvf", SnapshotCapability::Unsupported, true),
             ("libkrun", SnapshotCapability::Unsupported, false),
             ("qemu", SnapshotCapability::Unsupported, false),
@@ -2021,6 +2061,7 @@ mod tests {
                 state: StandbyState::Idle,
                 image_sha256: None,
                 parent_checkpoint: None,
+                preloaded_child_vm_name: None,
                 vsock_egress: false,
             }
         }

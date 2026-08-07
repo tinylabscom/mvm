@@ -3,10 +3,10 @@
 //! Drives the real driver seam end to end against a KVM host:
 //! `FcDriver::spawn_standby_parent` boots a clean factory parent,
 //! `capture_vm_full` takes its {rootfs, memory, vmstate} triple through the
-//! driver's own `vm_full_control`, and `FcDriver::fork_standby_child` restores
-//! a fresh child out of that saved memory. Those three calls are exactly what
-//! the role layer strings together for a claim, so the two numbers this prints
-//! bound how fast a pooled claim can be.
+//! driver's own `vm_full_control`, and the driver preloads a fresh child from
+//! that saved memory in a guarded paused state before claim-time resume. Those
+//! calls are exactly what the role layer strings together for a claim, so the
+//! timing output bounds the pooled claim path.
 //!
 //! It needs:
 //!
@@ -32,10 +32,11 @@ use mvm_core::vm_backend::{StandbySpec, StandbyState, StartMode};
 use mvm_runtime::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
 use mvm_runtime::driver::fc::FcDriver;
 use mvm_runtime::driver::{
-    BlockDev, ChildForkRequest, ConsoleCapture, KernelImage, StandbyParentSpawn, VmmDriver, VmmSpec,
+    BlockDev, ChildForkRequest, ConsoleCapture, KernelImage, PreloadChildRequest,
+    StandbyParentSpawn, VmmDriver, VmmSpec,
 };
 
-/// How long the child's agent gets to answer after the fork restore resumes it.
+/// How long the child's agent gets to answer after the preloaded restore resumes it.
 const CHILD_AGENT_TIMEOUT_SECS: u64 = 5;
 
 struct LiveImages {
@@ -167,13 +168,12 @@ fn fc_warm_pool_spawn_and_claim() {
     let child_id = format!("fc-warm-live-child-{pid}");
 
     let driver = FcDriver::new();
-    // The pool ships disarmed: the driver's spawn/capture/fork code is all
-    // present but the capability stays off until a claim is green end to end on
-    // real hardware. This harness is how that is measured, so it drives the
-    // driver directly rather than through the capability-gated claim path.
+    // The live harness exercises the same driver whose capability gates the
+    // production pool path: refill loads a paused child and claim resumes it
+    // only after the fresh host channels are wired.
     assert!(
-        !driver.capabilities().standby_pool,
-        "the FC standby pool must stay disarmed; this harness validates it, it does not arm it"
+        driver.capabilities().standby_pool,
+        "the FC standby pool must advertise the preloaded-child path"
     );
 
     let spec = standby_spec(&parent_id, &images, &home);
@@ -232,7 +232,7 @@ fn fc_warm_pool_spawn_and_claim() {
     let spawn_ms = t_spawn.elapsed().as_millis();
 
     // A captured parent costs disk, not a resident VM: release it before the
-    // claim so the child cannot collide with a live parent's TAP-free device
+    // preload so the child cannot collide with a live parent's TAP-free device
     // paths or its pid marker.
     let _ = mvm_runtime::microvm::stop_vm(&parent_id);
 
@@ -245,11 +245,24 @@ fn fc_warm_pool_spawn_and_claim() {
             .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
     }
 
+    let t_preload = Instant::now();
+    let preloaded = driver
+        .preload_standby_child(&PreloadChildRequest {
+            child_vm_name: &child_id,
+            child_dir: &child_dir,
+        })
+        .expect("preload Firecracker standby child");
+    let preload_ms = t_preload.elapsed().as_millis();
+    assert!(
+        preloaded.pid > 0,
+        "a preloaded child must expose its live pid"
+    );
+
     let t_claim = Instant::now();
     let genid = fresh_generation_token(parent_checkpoint.as_str().to_string());
     let token = genid.token;
-    let t_fork = Instant::now();
-    let fork_result = driver.fork_standby_child(&ChildForkRequest {
+    let t_resume = Instant::now();
+    let resume_result = driver.resume_preloaded_child(&ChildForkRequest {
         child_vm_name: &child_id,
         child_dir: &child_dir,
         parent_vm_name: None,
@@ -257,11 +270,12 @@ fn fc_warm_pool_spawn_and_claim() {
         // This harness drives the driver seam directly and stands up none of
         // the host-side processes a claim wires channels to — no gating
         // endpoint, no broker — so it hands down the empty set the parent
-        // itself booted with. What it measures is the restore, not the wiring.
+        // itself booted with. This direct witness measures the resume seam, not
+        // the full runner's endpoint and broker wiring.
         channels: &[],
     });
-    if let Err(ref e) = fork_result {
-        eprintln!("fork failed: {e:#}");
+    if let Err(ref e) = resume_result {
+        eprintln!("preloaded child resume failed: {e:#}");
         for name in ["firecracker.log", "console.log"] {
             let path = child_dir.join(name);
             if let Ok(bytes) = std::fs::read(&path) {
@@ -270,8 +284,8 @@ fn fc_warm_pool_spawn_and_claim() {
             }
         }
     }
-    fork_result.expect("fork Firecracker standby child");
-    let fork_ms = t_fork.elapsed().as_millis();
+    resume_result.expect("resume preloaded Firecracker standby child");
+    let resume_ms = t_resume.elapsed().as_millis();
 
     let t_identity = Instant::now();
     let identity = driver
@@ -296,7 +310,7 @@ fn fc_warm_pool_spawn_and_claim() {
         mvm_runtime::microvm::firecracker_vsock_uds_path(&child_dir.to_string_lossy());
     assert!(
         connect_to(&child_vsock, CHILD_AGENT_TIMEOUT_SECS).is_ok(),
-        "child VM must answer on its vsock agent port after the fork restore"
+        "child VM must answer on its vsock agent port after the preloaded restore"
     );
 
     let _ = mvm_runtime::microvm::stop_vm(&child_id);
@@ -304,7 +318,8 @@ fn fc_warm_pool_spawn_and_claim() {
 
     println!("FC_WARM_POOL_SPAWN_MS={spawn_ms}");
     println!("FC_WARM_POOL_CLAIM_MS={claim_ms}");
-    println!("FC_WARM_POOL_FORK_MS={fork_ms}");
+    println!("FC_WARM_POOL_PRELOAD_MS={preload_ms}");
+    println!("FC_WARM_POOL_RESUME_MS={resume_ms}");
     println!("FC_WARM_POOL_IDENTITY_MS={identity_ms}");
     println!("FC_WARM_POOL_IDENTITY_HANDSHAKE=authenticated");
 }
