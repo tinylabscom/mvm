@@ -65,6 +65,18 @@
       implementation is merged through PR #2132, whose branch and merge-group
       Test, Lint, and Nix gates passed.
 
+- [x] Backend crate separation + HVF DAX + QEMU virtio-fs — branch
+      `feat/backend-crate-separation`. Consolidated HVF under
+      `mvm-runtime/src/backends/hvf`, extracted the shared `mvm-vmm` crate for
+      VMM primitives, made `VmmSpec` backend-agnostic for virtio-fs shares, and
+      wired DAX through HVF, libkrun, and QEMU (via standalone `virtiofsd`).
+      Guest kernel configs enable `FS_DAX`/`FUSE_DAX` and Linux cross-compile
+      stubs keep the HVF crate building without Hypervisor.framework. The
+      pre-existing console-streaming test was fixed by isolating `MVM_HOME`.
+      `cargo test -p mvm-runtime` passes (1163 passed, 0 failed, 6 ignored);
+      `cargo clippy -p mvm-runtime -p mvm-build -- -D warnings` is clean on
+      macOS and the Linux builder VM.
+
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
       scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
