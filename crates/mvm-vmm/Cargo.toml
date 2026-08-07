@@ -34,3 +34,6 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.mvm.architecture]
+substrate_server_category = "vmm-device-model"
