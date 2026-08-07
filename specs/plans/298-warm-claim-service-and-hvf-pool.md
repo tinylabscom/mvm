@@ -249,6 +249,13 @@ reseeding, and policy validation.
   channels before the guest identity handshake. Failed claims stop the
   preloaded child and remove its state directory; claim-time registry checks
   reject a name collision before authority-bearing endpoints are created.
+- [x] Synced the warm-pool implementation with the current backend split. The
+  shared `VmmDriver`, `VmmSpec`, warm preload/resume requests, full-control
+  checkpoint contract, and HVF handoff wire type now live at the VMM seam;
+  runtime and hostd consume that seam rather than maintaining parallel backend
+  definitions. The split also removes the dependency cycle between the VMM
+  and build crates and keeps mock-driver access explicitly behind
+  `test-support`.
 - [~] Live-validate the same-process handoff on real Apple Silicon and complete
   the full 1,000-claim continuity witness. Darwin arm64 validation now proves
   the signed rootless handoff with the Hypervisor.framework entitlement, with
@@ -274,6 +281,15 @@ reseeding, and policy validation.
   remain open. The resident path defers reclamation of consumed parent
   payloads until after the measured handoff, keeping checkpoint and snapshot
   state bounded.
+- [x] Revalidated the exact post-sync source after the current `main` backend
+  refactor. Host validation passed with 207 `mvm-vmm` unit tests, 1,167
+  `mvm-runtime` unit tests (six ignored), and macOS workspace all-target
+  Clippy; the FC host also passed Linux workspace all-target Clippy. The live
+  Firecracker witness reports bootstrap=11,154ms outside the measured window,
+  claim=22ms, preload=42ms, resume=0ms, and authenticated identity=22ms. The
+  measured warm claim is below 300ms; the full Linux claim matrix, Linux
+  libkrun, Apple Silicon live matrix on this exact revision, and remaining
+  share-shape matrices remain open.
 - [x] Removed the process-wide `MVM_HOME` mutation from the UDS-channel test
   harness. Parallel host tests now use explicit isolated socket roots; the
   complete `mvm-hostd` package suite passes without the prior macOS hang.

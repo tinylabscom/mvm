@@ -1447,6 +1447,13 @@ Then unify + retire the old paths:
       24ms, preload 41ms, resume 0ms, and identity 23ms. Production Linux
       standby admission, the full Linux claim matrix, and the remaining backend
       matrices remain open.
+      After the latest `main` sync, including the backend crate/VMM-driver
+      refactor, the exact merged source also passes 207 `mvm-vmm` unit tests,
+      1,167 `mvm-runtime` unit tests (six ignored), macOS workspace all-target
+      Clippy, and Linux workspace all-target Clippy. A fresh FC-host witness
+      on that exact source reports spawn/bootstrap=11,154ms outside the SLO,
+      claim=22ms, preload=42ms, resume=0ms, and authenticated identity=22ms;
+      the measured warm claim is therefore below the strict 300ms requirement.
       #2195 adds fixed virtio-fs share slots; #2196 completes Linux
       Firecracker warm claims; #2197 hardens the VMM/share processes; #2198
       finalizes warm-required CLI semantics and timing; and #2199 adds the
