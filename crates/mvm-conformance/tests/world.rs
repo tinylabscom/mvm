@@ -106,6 +106,12 @@ pub struct CliWorld {
     pub last_run: Option<Output>,
     /// Id of the conformance claim currently being exercised by a claim scenario.
     pub current_claim_id: Option<String>,
+    /// Local file:// registry created by template-registry scenarios.
+    pub template_registry_dir: Option<tempfile::TempDir>,
+    /// Generated project directory guard created by template-registry scenarios.
+    pub generated_project_dir_tmp: Option<tempfile::TempDir>,
+    /// Path to the most recently generated project directory.
+    pub generated_project_dir: Option<PathBuf>,
     /// Output from the SDK fixture or code-generation command used by the
     /// cross-language SDK scenarios.
     pub sdk_output: Option<Output>,

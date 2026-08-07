@@ -210,6 +210,8 @@ impl Commands {
             Commands::Doctor(_) => "doctor",
             Commands::Prepare(_) => "prepare",
             Commands::Kernel(_) => "kernel",
+            Commands::Generate(_) => "generate",
+            Commands::Template(_) => "template",
             Commands::Watch(_) => "watch",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",

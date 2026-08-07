@@ -46,7 +46,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 /// Load the bundled image catalog with built-in presets.
-pub(in crate::commands) fn load_bundled_catalog() -> mvm_core::catalog::Catalog {
+pub fn load_bundled_catalog() -> mvm_core::catalog::Catalog {
     mvm_core::catalog::Catalog {
         schema_version: 1,
         entries: vec![
