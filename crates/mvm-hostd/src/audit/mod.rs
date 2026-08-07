@@ -10,5 +10,5 @@ pub mod host_keypair;
 pub mod merkle;
 pub mod plan_persist;
 /// Read-only exporter from chain-signed audit entries to signed
-/// ExecutionReceipts (Plan 298 WS3).
+/// ExecutionReceipts.
 pub mod receipt_export;
