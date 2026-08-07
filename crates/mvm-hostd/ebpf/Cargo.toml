@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 aya-ebpf = "0.2"
-aya-log-ebpf = "0.2"
 
 [[bin]]
 name = "mvm-hostd-ebpf"

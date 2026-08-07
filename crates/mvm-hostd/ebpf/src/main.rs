@@ -7,7 +7,6 @@ use aya_ebpf::{
     maps::RingBuf,
     programs::ProbeContext,
 };
-use aya_log_ebpf::info;
 
 /// Prefix mirror of `struct sock_common`.  The order and sizes match the
 /// in-kernel layout on x86_64 up to and including `skc_family`, which is
@@ -75,13 +74,6 @@ fn try_mvm_hostd_egress_tcp_connect(ctx: ProbeContext) -> Result<u32, u32> {
 
     let daddr: u32 = unsafe { bpf_probe_read_kernel(&(*sk).skc_daddr) }.map_err(|_| 1u32)?;
     let dport: u16 = unsafe { bpf_probe_read_kernel(&(*sk).skc_dport) }.map_err(|_| 1u32)?;
-
-    info!(
-        &ctx,
-        "mvm egress observed daddr=%u dport=%u",
-        u32::from_be(daddr),
-        u16::from_be(dport) as u32,
-    );
 
     if let Some(mut entry) = EVENTS.reserve::<EgressEvent>(0) {
         entry.write(EgressEvent {
