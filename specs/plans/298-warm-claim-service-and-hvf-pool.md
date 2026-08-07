@@ -264,15 +264,16 @@ reseeding, and policy validation.
   measured launch window. On the FC host, the source-matched build passes the
   Linux runtime unit suite (1,214 tests), the guest-agent suite (654 tests),
   the Linux Firecracker witness target's clippy check, and full workspace
-  all-target clippy. The live witness reaches parent boot, paused-child
-  preload, and child resume, but the supplied baked guest image rejects the
-  required post-restore clock resynchronization with `settimeofday: EPERM`, so
-  the authenticated claim and its timing are not accepted. A
-  production-compatible guest image/runtime contract and a rerun of the
-  authenticated KVM matrix remain required. Linux libkrun and the remaining
-  backend/share-shape matrices remain open. The resident path defers
-  reclamation of consumed parent payloads until after the measured handoff,
-  keeping checkpoint and snapshot state bounded.
+  all-target clippy. The initially supplied baked image was stale and rejected
+  post-restore clock resynchronization with `settimeofday: EPERM`; rebuilding
+  the current `mvm-oci-init` and `mvm-guest-agent` into an isolated copy fixed
+  the image/runtime contract. The authenticated witness now passes with
+  `claim=24ms`, `preload=41ms`, `resume=0ms`, and `identity=23ms` (the
+  `11,356ms` process bootstrap is outside the claim window). The full Linux
+  claim matrix, Linux libkrun, and the remaining backend/share-shape matrices
+  remain open. The resident path defers reclamation of consumed parent
+  payloads until after the measured handoff, keeping checkpoint and snapshot
+  state bounded.
 - [x] Removed the process-wide `MVM_HOME` mutation from the UDS-channel test
   harness. Parallel host tests now use explicit isolated socket roots; the
   complete `mvm-hostd` package suite passes without the prior macOS hang.

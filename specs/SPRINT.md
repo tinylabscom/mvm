@@ -1388,11 +1388,16 @@ Then unify + retire the old paths:
       only raw restore reachability. The source-matched authenticated witness
       completed 15/15 claims, with normal claims at 63–76ms but restore-start
       outliers at 513ms and 620ms; the identity RPC itself stayed at 24–35ms.
-      The strict Linux maximum is not green yet; the Firecracker path now
-      pre-loads paused child VMMs during pool refill so restore/process-start
-      variance is outside the measured launch window, with real Linux KVM
-      validation of that path next. Linux libkrun and remaining
-      backend/share-shape matrices remain open. The prior macOS host-vsock
+      The Firecracker path now pre-loads paused child VMMs during pool refill so
+      restore/process-start variance is outside the measured launch window. The
+      initially supplied baked guest image was stale and rejected clock
+      resynchronization with `settimeofday: EPERM`; rebuilding the current
+      `mvm-oci-init` and `mvm-guest-agent` into an isolated image copy fixed
+      that contract. The source-matched authenticated FC witness now passes
+      with claim=24ms, preload=41ms, resume=0ms, and identity=23ms; its
+      11,356ms process bootstrap is outside the claim window. The full Linux
+      claim matrix, Linux libkrun, and remaining backend/share-shape matrices
+      remain open. The prior macOS host-vsock
       test hang was a parallel-test race caused by process-wide `MVM_HOME`
       mutation; UDS-channel tests now use explicit isolated roots, and the
       complete `mvm-hostd` package suite passes.
@@ -1411,14 +1416,12 @@ Then unify + retire the old paths:
       helper remains optional for background publication and is not required by
       the rootless hot path. The 1,000-claim Darwin matrix passes the aggregate
       targets. On the FC host, the source-matched Linux build passes the runtime
-      and guest-agent unit suites plus full workspace all-target clippy, and the
-      live Firecracker path reaches parent boot, paused-child preload, and child
-      resume. The authenticated witness then fails because the supplied baked
-      guest image rejects post-restore clock resynchronization with
-      `settimeofday: EPERM`; no launch timing is accepted from that run.
-      Production Linux standby admission and the remaining backend matrices
-      remain open pending a production-compatible guest image/runtime contract
-      and a rerun of the authenticated KVM matrix.
+      and guest-agent unit suites plus full workspace all-target clippy. The
+      authenticated Firecracker witness now passes after rebuilding the current
+      `mvm-oci-init` and `mvm-guest-agent` into an isolated image copy: claim is
+      24ms, preload 41ms, resume 0ms, and identity 23ms. Production Linux
+      standby admission, the full Linux claim matrix, and the remaining backend
+      matrices remain open.
       #2195 adds fixed virtio-fs share slots; #2196 completes Linux
       Firecracker warm claims; #2197 hardens the VMM/share processes; #2198
       finalizes warm-required CLI semantics and timing; and #2199 adds the
