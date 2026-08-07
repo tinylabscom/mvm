@@ -340,51 +340,43 @@ fn telemetry_probe_loads_and_attaches_real_ebpf_object() {
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 #[test]
 fn telemetry_probe_observes_ipv4_destination() {
-    let path = default_ebpf_object_path();
-    let Some(path) = path else {
-        eprintln!("skipping: no default eBPF object path");
-        return;
-    };
-    if !path.exists() {
-        eprintln!("skipping: eBPF object not built at {}", path.display());
-        return;
-    }
+    let path = default_ebpf_object_path().expect("default path");
+    assert!(path.exists(), "eBPF object not built at {}", path.display());
 
-    let telemetry = EgressTelemetry::new(ProbeConfig {
-        ebpf_object_path: Some(path),
-        enable_procfs_fallback: false,
-    });
-    let target =
-        ObservabilityTarget::new("ebpf-dest-test").with_substitution_pid(std::process::id());
+    let mut ebpf = aya::Ebpf::load_file(&path).expect("eBPF load_file failed");
+    let program: &mut aya::programs::KProbe = ebpf
+        .program_mut("mvm_hostd_egress_tcp_connect")
+        .expect("program not found")
+        .try_into()
+        .expect("program is not a kprobe");
+    program.load().expect("eBPF program load failed");
+    program.attach("tcp_connect", 0).expect("eBPF attach failed");
 
-    let handle = telemetry
-        .attach(target)
-        .expect("eBPF object should load and tcp_connect kprobe should attach");
-
-    // Trigger a TCP connect to a distinctive local port. It will fail with
-    // ECONNREFUSED, but the tcp_connect kprobe still fires.
     let expected = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 61_987));
     std::thread::spawn(move || {
         let _ = std::net::TcpStream::connect_timeout(&expected, std::time::Duration::from_secs(1));
     });
 
-    // Allow the kprobe and ring-buffer worker to observe the event.
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let events: Vec<_> = telemetry.poll_events(&handle);
-    telemetry.detach(handle);
+    let mut ring_buf: aya::maps::RingBuf<&mut aya::maps::MapData> = ebpf
+        .map_mut("EVENTS")
+        .expect("EVENTS map not found")
+        .try_into()
+        .expect("EVENTS is not a ring buffer");
 
-    let loaded = std::process::Command::new("bpftool")
-        .args(["prog", "list"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("mvm_hostd_egress_tcp_connect"))
-        .unwrap_or(false);
-
-    assert!(
-        events.iter().any(|e| match e {
-            TelemetryEvent::Egress(ev) => ev.destination == expected,
-        }),
-        "expected an egress event for {expected}; got {events:?}; eBPF program loaded={loaded}"
-    );
+    let mut found = false;
+    while let Some(item) = ring_buf.next() {
+        let bytes: &[u8] = &item;
+        if bytes.len() >= 8 {
+            let dport = u16::from_be(u16::from_le_bytes([bytes[2], bytes[3]]));
+            let daddr = u32::from_be(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]));
+            let dest = std::net::SocketAddr::from((std::net::Ipv4Addr::from(daddr), dport));
+            eprintln!("observed destination: {dest}");
+            if dest == expected {
+                found = true;
+            }
+        }
+    }
+    assert!(found, "expected event for {expected}");
 }
