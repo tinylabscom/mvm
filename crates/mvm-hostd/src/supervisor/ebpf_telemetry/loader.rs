@@ -199,6 +199,15 @@ fn procfs_handle(target: ObservabilityTarget, _config: &ProbeConfig) -> ProbeHan
     ProbeHandle::new(target)
 }
 
+/// Raw record produced by the kernel-side eBPF program.
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+#[repr(C)]
+struct RawEgressEvent {
+    family: u16,
+    dport: u16,
+    daddr: u32,
+}
+
 #[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
 fn ebpf_worker(
     path: PathBuf,
@@ -237,18 +246,21 @@ fn ebpf_worker(
 
         if let Some(ref mut rb) = ring_buf {
             match rb.next() {
-                Some(_item) => {
-                    // Placeholder: each ring-buffer record counts as one
-                    // observed egress packet. Future iterations will parse
-                    // the destination out of the record bytes.
-                    let _ = events.send(TelemetryEvent::Egress(super::events::EgressEvent {
-                        destination: std::net::SocketAddr::from((
-                            std::net::Ipv4Addr::UNSPECIFIED,
-                            0,
-                        )),
-                        bytes: 0,
-                        latency_us: None,
-                    }));
+                Some(item) => {
+                    let bytes = item.as_slice();
+                    if bytes.len() >= core::mem::size_of::<RawEgressEvent>() {
+                        // SAFETY: the kernel wrote the full RawEgressEvent.
+                        let raw = unsafe { &*(bytes.as_ptr() as *const RawEgressEvent) };
+                        let destination = std::net::SocketAddr::from((
+                            std::net::Ipv4Addr::from(u32::from_be(raw.daddr)),
+                            u16::from_be(raw.dport),
+                        ));
+                        let _ = events.send(TelemetryEvent::Egress(super::events::EgressEvent {
+                            destination,
+                            bytes: 0,
+                            latency_us: None,
+                        }));
+                    }
                 }
                 None => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -323,4 +335,49 @@ fn telemetry_probe_loads_and_attaches_real_ebpf_object() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     telemetry.detach(handle);
+}
+
+#[cfg(all(target_os = "linux", feature = "ebpf-telemetry"))]
+#[test]
+fn telemetry_probe_observes_ipv4_destination() {
+    let path = default_ebpf_object_path();
+    let Some(path) = path else {
+        eprintln!("skipping: no default eBPF object path");
+        return;
+    };
+    if !path.exists() {
+        eprintln!("skipping: eBPF object not built at {}", path.display());
+        return;
+    }
+
+    let telemetry = EgressTelemetry::new(ProbeConfig {
+        ebpf_object_path: Some(path),
+        enable_procfs_fallback: false,
+    });
+    let target =
+        ObservabilityTarget::new("ebpf-dest-test").with_substitution_pid(std::process::id());
+
+    let handle = telemetry
+        .attach(target)
+        .expect("eBPF object should load and tcp_connect kprobe should attach");
+
+    // Trigger a TCP connect to a distinctive local port. It will fail with
+    // ECONNREFUSED, but the tcp_connect kprobe still fires.
+    let expected = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 61_987));
+    std::thread::spawn(move || {
+        let _ = std::net::TcpStream::connect_timeout(&expected, std::time::Duration::from_secs(1));
+    });
+
+    // Allow the kprobe and ring-buffer worker to observe the event.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let events: Vec<_> = telemetry.poll_events(&handle);
+    telemetry.detach(handle);
+
+    assert!(
+        events.iter().any(|e| match e {
+            TelemetryEvent::Egress(ev) => ev.destination == expected,
+        }),
+        "expected an egress event for {expected}; got {events:?}"
+    );
 }
