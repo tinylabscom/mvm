@@ -248,7 +248,10 @@ reseeding, and policy validation.
   1,000/1,000 successful warm claims below the strict 300ms ceiling and inside
   the p50≤30ms and p99≤50ms aggregate targets. A real Linux x86_64
   Firecracker/KVM direct-driver matrix also passes 30/30 claims at p50=39ms,
-  p95=39ms, and max=40ms. Production standby capability admission, Linux
+  p95=39ms, and max=40ms; the witness now also delivers a fresh generation
+  token through the real post-restore agent RPC and requires acknowledged,
+  reseeded, clock-resynchronized readiness. Production standby capability
+  admission, Linux
   libkrun, and the remaining backend/share-shape matrices remain open. The
   resident path defers reclamation of consumed parent payloads until after the
   measured handoff, keeping checkpoint and snapshot state bounded.

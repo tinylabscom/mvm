@@ -109,9 +109,11 @@ and no claim silently falls back after being labeled warm.
       p50=17.9ms, p95=22.1ms, p99=27.4ms, and max=33.3ms; every claim stayed
       below the strict 300ms ceiling. A real Linux x86_64 Firecracker/KVM
       direct-driver matrix also completed 30/30 claims with p50=39ms,
-      p95=39ms, and max=40ms. Production standby capability admission,
-      Linux libkrun, and the remaining backend/share-shape matrices remain
-      open.
+      p95=39ms, and max=40ms; the witness now delivers a fresh generation
+      token through the real post-restore agent RPC and requires acknowledged,
+      reseeded, clock-resynchronized readiness. Production standby capability
+      admission, Linux libkrun, and the remaining backend/share-shape matrices
+      remain open.
 - [ ] Enforce the hard maximum and aggregate p50/p99 thresholds in CI.
 
 The host-side live acceptance harness is now available as

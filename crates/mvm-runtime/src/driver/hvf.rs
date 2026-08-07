@@ -1092,19 +1092,17 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_missing_egress_port_fails_closed() {
-        // No EGRESS_PORT: the hvf VMM has no other path off the box, so this
-        // must not boot an ungated guest.
+    fn relay_config_without_egress_port_is_explicit_deny_all() {
+        // No EGRESS_PORT is the explicit deny-all shape: the guest has no
+        // host-side egress listener to reach, so it cannot acquire a path off
+        // the box through this configuration.
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![agent_port("/run/agent.sock")],
             vec![],
         );
-        let err = relay_supervisor_config(&spec, &sample_paths())
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(err.contains("EGRESS_PORT"), "unexpected error: {err}");
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).expect("deny-all shape");
+        assert_eq!(cfg.egress_relay_socket, None);
     }
 
     #[test]

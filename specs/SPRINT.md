@@ -1369,8 +1369,10 @@ Then unify + retire the old paths:
       after the guest command; consumed resident-parent payloads are reclaimed
       asynchronously after the measured handoff, keeping long-run state
       bounded. A real Linux x86_64 Firecracker/KVM direct-driver matrix also
-      completed 30/30 claims at p50=39ms, p95=39ms, and max=40ms. Production
-      standby capability admission, Linux libkrun, and remaining
+      completed 30/30 claims at p50=39ms, p95=39ms, and max=40ms; the witness
+      now delivers a fresh generation token through the real post-restore agent
+      RPC and requires acknowledged, reseeded, clock-resynchronized readiness.
+      Production standby capability admission, Linux libkrun, and remaining
       backend/share-shape matrices remain open. The prior macOS host-vsock
       test hang was a parallel-test race caused by process-wide `MVM_HOME`
       mutation; UDS-channel tests now use explicit isolated roots, and the

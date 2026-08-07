@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use mvm_agentd::vsock::connect_to;
 use mvm_core::checkpoint::CheckpointId;
-use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
+use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::vm_backend::{StandbySpec, StandbyState, StartMode};
 use mvm_runtime::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
 use mvm_runtime::driver::fc::FcDriver;
@@ -203,15 +203,13 @@ fn fc_warm_pool_spawn_and_claim() {
     }
 
     let t_claim = Instant::now();
+    let genid = fresh_generation_token(parent_checkpoint.as_str().to_string());
     let fork_result = driver.fork_standby_child(&ChildForkRequest {
         parent_vm_name: "standby-parent",
         child_vm_name: &child_id,
         child_dir: &child_dir,
         parent_vm_name: None,
-        genid: GenerationToken {
-            token: [0u8; GENID_BYTES],
-            content_hash: parent_checkpoint.as_str().to_string(),
-        },
+        genid,
         // This harness drives the driver seam directly and stands up none of
         // the host-side processes a claim wires channels to — no gating
         // endpoint, no broker — so it hands down the empty set the parent
@@ -229,6 +227,22 @@ fn fc_warm_pool_spawn_and_claim() {
         }
     }
     fork_result.expect("fork Firecracker standby child");
+
+    let identity = driver
+        .deliver_child_identity(&child_id, genid.token, None)
+        .expect("the restored child must complete the authenticated identity handshake");
+    assert!(
+        identity.acknowledged,
+        "the guest agent must acknowledge the post-restore identity handshake"
+    );
+    assert!(
+        identity.reseeded,
+        "the guest must reseed its identity from the fresh generation token"
+    );
+    assert!(
+        identity.clock_resynced,
+        "the guest must resynchronize its wall clock before readiness"
+    );
     let claim_ms = t_claim.elapsed().as_millis();
 
     let child_vsock =
@@ -243,4 +257,5 @@ fn fc_warm_pool_spawn_and_claim() {
 
     println!("FC_WARM_POOL_SPAWN_MS={spawn_ms}");
     println!("FC_WARM_POOL_CLAIM_MS={claim_ms}");
+    println!("FC_WARM_POOL_IDENTITY_HANDSHAKE=authenticated");
 }
