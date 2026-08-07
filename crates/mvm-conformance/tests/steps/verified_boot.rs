@@ -5,9 +5,8 @@
 use cucumber::{given, then, when};
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
-use mvm_runtime::driver::{
-    ConsoleCapture, HvfDriver, KernelImage, LibkrunDriver, VmmDriver, VmmSpec,
-};
+use mvm_runtime::backends::hvf::HvfDriver;
+use mvm_runtime::driver::{ConsoleCapture, KernelImage, LibkrunDriver, VmmDriver, VmmSpec};
 
 use crate::world::{CliWorld, MvmHomeGuard};
 
