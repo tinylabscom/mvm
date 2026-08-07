@@ -143,12 +143,10 @@ for detailed scope and acceptance criteria.
         The userspace backend carries v6 flows and still cannot emit an
         arbitrary v6 packet, so `ipv6_flows: true` with
         `arbitrary_ipv6: false`; `FULL_L3_V4` is renamed `FULL_L3`.
-        `CONFIG_IPV6` landed in the workload kernel, measured at +184,320 B
-        and one built-in symbol, carrying no IPsec and no tunnels — the
-        v6-IPsec options that drag XFRM in are disabled explicitly, so
-        `XFRM`/`XFRM_ALGO`/`XFRM_USER` stay in the required-disable set and
-        their absence is proven every build, and 6-in-4 is disabled beside
-        them because it carries no XFRM for that guard to catch. The
+        `CONFIG_IPV6` landed in the workload kernel, measured at +200,704 B
+        and carrying no IPsec — the v6-IPsec options that drag XFRM in are
+        disabled explicitly, so `XFRM`/`XFRM_ALGO`/`XFRM_USER` stay in the
+        required-disable set and their absence is proven every build. The
         guest agent then grew the v6 half of its bring-up: address, on-link
         peer, default route and resolver over rtnetlink — chosen over an
         `AF_INET6` ioctl mirror because `in6_rtmsg`'s fields are private in
@@ -628,6 +626,10 @@ for detailed scope and acceptance criteria.
         real nftables, one shared default-drop forward hook with isolated
         per-machine chains, live forwarding witnesses for two machines,
         verified-clean teardown (nine privileged tests)
+  - [x] IPv6 host datapath and shared `inet mvmn` isolation are implemented;
+        the 13-test Linux/KVM acceptance lane is green for dual-stack
+        assignment, IPv6 anti-spoofing, and two-machine chain
+        teardown/forwarding
   - [x] BDD suite `s25_l3_vsock` (23 hermetic scenarios)
   - [x] Workload `VmmSpec` mapping carries the typed L3 control/data channels;
         netd socket layout follows the selected backend

@@ -526,7 +526,9 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       plan. Shared no_std wire protocol, pure policy core (anti-spoof,
       canonical-egress admission, bounded flows, controlled DNS, declared
       ingress), guest `mvm-net-agent`, machine-scoped host gateway, Linux
-      host-TUN/nftables datapath, `CONFIG_TUN` in the workload kernel, and
+      host-TUN/nftables datapath with a shared default-drop `inet mvmn` table,
+      per-machine filter/NAT chains, opt-in IPv6 source pinning, `CONFIG_TUN`
+      in the workload kernel, and
       the amendment's backend-neutral guest channel, per-boot VM identity,
       signed network lease, and capability-gated forwarding. The Linux
       nftables datapath now uses one shared default-drop forward hook with

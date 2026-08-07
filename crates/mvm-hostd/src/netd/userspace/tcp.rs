@@ -41,15 +41,19 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::io::{Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 
 use mvm_net::l3::admit::DenyCode;
 use mvm_net::l3::flow::FlowKey;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
+use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::socket::tcp::{RecvError, Socket as TcpSocket, SocketBuffer, State};
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpListenEndpoint};
+use smoltcp::wire::{
+    HardwareAddress, IpAddress, IpCidr, IpListenEndpoint, IpProtocol, Ipv4Packet, Ipv4Repr,
+    Ipv6Packet, Ipv6Repr, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber,
+};
 use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
 
 use crate::netd::datapath::DatapathError;
@@ -64,10 +68,6 @@ use super::limits::{
     KEEPALIVE_PROBE_RETRIES, RESET_DELIVERY_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
 };
 use super::readiness::{Watch, Watched};
-
-mod segments;
-
-pub use segments::{emit_v4_segment, emit_v6_segment, synthesize_rst};
 
 /// A guest SYN held back from the stack while its host connect runs.
 pub struct HalfOpen {
@@ -683,24 +683,12 @@ impl EstablishedFlow {
     /// a retransmission timeout, and a symptom that expensive has to be
     /// countable from outside the process.
     pub fn pump(&mut self, now_millis: u64, metrics: &mut GatewayMetrics) -> PumpStats {
-        self.pump_with_host_writer(now_millis, metrics, write_some)
-    }
-
-    fn pump_with_host_writer<F>(
-        &mut self,
-        now_millis: u64,
-        metrics: &mut GatewayMetrics,
-        mut write_host: F,
-    ) -> PumpStats
-    where
-        F: FnMut(&mut TcpStream, &mut [u8], usize) -> (usize, HostWrite),
-    {
         let mut stats = PumpStats::default();
         let dropped_before = self.device.dropped_to_guest();
         // Ingest what the guest sent and let the stack answer it, so this
         // pass works on the freshest state rather than the last one's.
         self.poll(now_millis);
-        if self.guest_to_host(&mut stats, &mut write_host) {
+        if self.guest_to_host(&mut stats) {
             self.guest_fin_seen = true;
         }
         self.forward_guest_fin();
@@ -753,7 +741,7 @@ impl EstablishedFlow {
     /// this a no-op.
     pub fn on_guest_fin(&mut self) {
         let mut stats = PumpStats::default();
-        if self.guest_to_host(&mut stats, &mut write_some) {
+        if self.guest_to_host(&mut stats) {
             self.guest_fin_seen = true;
         }
         self.forward_guest_fin();
@@ -1007,10 +995,7 @@ impl EstablishedFlow {
     /// unconsumed bytes hold the stack's receive window closed, and the
     /// guest's own TCP stops sending. Nothing counts them and nothing has
     /// to.
-    fn guest_to_host<F>(&mut self, stats: &mut PumpStats, write_host: &mut F) -> bool
-    where
-        F: FnMut(&mut TcpStream, &mut [u8], usize) -> (usize, HostWrite),
-    {
+    fn guest_to_host(&mut self, stats: &mut PumpStats) -> bool {
         let Self {
             host,
             sockets,
@@ -1030,7 +1015,7 @@ impl EstablishedFlow {
         let mut budget = max_bytes_per_pass();
         while budget > 0 {
             let borrowed = &mut *stream;
-            let step = match socket.recv(|data| write_host(borrowed, data, budget)) {
+            let step = match socket.recv(|data| write_some(borrowed, data, budget)) {
                 Ok(step) => step,
                 // Every byte the guest will ever send has been handed over.
                 Err(RecvError::Finished) => return true,
@@ -1309,6 +1294,106 @@ pub(super) fn same_host(reached: IpAddr, admitted: IpAddr) -> bool {
     reached.to_canonical() == admitted.to_canonical()
 }
 
+/// Build the reset a guest is owed when the host side of its flow will
+/// never come up, so its `connect()` fails as it would on a real path
+/// instead of hanging until the guest's own timeout.
+///
+/// `key` supplies the admitted flow identity the reset must appear to come
+/// from, `guest` the leased address it is sent to, and `acknowledging` the
+/// sequence number of the SYN being answered. RFC 793's answer to a SYN is
+/// `RST|ACK` with sequence zero acknowledging the SYN's sequence plus one —
+/// a reset outside that window is discarded by the guest's stack and is no
+/// reset at all.
+///
+/// `None` only when the session leased the guest no address in the flow's
+/// family. It is not a statement about which families are supported — both
+/// are emitted.
+pub fn synthesize_rst(key: &FlowKey, guest: IpAddr, acknowledging: u32) -> Option<Vec<u8>> {
+    let tcp = TcpRepr {
+        src_port: key.remote_port,
+        dst_port: key.guest_port,
+        control: TcpControl::Rst,
+        seq_number: TcpSeqNumber(0),
+        // `as i32` is the wrap TCP sequence arithmetic is defined on: the
+        // space is modulo 2^32, and smoltcp carries it signed.
+        ack_number: Some(TcpSeqNumber(acknowledging as i32) + 1),
+        window_len: 0,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        sack_ranges: [None; 3],
+        timestamp: None,
+        payload: &[],
+    };
+    match (key.remote, guest) {
+        (IpAddr::V4(remote), IpAddr::V4(guest)) => Some(emit_v4_segment(remote, guest, &tcp)),
+        (IpAddr::V6(remote), IpAddr::V6(guest)) => Some(emit_v6_segment(remote, guest, &tcp)),
+        _ => None,
+    }
+}
+
+/// Emit `tcp` inside an IPv4 header. The header checksum is written by
+/// `emit` and covers only the header, so writing the segment afterwards
+/// does not invalidate it.
+///
+/// Named by direction rather than by role: this datapath emits segments
+/// both ways — host-originated resets toward the guest, and, in the test
+/// fixtures, guest segments toward a destination — and a signature that
+/// said `remote, guest` would read as an argument order the second use
+/// violates.
+pub(super) fn emit_v4_segment(src: Ipv4Addr, dst: Ipv4Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
+    let ip = Ipv4Repr {
+        src_addr: src,
+        dst_addr: dst,
+        next_header: IpProtocol::Tcp,
+        payload_len: tcp.buffer_len(),
+        hop_limit: RESET_HOP_LIMIT,
+    };
+    let checksums = ChecksumCapabilities::default();
+    let mut bytes = vec![0u8; ip.buffer_len() + tcp.buffer_len()];
+    let mut packet = Ipv4Packet::new_unchecked(&mut bytes);
+    ip.emit(&mut packet, &checksums);
+    tcp.emit(
+        &mut TcpPacket::new_unchecked(packet.payload_mut()),
+        &src.into(),
+        &dst.into(),
+        &checksums,
+    );
+    bytes
+}
+
+/// Emit `tcp` inside an IPv6 header. IPv6 has no header checksum, but the
+/// TCP checksum is computed over a different pseudo-header from IPv4's, so
+/// the two cannot share an emitter.
+///
+/// Named by direction rather than by role, for the reason
+/// [`emit_v4_segment`] gives.
+pub(super) fn emit_v6_segment(src: Ipv6Addr, dst: Ipv6Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
+    let ip = Ipv6Repr {
+        src_addr: src,
+        dst_addr: dst,
+        next_header: IpProtocol::Tcp,
+        payload_len: tcp.buffer_len(),
+        hop_limit: RESET_HOP_LIMIT,
+    };
+    let mut bytes = vec![0u8; ip.buffer_len() + tcp.buffer_len()];
+    let mut packet = Ipv6Packet::new_unchecked(&mut bytes);
+    ip.emit(&mut packet);
+    tcp.emit(
+        &mut TcpPacket::new_unchecked(packet.payload_mut()),
+        &src.into(),
+        &dst.into(),
+        &ChecksumCapabilities::default(),
+    );
+    bytes
+}
+
+/// TTL on a synthesized reset. The guest is one hop away over the stack's
+/// own interface, so this is only ever decremented by the guest's own
+/// receive path; the conventional 64 keeps the packet indistinguishable
+/// from one a real peer sent.
+const RESET_HOP_LIMIT: u8 = 64;
+
 /// Why a connect could not even be started.
 enum ConnectStartError {
     /// The kernel answered synchronously with a terminal failure —
@@ -1410,9 +1495,8 @@ mod tests {
     use mvm_contract::l3::ip::proto;
     use mvm_contract::l3::limits::MTU_V1;
     use mvm_net::l3::flow::FlowKey;
-    use smoltcp::wire::{TcpControl, TcpRepr, TcpSeqNumber};
     use std::io::{Read, Write};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
     use std::time::{Duration, Instant};
 
     use super::super::limits::{
@@ -1443,25 +1527,6 @@ mod tests {
         /// on `queue_drops_egress` call the real signature instead.
         fn pump_ignoring_metrics(&mut self, now_millis: u64) -> PumpStats {
             self.pump(now_millis, &mut GatewayMetrics::default())
-        }
-
-        /// Drive the real pump with a host writer that deterministically
-        /// reports backpressure. The production pump still uses the actual
-        /// socket writer; this only removes kernel buffer timing from the
-        /// sustained backpressure test.
-        fn pump_with_host_write_blocked(&mut self, now_millis: u64) -> PumpStats {
-            self.pump_with_host_writer(
-                now_millis,
-                &mut GatewayMetrics::default(),
-                |_, data, budget| {
-                    let take = data.len().min(budget);
-                    if take == 0 {
-                        (0, HostWrite::Idle)
-                    } else {
-                        (0, HostWrite::Blocked)
-                    }
-                },
-            )
         }
     }
 
@@ -2474,23 +2539,14 @@ mod tests {
     fn established_flow_with_full_host_buffer() -> (EstablishedFlow, std::net::TcpStream, FakeGuest)
     {
         let (host, peer) = host_pair();
+        socket2::SockRef::from(&peer)
+            .set_recv_buffer_size(1)
+            .expect("the peer receive buffer can be bounded");
         let (blocked, filled) = fill_until_would_block(&host);
         assert!(
             blocked && filled > 0,
             "the fixture must actually block the host socket, not merely write to it"
         );
-        let (mut flow, mut g) = flow_over(host);
-        g.offer(&mut flow, SOCKET_RX_BUFFER);
-        (flow, peer, g)
-    }
-
-    /// A flow with guest data waiting to go out, paired with a deterministic
-    /// host writer used by the sustained backpressure test. The real-socket
-    /// fixture above remains useful for checking the OS-facing path, but its
-    /// writability can change as the kernel moves bytes between buffers.
-    fn established_flow_with_blocked_host_buffer()
-    -> (EstablishedFlow, std::net::TcpStream, FakeGuest) {
-        let (host, peer) = host_pair();
         let (mut flow, mut g) = flow_over(host);
         g.offer(&mut flow, SOCKET_RX_BUFFER);
         (flow, peer, g)
@@ -2550,10 +2606,10 @@ mod tests {
     /// from.
     #[test]
     fn backpressure_holds_while_the_guest_keeps_pushing() {
-        let (mut flow, _peer, mut g) = established_flow_with_blocked_host_buffer();
+        let (mut flow, _peer, mut g) = established_flow_with_full_host_buffer();
         for pass in 0..16u64 {
             g.offer(&mut flow, SOCKET_RX_BUFFER);
-            let stats = flow.pump_with_host_write_blocked(pass);
+            let stats = flow.pump_ignoring_metrics(pass);
             assert_eq!(stats.to_host, 0, "the host socket is still full");
             assert!(
                 flow.bytes_buffered() <= FLOW_BUFFER_BYTES,

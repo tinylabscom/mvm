@@ -217,7 +217,8 @@ pub struct LinuxHandle {
 
 impl LinuxHandle {
     /// Assign the host side of the link, set the MTU, bring it up, install
-    /// exactly one route for the machine's /30, and load the nftables rules.
+    /// exactly one route for the machine's /30 — and, when the lease
+    /// carried one, for its /126 — and load the nftables rules.
     fn configure(&mut self, req: &DatapathRequest) -> Result<(), DatapathError> {
         if self.dry_run {
             self.nft_applied = true;
@@ -245,18 +246,17 @@ impl LinuxHandle {
     /// The nftables ruleset this handle installed. Exposed so the shape is
     /// assertable without root.
     pub fn ruleset(&self) -> String {
-        nft_ruleset(&self.table, &self.iface, self.guest, self.guest_v6)
+        nft_ruleset(
+            &self.table,
+            &self.iface,
+            &self.machine_id,
+            self.guest,
+            self.guest_v6,
+        )
     }
 
     pub fn iface(&self) -> &str {
         &self.iface
-    }
-
-    /// A descriptor that becomes readable when a packet arrives on the host
-    /// TUN. Exposed so the gateway can register it in its poll set rather
-    /// than waking on a timer tick.
-    pub fn readiness_fd(&self) -> Option<std::os::fd::RawFd> {
-        self.file.as_ref().map(std::fs::File::as_raw_fd)
     }
 }
 
@@ -399,20 +399,21 @@ fn slug(input: &str, budget: usize) -> String {
 /// The shared forward base chain owns the host-wide default drop. Each
 /// machine gets regular chains reached only by interface-scoped jumps, so a
 /// machine's rules cannot drop packets belonging to another machine.
-///
-/// The `inet` table covers both families, and the v6 source is pinned by the
-/// same mechanism as the v4 one. A machine with no v6 address emits no v6
-/// rule at all — it has no source to pin, and the closing `drop` already
-/// refuses the family.
-fn nft_ruleset(table: &str, iface: &str, guest: Ipv4Addr, guest_v6: Option<Ipv6Addr>) -> String {
-    let forward_chain = forward_chain_name(iface);
-    let nat_chain = nat_chain_name(iface);
+fn nft_ruleset(
+    table: &str,
+    iface: &str,
+    machine_id: &str,
+    guest: Ipv4Addr,
+    guest_v6: Option<Ipv6Addr>,
+) -> String {
+    let forward_chain = forward_chain_name(machine_id);
+    let nat_chain = nat_chain_name(machine_id);
     format!(
         "add table inet {table}\n\
          add chain inet {table} {NFT_POSTROUTING_CHAIN} {{ type nat hook postrouting priority srcnat; policy accept; }}\n\
          add chain inet {table} {NFT_FORWARD_CHAIN} {{ type filter hook forward priority filter; policy drop; }}\n\
          {machine_rules}",
-        machine_rules = machine_ruleset(table, iface, guest, guest_v6, &forward_chain, &nat_chain)
+        machine_rules = machine_ruleset(table, iface, guest, guest_v6, &forward_chain, &nat_chain,)
     )
 }
 
@@ -432,20 +433,22 @@ fn machine_ruleset(
     forward_chain: &str,
     nat_chain: &str,
 ) -> String {
-    let (v6_masquerade, v6_forward_in, v6_forward_out) = match guest_v6 {
-        Some(guest) => (
-            format!(
-                "add rule inet {table} {nat_chain} iifname \"{iface}\" ip6 saddr {guest}/128 masquerade"
-            ),
-            format!(
-                "add rule inet {table} {forward_chain} iifname \"{iface}\" ip6 saddr {guest}/128 counter accept"
-            ),
-            format!(
-                "add rule inet {table} {forward_chain} oifname \"{iface}\" ip6 daddr {guest}/128 ct state established,related counter accept"
-            ),
-        ),
-        None => (String::new(), String::new(), String::new()),
-    };
+    let (v6_forward, v6_return, v6_nat) = guest_v6.map_or_else(
+        || (String::new(), String::new(), String::new()),
+        |guest| {
+            (
+                format!(
+                    "add rule inet {table} {forward_chain} iifname \"{iface}\" ip6 saddr {guest}/128 counter accept\n"
+                ),
+                format!(
+                    "add rule inet {table} {forward_chain} oifname \"{iface}\" ip6 daddr {guest}/128 ct state established,related counter accept\n"
+                ),
+                format!(
+                    "add rule inet {table} {nat_chain} iifname \"{iface}\" ip6 saddr {guest}/128 masquerade\n"
+                ),
+            )
+        },
+    );
     format!(
         "add chain inet {table} {forward_chain}\n\
          add chain inet {table} {nat_chain}\n\
@@ -453,13 +456,13 @@ fn machine_ruleset(
          add rule inet {table} {NFT_FORWARD_CHAIN} oifname \"{iface}\" jump {forward_chain}\n\
          add rule inet {table} {NFT_POSTROUTING_CHAIN} iifname \"{iface}\" jump {nat_chain}\n\
          add rule inet {table} {forward_chain} iifname \"{iface}\" ip saddr {guest}/32 counter accept\n\
-         {v6_forward_in}\n\
+         {v6_forward}\
          add rule inet {table} {forward_chain} iifname \"{iface}\" drop\n\
          add rule inet {table} {forward_chain} oifname \"{iface}\" ip daddr {guest}/32 ct state established,related counter accept\n\
-         {v6_forward_out}\n\
+         {v6_return}\
          add rule inet {table} {forward_chain} oifname \"{iface}\" drop\n\
          add rule inet {table} {nat_chain} iifname \"{iface}\" ip saddr {guest}/32 masquerade\n\
-         {v6_masquerade}\n"
+         {v6_nat}",
     )
 }
 
@@ -660,8 +663,7 @@ fn remove_shared_table_if_empty(table: &str) -> Result<(), DatapathError> {
         trimmed.starts_with("chain mvmn_f_") || trimmed.starts_with("chain mvmn_n_")
     });
     if !has_machine_chain {
-        let rules = format!("delete table inet {table}\n");
-        apply_nft(&rules)?;
+        apply_nft(&format!("delete table inet {table}\n"))?;
     }
     Ok(())
 }
@@ -717,46 +719,6 @@ fn set_point_to_point(
     result.map_err(DatapathError::Io)
 }
 
-/// SAFETY: caller passes a valid, owned request struct of the type the
-/// named ioctl reads.
-unsafe fn ioctl_checked<T>(sock: libc::c_int, request: u64, ifr: &T) -> Result<(), std::io::Error> {
-    // SAFETY: forwarded from the caller's contract.
-    if unsafe { libc::ioctl(sock, ioctl_request(request), ifr) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn ifreq(iface: &str) -> libc::ifreq {
-    // SAFETY: `ifreq` is a plain C struct; zeroed is a valid empty request.
-    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-    for (i, b) in iface.bytes().enumerate().take(libc::IFNAMSIZ - 1) {
-        ifr.ifr_name[i] = b as libc::c_char;
-    }
-    ifr
-}
-
-fn write_sockaddr(dst: *mut libc::sockaddr, addr: Ipv4Addr) {
-    let sin = libc::sockaddr_in {
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: 0,
-        sin_addr: libc::in_addr {
-            s_addr: u32::from_ne_bytes(addr.octets()),
-        },
-        sin_zero: [0; 8],
-    };
-    // SAFETY: `dst` points at a `sockaddr`-sized field inside an `ifreq`
-    // the caller zeroed and owns; `sockaddr_in` is the same 16 bytes on
-    // every Linux ABI target.
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            &sin as *const libc::sockaddr_in as *const u8,
-            dst as *mut u8,
-            std::mem::size_of::<libc::sockaddr_in>(),
-        );
-    }
-}
-
 /// Assign the host side of the IPv6 half of the link.
 ///
 /// The host-side mirror of what the guest agent configures on `mvm0`, and
@@ -801,6 +763,46 @@ fn set_v6_address(iface: &str, gateway: Ipv6Addr, prefix_len: u8) -> Result<(), 
     // SAFETY: `sock` is the fd we opened and still own.
     unsafe { libc::close(sock) };
     result.map_err(DatapathError::Io)
+}
+
+/// SAFETY: caller passes a valid, owned request struct of the type the
+/// named ioctl reads.
+unsafe fn ioctl_checked<T>(sock: libc::c_int, request: u64, ifr: &T) -> Result<(), std::io::Error> {
+    // SAFETY: forwarded from the caller's contract.
+    if unsafe { libc::ioctl(sock, ioctl_request(request), ifr) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn ifreq(iface: &str) -> libc::ifreq {
+    // SAFETY: `ifreq` is a plain C struct; zeroed is a valid empty request.
+    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (i, b) in iface.bytes().enumerate().take(libc::IFNAMSIZ - 1) {
+        ifr.ifr_name[i] = b as libc::c_char;
+    }
+    ifr
+}
+
+fn write_sockaddr(dst: *mut libc::sockaddr, addr: Ipv4Addr) {
+    let sin = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: 0,
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes(addr.octets()),
+        },
+        sin_zero: [0; 8],
+    };
+    // SAFETY: `dst` points at a `sockaddr`-sized field inside an `ifreq`
+    // the caller zeroed and owns; `sockaddr_in` is the same 16 bytes on
+    // every Linux ABI target.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &sin as *const libc::sockaddr_in as *const u8,
+            dst as *mut u8,
+            std::mem::size_of::<libc::sockaddr_in>(),
+        );
+    }
 }
 
 /// Put a file descriptor in non-blocking mode.
@@ -926,10 +928,17 @@ mod tests {
         // and injection is what would *add* statements, so compare the
         // counts against a benign id instead.
         let guest = Ipv4Addr::new(10, 201, 0, 6);
-        let hostile_rules = nft_ruleset(&table_name(hostile), &device, guest, Some(GUEST_V6));
+        let hostile_rules = nft_ruleset(
+            &table_name(hostile),
+            &device,
+            hostile,
+            guest,
+            Some(GUEST_V6),
+        );
         let benign_rules = nft_ruleset(
             &table_name("vm-a"),
             &device_name("vm-a"),
+            "vm-a",
             guest,
             Some(GUEST_V6),
         );
@@ -966,8 +975,14 @@ mod tests {
     const GUEST_V6: Ipv6Addr = Ipv6Addr::new(0xfd6d, 0x766d, 1, 0, 0, 0, 0, 2);
 
     #[test]
-    fn the_ruleset_keeps_one_shared_default_drop_and_pins_the_guest_source() {
-        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6), None);
+    fn the_ruleset_defaults_to_drop_and_pins_the_guest_source() {
+        let rules = nft_ruleset(
+            "mvmn",
+            "mvmnvma",
+            "vm-a",
+            Ipv4Addr::new(10, 201, 0, 6),
+            None,
+        );
         assert!(rules.contains("policy drop"), "{rules}");
         assert!(
             rules.contains("ip saddr 10.201.0.6/32 counter accept"),
@@ -985,8 +1000,8 @@ mod tests {
             rules.contains("iifname \"mvmnvma\" drop"),
             "a final fail-closed rule must follow the accepts: {rules}"
         );
-        assert!(rules.contains("jump mvmn_f_mvmnvma"), "{rules}");
-        assert!(rules.contains("jump mvmn_n_mvmnvma"), "{rules}");
+        assert!(rules.contains("jump mvmn_f_vma"), "{rules}");
+        assert!(rules.contains("jump mvmn_n_vma"), "{rules}");
         assert_eq!(
             rules.matches("type filter hook forward").count(),
             1,
@@ -996,13 +1011,108 @@ mod tests {
 
     #[test]
     fn the_ruleset_has_no_bridge_and_no_tap() {
-        let rules = nft_ruleset("mvmn_vma", "mvmnvma", Ipv4Addr::new(10, 201, 0, 6), None);
+        let rules = nft_ruleset(
+            "mvmn",
+            "mvmnvma",
+            "vm-a",
+            Ipv4Addr::new(10, 201, 0, 6),
+            None,
+        );
         for forbidden in ["bridge", "tap", "br0", "virbr"] {
             assert!(
                 !rules.contains(forbidden),
                 "the L3 path must not reference {forbidden}: {rules}"
             );
         }
+    }
+
+    /// The v6 source is pinned by the same mechanism as the v4 one, in the
+    /// same `inet` table: a masquerade so replies come back, an inbound
+    /// accept for exactly the assigned address, and a stateful return path.
+    #[test]
+    fn the_ruleset_pins_the_v6_source_when_the_lease_carries_one() {
+        let rules = nft_ruleset(
+            "mvmn",
+            "mvmnvma",
+            "vm-a",
+            Ipv4Addr::new(10, 201, 0, 6),
+            Some(GUEST_V6),
+        );
+        assert!(
+            rules.contains("ip6 saddr fd6d:766d:1::2/128 counter accept"),
+            "{rules}"
+        );
+        assert!(
+            rules.contains("ip6 saddr fd6d:766d:1::2/128 masquerade"),
+            "{rules}"
+        );
+        assert!(
+            rules.contains(
+                "ip6 daddr fd6d:766d:1::2/128 ct state established,related counter accept",
+            ),
+            "v6 return traffic must be stateful too: {rules}"
+        );
+    }
+
+    /// A source-pinning rule that the fail-closed `drop` precedes would
+    /// never be reached, so the order is the property, not the presence.
+    #[test]
+    fn the_v6_accept_precedes_the_fail_closed_drop() {
+        let rules = nft_ruleset(
+            "mvmn",
+            "mvmnvma",
+            "vm-a",
+            Ipv4Addr::new(10, 201, 0, 6),
+            Some(GUEST_V6),
+        );
+        let accept = rules
+            .find("ip6 saddr fd6d:766d:1::2/128 counter accept")
+            .expect("the v6 accept must be present");
+        let drop = rules
+            .find("iifname \"mvmnvma\" drop")
+            .expect("the fail-closed drop must be present");
+        assert!(accept < drop, "{rules}");
+    }
+
+    /// A machine whose plan never asked for IPv6 must get exactly the
+    /// ruleset it got before the family was carried at all — not a
+    /// superset, not a reordering. Its own `drop` is what refuses v6.
+    #[test]
+    fn a_v4_only_lease_gets_a_ruleset_with_no_v6_rule_at_all() {
+        let rules = nft_ruleset(
+            "mvmn",
+            "mvmnvma",
+            "vm-a",
+            Ipv4Addr::new(10, 201, 0, 6),
+            None,
+        );
+        assert_eq!(
+            rules,
+            "add table inet mvmn\n\
+             add chain inet mvmn postrouting { type nat hook postrouting priority srcnat; policy accept; }\n\
+             add chain inet mvmn forward { type filter hook forward priority filter; policy drop; }\n\
+             add chain inet mvmn mvmn_f_vma\n\
+             add chain inet mvmn mvmn_n_vma\n\
+             add rule inet mvmn forward iifname \"mvmnvma\" jump mvmn_f_vma\n\
+             add rule inet mvmn forward oifname \"mvmnvma\" jump mvmn_f_vma\n\
+             add rule inet mvmn postrouting iifname \"mvmnvma\" jump mvmn_n_vma\n\
+             add rule inet mvmn mvmn_f_vma iifname \"mvmnvma\" ip saddr 10.201.0.6/32 counter accept\n\
+             add rule inet mvmn mvmn_f_vma iifname \"mvmnvma\" drop\n\
+             add rule inet mvmn mvmn_f_vma oifname \"mvmnvma\" ip daddr 10.201.0.6/32 ct state established,related counter accept\n\
+             add rule inet mvmn mvmn_f_vma oifname \"mvmnvma\" drop\n\
+             add rule inet mvmn mvmn_n_vma iifname \"mvmnvma\" ip saddr 10.201.0.6/32 masquerade\n"
+        );
+    }
+
+    /// The two IPv6 questions the capability seam asks are both yes here,
+    /// for the same reason the v4 pair is: the device carries whole
+    /// packets, whatever family they are in.
+    #[test]
+    fn the_linux_datapath_declares_both_families() {
+        let caps = LinuxDatapath::new().capabilities();
+        assert_eq!(caps, ForwardingCapabilities::FULL_L3);
+        assert!(caps.ipv6_flows);
+        assert!(caps.arbitrary_ipv6);
     }
 
     #[test]
@@ -1027,63 +1137,6 @@ mod tests {
     fn jump_handles_reject_a_matching_rule_without_a_kernel_handle() {
         let listing = r#"iifname "mvmna" jump mvmn_f_a"#;
         assert!(jump_handles(listing, "mvmn_f_a", "mvmna").is_err());
-    }
-
-    /// The v6 source is pinned by the same mechanism as the v4 one, in the
-    /// same `inet` table: a masquerade so replies come back, an inbound
-    /// accept for exactly the assigned address, and a stateful return path.
-    #[test]
-    fn the_ruleset_pins_the_v6_source_when_the_lease_carries_one() {
-        let rules = nft_ruleset(
-            "mvmn_vma",
-            "mvmnvma",
-            Ipv4Addr::new(10, 201, 0, 6),
-            Some(GUEST_V6),
-        );
-        assert!(
-            rules.contains("ip6 saddr fd6d:766d:1::2/128 counter accept"),
-            "{rules}"
-        );
-        assert!(
-            rules.contains("ip6 saddr fd6d:766d:1::2/128 masquerade"),
-            "{rules}"
-        );
-        assert!(
-            rules.contains(
-                "ip6 daddr fd6d:766d:1::2/128 ct state established,related counter accept"
-            ),
-            "v6 return traffic must be stateful too: {rules}"
-        );
-    }
-
-    /// A source-pinning rule that the fail-closed `drop` precedes would
-    /// never be reached, so the order is the property, not the presence.
-    #[test]
-    fn the_v6_accept_precedes_the_fail_closed_drop() {
-        let rules = nft_ruleset(
-            "mvmn_vma",
-            "mvmnvma",
-            Ipv4Addr::new(10, 201, 0, 6),
-            Some(GUEST_V6),
-        );
-        let accept = rules
-            .find("ip6 saddr fd6d:766d:1::2/128 counter accept")
-            .expect("the v6 accept must be present");
-        let drop = rules
-            .find("iifname \"mvmnvma\" drop")
-            .expect("the fail-closed drop must be present");
-        assert!(accept < drop, "{rules}");
-    }
-
-    /// The two IPv6 questions the capability seam asks are both yes here,
-    /// for the same reason the v4 pair is: the device carries whole
-    /// packets, whatever family they are in.
-    #[test]
-    fn the_linux_datapath_declares_both_families() {
-        let caps = LinuxDatapath::new().capabilities();
-        assert_eq!(caps, ForwardingCapabilities::FULL_L3);
-        assert!(caps.ipv6_flows);
-        assert!(caps.arbitrary_ipv6);
     }
 
     #[test]

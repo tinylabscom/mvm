@@ -126,12 +126,9 @@ base.mkKernel {
     "INET6_IPCOMP"
     "INET6_XFRM_TUNNEL"
     "INET6_TUNNEL"
-    # 6-in-4, on the same reasoning, and it needs saying here for a reason
-    # the others don't: it is the one v6 tunnel that carries no XFRM, so the
-    # required-disable set would not have caught it. Five of the seven
-    # built-ins IPv6 adds are this driver and its plumbing — INET_TUNNEL,
-    # NET_IP_TUNNEL, DST_CACHE, GRO_CELLS — and the guest has no v4 tunnel
-    # endpoint to encapsulate toward.
+    # 6-in-4 is likewise unreachable: a guest has one point-to-point link
+    # and no v4 tunnel endpoint. It is the v6 tunnel that carries no XFRM, so
+    # the required-disable set cannot catch it indirectly.
     "IPV6_SIT"
     "NETFILTER"
     "BLK_DEV_MD"

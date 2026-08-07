@@ -118,9 +118,10 @@ all green.
 
 **Verified.** 2247 pass across `mvm-hostd`/`mvm-net`/`mvm-protocol` and 2811
 across `mvm-core`/`mvm-runtime`, 0 failures; 17 tests added (15 unit, 2
-end-to-end against the shipping binary). The closure budget did not move
-(279 of 279) — the auditor reuses tokio, chrono and ed25519, all already
-linked. Run on a Linux host: this Mac's loader was wedged (`syspolicyd`
+end-to-end against the shipping binary). The closure budget is 283 of 283:
+the userspace socket datapath's host-side polling, socket, and smoltcp
+protocol dependencies are now explicit in the shipping binary. Run on a
+Linux host: this Mac's loader was wedged (`syspolicyd`
 spinning, every freshly built binary hanging at `_dyld_start`), so no test
 binary could start locally.
 
@@ -172,7 +173,7 @@ Each of these cost time on this branch.
 - **`check-no-spec-refs` is not a gate name.** It is
   `check-no-spec-refs-in-comments`; xtask rejects the short form as
   `Unknown xtask`, so a run of it silently checks nothing.
-- **The closure budget now has zero headroom** (279 of 279). The next
++ **The closure budget now has zero headroom** (283 of 283). The next
   dependency into mvmctl's default binary trips it. That is intended.
 - **A known flake, not a regression:** `host_agent_restart` (×4),
   `per_tenant_isolation`, and `broker_audit_round_trip` fail under
