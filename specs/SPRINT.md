@@ -104,6 +104,20 @@
       was the host-toolchain probe under isolated `CARGO_HOME`, and that test
       passed when rerun with the normal Cargo home.
 
+- [x] Host-side eBPF vsock egress telemetry spike — **issue #2211**.
+      Removed the standalone `mvm-ebpf-egress` crate and folded the Aya
+      loader/probe into `mvm-hostd` (userspace attach/detach) and
+      `mvm-runtime` (observability target metadata). Added
+      `VmObservabilityTarget` as a `mode.json` sidecar, wired
+      `EbpfTelemetryManager` into `Supervisor::launch`/`stop`, added vsock
+      egress counters to the global metrics snapshot, and kept macOS/Windows
+      builds on no-op stubs. Built the real `bpfel-unknown-none` object with
+      `just build-ebpf` (nightly + `bpf-linker`), added an attach→detach
+      integration test that reads the sidecar, implemented the Linux Aya
+      load/attach/ring-buffer read path, and ran the full workspace nextest
+      suite (10134 passed, 18 skipped). Validating load/attach on a live
+      Linux host remains for the builder VM.
+
 - [x] Source-checkout kernel bootstrap reliability. `just kernel-workload` and
       `mvmctl kernel build --which workload` now embed the Stage 0 egress client
       they need to reach Nix caches, so a first-time local compile completes
@@ -126,15 +140,6 @@
       over-budget chunk, preserving large HTTPS payloads and their hashes;
       short reads, EOF, and nonblocking errors refund unused reservations.
       Regression coverage proves an exhausted budget keeps the stream alive.
-
-- [~] NANDA-style execution receipts and conformance badges — **plan 298**
-      (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
-      approved: defines `ExecutionReceipt` (signed, chainable proof of what ran,
-      by whom, under what authority) and `ConformanceBadge` (signed, corpus-pinned
-      export of the MVM-SEC claim/witness program), both built on existing
-      Ed25519/JCS/SHA-256 primitives with no new authority or external dependency.
-      WS2–WS6 (core types, read-only exporter, runtime emission, badge generator,
-      docs) are scheduled next.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
@@ -1141,12 +1146,12 @@ The bar: a codebase an **expert human can read and navigate**, fully tested, fol
 | **mvm-runtime**  | `mvm` + `mvm-backend`                                             | `VmBackend` trait + libkrun/hvf/firecracker impls (mock behind `test-support`); VM lifecycle, templates, pool, warm-start.                                    | no                           |
 | **mvm-build**    | `mvm-build`                                                       | Nix builder-VM pipeline (the nix-execution engine).                                                                                                           | no                           |
 | **mvm-hostd**    | `mvm-hostd` + `mvm-vm-host` + host-side builder bins              | **The single host binary.** Resident single-process daemon; all host roles as in-process tasks.                                                               | no                           |
-| **mvm-agentd**   | `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi`       | **The single guest binary.** Shipped in the runtime-overlay volume.                                                                                           | no                           |
-| **mvm-sdk**      | `mvm-sdk` (minus `ir`)                                            | Decorator + runtime authoring + the **tree-sitter → Workload IR → nix template** pipeline.                                                                    | no                           |
+| **mvm-agentd**   | `mvm-guest` + `mvm-guest-helpers`                                 | **The single guest binary.** Shipped in the runtime-overlay volume.                                                                                           | no                           |
+| **mvm-sdk**      | `mvm-sdk` (minus `ir`) + `mvm-host-services-ffi`                  | Decorator + runtime authoring + the **tree-sitter → Workload IR → nix template** pipeline + the in-guest host-services C-ABI cdylib.                          | no                           |
 | **mvm-client**   | `mvm-client`                                                      | Facade (`MvmClient`). **Every CLI command routes through it.** The stable surface mvmd consumes.                                                              | no                           |
 | **mvm-cli**      | `mvm-cli`                                                         | `mvmctl`. Thin; delegates to `mvm-client`.                                                                                                                    | no                           |
 
-Kept as-is: `crates/deps/libkrun-sys` (FFI), `xtask`. **Dropped/folded:** `mvm-ext4`, `mvm-network`, `mvm-verify`, `mvm-guest-helpers`, `mvm-vm-host`, `mvm-host-services-ffi`, `mvm-mcp` (folded into `mvmctl serve` behind an `AgentProtocol` trait — MCP now, ACP later, no per-protocol crate; see WS7), orphan Swift `mvm-vz-supervisor`, `qemu` backend, dead deps (`colored`, `names`, `hickory-server`, stale `mvm-egress-proxy` path).
+Kept as-is: `crates/deps/libkrun-sys` (FFI), `xtask`. **Dropped/folded:** `mvm-ext4`, `mvm-network`, `mvm-verify`, `mvm-guest-helpers`, `mvm-vm-host`, `mvm-host-services-ffi` (folded into `mvm-sdk`), `mvm-mcp` (folded into `mvmctl serve` behind an `AgentProtocol` trait — MCP now, ACP later, no per-protocol crate; see WS7), orphan Swift `mvm-vz-supervisor`, `qemu` backend, dead deps (`colored`, `names`, `hickory-server`, stale `mvm-egress-proxy` path).
 
 Logging is **`mvm-core::log`** (a module, not a crate): structured `tracing` for operational logs (→ `~/.mvm/logs`) **and** the seam that emits chain-signed, tamper-evident entries to the audit log for every security-relevant action. Secrets/PII are redacted at the boundary — never logged. "Auditable everywhere" means every guest↔host RPC and every egress byte is traceable through the vsock seam and the chain-signed audit log.
 
@@ -1315,7 +1320,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [x] `mvm-vm-host`→`mvm-hostd` (flat; 3 supervisor bins) — `3fc1dae6d`
 - [x] `mvm-mcp`→`mvm-cli` `crate::mcp` (behind `mcp` feature) — `42b432b89`
 - [x] `mvm`+`mvm-backend`→`mvm-runtime` (flat, 96 files) — `764b7d897`
-- [x] `mvm-guest`+`mvm-guest-helpers`→`mvm-agentd` (214 files) — `19f1830ba`. **`mvm-host-services-ffi` kept SEPARATE** — it is a `cdylib` (`mvm_host_services`) the SDK runtimes `dlopen` + nix bakes into the overlay; folding it would break that FFI/nix contract (deviation from §2.1).
+- [x] `mvm-guest`+`mvm-guest-helpers`→`mvm-agentd` (214 files) — `19f1830ba`. ~~`mvm-host-services-ffi` kept SEPARATE~~ **Later folded into `mvm-sdk`** — the C-ABI veneer now lives in `crates/mvm-sdk/src/host_services_ffi.rs`; `mvm-sdk` builds it as a `cdylib` and the nix package preserves the stable `libmvm_host_services.so` artifact name.
 - [x] `mvm-contract` extraction (staged, `no_std`+wasm-clean each step) — **ALL 3 INCREMENTS COMPLETE**: **Increment 1** — `mvm-verify` → `mvm_contract::verify`; crate born `#![no_std]+alloc+forbid(unsafe)`, builds on `wasm32` (`13c2a46dd`). **Increment 2** — Workload IR (`mvm-sdk::ir`) → `mvm_contract::ir` + `detect_shell_entrypoint_argv` down from `mvm-core`; 35 consumers rewired, `mvm-net`/`mvm-runtime`/`mvm-storage` dropped `mvm-sdk` for `mvm-contract` (dep-graph tightened); schemars gated behind a `schema` feature so the default/wasm build stays truly `no_std` (`9aa8ba372`). **Increment 3 (DESIGNED — execution remaining, the hard one)**: pull the pure wire/policy DTOs out of `mvm-core`'s `plan/`+`policy/`+`protocol/` (~126 `crate::` refs into `config`/`crypto`/`security`/`instance`/`tenant`) down to `mvm-contract`, logic stays in `mvm-core` on top. Full design of record in `specs/refactor/10-increment3-protocol-core-split.md`: per-module cut (moves/stays/split across all three folders), the byte-identity invariant guarding the mvm↔mvmd signed contract (relocate DTOs **verbatim** — no serde-shape change), four resolved mechanics (keep `DateTime<Utc>` via scoped no_std `chrono`; `std::net`→`core::net`; scoped `thiserror`; orphan-rule crypto-method→free-fn rewrite), companion moves (`lifecycle::SnapshotAt`, `RedactionPolicy`+`ReversibleReplacementPolicy`, `{TenantId,PlanId,WorkloadId}`) that unblock `ExecutionPlan`, the `BundleNetworkPolicy` rename, explicit deferrals (`security_profile`, `HostdRequest`, `VmStartConfig`/`VerbGrantEnvelope`), and the leaf-first Tier 0→4 extraction order (green + wasm-clean after every step).
   - [x] **Tier 0 — GO** (`6577d06ba`): moved `plan/{types,verb,verb_trust}.rs` whole + split `validity.rs` (`FreshnessClaims`→protocol, `checked()`→`mvm-core` free fn) down to `mvm-contract::plan`; added scoped no_std `chrono`+`thiserror` + the FIRST `mvm-core`→`mvm-contract` dep edge. **Proved all four mechanics**: `DateTime<Utc>` compiles no_std on wasm32 + serializes byte-identical RFC-3339 (`"2026-07-16T12:34:56Z"`), `thiserror 2` no_std works, orphan-rule rewrite works, facade re-export keeps every consumer path unchanged. Green (wasm build + nextest 6595/0 + clippy + xtask). Reviewed: spec ✅ / quality approved, byte-identity `git show`-verified pre/post.
   - [x] **Tier 1 — COMPLETE** (all pure/PathBuf leaves across plan/policy/protocol now in mvm-contract; `{TenantId,PlanId,WorkloadId}` rode `types.rs` in Tier 0):
@@ -1374,7 +1379,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 
 **WS2 — single host + single guest binary, no forks**
 
-- [ ] `mvm-agentd`: merge `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi` **and the builder-VM guest bins** (`mvm-host-vm-init`/`mvm-builderd`/`stage0-init`/`mvm-rootfs-patcher` → a "builder" role); one binary, subcommand/argv0 dispatch; ship via the runtime-overlay volume.
+- [ ] `mvm-agentd`: merge `mvm-guest` + `mvm-guest-helpers` **and the builder-VM guest bins** (`mvm-host-vm-init`/`mvm-builderd`/`stage0-init`/`mvm-rootfs-patcher` → a "builder" role); one binary, subcommand/argv0 dispatch; ship via the runtime-overlay volume.
 - [ ] `mvm-hostd`: fold `mvm-vm-host` + host-side builder bins; single-process resident daemon; roles as tasks; state in append-only signed `jsonl` (§2.2).
 - [ ] Remove every `Command` shell-out (host/runtime/agent); native Rust replacements; the two carved exemptions (FC launch, builder-VM nix) allow-listed.
 - [ ] Secrets module: `mlock` + `zeroize` + `subtle`; daemon-wide seccomp + landlock.

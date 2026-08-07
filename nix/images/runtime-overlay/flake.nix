@@ -201,15 +201,16 @@
         };
 
       # libmvm_host_services.so — the in-guest host-services FFI shared
-      # object the language SDKs dlopen via ctypes/koffi. One JSON-in/
-      # JSON-out C ABI over the broker clients; built for the glibc workload
-      # rootfs (same platform as the agent), not the static-musl builder
-      # target — a cdylib needs the dynamic loader the rootfs provides.
-      mvmHostServicesFfiFor = system:
+      # object the language SDKs dlopen via ctypes/koffi. Built from the
+      # `mvm-sdk` crate's `cdylib` output and renamed to the stable FFI
+      # filename; built for the glibc workload rootfs (same platform as the
+      # agent), not the static-musl builder target — a cdylib needs the
+      # dynamic loader the rootfs provides.
+      mvmSdkCdylibFor = system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
-        import (workspace + "/nix/packages/mvm-host-services-ffi.nix") {
+        import (workspace + "/nix/packages/mvm-sdk-cdylib.nix") {
           inherit pkgs;
           lib = pkgs.lib;
           mvmSrc = workspace;
@@ -270,7 +271,7 @@
       mkSdkSidecar = system:
         let
           pkgs = import nixpkgs { inherit system; };
-          hostsvc = mvmHostServicesFfiFor system;
+          hostsvc = mvmSdkCdylibFor system;
         in
         pkgs.runCommand "mvm-sdk-sidecar-${system}"
           {

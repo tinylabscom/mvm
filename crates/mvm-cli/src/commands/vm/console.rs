@@ -557,6 +557,7 @@ mod accessible_gate_tests {
                     rootfs_path: None,
                     runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
                     runtime_overlay_version: None,
+                    observability_target: None,
                 },
             )
             .expect("write");
@@ -601,6 +602,7 @@ mod accessible_gate_tests {
                     rootfs_path: None,
                     runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
                     runtime_overlay_version: None,
+                    observability_target: None,
                 },
             )
             .expect("write");
@@ -628,6 +630,7 @@ mod accessible_gate_tests {
                     rootfs_path: None,
                     runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
                     runtime_overlay_version: None,
+                    observability_target: None,
                 },
             )
             .expect("write");
@@ -648,6 +651,7 @@ mod accessible_gate_tests {
                     rootfs_path: None,
                     runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
                     runtime_overlay_version: None,
+                    observability_target: None,
                 },
             )
             .expect("write");
@@ -737,6 +741,7 @@ mod picker_hvf_tests {
                 rootfs_path: None,
                 runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
+                observability_target: None,
             },
         )
         .unwrap();
