@@ -94,12 +94,12 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
             ephemeral: true,
             slot: 0,
         }],
-        virtiofs_shares: vec![],
         vsock: vec![],
         console: ConsoleCapture {
             log_path: state_dir.join("console.log"),
         },
         shares: Vec::new(),
+        trusted_builder: false,
     }
 }
 
