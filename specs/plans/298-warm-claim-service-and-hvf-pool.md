@@ -66,15 +66,17 @@ backend cannot provide this operation, the claim is refused as cold-only.
    Virtualization.framework/VZ is excluded.
 4. [ ] [#2195](https://github.com/tinylabscom/mvm/issues/2195) — Implement fixed
    virtio-fs share slots and claim-time read-only host binding.
-5. [ ] [#2196](https://github.com/tinylabscom/mvm/issues/2196) — Complete and
-   validate the Linux KVM/Firecracker warm-pool backend.
+5. [~] [#2196](https://github.com/tinylabscom/mvm/issues/2196) — Complete and
+   validate the Linux KVM/Firecracker warm-pool backend. The direct
+   Firecracker/KVM witness is green; production standby admission remains.
 6. [ ] [#2197](https://github.com/tinylabscom/mvm/issues/2197) — Harden the VMM
    and share-control processes with least privilege and platform-specific
    defense in depth.
 7. [ ] [#2198](https://github.com/tinylabscom/mvm/issues/2198) — Finish timing,
    refusal reasons, warm-required semantics, and command-line behavior.
-8. [ ] [#2199](https://github.com/tinylabscom/mvm/issues/2199) — Add the
-   1,000-claim benchmark matrix and CI enforcement.
+8. [~] [#2199](https://github.com/tinylabscom/mvm/issues/2199) — Add the
+   1,000-claim benchmark matrix and CI enforcement. The live Apple Silicon
+   matrix passes; CI enforcement and the remaining backend dimensions remain.
 
 ## Dependency graph
 
@@ -238,15 +240,16 @@ reseeding, and policy validation.
 - [x] Removed the secret-free deny-all endpoint process and guest egress channel
   from resident claims, and deferred the broad orphan-state maintenance sweep
   until after the guest command. The deny-all posture remains explicit and
-  fail-closed; a release-built 30-claim Apple Silicon matrix measured
-  p50=20.2ms, p95=32.2ms, p99=34.5ms, and max=34.5ms.
+  fail-closed; the fresh release-built 1,000-claim Apple Silicon matrix
+  measured p50=17.9ms, p95=22.1ms, p99=27.4ms, and max=33.3ms.
 - [~] Live-validate the same-process handoff on real Apple Silicon and complete
   the full 1,000-claim continuity witness. Darwin arm64 validation now proves
-  the signed rootless handoff with the Hypervisor.framework entitlement. A
-  fresh release-built 30-claim matrix now passes the stronger p50≤30ms and
-  p99≤50ms aggregate targets, with every claim below the strict 300ms ceiling.
-  The prior 1,000-claim witness remains recorded as the hard-ceiling baseline;
-  the optimized 1,000-claim rerun and Linux/backend matrices remain open. The
+  the signed rootless handoff with the Hypervisor.framework entitlement, with
+  1,000/1,000 successful warm claims below the strict 300ms ceiling and inside
+  the p50≤30ms and p99≤50ms aggregate targets. A real Linux x86_64
+  Firecracker/KVM direct-driver matrix also passes 30/30 claims at p50=39ms,
+  p95=39ms, and max=40ms. Production standby capability admission, Linux
+  libkrun, and the remaining backend/share-shape matrices remain open. The
   resident path defers reclamation of consumed parent payloads until after the
   measured handoff, keeping checkpoint and snapshot state bounded.
 - [x] Choose and implement the same-process paused-parent design: the parent

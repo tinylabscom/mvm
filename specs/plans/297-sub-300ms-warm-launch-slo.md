@@ -104,20 +104,23 @@ and no claim silently falls back after being labeled warm.
       backend capability contract.
 - [ ] Add a hermetic benchmark harness with deterministic claim/refusal cases.
 - [~] Run the live 1,000-claim matrix on every supported backend and record
-      the results in a dated validation note. Darwin arm64 previously
-      completed 1,000 resident HVF claims below 300ms; after removing the
-      deny-all endpoint startup and orphan sweep from the hot path, a fresh
-      30-claim release matrix measured p50=20.2ms, p95=32.2ms, p99=34.5ms,
-      and max=34.5ms, with every claim warm and below 300ms. Linux and other
-      backend/share-shape matrices remain open.
+      the results in a dated validation note. Darwin arm64 now has a fresh
+      release-built 1,000-claim run with 1,000/1,000 successful warm claims,
+      p50=17.9ms, p95=22.1ms, p99=27.4ms, and max=33.3ms; every claim stayed
+      below the strict 300ms ceiling. A real Linux x86_64 Firecracker/KVM
+      direct-driver matrix also completed 30/30 claims with p50=39ms,
+      p95=39ms, and max=40ms. Production standby capability admission,
+      Linux libkrun, and the remaining backend/share-shape matrices remain
+      open.
 - [ ] Enforce the hard maximum and aggregate p50/p99 thresholds in CI.
 
 The host-side live acceptance harness is now available as
 `just hvf-warm-restore`. It records the bootstrap separately, then requires a
 configurable matrix of real HVF claims to report warm mode, `warm_slo=ok`, and
-the strict `<300ms` ceiling before checking the p50/p99 targets. The Darwin
-arm64 30-claim continuity matrix now passes both aggregate targets; the full
-1,000-claim rerun and Linux/backend matrices remain open.
+the strict `<300ms` ceiling before checking the p50/p99 targets. The fresh
+Darwin arm64 1,000-claim matrix passes both aggregate targets. The direct
+Linux Firecracker/KVM witness is green; production standby admission and the
+remaining backend/share-shape matrices remain open.
 
 ## Non-goals
 

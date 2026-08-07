@@ -1361,16 +1361,17 @@ Then unify + retire the old paths:
       listener retargets only claim-derived endpoints, and the parent resumes
       as the child. Focused protocol, path-safety, and channel-rebind tests
       pass. Real Darwin arm64 validation now proves the rootless signed
-      resident handoff with the Hypervisor.framework entitlement. The prior
-      release fresh-state matrix completed 1,000/1,000 warm claims below the
-      strict 300ms ceiling. The optimized path now omits the secret-free
-      deny-all endpoint and defers broad orphan-state cleanup until after the
-      guest command; a fresh 30-claim release matrix measured p50=20.2ms,
-      p95=32.2ms, p99=34.5ms, and max=34.5ms, passing the stronger p50≤30ms
-      and p99≤50ms aggregate targets. Consumed resident-parent payloads are
-      reclaimed asynchronously after the measured handoff, keeping long-run
-      state bounded; the optimized 1,000-claim rerun and Linux/backend
-      matrices remain open.
+      resident handoff with the Hypervisor.framework entitlement. The fresh
+      release-built Darwin arm64 matrix completed 1,000/1,000 warm claims
+      below the strict 300ms ceiling, measuring p50=17.9ms, p95=22.1ms,
+      p99=27.4ms, and max=33.3ms. The optimized path now omits the
+      secret-free deny-all endpoint and defers broad orphan-state cleanup until
+      after the guest command; consumed resident-parent payloads are reclaimed
+      asynchronously after the measured handoff, keeping long-run state
+      bounded. A real Linux x86_64 Firecracker/KVM direct-driver matrix also
+      completed 30/30 claims at p50=39ms, p95=39ms, and max=40ms. Production
+      standby capability admission, Linux libkrun, and remaining
+      backend/share-shape matrices remain open.
       A host-only Apple Silicon acceptance harness is now
       available as `just hvf-warm-restore`; it records the cold bootstrap
       separately and refuses any measured cold fallback or warm-SLO violation;
@@ -1384,10 +1385,9 @@ Then unify + retire the old paths:
       child identity; it never points the child at mutable checkpoint bytes.
       Saved-state claims retain full lineage verification. The root-only APFS
       helper remains optional for background publication and is not required by
-      the rootless hot path. A release-built Darwin arm64 30-claim matrix
-      measured p50=20.2ms, p95=32.2ms, p99=34.5ms, and max=34.5ms, with all
-      warm claims below the 300ms hard ceiling and within the aggregate
-      targets. The optimized 1,000-claim rerun remains open.
+      the rootless hot path. The 1,000-claim Darwin matrix passes the aggregate
+      targets and the direct Linux Firecracker/KVM witness is green; production
+      Linux standby admission and the remaining backend matrices remain open.
       #2195 adds fixed virtio-fs share slots; #2196 completes Linux
       Firecracker warm claims; #2197 hardens the VMM/share processes; #2198
       finalizes warm-required CLI semantics and timing; and #2199 adds the
