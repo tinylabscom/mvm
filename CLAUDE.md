@@ -25,7 +25,7 @@ brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy
 - `libkrunfw` — bundles the TSI-patched Linux kernel libkrun's guests boot. Plan 86 / Plan 72 W5.D bullet 10 — `libkrun-sys::extract_bundled_kernel()` pulls the kernel out of the dylib's `.rodata` at runtime.
 - `gvproxy` — userspace virtio-net gateway **for the builder VM only**. Plan 88 / ADR-003 §"Cross-platform backends" — passt is Linux-only, so macOS dispatches to gvproxy via libkrun's `krun_add_net_unixgram` path. `MVM_NETWORKING` unset → per-OS default (macOS=gvproxy, Linux=passt); `passt`, `gvproxy`, and the opt-in `native` are accepted. `native` (ADR-003 — the hvf Rust gateway) requires `MVM_GATEWAY_BIN` to name the gateway binary and falls back to the per-OS default without it; it is parity-gated and not yet validated end-to-end, so the default never selects it. Plan 102 W6.A removed the `tsi` mode (TSI bypassed virtio-net entirely, violating the claim-10 no-bypass invariant — see ADR-014).
 
-  **This applies to the builder VM and Stage 0, never to a workload microVM.** `MVM_NETWORKING`, gvproxy, and passt select how *the build engine* reaches the network; no workload backend consults them. See "Workload microVMs have no NIC" under **Key Design Decisions**.
+  **This applies to the builder VM and Stage 0, never to a workload microVM.** `MVM_NETWORKING`, gvproxy, and passt select how _the build engine_ reaches the network; no workload backend consults them. See "Workload microVMs have no NIC" under **Key Design Decisions**.
 
 On Linux contributor hosts swap `gvproxy` for `passt` from the distro
 package manager (or build passt from source — see ADR-003 references).
@@ -75,7 +75,7 @@ Selection priority (highest first):
 
 `mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.
 
-**Auto-fallback (ADR-007).** When the *auto-detected* builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error — mvm transparently retries the next backend on macOS 26+ (hvf → libkrun). One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point. A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. On Linux the auto-detect default is **qemu**; the rootfs-backed libkrun builder now boots and builds on Linux/KVM (the guest kernel parses libkrun's virtio-mmio cmdline devices, and a poweroff-fallback halt defers to the on-disk build result) and is selectable as an explicit opt-in via `--builder libkrun`.
+**Auto-fallback (ADR-007).** When the _auto-detected_ builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error — mvm transparently retries the next backend on macOS 26+ (hvf → libkrun). One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point. A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. On Linux the auto-detect default is **qemu**; the rootfs-backed libkrun builder now boots and builds on Linux/KVM (the guest kernel parses libkrun's virtio-mmio cmdline devices, and a poweroff-fallback halt defers to the on-disk build result) and is selectable as an explicit opt-in via `--builder libkrun`.
 
 The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
 
@@ -102,8 +102,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 - `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`/`mvm-bridge`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
 - `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
-- `mvm-sdk` -- build-time SDK: decorator parser → canonical `Workload` IR → Nix template, plus the runtime SDK. Language SDK surfaces live under `crates/mvm-sdk/sdks/`.
-- `mvm-host-services-ffi` -- a C-ABI cdylib every language SDK dlopens (host.audit/time/cost broker clients); kept a separate crate because folding it would break the FFI contract.
+- `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, runtime record mode, and the in-guest host-services C-ABI cdylib (`libmvm_host_services.so`) loaded by every language SDK. Language SDK surfaces live under `crates/mvm-sdk/sdks/`.
 - `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
 
 `xtask` -- tooling + claim-gate lints. `mvm-conformance` -- dev-only cucumber-rs BDD harness running the security-claim scenarios against `mvmctl` (not a dependency of any shipped crate).
@@ -152,8 +151,8 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ### Key Design Decisions
 
-- **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on the runtime path. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / HVF on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-007; note the *builder* VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path (it's Tier 2 dev/test, not a workload-bearing tier — see ADR-001 §"Per-backend tier matrix" claim-10 egress-enforcement note). Egress default-deny is enforced at one seam for all three workload backends: the per-VM substitution endpoint, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-uniform-vsock-egress` pins Firecracker, libkrun, and HVF to that one spawn site so a backend cannot grow a second gate.
-- **Workload microVMs have no NIC**: every workload backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device, and the QEMU workload driver emits no `-netdev`. Egress leaves the guest only over vsock, to the host-side substitution endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host *originates* every outbound connection, so it can authorize, substitute, and log it. `xtask check-vsock-only-egress` fails closed if `virtio_net`, a tap, or a userspace gateway token appears on a workload path. The builder VM is the opposite tier and **does** have a NIC — see **Host dependencies**.
+- **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on the runtime path. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / HVF on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-007; note the _builder_ VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path (it's Tier 2 dev/test, not a workload-bearing tier — see ADR-001 §"Per-backend tier matrix" claim-10 egress-enforcement note). Egress default-deny is enforced at one seam for all three workload backends: the per-VM substitution endpoint, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-uniform-vsock-egress` pins Firecracker, libkrun, and HVF to that one spawn site so a backend cannot grow a second gate.
+- **Workload microVMs have no NIC**: every workload backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device, and the QEMU workload driver emits no `-netdev`. Egress leaves the guest only over vsock, to the host-side substitution endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-vsock-only-egress` fails closed if `virtio_net`, a tap, or a userspace gateway token appears on a workload path. The builder VM is the opposite tier and **does** have a NIC — see **Host dependencies**.
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The builder VM (where Nix builds run) is headless too — no interactive shell or console, just a build engine you debug through its logs. See **Security model** below for the full posture.
 - **Builder VM is headless**: there is no interactive shell into it. The builder VM exists solely to run `nix build` on behalf of `mvmctl build` / `mvmctl machine run`; `mvmctl bootstrap` optionally pre-fetches/builds its image ahead of time, but builds auto-bootstrap it on first use if you skip that step. On macOS 26+ Apple Silicon: a long-lived HVF builder VM with Nix + build tools. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. None of these start or SSH into a workload microVM — the builder VM and workload microVMs are always separate.
 - **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. Interactive access via `mvmctl console` (PTY-over-vsock, dev-mode only).
@@ -163,7 +162,7 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 - **Templates use dev_build path**: `mvmctl template build` runs `nix build` locally inside the builder VM (no ephemeral FC builder VMs).
 - **mvm-core stays whole**: orchestration types (tenant, pool, instance, agent, protocol) remain in mvm-core even though they're only used by mvmd. This avoids a third shared-types crate and keeps the facade dependency simple.
 - **No `clippy::too_many_arguments`**: `#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions in hand-written code (the only legitimate use is bindgen-generated FFI like `crates/deps/libkrun-sys/src/sys.rs`). When a function trips the lint, introduce a dedicated struct with a builder (Rust best practice) carrying those arguments and pass the built value. See AGENTS.md §"Clippy: Zero Warnings, Always".
-- **Reuse first — never reimplement what exists**: before writing anything, search the workspace (`rg`, the facade re-exports, the owning module) for a helper, type, trait impl, or crate that already does the job, and call it. Duplicated logic drifts and is this repo's most common bug source. If an existing helper is *almost* right, extend it — don't fork a second copy. Concrete standing rules: all `~/.mvm` paths go through `mvm-core::config` helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) — never build them inline with `std::env::var("HOME")` + `.join(...)` (that ignores `MVM_HOME` and breaks worktree isolation); shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
+- **Reuse first — never reimplement what exists**: before writing anything, search the workspace (`rg`, the facade re-exports, the owning module) for a helper, type, trait impl, or crate that already does the job, and call it. Duplicated logic drifts and is this repo's most common bug source. If an existing helper is _almost_ right, extend it — don't fork a second copy. Concrete standing rules: all `~/.mvm` paths go through `mvm-core::config` helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) — never build them inline with `std::env::var("HOME")` + `.join(...)` (that ignores `MVM_HOME` and breaks worktree isolation); shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
 - **Best-practice construction**: prefer many small single-purpose functions (each trivially unit-testable) over large branchy ones; use the **builder pattern** for types with more than a couple of (especially optional) fields instead of long positional constructors; express behavior that varies by backend/env/mode as a **trait with impls** (`VmBackend`, `ShellEnvironment`), not a `match` scattered across call sites; group related values into named config/params **structs** rather than threading bare arguments through layers; make illegal states unrepresentable with newtypes/enums over stringly-typed flags; and don't over-abstract (YAGNI) — reach for a trait/builder only when there's a real second case. If you can't write a focused test for a function, it's too big — split it. (See AGENTS.md §"Reuse First; Compose Small, Testable Units".)
 - **Source-checkout builds never depend on mvm-published artifacts**: when `mvmctl` is run from a source checkout of this repo (anywhere `find_dev_image_flake()` / `find_builder_vm_flake()` returns `Some`), every VM image is built locally from the in-repo flakes — both the builder VM image (`nix/images/builder-vm/`) and the user-facing image (user `--flake`, OCI images, `nix/images/runtime-overlay/`, etc.). The mvm-published prebuilts on GitHub releases are end-user infrastructure only; they are never a prerequisite for any source-checkout workflow. A contributor modifying `nix/images/builder-vm/flake.nix` must see their change the next time the builder VM boots — via `mvmctl bootstrap` or auto-bootstrap on the next build — with no release-pipeline round-trip. See ADR-007 §"Two artifact layers, two acquisition paths" for the resolution rule and ADR-007 §"Why the contributor path doesn't download" for the rationale.
 - **Host Nix is never used by mvmctl**, even when present: `mvmctl` does not shell out to a host `nix` binary, does not consult `nix-darwin`'s `linux-builder`, and does not honor `nix-daemon` URLs in any code path. Every Nix evaluation goes through a VM we launched; builds run inside that builder VM via libkrun (macOS) or Firecracker (Linux). The reason is determinism and consistency: the same `mvmctl` produces the same artifacts on every host regardless of what the host happens to have installed. A contributor with host Nix installed must not see different behavior from a contributor without it. This invariant supersedes ADR-004's "host Nix remains an opt-in power-user path" clause for everything inside `mvmctl`.
@@ -221,7 +220,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 
 1. **No host-fs access from a guest beyond explicit shares.** Per-service
    uid (W2.1), seccomp `standard` default (W1.1, W2.4), and `setpriv
-   --bounding-set=-all --no-new-privs` (W2.3) confine each service.
+--bounding-set=-all --no-new-privs` (W2.3) confine each service.
 2. **No guest binary can elevate to uid 0.** `setpriv --no-new-privs`
    in the launch path; `/etc/{passwd,group,nsswitch.conf}` are
    read-only bind-mounts so a compromised service can't mint a uid 0
@@ -299,12 +298,12 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    re-verified at fetch and at admit time.** Sprint 52 W2 +
    admit-time re-verify follow-on.
    `mvm_core::plan::bundle::read_and_verify_bundle`
-   + `mvm_core::plan::bundle::verify_plan_bundle` exercise the
-   rejection ladder on every PR: unknown-key, tampered manifest,
-   key_id mismatch, tampered artifact, missing artifact, unsafe
-   path, schema bump, pin-archive sha256 drift, pin-signature
-   drift. `mvmctl bundle fetch` round-trip + `admit_for_run` tests
-   assert refusal on pin-without-context and pin-archive mismatch.
+   - `mvm_core::plan::bundle::verify_plan_bundle` exercise the
+     rejection ladder on every PR: unknown-key, tampered manifest,
+     key_id mismatch, tampered artifact, missing artifact, unsafe
+     path, schema bump, pin-archive sha256 drift, pin-signature
+     drift. `mvmctl bundle fetch` round-trip + `admit_for_run` tests
+     assert refusal on pin-without-context and pin-archive mismatch.
 10. **No untrusted workload reaches the network unless explicitly
     admitted by policy.** Sprint 52 W3. `policy_default_is_deny_all`
     and `run_net_default_is_deny_all` (the ADR-001 row's witnesses)
@@ -314,33 +313,33 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     audit of DNS / vsock control-plane carve-out / Plan 104 broker
     channels as covert egress is tracked in Plan 111 Workstream A.
 11. **Every application-dep volume is hash-locked, attestation-checked,
-   CVE-scanned, SBOM-enumerated, and bound to the workload's audit
-   chain.** ADR-014 / Plan 73 Followups A + B.1/B.2/B.3 + C + D wire
-   this end-to-end: the builder VM (`mvm-host-vm-init` +
-   `LibkrunBuilderVm::run_build` Install arm) installs deps into a
-   sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
-   `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
-   hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
-   calls `mvm_sdk::compile::deps_audit::verify_sealed_volume` before
-   launch and refuses tampered volumes; `mvmctl up --prod` fails
-   closed on high/critical CVE findings or stub SBOM/CVE
-   (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
+    CVE-scanned, SBOM-enumerated, and bound to the workload's audit
+    chain.** ADR-014 / Plan 73 Followups A + B.1/B.2/B.3 + C + D wire
+    this end-to-end: the builder VM (`mvm-host-vm-init` +
+    `LibkrunBuilderVm::run_build` Install arm) installs deps into a
+    sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
+    `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
+    hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
+    calls `mvm_sdk::compile::deps_audit::verify_sealed_volume` before
+    launch and refuses tampered volumes; `mvmctl up --prod` fails
+    closed on high/critical CVE findings or stub SBOM/CVE
+    (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
    inspect` / `mvmctl deps audit` surface the sealed sidecars without
-   a VM spawn. The `app-deps-audit` job lives in
-   `.github/workflows/ci-full.yml` (Followup D), not `ci.yml` — that
-   workflow is `workflow_dispatch`-only, so this lane does **not**
-   gate every PR; it runs on manual dispatch. It exercises `mvmctl
+    a VM spawn. The `app-deps-audit` job lives in
+    `.github/workflows/ci-full.yml` (Followup D), not `ci.yml` — that
+    workflow is `workflow_dispatch`-only, so this lane does **not**
+    gate every PR; it runs on manual dispatch. It exercises `mvmctl
    build compile` on
-   `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
-   fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
-   asserts `mvmctl deps inspect --json` reports a well-formed report,
-   asserts the prod gate refuses the high-CVE fixture and the dev
-   gate admits it, and asserts a byte-flip on `cve.json` makes
-   inspect refuse via `verify_sealed_volume`. Full builder-VM round-trip
-   (real `uv pip install` + `pip-audit` inside the libkrun /
-   cloud-hypervisor builder VM) is still gated on Plan 72 W4/W5
-   cutover; the CI lane exercises every code path that doesn't
-   require a working microVM backend.
+    `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
+    fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
+    asserts `mvmctl deps inspect --json` reports a well-formed report,
+    asserts the prod gate refuses the high-CVE fixture and the dev
+    gate admits it, and asserts a byte-flip on `cve.json` makes
+    inspect refuse via `verify_sealed_volume`. Full builder-VM round-trip
+    (real `uv pip install` + `pip-audit` inside the libkrun /
+    cloud-hypervisor builder VM) is still gated on Plan 72 W4/W5
+    cutover; the CI lane exercises every code path that doesn't
+    require a working microVM backend.
 12. **Every host-side service the broker exposes is bound to a signed
     `ExecutionPlan.services` binding, enforced before handler
     dispatch, and audited via the chain-signed log.** Plan 104 W2 /
@@ -362,6 +361,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     authoritative. Payload-freedom for the stream plane's own audit
     entries is witnessed by
     `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
+
 13. **No raw secret value crosses the broker channel.**
     `host.secrets.v1` returns destination-bound, time-bound signed
     credentials only; raw secret bytes never leave the supervisor's
@@ -384,7 +384,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     allow-listed unpacker (`mvm_fs::oci::unpack::unpack_layer`),
     materializes an ext4 rootfs — by default in-process on the host
     via the memory-safe pure-Rust writer (`mvm_build::rootfs::
-    materialize_ext4_pure`; ADR-004 supersedes ADR-017's builder-VM
+materialize_ext4_pure`; ADR-004 supersedes ADR-017's builder-VM
     `mkfs` mechanism while preserving its roothash guarantee, and
     auto-falls-back to the builder VM for trees the writer can't
     faithfully emit, e.g. ones carrying `security.capability`
@@ -399,20 +399,20 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     drift, surfaced via `mvmctl trust audit verify`. `--prod` refuses
     mutable references before any network fetch
     (`crates/mvm-cli/src/commands/image/pull_core.rs::
-    prod_pull_requires_digest_pin_before_network` and
+prod_pull_requires_digest_pin_before_network` and
     `prod_run_image_requires_digest_pin_before_network` — `image` is a
     directory of modules, not a single `image.rs` file), demands an
     explicit registry policy, and requires cosign verification of the
     resolved digest before cache admission or boot. The OCI
     `unpack_layer` fuzz harness lives in
     `.github/workflows/security.yml`'s `fuzz` job (release-tag pushes
-    + nightly cron + manual dispatch); the
-    `oci-layer-unpack-adversarial`, `oci-digest-mismatch-reject`,
-    `oci-malformed-manifest`, `oci-mutable-tag-prod-reject`,
-    `oci-reproducibility`, and `oci-image-runner-smoke` lanes live in
-    `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
-    `workflow_dispatch`-only, so none of the six gate a PR; they run
-    on manual dispatch.
+    - nightly cron + manual dispatch); the
+      `oci-layer-unpack-adversarial`, `oci-digest-mismatch-reject`,
+      `oci-malformed-manifest`, `oci-mutable-tag-prod-reject`,
+      `oci-reproducibility`, and `oci-image-runner-smoke` lanes live in
+      `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
+      `workflow_dispatch`-only, so none of the six gate a PR; they run
+      on manual dispatch.
 15. **A sealed production microVM has no shell, no DevOnly guest-agent
     verbs, and no PTY.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
@@ -466,7 +466,7 @@ allowlist drops anything outside the agent and forward ranges
 
 Out of scope (named in ADR-001):
 
-- A malicious *host*. mvmctl trusts the host with the hypervisor and
+- A malicious _host_. mvmctl trusts the host with the hypervisor and
   private build keys.
 - Multi-tenant guests. One guest = one workload.
 - Hardware-backed key attestation.
@@ -512,6 +512,7 @@ clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
 those over raw cargo invocations.
 
 Every new module, type, or function needs test coverage:
+
 - Types: serde roundtrip, default values
 - Protocol/wire code: mock I/O roundtrip, tampered data rejection, error paths
 - CLI: integration tests in `tests/cli.rs` for help text and argument parsing

@@ -1,14 +1,25 @@
 [package]
 name = "mvm-sdk"
-description = "Build-time Rust SDK for mvm — declare workloads, emit canonical IR, manage addons. Ported from mvmforge-sdk + mvmforge-addon (SDK port plan)."
+description = "Rust SDK for mvm — build-time workload authoring, runtime record mode, and the in-guest host-services C-ABI cdylib loaded by language SDKs."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+# The normal Rust library (`lib`) is consumed by mvmctl and the build pipeline.
+# The `cdylib` output is the in-guest host-services FFI shared object the
+# Python/TypeScript SDKs dlopen; the nix package renames it to the stable
+# `libmvm_host_services.so` filename.
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 mvm-core = { workspace = true }
+# In-guest host-services FFI: drives `host.audit.v1` / `host.time.v1` /
+# `host.cost.v1` over the vsock broker. The broker client and vsock primitives
+# live in the guest-agent crate; mvm-sdk only holds the C-ABI veneer.
+mvm-agentd.workspace = true
 # The Workload IR itself (`mvm_sdk::ir` re-exports `mvm_contract::ir`
 # unchanged — see `src/lib.rs`). `schema` derives `JsonSchema` on the IR
 # types for `emit_schema`/`emit_addon_schema`; mvm-sdk already pulls
@@ -75,10 +86,6 @@ path = "src/bin/emit_runtime_schema.rs"
 # package-scoped, measured nothing here and reported it as clean.
 # Matches mvm-build and mvm-runtime.
 mvm-core = { workspace = true, features = ["test-support"] }
-# IR↔guest-parser contract test (runtime_json_contract): asserts the
-# IR's emitted runtime.json shapes match mvm-agentd's runtime_config
-# parser.
-mvm-agentd = { workspace = true }
 # Async tests for the subprocess MvmClient impl.
 tokio = { workspace = true, features = ["macros", "rt"] }
 

@@ -1,10 +1,11 @@
 # `libmvm_host_services.so` — the in-guest host-services FFI shared object.
 #
-# Built from `crates/mvm-host-services-ffi` (crate-type `cdylib`). Packaged in
-# the SDK sidecar at `/mvm/sdk/lib/` and loaded via `ctypes` / `koffi` by the
-# in-guest language SDKs (`mvm.audit.emit`, `mvm.host.time()`, ...).
-# It is the single JSON-in/JSON-out C ABI over `mvm_agentd::host_{audit,time,
-# cost}`, so every language SDK is a thin shim over this one object.
+# Built from the `mvm-sdk` crate's `cdylib` output and renamed to the stable
+# `libmvm_host_services.so` filename. Packaged in the SDK sidecar at
+# `/mvm/sdk/lib/` and loaded via `ctypes` / `koffi` by the in-guest language
+# SDKs (`mvm.audit.emit`, `mvm.host.time()`, ...). It is the single JSON-in/
+# JSON-out C ABI over `mvm_agentd::host_{audit,time,cost}`, so every language
+# SDK is a thin shim over this one object.
 #
 # Built for the workload rootfs's libc (the nixpkgs Linux platform = glibc,
 # matching `mvm-guest-agent`), not the static-musl builder-VM target — a
@@ -16,7 +17,7 @@
 }:
 
 pkgs.rustPlatform.buildRustPackage {
-  pname = "mvm-host-services-ffi";
+  pname = "mvm-sdk-cdylib";
   version = "0.17.0";
 
   src = mvmSrc;
@@ -25,23 +26,23 @@ pkgs.rustPlatform.buildRustPackage {
 
   unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
-  # Only the cdylib crate; the workspace's heavier members are not in its
-  # closure, so the artifact stays small.
+  # Build only mvm-sdk's library target, which produces both the Rust `lib`
+  # and the `cdylib`. The cdylib is renamed to the stable FFI filename below.
   cargoBuildFlags = [
-    "--package" "mvm-host-services-ffi"
+    "--package" "mvm-sdk"
     "--lib"
   ];
 
   # Tests run in the workspace's host-side `cargo test` lane.
   doCheck = false;
 
-  # `buildRustPackage` installs the cdylib to `$out/lib`; pin the canonical
-  # name so the overlay bake and the SDK loaders can both reference
-  # `$out/lib/libmvm_host_services.so` unconditionally.
+  # Cargo emits the cdylib as `libmvm_sdk.so` because the package name is
+  # `mvm-sdk`. The SDK bindings and the runtime overlay key on the stable
+  # `libmvm_host_services.so` name, so rename it during install.
   postInstall = ''
     mkdir -p $out/lib
     if [ ! -e $out/lib/libmvm_host_services.so ]; then
-      find target -name 'libmvm_host_services.so' -print -exec install -m0644 {} $out/lib/ \;
+      find target -name 'libmvm_sdk*.so' -print -exec install -m0644 {} $out/lib/libmvm_host_services.so \;
     fi
   '';
 
