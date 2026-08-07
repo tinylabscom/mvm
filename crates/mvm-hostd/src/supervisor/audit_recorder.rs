@@ -96,6 +96,14 @@ pub enum EventCategory {
     /// plan-bound. Recording echo under `flow` would mean either threading a
     /// plan into that process or silently dropping every entry.
     Icmp,
+    /// L3 tunnel gateway decisions. `l3.<verb>`.
+    ///
+    /// Its own category for the reason `icmp` and `dns` are: the gateway runs
+    /// as a per-machine process holding a plan *digest* and no
+    /// `ExecutionPlan`, and `flow` is mandatorily plan-bound. Recording a
+    /// tunnel decision under `flow` would mean either threading a plan into
+    /// that process or dropping every entry it makes.
+    L3,
     /// Workload-emitted audit entries via `host.audit.v1`. Distinct
     /// from system-emitted categories so the chain verifier can
     /// compute workload-asserted
@@ -121,6 +129,7 @@ impl EventCategory {
             Self::Audit => "audit",
             Self::Dns => "dns",
             Self::Icmp => "icmp",
+            Self::L3 => "l3",
             Self::WorkloadAudit => "workload_audit",
         }
     }
@@ -283,6 +292,7 @@ impl Recorder {
             EventCategory::Audit => &m.audit_audit_total,
             EventCategory::Dns => &m.audit_dns_total,
             EventCategory::Icmp => &m.audit_icmp_total,
+            EventCategory::L3 => &m.audit_l3_total,
             EventCategory::WorkloadAudit => &m.audit_workload_audit_total,
         };
         counter.fetch_add(1, Ordering::Relaxed);

@@ -15,7 +15,7 @@ use super::limits::{MAX_ERROR_DETAIL, MAX_QUEUES, MTU_V1, PROTOCOL_VERSION};
 /// Optional capabilities a peer may propose in `HELLO` and the host may
 /// grant in `CONFIG`. A bit set in `CONFIG` that was not offered in
 /// `HELLO` is a protocol error; a bit offered but not granted is simply
-/// off. Version 1 grants none of them.
+/// off.
 pub mod features {
     /// Peer can handle more than one data queue.
     pub const MULTI_QUEUE: u32 = 1 << 0;
@@ -25,8 +25,19 @@ pub mod features {
     /// rejected rather than ignored, so a feature bit a newer peer
     /// understands cannot be smuggled past an older one.
     pub const KNOWN: u32 = MULTI_QUEUE | IPV6;
-    /// What version 1 actually grants: nothing.
-    pub const GRANTED_V1: u32 = 0;
+
+    /// What the host grants, given what the guest offered and whether it
+    /// leased an IPv6 pair.
+    ///
+    /// Both halves are necessary. Granting a bit the guest did not offer
+    /// hands it an assignment it cannot apply; granting `IPV6` without a
+    /// lease would announce a family for which no address exists, and
+    /// nothing downstream could tell the difference from a real one.
+    ///
+    /// `MULTI_QUEUE` is never granted: version 1 opens one data queue.
+    pub const fn granted(offered: u32, assigning_v6: bool) -> u32 {
+        if assigning_v6 { offered & IPV6 } else { 0 }
+    }
 }
 
 /// Why a session is being torn down.
@@ -111,10 +122,15 @@ pub const HELLO_LEN: usize = 1 + 4 + 2;
 
 impl Hello {
     /// What a version-1 guest proposes.
+    ///
+    /// It offers IPv6 because it can apply one: the guest agent brings the
+    /// v6 half up over rtnetlink when the host assigns it. Offering is not
+    /// asking — the host grants the bit only for a machine it actually
+    /// leased an IPv6 pair to.
     pub fn v1() -> Self {
         Self {
             version: PROTOCOL_VERSION,
-            features: 0,
+            features: features::IPV6,
             max_queues: 1,
         }
     }
@@ -165,9 +181,9 @@ pub struct Ipv4Config {
     pub dns: [u8; 4],
 }
 
-/// An assigned IPv6 configuration. Reserved: version 1 never assigns one,
-/// because the workload kernel ships without IPv6. The layout exists so
-/// enabling it later needs no wire change.
+/// An assigned IPv6 configuration. Present for a machine whose plan asked
+/// for IPv6 and whose host leased it a pair; absent otherwise, which is
+/// still the ordinary case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv6Config {
     pub address: [u8; 16],
@@ -286,6 +302,13 @@ impl Config {
             return Err(MessageError::UnknownFeatureBits(
                 features & !features::KNOWN,
             ));
+        }
+        // The granted bit and the assignment are one statement. Letting
+        // them disagree would leave the guest and the host with different
+        // beliefs about which families the session carries, and only one
+        // of them enforces anti-spoofing.
+        if (features & features::IPV6 != 0) != v6.is_some() {
+            return Err(MessageError::FeatureAssignmentMismatch);
         }
         if let Some(v4) = &v4
             && (v4.prefix_len > 32)
@@ -479,6 +502,9 @@ pub enum MessageError {
     /// `CONFIG` assigned neither an IPv4 nor an IPv6 address.
     #[error("config assigns no address")]
     ConfigAssignsNoAddress,
+    /// `CONFIG`'s IPv6 feature bit and its IPv6 assignment disagree.
+    #[error("config's ipv6 feature bit does not match its ipv6 assignment")]
+    FeatureAssignmentMismatch,
     /// `CONFIG` named an MTU version 1 does not offer.
     #[error("unsupported mtu {0}")]
     UnsupportedMtu(u16),
@@ -533,7 +559,7 @@ mod tests {
             v6: None,
             mtu: MTU_V1,
             queue_count: 1,
-            features: features::GRANTED_V1,
+            features: 0,
             policy_epoch: 42,
         }
     }
@@ -754,9 +780,56 @@ mod tests {
         ));
     }
 
+    /// A grant is the intersection of what the guest can apply and what
+    /// the host actually leased. Granting a bit the guest never offered is
+    /// a protocol error; granting one for a family the host did not lease
+    /// would name an address that does not exist.
     #[test]
-    fn version_one_grants_no_features() {
-        assert_eq!(features::GRANTED_V1, 0);
+    fn ipv6_is_granted_only_when_it_was_both_offered_and_leased() {
+        assert_eq!(features::granted(features::IPV6, true), features::IPV6);
+        assert_eq!(features::granted(features::IPV6, false), 0);
+        assert_eq!(features::granted(0, true), 0);
+        assert_eq!(features::granted(0, false), 0);
+        // An offer of something else is not an offer of IPv6, and nothing
+        // outside the IPv6 bit is granted by this version.
+        assert_eq!(features::granted(features::MULTI_QUEUE, true), 0);
+        assert_eq!(
+            features::granted(features::MULTI_QUEUE | features::IPV6, true),
+            features::IPV6
+        );
+    }
+
+    /// The guest half of the handshake has to say it can apply an IPv6
+    /// assignment, or the host is obliged to withhold one.
+    #[test]
+    fn a_version_one_guest_offers_ipv6() {
+        assert_eq!(Hello::v1().features & features::IPV6, features::IPV6);
+    }
+
+    /// The feature bits and the assignment are two statements about the
+    /// same thing. A frame where they disagree is refused rather than
+    /// resolved in either direction.
+    #[test]
+    fn a_config_whose_ipv6_bit_disagrees_with_its_assignment_is_refused() {
+        let mut claims_v6 = v4_config();
+        claims_v6.features = features::IPV6;
+        assert!(matches!(
+            Config::decode(&claims_v6.encode()),
+            Err(MessageError::FeatureAssignmentMismatch)
+        ));
+
+        let mut silent_v6 = v4_config();
+        silent_v6.v6 = Some(Ipv6Config {
+            address: [0x20; 16],
+            prefix_len: 126,
+            peer: [0x21; 16],
+            dns: [0x22; 16],
+        });
+        silent_v6.features = 0;
+        assert!(matches!(
+            Config::decode(&silent_v6.encode()),
+            Err(MessageError::FeatureAssignmentMismatch)
+        ));
     }
 
     #[test]

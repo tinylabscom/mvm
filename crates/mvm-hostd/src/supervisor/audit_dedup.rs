@@ -182,6 +182,16 @@ impl RetryStormSuppressor {
         out
     }
 
+    /// Whether this bucket is already open.
+    ///
+    /// For callers that cap how many buckets they will let a hostile peer
+    /// open: without it, a table at its cap cannot tell "one more key I am
+    /// already tracking" from "a key that would grow the table", and would
+    /// have to refuse both.
+    pub fn contains(&self, key: &DedupKey) -> bool {
+        self.seen.contains_key(key)
+    }
+
     /// Number of buckets currently being tracked.
     pub fn len(&self) -> usize {
         self.seen.len()

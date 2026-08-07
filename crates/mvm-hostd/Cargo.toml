@@ -117,6 +117,17 @@ ed25519-dalek = { workspace = true, features = ["rand_core"] }
 etherparse = { workspace = true }
 sysinfo = { version = "0.30", default-features = false }
 ipnet.workspace = true
+# Readiness polling for the per-VM L3 gateway's drive loop: the guest data
+# channel and the datapath are independent sources of work.
+mio = { workspace = true }
+# Non-blocking host `connect()` for the userspace datapath's deferred handshake.
+# `all` for the TCP keepalive tuning knobs (`with_interval`, `with_retries`)
+# the userspace datapath sets on every flow's host socket. Declared here
+# rather than relied on: without it the crate builds only while some
+# unrelated transitive dependency happens to enable the feature, and the
+# failure when that changes names a missing method with no hint where the
+# feature went.
+socket2 = { workspace = true, features = ["all"] }
 # custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
 # carries no hickory and stays on the workspace 1.85 floor.
 hickory-resolver = { workspace = true, features = ["tokio"], optional = true }
@@ -144,6 +155,31 @@ zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# `proto-ipv6` is enabled so the userspace datapath can emit an IPv6 reset,
+# not to give the guest an IPv6 path.
+#
+# What keeps that surface dark is exactly one thing: `mvm_net::l3::admit`'s
+# `admit_outbound` denies `meta.version != 4` outright, so no IPv6 packet a
+# guest writes ever becomes an `AdmittedPacket`, and `send_to_network` takes
+# nothing else. Relax that check and this surface goes live the same day.
+#
+# It is specifically NOT kept dark by the interface having no IPv6 address.
+# In smoltcp 0.13.1 `process_ipv6` runs `process_hopbyhop` before any
+# address check, so an option chain is parsed — and can answer with an
+# ICMPv6 ParamProblem — with no IPv6 address configured; and the
+# "no assigned address" drop is not total, since `::1` passes via
+# `is_loopback()` and `ff02::1` passes `has_multicast_group` even with the
+# `multicast` feature off, both reaching `process_nxt_hdr` and socket
+# dispatch. Do not weaken the admission guard on the strength of the
+# interface configuration.
+#
+# `alloc` is on because every established flow owns its socket set and its
+# TCP ring buffers. Without it smoltcp can only borrow that storage for the
+# socket set's own lifetime, which for per-flow owned state leaves a
+# self-referential struct or a leaked allocation per connection. It adds no
+# crate to the tree: it turns on the owned-slice arm of `managed`, which is
+# already there as smoltcp's own dependency.
+smoltcp = { version = "0.13.1", default-features = false, features = ["alloc", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

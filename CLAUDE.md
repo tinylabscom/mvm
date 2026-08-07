@@ -242,9 +242,16 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    exercises the universal agent's runtime profile and signed grant boundary
    (W4.3). The unit and conformance tests enumerate the complete DevOnly
    request set.
-5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
-   targets at `crates/mvm-agentd/fuzz/` cover `GuestRequest` and
-   `AuthenticatedFrame` (W4.2). Plan 88 W6 adds
+5. **Vsock framing + supervisor-config JSON + the datapath ingress are
+   fuzzed.** `cargo-fuzz` targets at `crates/mvm-agentd/fuzz/` cover
+   `GuestRequest` and `AuthenticatedFrame` (W4.2).
+   `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_datapath_ingress.rs` covers the
+   userspace socket datapath's guest-facing ingress: IP admission (IPv4 and
+   IPv6, including the bounded extension-header walk), the datapath's own
+   re-read of an admitted packet, and the per-flow smoltcp stack guest bytes
+   reach through `deliver_from_guest`. It does not cover the privileged Linux
+   TUN datapath, which forwards whole packets rather than parsing them.
+   Plan 88 W6 adds
    `crates/deps/libkrun-sys/fuzz/fuzz_targets/fuzz_supervisor_config.rs` against the
    host-side `SupervisorConfig` parser the `mvm-libkrun-supervisor`
    binary reads on stdin. `#[serde(deny_unknown_fields)]` on every

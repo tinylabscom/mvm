@@ -19,8 +19,8 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 
 use mvm_contract::l3::{
-    Config, ErrorCode, ErrorMessage, Hello, Ipv4Config, MessageType, ParsedIpPacket, Ready,
-    Shutdown, ShutdownReason, frame, ip, limits, message,
+    Config, ErrorCode, ErrorMessage, Hello, Ipv4Config, Ipv6Config, MessageType, ParsedIpPacket,
+    Ready, Shutdown, ShutdownReason, frame, ip, limits, message,
 };
 use mvm_contract::protocol::dns::{DnsRcode, DnsRecordType, decode_query, encode_response};
 use mvm_net::channel::VmInstanceIdentity;
@@ -30,10 +30,11 @@ use mvm_net::l3::{
 };
 
 use super::datapath::{
-    DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
+    DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, InboundDrain,
+    L3Datapath, V6Link,
 };
 use super::metrics::GatewayMetrics;
-use super::packet::{build_udp_v4, udp_v4_payload};
+use super::packet::{build_udp_v4, build_udp_v6};
 
 /// How many packets may sit in either direction's queue before the gateway
 /// starts dropping.
@@ -46,6 +47,24 @@ pub const DEFAULT_QUEUE_DEPTH: usize = 256;
 
 /// Ceiling on DNS queries per second for one machine.
 pub const DEFAULT_DNS_QPS: u32 = 50;
+
+/// Packets one [`Gateway::poll_inbound`] pass may take off the datapath.
+///
+/// A burst that arrives faster than the guest can be handed it must not be
+/// able to hold the drive loop inside this drain and starve the guest-facing
+/// side. The guest-facing read has carried the same budget since it shipped;
+/// this is that treatment pointed the other way, and the number matches
+/// because a guest read yields about one packet too.
+///
+/// Not a throughput ceiling: the pass reports [`InboundDrain::Backlogged`]
+/// when the budget cuts it off, and the loop comes straight back rather than
+/// waiting on a readiness edge it has already spent.
+pub const MAX_INBOUND_PACKETS_PER_PASS: usize = 32;
+
+/// TTL, or hop limit, on a synthesized resolver reply. The guest is one hop
+/// away over the tunnel's own link, so this is only ever decremented by the
+/// guest's own receive path.
+const DNS_REPLY_TTL: u8 = 64;
 
 /// Everything the gateway needs to serve one machine.
 pub struct GatewayConfig {
@@ -93,6 +112,11 @@ impl GatewayConfig {
                 udp: true,
                 controlled_dns: true,
                 declared_ingress: true,
+                // The lease is the request. A machine holding an IPv6 pair
+                // was admitted for the family, so a backend that cannot
+                // carry it must refuse the session rather than let the
+                // guest configure an address whose packets go nowhere.
+                ipv6_flows: lease.gateway_v6.is_some(),
                 ..ForwardingCapabilities::NONE
             },
             machine_id,
@@ -163,6 +187,13 @@ pub enum GatewayEvent {
     RateLimited,
     /// The session ended and its resources were released.
     CleanedUp { session: SessionId },
+}
+
+/// One pass of [`Gateway::poll_inbound`].
+#[derive(Debug)]
+pub struct InboundPass {
+    pub events: Vec<GatewayEvent>,
+    pub drain: InboundDrain,
 }
 
 /// Which way a packet was going.
@@ -284,7 +315,25 @@ impl Gateway {
             gateway: config.lease.gateway,
             guest: config.lease.guest,
             prefix_len: config.lease.prefix_len(),
+            // One lease, read once. A backend addressing a guest in a family
+            // the lease never granted would be addressing somewhere nothing
+            // admitted.
+            v6: config
+                .lease
+                .gateway_v6
+                .zip(config.lease.guest_v6)
+                .map(|(gateway, guest)| V6Link {
+                    gateway,
+                    guest,
+                    prefix_len: config.lease.prefix_len_v6(),
+                }),
             mtu: config.policy.mtu,
+            // Copied out before the table moves into the admitter below. A
+            // backend that serves ingress by binding a listener needs the
+            // same declarations admission will check inbound packets
+            // against — one source, read twice, rather than two lists that
+            // can disagree about which ports are exposed.
+            ingress: config.ingress.iter().copied().collect(),
         })?;
 
         let admitter = L3Admitter::new(
@@ -354,6 +403,21 @@ impl Gateway {
         self.datapath.as_ref()
     }
 
+    /// Drive the datapath's clock-bound work: connects the kernel has
+    /// decided, transport timers, expiries.
+    ///
+    /// Forwarded rather than handing the handle out mutably. A caller
+    /// holding `&mut dyn DatapathHandle` is one standing beside the
+    /// admitter, and nothing outside this gateway needs that in order to
+    /// make time pass.
+    ///
+    /// Passes the datapath's own [`InboundDrain`] through: whether a pass
+    /// left work behind is the caller's business, since the caller is what
+    /// decides whether to wait.
+    pub fn service_datapath(&mut self, now_millis: u64) -> Result<InboundDrain, DatapathError> {
+        self.datapath.service(now_millis)
+    }
+
     /// Handle one complete control frame from the guest.
     ///
     /// Returns the bytes to write back on the control connection, plus what
@@ -381,7 +445,23 @@ impl Gateway {
                         events,
                     ));
                 }
-                let config = self.assign_config();
+                // A machine leased an IPv6 pair was admitted for the
+                // family. A guest that cannot apply one leaves the host
+                // enforcing anti-spoofing against an address nothing
+                // configured, so the session is refused rather than
+                // quietly downgraded to what the plan did not ask for.
+                if self.admitter.lease().gateway_v6.is_some()
+                    && hello.features & message::features::IPV6 == 0
+                {
+                    return Ok((
+                        self.error_frame(
+                            ErrorCode::FeatureUnsupported,
+                            "machine was leased an ipv6 pair the guest did not offer to apply",
+                        ),
+                        events,
+                    ));
+                }
+                let config = self.assign_config(hello.features);
                 self.state = GatewayState::AwaitingReady;
                 Ok((self.encode(MessageType::Config, &config.encode()), events))
             }
@@ -534,25 +614,36 @@ impl Gateway {
         events
     }
 
-    /// Drain whatever the host network has for this machine, admit it, and
-    /// queue the survivors for the guest. Returns what happened.
-    pub fn poll_inbound(&mut self, now_millis: u64) -> Vec<GatewayEvent> {
+    /// Take up to one pass's worth of what the host network has for this
+    /// machine, admit it, and queue the survivors for the guest.
+    ///
+    /// Bounded by [`MAX_INBOUND_PACKETS_PER_PASS`], and it says so when the
+    /// bound is what stopped it. Draining to `WouldBlock` would let a burst
+    /// hold the caller here while the guest-facing side went unserviced —
+    /// the starvation the guest-facing drain's own budget exists to prevent,
+    /// pointed the other way. A guest picks the destinations that reply, so
+    /// it has a hand on the rate.
+    pub fn poll_inbound(&mut self, now_millis: u64) -> InboundPass {
         let mut events = Vec::new();
-        loop {
+        let mut drain = InboundDrain::Backlogged;
+        for _ in 0..MAX_INBOUND_PACKETS_PER_PASS {
             let mut buf = std::mem::take(&mut self.recv_buf);
             let n = match self.datapath.recv_from_network(&mut buf) {
                 Ok(0) => {
                     self.recv_buf = buf;
+                    drain = InboundDrain::Idle;
                     break;
                 }
                 Ok(n) => n,
                 Err(DatapathError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     self.recv_buf = buf;
+                    drain = InboundDrain::Idle;
                     break;
                 }
                 Err(_) => {
                     self.metrics.datapath_errors += 1;
                     self.recv_buf = buf;
+                    drain = InboundDrain::Idle;
                     break;
                 }
             };
@@ -581,7 +672,7 @@ impl Gateway {
                 }
             }
         }
-        events
+        InboundPass { events, drain }
     }
 
     /// Take everything queued for the guest's data connection.
@@ -631,8 +722,26 @@ impl Gateway {
     }
 
     /// The configuration this gateway assigns. Every value is host-chosen.
-    fn assign_config(&self) -> Config {
+    ///
+    /// `offered` is what the guest proposed in `HELLO`; the IPv6 half is
+    /// assigned only where the lease and the offer agree, so the guest is
+    /// never handed an assignment it said it cannot apply.
+    fn assign_config(&self, offered: u32) -> Config {
         let lease = self.admitter.lease();
+        let v6 = lease
+            .gateway_v6
+            .zip(lease.guest_v6)
+            .map(|(gateway, guest)| {
+                Ipv6Config {
+                    address: guest.octets(),
+                    prefix_len: lease.prefix_len_v6(),
+                    peer: gateway.octets(),
+                    // The resolver is the gateway in this family too, so a
+                    // guest that prefers IPv6 still resolves through the
+                    // host-terminated resolver rather than around it.
+                    dns: gateway.octets(),
+                }
+            });
         Config {
             v4: Some(Ipv4Config {
                 address: lease.guest.octets(),
@@ -643,10 +752,10 @@ impl Gateway {
                 // terminates, which is what makes domain rules enforceable.
                 dns: lease.gateway.octets(),
             }),
-            v6: None,
+            v6,
             mtu: self.admitter.config().mtu,
             queue_count: limits::QUEUE_COUNT_V1,
-            features: message::features::GRANTED_V1,
+            features: message::features::granted(offered, v6.is_some()),
             policy_epoch: self.admitter.config().policy_epoch,
         }
     }
@@ -676,7 +785,10 @@ impl Gateway {
             });
             return events;
         }
-        let Some(payload) = udp_v4_payload(packet) else {
+        // The protocol crate's extractor rather than this module's v4-only
+        // one: a query may arrive in either family, and it has already
+        // structurally validated this packet.
+        let Some(payload) = ip::udp_payload(packet, meta) else {
             self.metrics.dns_denied += 1;
             events.push(GatewayEvent::DnsDenied {
                 name: String::new(),
@@ -742,19 +854,26 @@ impl Gateway {
         };
 
         // The reply comes from the gateway address, which inbound admission
-        // recognizes as host-originated.
+        // recognizes as host-originated — and in the family the query
+        // arrived in, since that is the only one the guest is listening on
+        // for this exchange.
         let lease = *self.admitter.lease();
         let guest_port = meta.src_port.unwrap_or(0);
         self.ip_id = self.ip_id.wrapping_add(1);
-        let reply = build_udp_v4(
-            lease.gateway,
-            lease.guest,
-            53,
-            guest_port,
-            &response,
-            64,
-            self.ip_id,
-        );
+        let reply = match (lease.gateway_v6, lease.guest_v6, meta.src) {
+            (Some(gateway), Some(guest), IpAddr::V6(_)) => {
+                build_udp_v6(gateway, guest, 53, guest_port, &response, DNS_REPLY_TTL)
+            }
+            _ => build_udp_v4(
+                lease.gateway,
+                lease.guest,
+                53,
+                guest_port,
+                &response,
+                DNS_REPLY_TTL,
+                self.ip_id,
+            ),
+        };
         if reply.len() <= self.admitter.config().mtu as usize {
             self.queue_to_guest(&reply);
         } else {
@@ -891,16 +1010,63 @@ pub fn belongs_to(lease: &AddressLease, addr: Ipv4Addr) -> bool {
 mod tests {
     use super::*;
     use crate::netd::datapath::LoopbackDatapath;
+    use crate::netd::test_packets::{tcp, v4_packet};
+    use crate::netd::userspace::UserspaceSocketDatapath;
     use mvm_contract::l3::proto;
     use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
-    use mvm_net::l3::{AddressAllocator, IngressMapping};
+    use mvm_net::l3::{AddressAllocator, AdmittedPacket, IngressMapping};
     use std::sync::Arc;
+    use std::time::Duration;
 
     const REMOTE: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
     const SESSION: SessionId = SessionId(0x1122_3344_5566_7788);
 
     fn lease() -> AddressLease {
         AddressAllocator::with_defaults().allocate().unwrap()
+    }
+
+    use std::net::Ipv6Addr;
+
+    const GATEWAY_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 1);
+    const GUEST_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xc9, 0, 0, 0, 0, 0, 2);
+
+    /// A minimal well-formed IPv6 packet carrying `payload`, with no
+    /// extension headers.
+    fn v6_packet(protocol: u8, src: Ipv6Addr, dst: Ipv6Addr, payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8; 40];
+        p[0] = 0x60;
+        p[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        p[6] = protocol;
+        p[7] = 64;
+        p[8..24].copy_from_slice(&src.octets());
+        p[24..40].copy_from_slice(&dst.octets());
+        p.extend_from_slice(payload);
+        p
+    }
+
+    /// A backend that carries everything except IPv6 flows — the shape the
+    /// Linux TUN datapath reports until its v6 half lands.
+    struct V4OnlyDatapath;
+
+    impl L3Datapath for V4OnlyDatapath {
+        fn open(
+            &self,
+            _req: &DatapathRequest,
+        ) -> Result<Box<dyn crate::netd::datapath::DatapathHandle>, DatapathError> {
+            LoopbackDatapath::sink().open(_req)
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities {
+                arbitrary_ipv6: false,
+                ipv6_flows: false,
+                ..ForwardingCapabilities::FULL_L3
+            }
+        }
     }
 
     fn rule(net: &str, port: u16) -> CanonicalRule {
@@ -949,27 +1115,6 @@ mod tests {
         let ready_frame = frame::encode(MessageType::Ready, SESSION.0, 0, &ready.encode()).unwrap();
         let (_, events) = gw.handle_control_frame(&ready_frame, 1).unwrap();
         assert!(matches!(events[0], GatewayEvent::TunnelReady { .. }));
-    }
-
-    fn v4_packet(protocol: u8, src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
-        let total = 20 + payload.len();
-        let mut p = vec![0u8; 20];
-        p[0] = 0x45;
-        p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
-        p[9] = protocol;
-        p[12..16].copy_from_slice(&src.octets());
-        p[16..20].copy_from_slice(&dst.octets());
-        p.extend_from_slice(payload);
-        p
-    }
-
-    fn tcp(src_port: u16, dst_port: u16, flags: u8) -> Vec<u8> {
-        let mut t = vec![0u8; 20];
-        t[0..2].copy_from_slice(&src_port.to_be_bytes());
-        t[2..4].copy_from_slice(&dst_port.to_be_bytes());
-        t[12] = 0x50;
-        t[13] = flags;
-        t
     }
 
     #[test]
@@ -1116,12 +1261,186 @@ mod tests {
         let wire = frame::encode(MessageType::Packet, SESSION.0, 0, &pkt).unwrap();
         gw.ingest_data_bytes(&wire, 2).unwrap();
 
-        let events = gw.poll_inbound(3);
+        let pass = gw.poll_inbound(3);
         assert!(
-            matches!(events[0], GatewayEvent::InboundDelivered { .. }),
-            "{events:?}"
+            matches!(pass.events[0], GatewayEvent::InboundDelivered { .. }),
+            "{:?}",
+            pass.events
         );
         assert_eq!(gw.take_guest_frames().len(), 1);
+    }
+
+    /// A datapath whose inbound queue the test fills, so one pass meets far
+    /// more than it is allowed to take.
+    ///
+    /// `LoopbackDatapath` cannot stand in: it produces at most one reply per
+    /// packet the guest sent, so a burst larger than the guest's own traffic
+    /// is unreachable through it.
+    #[derive(Clone, Default)]
+    struct BurstNetwork {
+        inbound: Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>,
+    }
+
+    impl BurstNetwork {
+        fn deliver(&self, packet: Vec<u8>) {
+            self.inbound
+                .lock()
+                .expect("inbound queue")
+                .push_back(packet);
+        }
+
+        /// Packets the network is still holding.
+        fn queued(&self) -> usize {
+            self.inbound.lock().expect("inbound queue").len()
+        }
+    }
+
+    impl L3Datapath for BurstNetwork {
+        fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+            Ok(Box::new(self.clone()))
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities::FULL_L3
+        }
+    }
+
+    impl DatapathHandle for BurstNetwork {
+        fn send_to_network(&mut self, _packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
+            match self.inbound.lock().expect("inbound queue").pop_front() {
+                Some(packet) => {
+                    let n = packet.len().min(buf.len());
+                    buf[..n].copy_from_slice(&packet[..n]);
+                    Ok(n)
+                }
+                None => Err(DatapathError::Io(std::io::Error::from(
+                    std::io::ErrorKind::WouldBlock,
+                ))),
+            }
+        }
+
+        fn close(&mut self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn description(&self) -> String {
+            "a host network holding a burst the test queued".to_string()
+        }
+    }
+
+    /// The defect this pins: the drain ran until the datapath said
+    /// `WouldBlock`, so a burst was taken in full before the pass returned
+    /// to the guest-facing side. The guest-facing read has had a budget and
+    /// a backlog report since it shipped; this is the same treatment
+    /// pointed the other way.
+    #[test]
+    fn the_inbound_drain_stops_at_its_budget_and_says_so() {
+        let dp = BurstNetwork::default();
+        let mut gw = open_443(&dp);
+        handshake(&mut gw);
+        let guest = gw.admitter().lease().guest;
+        // Unsolicited, so each packet is refused rather than delivered: the
+        // budget is spent per packet the drain takes off the datapath, and a
+        // refusal costs the same pass as a delivery.
+        let burst = MAX_INBOUND_PACKETS_PER_PASS * 3;
+        for _ in 0..burst {
+            dp.deliver(v4_packet(proto::TCP, REMOTE, guest, &tcp(443, 50000, 0)));
+        }
+
+        for pass in 0..3 {
+            let taken = gw.poll_inbound(3);
+            assert_eq!(
+                taken.events.len(),
+                MAX_INBOUND_PACKETS_PER_PASS,
+                "pass {pass} must take its budget and no more"
+            );
+            assert_eq!(
+                taken.drain,
+                InboundDrain::Backlogged,
+                "a pass its budget cut off has to say so, or the rest waits for \
+                 a readiness edge that has already been spent"
+            );
+            assert_eq!(
+                dp.queued(),
+                burst - MAX_INBOUND_PACKETS_PER_PASS * (pass + 1),
+                "the packets the budget cut off must still be on the datapath, \
+                 not dropped"
+            );
+        }
+        let after = gw.poll_inbound(3);
+        assert!(
+            after.events.is_empty(),
+            "the burst is exhausted, so the pass after it takes nothing"
+        );
+        assert_eq!(after.drain, InboundDrain::Idle);
+    }
+
+    /// A datapath that always says its own bound cut the pass short.
+    ///
+    /// The report belongs to the datapath — a userspace one raises it when a
+    /// flow's host-to-guest pump stops at its byte budget — and the driver
+    /// that decides whether to wait sits above the gateway, so the gateway
+    /// has to carry it rather than swallow it.
+    #[derive(Clone, Default)]
+    struct BackloggedNetwork;
+
+    impl L3Datapath for BackloggedNetwork {
+        fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+            Ok(Box::new(self.clone()))
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities::FULL_L3
+        }
+    }
+
+    impl DatapathHandle for BackloggedNetwork {
+        fn send_to_network(&mut self, _packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn recv_from_network(&mut self, _buf: &mut [u8]) -> Result<usize, DatapathError> {
+            Err(DatapathError::Io(std::io::Error::from(
+                std::io::ErrorKind::WouldBlock,
+            )))
+        }
+
+        fn service(&mut self, _now_millis: u64) -> Result<InboundDrain, DatapathError> {
+            Ok(InboundDrain::Backlogged)
+        }
+
+        fn close(&mut self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn description(&self) -> String {
+            "a host network whose every service pass ends backlogged".to_string()
+        }
+    }
+
+    #[test]
+    fn a_backlogged_service_pass_reaches_the_caller_that_decides_to_wait() {
+        let dp = BackloggedNetwork;
+        let mut gw = open_443(&dp);
+        handshake(&mut gw);
+        assert_eq!(
+            gw.service_datapath(3).expect("service"),
+            InboundDrain::Backlogged,
+            "the gateway may not swallow a datapath's backlog: it is the \
+             driver above that decides whether to wait, not this"
+        );
     }
 
     #[test]
@@ -1169,6 +1488,88 @@ mod tests {
             gw.admitter_mut().admit_inbound(&inbound, 5),
             InboundVerdict::Deliver(_)
         ));
+    }
+
+    /// Drive the gateway the way its loop does — service the datapath,
+    /// then drain what it produced — until `ready` holds. Bounded: a
+    /// condition that never comes true must fail an assertion, never hang.
+    fn drive_gateway_until(gw: &mut Gateway, ready: impl Fn(&Gateway) -> bool) -> bool {
+        for pass in 0..200u64 {
+            gw.service_datapath(pass).expect("service");
+            gw.poll_inbound(pass);
+            if ready(gw) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+
+    /// **Default-deny holds across the seam, for a real inbound datagram.**
+    ///
+    /// The userspace datapath binds a host listener because the plan
+    /// declared a mapping — but binding is not admitting. Every datagram
+    /// that listener produces leaves through the datapath's read path and
+    /// goes back through `admit_inbound`, which refuses one whose guest
+    /// port has no declared mapping. Withdrawing the declaration stops
+    /// delivery while the socket is still bound and still receiving, which
+    /// is the only arrangement in which "the datapath cannot smuggle an
+    /// undeclared delivery" means anything: the packet exists, it reaches
+    /// the seam, and the seam is what turns it away.
+    #[test]
+    fn an_inbound_datagram_reaches_the_guest_only_while_its_mapping_is_declared() {
+        let host_port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .expect("probe a free port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut config =
+            GatewayConfig::new("vm-a", "sha256:plan", lease(), L3PolicyConfig::default());
+        config
+            .ingress
+            .declare(IngressMapping::udp(loopback, host_port, 5140))
+            .expect("declare a datagram mapping");
+        let dp = UserspaceSocketDatapath::new();
+        let mut gw = Gateway::open(config, SESSION, &dp, Arc::new(StaticResolver::new()))
+            .expect("the backend advertises declared ingress, so this plan is servable");
+        handshake(&mut gw);
+
+        let declared = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a peer");
+        declared
+            .send_to(b"declared", (Ipv4Addr::LOCALHOST, host_port))
+            .expect("a peer datagram toward the declared mapping");
+        assert!(
+            drive_gateway_until(&mut gw, |g| g.metrics().packets_ingress > 0),
+            "a datagram for a declared mapping must reach the guest, or the refusal \
+             below proves nothing"
+        );
+        assert_eq!(gw.metrics().denies_for(DenyCode::UnsolicitedInbound), 0);
+
+        gw.admitter_mut()
+            .ingress_mut()
+            .withdraw(loopback, host_port);
+
+        // A second peer, deliberately. The first one's datagram opened a
+        // flow-table entry, so anything further from that exact 4-tuple is
+        // return traffic and would be admitted on the flow rather than on
+        // the declaration — which would make this assert nothing.
+        let stranger = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a second peer");
+        stranger
+            .send_to(b"undeclared", (Ipv4Addr::LOCALHOST, host_port))
+            .expect("send");
+        assert!(
+            drive_gateway_until(&mut gw, |g| g
+                .metrics()
+                .denies_for(DenyCode::UnsolicitedInbound)
+                > 0),
+            "a datagram whose guest port is no longer declared must be refused and counted"
+        );
+        assert_eq!(
+            gw.metrics().packets_ingress,
+            1,
+            "and nothing beyond the declared one reached the guest"
+        );
     }
 
     // ---- DNS --------------------------------------------------------
@@ -1226,6 +1627,57 @@ mod tests {
         let wire = frame::encode(MessageType::Packet, SESSION.0, 0, &pkt).unwrap();
         let events = gw.ingest_data_bytes(&wire, 11).unwrap();
         assert!(matches!(events[0], GatewayEvent::FlowAdmitted { .. }));
+    }
+
+    /// A query arriving over IPv6 has to be answered over IPv6. The reply
+    /// is built by the gateway, not by a stack that would have picked the
+    /// family for it, so a v4-only builder would leave a dual-stack guest
+    /// waiting on an answer that was never addressed to it.
+    #[test]
+    fn a_v6_dns_query_is_answered_from_the_v6_gateway_address() {
+        let dp = LoopbackDatapath::sink();
+        let resolver =
+            Arc::new(StaticResolver::new().with("api.example.com", &[IpAddr::V4(REMOTE)], 60));
+        let mut gw = Gateway::open(
+            GatewayConfig::new(
+                "vm-a",
+                "sha256:plan",
+                lease().with_v6(GATEWAY_V6, GUEST_V6),
+                L3PolicyConfig::default(),
+            ),
+            SESSION,
+            &dp,
+            resolver,
+        )
+        .unwrap();
+        handshake(&mut gw);
+
+        let query = dns_query("api.example.com");
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&40000u16.to_be_bytes());
+        udp.extend_from_slice(&53u16.to_be_bytes());
+        udp.extend_from_slice(&((8 + query.len()) as u16).to_be_bytes());
+        udp.extend_from_slice(&[0, 0]);
+        udp.extend_from_slice(&query);
+        let packet = v6_packet(proto::UDP, GUEST_V6, GATEWAY_V6, &udp);
+
+        let wire = frame::encode(MessageType::Packet, SESSION.0, 0, &packet).unwrap();
+        let events = gw.ingest_data_bytes(&wire, 10).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GatewayEvent::DnsAdmitted { answers: 1, .. })),
+            "{events:?}"
+        );
+
+        let frames = gw.take_guest_frames();
+        assert_eq!(frames.len(), 1, "the guest is owed exactly one answer");
+        let decoded = frame::decode(&frames[0]).unwrap();
+        let reply = ip::parse(decoded.payload).expect("the answer is a well-formed packet");
+        assert_eq!(reply.src, IpAddr::V6(GATEWAY_V6));
+        assert_eq!(reply.dst, IpAddr::V6(GUEST_V6));
+        assert_eq!(reply.src_port, Some(53));
+        assert_eq!(reply.dst_port, Some(40000));
     }
 
     #[test]
@@ -1461,6 +1913,153 @@ mod tests {
         };
         let wire = frame::encode(MessageType::Ready, SESSION.0, 0, &ready.encode()).unwrap();
         assert!(gw.handle_control_frame(&wire, 1).is_err());
+    }
+
+    /// The lease is the request. A machine issued a v6 pair has one
+    /// because something admitted it, so the backend that carries its
+    /// traffic has to be able to carry that family — otherwise the guest
+    /// gets an address whose packets die somewhere it cannot see.
+    #[test]
+    fn a_lease_with_a_v6_pair_requires_ipv6_flows_of_the_backend() {
+        let dual = GatewayConfig::new(
+            "vm-a",
+            "sha256:plan",
+            lease().with_v6(GATEWAY_V6, GUEST_V6),
+            L3PolicyConfig::default(),
+        );
+        assert!(
+            dual.required_capabilities.ipv6_flows,
+            "a v6 lease must require ipv6_flows of the forwarding backend"
+        );
+        let v4_only = GatewayConfig::new("vm-a", "sha256:plan", lease(), L3PolicyConfig::default());
+        assert!(
+            !v4_only.required_capabilities.ipv6_flows,
+            "a v4-only lease must require exactly what it required before v6 existed"
+        );
+    }
+
+    /// A backend that cannot carry v6 flows must refuse the session before
+    /// the VM boots, rather than drop the guest's v6 packets afterwards.
+    #[test]
+    fn a_backend_without_ipv6_flows_refuses_a_dual_stack_lease() {
+        let dp = V4OnlyDatapath;
+        let resolver = Arc::new(StaticResolver::new());
+        let err = Gateway::open(
+            GatewayConfig::new(
+                "vm-a",
+                "sha256:plan",
+                lease().with_v6(GATEWAY_V6, GUEST_V6),
+                L3PolicyConfig::default(),
+            ),
+            SESSION,
+            &dp,
+            resolver.clone(),
+        )
+        .expect_err("a v4-only backend cannot serve a dual-stack lease");
+        assert!(
+            matches!(
+                &err,
+                GatewayError::Datapath(DatapathError::CapabilityShortfall { missing, .. })
+                    if missing.contains(&"ipv6_flows")
+            ),
+            "{err:?}"
+        );
+        // The same backend still serves a v4-only lease: the refusal is
+        // about what was leased, not about the backend as such.
+        Gateway::open(
+            GatewayConfig::new("vm-a", "sha256:plan", lease(), L3PolicyConfig::default()),
+            SESSION,
+            &dp,
+            resolver,
+        )
+        .expect("a v4-only lease is within a v4-only backend's capabilities");
+    }
+
+    /// The end of the host-side half: what the allocator leased has to be
+    /// what the guest is told to configure, verbatim and in both families.
+    #[test]
+    fn the_assigned_config_carries_the_leases_v6_pair() {
+        let dp = LoopbackDatapath::sink();
+        let mut gw = Gateway::open(
+            GatewayConfig::new(
+                "vm-a",
+                "sha256:plan",
+                lease().with_v6(GATEWAY_V6, GUEST_V6),
+                L3PolicyConfig::default(),
+            ),
+            SESSION,
+            &dp,
+            Arc::new(StaticResolver::new()),
+        )
+        .unwrap();
+        let guest_v4 = gw.admitter().lease().guest;
+        let hello = frame::encode(MessageType::Hello, 0, 0, &Hello::v1().encode()).unwrap();
+        let (config_frame, _) = gw.handle_control_frame(&hello, 0).unwrap();
+        let parsed = frame::decode(&config_frame).unwrap();
+        let cfg = Config::decode(parsed.payload).unwrap();
+
+        let v6 = cfg
+            .v6
+            .expect("a dual-stack lease assigns a v6 configuration");
+        assert_eq!(Ipv6Addr::from(v6.address), GUEST_V6);
+        assert_eq!(Ipv6Addr::from(v6.peer), GATEWAY_V6);
+        // The resolver is the gateway in both families, so a guest that
+        // prefers v6 still reaches the host-terminated resolver — the one
+        // thing that makes domain rules enforceable.
+        assert_eq!(Ipv6Addr::from(v6.dns), GATEWAY_V6);
+        assert_ne!(
+            cfg.features & message::features::IPV6,
+            0,
+            "the granted feature bits must say the v6 half is live"
+        );
+        // The v4 half is untouched.
+        let v4 = cfg.v4.expect("a dual-stack assignment is additive");
+        assert_eq!(Ipv4Addr::from(v4.address), guest_v4);
+    }
+
+    /// A v4-only machine must see exactly the bytes it saw before any of
+    /// this existed.
+    #[test]
+    fn a_v4_only_lease_assigns_no_v6_and_grants_no_feature_bit() {
+        let dp = LoopbackDatapath::sink();
+        let mut gw = open_gateway(L3PolicyConfig::default(), &dp);
+        let hello = frame::encode(MessageType::Hello, 0, 0, &Hello::v1().encode()).unwrap();
+        let (config_frame, _) = gw.handle_control_frame(&hello, 0).unwrap();
+        let cfg = Config::decode(frame::decode(&config_frame).unwrap().payload).unwrap();
+        assert_eq!(cfg.v6, None);
+        assert_eq!(cfg.features, 0);
+    }
+
+    /// Silently degrading to v4 would leave an operator believing the
+    /// workload got the family its plan asked for.
+    #[test]
+    fn a_guest_that_does_not_offer_ipv6_is_refused_a_v6_lease() {
+        let dp = LoopbackDatapath::sink();
+        let mut gw = Gateway::open(
+            GatewayConfig::new(
+                "vm-a",
+                "sha256:plan",
+                lease().with_v6(GATEWAY_V6, GUEST_V6),
+                L3PolicyConfig::default(),
+            ),
+            SESSION,
+            &dp,
+            Arc::new(StaticResolver::new()),
+        )
+        .unwrap();
+        let silent_guest = Hello {
+            version: limits::PROTOCOL_VERSION,
+            features: 0,
+            max_queues: 1,
+        };
+        let hello = frame::encode(MessageType::Hello, 0, 0, &silent_guest.encode()).unwrap();
+        let (reply, _) = gw.handle_control_frame(&hello, 0).unwrap();
+        let parsed = frame::decode(&reply).unwrap();
+        assert_eq!(
+            parsed.header.msg_type,
+            MessageType::Error,
+            "a guest that cannot apply the assignment must be told, not quietly downgraded"
+        );
     }
 
     #[test]

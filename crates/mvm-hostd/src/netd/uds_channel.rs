@@ -18,6 +18,7 @@
 //! was created for, which the host minted for this boot. Nothing
 //! downstream re-derives identity from the endpoint.
 
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -188,11 +189,13 @@ impl GuestListener for UdsListener {
         // The identity comes from the listener, not from the connection:
         // the peer address of a Unix socket is unnamed, and the path is
         // reusable, so neither could tell us which boot this is.
+        let fd = stream.as_raw_fd();
         Ok(GuestConnection::new(
             self.instance.clone(),
             self.service,
             Box::new(stream) as Box<dyn GuestStream>,
-        ))
+        )
+        .with_pollable_fd(fd))
     }
 
     fn close(&mut self) -> Result<(), ChannelError> {
@@ -270,6 +273,16 @@ mod tests {
         }
     }
 
+    fn bound_listener_for_test() -> (Box<dyn GuestListener>, PathBuf) {
+        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+        let instance = instance();
+        let listener = provider
+            .bind_service(&instance, GuestService::NetworkControl)
+            .expect("bind");
+        let path = provider.socket_path(&instance, GuestService::NetworkControl);
+        (listener, path)
+    }
+
     #[test]
     fn each_service_gets_its_own_socket_path() {
         let _home = HomeGuard::new();
@@ -320,6 +333,18 @@ mod tests {
         assert_eq!(conn.instance, instance);
         assert_eq!(conn.service, GuestService::NetworkControl);
         writer.join().unwrap();
+    }
+
+    #[test]
+    fn an_accepted_uds_connection_exposes_its_pollable_descriptor() {
+        let _home = HomeGuard::new();
+        let (mut listener, path) = bound_listener_for_test();
+        let _client = std::thread::spawn(move || UnixStream::connect(&path).expect("connect"));
+        let conn = listener.accept().expect("accept");
+        assert!(
+            conn.pollable_fd.is_some(),
+            "a UDS-backed guest connection must expose a descriptor the poll loop can register"
+        );
     }
 
     #[test]

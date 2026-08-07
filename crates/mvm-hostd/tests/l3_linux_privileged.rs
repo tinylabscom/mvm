@@ -10,11 +10,12 @@
 
 #![cfg(target_os = "linux")]
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
 use mvm_hostd::netd::{
-    DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath, linux::LinuxDatapath,
+    DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath, V6Link,
+    linux::LinuxDatapath,
 };
 use mvm_net::l3::{
     AddressLease, DnsBindingStore, FlowTable, IngressTable, L3Admitter, L3PolicyConfig,
@@ -34,7 +35,36 @@ fn request(machine_id: &str, third_octet: u8) -> DatapathRequest {
         gateway: Ipv4Addr::new(10, 201, third_octet, 1),
         guest: Ipv4Addr::new(10, 201, third_octet, 2),
         prefix_len: 30,
+        // v4-only: this lane asserts that a real TUN device appears and
+        // carries packets, and the v6 half of an address pair adds nothing
+        // to that.
+        v6: None,
         mtu: 1500,
+        ingress: Vec::new(),
+    }
+}
+
+/// The unique-local pool the allocator carves the v6 half out of.
+const V6_POOL: Ipv6Addr = Ipv6Addr::new(0xfd6d, 0x766d, 1, 0, 0, 0, 0, 0);
+
+/// The /126 at `index`, laid out the way the allocator lays one out: the
+/// gateway first, the guest next. Indexed alongside the /30 above so two
+/// machines in one test share an address in neither family.
+fn v6_link(index: u128) -> V6Link {
+    let base = u128::from(V6_POOL) + 4 * index;
+    V6Link {
+        gateway: Ipv6Addr::from(base + 1),
+        guest: Ipv6Addr::from(base + 2),
+        prefix_len: 126,
+    }
+}
+
+/// A request for a machine whose plan asked for IPv6, so the datapath
+/// assigns both halves of the link.
+fn request_dual(machine_id: &str, third_octet: u8) -> DatapathRequest {
+    DatapathRequest {
+        v6: Some(v6_link(u128::from(third_octet))),
+        ..request(machine_id, third_octet)
     }
 }
 
@@ -138,7 +168,10 @@ fn the_datapath_reports_whether_this_host_can_serve_it() {
     let dp = LinuxDatapath::new();
     dp.is_available()
         .expect("the privileged lane needs /dev/net/tun and CAP_NET_ADMIN");
-    assert_eq!(dp.capabilities(), ForwardingCapabilities::FULL_L3_V4);
+    // A full packet path in both families: the handle assigns the v6 pair
+    // whenever the lease carries one, and its ruleset pins the v6 source
+    // the same way it pins the v4 one.
+    assert_eq!(dp.capabilities(), ForwardingCapabilities::FULL_L3);
 }
 
 #[test]
@@ -463,6 +496,22 @@ fn an_admitted_packet_reaches_the_host_stack_and_a_denied_one_does_not() {
 /// inbound poll would hang the session and take the shutdown path with it.
 /// The in-memory datapath returns `WouldBlock` instantly, so only a real
 /// device can witness this.
+/// Whether the device is gone, allowing for the kernel taking its time.
+///
+/// Closing the last descriptor is what removes a TUN interface, but the
+/// removal is the kernel's to schedule and it is not synchronous with the
+/// `close(2)` that triggered it.
+fn interface_gone(name: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !interface_exists(name) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    !interface_exists(name)
+}
+
 #[test]
 fn an_idle_host_tun_does_not_block_the_gateway() {
     if !enabled() {
@@ -477,15 +526,375 @@ fn an_idle_host_tun_does_not_block_the_gateway() {
 
     let mut buf = vec![0u8; 2048];
     let start = std::time::Instant::now();
-    match handle.recv_from_network(&mut buf) {
-        Err(DatapathError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-        Ok(n) => panic!("an idle device returned {n} bytes"),
-        Err(other) => panic!("expected WouldBlock on an idle device, got {other}"),
+    let limit = std::time::Duration::from_secs(1);
+    loop {
+        match handle.recv_from_network(&mut buf) {
+            Err(DatapathError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+            Ok(_) => {}
+            Err(other) => panic!("expected WouldBlock on an idle device, got {other}"),
+        }
+        assert!(
+            start.elapsed() < limit,
+            "the device never went quiet, so the gateway's drain would not terminate"
+        );
     }
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(1),
+        start.elapsed() < limit,
         "the read blocked instead of returning WouldBlock"
     );
 
     handle.close().expect("close");
+}
+
+/// Every IPv6 address the kernel holds on `iface`, read out of
+/// `/proc/net/if_inet6` rather than by shelling out.
+fn v6_addresses(iface: &str) -> Vec<Ipv6Addr> {
+    let Ok(text) = std::fs::read_to_string("/proc/net/if_inet6") else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let hex = fields.next()?;
+            if fields.next_back()? != iface {
+                return None;
+            }
+            let mut octets = [0u8; 16];
+            for (i, octet) in octets.iter_mut().enumerate() {
+                *octet = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+            }
+            Some(Ipv6Addr::from(octets))
+        })
+        .collect()
+}
+
+fn nft_listing(table: &str) -> String {
+    let out = std::process::Command::new("nft")
+        .args(["list", "table", "inet", table])
+        .output()
+        .expect("nft list");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A dual-stack lease puts both halves of the link on the host device, and
+/// teardown takes both with it.
+#[test]
+fn a_dual_lease_puts_both_families_on_the_host_device() {
+    if !enabled() {
+        eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
+        return;
+    }
+    let dp = LinuxDatapath::new();
+    let req = request_dual("privtest-dual", 70);
+    let v6 = req.v6.expect("a dual request carries a v6 link");
+    let iface = mvm_hostd::netd::linux::device_name(&req.machine_id);
+    let table = mvm_hostd::netd::linux::table_name(&req.machine_id);
+
+    let mut handle = dp.open(&req).expect("open the datapath");
+
+    let held = v6_addresses(&iface);
+    assert!(
+        held.contains(&v6.gateway),
+        "the host side of the v6 link must be on {iface}: {held:?}"
+    );
+    assert!(
+        !held.contains(&v6.guest),
+        "the guest's address belongs to the guest, not to the host device: {held:?}"
+    );
+
+    let rules = nft_listing(&table);
+    assert!(
+        rules.contains(&v6.guest.to_string()),
+        "the ruleset must pin the assigned v6 guest address: {rules}"
+    );
+
+    handle.close().expect("close");
+    assert!(interface_gone(&iface));
+    assert!(
+        v6_addresses(&iface).is_empty(),
+        "the v6 address must not outlive the device it was assigned to"
+    );
+    assert!(!nft_table_exists(&table));
+}
+
+/// A machine whose plan never asked for IPv6 gets none of it.
+#[test]
+fn a_v4_only_lease_puts_no_global_v6_address_on_the_device() {
+    if !enabled() {
+        eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
+        return;
+    }
+    let dp = LinuxDatapath::new();
+    let req = request("privtest-v4only", 71);
+    let iface = mvm_hostd::netd::linux::device_name(&req.machine_id);
+    let mut handle = dp.open(&req).expect("open the datapath");
+
+    let held = v6_addresses(&iface);
+    let pool = u128::from(V6_POOL) >> 64;
+    assert!(
+        held.iter().all(|addr| u128::from(*addr) >> 64 != pool),
+        "a v4-only lease must hold no address from the v6 pool: {held:?}"
+    );
+
+    let rules = nft_listing(&mvm_hostd::netd::linux::table_name(&req.machine_id));
+    assert!(
+        !rules.contains("ip6 saddr"),
+        "a v4-only lease must load no v6 rule: {rules}"
+    );
+
+    handle.close().expect("close");
+}
+
+/// One IPv6 TCP SYN, built by hand so a source the host never assigned can
+/// be put on the wire.
+fn v6_syn(src: Ipv6Addr, dst: Ipv6Addr, src_port: u16) -> Vec<u8> {
+    const NEXT_HEADER_TCP: u8 = 6;
+    let mut tcp = vec![0u8; 20];
+    tcp[0..2].copy_from_slice(&src_port.to_be_bytes());
+    tcp[2..4].copy_from_slice(&443u16.to_be_bytes());
+    tcp[12] = 0x50;
+    tcp[13] = 0x02;
+    let mut packet = vec![0u8; 40];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&(tcp.len() as u16).to_be_bytes());
+    packet[6] = NEXT_HEADER_TCP;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(&src.octets());
+    packet[24..40].copy_from_slice(&dst.octets());
+    packet.extend_from_slice(&tcp);
+    packet
+}
+
+fn global_v6_destination() -> Ipv6Addr {
+    Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
+}
+
+/// Put bytes on the host device the way a defect above this layer would.
+fn write_bypassing_admission(handle: &dyn DatapathHandle, packet: &[u8]) {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+
+    let fd = handle
+        .readiness_fd()
+        .expect("an open host tun exposes its descriptor");
+    let file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    (&*file).write_all(packet).expect("write to the host tun");
+}
+
+/// Ensures the host forwards IPv6 while a witness runs.
+struct HostIpv6Forwarding {
+    previous: String,
+}
+
+impl HostIpv6Forwarding {
+    const KNOB: &'static str = "/proc/sys/net/ipv6/conf/all/forwarding";
+
+    fn enabled() -> Self {
+        let previous = std::fs::read_to_string(Self::KNOB).expect("read the forwarding knob");
+        std::fs::write(Self::KNOB, "1\n").expect("enable ipv6 forwarding");
+        Self { previous }
+    }
+}
+
+impl Drop for HostIpv6Forwarding {
+    fn drop(&mut self) {
+        let _ = std::fs::write(Self::KNOB, &self.previous);
+    }
+}
+
+/// Counts IPv6 packets that survived the datapath's own forward chain.
+struct ForwardProbe {
+    table: String,
+}
+
+impl ForwardProbe {
+    fn watching(iface: &str) -> Self {
+        let table = format!("mvmnprobe{iface}");
+        let rules = format!(
+            "table inet {table} {{\n\\
+             \\x20 chain observe {{\n\\
+             \\x20   type filter hook forward priority filter + 10; policy accept;\n\\
+             \\x20   iifname \"{iface}\" meta nfproto ipv6 counter\n\\
+             \\x20 }}\n\\
+             }}\n"
+        );
+        let mut child = std::process::Command::new("nft")
+            .args(["-f", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn nft");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("stdin was piped")
+                .write_all(rules.as_bytes())
+                .expect("feed the probe ruleset to nft");
+        }
+        let out = child.wait_with_output().expect("nft -f -");
+        assert!(
+            out.status.success(),
+            "loading the probe ruleset failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Self { table }
+    }
+
+    fn count(&self) -> u64 {
+        let listing = nft_listing(&self.table);
+        listing
+            .split("counter packets ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no counter in the probe table: {listing}"))
+    }
+}
+
+impl Drop for ForwardProbe {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("nft")
+            .args(["delete", "table", "inet", &self.table])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// The anti-spoofing witness for IPv6, at the layer that is supposed to
+/// hold when admission does not.
+#[test]
+fn the_forward_chain_drops_a_v6_source_the_host_did_not_assign() {
+    if !enabled() {
+        eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
+        return;
+    }
+    let _forwarding = HostIpv6Forwarding::enabled();
+
+    const OCTET: u8 = 80;
+    let dp = LinuxDatapath::new();
+    let req = request_dual("privtest-v6spoof", OCTET);
+    let v6 = req.v6.expect("a dual request carries a v6 link");
+    let iface = mvm_hostd::netd::linux::device_name(&req.machine_id);
+    let mut handle = dp.open(&req).expect("open the datapath");
+
+    let probe = ForwardProbe::watching(&iface);
+    let dst = global_v6_destination();
+    let spoofed = v6_link(u128::from(OCTET) + 1).guest;
+    assert_ne!(spoofed, v6.guest);
+
+    let start = probe.count();
+    write_bypassing_admission(handle.as_ref(), &v6_syn(v6.guest, dst, 40001));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let assigned_first = probe.count() - start;
+
+    write_bypassing_admission(handle.as_ref(), &v6_syn(spoofed, dst, 40002));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let after_spoof = probe.count() - start - assigned_first;
+
+    write_bypassing_admission(handle.as_ref(), &v6_syn(v6.guest, dst, 40003));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let assigned_again = probe.count() - start - assigned_first - after_spoof;
+
+    assert_eq!(
+        assigned_first, 1,
+        "a packet carrying the assigned v6 source must pass the forward chain"
+    );
+    assert_eq!(
+        after_spoof, 0,
+        "a packet carrying a v6 source the host never assigned must be dropped"
+    );
+    assert_eq!(
+        assigned_again, 1,
+        "the drop must be about the source, not about anything the first packet consumed"
+    );
+
+    drop(probe);
+    handle.close().expect("close");
+}
+
+/// Holding a unique-local address is an identity on the link, never a
+/// permission to reach unique-local space.
+#[test]
+fn a_guest_holding_a_ula_address_still_cannot_reach_ula_space() {
+    if !enabled() {
+        eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
+        return;
+    }
+    use mvm_core::policy::projection::CanonicalEgress;
+    use mvm_net::l3::{
+        AddressLease, DenyCode, DnsBindingStore, FlowTable, IngressTable, L3Admitter,
+        L3PolicyConfig, OutboundVerdict,
+    };
+
+    let dp = LinuxDatapath::new();
+    let mine = request_dual("privtest-mine", 90);
+    let neighbour = request_dual("privtest-nbr", 91);
+    let my_v6 = mine.v6.expect("a dual request carries a v6 link");
+    let neighbour_v6 = neighbour.v6.expect("a dual request carries a v6 link");
+    let my_iface = mvm_hostd::netd::linux::device_name(&mine.machine_id);
+    let neighbour_iface = mvm_hostd::netd::linux::device_name(&neighbour.machine_id);
+
+    let mut my_handle = dp.open(&mine).expect("open mine");
+    let mut neighbour_handle = dp.open(&neighbour).expect("open the neighbour");
+
+    assert!(
+        v6_addresses(&neighbour_iface).contains(&neighbour_v6.gateway),
+        "the neighbour's link must be up for this witness to mean anything"
+    );
+
+    let mut admitter = L3Admitter::new(
+        AddressLease::for_test(mine.gateway, mine.guest).with_v6(my_v6.gateway, my_v6.guest),
+        L3PolicyConfig {
+            egress: CanonicalEgress::Unrestricted,
+            ..L3PolicyConfig::default()
+        },
+        FlowTable::with_defaults(),
+        DnsBindingStore::with_defaults(),
+        IngressTable::with_defaults(),
+    );
+    admitter.set_ready(true);
+
+    let mut now = 0u64;
+    for dst in [
+        neighbour_v6.guest,
+        neighbour_v6.gateway,
+        Ipv6Addr::new(0xfd00, 0x1234, 0, 0, 0, 0, 0, 5),
+    ] {
+        now += 1;
+        let before = (rx_packets(&my_iface), rx_packets(&neighbour_iface));
+        let packet = v6_syn(my_v6.guest, dst, 50000 + now as u16);
+        match admitter.admit_outbound(&packet, now) {
+            OutboundVerdict::Deny(DenyCode::PrivateRangeDenied) => {}
+            other => panic!("reaching {dst} must be refused as unique-local, got {other:?}"),
+        }
+        assert_eq!(
+            (rx_packets(&my_iface), rx_packets(&neighbour_iface)),
+            before,
+            "a refused packet for {dst} must never reach either device"
+        );
+    }
+
+    now += 1;
+    let admitted = v6_syn(my_v6.guest, global_v6_destination(), 50100);
+    let before = rx_packets(&my_iface);
+    match admitter.admit_outbound(&admitted, now) {
+        OutboundVerdict::Forward(packet) => my_handle
+            .send_to_network(&packet)
+            .expect("write the admitted packet to the host tun"),
+        other => panic!("a global v6 destination must be admitted, got {other:?}"),
+    }
+    let after = rx_packets(&my_iface);
+    assert!(
+        after > before,
+        "the kernel must have received the admitted v6 packet on {my_iface} \
+         (rx_packets {before} -> {after})"
+    );
+
+    my_handle.close().expect("close mine");
+    neighbour_handle.close().expect("close the neighbour");
+    assert!(interface_gone(&my_iface));
+    assert!(interface_gone(&neighbour_iface));
 }

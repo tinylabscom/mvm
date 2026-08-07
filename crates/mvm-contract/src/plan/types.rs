@@ -74,13 +74,15 @@ pub enum L3IcmpPolicy {
 
 /// One declared ingress mapping: a host listener forwarding into the guest.
 ///
-/// Version 1 implements TCP. A `udp` protocol is refused at admission rather
-/// than accepted and ignored, so a workload never believes it is reachable
-/// on a port nothing is listening for.
+/// `"tcp"` and `"udp"` are both declarable; anything else is refused at
+/// admission rather than accepted and ignored, so a workload never believes
+/// it is reachable on a port nothing is listening for. Whether a declared
+/// mapping is *served* is a property of the selected forwarding backend and
+/// is reported through its capabilities, not decided here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct L3IngressMapping {
-    /// `"tcp"`. Any other value is refused at admission.
+    /// `"tcp"` or `"udp"`. Any other value is refused at admission.
     pub proto: String,
     /// Host address the listener binds. `0.0.0.0` is a wildcard exposure.
     pub host_addr: String,
@@ -100,7 +102,15 @@ pub struct L3IngressMapping {
 pub struct L3NetworkSpec {
     /// Wire-protocol major version the plan admits. Version 1 today.
     pub protocol_version: u8,
-    /// Negotiated feature bits. Version 1 grants none.
+    /// Optional wire features the workload asks for, from
+    /// [`crate::l3::message::features`].
+    ///
+    /// This is the request side of the handshake: what is set here is what
+    /// the host allocates addresses for, and what the forwarding backend
+    /// is then required to be able to carry. `features::IPV6` is the only
+    /// one version 1 acts on. It is off by default — a workload that does
+    /// not name it keeps the v4-only posture, and one address family fewer
+    /// is one fewer for a compromised guest to reach anything through.
     #[serde(default)]
     pub features: u32,
     /// MTU assigned to the guest interface.
@@ -154,6 +164,26 @@ impl L3NetworkSpec {
             max_dns_bindings: 1024,
             policy_epoch: 0,
         }
+    }
+
+    /// The same spec, asking the host for an IPv6 assignment as well.
+    pub fn requesting_ipv6(mut self) -> Self {
+        self.features |= crate::l3::message::features::IPV6;
+        self
+    }
+
+    /// Whether this plan asked for IPv6.
+    pub fn requests_ipv6(&self) -> bool {
+        self.features & crate::l3::message::features::IPV6 != 0
+    }
+
+    /// Feature bits this build does not understand. Non-empty means the
+    /// plan asked for something that cannot be served, which is a refusal
+    /// rather than something to mask off — a workload silently given less
+    /// than it was admitted for is exactly what the capability check
+    /// exists to prevent.
+    pub fn unknown_features(&self) -> u32 {
+        self.features & !crate::l3::message::features::KNOWN
     }
 }
 

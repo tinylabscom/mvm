@@ -1031,6 +1031,75 @@ updates only its own entry below.
       completion follows the authoritative child exit after draining available
       stderr even if a detached descendant still holds a writer.
 
+- [ ] Plan 287 (`specs/plans/287-userspace-socket-datapath.md`, ADR-037) —
+      userspace socket datapath. Phase A (WS0) is landed: it fixed two
+      platform-neutral defects in the shipped `mvm-netd` gateway daemon that
+      also affected the Linux path in production — a per-frame counter passed
+      to `now_millis` APIs, so idle TCP flows needed 300,000 guest frames to
+      expire instead of five minutes; and a drive loop that blocked on the
+      guest data channel and only drained the datapath afterwards, so
+      host-to-guest traffic stalled whenever the guest was quiet. The fix
+      adds `GuestConnection::pollable_fd`, `DatapathHandle::readiness_fd`, a
+      `mio` poll loop with a timer tick, an injectable clock, and a bounded
+      read drain. Phase B (WS1) — the smoltcp-backed `UserspaceSocketDatapath`
+      that makes `l3-vsock` work on hosts with no privileges — is complete
+      at all 16 tasks. Selection landed: `host_datapath()` hands back the
+      userspace datapath on macOS and on any Linux host whose TUN probe
+      fails, carrying the reason with it, so a capability refusal names the
+      substitution that caused it rather than only its symptom. The
+      `MacosUserspaceGateway` placeholder is deleted. The blocker recorded
+      under task 14 — nothing in production drove
+      `UserspaceHandle::service`, so a fallback host's guest could not
+      complete a connect — is fixed: the drive loop services the datapath
+      it owns. Task 15 pins that end to end, unprivileged: nine witnesses,
+      six of them driven through the real `mvm-netd` process. Task 16 is
+      the documentation and ledger close-out: the public guide's platform
+      matrix now splits by forwarding backend rather than by platform,
+      ADR-036 no longer describes a type that has been deleted, and
+      ADR-037's memory ceiling is re-derived from `limits.rs` — its stated
+      `1024 × 32 KiB = 32 MiB` was wrong three ways over, against a real
+      46,500,608 bytes (44.35 MiB). Three defects shipped with it and were
+      written down as limitations rather than omitted; two are now closed.
+      Every host socket the datapath opens is registered on the set behind
+      its readiness descriptor, so a resolved connect and an arriving byte
+      wake the drive loop rather than waiting out its 50 ms tick, and
+      `poll_inbound` is bounded per pass and reports its backlog the way
+      the guest-facing drain already did. The two defects found while
+      closing those are closed too: a flow's host-to-guest pump reports the
+      same backlog when its per-pass byte budget stopped it, so a peer's
+      tail no longer waits out the tick, and the association fixture that
+      aimed at a closed loopback port — an ICMP unreachable the next `send`
+      surfaced as `ECONNREFUSED`, deterministic on Linux — now aims at a
+      destination that exists and discards. The last of the three is now
+      closed for datagrams by WS2: `declared_ingress: true` is backed by a
+      real host listener per declared UDP mapping, bound on exactly the
+      address the mapping named, with delivery still decided by
+      `admit_inbound` rather than by the datapath. Declared **TCP** ingress
+      on this backend stays unserved and is recorded as an open over-claim
+      rather than smoothed over.
+      IPv6 (ADR-038) is complete end to end and **opt-in per plan**: the
+      workload kernel carries `CONFIG_IPV6` without pulling XFRM in; a plan
+      setting `features::IPV6` in its `l3` spec is leased a unique-local
+      `/126` at the same index as its `/30`; the gateway assigns it; and
+      the guest agent brings the address, on-link peer, default route and
+      resolver up over rtnetlink in the same privileged phase as the v4
+      sequence. A leased pair now sets `required_capabilities.ipv6_flows`,
+      so a backend that cannot carry v6 flows refuses at open rather than
+      dropping the guest's packets — which closes ADR-037's `ipv6_flows`
+      known defect and leaves declared TCP ingress as the one remaining
+      over-claim there. Both backends carry it: the privileged Linux
+      packet backend assigns the host side of the `/126` on its TUN and
+      pins the guest's v6 source in the same `inet` ruleset that pins its
+      v4 one, so it declares `FULL_L3` outright, witnessed against real
+      nftables on hardware and mutation-proven both ways. Adding a unique-local pool did not turn a guest's
+      own address into permission to reach ULA space: a neighbour's leased
+      address stays refused under `unrestricted`, witnessed end to end and
+      mutation-proven. What no `mvmctl` surface does yet is populate an
+      `L3NetworkSpec` — for IPv6 or any other field of it. Remaining
+      plan-287 workstreams (benchmarking, zero-copy, node-to-node
+      transport, the node-control API, WSL2) are untouched; the `utun` + PF
+      backend is closed by ADR-039's rejection rather than queued.
+
 ---
 
 ## 1. Why

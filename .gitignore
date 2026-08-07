@@ -70,3 +70,6 @@ mutants.out/
 
 # Python bytecode caches (SDK test runs)
 __pycache__/
+
+# Per-worktree cargo target dirs used to isolate builds from the shared target.
+.cargo-target*

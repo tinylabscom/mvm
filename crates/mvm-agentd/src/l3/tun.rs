@@ -39,7 +39,8 @@ pub enum TunError {
     /// The name did not fit `IFNAMSIZ`.
     #[error("interface name {0:?} is too long")]
     NameTooLong(String),
-    /// An ioctl configuring addresses, MTU, flags, or routes failed.
+    /// A request configuring addresses, MTU, flags, or routes failed — an
+    /// ioctl for the IPv4 half, an rtnetlink request for the IPv6 one.
     #[error("configuring {what} on {name:?} failed: {source}")]
     ConfigureFailed {
         what: &'static str,

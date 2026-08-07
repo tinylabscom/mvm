@@ -38,10 +38,21 @@ use std::path::Path;
 /// physical-network, SoC, filesystem, tracing/debug, kexec/hibernate, legacy
 /// crypto, power-management, task-accounting, NetLabel and unprovisioned
 /// swap/huge-page families. Resolved Linux 6.12.100 configs contain exactly
-/// 936 aarch64 and 902 x86_64 built-ins. PCI, virtio-net, virtio-balloon, KVM
+/// 937 aarch64 and 903 x86_64 built-ins. PCI, virtio-net, virtio-balloon, KVM
 /// time, and x86 ACPI core remain because supported backends exercise them.
-const BUDGET_AARCH64: usize = 936;
-const BUDGET_X86_64: usize = 902;
+///
+/// Both figures rose by exactly one when the workload kernel gained IPv6, so
+/// the guest can hold the v6 half of the pair its plan leases. IPv6 arrives
+/// with six more built-ins than that — the 6-in-4 tunnel driver, its
+/// NDISC node-type hook, and the INET_TUNNEL / NET_IP_TUNNEL / DST_CACHE /
+/// GRO_CELLS plumbing under it — and all six are dropped in `workload.nix`
+/// rather than absorbed here: a guest with one point-to-point link has no
+/// tunnel endpoint to encapsulate toward. The v6 IPsec families go the same
+/// way, which is why XFRM stays in the required-disable set. Measured on
+/// resolved configs, not derived: x86_64 902 → 903 locally, aarch64 936 → 937
+/// on CI's native runner.
+const BUDGET_AARCH64: usize = 937;
+const BUDGET_X86_64: usize = 903;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
 /// the larger budget (fail-open on the ceiling, never a false pass on a real
