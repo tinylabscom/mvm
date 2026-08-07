@@ -124,6 +124,7 @@ fn generate_template_fetches_and_scaffolds_remote_template() {
         .unwrap()
         .env("MVM_TEMPLATE_REGISTRY", &registry_url)
         .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
         .args([
             "generate",
             "template",
@@ -174,6 +175,7 @@ fn generate_template_fetches_and_scaffolds_remote_template() {
         .unwrap()
         .env("MVM_TEMPLATE_REGISTRY", registry_url)
         .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
         .args([
             "generate",
             "template",
