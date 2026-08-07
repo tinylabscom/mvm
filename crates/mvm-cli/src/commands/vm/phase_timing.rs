@@ -43,6 +43,10 @@ pub struct RunPhaseMarks {
     pub drives_ready: Instant,
     /// The transient workload's signed plan was admitted (or admission skipped).
     pub admitted: Instant,
+    /// Start of warm-pool maintenance and compatible-parent selection.
+    pub pool_wait_started: Option<Instant>,
+    /// Start of the actual warm claim after pool maintenance completed.
+    pub claim_started: Option<Instant>,
     /// The backend reported the VM booted (cold start or snapshot restore).
     pub backend_started: Instant,
     /// The guest agent first became reachable over vsock — i.e. the command
@@ -64,11 +68,25 @@ pub struct RunPhaseTimings {
     pub resolve_ms: f64,
     pub drives_ms: f64,
     pub admit_ms: f64,
+    pub pool_wait_ms: f64,
+    pub claim_ms: f64,
     pub backend_start_ms: f64,
     pub vsock_wait_ms: f64,
+    pub warm_window_ms: f64,
     pub command_ms: f64,
     pub teardown_ms: f64,
     pub total_ms: f64,
+}
+
+/// Mutable timing marks owned by the boot selector while it decides whether a
+/// launch can use a warm parent. Keeping these marks separate from
+/// [`RunPhaseMarks`] lets cold launches retain a zero-valued warm breakdown.
+#[derive(Debug, Default)]
+pub struct WarmClaimMarks {
+    /// When warm-pool maintenance and compatible-parent selection began.
+    pub pool_wait_started: Option<Instant>,
+    /// When the backend claim began after pool maintenance.
+    pub claim_started: Option<Instant>,
 }
 
 impl RunPhaseMarks {
@@ -82,8 +100,22 @@ impl RunPhaseMarks {
             resolve_ms: ms(self.start, self.image_resolved),
             drives_ms: ms(self.image_resolved, self.drives_ready),
             admit_ms: ms(self.drives_ready, self.admitted),
+            pool_wait_ms: if self.launch_mode == LaunchMode::Warm {
+                self.pool_wait_started.map_or(0.0, |start| {
+                    ms(start, self.claim_started.unwrap_or(self.admitted))
+                })
+            } else {
+                0.0
+            },
+            claim_ms: if self.launch_mode == LaunchMode::Warm {
+                self.claim_started
+                    .map_or(0.0, |start| ms(start, self.backend_started))
+            } else {
+                0.0
+            },
             backend_start_ms: ms(self.admitted, self.backend_started),
             vsock_wait_ms: ms(self.backend_started, self.vsock_ready),
+            warm_window_ms: ms(self.admitted, self.vsock_ready),
             command_ms: ms(self.vsock_ready, self.command_done),
             teardown_ms: ms(self.command_done, self.torn_down),
             total_ms: ms(self.start, self.torn_down),
@@ -130,13 +162,17 @@ impl RunPhaseTimings {
     pub fn render(&self) -> String {
         format!(
             "[mvm] phase-timing: resolve={:.1}ms drives={:.1}ms admit={:.1}ms \
-             backend_start={:.1}ms vsock_wait={:.1}ms command={:.1}ms \
+             pool_wait_ms={:.1} claim_ms={:.1} backend_start={:.1}ms \
+             vsock_wait={:.1}ms warm_window_ms={:.1} command={:.1}ms \
              teardown={:.1}ms total={:.1}ms launch_mode={} dispatch_window={:.1}ms warm_slo={}",
             self.resolve_ms,
             self.drives_ms,
             self.admit_ms,
+            self.pool_wait_ms,
+            self.claim_ms,
             self.backend_start_ms,
             self.vsock_wait_ms,
+            self.warm_window_ms,
             self.command_ms,
             self.teardown_ms,
             self.total_ms,
@@ -217,11 +253,13 @@ mod tests {
 
     fn ordered_marks(t0: Instant) -> RunPhaseMarks {
         RunPhaseMarks {
-            launch_mode: LaunchMode::Cold,
+            launch_mode: LaunchMode::Warm,
             start: t0,
             image_resolved: t0 + Duration::from_millis(5),
             drives_ready: t0 + Duration::from_millis(12),
             admitted: t0 + Duration::from_millis(20),
+            pool_wait_started: Some(t0 + Duration::from_millis(20)),
+            claim_started: Some(t0 + Duration::from_millis(25)),
             backend_started: t0 + Duration::from_millis(120),
             vsock_ready: t0 + Duration::from_millis(150),
             command_done: t0 + Duration::from_millis(160),
@@ -235,8 +273,11 @@ mod tests {
         approx(t.resolve_ms, 5.0);
         approx(t.drives_ms, 7.0);
         approx(t.admit_ms, 8.0);
+        approx(t.pool_wait_ms, 5.0);
+        approx(t.claim_ms, 95.0);
         approx(t.backend_start_ms, 100.0);
         approx(t.vsock_wait_ms, 30.0);
+        approx(t.warm_window_ms, 130.0);
         approx(t.command_ms, 10.0);
         approx(t.teardown_ms, 15.0);
         approx(t.total_ms, 175.0);
@@ -270,6 +311,8 @@ mod tests {
             image_resolved: t0 + Duration::from_millis(5),
             drives_ready: t0 + Duration::from_millis(12),
             admitted: t0 + Duration::from_millis(20),
+            pool_wait_started: None,
+            claim_started: None,
             // backend_started before admitted (clock anomaly): clamps to 0.
             backend_started: t0 + Duration::from_millis(10),
             vsock_ready: t0 + Duration::from_millis(150),
@@ -287,15 +330,18 @@ mod tests {
             resolve_ms: 5.0,
             drives_ms: 7.0,
             admit_ms: 8.0,
+            pool_wait_ms: 5.0,
+            claim_ms: 95.0,
             backend_start_ms: 100.0,
             vsock_wait_ms: 30.0,
+            warm_window_ms: 130.0,
             command_ms: 10.0,
             teardown_ms: 15.0,
             total_ms: 175.0,
         };
         assert_eq!(
             t.render(),
-            "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms backend_start=100.0ms vsock_wait=30.0ms command=10.0ms teardown=15.0ms total=175.0ms launch_mode=warm dispatch_window=130.0ms warm_slo=ok"
+            "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms pool_wait_ms=5.0 claim_ms=95.0 backend_start=100.0ms vsock_wait=30.0ms warm_window_ms=130.0 command=10.0ms teardown=15.0ms total=175.0ms launch_mode=warm dispatch_window=130.0ms warm_slo=ok"
         );
     }
 
@@ -307,8 +353,11 @@ mod tests {
             resolve_ms: 0.0,
             drives_ms: 0.0,
             admit_ms: 0.0,
+            pool_wait_ms: 0.0,
+            claim_ms: 0.0,
             backend_start_ms,
             vsock_wait_ms,
+            warm_window_ms: backend_start_ms + vsock_wait_ms,
             command_ms: 0.0,
             teardown_ms: 0.0,
             total_ms: backend_start_ms + vsock_wait_ms,

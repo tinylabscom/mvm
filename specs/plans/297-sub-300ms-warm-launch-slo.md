@@ -98,7 +98,7 @@ and no claim silently falls back after being labeled warm.
       path and defer broad orphan-state maintenance until after the guest
       command; the security posture remains fail-closed while launch timing
       excludes unrelated filesystem cleanup.
-- [ ] Add `pool_wait_ms`, `claim_ms`, and `warm_window_ms` to the runtime timing
+- [x] Add `pool_wait_ms`, `claim_ms`, and `warm_window_ms` to the runtime timing
       record.
 - [ ] Make pool compatibility and late-bound share attachment explicit in the
       backend capability contract.

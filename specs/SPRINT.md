@@ -1316,7 +1316,8 @@ Then unify + retire the old paths:
       read-only virtio-fs share on HVF instead of materializing an ext4 image;
       warm-start remains separately gated on a backend standby-pool capability.
       Phase timing now labels every launch `launch_mode=cold|warm` and reports
-      `warm_slo=ok|over|na`; directory-share claims remain fail-closed until a
+      `pool_wait_ms`, `claim_ms`, `warm_window_ms`, and `warm_slo=ok|over|na`;
+      directory-share claims remain fail-closed until a
       backend can late-bind the host path after warm-child materialization.
       Plan 298 now breaks the implementation into eight owned issues: #2192
       defines the resident claim service and now has the typed warm/cold

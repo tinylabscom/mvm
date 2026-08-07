@@ -962,13 +962,19 @@ fn run_inner(
 
     // Reap stale standbys, try a warm-pool claim, then fall back to
     // snapshot-restore / cold boot. See `boot_transient_vm`.
+    let mut warm_claim_marks = crate::commands::vm::phase_timing::WarmClaimMarks::default();
     let requested_vm_name = vm_name.clone();
     let boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
         resolved: &resolved,
     };
-    let (vm_name, launch_mode) = boot_transient_vm(vm_name, use_snapshot, &boot_attempt)?;
+    let (vm_name, launch_mode) = boot_transient_vm(
+        vm_name,
+        use_snapshot,
+        &boot_attempt,
+        timing.then_some(&mut warm_claim_marks),
+    )?;
     let t_backend_started = timing.then(std::time::Instant::now);
 
     // Install Ctrl-C handler that tears the VM down.
@@ -1019,6 +1025,8 @@ fn run_inner(
             image_resolved,
             drives_ready,
             admitted,
+            pool_wait_started: warm_claim_marks.pool_wait_started,
+            claim_started: warm_claim_marks.claim_started,
             backend_started,
             vsock_ready,
             command_done,
@@ -1265,9 +1273,13 @@ fn boot_transient_vm(
     vm_name: String,
     use_snapshot: bool,
     attempt: &BootAttempt<'_>,
+    mut warm_claim_marks: Option<&mut crate::commands::vm::phase_timing::WarmClaimMarks>,
 ) -> Result<(String, crate::commands::vm::phase_timing::LaunchMode)> {
     let phase_timing = crate::commands::vm::phase_timing::enabled();
     let boot_started = phase_timing.then(std::time::Instant::now);
+    if let Some(marks) = warm_claim_marks.as_mut() {
+        marks.pool_wait_started = boot_started;
+    }
     let report_phase = |phase: &'static str| {
         if let Some(started) = boot_started {
             eprintln!(
@@ -1282,6 +1294,10 @@ fn boot_transient_vm(
     // spares resident until a manual `cache prune`. Best-effort; never blocks.
     crate::commands::pool::reap_stale_standbys_best_effort();
     report_phase("standby_reap");
+
+    if let Some(marks) = warm_claim_marks.as_mut() {
+        marks.claim_started = phase_timing.then(std::time::Instant::now);
+    }
 
     // Try a warm-pool claim before snapshot/cold-boot. A claimed standby is
     // pre-booted to agent-ready and runs under its own standby-id, so the
