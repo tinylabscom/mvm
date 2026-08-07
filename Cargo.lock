@@ -3238,6 +3238,7 @@ dependencies = [
  "mvm-net",
  "mvm-runtime",
  "mvm-sdk",
+ "mvm-vmm",
  "rand 0.8.6",
  "regex",
  "reqwest",

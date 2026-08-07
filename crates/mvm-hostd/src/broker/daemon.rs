@@ -564,7 +564,7 @@ fn registration_owner_is_dead(registration: &RegisterVm) -> bool {
         return false;
     };
     pid_path.parent() == Some(state_dir)
-        && !mvm_runtime::vm::reconcile::pid_file_has_live_process(&pid_path)
+        && !mvm_vmm::host::process_liveness::pid_file_has_live_process(&pid_path)
 }
 
 /// Validate a `vm_id` is safe to embed in a filesystem path: a non-empty DNS-

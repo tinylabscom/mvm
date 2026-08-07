@@ -313,6 +313,8 @@ jobs:
           cargo nextest run -p mvm-client --features test-support --lib
           cargo nextest run -p mvm-cli --features test-support --lib
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
+          cargo nextest run -p mvm-backends --features test-support --lib
+          cargo nextest run -p mvm-vmm --features test-support --lib
           cargo check -p mvm-cli --features test-support --example verification_loop
 
   lint:

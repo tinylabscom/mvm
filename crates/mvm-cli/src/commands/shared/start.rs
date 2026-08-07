@@ -3,7 +3,7 @@
 //! surface to every command file.
 
 use mvm_runtime::config;
-use mvm_runtime::{image, microvm};
+use mvm_runtime::image;
 
 /// Parameters for building a `VmStartConfig` from runtime-specific types.
 pub struct VmStartParams<'a> {
@@ -27,8 +27,8 @@ pub struct VmStartParams<'a> {
     /// `None` keeps the legacy "commit memory_mib at boot" behaviour.
     pub mem_initial_mib: Option<u32>,
     pub volumes: &'a [image::RuntimeVolume],
-    pub config_files: &'a [microvm::DriveFile],
-    pub secret_files: &'a [microvm::DriveFile],
+    pub config_files: &'a [mvm_vmm::host::drive_file::DriveFile],
+    pub secret_files: &'a [mvm_vmm::host::drive_file::DriveFile],
     pub port_mappings: &'a [config::PortMapping],
     /// Warm-pool target (`--warm-pool-size`); 0 = off.
     pub warm_pool_size: u32,

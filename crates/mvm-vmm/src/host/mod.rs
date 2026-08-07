@@ -4,7 +4,12 @@
 //! without creating a dependency cycle with `mvm-runtime` or `mvm-build`.
 
 pub mod aux_bin;
+pub mod broker_services_spawn;
+pub mod drive_file;
 pub mod egress_shared;
+pub mod host_agent_spawn;
 pub mod netd_spawn;
+pub mod process_liveness;
+pub mod substitution_spawn;
 pub mod virtiofsd;
 pub mod workload_wait;

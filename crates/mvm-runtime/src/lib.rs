@@ -44,7 +44,6 @@ pub mod backends;
 pub mod base;
 /// Per-VM broker-services (`mvm-broker` / `mvm-audit-signer`) subprocess
 /// spawn/reap helpers, mirroring [`substitution_spawn`].
-pub(crate) mod broker_services_spawn;
 /// The builder role layer: boots a builder VM over the `VmmDriver` seam with the
 /// disk-only job/artifact transport (trusted, no egress endpoint, no virtio-fs).
 pub mod builder_runner;
@@ -60,7 +59,6 @@ pub mod egress_redirect;
 /// the libkrun + Firecracker substitution-endpoint spawn paths.
 pub mod firecracker;
 pub mod handle_registry;
-pub(crate) mod host_agent_spawn;
 pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification
 /// (the image analog of [`checkpoint`]). Reuses the shared `lineage` walk.
@@ -101,7 +99,6 @@ pub mod selection;
 pub mod standby_pool;
 /// Shared per-VM substitution-endpoint spawn/reap helpers used by the
 /// QEMU + Firecracker launch paths (one impl, no drift).
-pub(crate) mod substitution_spawn;
 #[cfg(test)]
 pub(crate) mod test_support;
 /// Resident owner for opaque trusted-snapshot publications.
@@ -178,30 +175,24 @@ pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 /// The per-VM egress-TLS cert/key split helper. `mvmctl up`
 /// (mvm-cli) calls this while assembling the guest secrets drive: the cert is
 /// pushed onto the drive, the key is persisted host-side for the terminator
-/// endpoint. See [`substitution_spawn::build_egress_tls_delivery`].
-pub use substitution_spawn::{
-    EGRESS_CERT_DRIVE_NAME, EgressTlsDelivery, EndpointHandshake, EndpointTransport,
-    build_egress_tls_delivery, forget_secret_fingerprints, record_secret_fingerprints,
-    recorded_secret_fingerprints,
+/// Per-VM egress-substitution spawn helpers. Re-exported from `mvm-vmm::host`.
+pub use mvm_vmm::host::substitution_spawn;
+
+/// Per-VM broker-services spawn/reap. Re-exported from `mvm-vmm::host`.
+pub use mvm_vmm::host::broker_services_spawn;
+
+/// Per-tenant host-agent daemon seam. Re-exported from `mvm-vmm::host`.
+pub use mvm_vmm::host::host_agent_spawn;
+
+/// Host-agent registration helpers used by integration tests and the
+/// `mvmctl` host-agent path. Re-exported from `mvm-vmm::host::host_agent_spawn`.
+pub use mvm_vmm::host::host_agent_spawn::{
+    deregister_vm, ensure_host_agent_daemon, load_host_signing_key, register_vm,
 };
 
-/// Per-VM broker-services spawn/reap, called from the workload backends' launch
-/// path. Exposed so the backends and tests share one impl.
-pub use broker_services_spawn::{
-    AuditSignerHandle, AuditSignerSpawnParams, BrokerHandle, BrokerServicesGuard,
-    BrokerServicesSpawnParams, BrokerSpawnParams, reap_audit_signer, reap_broker,
-    reap_broker_services, spawn_audit_signer, spawn_broker, spawn_broker_services_if_admitted,
-};
-
-/// Per-tenant host-agent daemon seam: register/deregister VMs with one
-/// resident daemon instead of forking a per-VM broker. Exposed so the backend
-/// start/stop paths (and tests) share one impl. Not yet wired into `start()` —
-/// that lands behind a flag next.
-pub use host_agent_spawn::{
-    HostAgentServicesGuard, HostAgentServicesParams, ServicesGuard, deregister_vm,
-    ensure_host_agent_daemon, host_agent_daemon_enabled, load_host_signing_key,
-    reap_host_agent_services_from_state, register_host_agent_services_if_admitted, register_vm,
-};
+/// Substitution-endpoint helpers used by integration tests and the
+/// `mvmctl` secrets-drive path. Re-exported from `mvm-vmm::host::substitution_spawn`.
+pub use mvm_vmm::host::substitution_spawn::{EndpointHandshake, record_secret_fingerprints};
 
 /// Crate-wide test serialization for tests that mutate `HOME` or
 /// other process-global env vars. Re-exported from

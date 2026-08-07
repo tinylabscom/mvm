@@ -14,7 +14,7 @@ substrate_server_category = "per-VM provider plumbing (host agent, console, hand
 [dependencies]
 anyhow.workspace = true
 # Egress policy types used by the vsock egress bridge.
-mvm-core = { workspace = true }
+mvm-core = { workspace = true, features = ["egress-ca"] }
 # Well-known vsock port constants for the in-guest agent.
 mvm-net = { workspace = true }
 # Backend-agnostic error handling used by the driver seam.
