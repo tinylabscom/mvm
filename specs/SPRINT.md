@@ -142,6 +142,15 @@
       short reads, EOF, and nonblocking errors refund unused reservations.
       Regression coverage proves an exhausted budget keeps the stream alive.
 
+- [~] NANDA-style execution receipts and conformance badges — **plan 298**
+      (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
+      approved, WS2 core types landed in `mvm-core`, and WS3 read-only receipt
+      exporter landed: `mvmctl trust audit receipts export` converts verified
+      chain-signed `AuditEntry` events into signed `ExecutionReceipt`s. All
+      `mvm-core` / `mvm-hostd` unit tests and integration tests pass; workspace
+      `cargo check` / `cargo clippy` are clean. WS4–WS6 (runtime emission,
+      badge generator, docs) are next.
+
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
 Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,

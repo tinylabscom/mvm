@@ -201,6 +201,7 @@ leakguard = { version = "=0.8.0", default-features = false }
 # Crypto
 aes-gcm = "0.11"
 base64 = "0.22"
+bs58 = "0.5"
 ed25519-dalek = "3"
 hmac = "0.13"
 rand = "0.8"
@@ -459,6 +460,9 @@ toml.workspace = true
 # Plan 73 Followup H — `tests/run_plan_mode.rs` resolves python3 from
 # PATH to drive the SDK record-mode auto-exec end-to-end.
 which.workspace = true
+# `tests/audit_receipt_export.rs` builds a synthetic chain-signed audit log
+# directly with the same primitives the host uses.
+mvm-hostd = { workspace = true, default-features = false }
 
 [features]
 # ── The two product surfaces — the only two things this project ships ─────────
