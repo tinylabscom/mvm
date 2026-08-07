@@ -246,13 +246,16 @@ reseeding, and policy validation.
   the full 1,000-claim continuity witness. Darwin arm64 validation now proves
   the signed rootless handoff with the Hypervisor.framework entitlement, with
   1,000/1,000 successful warm claims below the strict 300ms ceiling and inside
-  the p50≤30ms and p99≤50ms aggregate targets. A real Linux x86_64
-  Firecracker/KVM direct-driver matrix also passes 30/30 claims at p50=39ms,
-  p95=39ms, and max=40ms; the witness now also delivers a fresh generation
-  token through the real post-restore agent RPC and requires acknowledged,
-  reseeded, clock-resynchronized readiness. Production standby capability
-  admission, Linux
-  libkrun, and the remaining backend/share-shape matrices remain open. The
+  the p50≤30ms and p99≤50ms aggregate targets. The earlier Linux x86_64
+  Firecracker/KVM 30/30 matrix measured only raw restore reachability and is
+  not an authenticated claim acceptance result. With a source-matched guest
+  image, the stricter witness completed 15/15 authenticated claims; normal
+  claims measured 63–76ms, but two restore-start outliers measured 513ms and
+  620ms while the identity RPC remained 24–35ms. The strict Linux maximum is
+  therefore not green yet. The Linux design follow-up is to pre-load paused
+  child VMMs during pool refill so Firecracker process/snapshot restore work is
+  outside the measured launch window. Production standby capability admission,
+  Linux libkrun, and the remaining backend/share-shape matrices remain open. The
   resident path defers reclamation of consumed parent payloads until after the
   measured handoff, keeping checkpoint and snapshot state bounded.
 - [x] Removed the process-wide `MVM_HOME` mutation from the UDS-channel test

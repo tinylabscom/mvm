@@ -60,6 +60,17 @@ fn sha256(path: &Path) -> String {
     mvm_core::crypto::image_verify::sha256_file(path).expect("sha256 file")
 }
 
+fn host_signer_pub_cmdline_token() -> String {
+    let path = mvm_core::config::mvm_keys_dir().join("host-signer.pub");
+    let public_key = std::fs::read(&path).expect("read live-test host signer public key");
+    assert_eq!(
+        public_key.len(),
+        32,
+        "live-test host signer public key must be exactly 32 bytes"
+    );
+    format!("mvm.host_signer_pub={}", hex::encode(public_key))
+}
+
 /// The parent's boot recipe. A factory parent boots the same NIC-less shape a
 /// workload does — one virtio-blk root, a console capture, no network device —
 /// because every child restored from it inherits this device model and cmdline
@@ -69,9 +80,10 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
         name: name.to_string(),
         kernel: KernelImage::Path(images.kernel.clone()),
         initramfs: None,
-        cmdline:
-            "console=ttyS0 reboot=k panic=1 net.ifnames=0 root=/dev/vda rw rootwait init=/init"
-                .to_string(),
+        cmdline: format!(
+            "console=ttyS0 reboot=k panic=1 net.ifnames=0 root=/dev/vda rw rootwait init=/init {}",
+            host_signer_pub_cmdline_token()
+        ),
         vcpus: 2,
         memory_mib: 512,
         mem_initial_mib: None,
@@ -137,8 +149,14 @@ fn fc_warm_pool_spawn_and_claim() {
     std::fs::create_dir_all(&home).expect("create live-test home");
     let keys = home.join("keys");
     std::fs::create_dir_all(&keys).expect("create live-test keys");
+    let host_signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
     std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32])
         .expect("write live-test host signer");
+    std::fs::write(
+        keys.join("host-signer.pub"),
+        host_signing_key.verifying_key().to_bytes(),
+    )
+    .expect("write live-test host signer public key");
     // SAFETY: this harness is `#[ignore]` and runs single-threaded by hand, so
     // no other thread is reading the environment concurrently.
     unsafe { std::env::set_var("MVM_HOME", &home) };
@@ -178,6 +196,14 @@ fn fc_warm_pool_spawn_and_claim() {
     assert_eq!(handle.id, parent_id);
     assert_eq!(handle.state, StandbyState::Idle);
     assert!(handle.pid > 0, "a booted parent must expose a readable pid");
+    let parent_vsock = mvm_runtime::microvm::firecracker_vsock_uds_path(
+        &mvm_core::config::vm_state_dir(&parent_id).to_string_lossy(),
+    );
+    assert!(
+        mvm_agentd::vsock::ping_at(&parent_vsock)
+            .expect("the parent must complete an authenticated ping"),
+        "the parent guest agent must answer an authenticated ping before capture"
+    );
 
     // Capture the booted parent's whole state — the pool's actual asset. This
     // is the same call the role layer makes, through the driver's own control.
@@ -221,6 +247,7 @@ fn fc_warm_pool_spawn_and_claim() {
     let t_claim = Instant::now();
     let genid = fresh_generation_token(parent_checkpoint.as_str().to_string());
     let token = genid.token;
+    let t_fork = Instant::now();
     let fork_result = driver.fork_standby_child(&ChildForkRequest {
         parent_vm_name: "standby-parent",
         child_vm_name: &child_id,
@@ -244,10 +271,13 @@ fn fc_warm_pool_spawn_and_claim() {
         }
     }
     fork_result.expect("fork Firecracker standby child");
+    let fork_ms = t_fork.elapsed().as_millis();
 
+    let t_identity = Instant::now();
     let identity = driver
         .deliver_child_identity(&child_id, token, None)
         .expect("the restored child must complete the authenticated identity handshake");
+    let identity_ms = t_identity.elapsed().as_millis();
     assert!(
         identity.acknowledged,
         "the guest agent must acknowledge the post-restore identity handshake"
@@ -274,5 +304,7 @@ fn fc_warm_pool_spawn_and_claim() {
 
     println!("FC_WARM_POOL_SPAWN_MS={spawn_ms}");
     println!("FC_WARM_POOL_CLAIM_MS={claim_ms}");
+    println!("FC_WARM_POOL_FORK_MS={fork_ms}");
+    println!("FC_WARM_POOL_IDENTITY_MS={identity_ms}");
     println!("FC_WARM_POOL_IDENTITY_HANDSHAKE=authenticated");
 }

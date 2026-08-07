@@ -107,13 +107,15 @@ and no claim silently falls back after being labeled warm.
       the results in a dated validation note. Darwin arm64 now has a fresh
       release-built 1,000-claim run with 1,000/1,000 successful warm claims,
       p50=17.9ms, p95=22.1ms, p99=27.4ms, and max=33.3ms; every claim stayed
-      below the strict 300ms ceiling. A real Linux x86_64 Firecracker/KVM
-      direct-driver matrix also completed 30/30 claims with p50=39ms,
-      p95=39ms, and max=40ms; the witness now delivers a fresh generation
-      token through the real post-restore agent RPC and requires acknowledged,
-      reseeded, clock-resynchronized readiness. Production standby capability
-      admission, Linux libkrun, and the remaining backend/share-shape matrices
-      remain open.
+      below the strict 300ms ceiling. The earlier Linux x86_64 Firecracker/KVM
+      30/30 matrix measured only raw restore reachability. The source-matched
+      authenticated witness completed 15/15 claims, with normal claims at
+      63–76ms but restore-start outliers at 513ms and 620ms; the identity RPC
+      itself stayed at 24–35ms. The strict Linux maximum is not green yet; the
+      next Linux slice must pre-load paused child VMMs during pool refill so
+      restore/process-start variance is outside the measured window. Production
+      standby capability admission, Linux libkrun, and the
+      remaining backend/share-shape matrices remain open.
 - [ ] Enforce the hard maximum and aggregate p50/p99 thresholds in CI.
 
 The host-side live acceptance harness is now available as

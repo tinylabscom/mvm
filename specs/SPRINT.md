@@ -1368,12 +1368,15 @@ Then unify + retire the old paths:
       secret-free deny-all endpoint and defers broad orphan-state cleanup until
       after the guest command; consumed resident-parent payloads are reclaimed
       asynchronously after the measured handoff, keeping long-run state
-      bounded. A real Linux x86_64 Firecracker/KVM direct-driver matrix also
-      completed 30/30 claims at p50=39ms, p95=39ms, and max=40ms; the witness
-      now delivers a fresh generation token through the real post-restore agent
-      RPC and requires acknowledged, reseeded, clock-resynchronized readiness.
-      Production standby capability admission, Linux libkrun, and remaining
-      backend/share-shape matrices remain open. The prior macOS host-vsock
+      bounded. The earlier Linux x86_64 Firecracker/KVM 30/30 matrix measured
+      only raw restore reachability. The source-matched authenticated witness
+      completed 15/15 claims, with normal claims at 63–76ms but restore-start
+      outliers at 513ms and 620ms; the identity RPC itself stayed at 24–35ms.
+      The strict Linux maximum is not green yet; the next Linux slice must
+      pre-load paused child VMMs during pool refill so restore/process-start
+      variance is outside the measured launch window. Production standby
+      capability admission, Linux libkrun, and remaining backend/share-shape
+      matrices remain open. The prior macOS host-vsock
       test hang was a parallel-test race caused by process-wide `MVM_HOME`
       mutation; UDS-channel tests now use explicit isolated roots, and the
       complete `mvm-hostd` package suite passes.

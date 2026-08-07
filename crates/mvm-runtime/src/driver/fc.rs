@@ -553,14 +553,14 @@ impl VmmDriver for FcDriver {
         // `vm_full_control` captures its whole {rootfs, memory, vmstate} — and
         // validation on real KVM hardware has since shown that half working:
         // the parent boots the workload's verified shape, reaches its guest
-        // agent, and the capture writes a memory-carrying checkpoint. But the
-        // capability means "can actually spawn AND claim a warm parent on this
-        // host", and the claim half has never been exercised live: the
-        // transient run path mints no verb-grant sidecar, so a restored child
-        // has no host-signer anchor to authenticate against and every claim
-        // falls back to a cold boot. Advertising it would cost every launch a
-        // parent boot for a claim that cannot yet land, so it stays false until
-        // a live run is green end to end. That capture/restore pair is a
+        // agent, and the capture writes a memory-carrying checkpoint. The
+        // authenticated direct-driver claim witness also works, but its
+        // on-demand restore has shown host-scheduling outliers above the
+        // strict warm window, and it does not yet exercise the production
+        // runner's endpoint, grant, and share wiring. Advertising it would
+        // make every launch depend on a claim path that has not passed the
+        // production and worst-case timing gates, so it stays false until
+        // those gates are green. That capture/restore pair is a
         // distinct seam from the coarse `snapshots`/`snapshot_capability` tier
         // below — it captures one specific parent shape for the standby pool,
         // not an arbitrary named VM's live memory on demand, so those two
