@@ -293,7 +293,15 @@ for detailed scope and acceptance criteria.
         stay refused at admission on the userspace backend, honestly and
         for a stated reason. ADR-039 status Rejected; reopening requires a
         workload with a demonstrated need
-
+- [~] Extract `mvm-backends` crate (`specs/plans/298-extract-mvm-backends-crate.md`)
+  - [x] Driver seam (`VmmDriver`, `VmmSpec`, `RunningVm`, snapshot types) moved to `mvm-vmm`
+  - [x] Host `virtiofsd` helper moved to `mvm-vmm`
+  - [x] Shared host helpers (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`, `process_liveness`) moved to `mvm-vmm::host`
+  - [x] Microvm boot/cmdline helpers (`boot_config`, `egress_bridge`) moved to `mvm-vmm::host`
+  - [x] `mvm-backends` crate scaffolded; `MockDriver` lives under `test-support`
+  - [ ] Move concrete drivers (`FcDriver`, `HvfDriver`, `LibkrunDriver`, `QemuDriver`) into `mvm-backends`
+  - [ ] Move legacy `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`) into `mvm-backends`
+  - [ ] Wire `mvm-runtime` to depend on `mvm-backends` and remove local driver/backend source files
 - [ ] Plan 298 — NANDA-style execution receipts and conformance badges
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`)
   - [x] WS1 RFC approved: `ExecutionReceipt` and `ConformanceBadge` envelopes,

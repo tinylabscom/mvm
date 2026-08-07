@@ -144,6 +144,19 @@
       page and security docs now state the warm-millisecond promise alongside
       first-run behavior and the default-deny trust model.
 
+- [~] Extract `mvm-backends` crate — **plan 298**
+      (`specs/plans/298-extract-mvm-backends-crate.md`). Host-side
+      orchestration helpers (`host_agent_spawn`, `substitution_spawn`,
+      `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`,
+      `workload_wait`, `drive_file`, `process_liveness`) moved from
+      `mvm-runtime` into `mvm-vmm::host`, the `VmmDriver` seam and `VmmSpec`
+      already live in `mvm-vmm`, and the `mvm-backends` crate is scaffolded
+      with `MockDriver` behind `test-support`. Workspace `cargo nextest run
+      --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`
+      are green. Remaining: move concrete drivers and legacy `VmBackend`
+      implementations into `mvm-backends`, then wire `mvm-runtime` to depend on
+      the new crate.
+
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
       approved, WS2 core types landed in `mvm-core`, WS3 read-only receipt

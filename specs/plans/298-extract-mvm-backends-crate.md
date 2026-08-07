@@ -87,7 +87,7 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
   and every caller (drivers, tests, examples, builder VM). Note which
   methods drivers still delegate to.
 
-- [ ] **Step 3: Decide the `virtiofsd` helper location**
+- [x] **Step 3: Decide the `virtiofsd` helper location**
 
   The QEMU driver and the builder VM both need `virtiofsd`. Options:
   - Move it into `mvm-vmm` under a `host` module (recommended).
@@ -96,7 +96,7 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
     depend on `mvm-backends`). So this is only viable if `mvm-build`'s runtime
     dependency is inverted first — do not choose without explicit approval.
 
-- [ ] **Step 4: Decide `MockBackend` location**
+- [x] **Step 4: Decide `MockBackend` location**
 
   It is a test-only backend. Either move it into `mvm-backends` under a
   `test-support` feature or keep a minimal mock in `mvm-runtime` tests.
