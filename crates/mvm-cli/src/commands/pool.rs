@@ -245,6 +245,7 @@ fn admit_standby_parent_plan(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        stream_edges: Vec::new(),
         stream_retention: Default::default(),
         // The parent reaches nothing, so it gets the closed transport and no
         // L3 spec — the same "no workload authority" posture as the empty

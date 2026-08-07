@@ -3,7 +3,6 @@
 //! runners above it.
 
 pub mod fc;
-pub mod hvf;
 pub mod libkrun;
 pub mod mock;
 pub mod qemu;
@@ -11,7 +10,6 @@ pub mod spec;
 pub mod traits;
 
 pub use fc::FcDriver;
-pub use hvf::HvfDriver;
 pub use libkrun::LibkrunDriver;
 pub use mock::{MockDriver, MockRunningVm};
 pub use qemu::QemuDriver;

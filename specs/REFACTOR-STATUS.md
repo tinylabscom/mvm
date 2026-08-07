@@ -692,6 +692,21 @@ for detailed scope and acceptance criteria.
   - [x] Exact tenant audit-chain anchor required before transcript key unwrap
         and decryption, with hermetic operator-path BDD coverage
 
+- [x] Backend crate separation + HVF DAX + QEMU virtio-fs
+  (**PR #2220**, branch `feat/backend-crate-separation`)
+  - [x] Consolidate HVF under `mvm-runtime/src/backends/hvf`
+  - [x] Extract shared `mvm-vmm` crate for VMM primitives
+  - [x] Backend-agnostic `VmmSpec` with typed `VirtioFsShare` entries
+  - [x] HVF and libkrun DAX support through `virtiofs` share mapping
+  - [x] QEMU virtio-fs (and DAX) via standalone `virtiofsd` spawn helper
+  - [x] Guest kernel config enables `FS_DAX`/`FUSE_DAX`/hotplug/zone-device
+  - [x] Linux cross-compile stubs for Hypervisor.framework symbols
+  - [x] Console-streaming test isolated with temp `MVM_HOME`
+  - [x] `cargo test -p mvm-runtime` green; `cargo clippy -p mvm-runtime
+        -p mvm-build -- -D warnings` clean on macOS and Linux builder VM
+  - [x] Full workspace test run on x86_64 Linux builder VM —
+        `cargo nextest run --workspace`: 10372 passed, 19 skipped (4 threads)
+
 - [~] Plan 255 — vsock-first snapshot, egress, and warm-start adoption
   (`specs/plans/255-vsock-first-snapshot-egress-adoption.md`)
   - [x] Snapshot storage and lineage-protected clone primitives

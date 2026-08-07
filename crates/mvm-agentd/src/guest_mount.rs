@@ -20,6 +20,11 @@ pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
 
+/// Home directory used by workload processes when the rootfs is writable.
+pub const WORKLOAD_HOME: &str = "/home/mvm-worker";
+/// Writable fallback home for read-only workload rootfs images.
+pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
+
 /// Linux capability used by the authenticated guest agent to signal PID 1.
 pub const CAP_KILL: u32 = 5;
 /// Linux capability used by the guest agent's optional loopback DNS helper.
@@ -445,6 +450,27 @@ pub fn drop_guest_agent_privilege(uid: u32, gid: u32) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
         drop_privilege(uid, gid)
+    }
+}
+
+/// Ensure the preferred workload home exists before the agent drops privilege.
+#[cfg(target_os = "linux")]
+pub fn ensure_workload_home() -> Result<()> {
+    ensure_dir(WORKLOAD_HOME)?;
+    chown(WORKLOAD_HOME, WORKLOAD_UID, WORKLOAD_GID)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn ensure_workload_home() -> Result<()> {
+    Ok(())
+}
+
+/// Resolve the writable home directory for workload processes.
+pub fn workload_home() -> &'static str {
+    if Path::new(WORKLOAD_HOME).is_dir() {
+        WORKLOAD_HOME
+    } else {
+        WORKLOAD_HOME_FALLBACK
     }
 }
 

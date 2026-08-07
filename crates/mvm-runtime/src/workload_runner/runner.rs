@@ -310,6 +310,8 @@ impl StandingSockets {
             egress_gateway: egress_uds,
             exit: &self.exit,
             broker: self.broker.as_deref(),
+            network_control: None,
+            network_data: None,
             console_data: self.console_data.clone(),
         }
     }
@@ -1398,7 +1400,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // it: there is no retry and no fallback, so a guest that finds no
         // listener has no network at all. A no-op for every plan that did
         // not select the tunnel.
-        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir)?;
+        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
 
         // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
         // below, so bind them here rather than inline.
@@ -1589,7 +1591,7 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use mvm_fs::snapshot_store::SnapshotStore;
 
-    use crate::driver::HvfDriver;
+    use crate::backends::hvf::HvfDriver;
     use crate::driver::mock::MockDriver;
 
     /// An `EndpointSpawner` test double: records the request it was handed and
@@ -1744,7 +1746,7 @@ mod tests {
     fn egress_host_uds(spec: &crate::driver::VmmSpec) -> &Path {
         spec.vsock
             .iter()
-            .find(|p| p.guest_port == EGRESS_PORT)
+            .find(|p| p.service.port() == EGRESS_PORT)
             .map(|p| p.host_uds.as_path())
             .expect("spec carries an EGRESS_PORT vsock channel")
     }
@@ -2063,7 +2065,7 @@ mod tests {
         let broker = specs[0]
             .vsock
             .iter()
-            .find(|p| p.guest_port == BROKER_PORT)
+            .find(|p| p.service.port() == BROKER_PORT)
             .expect("admitted spec carries a BROKER_PORT channel");
         assert_eq!(broker.direction, crate::driver::VsockDirection::GuestDials);
         assert_eq!(broker.host_uds, expected_socket);
@@ -2102,7 +2104,10 @@ mod tests {
         // BROKER_PORT stays ECONNREFUSED (fail-closed).
         let specs = runner.driver.booted_specs();
         assert!(
-            specs[0].vsock.iter().all(|p| p.guest_port != BROKER_PORT),
+            specs[0]
+                .vsock
+                .iter()
+                .all(|p| p.service.port() != BROKER_PORT),
             "unadmitted VM must carry no broker port"
         );
     }
@@ -2824,7 +2829,7 @@ mod tests {
         let console: Vec<_> = spec
             .vsock
             .iter()
-            .filter(|p| p.guest_port > CONSOLE_PORT_BASE)
+            .filter(|p| p.service.port() > CONSOLE_PORT_BASE)
             .collect();
         assert_eq!(console.len(), 128);
         assert!(
@@ -3046,7 +3051,7 @@ mod tests {
             booted[0]
                 .vsock
                 .iter()
-                .map(|p| p.guest_port)
+                .map(|p| p.service.port())
                 .collect::<Vec<_>>()
         );
 
@@ -3935,7 +3940,7 @@ mod tests {
                             .map(|rest| format!("<vm>/{}", rest.display()))
                     })
                     .unwrap_or_else(|| p.host_uds.display().to_string());
-                (p.guest_port, p.direction, where_)
+                (p.service.port(), p.direction, where_)
             })
             .collect()
     }
@@ -4051,7 +4056,7 @@ mod tests {
         // Non-vacuity: the fixture must actually exercise all four standing
         // channels, or "the two match" would say nothing. These are the three
         // the fork used to drop, plus the agent RPC.
-        let ports: Vec<u32> = cold.iter().map(|p| p.guest_port).collect();
+        let ports: Vec<u32> = cold.iter().map(|p| p.service.port()).collect();
         for (port, what) in [
             (EGRESS_PORT, "the gated egress endpoint"),
             (BROKER_PORT, "host.audit.v1 / host.secrets.v1"),
@@ -4094,7 +4099,7 @@ mod tests {
         let wired = run.driver.forked_children()[0]
             .channels
             .iter()
-            .find(|p| p.guest_port == BROKER_PORT)
+            .find(|p| p.service.port() == BROKER_PORT)
             .map(|p| p.host_uds.clone())
             .expect("the child carries a broker channel");
         assert_eq!(

@@ -15,6 +15,9 @@ substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + b
 [dependencies]
 # Volume backend contract plus the IR/protocol types used by persistence.
 mvm-contract = { workspace = true, features = ["local", "volume"] }
+# Backend-agnostic VMM device model + hypervisor seam; split out so concrete
+# backends can depend on it without circular references to mvm-runtime.
+mvm-vmm = { workspace = true }
 # `egress-ca`: `substitution_spawn::build_egress_tls_delivery`
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.

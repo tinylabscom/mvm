@@ -20,18 +20,15 @@ use crate::vm::instance_snapshot::PostRestoreOutcome;
 /// What a driver needs to fork a standby parent into a fresh child VMM. Grouped
 /// so the seam takes one value instead of a positional list.
 pub struct ChildForkRequest<'a> {
-    /// The verified standby parent that is being handed off to this child.
-    /// Saved-state drivers use the checkpoint in `child_dir`; live standby
-    /// drivers use this name to transfer their paused resident VM.
-    pub parent_vm_name: &'a str,
     /// The child's fresh, registry-unique name (its `~/.mvm/vms/<name>` key).
     pub child_vm_name: &'a str,
     /// The child's fresh host-side state dir. Saved-state restores populate it
     /// with a copy-on-write clone; resident handoffs populate only the runtime
     /// sockets and markers needed by the transferred supervisor.
     pub child_dir: &'a Path,
-    /// The resident parent name for an in-process handoff. `None` selects the
-    /// saved-state restore path used by drivers that launch a fresh VMM.
+    /// The verified resident parent name for an in-process handoff. `None`
+    /// selects the saved-state restore path used by drivers that launch a fresh
+    /// VMM.
     pub parent_vm_name: Option<&'a str>,
     /// Fresh VMGenID token, bound to the child's content-address, that the
     /// child must adopt so its CSPRNG diverges from the parent's.

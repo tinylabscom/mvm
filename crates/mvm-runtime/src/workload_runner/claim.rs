@@ -289,6 +289,8 @@ mod tests {
                 443,
             )]);
         let state = tempfile::tempdir().unwrap();
+        let expected_child = mvm_core::config::vm_substitution_endpoint_socket("child-a");
+        let expected_sibling = mvm_core::config::vm_substitution_endpoint_socket("child-b");
 
         let mut child = guards
             .spawn_endpoint(
@@ -299,14 +301,8 @@ mod tests {
 
         // The endpoint socket is keyed on child-a's own id — private to it, and
         // provably not a sibling's socket (no cross-workload reuse).
-        assert_eq!(
-            child.egress_uds(),
-            Some(mvm_core::config::vm_substitution_endpoint_socket("child-a").as_path())
-        );
-        assert_ne!(
-            child.egress_uds(),
-            Some(mvm_core::config::vm_substitution_endpoint_socket("child-b").as_path())
-        );
+        assert_eq!(child.egress_uds(), Some(expected_child.as_path()));
+        assert_ne!(child.egress_uds(), Some(expected_sibling.as_path()));
         // The fresh id was threaded to the spawner, not a parent/shared name.
         assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), Some("child-a"));
 

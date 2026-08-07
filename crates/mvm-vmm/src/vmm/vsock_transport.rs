@@ -337,29 +337,6 @@ impl VsockTransportCore {
         });
     }
 
-    /// Record the peer's advertised receive-buffer credit from an incoming
-    /// packet. The guest updates `buf_alloc` and `fwd_cnt` as it consumes data,
-    /// so the host must refresh its view before sending more.
-    pub(crate) fn record_tx_credit(&mut self, inbound: &VsockHdr) {
-        let key = VsockConnectionKey {
-            host_port: inbound.dst_port,
-            guest_port: inbound.src_port,
-        };
-        if !self.tx_credit.contains_key(&key) && self.tx_credit.len() >= MAX_CONNECTIONS {
-            return;
-        }
-        let now = Instant::now();
-        let entry = self.tx_credit.entry(key).or_insert(TxCredit {
-            peer_buf_alloc: inbound.buf_alloc,
-            peer_fwd_cnt: inbound.fwd_cnt,
-            tx_cnt: 0,
-            last_activity: now,
-        });
-        entry.peer_buf_alloc = inbound.buf_alloc;
-        entry.peer_fwd_cnt = inbound.fwd_cnt;
-        entry.last_activity = now;
-    }
-
     pub(crate) fn tx_credit_available(&self, host_port: u32, guest_port: u32) -> u32 {
         self.tx_credit
             .get(&VsockConnectionKey {
@@ -515,26 +492,6 @@ impl VsockTransportCore {
         self.queues[RX].next_used = queue.next_used();
         delivered
     }
-    #[cfg(test)]
-    pub(crate) fn test_provide_rx_descriptor(&mut self, buf_addr: u64, buf_len: usize) {
-        let base = 0x5000_0000u64;
-        self.queues[RX] = Queue {
-            num: 1,
-            ready: 1,
-            desc: base,
-            avail: base + 0x100,
-            used: base + 0x200,
-            last_avail: 0,
-            next_used: 0,
-        };
-        self.mem.write_bytes(base, &buf_addr.to_le_bytes());
-        self.mem
-            .write_bytes(base + 8, &(buf_len as u32).to_le_bytes());
-        self.mem.wr_u16(base + 12, 2); // DESC_F_WRITE
-        self.mem.wr_u16(base + 0x100 + 2, 1); // avail_idx = 1
-        self.mem.wr_u16(base + 0x100 + 4, 0); // ring[0] = 0
-    }
-
     fn cur(&self) -> &Queue {
         &self.queues[(self.queue_sel as usize).min(NUM_QUEUES - 1)]
     }

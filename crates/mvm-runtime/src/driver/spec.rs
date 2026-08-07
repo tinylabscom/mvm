@@ -8,6 +8,8 @@
 
 use std::path::PathBuf;
 
+use mvm_net::channel::GuestService;
+
 /// Where a VM's kernel comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelImage {
@@ -50,21 +52,19 @@ pub enum VsockDirection {
     GuestDials,
 }
 
-/// One vsock port mapping between a guest port and a host unix socket.
+/// One typed guest service mapping to a host unix socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VsockPort {
-    pub guest_port: u32,
+    pub service: GuestService,
     pub host_uds: PathBuf,
     pub direction: VsockDirection,
 }
 
-/// One live host-directory share served to a guest over read-only virtio-fs.
-/// The tag is the guest-visible virtio-fs identifier used by the activation
-/// manifest; it is not derived from the host path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VirtioFsShare {
-    pub host: PathBuf,
-    pub tag: String,
+impl VsockPort {
+    /// The numeric vsock port used at the VMM boundary.
+    pub fn port(&self) -> u32 {
+        self.service.port()
+    }
 }
 
 /// Write-only host capture of the guest console. There is no input fd — the
@@ -73,6 +73,20 @@ pub struct VirtioFsShare {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsoleCapture {
     pub log_path: PathBuf,
+}
+
+/// One virtio-fs host directory share.
+///
+/// Backends that support virtio-fs attach this as a guest-visible filesystem
+/// tagged with `tag`. `dax` requests direct host-page access when both the
+/// backend and the guest kernel support it; backends without DAX support
+/// ignore the flag and serve the share through the normal FUSE path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtioFsShare {
+    pub tag: String,
+    pub host_path: PathBuf,
+    pub read_only: bool,
+    pub dax: bool,
 }
 
 /// The backend-agnostic physical recipe a [`VmmDriver`](crate::driver::VmmDriver)
@@ -91,27 +105,26 @@ pub struct VmmSpec {
     /// the full `memory_mib` at boot.
     pub mem_initial_mib: Option<u32>,
     pub blocks: Vec<BlockDev>,
-    /// Live read-only host-directory shares. Backends without virtio-fs support
-    /// must reject a non-empty list rather than silently dropping a mount.
-    pub virtiofs_shares: Vec<VirtioFsShare>,
     pub vsock: Vec<VsockPort>,
     pub console: ConsoleCapture,
-    /// Trusted-builder VM: it carries no untrusted workload, so it boots WITHOUT
-    /// the claim-10 egress gate (no `EGRESS_PORT` relay required). A workload
-    /// leaves this `false` so a missing egress relay fails closed rather than
-    /// booting ungated.
+    /// virtio-fs host directory shares. A `virtiofs_root` boot supplies one
+    /// share tagged `mvmroot`; additional `DirShare` volumes add more tags.
+    /// Backends without virtio-fs support must reject a non-empty list.
+    pub shares: Vec<VirtioFsShare>,
+    /// Trusted-builder VM: it carries no untrusted workload, so it boots
+    /// without an egress relay. Workload launches leave this false so a
+    /// missing relay fails closed rather than booting ungated.
     pub trusted_builder: bool,
 }
 
 impl VmmSpec {
-    /// The host unix socket a standing vsock port binds to, found by its
-    /// guest-port number. `None` when the spec carries no channel for that
-    /// port. Both drivers resolve the egress/agent/broker sockets through this
-    /// one lookup instead of each re-scanning `vsock`.
-    pub fn host_socket_for_port(&self, guest_port: u32) -> Option<PathBuf> {
+    /// The host unix socket a standing guest service binds to.
+    /// `None` when the spec carries no channel for that service. Drivers use
+    /// this lookup instead of each re-scanning the raw channel list.
+    pub fn host_socket_for_service(&self, service: GuestService) -> Option<PathBuf> {
         self.vsock
             .iter()
-            .find(|p| p.guest_port == guest_port)
+            .find(|p| p.service == service)
             .map(|p| p.host_uds.clone())
     }
 }
@@ -131,5 +144,18 @@ mod tests {
         assert_eq!(mk(0).device_node(), "/dev/vda");
         assert_eq!(mk(1).device_node(), "/dev/vdb");
         assert_eq!(mk(25).device_node(), "/dev/vdz");
+    }
+
+    #[test]
+    fn typed_vsock_service_resolves_its_transport_port() {
+        let channel = VsockPort {
+            service: GuestService::NetworkData { queue: 0 },
+            host_uds: "/run/network-data.sock".into(),
+            direction: VsockDirection::GuestDials,
+        };
+        assert_eq!(
+            channel.port(),
+            GuestService::NetworkData { queue: 0 }.port()
+        );
     }
 }

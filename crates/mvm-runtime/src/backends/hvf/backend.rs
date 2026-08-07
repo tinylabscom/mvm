@@ -373,11 +373,6 @@ fn hvf_workload_support_available() -> bool {
     hvf_platform_supported() && hvf_supervisor_launch_support_available()
 }
 
-fn hvf_live_handoff_validation_enabled() -> bool {
-    cfg!(feature = "hvf-live-validation")
-        && std::env::var("MVM_HVF_ENABLE_WARM_HANDOFF").as_deref() == Ok("1")
-}
-
 impl VmBackend for HvfBackend {
     fn name(&self) -> &str {
         "hvf"
@@ -394,10 +389,10 @@ impl VmBackend for HvfBackend {
         VmCapabilities {
             pause_resume: true,
             snapshot_capability: SnapshotCapability::Unsupported,
-            // Normal admission stays fail-closed. Hardware validation may opt in
-            // explicitly from an isolated test process after the full witness is
-            // ready; this is never enabled by the normal launch environment.
-            standby_pool: hvf_live_handoff_validation_enabled(),
+            // The native resident handoff is the warm-launch implementation;
+            // admission still requires the backend's ordinary availability and
+            // security gates before a parent can be created or claimed.
+            standby_pool: true,
             vsock: true,
             // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
             // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
@@ -532,7 +527,7 @@ impl VmBackend for HvfBackend {
             cmdline: cmdline::workload_cmdline(
                 config,
                 &state_dir,
-                crate::hvf_bootargs::workload_bootargs,
+                crate::backends::hvf::workload_bootargs,
             ),
             memory_mib: config.memory_mib,
             initramfs: cmdline::effective_initrd(config),
@@ -978,6 +973,7 @@ mod tests {
             egress_policy_ref: None,
             tool_policy_ref: None,
             secret_release: SecretReleasePolicy::PlanBound,
+            stream_edges: Vec::new(),
             secrets: vec![SecretBinding {
                 name: "API_KEY".into(),
                 source: SecretSource::Keystore {
@@ -1059,7 +1055,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let assembled =
-            cmdline::workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+            cmdline::workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
                 .expect("cmdline");
         assert!(
             assembled.contains("mvm.runtime_data=/dev/vdb"),

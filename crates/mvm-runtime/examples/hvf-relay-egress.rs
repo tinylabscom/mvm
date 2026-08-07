@@ -63,8 +63,9 @@ fn main() {
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::vm_backend::VmStatus;
     use mvm_net::channel::GuestService;
+    use mvm_runtime::backends::hvf::driver::HvfDriver;
     use mvm_runtime::driver::{
-        ConsoleCapture, HvfDriver, KernelImage, VmmDriver, VmmSpec, VsockDirection, VsockPort,
+        ConsoleCapture, KernelImage, VmmDriver, VmmSpec, VsockDirection, VsockPort,
     };
 
     fn endpoint_bin() -> PathBuf {
@@ -168,7 +169,7 @@ fn main() {
             memory_mib: 512,
             mem_initial_mib: None,
             blocks: vec![],
-            virtiofs_shares: vec![],
+            shares: vec![],
             // The one channel off the box: the guest dials EGRESS_PORT, the host
             // relays it to the gating endpoint's UDS.
             vsock: vec![VsockPort {
@@ -179,6 +180,7 @@ fn main() {
             console: ConsoleCapture {
                 log_path: state_dir.join("console.log"),
             },
+            trusted_builder: false,
         };
 
         let driver = HvfDriver::new();

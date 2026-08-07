@@ -513,11 +513,12 @@ mod tests {
             memory_mib: 256,
             mem_initial_mib: None,
             blocks: vec![],
-            virtiofs_shares: vec![],
+            shares: vec![],
             vsock: vec![],
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
+            trusted_builder: false,
         }
     }
 

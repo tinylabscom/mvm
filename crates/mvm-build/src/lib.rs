@@ -43,7 +43,7 @@ pub mod egress_proxy;
 pub mod fc_kernel;
 pub mod firecracker;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
-/// macOS backend, raw HVF backend). Shared by `mvm_runtime::hvf` (writer) + the bin.
+/// macOS backend, raw HVF backend). Shared by `mvm_runtime::backends::hvf` (writer) + the bin.
 pub mod hvf_supervisor;
 /// Universal initramfs build + cache resolution.
 pub mod initramfs;
@@ -94,6 +94,8 @@ pub mod libkrun_network_provider;
 /// `cfg(linux)`) plus pure address-parsing/encoding utilities tested
 /// on every host. Consumed by both `stage0-init` and `mvm-host-vm-init`.
 pub mod guest_net;
+
+pub mod virtiofsd;
 
 pub mod qemu_builder;
 

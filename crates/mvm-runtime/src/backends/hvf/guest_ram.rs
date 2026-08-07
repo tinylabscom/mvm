@@ -184,6 +184,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn allocates_requested_size_page_aligned() {
         let ram = GuestRam::new(HVF_PAGE_SIZE * 4).expect("mmap");
         assert_eq!(ram.len(), HVF_PAGE_SIZE * 4);

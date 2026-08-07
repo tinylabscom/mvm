@@ -17,6 +17,10 @@ use core::ffi::c_void;
 /// `hv_return_t` is `int`; `HV_SUCCESS` is 0, errors are nonzero codes.
 pub type hv_return_t = i32;
 pub const HV_SUCCESS: hv_return_t = 0;
+/// Stub error returned by the HVF FFI on non-Apple targets. Hypervisor.framework
+/// is unavailable there; the HVF backend is never selected, but the symbols must
+/// still link.
+pub const HV_ERROR_UNSUPPORTED: hv_return_t = i32::MAX;
 
 /// Guest physical address.
 pub type hv_ipa_t = u64;
@@ -125,6 +129,7 @@ const _: () = {
     assert!(offset_of!(hv_vcpu_exit_t, exception) == 8);
 };
 
+#[cfg(target_os = "macos")]
 #[link(name = "Hypervisor", kind = "framework")]
 unsafe extern "C" {
     pub fn hv_vm_create(config: hv_config_t) -> hv_return_t;
@@ -176,6 +181,129 @@ unsafe extern "C" {
         spi_intid_base: *mut u32,
         spi_intid_count: *mut u32,
     ) -> hv_return_t;
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vm_create(_config: hv_config_t) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+pub unsafe fn hv_vm_destroy() -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vm_map(
+    _addr: *mut c_void,
+    _ipa: hv_ipa_t,
+    _size: usize,
+    _flags: hv_memory_flags_t,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vm_unmap(_ipa: hv_ipa_t, _size: usize) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vcpu_create(
+    _vcpu: *mut hv_vcpu_t,
+    _exit: *mut *mut hv_vcpu_exit_t,
+    _config: hv_config_t,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+pub unsafe fn hv_vcpu_destroy(_vcpu: hv_vcpu_t) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+pub unsafe fn hv_vcpu_run(_vcpu: hv_vcpu_t) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vcpu_set_reg(_vcpu: hv_vcpu_t, _reg: hv_reg_t, _value: u64) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vcpu_get_reg(_vcpu: hv_vcpu_t, _reg: hv_reg_t, _value: *mut u64) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vcpu_set_sys_reg(
+    _vcpu: hv_vcpu_t,
+    _reg: hv_sys_reg_t,
+    _value: u64,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vcpus_exit(_vcpus: *const hv_vcpu_t, _vcpu_count: u32) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+pub unsafe fn hv_gic_config_create() -> hv_gic_config_t {
+    std::ptr::null_mut()
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_config_set_distributor_base(
+    _config: hv_gic_config_t,
+    _base: hv_ipa_t,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_config_set_redistributor_base(
+    _config: hv_gic_config_t,
+    _base: hv_ipa_t,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_create(_config: hv_gic_config_t) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+pub unsafe fn hv_gic_set_spi(_intid: u32, _level: bool) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_get_distributor_size(_size: *mut usize) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_get_distributor_base_alignment(_alignment: *mut usize) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_get_redistributor_size(_size: *mut usize) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_get_redistributor_base_alignment(_alignment: *mut usize) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_get_spi_interrupt_range(
+    _spi_intid_base: *mut u32,
+    _spi_intid_count: *mut u32,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
 }
 
 /// Opaque `hv_gic_config_t`.

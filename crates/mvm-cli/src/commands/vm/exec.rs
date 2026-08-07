@@ -972,6 +972,7 @@ fn emit_oci_run_admission(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        stream_edges: Vec::new(),
         stream_retention: Default::default(),
     };
     let ledger = InMemoryNonceLedger::new();

@@ -5,9 +5,6 @@ use std::os::unix::net::UnixListener;
 #[cfg(test)]
 use std::path::Path;
 
-#[cfg(all(test, feature = "test-support"))]
-use crate::mock_guest_agent::MockGuestAgent;
-
 #[cfg(test)]
 fn is_permission_denied_io(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::PermissionDenied
@@ -61,20 +58,20 @@ pub(crate) fn bind_unix_listener(path: &Path) -> Option<UnixListener> {
     }
 }
 
-#[cfg(all(test, feature = "test-support"))]
-pub(crate) fn start_mock_guest_agent(vm_dir: &Path) -> Option<MockGuestAgent> {
-    match MockGuestAgent::start(vm_dir) {
-        Ok(agent) => Some(agent),
-        Err(err) if error_chain_has_permission_denied(err.as_ref()) => {
-            eprintln!(
-                "skipping test: sandbox denied starting MockGuestAgent under {}: {err}",
-                vm_dir.display()
-            );
-            None
-        }
-        Err(err) => panic!(
-            "starting MockGuestAgent under {} failed: {err}",
-            vm_dir.display()
-        ),
-    }
+/// Allocate `size` bytes of zeroed, **page-aligned** scratch RAM for the VMM
+/// device tests and leak it for the process lifetime.
+#[cfg(test)]
+pub(crate) fn page_aligned_ram(size: usize) -> &'static mut [u8] {
+    use std::alloc::{Layout, alloc_zeroed};
+    assert!(size > 0, "scratch RAM size must be non-zero");
+    // SAFETY: `sysconf(_SC_PAGESIZE)` returns the process page size, a valid
+    // power-of-two alignment for `Layout`.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let layout = Layout::from_size_align(size, page).expect("page-aligned layout");
+    // SAFETY: `layout` has non-zero size.
+    let ptr = unsafe { alloc_zeroed(layout) };
+    assert!(!ptr.is_null(), "page-aligned RAM allocation failed");
+    // SAFETY: `ptr` is a fresh, uniquely-owned `size`-byte zeroed allocation,
+    // intentionally leaked so it stays valid for the whole test process.
+    unsafe { std::slice::from_raw_parts_mut(ptr, size) }
 }

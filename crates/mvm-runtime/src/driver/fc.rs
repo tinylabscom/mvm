@@ -707,6 +707,12 @@ impl VmmDriver for FcDriver {
     }
 
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+        if !spec.shares.is_empty() {
+            bail!(
+                "Firecracker does not support virtio-fs shares ({} requested);                  use the HVF or libkrun backend",
+                spec.shares.len()
+            );
+        }
         let kernel_path = resolve_fc_kernel_path(spec)?;
 
         let state_dir = vm_state_dir(&spec.name);
@@ -966,7 +972,7 @@ impl RunningVm for FcRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::ConsoleCapture;
+    use crate::driver::{ConsoleCapture, VirtioFsShare};
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
 
     fn host_dials(service: GuestService, uds: &str) -> VsockPort {
@@ -1006,11 +1012,12 @@ mod tests {
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,
-            virtiofs_shares: vec![],
+            shares: vec![],
             vsock,
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
+            trusted_builder: false,
         }
     }
 
@@ -1096,6 +1103,30 @@ mod tests {
     }
 
     #[test]
+    fn boot_rejects_virtio_fs_shares() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            workload_channels(),
+            vec![],
+        );
+        spec.shares.push(VirtioFsShare {
+            tag: "mvmroot".into(),
+            host_path: "/host/root".into(),
+            read_only: true,
+            dax: true,
+        });
+        let result = FcDriver::new().boot(&spec);
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected boot to fail for a spec with virtio-fs shares"),
+        };
+        assert!(
+            err.contains("does not support virtio-fs shares"),
+            "expected share-rejection error, got: {err}"
+        );
+    }
+
+    #[test]
     fn identity_and_capabilities_report_the_flipped_nic_less_profile() {
         let d = FcDriver::new();
         assert_eq!(d.name(), "firecracker");
@@ -1125,7 +1156,8 @@ mod tests {
     /// hermetic claim tests; the `MockDriver` seam here does not.)
     #[test]
     fn only_hvf_advertises_the_live_standby_pool() {
-        use crate::driver::{HvfDriver, LibkrunDriver, MockDriver};
+        use crate::backends::hvf::driver::HvfDriver;
+        use crate::driver::{LibkrunDriver, MockDriver};
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
 
@@ -1953,7 +1985,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("never-materialized");
         let req = ChildForkRequest {
-            parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-1",
             child_dir: &missing,
             parent_vm_name: None,
@@ -1978,7 +2009,6 @@ mod tests {
         std::fs::create_dir_all(&child_dir).unwrap();
         std::fs::write(child_dir.join("rootfs.ext4"), b"rootfs").unwrap();
         let req = ChildForkRequest {
-            parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-2",
             child_dir: &child_dir,
             parent_vm_name: None,
@@ -2013,7 +2043,6 @@ mod tests {
 
         let channels = workload_channels();
         let req = ChildForkRequest {
-            parent_vm_name: "parent-vm",
             child_vm_name: "child-vm-3",
             child_dir: &child_dir,
             parent_vm_name: None,

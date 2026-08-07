@@ -14,9 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
-use mvm_agentd::vsock::{
-    BROKER_PORT, CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports,
-};
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_build::hvf_supervisor::{
     ConsoleDataSocket, HvfDisk, HvfHandoffRequest, HvfSupervisorConfig, HvfVirtioFsShare,
 };
@@ -25,14 +23,15 @@ use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyError, StandbyHandle,
     StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
+use mvm_net::channel::GuestService;
 
+use super::backend::{
+    self as hvf_backend, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
+};
 use crate::checkpoint::{DeviceAnchors, VmFullControl};
 use crate::driver::spec::KernelImage;
 use crate::driver::{
     ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver, VmmSpec,
-};
-use crate::hvf_backend::{
-    self, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
 };
 
 /// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
@@ -134,14 +133,20 @@ fn relay_supervisor_config_with_handoff(
     // vsock relay so every backend uses one egress path. A channel-less factory
     // parent is the one intentional exception: it has no guest-facing host
     // channel at all, so there is no egress path to wire or authorize.
-    let egress_relay_socket = match spec.host_socket_for_port(EGRESS_PORT) {
+    let egress_relay_socket = match spec.host_socket_for_service(GuestService::Substitution) {
         Some(socket) => Some(socket),
         None if spec.vsock.is_empty() => None,
         // A sealed workload with no EGRESS_PORT has an explicit deny-all,
         // secret-free posture. There is no host listener to wire because the
         // guest has no admitted egress capability; its attempted dial fails
         // closed in the vsock device.
-        None if !spec.vsock.iter().any(|port| port.guest_port == EGRESS_PORT) => None,
+        None if !spec
+            .vsock
+            .iter()
+            .any(|port| port.service == GuestService::Substitution) =>
+        {
+            None
+        }
         None if spec.trusted_builder => None,
         None => {
             return Err(anyhow!(
@@ -164,9 +169,11 @@ fn relay_supervisor_config_with_handoff(
     let console_data_sockets = spec
         .vsock
         .iter()
-        .filter(|p| dev_console_data_ports().any(|cp| cp == p.guest_port))
+        .filter(|p| {
+            matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port))
+        })
         .map(|p| ConsoleDataSocket {
-            guest_port: p.guest_port,
+            guest_port: p.port(),
             host_socket: p.host_uds.clone(),
         })
         .collect();
@@ -177,12 +184,17 @@ fn relay_supervisor_config_with_handoff(
         memory_mib: spec.memory_mib,
         initramfs: spec.initramfs.clone(),
         disks,
-        virtiofs_root: None,
-        virtiofs_shares: spec
-            .virtiofs_shares
+        virtiofs_root: spec
+            .shares
             .iter()
+            .find(|share| share.tag == "mvmroot")
+            .map(|share| share.host_path.clone()),
+        virtiofs_shares: spec
+            .shares
+            .iter()
+            .filter(|share| share.tag != "mvmroot")
             .map(|share| HvfVirtioFsShare {
-                path: share.host.clone(),
+                path: share.host_path.clone(),
                 tag: share.tag.clone(),
             })
             .collect(),
@@ -208,7 +220,7 @@ fn relay_supervisor_config_with_handoff(
         // splices the guest's BROKER_PORT dial to it so host.audit.v1 /
         // host.secrets.v1 reach the per-VM broker (or the per-tenant host-agent
         // daemon). Absent for a builder/dev VM, which runs no admitted workload.
-        broker_socket: spec.host_socket_for_port(BROKER_PORT),
+        broker_socket: spec.host_socket_for_service(GuestService::Broker),
         console_data_sockets,
         handoff_socket: handoff.map(|value| value.socket.clone()),
         handoff_root: handoff.map(|value| value.root.clone()),
@@ -420,13 +432,17 @@ impl VmmDriver for HvfDriver {
         let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
             .map_err(|e| StandbyError::ClaimFailed(format!("load host handoff identity: {e}")))?;
         let channel_mask = req.channels.iter().fold(0_u8, |mask, channel| {
-            if channel.guest_port == GUEST_AGENT_PORT {
+            if channel.service == GuestService::MachineControl {
                 mask | 1
-            } else if channel.guest_port == EGRESS_PORT {
+            } else if channel.service == GuestService::Substitution {
                 mask | 2
-            } else if channel.guest_port == BROKER_PORT {
+            } else if channel.service == GuestService::Broker {
                 mask | 4
-            } else if dev_console_data_ports().any(|port| port == channel.guest_port) {
+            } else if matches!(
+                channel.service,
+                GuestService::ConsoleData { port }
+                    if dev_console_data_ports().any(|candidate| candidate == port)
+            ) {
                 mask | 8
             } else {
                 mask
@@ -499,7 +515,7 @@ impl VmmDriver for HvfDriver {
     }
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+        super::bootargs::workload_bootargs(virtiofs_root, has_disk)
     }
 }
 
@@ -826,7 +842,7 @@ mod tests {
 
     fn egress_port(uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: EGRESS_PORT,
+            service: GuestService::Substitution,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -834,7 +850,7 @@ mod tests {
 
     fn agent_port(uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: GUEST_AGENT_PORT,
+            service: GuestService::MachineControl,
             host_uds: uds.into(),
             direction: VsockDirection::HostDials,
         }
@@ -842,7 +858,7 @@ mod tests {
 
     fn broker_port(uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: BROKER_PORT,
+            service: GuestService::Broker,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -858,7 +874,7 @@ mod tests {
             memory_mib: 256,
             mem_initial_mib: None,
             blocks,
-            virtiofs_shares: vec![],
+            shares: vec![],
             vsock,
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
@@ -889,11 +905,11 @@ mod tests {
         let d = HvfDriver::new();
         assert_eq!(
             d.workload_base_bootargs(false, true),
-            crate::hvf_bootargs::workload_bootargs(false, true)
+            crate::backends::hvf::bootargs::workload_bootargs(false, true)
         );
         assert_eq!(
             d.workload_base_bootargs(true, false),
-            crate::hvf_bootargs::workload_bootargs(true, false)
+            crate::backends::hvf::bootargs::workload_bootargs(true, false)
         );
     }
 
@@ -1234,7 +1250,7 @@ mod tests {
 
     fn console_vsock_port(port: u32, uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: port,
+            service: GuestService::ConsoleData { port },
             host_uds: uds.into(),
             direction: VsockDirection::HostDials,
         }

@@ -9,7 +9,7 @@
 //! this contract and each platform supplies the native implementation.
 //!
 //! Dispatch is **static**: the active backend is bound as a concrete type at
-//! compile time ([`ActiveVm`]), so trait calls monomorphize to direct calls —
+//! backend crate implementations to direct calls —
 //! no `dyn` on the vCPU hot path. The register model is aarch64-architectural
 //! today (HVF and aarch64 KVM expose the same registers, each mapping them to
 //! its native id); an x86_64 backend extends [`VcpuExit`] with its decoded
@@ -147,7 +147,7 @@ pub trait HypervisorVcpu {
 
 /// A VM: owns guest physical memory, its interrupt controller, and creates
 /// vCPUs. One backend type implements this per platform, selected as a concrete
-/// type at compile time ([`ActiveVm`]) — never behind `dyn`.
+/// type at compile time (backend crate) — never behind `dyn`.
 pub trait HypervisorVm: Sized {
     type Error;
     type Vcpu: HypervisorVcpu<Error = Self::Error>;
@@ -180,17 +180,3 @@ pub trait HypervisorVm: Sized {
 }
 
 // ----------------------------------------------------------------------------
-// Static, cfg-selected active backend. macOS/Apple-silicon → HVF; the Linux/KVM
-// and Windows/WHP branches bind their concrete types here as they land. The
-// orchestration names `Active*` and never a concrete backend type.
-// ----------------------------------------------------------------------------
-
-/// The hypervisor backend selected for this build. Bound as a concrete type so
-/// all dispatch is static.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub type ActiveVm = crate::hvf::HvfVm;
-
-/// Linux/x86_64 → KVM. (aarch64 KVM, which reuses the whole arm64 device model,
-/// is a later slice; see the shared VMM seam.)
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub type ActiveVm = crate::kvm::KvmVm;

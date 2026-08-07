@@ -26,6 +26,11 @@ use crate::driver::spec::KernelImage;
 use crate::driver::{BlockDev, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection};
 use crate::libkrun::LibkrunBackend;
 
+/// DAX window size exported to libkrun for any virtio-fs share that
+/// requests DAX. 256 MiB matches the HVF DAX window and is large enough
+/// for typical workload roots without overcommitting guest address space.
+const VIRTIO_FS_DAX_SHM_SIZE: u64 = 256 * 1024 * 1024;
+
 /// The libkrun VMM driver: pure VMM mechanics, no policy and no admission. It
 /// boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge,
@@ -116,10 +121,11 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // (the shared assembler returns None when no extra tokens are needed); a
     // non-empty one already carries the console + root/init base plus every
     // layered token, so it is threaded verbatim.
+    let has_virtiofs_root = spec.shares.iter().any(|s| s.tag == "mvmroot");
     let has_disk = spec.initramfs.is_none() && !spec.blocks.is_empty();
     let trimmed = spec.cmdline.trim();
     let cmdline = if trimmed.is_empty() {
-        libkrun_base_bootargs(false, has_disk)
+        libkrun_base_bootargs(has_virtiofs_root, has_disk)
     } else {
         trimmed.to_string()
     };
@@ -129,11 +135,17 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // rootfs disk (plain-rootfs boot) or the first extra disk (initramfs boot,
     // where the initramfs PID 1 owns root selection), so an initramfs spec puts
     // every block in extra_disks and a plain spec pins slot 0 as the rootfs.
+    // A virtiofs-root boot has no block rootfs either; all blocks are extra disks.
     let mut ordered: Vec<&BlockDev> = spec.blocks.iter().collect();
     ordered.sort_by_key(|b| b.slot);
     match &spec.initramfs {
         Some(initramfs) => {
             krun.initramfs_path = Some(initramfs.to_string_lossy().into_owned());
+            for block in &ordered {
+                krun = attach_block(krun, block);
+            }
+        }
+        None if has_virtiofs_root => {
             for block in &ordered {
                 krun = attach_block(krun, block);
             }
@@ -147,6 +159,25 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
                 krun = attach_block(krun, block);
             }
         }
+    }
+
+    // Attach every virtio-fs share declared by the spec. DAX is enabled when
+    // the share requests it; read-only shares use libkrun's v3 API so the
+    // host-side export is enforced read-only rather than merely guest-mount ro.
+    for share in &spec.shares {
+        let shm_size = if share.dax {
+            Some(VIRTIO_FS_DAX_SHM_SIZE)
+        } else if share.read_only {
+            Some(0)
+        } else {
+            None
+        };
+        krun = krun.add_virtio_fs_full(
+            &share.tag,
+            share.host_path.to_string_lossy(),
+            shm_size,
+            share.read_only,
+        );
     }
 
     // Wire every standing vsock port by direction: the host dials the guest's
@@ -447,7 +478,7 @@ impl RunningVm for LibkrunRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::{ConsoleCapture, VsockPort};
+    use crate::driver::{ConsoleCapture, VirtioFsShare, VsockPort};
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, WORKLOAD_EXIT_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
 
@@ -477,11 +508,12 @@ mod tests {
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,
-            virtiofs_shares: vec![],
+            shares: vec![],
             vsock,
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
+            trusted_builder: false,
         }
     }
 
@@ -495,6 +527,7 @@ mod tests {
         assert_eq!(d.name(), "libkrun");
         assert_eq!(d.kind(), BackendKind::Libkrun);
         let caps = d.capabilities();
+        assert!(caps.virtiofs_root, "libkrun must advertise virtiofs_root");
         assert!(caps.vsock);
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
@@ -658,6 +691,104 @@ mod tests {
             .map(|d| d.path.as_str())
             .collect();
         assert_eq!(paths, vec!["/img/rootfs.ext4", "/img/rootfs.verity"]);
+    }
+
+    #[test]
+    fn relay_config_treats_virtiofs_root_as_a_share_not_a_block() {
+        let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
+        spec.shares.push(VirtioFsShare {
+            tag: "mvmroot".into(),
+            host_path: "/host/root".into(),
+            read_only: true,
+            dax: true,
+        });
+        let cfg = relay(&spec);
+        // No block rootfs; the root is supplied by the virtiofs share.
+        assert_eq!(cfg.krun.rootfs_path, None);
+        assert_eq!(cfg.krun.initramfs_path, None);
+        assert_eq!(cfg.krun.extra_disks.len(), 0);
+        assert_eq!(cfg.krun.virtio_fs_mounts.len(), 1);
+        let root = &cfg.krun.virtio_fs_mounts[0];
+        assert_eq!(root.tag, "mvmroot");
+        assert_eq!(root.host_path, "/host/root");
+        assert!(root.read_only);
+        assert_eq!(root.shm_size, Some(VIRTIO_FS_DAX_SHM_SIZE));
+        // Empty cmdline ⇒ the driver supplies the virtiofs-root base.
+        assert_eq!(
+            cfg.krun.kernel_cmdline.as_deref(),
+            Some("console=hvc0 rootfstype=virtiofs root=mvmroot rw init=/init")
+        );
+    }
+
+    #[test]
+    fn relay_config_keeps_blocks_as_extras_when_virtiofs_root_is_present() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![],
+            vec![BlockDev {
+                source: "/img/data.img".into(),
+                read_only: false,
+                ephemeral: false,
+                slot: 0,
+            }],
+        );
+        spec.shares.push(VirtioFsShare {
+            tag: "mvmroot".into(),
+            host_path: "/host/root".into(),
+            read_only: true,
+            dax: true,
+        });
+        let cfg = relay(&spec);
+        // The share is the root; the block is an extra disk, not /dev/vda rootfs.
+        assert_eq!(cfg.krun.rootfs_path, None);
+        assert_eq!(cfg.krun.extra_disks.len(), 1);
+        assert_eq!(cfg.krun.extra_disks[0].path, "/img/data.img");
+        assert_eq!(cfg.krun.virtio_fs_mounts.len(), 1);
+    }
+
+    #[test]
+    fn relay_config_maps_dir_shares_with_dax_and_read_only() {
+        let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
+        spec.shares.push(VirtioFsShare {
+            tag: "uvol0".into(),
+            host_path: "/host/rw".into(),
+            read_only: false,
+            dax: true,
+        });
+        spec.shares.push(VirtioFsShare {
+            tag: "uvol1".into(),
+            host_path: "/host/ro".into(),
+            read_only: true,
+            dax: true,
+        });
+        spec.shares.push(VirtioFsShare {
+            tag: "uvol2".into(),
+            host_path: "/host/legacy".into(),
+            read_only: false,
+            dax: false,
+        });
+        let cfg = relay(&spec);
+        let mounts: std::collections::HashMap<&str, &libkrun_sys::KrunVirtioFs> = cfg
+            .krun
+            .virtio_fs_mounts
+            .iter()
+            .map(|m| (m.tag.as_str(), m))
+            .collect();
+        assert_eq!(mounts.len(), 3);
+        let rw = mounts["uvol0"];
+        assert_eq!(rw.host_path, "/host/rw");
+        assert!(!rw.read_only);
+        assert_eq!(rw.shm_size, Some(VIRTIO_FS_DAX_SHM_SIZE));
+
+        let ro = mounts["uvol1"];
+        assert_eq!(ro.host_path, "/host/ro");
+        assert!(ro.read_only);
+        assert_eq!(ro.shm_size, Some(VIRTIO_FS_DAX_SHM_SIZE));
+
+        let legacy = mounts["uvol2"];
+        assert_eq!(legacy.host_path, "/host/legacy");
+        assert!(!legacy.read_only);
+        assert_eq!(legacy.shm_size, None);
     }
 
     #[test]

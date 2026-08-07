@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 use mvm_build::rootfs_inject::{InjectBinary, build_inject_initramfs};
 
-use crate::hvf_backend::resolve_supervisor_path;
+use crate::backends::hvf::backend::resolve_supervisor_path;
 
 /// A rootfs-injection request.
 pub struct InjectRequest<'a> {

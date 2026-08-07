@@ -98,6 +98,7 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
         console: ConsoleCapture {
             log_path: state_dir.join("console.log"),
         },
+        shares: Vec::new(),
     }
 }
 
@@ -249,7 +250,6 @@ fn fc_warm_pool_spawn_and_claim() {
     let token = genid.token;
     let t_fork = Instant::now();
     let fork_result = driver.fork_standby_child(&ChildForkRequest {
-        parent_vm_name: "standby-parent",
         child_vm_name: &child_id,
         child_dir: &child_dir,
         parent_vm_name: None,

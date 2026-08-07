@@ -9,10 +9,11 @@ use mvm_core::vm_backend::{
 // `microvm`, `image` are siblings under `crate::`; the substrate
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::apple_container_backend::AppleContainerBackend;
+use crate::backends::hvf::driver::HvfDriver;
 use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
 use crate::docker_backend::DockerBackend;
-use crate::driver::{FcDriver, HvfDriver, LibkrunDriver, QemuDriver};
+use crate::driver::{FcDriver, LibkrunDriver, QemuDriver};
 use crate::image::RuntimeVolume;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 #[cfg(feature = "test-support")]
@@ -24,7 +25,7 @@ use crate::{firecracker, microvm};
 /// The hvf VMM driven through the unified workload-runner role over the driver
 /// seam — hvf's sole workload launch path (`--hypervisor hvf` and the macOS-26
 /// `auto_select` default). NIC-less: egress routes to the per-VM gating endpoint
-/// over vsock only; the raw [`HvfBackend`](crate::hvf_backend::HvfBackend) shim
+/// over vsock only; the raw [`HvfBackend`](crate::backends::hvf::HvfBackend) shim
 /// stays behind the driver as its identity delegate and for the
 /// `examples/hvf-backend-*.rs` witnesses, unreached via this enum. One alias
 /// keeps the long generic instantiation readable at the enum variant and its
@@ -480,7 +481,7 @@ pub enum AnyBackend {
     /// selected by `--hypervisor hvf` / `MVM_BACKEND=hvf` and the macOS-26
     /// auto-detect default. NIC-less: egress routes to the per-VM gating endpoint
     /// over vsock only (claim-10 + claims 12/13 at the endpoint); no routable
-    /// guest NIC. The raw [`HvfBackend`](crate::hvf_backend::HvfBackend) stays
+    /// guest NIC. The raw [`HvfBackend`](crate::backends::hvf::HvfBackend) stays
     /// behind the driver as its identity delegate and for the
     /// `examples/hvf-backend-*.rs` witnesses, unreached via this enum. The
     /// destination macOS backend.

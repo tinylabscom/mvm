@@ -3160,6 +3160,7 @@ dependencies = [
  "async-trait",
  "base64",
  "criterion",
+ "ed25519-dalek",
  "ext4-view",
  "flate2",
  "hex",
@@ -3208,6 +3209,7 @@ dependencies = [
  "mvm-build",
  "mvm-contract",
  "mvm-core",
+ "mvm-fs",
  "mvm-net",
  "mvm-runtime",
  "mvm-sdk",
@@ -3274,6 +3276,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-net",
+ "mvm-vmm",
  "nix 0.29.0",
  "object_store",
  "rand 0.8.6",
@@ -3325,6 +3328,25 @@ dependencies = [
  "tree-sitter-nix",
  "tree-sitter-python",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "mvm-vmm"
+version = "0.18.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "libc",
+ "mio",
+ "mvm-agentd",
+ "mvm-build",
+ "mvm-core",
+ "rand 0.8.6",
+ "serde_json",
+ "tempfile",
+ "virtio-queue",
+ "virtio-vsock",
+ "vm-memory",
 ]
 
 [[package]]

@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::HvfError;
+use super::bootargs::{default_bootargs, default_virtiofs_bootargs};
 #[cfg(test)]
 use super::guest_ram::HVF_PAGE_SIZE;
 use super::guest_ram::{GuestRam, page_rounded_len};
@@ -30,7 +31,6 @@ use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::snapshot::HVF_SNAPSHOT_BACKEND_KIND;
 use super::sys::*;
 use super::vcpu::esr_ec;
-use crate::hvf_bootargs::{default_bootargs, default_virtiofs_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::device_state::capture_device_states;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
