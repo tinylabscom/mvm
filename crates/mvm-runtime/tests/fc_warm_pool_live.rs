@@ -204,6 +204,7 @@ fn fc_warm_pool_spawn_and_claim() {
 
     let t_claim = Instant::now();
     let genid = fresh_generation_token(parent_checkpoint.as_str().to_string());
+    let token = genid.token;
     let fork_result = driver.fork_standby_child(&ChildForkRequest {
         parent_vm_name: "standby-parent",
         child_vm_name: &child_id,
@@ -229,7 +230,7 @@ fn fc_warm_pool_spawn_and_claim() {
     fork_result.expect("fork Firecracker standby child");
 
     let identity = driver
-        .deliver_child_identity(&child_id, genid.token, None)
+        .deliver_child_identity(&child_id, token, None)
         .expect("the restored child must complete the authenticated identity handshake");
     assert!(
         identity.acknowledged,
