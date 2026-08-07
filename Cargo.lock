@@ -3284,6 +3284,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-net",
+ "mvm-vmm",
  "nix 0.29.0",
  "object_store",
  "rand 0.8.6",
@@ -3335,6 +3336,21 @@ dependencies = [
  "tree-sitter-nix",
  "tree-sitter-python",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "mvm-vmm"
+version = "0.18.0"
+dependencies = [
+ "libc",
+ "mio",
+ "mvm-agentd",
+ "mvm-core",
+ "rand 0.8.6",
+ "tempfile",
+ "virtio-queue",
+ "virtio-vsock",
+ "vm-memory",
 ]
 
 [[package]]

@@ -11,8 +11,11 @@
 # `nix flake check --no-build` refuses.
 #
 # Builder-only features (why each is here, not in base):
-#   - VIRTIO_FS / FUSE_FS  — the builder mounts four virtio-fs host
-#     shares (/work, /out, /job, /mvm-bins). virtio-fs is FUSE-backed.
+#   - VIRTIO_FS / FUSE_FS / FUSE_DAX — the builder mounts four virtio-fs
+#     host shares (/work, /out, /job, /mvm-bins). DAX lets eligible shares
+#     bypass the guest page cache by mapping host pages directly into the
+#     guest DAX window; the dependency chain (ZONE_DEVICE, MEMORY_HOTPLUG,
+#     etc.) is builder-only dead weight for a sealed workload.
 #   - NAMESPACES + cgroup cluster — the nix-build sandbox needs user
 #     namespaces and cgroups v2. A sealed single-workload guest doesn't.
 #   - NETFILTER / iptables cluster — `mvm-host-vm-init` installs an
@@ -34,7 +37,7 @@
 base.mkKernel {
   extraEnables = [
     # virtio-fs (FUSE-backed) — host share mounts
-    "VIRTIO_FS" "FUSE_FS"
+    "VIRTIO_FS" "FUSE_FS" "MIGRATION" "MEMORY_HOTPLUG" "MEMORY_HOTREMOVE" "SPARSEMEM_VMEMMAP" "ZONE_DEVICE" "FS_DAX" "FUSE_DAX"
 
     # namespaces + cgroups v2 — nix-build sandbox
     "NAMESPACES" "UTS_NS" "IPC_NS" "USER_NS" "PID_NS" "NET_NS"

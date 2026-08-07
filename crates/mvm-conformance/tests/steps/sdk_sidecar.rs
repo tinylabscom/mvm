@@ -13,7 +13,8 @@ use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
 use mvm_fs::sdk_sidecar::{
     SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
 };
-use mvm_runtime::driver::{HvfDriver, VmmDriver};
+use mvm_runtime::backends::hvf::HvfDriver;
+use mvm_runtime::driver::VmmDriver;
 
 use crate::world::CliWorld;
 

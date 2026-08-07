@@ -115,6 +115,7 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         console: ConsoleCapture {
             log_path: inputs.console_log.clone(),
         },
+        shares: Vec::new(),
     }
 }
 

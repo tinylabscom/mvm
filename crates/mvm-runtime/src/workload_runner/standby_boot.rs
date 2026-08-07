@@ -205,7 +205,7 @@ pub fn factory_parent_config(
 ///
 /// A second divergence is **not** covered, and no test here can cover it: the
 /// per-VM grant tokens. [`cmdline::workload_cmdline`] appends whatever
-/// [`crate::hvf_bootargs::grant_tokens`] derives from the named VM's
+/// [`crate::backends::hvf::bootargs::grant_tokens`] derives from the named VM's
 /// `verb-grant.json` sidecar, and a factory parent holds no plan, so it has no
 /// sidecar by construction and emits none. The transient run path mints no
 /// sidecar today, which is the only reason the two cmdlines currently agree;

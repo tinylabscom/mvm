@@ -16,8 +16,8 @@ fn main() {
     use std::path::PathBuf;
 
     use mvm_build::builder_disk_transport::create_output_disk;
+    use mvm_runtime::backends::hvf::driver::HvfDriver;
     use mvm_runtime::builder_runner::{BuilderBuild, BuilderRunner};
-    use mvm_runtime::driver::HvfDriver;
 
     let dev = format!("{}/dev/current", mvm_core::config::mvm_home());
     let kernel = PathBuf::from(

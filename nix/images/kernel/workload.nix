@@ -11,11 +11,13 @@
 #   MD          — device-mapper block layer
 #   BLK_DEV_DM  — the dm block device
 #   DM_VERITY   — dm-verity target (hash-tree + roothash verification)
-#   VIRTIO_FS   — virtio-fs transport for host-directory volume shares; the
-#                 guest mounts each `mvm.uvols=` cmdline entry over it. Without
-#                 the built-in driver the mount fails "No such device".
-#   FUSE_FS     — virtio-fs is FUSE-backed, so the workload needs it too (the
-#                 builder kernel already carries both — same proven recipe).
+#   VIRTIO_FS / FUSE_FS / FUSE_DAX — virtio-fs transport for host-directory
+#                 volume shares; the guest mounts each `mvm.uvols=` cmdline
+#                 entry over it. DAX lets eligible shares bypass the guest
+#                 page cache by mapping host pages directly into the guest DAX
+#                 window. The dependency chain (ZONE_DEVICE, MEMORY_HOTPLUG,
+#                 etc.) is no longer builder-only dead weight: sealed workloads
+#                 can boot from a virtiofs root and map DAX-backed uvols.
 #   TUN         — /dev/net/tun, for the opt-in L3-over-vsock network mode. The
 #                 guest agent creates `mvm0` with IFF_TUN | IFF_NO_PI and
 #                 frames raw IP packets over vsock; without the built-in
@@ -44,6 +46,13 @@ base.mkKernel {
     "DM_VERITY"
     "VIRTIO_FS"
     "FUSE_FS"
+    "MIGRATION"
+    "MEMORY_HOTPLUG"
+    "MEMORY_HOTREMOVE"
+    "SPARSEMEM_VMEMMAP"
+    "ZONE_DEVICE"
+    "FS_DAX"
+    "FUSE_DAX"
     "TUN"
     "IPV6"
   ]

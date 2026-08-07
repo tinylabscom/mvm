@@ -1358,7 +1358,7 @@ mod tests {
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
     use mvm_core::util::test_env::TestEnv;
 
-    use crate::driver::HvfDriver;
+    use crate::backends::hvf::driver::HvfDriver;
     use crate::driver::mock::MockDriver;
 
     /// An `EndpointSpawner` test double: records the request it was handed and
@@ -1553,6 +1553,10 @@ mod tests {
 
     #[test]
     fn start_workload_starts_console_streaming_and_stop_tears_it_down_without_losing_bytes() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(tmp.path());
+
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let streamer = Arc::new(RecordingConsoleStreamer::default());

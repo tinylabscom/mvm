@@ -13,7 +13,7 @@
 fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        use mvm_runtime::hvf::console_smoke;
+        use mvm_runtime::backends::hvf::console_smoke;
         match console_smoke() {
             Ok(p) => {
                 println!(

@@ -98,7 +98,7 @@ pub(crate) fn runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &st
 ///
 /// `base_bootargs` supplies the VMM-specific console/earlycon/root base
 /// (`VmmDriver::workload_base_bootargs` for a runner driver, or
-/// `crate::hvf_bootargs::workload_bootargs` directly for the raw HVF
+/// `crate::backends::hvf::workload_bootargs` directly for the raw HVF
 /// backend, which has no driver to call through) — every other token here is
 /// shared across VMMs.
 pub(crate) fn workload_cmdline(
@@ -107,7 +107,7 @@ pub(crate) fn workload_cmdline(
     base_bootargs: impl Fn(bool, bool) -> String,
 ) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
-    let grants = crate::hvf_bootargs::grant_tokens(&config.name);
+    let grants = crate::backends::hvf::bootargs::grant_tokens(&config.name);
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
     let verity_is_enabled = verity_enabled(config);
@@ -293,8 +293,9 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
-            .expect("cmdline");
+        let cmdline =
+            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
+                .expect("cmdline");
         assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
         assert!(cmdline.contains("mvm.runtime_source_policy=rootfs_only"));
@@ -328,8 +329,9 @@ mod tests {
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
-        let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
-            .expect("cmdline");
+        let cmdline =
+            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
+                .expect("cmdline");
         assert!(
             crate::microvm::booted_with_universal_initramfs(&config),
             "fixture must resolve as a universal-initramfs boot"
@@ -381,8 +383,9 @@ mod tests {
             !crate::microvm::booted_with_universal_initramfs(&config),
             "fixture must resolve as a legacy-initramfs boot"
         );
-        let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
-            .expect("cmdline");
+        let cmdline =
+            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
+                .expect("cmdline");
         for token in [
             format!("mvm.roothash={rootfs_hash}"),
             "mvm.data=/dev/vda".to_string(),
@@ -451,8 +454,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = VmStartConfig::default();
         assert_eq!(
-            runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs),
-            workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+            runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs),
+            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
                 .unwrap_or_default()
         );
     }
@@ -474,9 +477,9 @@ mod tests {
         };
         // The egress token forces workload_cmdline's non-shortcut branch, so
         // this exercises the `Some(base)` arm of runner_cmdline's match.
-        let base = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+        let base = workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
             .expect("non-trivial base");
-        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
         assert!(
             cmdline.starts_with(&base),
             "base: {base}\ncmdline: {cmdline}"
@@ -505,10 +508,10 @@ mod tests {
         // shortcut), so runner_cmdline must not silently drop the base
         // bootargs the volume token needs to ride on.
         assert_eq!(
-            workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs),
+            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs),
             None
         );
-        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
         assert!(cmdline.contains("root=/dev/vda"), "cmdline: {cmdline}");
         assert!(cmdline.contains("init=/init"), "cmdline: {cmdline}");
         assert!(
@@ -533,7 +536,7 @@ mod tests {
             volumes: vec![disk_volume("/vol/data.img", "/data")],
             ..Default::default()
         };
-        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
         assert!(
             !cmdline.contains("mvm.sdk_dev="),
             "a workload with no SDK sidecar must carry no sidecar token: {cmdline}"
@@ -553,7 +556,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
         // Two disks after the rootfs on an unsealed boot: the user volume takes
         // /dev/vdb, so the sidecar is /dev/vdc. The token must match the block
         // list, not a baked constant.
@@ -578,7 +581,7 @@ mod tests {
         env.set("MVM_HOME", dir.path());
         let config = VmStartConfig::default();
         assert_eq!(
-            runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs),
+            runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs),
             String::new()
         );
     }
@@ -590,7 +593,7 @@ mod tests {
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
         };
-        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
         let epoch = cmdline
             .split_whitespace()
             .find_map(|token| token.strip_prefix("mvm.hostepoch="))

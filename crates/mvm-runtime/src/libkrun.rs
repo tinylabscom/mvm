@@ -839,6 +839,9 @@ impl VmBackend for LibkrunBackend {
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
             balloon: false,
+            // libkrun's krun_add_virtiofs2/3 APIs can export a host directory
+            // as a virtio-fs share, including DAX and host-enforced read-only.
+            virtiofs_root: true,
             // libkrun runs on macOS but the rootfs lives in a regular
             // file, not an APFS clone-eligible volume mount; no
             // clonefile shortcut here.

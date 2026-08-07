@@ -10,7 +10,9 @@ use mvm_core::config::vm_hvf_vsock_port_socket_at;
 use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 use mvm_net::channel::GuestService;
 
-use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
+use crate::driver::{
+    BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
+};
 
 /// The ordered virtio-blk list for a sealed workload: the read-only rootfs at
 /// `/dev/vda` (slot 0), its dm-verity Merkle sidecar at `/dev/vdb` (slot 1) when
@@ -300,7 +302,40 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
         console: ConsoleCapture {
             log_path: console_log.to_path_buf(),
         },
+        shares: workload_shares(config),
     }
+}
+
+/// virtio-fs host directory shares derived from the launch config.
+///
+/// A `virtiofs_root` boot produces a single read-only root share tagged
+/// `mvmroot`. Each `DirShare` volume becomes an additional share using the
+/// volume's tag/host path/read_only flags. Backends that cannot attach a
+/// virtio-fs device fail closed when this list is non-empty.
+pub fn workload_shares(config: &VmStartConfig) -> Vec<VirtioFsShare> {
+    let mut shares = Vec::new();
+    if let Some(root) = &config.virtiofs_root {
+        shares.push(VirtioFsShare {
+            tag: "mvmroot".into(),
+            host_path: root.clone().into(),
+            read_only: true,
+            dax: true,
+        });
+    }
+    for (idx, volume) in config
+        .volumes
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| matches!(v.kind, VmVolumeKind::DirShare))
+    {
+        shares.push(VirtioFsShare {
+            tag: format!("uvol{idx}"),
+            host_path: volume.host.clone().into(),
+            read_only: volume.read_only,
+            dax: true,
+        });
+    }
+    shares
 }
 
 /// Compose a `VmmSpec` from an admitted `VmStartConfig` and the runtime paths the
@@ -319,6 +354,7 @@ pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
 mod tests {
     use super::*;
     use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT};
+    use mvm_core::vm_backend::VmVolume;
     use std::path::PathBuf;
 
     fn base() -> VmStartConfig {
@@ -331,6 +367,55 @@ mod tests {
 
     fn nodes(blocks: &[BlockDev]) -> Vec<String> {
         blocks.iter().map(BlockDev::device_node).collect()
+    }
+
+    #[test]
+    fn virtiofs_root_maps_to_a_dax_read_only_mvmroot_share() {
+        let cfg = VmStartConfig {
+            virtiofs_root: Some("/host/root".into()),
+            ..base()
+        };
+        let shares = workload_shares(&cfg);
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].tag, "mvmroot");
+        assert_eq!(shares[0].host_path, PathBuf::from("/host/root"));
+        assert!(shares[0].read_only);
+        assert!(shares[0].dax);
+    }
+
+    #[test]
+    fn dir_share_volumes_map_to_dax_shares_with_read_only_preserved() {
+        let cfg = VmStartConfig {
+            volumes: vec![
+                VmVolume {
+                    host: "/host/rw".into(),
+                    guest: "/guest/rw".into(),
+                    size: String::new(),
+                    read_only: false,
+                    kind: VmVolumeKind::DirShare,
+                    encrypted: false,
+                },
+                VmVolume {
+                    host: "/host/ro".into(),
+                    guest: "/guest/ro".into(),
+                    size: String::new(),
+                    read_only: true,
+                    kind: VmVolumeKind::DirShare,
+                    encrypted: false,
+                },
+            ],
+            ..base()
+        };
+        let shares = workload_shares(&cfg);
+        assert_eq!(shares.len(), 2);
+        assert_eq!(shares[0].tag, "uvol0");
+        assert_eq!(shares[0].host_path, PathBuf::from("/host/rw"));
+        assert!(!shares[0].read_only);
+        assert!(shares[0].dax);
+        assert_eq!(shares[1].tag, "uvol1");
+        assert_eq!(shares[1].host_path, PathBuf::from("/host/ro"));
+        assert!(shares[1].read_only);
+        assert!(shares[1].dax);
     }
 
     #[test]

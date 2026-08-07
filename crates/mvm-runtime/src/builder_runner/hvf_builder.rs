@@ -26,7 +26,7 @@ use mvm_build::builder_vm_runtime::{
 };
 
 use super::runner::{BuilderBuild, BuilderRunner};
-use crate::driver::HvfDriver;
+use crate::backends::hvf::driver::HvfDriver;
 
 /// Default persistent nix-store disk size (GiB → MiB). Matches the other
 /// builders' generous sparse allocation; the guest formats + seeds it.
