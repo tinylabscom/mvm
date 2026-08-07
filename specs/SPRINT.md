@@ -73,9 +73,12 @@
       Guest kernel configs enable `FS_DAX`/`FUSE_DAX` and Linux cross-compile
       stubs keep the HVF crate building without Hypervisor.framework. The
       pre-existing console-streaming test was fixed by isolating `MVM_HOME`.
-      `cargo test -p mvm-runtime` passes (1163 passed, 0 failed, 6 ignored);
-      `cargo clippy -p mvm-runtime -p mvm-build -- -D warnings` is clean on
-      macOS and the Linux builder VM.
+      `cargo test -p mvm-runtime` passes (1163 passed, 0 failed, 6 ignored)
+      on macOS; `cargo nextest run --workspace` passes on the x86_64 Linux
+      builder VM (10372 passed, 19 skipped); and
+      `cargo clippy --workspace --all-targets -- -D warnings` is clean on both
+      hosts. The follow-up extraction of an `mvm-backends` crate is captured in
+      `specs/plans/298-extract-mvm-backends-crate.md`.
 
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated

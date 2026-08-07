@@ -412,7 +412,8 @@ for detailed scope and acceptance criteria.
   - [x] Console-streaming test isolated with temp `MVM_HOME`
   - [x] `cargo test -p mvm-runtime` green; `cargo clippy -p mvm-runtime
         -p mvm-build -- -D warnings` clean on macOS and Linux builder VM
-  - [ ] Full workspace test run in CI / Linux builder VM
+  - [x] Full workspace test run on x86_64 Linux builder VM —
+        `cargo nextest run --workspace`: 10372 passed, 19 skipped (4 threads)
 
 - [~] Plan 255 — vsock-first snapshot, egress, and warm-start adoption
   (`specs/plans/255-vsock-first-snapshot-egress-adoption.md`)
