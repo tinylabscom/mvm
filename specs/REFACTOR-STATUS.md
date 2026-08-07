@@ -401,7 +401,7 @@ for detailed scope and acceptance criteria.
         and decryption, with hermetic operator-path BDD coverage
 
 - [x] Backend crate separation + HVF DAX + QEMU virtio-fs
-  (branch `feat/backend-crate-separation`)
+  (**PR #2220**, branch `feat/backend-crate-separation`)
   - [x] Consolidate HVF under `mvm-runtime/src/backends/hvf`
   - [x] Extract shared `mvm-vmm` crate for VMM primitives
   - [x] Backend-agnostic `VmmSpec` with typed `VirtioFsShare` entries

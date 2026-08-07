@@ -65,8 +65,8 @@
       implementation is merged through PR #2132, whose branch and merge-group
       Test, Lint, and Nix gates passed.
 
-- [x] Backend crate separation + HVF DAX + QEMU virtio-fs — branch
-      `feat/backend-crate-separation`. Consolidated HVF under
+- [x] Backend crate separation + HVF DAX + QEMU virtio-fs — **PR #2220**,
+      branch `feat/backend-crate-separation`. Consolidated HVF under
       `mvm-runtime/src/backends/hvf`, extracted the shared `mvm-vmm` crate for
       VMM primitives, made `VmmSpec` backend-agnostic for virtio-fs shares, and
       wired DAX through HVF, libkrun, and QEMU (via standalone `virtiofsd`).
