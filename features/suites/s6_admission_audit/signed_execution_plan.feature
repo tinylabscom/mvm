@@ -4,10 +4,17 @@ Feature: Every workload runs from a signed, audited execution plan
   workload, and every admission — success or failure — is recorded as a
   chain-signed entry in the audit log.
 
-  @wip
   Scenario: Admission of a workload is recorded in the chain-signed audit log
-    Given a scenario awaiting its step implementation
+    Given an isolated mvm home
+    And a workload plan was admitted in the audit chain
+    When I run mvmctl in the isolated mvm home with "trust audit verify --verbose --tenant local"
+    Then the command exits with code 0
+    And the audit chain verifies clean
 
-  @wip
   Scenario: A tampered audit chain is detected on verify
-    Given a scenario awaiting its step implementation
+    Given an isolated mvm home
+    And a workload plan was admitted in the audit chain
+    When the audit chain is tampered
+    And I run mvmctl in the isolated mvm home with "trust audit verify --verbose --tenant local"
+    Then the command exits with code 1
+    And the audit chain verify fails with a tampering error

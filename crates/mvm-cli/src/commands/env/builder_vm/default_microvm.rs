@@ -156,7 +156,7 @@ pub(crate) fn assert_workload_kernel_supports_verity(kernel_path: &str) -> Resul
             "resolved workload kernel {kernel_path} carries no device-mapper/dm-verity \
              support, but the workload boots verity-sealed. It would panic the guest at boot \
              (mvm-verity-init: open /dev/mapper/control: No such file or directory). This \
-             kernel cannot back a sealed workload — resolve or rebuild the workload kernel."
+             kernel cannot back a sealed workload — rebuild it with `mvmctl kernel build --which workload` or resolve a published kernel."
         );
     }
     Ok(())

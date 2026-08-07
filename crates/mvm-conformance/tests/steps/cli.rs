@@ -132,6 +132,28 @@ fn isolated_mvm_home(world: &mut CliWorld) {
     world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
 }
 
+#[given(expr = "an isolated mvm home with a cached non-verity workload kernel")]
+fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
+    let home = tempfile::tempdir().expect("create isolated MVM_HOME");
+    let arch = std::env::consts::ARCH;
+    let kernel_dir = home
+        .path()
+        .join("cache")
+        .join("builder-vm")
+        .join(arch)
+        .join("kernels")
+        .join("workload");
+    std::fs::create_dir_all(&kernel_dir).expect("create fake workload kernel cache dir");
+    // A kernel file that is recognisably a kernel but carries no device-mapper /
+    // dm-verity markers, so `assert_workload_kernel_supports_verity` fails fast.
+    std::fs::write(
+        kernel_dir.join("vmlinux"),
+        b"Linux version 6.12.0 (fake non-verity kernel for BDD)\n",
+    )
+    .expect("write fake workload kernel");
+    world.isolated_home = Some(home);
+}
+
 #[given(expr = "warm residency is enabled")]
 fn warm_residency_enabled(world: &mut CliWorld) {
     world.warm_residency = true;

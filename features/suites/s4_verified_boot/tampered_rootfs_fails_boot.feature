@@ -56,6 +56,8 @@ Feature: Verified boot rejects a tampered rootfs
     When I map an existing ELF workload kernel through the libkrun driver
     Then the libkrun kernel format matches the current host architecture
 
-  @wip
   Scenario: A single flipped data block on a sealed rootfs refuses to boot
-    Given a scenario awaiting its step implementation
+    Given a sealed ext4 rootfs with /sbin/init
+    And the rootfs verity root hash is recorded
+    When a single byte in the rootfs data area is flipped
+    Then the tampered rootfs does not match the recorded verity root hash
