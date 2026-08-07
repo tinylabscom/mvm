@@ -18,6 +18,7 @@
 //!
 //! It is `#[ignore]` so CI never runs it; execute manually on a KVM box with
 //! `cargo test -p mvm-runtime --test fc_warm_pool_live -- --ignored --nocapture`.
+//! Set `MVM_LIVE_HOME` to retain the VM state and console log after a failure.
 
 #![cfg(target_os = "linux")]
 
@@ -122,10 +123,21 @@ fn fc_warm_pool_spawn_and_claim() {
         return;
     };
 
-    let home = tempfile::tempdir().expect("tempdir");
+    let home_override = std::env::var_os("MVM_LIVE_HOME").map(PathBuf::from);
+    let home_temp = home_override
+        .is_none()
+        .then(|| tempfile::tempdir().expect("tempdir"));
+    let home = home_override.unwrap_or_else(|| {
+        home_temp
+            .as_ref()
+            .expect("temporary live-test home")
+            .path()
+            .to_path_buf()
+    });
+    std::fs::create_dir_all(&home).expect("create live-test home");
     // SAFETY: this harness is `#[ignore]` and runs single-threaded by hand, so
     // no other thread is reading the environment concurrently.
-    unsafe { std::env::set_var("MVM_HOME", home.path()) };
+    unsafe { std::env::set_var("MVM_HOME", &home) };
 
     let pid = std::process::id();
     let parent_id = format!("fc-warm-live-parent-{pid}");
@@ -141,7 +153,7 @@ fn fc_warm_pool_spawn_and_claim() {
         "the FC standby pool must stay disarmed; this harness validates it, it does not arm it"
     );
 
-    let spec = standby_spec(&parent_id, &images, home.path());
+    let spec = standby_spec(&parent_id, &images, &home);
     let parent_state_dir = mvm_core::config::vm_state_dir(&parent_id);
     std::fs::create_dir_all(&parent_state_dir).expect("create parent state dir");
     mvm_runtime::base::runtime_meta::record_from_rootfs(
