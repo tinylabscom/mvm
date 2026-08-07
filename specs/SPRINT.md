@@ -1032,7 +1032,7 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       completion follows the authoritative child exit after draining available
       stderr even if a detached descendant still holds a writer.
 
-- [ ] Plan 287 (`specs/plans/287-userspace-socket-datapath.md`, ADR-037) —
+- [x] Plan 287 (`specs/plans/287-userspace-socket-datapath.md`, ADR-037) —
       userspace socket datapath. Phase A (WS0) is landed: it fixed two
       platform-neutral defects in the shipped `mvm-netd` gateway daemon that
       also affected the Linux path in production — a per-frame counter passed
