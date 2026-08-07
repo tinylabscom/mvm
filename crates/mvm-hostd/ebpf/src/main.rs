@@ -9,16 +9,20 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::info;
 
-/// Minimal mirror of `struct sock_common` used for BTF CO-RE relocations.
-/// Only the fields we read need to exist; the kernel layout may differ.
+/// Local layout mirror of `struct sock_common`.  The order and sizes match
+/// the in-kernel layout on x86_64 so that reads resolve to the right offsets
+/// when the object is loaded without BTF CO-RE relocations for these types.
 #[repr(C)]
 pub struct sock_common {
-    pub skc_family: u16,
-    pub skc_dport: u16,
     pub skc_daddr: u32,
+    pub skc_rcv_saddr: u32,
+    pub skc_hash: u32,
+    pub skc_dport: u16,
+    pub skc_num: u16,
+    pub skc_family: u16,
 }
 
-/// Minimal mirror of `struct sock` used for BTF CO-RE relocations.
+/// Local layout mirror of `struct sock`.  Only `__sk_common` is needed.
 #[repr(C)]
 pub struct sock {
     pub __sk_common: sock_common,
@@ -51,8 +55,6 @@ fn try_mvm_hostd_egress_tcp_connect(ctx: ProbeContext) -> Result<u32, u32> {
     // `tcp_connect(struct sock *sk, ...)` — sk is the first argument.
     let sk: *mut sock = ctx.arg(0).ok_or(1u32)?;
 
-    // Use bpf_probe_read_kernel with BTF CO-RE relocations so the same
-    // object works across kernel versions even if struct layouts drift.
     let family: u16 =
         unsafe { bpf_probe_read_kernel(&(*sk).__sk_common.skc_family) }.map_err(|_| 1u32)?;
 

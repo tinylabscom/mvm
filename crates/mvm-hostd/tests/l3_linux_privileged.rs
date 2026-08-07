@@ -72,7 +72,7 @@ fn udp_packet(src: Ipv4Addr, dst: Ipv4Addr, dst_port: u16) -> Vec<u8> {
     let checksum = packet[..20]
         .chunks_exact(2)
         .map(|word| u32::from(u16::from_be_bytes([word[0], word[1]])))
-        .fold(0u32, |sum, word| sum + word);
+        .sum::<u32>();
     let checksum = ((checksum & 0xffff) + (checksum >> 16)) as u16;
     let checksum = (!checksum).to_be_bytes();
     packet[10..12].copy_from_slice(&checksum);

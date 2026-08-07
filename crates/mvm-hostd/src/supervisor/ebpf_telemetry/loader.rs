@@ -350,7 +350,9 @@ fn telemetry_probe_observes_ipv4_destination() {
         .try_into()
         .expect("program is not a kprobe");
     program.load().expect("eBPF program load failed");
-    program.attach("tcp_connect", 0).expect("eBPF attach failed");
+    program
+        .attach("tcp_connect", 0)
+        .expect("eBPF attach failed");
 
     let expected = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 61_987));
     std::thread::spawn(move || {
