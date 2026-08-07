@@ -460,6 +460,9 @@ toml.workspace = true
 # Plan 73 Followup H — `tests/run_plan_mode.rs` resolves python3 from
 # PATH to drive the SDK record-mode auto-exec end-to-end.
 which.workspace = true
+# `tests/audit_receipt_export.rs` builds a synthetic chain-signed audit log
+# directly with the same primitives the host uses.
+mvm-hostd = { workspace = true, default-features = false }
 
 [features]
 # ── The two product surfaces — the only two things this project ships ─────────

@@ -1,6 +1,6 @@
 # NANDA-style execution receipts and conformance badges
 
-**Status:** In progress. WS1 (RFC) and WS2 (core types) complete. WS3–WS6 pending.
+**Status:** In progress. WS1–WS3 complete. WS4–WS6 pending.
 
 **Date:** 2026-08-06
 **Owner:** mvm
@@ -268,16 +268,20 @@ canonicalization and Ed25519 signing/verification.
 **Goal:** Add a tool/CLI command that converts existing chain-signed audit
 entries into signed `ExecutionReceipt`s.
 
-- [ ] Add `mvmctl trust audit receipts export` (or similar) command.
-- [ ] Implement derivation from `AuditEntry` to `ExecutionReceipt`.
-- [ ] Ensure exported receipts verify offline end-to-end.
-- [ ] Add integration tests using the frozen audit corpus.
+- [x] Add `mvmctl trust audit receipts export` (or similar) command.
+- [x] Implement derivation from `AuditEntry` to `ExecutionReceipt`.
+- [x] Ensure exported receipts verify offline end-to-end.
+- [x] Add integration tests using the frozen audit corpus.
 
-**Files likely touched:**
+**Files touched:**
 
-- `crates/mvm-cli/src/commands/cmd_audit.rs`
-- `crates/mvm-hostd/src/audit/emitter.rs` (read path)
+- `crates/mvm-hostd/src/audit/receipt_export.rs` (new)
+- `crates/mvm-hostd/src/audit/mod.rs`
+- `crates/mvm-cli/src/commands/ops/audit.rs`
+- `crates/mvm-cli/src/commands/tests.rs`
 - `tests/audit_total_coverage.rs`
+- `tests/audit_receipt_export.rs` (new)
+- `Cargo.toml` (dev-dependency for integration test)
 
 ### WS4 — Runtime emission of receipts
 

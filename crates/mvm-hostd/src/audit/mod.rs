@@ -9,3 +9,6 @@ pub mod host_keypair;
 /// tenant's chain-signed audit log.
 pub mod merkle;
 pub mod plan_persist;
+/// Read-only exporter from chain-signed audit entries to signed
+/// ExecutionReceipts (Plan 298 WS3).
+pub mod receipt_export;
