@@ -49,17 +49,31 @@ writer processes — a same-process test cannot stand in for two supervisors),
 `a_failed_append_does_not_leave_the_head_behind_the_tail`,
 `a_failed_build_advances_nothing`.
 
-- [ ] **WS4 — audit emission is advisory, so a missing entry is invisible.**
-      Every `emit_*` call site warns and continues
-      (`crates/mvm-cli/src/commands/vm/up/admission.rs`,
-      `crates/mvm-hostd/src/plan_admission.rs`). The chain proves completeness
-      of what was *retained*; nothing detects an entry that was never written,
-      because there is no gap to detect. Claim 8 reads "every workload runs
-      from a signed, audited `ExecutionPlan`" and the audited half is currently
-      best-effort. Proposal: `--prod` fails closed when `plan.admitted` cannot
-      persist, making the receipt a control rather than a record. Dev keeps the
-      warn-and-continue behaviour. Needs a decision on whether a chain that is
-      unreachable at boot should block the boot.
+- [x] **WS4 — audit emission was advisory, so a missing entry was invisible.**
+      Every `emit_*` call site warned and continued. The chain proves
+      completeness of what was *retained*; nothing detected an entry that was
+      never written, because a missing entry leaves no gap — the line after it
+      links to the line before it and the chain verifies clean. Claim 8 reads
+      "every workload runs from a signed, audited `ExecutionPlan`", and the
+      audited half was best-effort.
+
+      `mvm_hostd::audit::durability` is now the single decision point:
+      `AuditDurability::{Required, BestEffort}` plus `record_admission`, which
+      turns a failed `plan.admitted` into a refused boot on the sealed tier and
+      a warning elsewhere. A missing emitter counts as a failure under
+      `Required` — having nowhere to record an admission is not better than
+      failing to record it. The tier signal is `restrict_agent_verbs`, reusing
+      the sealed-production signal the shell-entrypoint refusal already keys on
+      rather than inventing a second notion of "prod".
+
+      Only the admission is gated, deliberately. `plan.launched` and
+      `plan.failed` describe what has already happened, so refusing on them
+      prevents nothing and would trade a missing record for a killed workload.
+      The admission is written before the backend starts, so refusing on it
+      actually stops the unaudited run — witnessed by
+      `a_required_admission_record_that_cannot_be_written_stops_the_boot`,
+      which asserts the backend holds no VM rather than merely that an error
+      surfaced.
 
 - [ ] **WS5 — two canonicalization schemes for one job.**
       `supervisor/audit_file.rs` signs `serde_json::to_vec(entry) || prev_hash`,

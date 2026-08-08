@@ -759,7 +759,7 @@ for detailed scope and acceptance criteria.
         actually excludes two threads
   - [x] `audit_signer::Chain` takes a sole-writer lock, writes each line in
         one `write_all`, and re-seeds its head after a failed append
-  - [ ] Audit emission fails closed under `--prod` (currently advisory, so a
-        missing entry leaves no gap to detect)
+  - [x] Audit emission fails closed on the sealed tier — a run that cannot
+        record its admission does not reach the backend
   - [ ] Converge the primary chain on JCS canonical bytes so no verifier has
         to reproduce serde field order
