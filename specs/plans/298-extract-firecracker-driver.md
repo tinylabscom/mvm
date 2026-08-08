@@ -186,10 +186,45 @@ move while it stays. Pick one before touching them:
    Firecracker works" — but then say so in the module docs, so the boundary
    is a decision rather than an accident.
 
-Option 2 looks most likely to be right and cheapest to verify; confirm by
-reading `FlakeRunConfig`'s fields before committing to it. Do not start the
-remaining moves until this is settled — the modules are mutually entangled,
-so a wrong call has to be unwound all at once.
+**Investigated — the knot is smaller than it looks.** `flake_run.rs` is 383
+lines, and its module doc already says what it is: "Compatibility data types
+for the retired raw Firecracker flake launcher." Checking each public
+function against the whole repo (`crates/`, `tests/`, `src/`, `examples/`,
+`xtask/`, `features/`, excluding comment lines) finds **zero callers** for
+all four:
+
+| Function | Non-comment references |
+|---|---|
+| `run_from_build` | 0 |
+| `run_from_prestarted_build` | 0 |
+| `create_dev_config_drive` | 0 |
+| `create_dev_secrets_drive` | 0 |
+
+`run_from_build` does not launch anything either — its body is
+`config.validate()?` followed by `bail!("raw Firecracker flake launch is
+disabled; use the vsock workload runner")`. It is a refusal stub, and an
+unreachable one.
+
+That refusal is **not** a registered control: `cargo xtask
+check-dormant-controls` reports 4 total (1 live, 3 declared dormant) and
+none of them is this, and neither `model/claims.toml` nor ADR-001 names
+`flake_run` or `run_from_build`. The invariant it gestures at — workloads
+enter through the runner, guests have no NIC — is enforced live by
+`check-vsock-only-egress` and `check-uniform-vsock-egress`.
+
+So the cheap resolution is **delete the dead launcher, keep the
+descriptor**: drop the four functions plus the private
+`drive_file_inject_commands`, leaving `FlakeRunConfig` and its `validate()`.
+That removes the `run_in_vm` dependency outright and shrinks the coupling
+question to just `VmSlot` and `RuntimeVolume` on a plain data struct.
+
+**Confirm before deleting** that removing an unreachable refusal is wanted.
+It guards nothing today, but it is the kind of stub someone added on
+purpose; a reviewer should agree it is redundant with the two egress gates
+rather than discovering later that it was load-bearing prose.
+
+Do not start the remaining moves until this is settled — the modules are
+mutually entangled, so a wrong call has to be unwound all at once.
 
 ---
 
