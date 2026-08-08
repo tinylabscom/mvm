@@ -155,6 +155,42 @@ Create `crates/mvm-backends/src/fc/` for FC-specific implementation detail. Keep
 
 **Do not move** the install/asset helpers in `mvm-runtime/src/firecracker.rs` (`is_installed`, `download_assets`, …). Those are runtime/CLI policy, not backend substrate, and they stay.
 
+### The `FlakeRunConfig` knot — decide before moving the rest
+
+The four modules moved so far had no orchestration coupling. The remainder is
+not so clean, and the blocker is one type:
+
+- `flake_run.rs` defines `FlakeRunConfig` **and** consumes
+  `crate::image::RuntimeVolume`, which is a `mvm-runtime` type.
+- `run_info.rs`, `snapshot.rs`, and `boot_config.rs` all consume
+  `FlakeRunConfig`.
+- `guards.rs` calls `observe::release_slot_reservation`; `observe.rs` and
+  `control.rs` reach `crate::firecracker`.
+
+So `flake_run.rs` cannot follow the others down while it needs a
+`mvm-runtime` type, and the three modules that consume its config cannot
+move while it stays. Pick one before touching them:
+
+1. **Move `RuntimeVolume` down** (to `mvm-vmm`, or `mvm-contract` beside the
+   other volume DTOs) and take `flake_run.rs` with it. Check first whether
+   `RuntimeVolume` is genuinely a contract type or carries runtime policy —
+   `mvm-cli`, `mvm-client`, and `backend.rs` all name it, so this widens
+   beyond the FC extraction.
+2. **Split `FlakeRunConfig` from `flake_run.rs`**: the config struct moves to
+   `mvm-vmm` as a plain descriptor, the flake-running orchestration stays in
+   `mvm-runtime`. Cheapest if the struct turns out not to reference
+   `RuntimeVolume` in a load-bearing way.
+3. **Leave `flake_run.rs`, `run_info.rs`, `snapshot.rs`, and `boot_config.rs`
+   in `mvm-runtime`** and accept a smaller `mvm-backends::fc`. Legitimate if
+   they are closer to "which flake and which volumes to run" than to "how
+   Firecracker works" — but then say so in the module docs, so the boundary
+   is a decision rather than an accident.
+
+Option 2 looks most likely to be right and cheapest to verify; confirm by
+reading `FlakeRunConfig`'s fields before committing to it. Do not start the
+remaining moves until this is settled — the modules are mutually entangled,
+so a wrong call has to be unwound all at once.
+
 ---
 
 ## Task 3: Move `driver/fc.rs` into `mvm-backends`
