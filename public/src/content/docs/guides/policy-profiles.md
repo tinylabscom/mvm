@@ -32,13 +32,14 @@ Use `standard` when the workload needs explicit environment values or
 read-only input files:
 
 ```sh
-mvmctl run --profile standard --add-dir ./fixtures:/fixtures:ro -- python task.py
+mvmctl run --profile standard --mount ./fixtures:/fixtures:ro -- python task.py
 ```
 
-Use `dev` for writable project-tree iteration:
+Use `dev` for local development commands that need the broader development
+profile. Transient host-directory shares remain read-only:
 
 ```sh
-mvmctl run --profile dev --add-dir .:/work:rw -- cargo test
+mvmctl run --profile dev --mount .:/work:ro -- cargo test
 ```
 
 Use `permissive` only when a local experiment needs the escape hatch. It
@@ -50,22 +51,20 @@ MVM_ACK_PERMISSIVE_RUN=1 mvmctl run --profile permissive -- ./debug-script.sh
 
 ## Filesystem policy
 
-Host directory mounts are declared with:
+Transient host directory mounts are declared with:
 
 ```sh
-mvmctl run --add-dir HOST:GUEST[:MODE] -- command
+mvmctl run --mount HOST:GUEST:ro -- command
 ```
 
 Rules:
 
-- `MODE` defaults to `ro`.
-- `rw` is allowed only with `--profile dev` or `--profile permissive`.
-- `restrictive` rejects `--add-dir`.
-- `standard` rejects writable host shares.
+- the mode must be `ro`;
+- `restrictive` rejects host directory shares;
+- `standard` accepts read-only host shares.
 
 Prefer read-only shares for test inputs, source snapshots, fixtures, and model
-context. Use writable shares only for local developer workflows where syncing
-changes back to the host is the point of the run.
+context. Use `mvmctl cp` or a managed volume when changes must persist.
 
 ## Environment policy
 

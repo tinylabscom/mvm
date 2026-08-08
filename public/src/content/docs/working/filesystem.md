@@ -27,14 +27,11 @@ Exactly one endpoint uses `VM:/absolute/path` form. Guest paths are validated by
 For short-lived one-shot runs:
 
 ```sh
-mvmctl run --add-dir ./fixtures:/work:ro -- python /work/test.py
+mvmctl run --mount ./fixtures:/work:ro -- python /work/test.py
 ```
 
-Writable host shares require a dev or permissive profile:
-
-```sh
-mvmctl run --profile dev --add-dir ./workspace:/work:rw -- bash -lc 'cd /work && make test'
-```
+Transient host-directory shares are read-only. Use `mvmctl cp` or a managed
+volume when the guest must produce host-visible changes.
 
 ## Volumes
 

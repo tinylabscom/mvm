@@ -596,8 +596,18 @@ impl LocalBackend {
     ) -> Result<LaunchOutcome> {
         let profile = AdmittedProfile::from_profile_name(&request.profile);
         let mut preparation = self.acquire_leases(name, profile)?;
-        let volumes: Vec<mvm_core::vm_backend::VmVolume> =
-            preparation.volumes.iter().map(Into::into).collect();
+        let volumes: Vec<mvm_core::vm_backend::VmVolume> = preparation
+            .volumes
+            .iter()
+            .map(|volume| mvm_core::vm_backend::VmVolume {
+                host: volume.host.clone(),
+                guest: volume.guest.clone(),
+                size: volume.size.clone(),
+                read_only: volume.read_only,
+                kind: volume.kind,
+                encrypted: volume.encrypted,
+            })
+            .collect();
 
         let started = self
             .boot_admitted(BootParams {

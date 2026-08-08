@@ -169,6 +169,7 @@ fn main() {
             memory_mib: 512,
             mem_initial_mib: None,
             blocks: vec![],
+            shares: vec![],
             // The one channel off the box: the guest dials EGRESS_PORT, the host
             // relays it to the gating endpoint's UDS.
             vsock: vec![VsockPort {
@@ -179,7 +180,7 @@ fn main() {
             console: ConsoleCapture {
                 log_path: state_dir.join("console.log"),
             },
-            shares: Vec::new(),
+            trusted_builder: false,
         };
 
         let driver = HvfDriver::new();

@@ -96,6 +96,10 @@ impl AgentBridge {
         self.active = Some(counter);
     }
 
+    pub fn has_binding(&self) -> bool {
+        self.listener.is_some()
+    }
+
     /// Fds the host-I/O thread should watch: the listener plus any established
     /// host streams. Unestablished streams are excluded so buffered pre-accept
     /// bytes do not keep the readiness loop hot before the guest accepts them.

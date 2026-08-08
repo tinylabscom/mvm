@@ -29,7 +29,17 @@ mod trust;
 pub(crate) mod vm;
 mod watch;
 
+/// Source-resolution and worker-construction surface used by the resident
+/// warm-artifact service. It is separate from foreground launch commands so
+/// image resolution cannot re-enter the sub-300ms claim path.
+pub mod warm_artifact_source {
+    pub use super::machine::prewarm::{
+        resolve_warm_artifact_plan, warm_artifact_worker, warm_artifact_worker_with_factory,
+    };
+}
+
 pub(in crate::commands) use build::ir_input::load_ir_json_workload;
+pub(crate) use shared::{DirShareSpec, parse_dir_share_spec};
 
 #[cfg(test)]
 mod tests;

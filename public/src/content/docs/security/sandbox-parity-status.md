@@ -161,7 +161,7 @@ Tracking work:
 
 ### `filesystem-backends` — Planned
 
-mvm has volume primitives (virtio-fs `--add-dir`, named volumes)
+mvm has volume primitives (virtio-fs `--mount`, named volumes)
 and an instance-snapshot path with HMAC-sealed monotonic-epoch
 replay protection. There is no shared `VolumeBackend` conformance
 suite and no encrypted, object-store, or in-memory backend.

@@ -13,6 +13,7 @@
 
 use std::time::Duration;
 
+use super::device_state::SnapshotDeviceState;
 use super::hv::{HypervisorVcpu, VcpuExit};
 
 /// A guest device the run loop dispatches decoded accesses to. Matched by guest
@@ -33,6 +34,23 @@ pub trait RunDevice {
     /// Called on every timer tick so host→guest delivery happens even when the
     /// guest isn't doing MMIO. Default: nothing to do.
     fn poll(&mut self) -> Option<u32> {
+        None
+    }
+
+    /// Drop host-owned handles before a paused snapshot is serialized.
+    ///
+    /// Most devices have no host handles. The vsock device overrides this to
+    /// stop its host-I/O owner and clear host bindings; those are recreated
+    /// explicitly for a restored child.
+    fn prepare_snapshot(&mut self) {}
+
+    /// Expose deterministic device state to the pause snapshot hook.
+    fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
+        None
+    }
+
+    /// Expose a mutable deterministic device-state target for restore.
+    fn snapshot_device_mut(&mut self) -> Option<&mut dyn SnapshotDeviceState> {
         None
     }
 }
@@ -113,7 +131,7 @@ pub fn run<C, S, X, Q, P>(
     vcpu: &C,
     set_irq: S,
     devices: &mut [&mut dyn RunDevice],
-    mut on_exception: X,
+    on_exception: X,
     should_stop: Q,
     should_pause: P,
 ) -> Result<RunOutcome, C::Error>
@@ -124,6 +142,39 @@ where
     Q: Fn() -> bool,
     P: Fn() -> bool,
 {
+    run_with_pause_hook(
+        vcpu,
+        set_irq,
+        devices,
+        on_exception,
+        should_stop,
+        should_pause,
+        |_, _| Ok(()),
+    )
+}
+
+/// Run a vCPU and invoke `on_pause` while the vCPU is held outside guest
+/// execution. The hook is called repeatedly until the pause request clears so
+/// a host control plane can publish a snapshot asynchronously after the pause
+/// acknowledgement arrives.
+pub fn run_with_pause_hook<C, S, X, Q, P, H>(
+    vcpu: &C,
+    set_irq: S,
+    devices: &mut [&mut dyn RunDevice],
+    mut on_exception: X,
+    should_stop: Q,
+    should_pause: P,
+    mut on_pause: H,
+) -> Result<RunOutcome, C::Error>
+where
+    C: HypervisorVcpu,
+    S: Fn(u32, bool) -> Result<(), C::Error>,
+    X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
+    Q: Fn() -> bool,
+    P: Fn() -> bool,
+    H: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
+{
+    let mut pause_prepared = false;
     loop {
         match vcpu.step()? {
             VcpuExit::VTimer => {
@@ -153,8 +204,33 @@ where
                 // execution, so RAM and device state stay frozen until resume
                 // clears the pause (or a stop arrives). The device poll above
                 // already drained any in-flight host reply before we park.
+                if should_pause() {
+                    if !pause_prepared {
+                        for device in devices.iter_mut() {
+                            device.prepare_snapshot();
+                        }
+                        pause_prepared = true;
+                    }
+                    let snapshot_devices = devices
+                        .iter()
+                        .filter_map(|device| device.snapshot_device())
+                        .collect::<Vec<_>>();
+                    on_pause(vcpu, &snapshot_devices)?;
+                } else {
+                    pause_prepared = false;
+                }
                 while should_pause() && !should_stop() {
-                    std::thread::sleep(Duration::from_millis(20));
+                    for d in devices.iter_mut() {
+                        if let Some(irq) = d.poll() {
+                            set_irq(irq, true)?;
+                        }
+                    }
+                    let snapshot_devices = devices
+                        .iter()
+                        .filter_map(|device| device.snapshot_device())
+                        .collect::<Vec<_>>();
+                    on_pause(vcpu, &snapshot_devices)?;
+                    std::thread::sleep(Duration::from_millis(1));
                 }
             }
             VcpuExit::Halt => return Ok(RunOutcome::Halt),
@@ -211,6 +287,12 @@ impl RunDevice for super::device::Pl011 {
         super::device::MmioDevice::write(self, offset, value, size);
         None // PL011 has no interrupt in this model
     }
+    fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
+        Some(self)
+    }
+    fn snapshot_device_mut(&mut self) -> Option<&mut dyn SnapshotDeviceState> {
+        Some(self)
+    }
 }
 
 impl RunDevice for super::virtio::VirtioBlk {
@@ -225,6 +307,12 @@ impl RunDevice for super::virtio::VirtioBlk {
     }
     fn write(&mut self, offset: u64, value: u64, _size: u8) -> Option<u32> {
         self.write(offset, value).then(|| self.irq())
+    }
+    fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
+        Some(self)
+    }
+    fn snapshot_device_mut(&mut self) -> Option<&mut dyn SnapshotDeviceState> {
+        Some(self)
     }
 }
 
@@ -241,6 +329,12 @@ impl RunDevice for super::virtio::VirtioFs {
     fn write(&mut self, offset: u64, value: u64, _size: u8) -> Option<u32> {
         self.write(offset, value).then(|| self.irq())
     }
+    fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
+        Some(self)
+    }
+    fn snapshot_device_mut(&mut self) -> Option<&mut dyn SnapshotDeviceState> {
+        Some(self)
+    }
 }
 
 impl RunDevice for super::virtio_rng::VirtioRng {
@@ -255,6 +349,12 @@ impl RunDevice for super::virtio_rng::VirtioRng {
     }
     fn write(&mut self, offset: u64, value: u64, _size: u8) -> Option<u32> {
         self.write(offset, value).then(|| self.irq())
+    }
+    fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
+        Some(self)
+    }
+    fn snapshot_device_mut(&mut self) -> Option<&mut dyn SnapshotDeviceState> {
+        Some(self)
     }
 }
 
@@ -278,6 +378,15 @@ impl RunDevice for super::vsock::VirtioVsock {
         // run-loop path remains a fallback (e.g. KVM) and is a harmless no-op when
         // the I/O thread already serviced everything (both run under the lock).
         super::vsock::VirtioVsock::poll(self)
+    }
+    fn prepare_snapshot(&mut self) {
+        super::vsock::VirtioVsock::prepare_snapshot(self);
+    }
+    fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
+        Some(self)
+    }
+    fn snapshot_device_mut(&mut self) -> Option<&mut dyn SnapshotDeviceState> {
+        Some(self)
     }
 }
 

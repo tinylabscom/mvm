@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use mvm_core::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::{StandbyClaim, StandbyCompat, VmBackend, VmStartConfig};
+use mvm_core::vm_backend::{StandbyClaim, StandbyCompat, VmBackend, VmStartConfig, WarmLaunchMode};
 use mvm_runtime::MockBackend;
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 use mvm_runtime::{AcquireSpec, WarmLease};
@@ -31,6 +31,7 @@ fn main() -> Result<()> {
     let backend: Arc<dyn VmBackend> = Arc::new(MockBackend::new());
     let spec = AcquireSpec {
         want: standby_compat(),
+        mode: WarmLaunchMode::Optional,
         claim: admitted_claim("verify-vm"),
     };
 
@@ -39,7 +40,7 @@ fn main() -> Result<()> {
     // transport().connect, no backend.stop, no replenish — the lease owns all
     // of it.
     // ======================================================================
-    let lease = WarmLease::acquire(backend, &pool, &spec, None)?;
+    let mut lease = WarmLease::acquire(backend, &pool, &spec, None)?;
     println!("acquired warm VM: {}", lease.id());
 
     // Stage a verification script, then run it and a follow-up check on one

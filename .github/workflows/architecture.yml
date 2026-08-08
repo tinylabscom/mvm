@@ -107,10 +107,15 @@ jobs:
   #      (the `mvm-libkrun-supervisor` / `mvm-hvf-supervisor` bins). Each
   #      binds a per-port vsock proxy (`<socket_dir>/vsock-<port>.sock`)
   #      that splices host agent-RPC connections into the guest's vsock
-  #      device; `mvm-hostd` declares
+  #      device; `mvm-hostd` and the shared `mvm-vmm` crate declare
   #      `[package.metadata.mvm.architecture].substrate_server_category`.
   #      Per-VM provider plumbing (same family as category 3), spawned by the
   #      backend for a single guest — not a multi-tenant control-plane server.
+  #   11. Per-workload immutable snapshot helper — the opt-in APFS helper in
+  #      `mvm-fs` serves authenticated, path-confined sealing/materialization
+  #      requests for one workload's snapshot root. It is a privileged
+  #      filesystem security primitive, not an orchestration or control-plane
+  #      server; `mvm-fs` declares the category metadata.
   #
   # The in-guest vsock agent in `mvm-guest` is also excluded — it
   # runs *inside* the microVM, not on the host.
@@ -301,4 +306,3 @@ jobs:
             echo "An invariant lane did not pass: $RESULT"
             exit 1
           fi
-

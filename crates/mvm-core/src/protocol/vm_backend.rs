@@ -24,8 +24,10 @@ pub use mvm_contract::protocol::vm_backend::{
     RuntimeSourcePolicy, RuntimeSourceRootStrategy, SnapshotCapability, StandbyCompat,
     StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmCapabilities,
     VmExitStatus, VmFile, VmId, VmInfo, VmNetworkInfo, VmPortMapping, VmStatus, VmVolume,
-    VmVolumeKind, WarmStartError, WarmStartOutcome, encode_egress_ca_cmdline,
-    encode_runtime_source_policy_cmdline, encode_secret_env_cmdline, encode_user_volumes_cmdline,
+    VmVolumeKind, WarmArtifactIdentity, WarmClaimOutcome, WarmClaimRefusal, WarmClaimTiming,
+    WarmLaunchMode, WarmPrewarmSource, WarmServiceRequest, WarmServiceResponse, WarmStartError,
+    WarmStartOutcome, encode_egress_ca_cmdline, encode_runtime_source_policy_cmdline,
+    encode_secret_env_cmdline, encode_user_volumes_cmdline,
 };
 
 /// Inputs to the shared runtime-source policy selector.
@@ -353,6 +355,12 @@ pub trait VmBackend: Send + Sync {
     /// Capabilities supported by this backend.
     fn capabilities(&self) -> VmCapabilities;
 
+    /// Whether a warm claim transfers a resident paused VMM directly into the
+    /// child, instead of restoring a saved-state bundle.
+    fn supports_resident_handoff(&self) -> bool {
+        false
+    }
+
     /// Warm-start snapshot tier. This compatibility accessor reads the
     /// authoritative value in [`VmCapabilities`]; backend implementations
     /// should set `capabilities().snapshot_capability` instead of overriding
@@ -669,6 +677,7 @@ mod tests {
                 image_sha256: None,
                 parent_checkpoint: None,
                 vsock_egress: false,
+                preloaded_child_vm_name: None,
             },
             &sample_standby_claim(),
         ) {

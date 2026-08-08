@@ -43,19 +43,8 @@ use std::path::Path;
 /// ZONE_DEVICE, FS_DAX, FUSE_DAX) in the workload kernel. PCI, virtio-net,
 /// virtio-balloon, KVM time, and x86 ACPI core remain because supported
 /// backends exercise them.
-///
-/// Both figures rose by exactly one when the workload kernel gained IPv6, so
-/// the guest can hold the v6 half of the pair its plan leases. The additional
-/// IPv6-only tunnel plumbing is dropped in `workload.nix`; the guest has one
-/// point-to-point link and no tunnel endpoint to encapsulate toward. The v6
-/// IPsec families remain in the required-disable set, so XFRM is not absorbed
-/// into this budget. These values are measured from resolved configs on the
-/// native CI architectures.
 const BUDGET_AARCH64: usize = 944;
-// The workload kernel gained IPv6 on x86_64 when the v6 datapath was merged,
-// adding one built-in symbol. Keep the ratchet tight by raising the ceiling
-// only by that single symbol.
-const BUDGET_X86_64: usize = 917;
+const BUDGET_X86_64: usize = 916;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
 /// the larger budget (fail-open on the ceiling, never a false pass on a real

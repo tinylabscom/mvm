@@ -18,12 +18,9 @@ use mvm_core::vm_backend::{
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
-use crate::driver::spec::{VmmSpec, VsockPort};
-use crate::driver::traits::{
-    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
-};
-use crate::standby_pool::now_unix_secs;
-use crate::vm::instance_snapshot::PostRestoreOutcome;
+use mvm_vmm::driver::spec::{VmmSpec, VsockPort};
+use mvm_vmm::driver::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
+use mvm_vmm::post_restore::PostRestoreOutcome;
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
 
@@ -105,6 +102,9 @@ pub struct MockDriver {
     /// whose supervisor is already gone by the time a `stop` reaches it — so
     /// a test can prove the teardown steps that must run regardless still do.
     refuse_attach: bool,
+    /// Whether claims should use the resident-handoff path instead of the
+    /// saved-state materialization path.
+    resident_handoff: bool,
 }
 
 impl Default for MockDriver {
@@ -129,6 +129,7 @@ impl MockDriver {
             killed: Arc::new(Mutex::new(Vec::new())),
             dying_console_output: Vec::new(),
             refuse_attach: false,
+            resident_handoff: false,
         }
     }
 
@@ -136,6 +137,13 @@ impl MockDriver {
     #[must_use]
     pub fn refusing_attach(mut self) -> Self {
         self.refuse_attach = true;
+        self
+    }
+
+    /// Make claims use the resident-handoff path without requiring a
+    /// hypervisor, so the runner's no-materialization contract can be tested.
+    pub fn with_resident_handoff(mut self) -> Self {
+        self.resident_handoff = true;
         self
     }
 
@@ -245,6 +253,10 @@ impl VmmDriver for MockDriver {
             ],
         }
     }
+
+    fn supports_resident_handoff(&self) -> bool {
+        self.resident_handoff
+    }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         self.booted.lock().unwrap().push(spec.clone());
         Ok(Box::new(MockRunningVm {
@@ -281,11 +293,12 @@ impl VmmDriver for MockDriver {
             vcpus: spec.vcpus,
             mem_mib: spec.mem_mib,
             binding_nonce: spec.binding_nonce.clone(),
-            spawned_unix_secs: now_unix_secs(),
+            spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: spec.image_sha256.clone(),
             vsock_egress: spec.vsock_egress,
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
         })
     }
 
@@ -348,7 +361,10 @@ impl VmmDriver for MockDriver {
         })
     }
 
-    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+    fn vm_full_control(
+        &self,
+        vm_name: &str,
+    ) -> Option<Box<dyn mvm_vmm::checkpoint::VmFullControl>> {
         let _ = vm_name;
         Some(Box::new(MockVmFullControl {
             rootfs: self.vm_full_rootfs.clone(),
@@ -439,7 +455,7 @@ impl RunningVm for MockRunningVm {
     }
 }
 
-/// Hypervisor-free [`crate::checkpoint::VmFullControl`] test double: no real
+/// Hypervisor-free [`mvm_vmm::checkpoint::VmFullControl`] test double: no real
 /// pause/resume happens, `save_memory` writes a small deterministic file
 /// instead of a real machine-memory image, and `rootfs_path`/`device_anchors`
 /// report the path a test seeded on the owning `MockDriver`. Every call is
@@ -450,7 +466,7 @@ struct MockVmFullControl {
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
-impl crate::checkpoint::VmFullControl for MockVmFullControl {
+impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
     fn pause(&self) -> Result<()> {
         self.calls.lock().unwrap().push("pause");
         Ok(())
@@ -471,8 +487,8 @@ impl crate::checkpoint::VmFullControl for MockVmFullControl {
         Ok(self.rootfs.clone())
     }
 
-    fn device_anchors(&self) -> Result<crate::checkpoint::DeviceAnchors> {
-        Ok(crate::checkpoint::DeviceAnchors {
+    fn device_anchors(&self) -> Result<mvm_core::checkpoint::DeviceAnchors> {
+        Ok(mvm_core::checkpoint::DeviceAnchors {
             rootfs: self.rootfs.clone(),
             rootfs_verity: None,
             config: None,
@@ -486,7 +502,7 @@ impl crate::checkpoint::VmFullControl for MockVmFullControl {
 mod tests {
     use super::*;
 
-    use crate::driver::spec::{ConsoleCapture, KernelImage};
+    use mvm_vmm::driver::spec::{ConsoleCapture, KernelImage};
 
     fn sample_spec(name: &str) -> VmmSpec {
         VmmSpec {
@@ -498,11 +514,12 @@ mod tests {
             memory_mib: 256,
             mem_initial_mib: None,
             blocks: vec![],
+            shares: vec![],
             vsock: vec![],
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
-            shares: Vec::new(),
+            trusted_builder: false,
         }
     }
 

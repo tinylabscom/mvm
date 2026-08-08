@@ -687,6 +687,208 @@ pub struct WarmStartOutcome {
     pub reseed: ReseedStatus,
 }
 
+/// Whether a launch may use a cold boot when no compatible warm capacity is
+/// immediately available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmLaunchMode {
+    /// Use warm capacity when available, but preserve a cold-boot path.
+    #[default]
+    Optional,
+    /// Refuse the launch unless a compatible warm parent can be claimed.
+    Required,
+    /// Do not consult the warm pool.
+    Cold,
+}
+
+impl WarmLaunchMode {
+    /// Whether this mode requires an authenticated warm claim.
+    pub const fn requires_warm(self) -> bool {
+        matches!(self, Self::Required)
+    }
+
+    /// Whether this mode permits a cold boot.
+    pub const fn permits_cold(self) -> bool {
+        !self.requires_warm()
+    }
+}
+
+/// A typed reason a warm claim was refused. These reasons are part of the
+/// host-side launch contract: callers can distinguish capacity pressure from
+/// an incompatible or unhealthy parent without parsing log text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum WarmClaimRefusal {
+    /// The selected backend cannot provide a warm pool.
+    #[error("backend '{backend}' does not support warm claims")]
+    BackendUnsupported { backend: String },
+    /// No parent matches the complete compatibility key at claim time.
+    #[error("no compatible warm parent is available")]
+    NoCompatibleParent,
+    /// The launch shape cannot be represented by the current pool topology.
+    #[error("warm claim is incompatible: {reason}")]
+    Incompatible { reason: String },
+    /// The claim could not be prepared before it reached the backend.
+    #[error("warm claim preparation failed: {reason}")]
+    PreparationFailed { reason: String },
+    /// The backend rejected the claim after reservation.
+    #[error("warm claim rejected: {reason}")]
+    ClaimRejected { reason: String },
+}
+
+/// The backend-neutral result of a warm-pool decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WarmClaimOutcome {
+    /// A compatible parent was claimed and the child is becoming ready.
+    Claimed,
+    /// No warm parent was used; the caller may cold-boot if its mode permits it.
+    ColdBoot,
+    /// The caller requested warm service and must not cold-boot.
+    Refused(WarmClaimRefusal),
+}
+
+/// Monotonic timing marks for one warm decision. Values are integer
+/// microseconds so the same record is stable across JSON, logs, and metrics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarmClaimTiming {
+    /// Time spent waiting for a compatible pool entry.
+    pub pool_wait_us: u64,
+    /// Time spent claiming and authenticating the child.
+    pub claim_us: u64,
+    /// Total warm window from claim dispatch to authenticated readiness.
+    pub warm_window_us: u64,
+}
+
+/// Host-path-free source descriptor for an asynchronous warm-artifact job.
+/// Mutable source references are resolved by the worker and are never used as
+/// the published artifact identity; the resulting content digests remain the
+/// cache key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WarmPrewarmSource {
+    /// Resolve an OCI image reference through the trusted local image cache or
+    /// its configured registry policy.
+    OciImage { reference: String },
+    /// Resolve a previously registered template by identity.
+    Template { template_id: String },
+}
+
+impl WarmPrewarmSource {
+    /// Reject empty or NUL-containing source identifiers before they reach a
+    /// resolver or an audit record.
+    pub fn validate(&self) -> Result<(), String> {
+        let value = match self {
+            Self::OciImage { reference } => reference,
+            Self::Template { template_id } => template_id,
+        };
+        if value.trim().is_empty() {
+            return Err("warm prewarm source identifier is empty".into());
+        }
+        if value.contains('\0') {
+            return Err("warm prewarm source identifier contains NUL".into());
+        }
+        Ok(())
+    }
+}
+
+/// Host-path-free content identity supplied with an asynchronous prewarm
+/// request. The runtime converts this DTO into its validated cache key before
+/// it can enter the artifact store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WarmArtifactIdentity {
+    /// Backend and configuration identity for the golden VM.
+    pub backend: String,
+    pub backend_version: String,
+    /// Guest-agent content identity.
+    pub guest_agent_sha256: String,
+    /// Kernel content identity.
+    pub kernel_sha256: String,
+    /// Universal initramfs content identity.
+    pub initramfs_sha256: String,
+    /// Workload rootfs content identity.
+    pub rootfs_sha256: String,
+    /// Runtime overlay content identity, when required.
+    pub runtime_overlay_sha256: Option<String>,
+}
+
+/// Control-plane request for the resident warm-launch service.
+///
+/// The admitted workload envelope remains owned by the trusted launch role;
+/// this boundary carries the request identity and compatibility shape used to
+/// schedule it, never a host path or user secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum WarmServiceRequest {
+    /// Claim one compatible warm parent for a launch lease.
+    Claim {
+        /// Caller-generated id used for audit correlation and replay checks.
+        request_id: String,
+        /// Lease id that will own the claimed child until release.
+        lease_id: String,
+        /// Whether cold fallback is permitted.
+        mode: WarmLaunchMode,
+        /// Complete parent compatibility shape; host paths are excluded.
+        compatibility: StandbyCompat,
+    },
+    /// Release a previously accepted lease.
+    Release {
+        /// Caller-generated id used for audit correlation.
+        request_id: String,
+        /// Lease to stop and remove from active service state.
+        lease_id: String,
+    },
+    /// Ask the service to prepare capacity for a compatibility shape.
+    Prewarm {
+        /// Caller-generated id used for audit correlation.
+        request_id: String,
+        /// Immutable-source intent resolved by the asynchronous worker.
+        source: WarmPrewarmSource,
+        /// Complete content identity for the artifact object to prepare.
+        artifact: WarmArtifactIdentity,
+        /// Shape the published parents must satisfy.
+        compatibility: StandbyCompat,
+        /// Desired number of idle parents.
+        target: u32,
+    },
+}
+
+/// Control-plane response from the resident warm-launch service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum WarmServiceResponse {
+    /// A child is authenticated and owned by `lease_id`.
+    Claimed {
+        request_id: String,
+        lease_id: String,
+        vm_id: VmId,
+        timing: WarmClaimTiming,
+    },
+    /// Optional mode had no usable warm capacity and may cold-boot.
+    ColdBoot {
+        request_id: String,
+        lease_id: String,
+        vm_id: VmId,
+        timing: WarmClaimTiming,
+    },
+    /// Required mode could not be honored.
+    Refused {
+        request_id: String,
+        refusal: WarmClaimRefusal,
+        timing: WarmClaimTiming,
+    },
+    /// The service accepted release and removed the active lease.
+    Released {
+        request_id: String,
+        lease_id: String,
+    },
+    /// The service accepted an asynchronous prewarm request.
+    PrewarmAccepted {
+        request_id: String,
+        target: u32,
+        current: u32,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Supervisor standby pool
 // ---------------------------------------------------------------------------
@@ -747,7 +949,7 @@ pub struct StandbySpec {
 /// attach to). Compatibility is exact in both directions — `None == None` and
 /// `Some(a) == Some(b)` iff `a == b` — so a claim that computes this field differently
 /// from the spawn that recorded it matches nothing, silently and forever.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandbyCompat {
     /// Registered template identity. Compatibility is exact, including the
     /// distinction between a template-bound and image-agnostic standby.
@@ -809,6 +1011,14 @@ pub struct StandbyHandle {
     /// lives a layer up; the runtime converts at its boundary.
     #[serde(default)]
     pub parent_checkpoint: Option<String>,
+    /// An already-loaded, paused child VMM prepared from `parent_checkpoint`.
+    ///
+    /// When present, the pool owns this child process instead of a saved-only
+    /// parent. The child name becomes the final workload VM identity at claim
+    /// time; it is never exposed to a workload before fresh admission,
+    /// channel wiring, and post-restore identity reseeding complete.
+    #[serde(default)]
+    pub preloaded_child_vm_name: Option<String>,
     /// Whether this parent booted its guest's vsock egress client on
     /// (see [`StandbyCompat::vsock_egress`]).
     ///
@@ -1085,6 +1295,138 @@ pub enum BackendKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_launch_mode_defaults_to_optional_and_round_trips() {
+        assert_eq!(WarmLaunchMode::default(), WarmLaunchMode::Optional);
+        assert!(WarmLaunchMode::Required.requires_warm());
+        assert!(!WarmLaunchMode::Optional.requires_warm());
+        assert!(!WarmLaunchMode::Required.permits_cold());
+        assert!(WarmLaunchMode::Cold.permits_cold());
+
+        for mode in [
+            WarmLaunchMode::Optional,
+            WarmLaunchMode::Required,
+            WarmLaunchMode::Cold,
+        ] {
+            let encoded = serde_json::to_string(&mode).expect("warm launch mode serializes");
+            let decoded: WarmLaunchMode =
+                serde_json::from_str(&encoded).expect("warm launch mode deserializes");
+            assert_eq!(decoded, mode);
+        }
+    }
+
+    #[test]
+    fn warm_claim_refusal_keeps_capacity_and_failure_distinct() {
+        let unavailable = WarmClaimRefusal::NoCompatibleParent;
+        let rejected = WarmClaimRefusal::ClaimRejected {
+            reason: "identity handshake failed".into(),
+        };
+        assert_ne!(unavailable, rejected);
+        assert_eq!(
+            unavailable.to_string(),
+            "no compatible warm parent is available"
+        );
+        assert!(rejected.to_string().contains("identity handshake failed"));
+        assert_eq!(
+            WarmClaimOutcome::Refused(unavailable.clone()),
+            WarmClaimOutcome::Refused(unavailable)
+        );
+    }
+
+    #[test]
+    fn warm_service_request_and_response_roundtrip_without_host_paths() {
+        let compatibility = StandbyCompat {
+            template_id: Some("python-312".into()),
+            kernel_sha256: "aa".repeat(32),
+            vcpus: 2,
+            mem_mib: 128,
+            image_sha256: Some("bb".repeat(32)),
+            vsock_egress: false,
+        };
+        let request = WarmServiceRequest::Claim {
+            request_id: "req-1".into(),
+            lease_id: "lease-1".into(),
+            mode: WarmLaunchMode::Required,
+            compatibility,
+        };
+        let json = serde_json::to_string(&request).expect("warm request serializes");
+        assert!(!json.contains("/") && !json.contains("host"));
+        let decoded: WarmServiceRequest =
+            serde_json::from_str(&json).expect("warm request deserializes");
+        assert_eq!(decoded, request);
+
+        let response = WarmServiceResponse::Refused {
+            request_id: "req-1".into(),
+            refusal: WarmClaimRefusal::NoCompatibleParent,
+            timing: WarmClaimTiming {
+                pool_wait_us: 12,
+                claim_us: 0,
+                warm_window_us: 12,
+            },
+        };
+        let response_json = serde_json::to_string(&response).expect("warm response serializes");
+        let decoded_response: WarmServiceResponse =
+            serde_json::from_str(&response_json).expect("warm response deserializes");
+        assert_eq!(decoded_response, response);
+
+        let prewarm = WarmServiceRequest::Prewarm {
+            request_id: "req-2".into(),
+            source: WarmPrewarmSource::OciImage {
+                reference: "python:3.12".into(),
+            },
+            artifact: WarmArtifactIdentity {
+                backend: "hvf".into(),
+                backend_version: "v1".into(),
+                guest_agent_sha256: "aa".repeat(32),
+                kernel_sha256: "bb".repeat(32),
+                initramfs_sha256: "cc".repeat(32),
+                rootfs_sha256: "dd".repeat(32),
+                runtime_overlay_sha256: Some("ee".repeat(32)),
+            },
+            compatibility: StandbyCompat {
+                template_id: None,
+                kernel_sha256: "cc".repeat(32),
+                vcpus: 2,
+                mem_mib: 128,
+                image_sha256: Some("dd".repeat(32)),
+                vsock_egress: false,
+            },
+            target: 1,
+        };
+        let prewarm_json = serde_json::to_string(&prewarm).expect("prewarm serializes");
+        assert!(!prewarm_json.contains("/"));
+        assert_eq!(
+            serde_json::from_str::<WarmServiceRequest>(&prewarm_json)
+                .expect("prewarm deserializes"),
+            prewarm
+        );
+    }
+
+    #[test]
+    fn warm_prewarm_source_rejects_empty_and_nul_identifiers() {
+        assert!(
+            WarmPrewarmSource::OciImage {
+                reference: " ".into()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            WarmPrewarmSource::Template {
+                template_id: "template\0id".into()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            WarmPrewarmSource::Template {
+                template_id: "template-312".into()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
     use alloc::collections::BTreeSet;
     use alloc::vec;
 
@@ -1104,11 +1446,13 @@ mod tests {
             image_sha256: None,
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         };
         let json = serde_json::to_string(&h).unwrap();
         let back: StandbyHandle = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "standby-abc");
         assert_eq!(back.state, StandbyState::Idle);
+        assert_eq!(back.preloaded_child_vm_name, None);
         let want = StandbyCompat {
             template_id: None,
             kernel_sha256: "a".repeat(64),
@@ -1210,6 +1554,10 @@ mod tests {
             !h.vsock_egress,
             "a record from before the field existed booted no egress client"
         );
+        assert_eq!(
+            h.preloaded_child_vm_name, None,
+            "a record from before the field existed has no preloaded child"
+        );
         assert!(!h.is_saved_state(), "pid != 0 → live standby");
         // An old libkrun standby is compatible with a libkrun launch (both None).
         let want = StandbyCompat {
@@ -1248,6 +1596,7 @@ mod tests {
             image_sha256: Some("dd".repeat(32)),
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         };
         assert!(saved.is_saved_state());
         // serde roundtrip preserves the image sha and pid=0.

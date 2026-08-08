@@ -57,7 +57,7 @@ pub(crate) fn abs_vms_dir() -> String {
 /// Resolve the absolute directory path for a running VM by name:
 /// `<mvm_home>/vms/<name>`. A host path the VMM reads, resolved on the host.
 pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
-    Ok(format!("{}/{name}", abs_vms_dir()))
+    Ok(mvm_core::config::running_vm_dir(name))
 }
 
 /// Return the host-side path to Firecracker's PID file for VM `name`:

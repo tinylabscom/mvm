@@ -73,6 +73,7 @@ mvm-agentd.workspace = true
 # Optional + folded into `builder-vm`: the provider is gated with
 # `libkrun_builder`, so a default build pulls neither.
 mvm-net = { workspace = true, optional = true }
+mvm-vmm = { workspace = true }
 # `install_app_deps` reuses
 # `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
 # for cache-hit verification. The orchestrator owns the cache

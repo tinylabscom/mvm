@@ -17,6 +17,9 @@ use std::sync::OnceLock;
 use virtio_queue::desc::split::Descriptor;
 use virtio_queue::{QueueOwnedT, QueueT};
 
+use super::device_state::{
+    DeviceKind, DeviceStateError, SnapshotDeviceState, StateReader, StateWriter,
+};
 use super::guest_mem::GuestMem;
 use super::{RingGeometry, build_split_queue};
 
@@ -518,6 +521,87 @@ impl VirtioBlk {
     }
 }
 
+impl SnapshotDeviceState for VirtioBlk {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::VirtioBlk
+    }
+
+    fn snapshot_state(&self) -> Result<Vec<u8>, DeviceStateError> {
+        let mut writer = StateWriter::new(1);
+        writer.u32(self.device_features_sel);
+        writer.u32(self.driver_features_sel);
+        writer.u32(self.status);
+        writer.u32(self.queue_num);
+        writer.u32(self.queue_ready);
+        writer.u64(self.desc);
+        writer.u64(self.avail);
+        writer.u64(self.used);
+        writer.u16(self.last_avail);
+        writer.u16(self.next_used);
+        writer.u32(self.interrupt_status);
+        Ok(writer.finish())
+    }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceStateError> {
+        let kind = DeviceKind::VirtioBlk;
+        let mut reader = StateReader::new(bytes);
+        let version = reader.version(kind)?;
+        if version != 1 {
+            return Err(DeviceStateError::UnsupportedVersion(version));
+        }
+        let device_features_sel = reader.u32(kind, "device_features_sel")?;
+        let driver_features_sel = reader.u32(kind, "driver_features_sel")?;
+        let status = reader.u32(kind, "status")?;
+        let queue_num = reader.u32(kind, "queue_num")?;
+        let queue_ready = reader.u32(kind, "queue_ready")?;
+        let desc = reader.u64(kind, "desc")?;
+        let avail = reader.u64(kind, "avail")?;
+        let used = reader.u64(kind, "used")?;
+        let last_avail = reader.u16(kind, "last_avail")?;
+        let next_used = reader.u16(kind, "next_used")?;
+        let interrupt_status = reader.u32(kind, "interrupt_status")?;
+        reader.finish()?;
+
+        if device_features_sel > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "device_features_sel",
+            });
+        }
+        if driver_features_sel > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "driver_features_sel",
+            });
+        }
+        if queue_ready > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_ready",
+            });
+        }
+        if queue_num != 0 && super::validated_queue_size(queue_num).is_none() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_num",
+            });
+        }
+
+        self.device_features_sel = device_features_sel;
+        self.driver_features_sel = driver_features_sel;
+        self.status = status;
+        self.queue_num = queue_num;
+        self.queue_ready = queue_ready;
+        self.desc = desc;
+        self.avail = avail;
+        self.used = used;
+        self.last_avail = last_avail;
+        self.next_used = next_used;
+        self.interrupt_status = interrupt_status;
+        Ok(())
+    }
+}
+
 // ---- virtio-fs (read-only root) --------------------------------------------
 
 const VIRTIO_ID_FS: u32 = 26;
@@ -525,19 +609,9 @@ const VIRTIO_ID_FS: u32 = 26;
 const FS_NUM_QUEUES: usize = 2;
 // The tag the guest mounts: `mount -t virtiofs mvmroot /`.
 const FS_TAG: &str = "mvmroot";
-const VIRTIO_FS_F_DAX: u32 = 1 << 0;
-const VIRTIO_FS_SHMCAP_ID_CACHE: u32 = 0;
-
-// virtio-mmio shared-memory-region registers.
-const R_SHM_SEL: u64 = 0x0ac;
-const R_SHM_LEN_LOW: u64 = 0x0b0;
-const R_SHM_LEN_HIGH: u64 = 0x0b4;
-const R_SHM_BASE_LOW: u64 = 0x0b8;
-const R_SHM_BASE_HIGH: u64 = 0x0bc;
-const R_CONFIG_GENERATION: u64 = 0x0fc;
 
 /// Per-queue virtqueue state (virtio-fs has multiple queues, unlike blk).
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 struct FsQueue {
     num: u32,
     ready: u32,
@@ -579,21 +653,12 @@ pub struct VirtioFs {
     irq: u32,
     mem: GuestMem,
     server: super::virtio_fs::FuseServer,
-    fs_features_low: u32,
-    shm: Option<ShmRegion>,
-    shm_sel: u32,
     device_features_sel: u32,
     status: u32,
     queue_sel: u32,
     queues: [FsQueue; FS_NUM_QUEUES],
     interrupt_status: u32,
     config: [u8; 40],
-}
-
-/// A virtio shared-memory region exposed via the MMIO SHM registers.
-struct ShmRegion {
-    base: u64,
-    len: u64,
 }
 
 impl VirtioFs {
@@ -608,9 +673,32 @@ impl VirtioFs {
         ram_size: usize,
         root: std::path::PathBuf,
     ) -> Self {
+        // The root device keeps the historical `mvmroot` tag.
+        // SAFETY: the caller supplies the same guest-RAM lifetime contract as
+        // `with_tag`; this wrapper only supplies the historical root tag.
+        unsafe { Self::with_tag(base, irq, ram, ram_base, ram_size, root, FS_TAG.to_string()) }
+    }
+
+    /// Construct a read-only virtio-fs device with an explicit guest tag.
+    /// Tags are supplied by the host-side volume manifest and must fit the
+    /// 36-byte virtio-fs config field.
+    ///
+    /// # Safety
+    /// `ram`/`ram_base`/`ram_size` must describe the mapped guest RAM region for
+    /// the lifetime of this device.
+    pub unsafe fn with_tag(
+        base: u64,
+        irq: u32,
+        ram: *mut u8,
+        ram_base: u64,
+        ram_size: usize,
+        root: std::path::PathBuf,
+        tag: String,
+    ) -> Self {
         let mut config = [0u8; 40];
-        let tag = FS_TAG.as_bytes();
-        config[..tag.len()].copy_from_slice(tag); // tag[36], NUL-padded
+        let tag = tag.as_bytes();
+        let tag_len = tag.len().min(36);
+        config[..tag_len].copy_from_slice(&tag[..tag_len]);
         config[36..40].copy_from_slice(&1u32.to_le_bytes()); // num_request_queues
         VirtioFs {
             base,
@@ -618,9 +706,6 @@ impl VirtioFs {
             // SAFETY: forwarded from the caller's guest-RAM contract.
             mem: unsafe { GuestMem::new(ram, ram_base, ram_size) },
             server: super::virtio_fs::FuseServer::new(root),
-            fs_features_low: 0,
-            shm: None,
-            shm_sel: 0,
             device_features_sel: 0,
             status: 0,
             queue_sel: 0,
@@ -628,30 +713,6 @@ impl VirtioFs {
             interrupt_status: 0,
             config,
         }
-    }
-
-    /// # Safety
-    /// Same RAM-contract as [`VirtioFs::new`]. The supplied `mapper` is used to
-    /// back `FUSE_SETUPMAPPING` / `FUSE_REMOVEMAPPING` and the device advertises
-    /// `VIRTIO_FS_F_DAX`.
-    pub unsafe fn new_with_mapper(
-        base: u64,
-        irq: u32,
-        ram: *mut u8,
-        ram_base: u64,
-        ram_size: usize,
-        root: std::path::PathBuf,
-        mapper: Box<dyn crate::dax::DaxMapper>,
-    ) -> Self {
-        let mut dev = unsafe { Self::new(base, irq, ram, ram_base, ram_size, root.clone()) };
-        let (dax_base, dax_len) = mapper.window();
-        dev.server = super::virtio_fs::FuseServer::new_with_mapper(root, Some(mapper));
-        dev.fs_features_low = VIRTIO_FS_F_DAX;
-        dev.shm = Some(ShmRegion {
-            base: dax_base,
-            len: dax_len,
-        });
-        dev
     }
 
     pub fn base(&self) -> u64 {
@@ -679,7 +740,7 @@ impl VirtioFs {
             R_VENDOR_ID => VIRTIO_VENDOR,
             // Only VIRTIO_F_VERSION_1 (high feature word); no low-word features.
             R_DEVICE_FEATURES if self.device_features_sel == 1 => 1,
-            R_DEVICE_FEATURES => self.fs_features_low,
+            R_DEVICE_FEATURES => 0,
             R_QUEUE_NUM_MAX => super::QUEUE_SIZE_MAX,
             R_QUEUE_READY => self.q().ready,
             R_INTERRUPT_STATUS => self.interrupt_status,
@@ -691,12 +752,6 @@ impl VirtioFs {
                 b[..n].copy_from_slice(&self.config[i..i + n]);
                 u32::from_le_bytes(b)
             }
-            R_SHM_SEL => self.shm_sel,
-            R_SHM_LEN_LOW => self.shm_len_low(),
-            R_SHM_LEN_HIGH => self.shm_len_high(),
-            R_SHM_BASE_LOW => self.shm_base_low(),
-            R_SHM_BASE_HIGH => self.shm_base_high(),
-            R_CONFIG_GENERATION => 0,
             _ => 0,
         })
     }
@@ -706,7 +761,6 @@ impl VirtioFs {
         let v = value as u32;
         match offset {
             R_DEVICE_FEATURES_SEL => self.device_features_sel = v,
-            R_SHM_SEL => self.shm_sel = v,
             R_DRIVER_FEATURES_SEL | R_DRIVER_FEATURES => {}
             R_QUEUE_SEL => self.queue_sel = v,
             R_QUEUE_NUM => self.q_mut().num = v,
@@ -754,32 +808,6 @@ impl VirtioFs {
             _ => {}
         }
         false
-    }
-
-    fn shm_field(&self, is_base: bool) -> u64 {
-        let Some(shm) = &self.shm else {
-            return u64::MAX;
-        };
-        if self.shm_sel != VIRTIO_FS_SHMCAP_ID_CACHE {
-            return u64::MAX;
-        }
-        if is_base { shm.base } else { shm.len }
-    }
-
-    fn shm_base_low(&self) -> u32 {
-        (self.shm_field(true) & 0xffff_ffff) as u32
-    }
-
-    fn shm_base_high(&self) -> u32 {
-        (self.shm_field(true) >> 32) as u32
-    }
-
-    fn shm_len_low(&self) -> u32 {
-        (self.shm_field(false) & 0xffff_ffff) as u32
-    }
-
-    fn shm_len_high(&self) -> u32 {
-        (self.shm_field(false) >> 32) as u32
     }
 
     fn process_queue(&mut self, qidx: usize) -> bool {
@@ -864,6 +892,88 @@ impl VirtioFs {
             off += wrote;
         }
         written
+    }
+}
+
+impl SnapshotDeviceState for VirtioFs {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::VirtioFs
+    }
+
+    fn snapshot_state(&self) -> Result<Vec<u8>, DeviceStateError> {
+        let mut writer = StateWriter::new(1);
+        writer.u32(self.device_features_sel);
+        writer.u32(self.status);
+        writer.u32(self.queue_sel);
+        writer.u32(self.interrupt_status);
+        for queue in self.queues {
+            writer.u32(queue.num);
+            writer.u32(queue.ready);
+            writer.u64(queue.desc);
+            writer.u64(queue.avail);
+            writer.u64(queue.used);
+            writer.u16(queue.last_avail);
+            writer.u16(queue.next_used);
+        }
+        Ok(writer.finish())
+    }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceStateError> {
+        let kind = DeviceKind::VirtioFs;
+        let mut reader = StateReader::new(bytes);
+        let version = reader.version(kind)?;
+        if version != 1 {
+            return Err(DeviceStateError::UnsupportedVersion(version));
+        }
+        let device_features_sel = reader.u32(kind, "device_features_sel")?;
+        let status = reader.u32(kind, "status")?;
+        let queue_sel = reader.u32(kind, "queue_sel")?;
+        let interrupt_status = reader.u32(kind, "interrupt_status")?;
+        let mut queues = [FsQueue::default(); FS_NUM_QUEUES];
+        for queue in &mut queues {
+            queue.num = reader.u32(kind, "queue_num")?;
+            queue.ready = reader.u32(kind, "queue_ready")?;
+            queue.desc = reader.u64(kind, "desc")?;
+            queue.avail = reader.u64(kind, "avail")?;
+            queue.used = reader.u64(kind, "used")?;
+            queue.last_avail = reader.u16(kind, "last_avail")?;
+            queue.next_used = reader.u16(kind, "next_used")?;
+        }
+        reader.finish()?;
+
+        if device_features_sel > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "device_features_sel",
+            });
+        }
+        if usize::try_from(queue_sel).map_or(true, |index| index >= FS_NUM_QUEUES) {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_sel",
+            });
+        }
+        for queue in &queues {
+            if queue.ready > 1 {
+                return Err(DeviceStateError::InvalidValue {
+                    kind,
+                    field: "queue_ready",
+                });
+            }
+            if queue.num != 0 && super::validated_queue_size(queue.num).is_none() {
+                return Err(DeviceStateError::InvalidValue {
+                    kind,
+                    field: "queue_num",
+                });
+            }
+        }
+
+        self.device_features_sel = device_features_sel;
+        self.status = status;
+        self.queue_sel = queue_sel;
+        self.queues = queues;
+        self.interrupt_status = interrupt_status;
+        Ok(())
     }
 }
 
@@ -2251,85 +2361,81 @@ mod tests {
             "slot 1 records the second chain's head"
         );
     }
-    /// Local fake DAX mapper for virtio-fs transport tests.
-    struct FakeDaxMapper;
 
-    impl crate::dax::DaxMapper for FakeDaxMapper {
-        fn map(
-            &mut self,
-            _path: &std::path::Path,
-            _file_offset: u64,
-            _window_offset: u64,
-            _len: u64,
-            _writable: bool,
-        ) -> Result<(), i32> {
-            Ok(())
-        }
+    #[test]
+    fn blk_device_state_roundtrips_control_plane_without_backing_disk() {
+        let mut source = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        source.device_features_sel = 1;
+        source.driver_features_sel = 1;
+        source.status = 7;
+        source.queue_num = 8;
+        source.queue_ready = 1;
+        source.desc = BLK_BASE + 0x1000;
+        source.avail = BLK_BASE + 0x2000;
+        source.used = BLK_BASE + 0x3000;
+        source.last_avail = 9;
+        source.next_used = 11;
+        source.interrupt_status = 1;
+        let state = source.snapshot_state().unwrap();
 
-        fn unmap(&mut self, _window_offset: u64, _len: u64) -> Result<(), i32> {
-            Ok(())
-        }
-
-        fn window(&self) -> (u64, u64) {
-            (0x0c00_0000, 0x1000_0000)
-        }
-
-        fn alignment(&self) -> u64 {
-            16 * 1024
-        }
-    }
-
-    fn fs_dev_with_mapper(root: &std::path::Path) -> VirtioFs {
-        let ram = crate::test_support::page_aligned_ram(RAM_SIZE);
-        // SAFETY: page-aligned, zeroed, leaked for the test process lifetime.
-        unsafe {
-            VirtioFs::new_with_mapper(
-                0,
-                5,
-                ram.as_mut_ptr(),
-                0,
-                ram.len(),
-                root.to_path_buf(),
-                Box::new(FakeDaxMapper),
-            )
-        }
+        let mut target = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        target.restore_state(&state).unwrap();
+        assert_eq!(target.device_features_sel, 1);
+        assert_eq!(target.driver_features_sel, 1);
+        assert_eq!(target.status, 7);
+        assert_eq!(target.queue_num, 8);
+        assert_eq!(target.queue_ready, 1);
+        assert_eq!(
+            (target.desc, target.avail, target.used),
+            (BLK_BASE + 0x1000, BLK_BASE + 0x2000, BLK_BASE + 0x3000)
+        );
+        assert_eq!((target.last_avail, target.next_used), (9, 11));
+        assert_eq!(target.interrupt_status, 1);
     }
 
     #[test]
-    fn fs_without_mapper_reports_no_shm_region() {
-        let dir = tempfile::tempdir().unwrap();
-        let fs = fs_dev(dir.path());
-        let absent = u64::from(u32::MAX);
-        assert_eq!(fs.read(R_SHM_LEN_LOW), absent);
-        assert_eq!(fs.read(R_SHM_LEN_HIGH), absent);
-        assert_eq!(fs.read(R_SHM_BASE_LOW), absent);
-        assert_eq!(fs.read(R_SHM_BASE_HIGH), absent);
+    fn blk_device_state_rejects_an_illegal_queue_size_before_mutation() {
+        let mut source = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        source.queue_num = 8;
+        let mut state = source.snapshot_state().unwrap();
+        state[14..18].copy_from_slice(&3u32.to_le_bytes());
+
+        let mut target = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        assert!(matches!(
+            target.restore_state(&state),
+            Err(DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioBlk,
+                field: "queue_num"
+            })
+        ));
+        assert_eq!(target.queue_num, 0);
     }
 
     #[test]
-    fn fs_with_mapper_exposes_dax_shm_region() {
+    fn fs_device_state_roundtrips_all_queue_control_state() {
         let dir = tempfile::tempdir().unwrap();
-        let fs = fs_dev_with_mapper(dir.path());
+        let mut source = fs_dev(dir.path());
+        source.device_features_sel = 1;
+        source.status = 7;
+        source.queue_sel = 1;
+        source.interrupt_status = 1;
+        source.queues[0] = FsQueue {
+            num: 4,
+            ready: 1,
+            desc: 0x1000,
+            avail: 0x2000,
+            used: 0x3000,
+            last_avail: 2,
+            next_used: 3,
+        };
+        let state = source.snapshot_state().unwrap();
 
-        // Select a non-existent region first.
-        let mut fs = fs;
-        fs.write(R_SHM_SEL, 7);
-        assert_eq!(fs.read(R_SHM_LEN_LOW), u64::from(u32::MAX));
-
-        // Select the DAX cache region (id 0).
-        fs.write(R_SHM_SEL, u64::from(VIRTIO_FS_SHMCAP_ID_CACHE));
-        let base = 0x0c00_0000u64;
-        let len = 0x1000_0000u64;
-        assert_eq!(fs.read(R_SHM_BASE_LOW), base & 0xffff_ffff);
-        assert_eq!(fs.read(R_SHM_BASE_HIGH), base >> 32);
-        assert_eq!(fs.read(R_SHM_LEN_LOW), len & 0xffff_ffff);
-        assert_eq!(fs.read(R_SHM_LEN_HIGH), len >> 32);
-    }
-
-    #[test]
-    fn fs_with_mapper_advertises_dax_feature_bit() {
-        let dir = tempfile::tempdir().unwrap();
-        let fs = fs_dev_with_mapper(dir.path());
-        assert_ne!(fs.read(R_DEVICE_FEATURES) & u64::from(VIRTIO_FS_F_DAX), 0);
+        let mut target = fs_dev(dir.path());
+        target.restore_state(&state).unwrap();
+        assert_eq!(target.device_features_sel, 1);
+        assert_eq!(target.status, 7);
+        assert_eq!(target.queue_sel, 1);
+        assert_eq!(target.interrupt_status, 1);
+        assert_eq!(target.queues[0], source.queues[0]);
     }
 }

@@ -6,9 +6,10 @@
 //! template entrypoint) can be added without churning the inline-command
 //! surface.
 //!
-//! Dev-mode only: the guest agent admits the Exec handler only when the
-//! runtime profile and signed verb grant authorize DevOnly access. The same
-//! universal guest-agent artifact is used for every image tier.
+//! Dev-mode only: the guest agent's Exec handler is gated at compile time
+//! by the `interactive` Cargo feature. Production guest binaries are built
+//! without `interactive`, so the handler is not present and `exec` returns
+//! "exec not available" regardless of any runtime configuration.
 
 use anyhow::{Context, Result, anyhow};
 use mvm_core::vm_backend::{
@@ -20,6 +21,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::commands::DirShareSpec;
 use crate::ui;
 
 /// Exit code the CLI returns when a guest command exceeds its `--timeout`.
@@ -66,76 +68,6 @@ pub struct LaunchEntrypoint {
     pub command: Vec<String>,
     pub working_dir: Option<String>,
     pub env: BTreeMap<String, String>,
-}
-
-/// One `--mount host:guest[:mode]` mapping.
-///
-/// The host directory is materialized into a small ext4 image attached as
-/// an extra Firecracker drive, then mounted at `guest_path` by a wrapper
-/// script before the user's command runs. When `read_only` is false
-/// (mode `:rw`), guest writes land in the ext4 image and are rsynced
-/// back to the host directory after the command exits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddDir {
-    pub host_path: String,
-    pub guest_path: String,
-    pub read_only: bool,
-}
-
-impl AddDir {
-    /// Parse a `host:guest[:mode]` spec.
-    ///
-    /// The first colon splits host from guest. An optional trailing
-    /// `:ro` or `:rw` selects the mount mode (default `:ro`). Other
-    /// trailing tokens that look like a mode (no slash, alphanumeric)
-    /// are rejected to catch typos. Guest paths that legitimately
-    /// contain colons remain supported as long as the trailing
-    /// component is unambiguously path-shaped (contains a slash).
-    pub fn parse(spec: &str) -> Result<Self> {
-        let (host, rest) = spec.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!("--mount '{spec}': expected 'host:guest[:mode]', missing ':'")
-        })?;
-        if host.is_empty() {
-            anyhow::bail!("--mount '{spec}': host path must not be empty");
-        }
-
-        let (guest, read_only) = match rest.rsplit_once(':') {
-            Some((path, "ro")) => (path, true),
-            Some((path, "rw")) => (path, false),
-            Some((_, tail)) if looks_like_mode_typo(tail) => {
-                anyhow::bail!("--mount '{spec}': unknown mode '{tail}' (expected 'ro' or 'rw')");
-            }
-            _ => (rest, true),
-        };
-
-        if guest.is_empty() {
-            anyhow::bail!("--mount '{spec}': guest path must not be empty");
-        }
-        if !guest.starts_with('/') {
-            anyhow::bail!("--mount '{spec}': guest path must be absolute (start with '/')");
-        }
-        Ok(Self {
-            host_path: expand_tilde(host),
-            guest_path: guest.to_string(),
-            read_only,
-        })
-    }
-}
-
-fn looks_like_mode_typo(tail: &str) -> bool {
-    !tail.is_empty()
-        && tail.len() <= 8
-        && !tail.contains('/')
-        && tail.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return format!("{home}/{rest}");
-    }
-    path.to_string()
 }
 
 /// Where the VM's disk image and kernel come from.
@@ -356,7 +288,8 @@ pub struct ExecRequest {
     /// [`VmStartConfig::mem_initial_mib`]:
     ///     mvm_core::vm_backend::VmStartConfig::mem_initial_mib
     pub mem_initial_mib: Option<u32>,
-    pub add_dirs: Vec<AddDir>,
+    /// Live read-only host-directory shares requested by `machine run --mount`.
+    pub dir_shares: Vec<DirShareSpec>,
     pub env: Vec<(String, String)>,
     pub target: ExecTarget,
     /// Timeout for the in-guest command in seconds. `None` ⇒ no per-command
@@ -732,43 +665,19 @@ pub fn shell_quote(arg: &str) -> String {
 }
 
 /// Build the wrapper script that runs inside the guest:
-///   1. mounts each `--mount` ext4 image at the exact VMM-assigned block device
-///   2. exports launch-plan-derived env vars (when target is LaunchPlan)
-///   3. exports CLI `--env` vars (CLI overrides launch-plan)
-///   4. cds into `working_dir` (when target is LaunchPlan and it's set)
-///   5. execs the resolved command
+///   1. exports launch-plan-derived env vars (when target is LaunchPlan)
+///   2. exports CLI `--env` vars (CLI overrides launch-plan)
+///   3. cds into `working_dir` (when target is LaunchPlan and it's set)
+///   4. execs the resolved command
 ///
-/// `add_dir_devices` is the parallel list of guest block devices assigned to
-/// each `AddDir` (in the same order as `req.add_dirs`). The devices come from
-/// the runner's block-layout mapper; label lookup is unavailable in some
-/// minimal OCI guests.
+/// Host directories are attached and mounted by the guest activation path. The
+/// command wrapper must not contain a second mount implementation.
 ///
 /// Env precedence (lowest → highest): launch-plan app.env → launch-plan
 /// entrypoint.env → CLI `--env`. The first two are merged in
 /// `parse_launch_plan`; CLI wins by being emitted last.
-pub fn build_guest_wrapper(req: &ExecRequest, add_dir_devices: &[String]) -> String {
+pub fn build_guest_wrapper(req: &ExecRequest) -> String {
     let mut script = String::from("set -e\n");
-    for (dir, device) in req.add_dirs.iter().zip(add_dir_devices.iter()) {
-        let mount_point = shell_quote(&dir.guest_path);
-        let device_q = shell_quote(device);
-        let mount_probe = shell_quote(&format!(" {} ", dir.guest_path));
-        let mount_opts = if dir.read_only { " -o ro" } else { "" };
-        // The OCI init may have mounted this volume already. Keep the
-        // wrapper idempotent while retaining a fallback for images whose init
-        // does not perform user-volume activation.
-        script.push_str(&format!(
-            concat!(
-                "mkdir -p {mount_point}\n",
-                "if ! grep -Fq {mount_probe} /proc/mounts 2>/dev/null; then\n",
-                "mount {device_q} {mount_point}{mount_opts}\n",
-                "fi\n",
-            ),
-            mount_point = mount_point,
-            mount_probe = mount_probe,
-            device_q = device_q,
-            mount_opts = mount_opts,
-        ));
-    }
     if let ExecTarget::LaunchPlan { entrypoint } = &req.target {
         for (k, v) in &entrypoint.env {
             script.push_str(&format!("export {k}={}\n", shell_quote(v)));
@@ -809,13 +718,13 @@ pub fn transient_run_dev_console(pty: bool, image_sealed: bool) -> bool {
     pty && !image_sealed
 }
 
-/// Remove the transient VM's host state dir (`~/.mvm/vms/<name>`, which also
-/// holds any `--mount` extra images) once the VM is stopped. Host-side
+/// Remove the transient VM's host state dir (`~/.mvm/vms/<name>`) once the VM
+/// is stopped. Host-side
 /// `std::fs` — never `run_in_vm`, which targets a path *inside* the guest and
 /// (on macOS) would wake a builder VM to `rm` a path that isn't there, leaking
-/// the real host dir. Runs for every transient run, `--mount` or not: the
-/// backend writes `hvf.pid` / `console.log` here regardless, so a plain OCI
-/// launch created the dir and must clean it up too. Best-effort — teardown must
+/// the real host dir. Runs for every transient run: the backend writes
+/// `hvf.pid` / `console.log` here regardless, so a plain OCI launch created
+/// the dir and must clean it up too. Best-effort — teardown must
 /// never fail on a cleanup error.
 fn remove_transient_state_dir(staging_dir: &str) {
     match std::fs::remove_dir_all(staging_dir) {
@@ -856,19 +765,18 @@ fn remove_transient_state_dir(staging_dir: &str) {
 /// Decide whether snapshot restore is safe for this request.
 ///
 /// Only enabled for the trivial case: a registered template (so the image
-/// has a snapshot at all), no `--mount` extras (so the drive layout
+/// has a snapshot at all), no live directory shares (so the device layout
 /// matches the snapshot's recorded layout), and a backend that advertises
-/// snapshot support. Adding `--mount` would change the drive count and
-/// break the snapshot — that case stays cold-boot for now.
+/// snapshot support.
 pub fn snapshot_eligible(
     image: &ImageSource,
-    add_dirs: &[AddDir],
+    dir_shares: &[DirShareSpec],
     snap_present: bool,
     snapshot_capability: SnapshotCapability,
 ) -> bool {
     if snapshot_capability == SnapshotCapability::Unsupported
         || !snap_present
-        || !add_dirs.is_empty()
+        || !dir_shares.is_empty()
     {
         return false;
     }
@@ -996,11 +904,6 @@ fn run_inner(
     let timing = crate::commands::vm::phase_timing::enabled();
     let t_start = timing.then(std::time::Instant::now);
 
-    // Validate inputs that do not depend on the image before doing any
-    // expensive work (OCI layer pulls, snapshot probes, etc.). A bad --mount
-    // host path should fail fast rather than after downloading a guest image.
-    validate_add_dirs_before_resolve(&req.add_dirs)?;
-
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
     // cold-boot cost when the request is snapshot-eligible.
@@ -1008,13 +911,9 @@ fn run_inner(
 
     let t_image_resolved = timing.then(std::time::Instant::now);
 
-    // Build read-only ext4 images for each --mount, staged in a transient
-    // VMS subdirectory so cleanup is straightforward.
-    let AddDirStaging {
-        vm_name,
-        staging_dir,
-        volumes,
-    } = stage_add_dir_volumes(&req)?;
+    // A transient run owns only its state directory. Host directories are
+    // attached as live virtio-fs shares; no host tree is copied or staged.
+    let vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
 
     // Snapshot eligibility, the dm-verity sidecar probe, the virtiofs-root
     // tier gate, and the effective initrd all fall out of the resolved image
@@ -1041,7 +940,7 @@ fn run_inner(
     // `run_supervisor` dispatch. Routing template restores through
     // admission would add an `admit_for_run` call here and a
     // `populate_audit_substrate` invocation after the struct literal.
-    let mut start_config = build_start_config(&req, &vm_name, &resolved, &boot, &volumes);
+    let mut start_config = build_start_config(&req, &vm_name, &resolved, &boot);
 
     // Admit the transient run as a locally-signed workload. Setting
     // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
@@ -1059,39 +958,44 @@ fn run_inner(
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
     crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
-    let add_dir_devices = add_dir_block_devices(&start_config, req.add_dirs.len())?;
     let t_admitted = timing.then(std::time::Instant::now);
 
     // Reap stale standbys, try a warm-pool claim, then fall back to
     // snapshot-restore / cold boot. See `boot_transient_vm`.
+    let mut warm_claim_marks = crate::commands::vm::phase_timing::WarmClaimMarks::default();
     let requested_vm_name = vm_name.clone();
     let boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
         resolved: &resolved,
     };
-    let vm_name = boot_transient_vm(vm_name, use_snapshot, &boot_attempt)?;
+    let (vm_name, launch_mode) = boot_transient_vm(
+        vm_name,
+        use_snapshot,
+        &boot_attempt,
+        timing.then_some(&mut warm_claim_marks),
+    )?;
     let t_backend_started = timing.then(std::time::Instant::now);
 
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
 
     // Run the command + always tear down.
-    let run_outcome = run_in_guest(&vm_name, &req, &add_dir_devices, capture, timing);
+    let run_outcome = run_in_guest(&vm_name, &req, capture, timing);
     let t_command_done = timing.then(std::time::Instant::now);
     let (result, t_vsock_ready) = match run_outcome {
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
         Err(e) => (Err(e), None),
     };
 
-    teardown_transient_vm(
-        &backend,
-        &vm_name,
-        &start_config,
-        &req.add_dirs,
-        &staging_dir,
-        &requested_vm_name,
-    );
+    // Reap state dirs a killed or crashed prior transient run left behind: a
+    // SIGKILL or a closed terminal skips teardown, so `~/.mvm/vms/<name>` leaks.
+    // Keep this broad orphan-only sweep off the launch path; transient names
+    // are unique and the current VM has already completed its command, so the
+    // maintenance pass cannot delay admission or the first guest operation.
+    let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
+
+    teardown_transient_vm(&backend, &vm_name, &start_config, &requested_vm_name);
     let t_torn_down = timing.then(std::time::Instant::now);
 
     // Emit the phase breakdown when every seam was marked (i.e. timing was
@@ -1116,10 +1020,13 @@ fn run_inner(
         t_torn_down,
     ) {
         let marks = crate::commands::vm::phase_timing::RunPhaseMarks {
+            launch_mode,
             start,
             image_resolved,
             drives_ready,
             admitted,
+            pool_wait_started: warm_claim_marks.pool_wait_started,
+            claim_started: warm_claim_marks.claim_started,
             backend_started,
             vsock_ready,
             command_done,
@@ -1214,75 +1121,6 @@ fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
     }
 }
 
-/// Per-`--mount` staging: a small RO ext4 image built for each host
-/// directory mapping, plus the VM name / staging dir the images live under.
-struct AddDirStaging {
-    vm_name: String,
-    staging_dir: String,
-    volumes: Vec<mvm_runtime::image::RuntimeVolume>,
-}
-
-/// Fail fast if any `--mount` host path is missing or not a directory.
-///
-/// This runs before image resolution so a typo in a host path does not pay
-/// for an OCI pull only to error out during volume staging.
-fn validate_add_dirs_before_resolve(add_dirs: &[AddDir]) -> Result<()> {
-    for dir in add_dirs {
-        let path = Path::new(&dir.host_path);
-        if !path.exists() {
-            anyhow::bail!(
-                "--mount '{}' -> '{}': host path does not exist",
-                dir.host_path,
-                dir.guest_path
-            );
-        }
-        if !path.is_dir() {
-            anyhow::bail!(
-                "--mount '{}' -> '{}': host path is not a directory",
-                dir.host_path,
-                dir.guest_path
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Build read-only ext4 images for each `--mount`, staged in a transient
-/// VM's `extras` subdirectory so cleanup is straightforward.
-fn stage_add_dir_volumes(req: &ExecRequest) -> Result<AddDirStaging> {
-    let vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
-    let staging_dir = mvm_core::config::vm_state_dir(&vm_name)
-        .join("extras")
-        .display()
-        .to_string();
-    let mut volumes: Vec<mvm_runtime::image::RuntimeVolume> = Vec::new();
-    for (idx, dir) in req.add_dirs.iter().enumerate() {
-        let label = format!("mvm-extra-{idx}");
-        let image_path = format!("{staging_dir}/extra-{idx}.ext4");
-        mvm_runtime::image::build_dir_image_ro(&dir.host_path, &label, &image_path).with_context(
-            || {
-                format!(
-                    "preparing --mount image for '{}' -> '{}'",
-                    dir.host_path, dir.guest_path
-                )
-            },
-        )?;
-        volumes.push(mvm_runtime::image::RuntimeVolume {
-            host: image_path,
-            guest: dir.guest_path.clone(),
-            size: String::new(),
-            read_only: dir.read_only,
-            // `--mount` builds an RO ext4 image, so this is a disk.
-            ..Default::default()
-        });
-    }
-    Ok(AddDirStaging {
-        vm_name,
-        staging_dir,
-        volumes,
-    })
-}
-
 /// The run-path tier gate's outputs for one boot: whether the request is
 /// still snapshot-restore eligible, the dm-verity sidecar (if any), the
 /// virtiofs root candidate, the resolved rootfs strategy + runtime source
@@ -1309,7 +1147,7 @@ fn resolve_boot_strategy(
     // Snapshot path is taken when the request is eligible; otherwise cold boot.
     let use_snapshot = snapshot_eligible(
         &req.image,
-        &req.add_dirs,
+        &req.dir_shares,
         resolved.snap_info.is_some(),
         backend.capabilities().snapshot_capability,
     );
@@ -1367,7 +1205,6 @@ fn build_start_config(
     vm_name: &str,
     resolved: &ResolvedImage,
     boot: &BootStrategy,
-    volumes: &[mvm_runtime::image::RuntimeVolume],
 ) -> VmStartConfig {
     // Pre-open console data sockets for interactive PTY runs against
     // non-sealed images. OCI/dev images can carry verity sidecars and still be
@@ -1392,19 +1229,17 @@ fn build_start_config(
         memory_mib: req.memory_mib,
         mem_initial_mib: req.mem_initial_mib,
         ports: Vec::new(),
-        // User `--mount` volumes first, then the SDK sidecar. The order is
-        // the block-device order every backend assigns, so keeping the
-        // host-resolved sidecar last means adding or removing it never
-        // renumbers a user volume's device.
-        volumes: volumes
+        // Live shares precede the SDK sidecar so their tags and admission
+        // records remain stable across sidecar changes.
+        volumes: req
+            .dir_shares
             .iter()
-            .map(|v| VmVolume {
-                host: v.host.clone(),
-                guest: v.guest.clone(),
-                size: v.size.clone(),
-                read_only: v.read_only,
-                kind: v.kind,
-                encrypted: v.encrypted,
+            .map(|share| VmVolume {
+                host: share.host_dir.clone(),
+                guest: share.guest_mount.clone(),
+                read_only: share.read_only,
+                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+                ..Default::default()
             })
             .chain(req.sdk_sidecar.iter().map(|a| a.volume.clone()))
             .collect(),
@@ -1432,26 +1267,37 @@ struct BootAttempt<'a> {
 /// housekeeping since there is no daemon to do it between invocations.
 ///
 /// Returns the effective VM name — a claimed standby runs under its own
-/// standby id, not `vm_name`. On a cold-boot failure the `--mount`
-/// staging is cleaned up and the error is returned, exactly as the inline
-/// boot sequence this replaces used to do.
+/// standby id, not `vm_name`. A cold-boot failure returns the error after
+/// the normal transient state cleanup path.
 fn boot_transient_vm(
     vm_name: String,
     use_snapshot: bool,
     attempt: &BootAttempt<'_>,
-) -> Result<String> {
+    mut warm_claim_marks: Option<&mut crate::commands::vm::phase_timing::WarmClaimMarks>,
+) -> Result<(String, crate::commands::vm::phase_timing::LaunchMode)> {
+    let phase_timing = crate::commands::vm::phase_timing::enabled();
+    let boot_started = phase_timing.then(std::time::Instant::now);
+    if let Some(marks) = warm_claim_marks.as_mut() {
+        marks.pool_wait_started = boot_started;
+    }
+    let report_phase = |phase: &'static str| {
+        if let Some(started) = boot_started {
+            eprintln!(
+                "[mvm] warm-claim-phase: {phase}={:.1}ms",
+                started.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
+    };
     // Reap dead/expired standbys before claiming/booting. There is no daemon, so
     // this on-use reap is what enforces the standby TTL between invocations —
     // without it a one-off run (or runs against different images) leaves warm
     // spares resident until a manual `cache prune`. Best-effort; never blocks.
     crate::commands::pool::reap_stale_standbys_best_effort();
+    report_phase("standby_reap");
 
-    // Reap state dirs a killed or crashed prior transient run left behind: a
-    // SIGKILL or a closed terminal skips teardown, so `~/.mvm/vms/<name>` leaks.
-    // Narrow orphan-only reap — no registry convergence or resume — so a
-    // throwaway launch stays side-effect free; shields this run's own name,
-    // whose dir may exist before its supervisor comes up.
-    let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
+    if let Some(marks) = warm_claim_marks.as_mut() {
+        marks.claim_started = phase_timing.then(std::time::Instant::now);
+    }
 
     // Try a warm-pool claim before snapshot/cold-boot. A claimed standby is
     // pre-booted to agent-ready and runs under its own standby-id, so the
@@ -1474,6 +1320,7 @@ fn boot_transient_vm(
             Ok(None) => (vm_name, false),
             Err(e) => return Err(e).context("claiming configured warm standby"),
         };
+    report_phase("warm_claim");
 
     let booted = warm_claimed
         || if use_snapshot {
@@ -1505,7 +1352,12 @@ fn boot_transient_vm(
             return Err(e).context("starting transient microVM");
         }
     }
-    Ok(vm_name)
+    let launch_mode = if warm_claimed {
+        crate::commands::vm::phase_timing::LaunchMode::Warm
+    } else {
+        crate::commands::vm::phase_timing::LaunchMode::Cold
+    };
+    Ok((vm_name, launch_mode))
 }
 
 /// Arm the Ctrl-C handler for this transient run: on interrupt, flag the
@@ -1529,42 +1381,10 @@ fn install_ctrlc_teardown(
     interrupted
 }
 
-/// Resolve the guest block devices for the transient command's `--mount`
-/// volumes. `build_start_config` places those volumes before any SDK sidecar,
-/// while the runtime mapper resolves their actual slots after rootfs, verity,
-/// and runtime-overlay devices have been accounted for.
-fn add_dir_block_devices(config: &VmStartConfig, count: usize) -> Result<Vec<String>> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-
-    let devices = mvm_runtime::workload_runner::workload_volume_devices(config);
-    if devices.len() < count {
-        anyhow::bail!(
-            "expected {count} --mount volumes, but the start config carries only {}",
-            devices.len()
-        );
-    }
-
-    devices
-        .into_iter()
-        .take(count)
-        .enumerate()
-        .map(|(idx, device)| {
-            device.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--mount volume {idx} has no attached block device on the workload runner"
-                )
-            })
-        })
-        .collect()
-}
-
 /// Tear down the transient VM after the guest command finishes (or fails to
 /// dispatch): stop the backend VM, top up the warm pool toward its target,
-/// sync back any writable `--mount` mounts, and remove the host VM state
-/// directory (`~/.mvm/vms/<name>`), which includes the `extras` staging
-/// subdirectory and any backend files such as `hvf.pid` / `console.log`.
+/// and remove the host VM state directory (`~/.mvm/vms/<name>`), which includes
+/// backend files such as `hvf.pid` / `console.log`.
 ///
 /// The caller invokes this unconditionally after capturing the guest
 /// command's `Result` in a local — there is no `?` between the backend
@@ -1574,8 +1394,6 @@ fn teardown_transient_vm(
     backend: &AnyBackend,
     vm_name: &str,
     start_config: &VmStartConfig,
-    add_dirs: &[AddDir],
-    staging_dir: &str,
     requested_vm_name: &str,
 ) {
     let _ = backend.stop_transient(&VmId(vm_name.to_string()));
@@ -1587,23 +1405,6 @@ fn teardown_transient_vm(
     // work that can contend with foreground launches.
     if let Err(e) = crate::commands::pool::replenish_after_launch(backend, start_config) {
         tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
-    }
-
-    // Writable --mount uses rsync-back. With the VM stopped the
-    // ext4 image is no longer in use, so we mount it host-side and rsync
-    // its contents over the host directory before nuking the staging dir.
-    // Failures here are warned but do not override the guest exit code.
-    for (idx, dir) in add_dirs.iter().enumerate() {
-        if dir.read_only {
-            continue;
-        }
-        let image_path = format!("{staging_dir}/extra-{idx}.ext4");
-        if let Err(e) = mvm_runtime::image::rsync_image_to_host(&image_path, &dir.host_path) {
-            ui::warn(&format!(
-                "writable --mount sync-back failed for '{}' -> '{}': {e:#}",
-                dir.host_path, dir.guest_path,
-            ));
-        }
     }
 
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -1626,7 +1427,7 @@ fn remove_transient_state_dirs(effective_dir: &Path, requested_dir: &Path) {
 /// Mirrors the snapshot path in `cmd_run`: allocate a slot, build a
 /// `FlakeRunConfig` matching the snapshot's recorded layout, then call
 /// `microvm::restore_from_template_snapshot`. The caller is responsible for
-/// ensuring the request is `snapshot_eligible` first (no `--mount`,
+/// ensuring the request is `snapshot_eligible` first (no directory shares,
 /// template image source).
 fn restore_via_snapshot(
     vm_name: &str,
@@ -1692,7 +1493,6 @@ fn restore_via_snapshot(
 fn run_in_guest(
     vm_name: &str,
     req: &ExecRequest,
-    devices: &[String],
     capture: bool,
     timing: bool,
 ) -> Result<(Either<i32, ExecOutput>, Option<std::time::Instant>)> {
@@ -1702,10 +1502,10 @@ fn run_in_guest(
     }
     // Agent reachable over vsock: the command is about to be dispatched.
     let vsock_ready = timing.then(std::time::Instant::now);
-    let wrapper = build_guest_wrapper(req, devices);
+    let wrapper = build_guest_wrapper(req);
 
     if req.pty {
-        let pty = pty_console_request(req, devices, wrapper);
+        let pty = pty_console_request(req, wrapper);
         let exit_code =
             crate::commands::vm::console::run_pty_argv_for_exit(vm_name, pty.argv, pty.env)?;
         return Ok((Either::Left(exit_code), vsock_ready));
@@ -1791,14 +1591,12 @@ struct PtyConsoleRequest {
     env: Vec<(String, String)>,
 }
 
-fn pty_console_request(req: &ExecRequest, labels: &[String], wrapper: String) -> PtyConsoleRequest {
+fn pty_console_request(req: &ExecRequest, wrapper: String) -> PtyConsoleRequest {
     match &req.target {
-        ExecTarget::Inline { argv } if direct_pty_inline_argv(argv, req, labels) => {
-            PtyConsoleRequest {
-                argv: argv.clone(),
-                env: req.env.clone(),
-            }
-        }
+        ExecTarget::Inline { argv } if direct_pty_inline_argv(argv, req) => PtyConsoleRequest {
+            argv: argv.clone(),
+            env: req.env.clone(),
+        },
         _ => PtyConsoleRequest {
             argv: vec!["/bin/sh".to_string(), "-lc".to_string(), wrapper],
             env: Vec::new(),
@@ -1806,10 +1604,8 @@ fn pty_console_request(req: &ExecRequest, labels: &[String], wrapper: String) ->
     }
 }
 
-fn direct_pty_inline_argv(req_argv: &[String], req: &ExecRequest, labels: &[String]) -> bool {
-    labels.is_empty()
-        && req.add_dirs.is_empty()
-        && req_argv.first().is_some_and(|argv0| argv0.starts_with('/'))
+fn direct_pty_inline_argv(req_argv: &[String], req: &ExecRequest) -> bool {
+    req.dir_shares.is_empty() && req_argv.first().is_some_and(|argv0| argv0.starts_with('/'))
 }
 
 // ---------------------------------------------------------------------------
@@ -1824,9 +1620,8 @@ fn direct_pty_inline_argv(req_argv: &[String], req: &ExecRequest, labels: &[Stri
 //   2. dispatch N  → ExecOutput per call
 //   3. tear down   → on idle / max / close / shutdown
 //
-// They deliberately NOT support `--mount` (volumes, rsync-back,
-// staging dirs) — session VMs are meant for repeated calls against a
-// clean closure, not interactive file mounts.
+// They deliberately do not take transient host-directory shares; those are
+// attached when the session itself is created rather than per command.
 
 /// Handle to a long-running session microVM.
 ///
@@ -1839,7 +1634,7 @@ pub struct SessionVm {
 /// Boot a session microVM from a registered template. Snapshot-resume
 /// is taken when the template has one and the backend supports it
 /// (matches the eligibility rule in [`snapshot_eligible`] for the
-/// no-`--mount` case), unless an admission hook supplies per-boot
+/// no-directory-share case), unless an admission hook supplies per-boot
 /// state that must ride the fresh boot path.
 ///
 /// `vm_name_prefix` becomes the human-readable part of the VM name —
@@ -1989,7 +1784,7 @@ pub fn dispatch_in_session(
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
     // Reuse build_guest_wrapper by constructing a minimal ExecRequest
-    // with no add_dirs (sessions don't take --mount). The wrapper
+    // with no directory shares (sessions do not attach host directories). The wrapper
     // emits `set -e\n<env exports>\n<argv>\n`.
     let req = ExecRequest {
         name: None,
@@ -1998,7 +1793,7 @@ pub fn dispatch_in_session(
         cpus: 0,
         memory_mib: 0,
         mem_initial_mib: None,
-        add_dirs: vec![],
+        dir_shares: vec![],
         env: vec![],
         target: ExecTarget::Inline {
             argv: vec!["bash".to_string(), "-c".to_string(), code],
@@ -2013,7 +1808,7 @@ pub fn dispatch_in_session(
         hypervisor: None,
         sdk_sidecar: None,
     };
-    let wrapper = build_guest_wrapper(&req, &[]);
+    let wrapper = build_guest_wrapper(&req);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
     let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     // Inbound vsock RPC audit. Mirrors run_in_guest's emit; was lost when
@@ -2108,16 +1903,6 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
 mod tests {
     use super::*;
 
-    fn disk_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
-        mvm_core::vm_backend::VmVolume {
-            host: host.into(),
-            guest: guest.into(),
-            size: String::new(),
-            read_only: true,
-            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
-            encrypted: false,
-        }
-    }
     use mvm_core::util::test_env::TestEnv;
 
     #[test]
@@ -2230,124 +2015,6 @@ mod tests {
     }
 
     #[test]
-    fn add_dir_parse_happy_path() {
-        let d = AddDir::parse("/tmp/src:/work").unwrap();
-        assert_eq!(d.host_path, "/tmp/src");
-        assert_eq!(d.guest_path, "/work");
-    }
-
-    #[test]
-    fn add_dir_parse_rejects_missing_colon() {
-        let err = AddDir::parse("/tmp/src").unwrap_err();
-        assert!(err.to_string().contains("missing ':'"));
-    }
-
-    #[test]
-    fn add_dir_parse_rejects_empty_host() {
-        let err = AddDir::parse(":/work").unwrap_err();
-        assert!(err.to_string().contains("host path"));
-    }
-
-    #[test]
-    fn add_dir_parse_rejects_empty_guest() {
-        let err = AddDir::parse("/tmp/src:").unwrap_err();
-        assert!(err.to_string().contains("guest path"));
-    }
-
-    #[test]
-    fn add_dir_parse_rejects_relative_guest() {
-        let err = AddDir::parse("/tmp/src:relative/path").unwrap_err();
-        assert!(err.to_string().contains("absolute"));
-    }
-
-    #[test]
-    fn add_dir_expands_tilde_in_host_path() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("HOME", "/tmp/fakehome");
-        let d = AddDir::parse("~/configs:/etc/configs").unwrap();
-        assert_eq!(d.host_path, "/tmp/fakehome/configs");
-        assert_eq!(d.guest_path, "/etc/configs");
-    }
-
-    #[test]
-    fn add_dir_parse_default_is_read_only() {
-        let d = AddDir::parse("/tmp/src:/work").unwrap();
-        assert!(d.read_only, "default mode should be read-only");
-    }
-
-    #[test]
-    fn add_dir_parse_explicit_ro() {
-        let d = AddDir::parse("/tmp/src:/work:ro").unwrap();
-        assert_eq!(d.host_path, "/tmp/src");
-        assert_eq!(d.guest_path, "/work");
-        assert!(d.read_only);
-    }
-
-    #[test]
-    fn add_dir_parse_explicit_rw() {
-        let d = AddDir::parse("/tmp/src:/work:rw").unwrap();
-        assert_eq!(d.host_path, "/tmp/src");
-        assert_eq!(d.guest_path, "/work");
-        assert!(!d.read_only);
-    }
-
-    #[test]
-    fn add_dir_parse_rejects_bogus_mode() {
-        let err = AddDir::parse("/tmp/src:/work:bogus").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("unknown mode"), "got: {msg}");
-        assert!(msg.contains("'bogus'"), "got: {msg}");
-    }
-
-    #[test]
-    fn add_dir_extra_colons_belong_to_guest_path() {
-        // A guest path that legitimately contains a colon: the trailing
-        // component must be path-shaped (contains a slash) so we can
-        // distinguish it from a mode token.
-        let d = AddDir::parse("/host:/weird:path/file").unwrap();
-        assert_eq!(d.host_path, "/host");
-        assert_eq!(d.guest_path, "/weird:path/file");
-        assert!(d.read_only);
-    }
-
-    #[test]
-    fn validate_add_dirs_rejects_missing_host_path() {
-        let dirs = vec![AddDir {
-            host_path: "/definitely/not/a/real/path".into(),
-            guest_path: "/work".into(),
-            read_only: true,
-        }];
-        let err = validate_add_dirs_before_resolve(&dirs).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("does not exist"), "got: {msg}");
-        assert!(msg.contains("/definitely/not/a/real/path"), "got: {msg}");
-    }
-
-    #[test]
-    fn validate_add_dirs_rejects_non_directory_host_path() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let dirs = vec![AddDir {
-            host_path: file.path().to_str().unwrap().into(),
-            guest_path: "/work".into(),
-            read_only: true,
-        }];
-        let err = validate_add_dirs_before_resolve(&dirs).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("is not a directory"), "got: {msg}");
-    }
-
-    #[test]
-    fn validate_add_dirs_accepts_existing_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let dirs = vec![AddDir {
-            host_path: dir.path().to_str().unwrap().into(),
-            guest_path: "/work".into(),
-            read_only: true,
-        }];
-        validate_add_dirs_before_resolve(&dirs).expect("existing directory should validate");
-    }
-
-    #[test]
     fn shell_quote_basic() {
         assert_eq!(shell_quote("hello"), "'hello'");
         assert_eq!(shell_quote("hello world"), "'hello world'");
@@ -2367,7 +2034,8 @@ mod tests {
             cpus: 1,
             memory_mib: 256,
             mem_initial_mib: None,
-            add_dirs: Vec::new(),
+            // Live shares are attached by the guest activation path.
+            dir_shares: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::Inline {
                 argv: vec!["uname".into(), "-a".into()],
@@ -2384,36 +2052,6 @@ mod tests {
     }
 
     #[test]
-    fn add_dir_block_devices_follow_the_runtime_volume_layout() {
-        let config = VmStartConfig {
-            rootfs_path: "/img/rootfs.ext4".into(),
-            verity_path: Some("/img/rootfs.verity".into()),
-            runtime_overlay_path: Some("/img/overlay.ext4".into()),
-            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
-            runtime_overlay_roothash: Some("ab".repeat(32)),
-            volumes: vec![
-                disk_volume("/vol/app.ext4", "/work"),
-                disk_volume("/vol/data.ext4", "/data"),
-            ],
-            ..Default::default()
-        };
-        assert_eq!(
-            add_dir_block_devices(&config, 2).expect("disk volumes resolve"),
-            vec!["/dev/vde", "/dev/vdf"]
-        );
-    }
-
-    #[test]
-    fn add_dir_block_devices_rejects_a_missing_volume() {
-        let config = VmStartConfig {
-            rootfs_path: "/img/rootfs.ext4".into(),
-            ..Default::default()
-        };
-        let error = add_dir_block_devices(&config, 1).expect_err("missing volume must fail");
-        assert!(error.to_string().contains("expected 1 --mount volumes"));
-    }
-
-    #[test]
     fn build_guest_wrapper_no_extras() {
         let req = ExecRequest {
             name: None,
@@ -2422,7 +2060,8 @@ mod tests {
             cpus: 1,
             memory_mib: 256,
             mem_initial_mib: None,
-            add_dirs: Vec::new(),
+            // Live shares are attached by the guest activation path.
+            dir_shares: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],
@@ -2435,7 +2074,7 @@ mod tests {
             hypervisor: None,
             sdk_sidecar: None,
         };
-        let script = build_guest_wrapper(&req, &[]);
+        let script = build_guest_wrapper(&req);
         assert!(script.starts_with("set -e\n"));
         assert!(script.contains("exec 'true'"));
         assert!(!script.contains("mount"));
@@ -2455,7 +2094,8 @@ mod tests {
             cpus: 1,
             memory_mib: 256,
             mem_initial_mib: None,
-            add_dirs: Vec::new(),
+            // Live shares are attached by the guest activation path.
+            dir_shares: Vec::new(),
             env: vec![("PATH".into(), "/usr/bin".into())],
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],
@@ -2468,7 +2108,7 @@ mod tests {
             hypervisor: None,
             sdk_sidecar: None,
         };
-        let script = build_guest_wrapper(&req, &[]);
+        let script = build_guest_wrapper(&req);
         let caller = script.find("export PATH='/usr/bin'").expect("caller PATH");
         let mediated = script
             .find(mvm_core::guest_netd::MEDIATED_TOOLS_BIN)
@@ -2483,113 +2123,6 @@ mod tests {
     }
 
     #[test]
-    fn build_guest_wrapper_mounts_and_env() {
-        let req = ExecRequest {
-            name: None,
-            warm_pool_size: 0,
-            image: ImageSource::Template("t".into()),
-            cpus: 1,
-            memory_mib: 256,
-            mem_initial_mib: None,
-            add_dirs: vec![AddDir {
-                host_path: "/h".into(),
-                guest_path: "/g".into(),
-                read_only: true,
-            }],
-            env: vec![("FOO".into(), "bar baz".into())],
-            target: ExecTarget::Inline {
-                argv: vec!["echo".into(), "$FOO".into()],
-            },
-            timeout_secs: Some(30),
-            pty: false,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-            sdk_sidecar: None,
-        };
-        let script = build_guest_wrapper(&req, &["/dev/vde".to_string()]);
-        assert!(script.contains("mkdir -p '/g'"));
-        assert!(script.contains("if ! grep -Fq ' /g ' /proc/mounts 2>/dev/null; then"));
-        assert!(script.contains("mount '/dev/vde' '/g' -o ro"));
-        assert!(script.contains("export FOO='bar baz'"));
-        assert!(script.contains("exec 'echo' '$FOO'"));
-    }
-
-    #[test]
-    fn build_guest_wrapper_writable_mount_drops_ro_flag() {
-        let req = ExecRequest {
-            name: None,
-            warm_pool_size: 0,
-            image: ImageSource::Template("t".into()),
-            cpus: 1,
-            memory_mib: 256,
-            mem_initial_mib: None,
-            add_dirs: vec![AddDir {
-                host_path: "/h".into(),
-                guest_path: "/g".into(),
-                read_only: false,
-            }],
-            env: Vec::new(),
-            target: ExecTarget::Inline {
-                argv: vec!["true".into()],
-            },
-            timeout_secs: Some(30),
-            pty: false,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-            sdk_sidecar: None,
-        };
-        let script = build_guest_wrapper(&req, &["/dev/vde".to_string()]);
-        // RW mount is unqualified — no `-o ro`.
-        assert!(
-            script.contains("mount '/dev/vde' '/g'\n"),
-            "expected unqualified mount line, got: {script}"
-        );
-        assert!(!script.contains("-o ro"), "RW mount must not include -o ro");
-    }
-
-    #[test]
-    fn build_guest_wrapper_emits_every_configured_mount() {
-        let req = ExecRequest {
-            name: None,
-            warm_pool_size: 0,
-            image: ImageSource::Template("t".into()),
-            cpus: 1,
-            memory_mib: 256,
-            mem_initial_mib: None,
-            add_dirs: vec![
-                AddDir {
-                    host_path: "/app".into(),
-                    guest_path: "/work".into(),
-                    read_only: true,
-                },
-                AddDir {
-                    host_path: "/data".into(),
-                    guest_path: "/data".into(),
-                    read_only: false,
-                },
-            ],
-            env: Vec::new(),
-            target: ExecTarget::Inline {
-                argv: vec!["true".into()],
-            },
-            timeout_secs: Some(30),
-            pty: false,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-            sdk_sidecar: None,
-        };
-        let script = build_guest_wrapper(&req, &["/dev/vde".to_string(), "/dev/vdf".to_string()]);
-        assert!(script.contains("mount '/dev/vde' '/work' -o ro\n"));
-        assert!(script.contains("mount '/dev/vdf' '/data'\n"));
-    }
-
-    #[test]
     fn pty_console_request_passes_inline_argv_directly() {
         let req = ExecRequest {
             name: None,
@@ -2598,7 +2131,8 @@ mod tests {
             cpus: 1,
             memory_mib: 256,
             mem_initial_mib: None,
-            add_dirs: Vec::new(),
+            // Live shares are attached by the guest activation path.
+            dir_shares: Vec::new(),
             env: vec![("TERM".into(), "xterm-256color".into())],
             target: ExecTarget::Inline {
                 argv: vec!["/bin/sh".into()],
@@ -2612,44 +2146,10 @@ mod tests {
             sdk_sidecar: None,
         };
 
-        let pty = pty_console_request(&req, &[], "set -e\nexec '/bin/sh'\n".to_string());
+        let pty = pty_console_request(&req, "set -e\nexec '/bin/sh'\n".to_string());
 
         assert_eq!(pty.argv, vec!["/bin/sh"]);
         assert_eq!(pty.env, vec![("TERM".into(), "xterm-256color".into())]);
-    }
-
-    #[test]
-    fn pty_console_request_uses_wrapper_when_mount_setup_is_required() {
-        let req = ExecRequest {
-            name: None,
-            warm_pool_size: 0,
-            image: ImageSource::Template("t".into()),
-            cpus: 1,
-            memory_mib: 256,
-            mem_initial_mib: None,
-            add_dirs: vec![AddDir {
-                host_path: "/h".into(),
-                guest_path: "/g".into(),
-                read_only: true,
-            }],
-            env: vec![("FOO".into(), "bar".into())],
-            target: ExecTarget::Inline {
-                argv: vec!["/bin/sh".into()],
-            },
-            timeout_secs: None,
-            pty: true,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-            sdk_sidecar: None,
-        };
-        let wrapper = build_guest_wrapper(&req, &["/dev/vde".to_string()]);
-
-        let pty = pty_console_request(&req, &["/dev/vde".to_string()], wrapper.clone());
-
-        assert_eq!(pty.argv, vec!["/bin/sh", "-lc", wrapper.as_str()]);
-        assert!(pty.env.is_empty());
     }
 
     #[test]
@@ -2661,7 +2161,8 @@ mod tests {
             cpus: 1,
             memory_mib: 256,
             mem_initial_mib: None,
-            add_dirs: Vec::new(),
+            // Live shares are attached by the guest activation path.
+            dir_shares: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::Inline {
                 argv: vec!["htop".into()],
@@ -2674,9 +2175,9 @@ mod tests {
             hypervisor: None,
             sdk_sidecar: None,
         };
-        let wrapper = build_guest_wrapper(&req, &[]);
+        let wrapper = build_guest_wrapper(&req);
 
-        let pty = pty_console_request(&req, &[], wrapper.clone());
+        let pty = pty_console_request(&req, wrapper.clone());
 
         assert_eq!(pty.argv, vec!["/bin/sh", "-lc", wrapper.as_str()]);
         assert!(pty.env.is_empty());
@@ -2894,7 +2395,8 @@ mod tests {
             cpus: 1,
             memory_mib: 256,
             mem_initial_mib: None,
-            add_dirs: Vec::new(),
+            // Live shares are attached by the guest activation path.
+            dir_shares: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::LaunchPlan {
                 entrypoint: LaunchEntrypoint {
@@ -2926,7 +2428,8 @@ mod tests {
             cpus: 1,
             memory_mib: 256,
             mem_initial_mib: None,
-            add_dirs: Vec::new(),
+            // Live shares are attached by the guest activation path.
+            dir_shares: Vec::new(),
             env: vec![("CLI_OVER".to_string(), "wins".to_string())],
             target: ExecTarget::LaunchPlan {
                 entrypoint: LaunchEntrypoint {
@@ -2943,7 +2446,7 @@ mod tests {
             hypervisor: None,
             sdk_sidecar: None,
         };
-        let script = build_guest_wrapper(&req, &[]);
+        let script = build_guest_wrapper(&req);
         // Env from entrypoint exported.
         assert!(script.contains("export PORT='8080'"));
         assert!(script.contains("export LOG='info'"));
@@ -2973,7 +2476,7 @@ mod tests {
             cpus: 1,
             memory_mib: 256,
             mem_initial_mib: None,
-            add_dirs: Vec::new(),
+            dir_shares: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],
@@ -2986,7 +2489,7 @@ mod tests {
             hypervisor: None,
             sdk_sidecar: None,
         };
-        let script = build_guest_wrapper(&req, &[]);
+        let script = build_guest_wrapper(&req);
         assert!(!script.contains("cd "));
         assert_eq!(script.matches("export ").count(), 1);
         assert!(script.contains(mvm_core::guest_netd::MEDIATED_TOOLS_BIN));
@@ -3047,14 +2550,6 @@ mod tests {
         assert_eq!(resolve_virtiofs_root(&prebuilt(), true, false), None);
     }
 
-    fn add_dir() -> AddDir {
-        AddDir {
-            host_path: "/h".into(),
-            guest_path: "/g".into(),
-            read_only: true,
-        }
-    }
-
     #[test]
     fn snapshot_eligible_true_for_template_no_extras_with_snapshot() {
         assert!(snapshot_eligible(
@@ -3086,11 +2581,15 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_eligible_false_with_add_dirs() {
-        // Adding extra drives changes the recorded layout; snapshot would fail.
+    fn snapshot_eligible_false_with_directory_shares() {
+        // A live share changes the device layout; snapshot would fail.
         assert!(!snapshot_eligible(
             &template("t"),
-            &[add_dir()],
+            &[DirShareSpec {
+                host_dir: "/h".into(),
+                guest_mount: "/g".into(),
+                read_only: true,
+            }],
             true,
             SnapshotCapability::LiveMemory
         ));
@@ -3260,7 +2759,7 @@ mod tests {
 
     #[test]
     fn remove_transient_state_dir_removes_the_host_dir() {
-        // Every transient run (with or without --mount) creates its state dir
+        // Every transient run creates its state dir
         // when the backend writes hvf.pid / console.log there, so teardown must
         // remove it host-side — not via run_in_vm, which targets the guest.
         let tmp = tempfile::tempdir().expect("tempdir");

@@ -256,7 +256,7 @@ fn factory_parent_spec_inner(
     let broker = state_dir.join("standby-broker.sock");
     let sockets = WorkloadSockets {
         agent: &agent,
-        egress_gateway: &egress,
+        egress_gateway: Some(&egress),
         exit: &exit,
         broker: Some(&broker),
         network_control: None,
@@ -369,7 +369,7 @@ mod tests {
             config: launch,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),
-                egress_gateway: Path::new("/run/egress.sock"),
+                egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
                 network_control: None,

@@ -4,7 +4,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "mvm-setpriv";
-  version = "0.18.0";
+  version = "0.18.1";
 
   src = mvmSrc;
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";

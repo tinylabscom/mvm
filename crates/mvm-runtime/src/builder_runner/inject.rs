@@ -68,10 +68,17 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
             ephemeral: false,
         }],
         virtiofs_root: None,
+        virtiofs_shares: vec![],
         vsock: false,
         console_log: console_log.clone(),
         pid_file: req.work_dir.join("inject.pid"),
         workload_exit: req.work_dir.join("inject.exit"),
+        pause_state: None,
+        snapshot_request: None,
+        snapshot_ram: None,
+        snapshot_frame: None,
+        restore_ram: None,
+        restore_frame: None,
         timeout_secs: 120,
         agent_socket: None,
         substitution_socket: None,
@@ -80,6 +87,9 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         broker_socket: None,
         // The rootfs-inject helper VM has no egress tunnel.
         console_data_sockets: vec![],
+        handoff_socket: None,
+        handoff_root: None,
+        handoff_verify_key: None,
     };
     let json = serde_json::to_string(&cfg).context("serialize inject supervisor config")?;
 

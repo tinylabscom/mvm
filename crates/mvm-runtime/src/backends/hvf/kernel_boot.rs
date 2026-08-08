@@ -24,14 +24,15 @@ use std::time::Duration;
 
 use super::HvfError;
 use super::bootargs::{default_bootargs, default_virtiofs_bootargs};
-use super::dax_mapper::HvfDaxMapper;
 #[cfg(test)]
 use super::guest_ram::HVF_PAGE_SIZE;
 use super::guest_ram::{GuestRam, page_rounded_len};
 use super::hv_impl::{HvfHandle, HvfVcpu};
+use super::snapshot::HVF_SNAPSHOT_BACKEND_KIND;
 use super::sys::*;
 use super::vcpu::esr_ec;
 use crate::vmm::device::Pl011;
+use crate::vmm::device_state::capture_device_states;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
 use crate::vmm::virtio::{DiskImage, VirtioBlk, VirtioFs};
@@ -69,15 +70,18 @@ const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
-/// virtio-fs **root** window + SPI, above the disk band (MAX_DISKS=5 → up to
-/// base+5*stride) and vsock, so it never collides. Used only on a virtiofs-root
-/// dev boot (there are no virtio-blk disks then).
+/// virtio-fs windows start above the disk band (MAX_DISKS=5 → up to
+/// base+5*stride) and vsock. The first slot is the optional virtio-fs root;
+/// following slots are live user directory shares.
 const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 6 * MMIO_STRIDE;
 const FS_IRQ: u32 = 54;
+/// Maximum number of user virtio-fs shares in one HVF guest. The bound keeps the
+/// MMIO and SPI allocations fixed and leaves the entropy device at a stable slot.
+const MAX_VIRTIOFS_SHARES: usize = 8;
 /// The entropy device follows every optional disk/vsock/virtio-fs window, so its
 /// stable address cannot collide with a device combination selected at runtime.
-const RNG_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 7 * MMIO_STRIDE;
-const RNG_IRQ: u32 = 55;
+const RNG_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + (7 + MAX_VIRTIOFS_SHARES as u64) * MMIO_STRIDE;
+const RNG_IRQ: u32 = FS_IRQ + MAX_VIRTIOFS_SHARES as u32 + 1;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 const MMIO_STRIDE: u64 = 0x200;
 /// Max virtio-blk devices (`/dev/vda`..). The builder-with-runtime-overlay path
@@ -183,6 +187,28 @@ pub struct HostChannels {
     /// Plan-223 dev-tier boot. No virtio-blk disk is attached; the default
     /// cmdline becomes `rootfstype=virtiofs root=mvmroot`.
     pub virtiofs_root: Option<PathBuf>,
+    /// Read-only live host-directory shares as `(virtio-fs tag, host path)`.
+    pub virtiofs_shares: Vec<(String, PathBuf)>,
+    /// Optional host-visible marker acknowledged after the run loop enters its
+    /// pause hold. It is removed when resume is observed.
+    pub pause_state: Option<PathBuf>,
+    /// Host-side request file asking the paused run loop to serialize RAM and
+    /// deterministic device/vCPU state.
+    pub snapshot_request: Option<PathBuf>,
+    /// Fixed supervisor-owned raw RAM output for a parent snapshot.
+    pub snapshot_ram: Option<PathBuf>,
+    /// Fixed supervisor-owned vCPU/device frame output for a parent snapshot.
+    pub snapshot_frame: Option<PathBuf>,
+    /// Raw parent RAM file to map privately for a restored child.
+    pub restore_ram: Option<PathBuf>,
+    /// Complete parent frame to restore into a fresh child VMM.
+    pub restore_frame: Option<PathBuf>,
+    /// Fixed supervisor-owned live-handoff control socket.
+    pub handoff_socket: Option<PathBuf>,
+    /// Trusted root from which the supervisor derives child channel paths.
+    pub handoff_root: Option<PathBuf>,
+    /// Host identity public key pinned for handoff authentication.
+    pub handoff_verify_key: Option<String>,
 }
 
 static NEVER_STOP: AtomicBool = AtomicBool::new(false);
@@ -425,6 +451,9 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     // them, so idle residency tracks the working set instead of `ram_size`.
     // `guest_ram` owns the region and unmaps it on drop, after `hv_vm_destroy`.
     let mut guest_ram = GuestRam::new(ram_size)?;
+    if let Some(path) = channels.restore_ram.as_deref() {
+        guest_ram.map_private_file(path)?;
+    }
     let ram = guest_ram.as_ptr();
 
     // Base cmdline, plus optional appended args. Precedence: the `MVM_HVF_BOOTARGS`
@@ -463,8 +492,16 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     if vsock {
         virtio_nodes.push((VSOCK_MMIO_BASE, VSOCK_IRQ));
     }
-    if channels.virtiofs_root.is_some() {
-        virtio_nodes.push((FS_MMIO_BASE, FS_IRQ));
+    let has_virtiofs_root = channels.virtiofs_root.is_some();
+    let fs_count = usize::from(has_virtiofs_root) + channels.virtiofs_shares.len();
+    if fs_count > MAX_VIRTIOFS_SHARES + 1 {
+        return Err(HvfError::BadKernel);
+    }
+    for index in 0..fs_count {
+        virtio_nodes.push((
+            FS_MMIO_BASE + index as u64 * MMIO_STRIDE,
+            FS_IRQ + index as u32,
+        ));
     }
     virtio_nodes.push((RNG_MMIO_BASE, RNG_IRQ));
     // Fresh host entropy per boot covers the window before the virtio-rng driver
@@ -482,10 +519,12 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         return Err(HvfError::BadKernel);
     }
 
-    kernel.load_into(&mut guest_ram, load_off)?;
-    guest_ram.copy_at(dtb_off, &dtb)?;
-    if let Some(rd) = initramfs {
-        guest_ram.copy_at(initrd_off, rd)?;
+    if channels.restore_frame.is_none() {
+        kernel.load_into(&mut guest_ram, load_off)?;
+        guest_ram.copy_at(dtb_off, &dtb)?;
+        if let Some(rd) = initramfs {
+            guest_ram.copy_at(initrd_off, rd)?;
+        }
     }
 
     let entry = RAM_BASE + KERNEL_LOAD_OFFSET;
@@ -497,7 +536,9 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         if rc != HV_SUCCESS {
             return Err(HvfError::VmCreate(rc));
         }
+        let mapped_ram_size = guest_ram.len();
         let r = run(
+            &mut guest_ram,
             ram,
             entry,
             dtb_addr,
@@ -505,13 +546,23 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 disks,
                 vsock,
                 timeout,
-                ram_size: guest_ram.len(),
+                ram_size: mapped_ram_size,
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
                 broker_socket: channels.broker_socket,
                 console_data_sockets: channels.console_data_sockets,
                 virtiofs_root: channels.virtiofs_root,
+                virtiofs_shares: channels.virtiofs_shares,
+                pause_state: channels.pause_state,
+                snapshot_request: channels.snapshot_request,
+                snapshot_ram: channels.snapshot_ram,
+                snapshot_frame: channels.snapshot_frame,
+                restore_ram: channels.restore_ram,
+                restore_frame: channels.restore_frame,
+                handoff_socket: channels.handoff_socket,
+                handoff_root: channels.handoff_root,
+                handoff_verify_key: channels.handoff_verify_key,
             },
             stop,
             paused,
@@ -549,9 +600,20 @@ struct RunInputs {
     console_data_sockets: Vec<(u32, PathBuf)>,
     /// When set, serve this host dir to the guest as a read-only virtiofs root.
     virtiofs_root: Option<PathBuf>,
+    virtiofs_shares: Vec<(String, PathBuf)>,
+    pause_state: Option<PathBuf>,
+    snapshot_request: Option<PathBuf>,
+    snapshot_ram: Option<PathBuf>,
+    snapshot_frame: Option<PathBuf>,
+    restore_ram: Option<PathBuf>,
+    restore_frame: Option<PathBuf>,
+    handoff_socket: Option<PathBuf>,
+    handoff_root: Option<PathBuf>,
+    handoff_verify_key: Option<String>,
 }
 
 unsafe fn run(
+    guest_ram: &mut GuestRam,
     ram: *mut u8,
     entry: u64,
     dtb_addr: u64,
@@ -570,6 +632,16 @@ unsafe fn run(
         broker_socket,
         console_data_sockets,
         virtiofs_root,
+        virtiofs_shares,
+        pause_state,
+        snapshot_request,
+        snapshot_ram,
+        snapshot_frame,
+        restore_ram: _restore_ram,
+        restore_frame,
+        handoff_socket,
+        handoff_root,
+        handoff_verify_key,
     } = inputs;
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
@@ -638,6 +710,9 @@ unsafe fn run(
         // no host push to wait for, so the host can idle instead of waking 200×/s.
         let egress_active = Arc::new(AtomicUsize::new(0));
         let egress_active_w = egress_active.clone();
+        let pause_ack = Arc::new(AtomicBool::new(false));
+        let pause_ack_w = Arc::clone(&pause_ack);
+        let pause_state_w = pause_state.clone();
         // Host agent listener path (host→guest RPC, GUEST_AGENT_PORT). When bound,
         // the heartbeat fires unconditionally so the run loop polls the listener +
         // services agent streams even while the guest is idle in WFI — an agent VM
@@ -657,6 +732,9 @@ unsafe fn run(
             loop {
                 std::thread::sleep(step);
                 if done_w.load(Ordering::Relaxed) {
+                    if let Some(path) = &pause_state_w {
+                        let _ = std::fs::remove_file(path);
+                    }
                     return; // run already ended; don't poke a finishing vCPU
                 }
                 if stop.load(Ordering::Relaxed) {
@@ -680,6 +758,10 @@ unsafe fn run(
                     HvfHandle::force_exit(&[handle]); // wake the run loop
                 }
             }
+            pause_ack_w.store(false, Ordering::Release);
+            if let Some(path) = &pause_state_w {
+                let _ = std::fs::remove_file(path);
+            }
             HvfHandle::force_exit(&[handle]); // final wake → loop sees stop, returns
         });
 
@@ -698,27 +780,39 @@ unsafe fn run(
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, ram_size));
         // virtiofs-root dev boot: serve the unpacked+injected tree read-only.
-        let mut fs_dev = virtiofs_root.as_ref().map(|root| {
+        let has_virtiofs_root = virtiofs_root.is_some();
+        let mut fs_devs =
+            Vec::with_capacity(usize::from(has_virtiofs_root) + virtiofs_shares.len());
+        if let Some(root) = virtiofs_root {
             // SAFETY: `ram` is the mapped guest RAM valid for the run (this fn body
             // is within an `unsafe` block), same contract as the other devices.
-            // The DAX mapper is created here (after `hv_vm_create`) so HVF can
-            // install the host mappings into the guest IPA space.
-            let mapper = Box::new(HvfDaxMapper::new());
-            VirtioFs::new_with_mapper(
+            fs_devs.push(VirtioFs::new(
                 FS_MMIO_BASE,
                 FS_IRQ,
                 ram,
                 RAM_BASE,
                 ram_size,
-                root.clone(),
-                mapper,
-            )
-        });
+                root,
+            ));
+        }
+        for (index, (tag, root)) in virtiofs_shares.into_iter().enumerate() {
+            fs_devs.push(VirtioFs::with_tag(
+                FS_MMIO_BASE + (index + usize::from(has_virtiofs_root)) as u64 * MMIO_STRIDE,
+                FS_IRQ + (index + usize::from(has_virtiofs_root)) as u32,
+                ram,
+                RAM_BASE,
+                ram_size,
+                root,
+                tag,
+            ));
+        }
         // SAFETY: `ram` is the mapped guest RAM valid for the run. The device
         // retains no generated bytes, so restored guests continue from fresh OS
         // entropy rather than replaying device-owned state.
         let mut rng_dev = VirtioRng::new(RNG_MMIO_BASE, RNG_IRQ, ram, RAM_BASE, ram_size);
-        if let Some(v) = vsock_dev.as_mut() {
+        if restore_frame.is_none()
+            && let Some(v) = vsock_dev.as_mut()
+        {
             // Transient run-to-exit: a guest write of the exit code to the workload
             // exit port stops the run (VM life = workload life) — but ONLY when this
             // is not an agent-serving VM. An agent VM binds the agent socket; its
@@ -778,6 +872,16 @@ unsafe fn run(
                     eprintln!("mvm-hvf: console socket bind failed: {e}");
                 }
             }
+            if v.set_handoff_control(
+                handoff_socket.as_deref(),
+                handoff_root.as_deref(),
+                handoff_verify_key.as_deref(),
+                stop,
+            )
+            .is_err()
+            {
+                return Err(HvfError::SnapshotState("handoff control setup failed"));
+            }
             // Start the dedicated host-I/O thread now that the agent/egress/console
             // sockets are wired: it services host→guest delivery on wall-clock time
             // and raises the guest IRQ itself, so reachability no longer depends on
@@ -792,6 +896,55 @@ unsafe fn run(
         let mut psci_fns: Vec<u64> = Vec::new();
         let mut other_ecs: Vec<u32> = Vec::new();
 
+        if let Some(frame_path) = restore_frame.as_deref() {
+            let frame = std::fs::read(frame_path)
+                .map_err(|_| HvfError::SnapshotState("restore frame read failed"))?;
+            let mut restore_devices: Vec<&mut dyn RunDevice> = vec![&mut uart];
+            for device in &mut virtio_disks {
+                restore_devices.push(device);
+            }
+            if let Some(device) = vsock_dev.as_mut() {
+                restore_devices.push(device);
+            }
+            for device in &mut fs_devs {
+                restore_devices.push(device);
+            }
+            restore_devices.push(&mut rng_dev);
+            let mut snapshot_targets = restore_devices
+                .iter_mut()
+                .filter_map(|device| device.snapshot_device_mut())
+                .collect::<Vec<_>>();
+            super::snapshot::restore_hvf_snapshot_control(
+                &frame,
+                guest_ram.len(),
+                &vcpu,
+                &mut snapshot_targets,
+            )
+            .map_err(|_| HvfError::SnapshotState("restore control state failed"))?;
+            drop(snapshot_targets);
+            drop(restore_devices);
+
+            if let Some(v) = vsock_dev.as_mut() {
+                if !agent_bound {
+                    v.capture_workload_exit(stop);
+                }
+                v.set_agent_activity(egress_active.clone());
+                v.set_substitution_activity(egress_active.clone());
+                v.set_broker_activity(egress_active.clone());
+                v.set_console_activity(egress_active.clone());
+                let bindings = crate::vmm::vsock::VsockHostBindings {
+                    agent_socket: agent_socket.clone(),
+                    substitution_endpoint: egress_relay
+                        .clone()
+                        .or_else(|| substitution_socket.clone()),
+                    broker_endpoint: broker_socket.clone(),
+                    console_sockets: console_data_sockets.clone(),
+                };
+                v.rebind_host_channels(&bindings, Arc::new(GicSpi))
+                    .map_err(|_| HvfError::SnapshotState("restore channel rebind failed"))?;
+            }
+        }
+
         // Scope the device list so its mutable borrows end before we read the
         // device output below.
         let outcome = {
@@ -802,7 +955,7 @@ unsafe fn run(
             if let Some(v) = vsock_dev.as_mut() {
                 devices.push(v);
             }
-            if let Some(fs) = fs_dev.as_mut() {
+            for fs in &mut fs_devs {
                 devices.push(fs);
             }
             devices.push(&mut rng_dev);
@@ -815,7 +968,7 @@ unsafe fn run(
                     Err(HvfError::GicCreate(0))
                 }
             };
-            run::run(
+            run::run_with_pause_hook(
                 &vcpu,
                 set_irq,
                 &mut devices,
@@ -851,7 +1004,53 @@ unsafe fn run(
                 move || stop.load(Ordering::Relaxed),
                 // Park the vCPU in the run loop's pause hold while `paused` is set,
                 // freezing guest RAM + device state in place until resume clears it.
-                move || paused.load(Ordering::Relaxed),
+                move || {
+                    let requested = paused.load(Ordering::Relaxed);
+                    if requested {
+                        if !pause_ack.swap(true, Ordering::AcqRel)
+                            && let Some(path) = &pause_state
+                        {
+                            let _ = std::fs::write(path, b"paused\n");
+                        }
+                    } else if pause_ack.swap(false, Ordering::AcqRel)
+                        && let Some(path) = &pause_state
+                    {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    requested
+                },
+                move |vcpu, devices| {
+                    let (Some(request_path), Some(ram_path), Some(frame_path)) = (
+                        snapshot_request.as_deref(),
+                        snapshot_ram.as_deref(),
+                        snapshot_frame.as_deref(),
+                    ) else {
+                        return Ok(());
+                    };
+                    if !request_path.exists() {
+                        return Ok(());
+                    }
+                    let ram_bytes = guest_ram.snapshot_bytes();
+                    let device_bytes = capture_device_states(devices)
+                        .map_err(|_| HvfError::SnapshotState("snapshot device capture failed"))?;
+                    let vcpu_state = vcpu.capture_state()?;
+                    let frame = super::snapshot::encode_hvf_snapshot_frame(
+                        HVF_SNAPSHOT_BACKEND_KIND,
+                        0,
+                        &ram_bytes,
+                        &device_bytes,
+                        &vcpu_state,
+                        &[],
+                    )
+                    .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
+                    std::fs::write(ram_path, &ram_bytes)
+                        .map_err(|_| HvfError::SnapshotState("snapshot RAM write failed"))?;
+                    std::fs::write(frame_path, frame)
+                        .map_err(|_| HvfError::SnapshotState("snapshot frame write failed"))?;
+                    std::fs::remove_file(request_path)
+                        .map_err(|_| HvfError::SnapshotState("snapshot request cleanup failed"))?;
+                    Ok(())
+                },
             )?
         };
 

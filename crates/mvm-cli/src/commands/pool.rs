@@ -22,13 +22,13 @@ use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
     StandbyClaim, StandbyCompat, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmBackend,
-    VmId, VmStartConfig,
+    VmId, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::CheckpointStore;
-use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
-use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, SpawnContext};
+use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool};
+use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, PreloadContext, SpawnContext};
 use sha2::{Digest, Sha256};
 
 use super::Cli;
@@ -215,7 +215,6 @@ fn admit_standby_parent_plan(
     mem_mib: u32,
 ) -> Result<AdmittedPlan> {
     let input = SynthesisInput {
-        stream_edges: Vec::new(),
         kernel_sha256: None,
         vm_name: &handle.id,
         tenant: Some(tenant),
@@ -246,6 +245,7 @@ fn admit_standby_parent_plan(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        stream_edges: Vec::new(),
         stream_retention: Default::default(),
         // The parent reaches nothing, so it gets the closed transport and no
         // L3 spec — the same "no workload authority" posture as the empty
@@ -311,6 +311,33 @@ fn discard_unauditable_parent(checkpoints: &CheckpointStore, handle: &StandbyHan
             checkpoint = id,
             error = %e,
             "could not remove the unauditable parent's checkpoint; it will occupy disk until pruned"
+        );
+    }
+}
+
+/// Reap a paused child if the pool record cannot be published after preload.
+/// The child is not yet a user VM, so leaving it behind would leak a VMM that
+/// no persisted reaper can discover.
+fn discard_preloaded_child(backend: &AnyBackend, handle: &StandbyHandle) {
+    let Some(child_name) = handle.preloaded_child_vm_name.as_deref() else {
+        return;
+    };
+    if let Err(error) = backend.stop_transient(&VmId(child_name.to_string())) {
+        tracing::warn!(
+            child = child_name,
+            %error,
+            "could not stop unpublished preloaded standby child"
+        );
+    }
+    let child_dir = mvm_core::config::vm_state_dir(child_name);
+    if let Err(error) = std::fs::remove_dir_all(&child_dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            child = child_name,
+            path = %child_dir.display(),
+            %error,
+            "could not remove unpublished preloaded child state"
         );
     }
 }
@@ -392,7 +419,35 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                     .unwrap_or(STANDBY_PARENT_TENANT);
                 match audit_captured_parent(&checkpoints, &handle, p.backend.name(), tenant) {
                     Ok(()) => {
-                        pool.record(&handle)?;
+                        let mut handle = handle;
+                        if p.backend.supports_preloaded_standby() {
+                            let snapshots =
+                                FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
+                            let anchor = SignedChainAnchor::load()?;
+                            let registry_path = mvm_runtime::vm::name_registry::registry_path();
+                            let preload = PreloadContext {
+                                checkpoints: &checkpoints,
+                                snapshots: &snapshots,
+                                anchor: &anchor,
+                                registry_path: &registry_path,
+                            };
+                            if let Err(error) =
+                                p.backend.preload_standby_via_runner(&preload, &mut handle)
+                            {
+                                tracing::warn!(
+                                    standby = %handle.id,
+                                    %error,
+                                    "could not preload paused child; discarding standby"
+                                );
+                                discard_preloaded_child(p.backend, &handle);
+                                failed += 1;
+                                continue;
+                            }
+                        }
+                        if let Err(error) = pool.record(&handle) {
+                            discard_preloaded_child(p.backend, &handle);
+                            return Err(error);
+                        }
                         spawned += 1;
                     }
                     Err(e) => {
@@ -465,19 +520,19 @@ pub fn image_identity(rootfs_path: &Path) -> Result<String> {
 pub enum LaunchDecision {
     /// A standby was claimed and is booting under this VmId.
     Claimed(VmId),
-    /// No compatible warm standby (or the claim failed) — caller must cold-boot.
+    /// No compatible warm standby — caller may cold-boot when its mode permits it.
     ColdBoot,
+    /// The caller required warm service and must not cold-boot.
+    Refused(WarmClaimRefusal),
 }
 
-/// Try to claim an idle standby compatible with `want`. On a claim error the standby is
-/// removed (it's spent/broken), never left idle, so the next launch doesn't keep retrying
-/// a dead standby. A backend without standby support is an explicit typed error rather
-/// than a silent cold-boot fallback.
+/// Try a warm claim in the default compatibility mode: use warm capacity when
+/// available and preserve the existing cold-boot fallback.
 ///
 /// `make_claim` builds the [`StandbyClaim`] **for the selected standby's id** — the audit
 /// substrate (`gateway-<vm>.sock`) is name-keyed, and a claimed VM runs under its
-/// standby-id, so the caller must compute those paths against `handle.id`. A `make_claim`
-/// error returns a cold-boot decision after reaping the reserved standby.
+/// standby-id, so the caller must compute those paths against `handle.id`. Errors from
+/// `make_claim` are surfaced to [`claim_with_mode`] for mode-specific handling.
 pub fn claim_or_cold<F>(
     pool: &SupervisorStandbyPool,
     backend: &AnyBackend,
@@ -487,7 +542,34 @@ pub fn claim_or_cold<F>(
 where
     F: FnOnce(&StandbyHandle) -> Result<StandbyClaim>,
 {
+    claim_with_mode(pool, backend, want, WarmLaunchMode::Optional, make_claim)
+}
+
+/// Try to claim an idle standby compatible with `want` under an explicit warm
+/// launch mode. A required warm launch returns a typed refusal for every
+/// capacity, compatibility, preparation, and backend claim failure; it never
+/// silently turns those failures into a cold boot.
+pub fn claim_with_mode<F>(
+    pool: &SupervisorStandbyPool,
+    backend: &AnyBackend,
+    want: &StandbyCompat,
+    mode: WarmLaunchMode,
+    make_claim: F,
+) -> Result<LaunchDecision>
+where
+    F: FnOnce(&StandbyHandle) -> Result<StandbyClaim>,
+{
+    if matches!(mode, WarmLaunchMode::Cold) {
+        return Ok(LaunchDecision::ColdBoot);
+    }
     if !backend.capabilities().standby_pool {
+        if mode.requires_warm() {
+            return Ok(LaunchDecision::Refused(
+                WarmClaimRefusal::BackendUnsupported {
+                    backend: backend.name().to_string(),
+                },
+            ));
+        }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
             backend: backend.name().to_string(),
         })
@@ -503,15 +585,23 @@ where
     // lock serializes them and the loser is refused into a cold boot, which is
     // the same outcome reserving here bought, without deadlocking the winner.
     let Some(handle) = pool.select_idle_compatible(want)? else {
-        return Ok(LaunchDecision::ColdBoot);
+        return Ok(match mode {
+            WarmLaunchMode::Required => {
+                LaunchDecision::Refused(WarmClaimRefusal::NoCompatibleParent)
+            }
+            WarmLaunchMode::Optional | WarmLaunchMode::Cold => LaunchDecision::ColdBoot,
+        });
     };
     let claim = match make_claim(&handle) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %e, "build claim failed; cold-booting");
-            stop_live_standby_best_effort(backend, &handle);
-            let _ = pool.remove(&handle.id);
-            return Ok(LaunchDecision::ColdBoot);
+            tracing::warn!(standby = %handle.id, error = %e, "build claim failed");
+            return Ok(decision_for_mode(
+                mode,
+                WarmClaimRefusal::PreparationFailed {
+                    reason: e.to_string(),
+                },
+            ));
         }
     };
     // A claim verifies the parent's content and lineage against the checkpoint
@@ -519,15 +609,23 @@ where
     let parent_checkpoint = match parent_checkpoint_for(&handle) {
         Ok(id) => id,
         Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %e, "cold-booting");
-            stop_live_standby_best_effort(backend, &handle);
+            tracing::warn!(standby = %handle.id, error = %e, "warm claim parent checkpoint unavailable");
             let _ = pool.remove(&handle.id);
-            return Ok(LaunchDecision::ColdBoot);
+            return Ok(decision_for_mode(
+                mode,
+                WarmClaimRefusal::ClaimRejected {
+                    reason: e.to_string(),
+                },
+            ));
         }
     };
     let checkpoints = CheckpointStore::open();
     let snapshots = FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
-    let anchor = SignedChainAnchor::load()?;
+    let anchor = if backend.as_vm_backend().supports_resident_handoff() {
+        SignedChainAnchor::empty()
+    } else {
+        SignedChainAnchor::load()?
+    };
     let registry_path = mvm_runtime::vm::name_registry::registry_path();
     let grant_issuer = HostChildGrantIssuer;
     let ctx = ClaimContext {
@@ -547,19 +645,26 @@ where
             Ok(LaunchDecision::Claimed(vm_id))
         }
         Err(e) => {
-            tracing::warn!(standby = %handle.id, error = %e, "standby claim failed; cold-booting");
-            stop_live_standby_best_effort(backend, &handle);
-            let _ = pool.remove(&handle.id); // spent/broken — never leave it idle
-            Ok(LaunchDecision::ColdBoot)
+            tracing::warn!(standby = %handle.id, error = %e, "standby claim failed");
+            // The runner owns the reservation lease. Healthy parents are
+            // released by its cleanup guard; parents that fail verification
+            // are quarantined there. The orchestration layer must not delete
+            // the record and strand healthy warm capacity.
+            Ok(decision_for_mode(
+                mode,
+                WarmClaimRefusal::ClaimRejected {
+                    reason: e.to_string(),
+                },
+            ))
         }
     }
 }
 
-fn stop_live_standby_best_effort(backend: &AnyBackend, handle: &StandbyHandle) {
-    if handle.pid != 0
-        && let Err(e) = backend.stop_transient(&VmId(handle.id.clone()))
-    {
-        tracing::debug!(standby = %handle.id, error = %e, "failed to stop discarded live standby");
+fn decision_for_mode(mode: WarmLaunchMode, refusal: WarmClaimRefusal) -> LaunchDecision {
+    if mode.requires_warm() {
+        LaunchDecision::Refused(refusal)
+    } else {
+        LaunchDecision::ColdBoot
     }
 }
 
@@ -622,8 +727,12 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 /// resolved host-side on the claimed child's own egress endpoint, from that
 /// child's own policy. A shared parent therefore holds nothing per-launch that
 /// could reach the next claim.
+///
+/// `VmVolumeKind::DirShare` is included in the volume check. The current
+/// factory-parent path has no late attachment operation for a host path, so a
+/// live read-only share remains cold-path-only until the backend supplies one.
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
-    cfg.volumes.is_empty() && cfg.virtiofs_root.is_none() && !cfg.dev_console
+    cfg.volumes.is_empty() && cfg.virtiofs_root.is_none()
 }
 
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
@@ -673,7 +782,12 @@ pub fn try_warm_claim(
     let bundle_json = cfg.bundle_json.clone();
     let claim_start_config = cfg.clone();
     let pool = SupervisorStandbyPool::open()?;
-    let decision = claim_or_cold(&pool, backend, &want, |handle| {
+    let claim_mode = if std::env::var("MVM_HVF_WARM_REQUIRE_CLAIM").as_deref() == Ok("1") {
+        WarmLaunchMode::Required
+    } else {
+        WarmLaunchMode::Optional
+    };
+    let make_claim = |handle: &StandbyHandle| {
         // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
         // under the standby-id, so compute it for `handle.id`.
         let sub = mvm_runtime::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
@@ -697,10 +811,16 @@ pub fn try_warm_claim(
             bundle_json: bundle_json.clone(),
             network_policy: cfg.network_policy.clone(),
         })
-    })?;
+    };
+    let decision = if matches!(claim_mode, WarmLaunchMode::Optional) {
+        claim_or_cold(&pool, backend, &want, make_claim)
+    } else {
+        claim_with_mode(&pool, backend, &want, claim_mode, make_claim)
+    }?;
     Ok(match decision {
         LaunchDecision::Claimed(id) => Some(id),
         LaunchDecision::ColdBoot => None,
+        LaunchDecision::Refused(refusal) => return Err(anyhow::Error::new(refusal)),
     })
 }
 
@@ -725,7 +845,7 @@ fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<
 /// reapers agree on what "stale" means.
 pub fn reap_stale_standbys_best_effort() {
     match SupervisorStandbyPool::open()
-        .and_then(|pool| pool.reap_stale(STANDBY_POOL_TTL, now_unix_secs()))
+        .and_then(|pool| pool.reap_stale(STANDBY_POOL_TTL, mvm_core::time::now_unix_secs()))
     {
         Ok(reaped) if !reaped.is_empty() => {
             tracing::debug!(count = reaped.len(), "reaped stale standbys on launch");
@@ -870,6 +990,7 @@ mod tests {
             kernel_sha256: "a".repeat(64),
             image_sha256: Some("b".repeat(64)),
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         }
     }
 
@@ -1010,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn try_warm_claim_cold_with_extra_volumes() {
+    fn try_warm_claim_cold_with_directory_share_volume() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
@@ -1411,6 +1532,7 @@ mod tests {
             image_sha256: None,
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         }
     }
 
@@ -1429,6 +1551,7 @@ mod tests {
             image_sha256: Some(image.into()),
             parent_checkpoint: None,
             vsock_egress: false,
+            preloaded_child_vm_name: None,
         }
     }
 

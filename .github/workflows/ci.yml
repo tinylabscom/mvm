@@ -308,6 +308,7 @@ jobs:
 
       - name: test-support feature tests (mock backend)
         run: |
+          cargo nextest run -p mvm-backends --features test-support --lib
           cargo nextest run -p mvm-runtime --features test-support --lib
           cargo nextest run -p mvm-client --features test-support --lib
           cargo nextest run -p mvm-cli --features test-support --lib

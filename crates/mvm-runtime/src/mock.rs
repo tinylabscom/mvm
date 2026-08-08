@@ -128,7 +128,7 @@ impl MockBackend {
                 runtime_source_policy: None,
                 runtime_overlay_version: None,
                 tag: None,
-                created_unix: crate::standby_pool::now_unix_secs(),
+                created_unix: mvm_core::time::now_unix_secs(),
                 quiesced: true,
             },
         )
@@ -269,6 +269,7 @@ impl VmBackend for MockBackend {
             image_sha256: spec.image_sha256.clone(),
             vsock_egress: spec.vsock_egress,
             parent_checkpoint: None,
+            preloaded_child_vm_name: None,
         })
     }
 

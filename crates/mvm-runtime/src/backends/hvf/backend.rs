@@ -20,7 +20,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
+use mvm_build::hvf_supervisor::{
+    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
+};
 use mvm_core::config::{vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
@@ -36,10 +38,7 @@ pub(crate) const PID_FILE_NAME: &str = "hvf.pid";
 /// How long `start` waits for the supervisor to confirm boot (PID file). Shared
 /// with the hvf driver, which spawns the same supervisor binary.
 pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Readiness is signalled by a file written by the detached supervisor. Keep
-/// the poll interval below the launch latency budget; the file check is cheap,
-/// and a coarse interval otherwise adds visible tail latency to every run.
-pub(crate) const PID_FILE_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const PAUSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Raw HVF (`Hypervisor.framework`) backend. macOS / Apple-silicon only.
 pub struct HvfBackend;
@@ -102,6 +101,50 @@ pub(crate) fn terminate_pid(pid: libc::pid_t) {
             libc::kill(pid, libc::SIGKILL);
         }
         let _ = wait_for_pid_exit(pid, Duration::from_millis(500));
+    }
+}
+
+/// Ask a running HVF supervisor to change its vCPU execution state.
+///
+/// The supervisor owns the HVF VM and translates these signals into the
+/// atomic controls consumed by the unified run loop. Keeping the signal
+/// operation here gives both the legacy `VmBackend` surface and the driver
+/// surface the same liveness and error handling.
+pub(crate) fn signal_vm(pid_path: &Path, signal: libc::c_int, operation: &str) -> Result<()> {
+    let pid = read_pid(pid_path)
+        .with_context(|| format!("hvf {operation}: missing pid file {}", pid_path.display()))?;
+    if !pid_alive(pid) {
+        bail!(
+            "hvf {operation}: supervisor pid {pid} from {} is not running",
+            pid_path.display()
+        );
+    }
+    // SAFETY: the pid came from the VM's own private state directory and was
+    // verified live immediately before the signal. The supervisor installs
+    // only async-signal-safe handlers for these controls.
+    if unsafe { libc::kill(pid, signal) } != 0 {
+        return Err(anyhow!(
+            "hvf {operation}: signal supervisor pid {pid}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn wait_for_pause_state(path: &Path, paused: bool) -> Result<()> {
+    let deadline = Instant::now() + PAUSE_ACK_TIMEOUT;
+    loop {
+        if path.exists() == paused {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "hvf pause state did not become {} at {}",
+                if paused { "paused" } else { "resumed" },
+                path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -344,8 +387,12 @@ impl VmBackend for HvfBackend {
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
+            pause_resume: true,
             snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: false,
+            // The native resident handoff is the warm-launch implementation;
+            // admission still requires the backend's ordinary availability and
+            // security gates before a parent can be created or claimed.
+            standby_pool: true,
             vsock: true,
             // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
             // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
@@ -486,16 +533,35 @@ impl VmBackend for HvfBackend {
             initramfs: cmdline::effective_initrd(config),
             disks,
             virtiofs_root,
+            virtiofs_shares: config
+                .volumes
+                .iter()
+                .enumerate()
+                .filter(|(_, volume)| volume.kind == mvm_core::vm_backend::VmVolumeKind::DirShare)
+                .map(|(index, volume)| HvfVirtioFsShare {
+                    path: PathBuf::from(&volume.host),
+                    tag: format!("uvol{index}"),
+                })
+                .collect(),
             vsock: true,
             console_log: console_log.clone(),
             pid_file: pid_file.clone(),
             workload_exit,
+            pause_state: Some(state_dir.join("pause.state")),
+            snapshot_request: None,
+            snapshot_ram: None,
+            snapshot_frame: None,
+            restore_ram: None,
+            restore_frame: None,
             timeout_secs,
             agent_socket: Some(agent_socket),
             substitution_socket: None,
             egress_relay_socket,
             broker_socket: Some(broker_listen_socket.clone()),
             console_data_sockets,
+            handoff_socket: None,
+            handoff_root: None,
+            handoff_verify_key: None,
         };
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
@@ -544,7 +610,7 @@ impl VmBackend for HvfBackend {
                     console_log.display()
                 );
             }
-            std::thread::sleep(PID_FILE_POLL_INTERVAL);
+            std::thread::sleep(Duration::from_millis(50));
         }
 
         // Boot confirmed: the supervisor's device is wired to the endpoint, so it
@@ -632,12 +698,24 @@ impl VmBackend for HvfBackend {
         Ok(())
     }
 
-    fn pause(&self, _id: &VmId) -> Result<()> {
-        bail!("hvf pause/resume is not yet implemented (no snapshot/pause support)")
+    fn pause(&self, id: &VmId) -> Result<()> {
+        let pause_state = vm_state_dir(&id.0).join("pause.state");
+        signal_vm(
+            &vm_state_dir(&id.0).join(PID_FILE_NAME),
+            libc::SIGUSR1,
+            "pause",
+        )?;
+        wait_for_pause_state(&pause_state, true)
     }
 
-    fn resume(&self, _id: &VmId) -> Result<()> {
-        bail!("hvf pause/resume is not yet implemented (no snapshot/pause support)")
+    fn resume(&self, id: &VmId) -> Result<()> {
+        let pause_state = vm_state_dir(&id.0).join("pause.state");
+        signal_vm(
+            &vm_state_dir(&id.0).join(PID_FILE_NAME),
+            libc::SIGUSR2,
+            "resume",
+        )?;
+        wait_for_pause_state(&pause_state, false)
     }
 
     fn status(&self, id: &VmId) -> Result<VmStatus> {
@@ -742,10 +820,10 @@ mod tests {
     }
 
     #[test]
-    fn vsock_is_capable_pause_snapshot_are_not() {
+    fn vsock_and_pause_are_capable_but_snapshot_is_not() {
         let c = HvfBackend.capabilities();
         assert!(c.vsock, "vsock is live-proven");
-        assert!(!c.pause_resume);
+        assert!(c.pause_resume, "pause/resume is signal-wired");
         assert!(!c.snapshots);
         assert!(!c.tap_networking);
     }
@@ -879,7 +957,6 @@ mod tests {
         use mvm_core::policy::RedactionPolicy;
 
         let input = SynthesisInput {
-            stream_edges: Vec::new(),
             kernel_sha256: None,
             network_mode: Default::default(),
             l3_network: None,
@@ -896,6 +973,7 @@ mod tests {
             egress_policy_ref: None,
             tool_policy_ref: None,
             secret_release: SecretReleasePolicy::PlanBound,
+            stream_edges: Vec::new(),
             secrets: vec![SecretBinding {
                 name: "API_KEY".into(),
                 source: SecretSource::Keystore {
@@ -1066,10 +1144,16 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_report_unimplemented() {
+    fn pause_resume_refuses_a_missing_or_stopped_vm() {
         let id = VmId("x".into());
-        assert!(HvfBackend.pause(&id).is_err());
-        assert!(HvfBackend.resume(&id).is_err());
+        let pause = HvfBackend
+            .pause(&id)
+            .expect_err("missing VM must fail closed");
+        assert!(pause.to_string().contains("missing pid file"));
+        let resume = HvfBackend
+            .resume(&id)
+            .expect_err("missing VM must fail closed");
+        assert!(resume.to_string().contains("missing pid file"));
     }
 
     #[test]

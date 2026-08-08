@@ -451,7 +451,12 @@ mod tests {
 
     #[test]
     fn runner_cmdline_matches_workload_cmdline_when_no_volumes_are_present() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
         let config = VmStartConfig::default();
         assert_eq!(
             runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs),

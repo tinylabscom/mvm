@@ -36,7 +36,7 @@ use crate::qemu::{
     self, QEMU_LOG_FILE, QEMU_PID_FILE, QemuBackend, QemuBridgeGuestDial, QemuBridgeHostDial,
     QemuBridgeSpec,
 };
-use mvm_build::virtiofsd::{SpawnParams, VirtiofsdGuard, locate_virtiofsd};
+use mvm_vmm::host::virtiofsd::{SpawnParams, VirtiofsdGuard, locate_virtiofsd};
 
 /// The QEMU VMM driver: pure VMM mechanics, no policy and no admission. It
 /// boots what a `VmmSpec` describes and relays the guest's channels through
@@ -578,11 +578,12 @@ mod tests {
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,
+            shares: vec![],
             vsock,
             console: ConsoleCapture {
                 log_path: "/state/w/console.log".into(),
             },
-            shares: Vec::new(),
+            trusted_builder: false,
         }
     }
 

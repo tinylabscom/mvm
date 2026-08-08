@@ -20,16 +20,19 @@ pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
 
-/// Home directory for the workload identity.
-///
-/// Tools like pip default to `$HOME/.cache`. Without a writable home, UID 901
-/// falls back to `/` (root-owned) and emits spurious sudo warnings. The PID-1
-/// boot paths create this directory and chown it to [`WORKLOAD_UID`] before
-/// dropping privilege.
+/// Home directory used by workload processes when the rootfs is writable.
 pub const WORKLOAD_HOME: &str = "/home/mvm-worker";
-
-/// Fallback home when the rootfs is read-only (e.g. dm-verity prod boots).
+/// Writable fallback home for read-only workload rootfs images.
 pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
+
+/// Linux capability used by the authenticated guest agent to signal PID 1.
+pub const CAP_KILL: u32 = 5;
+/// Linux capability used by the guest agent's optional loopback DNS helper.
+pub const CAP_NET_BIND_SERVICE: u32 = 10;
+/// Linux capability used by the guest agent to correct a restored wall clock.
+pub const CAP_SYS_TIME: u32 = 25;
+/// Capabilities explicitly retained by the guest agent after boot setup.
+pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SYS_TIME);
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.
@@ -436,6 +439,42 @@ pub fn drop_privilege(uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Drop the PID-1 guest agent to its fixed identity while retaining its
+/// narrowly scoped restore capabilities.
+#[cfg(target_os = "linux")]
+pub fn drop_guest_agent_privilege(uid: u32, gid: u32) -> Result<()> {
+    drop_guest_agent_privilege_raw(uid, gid)
+        .map_err(|source| MountError::syscall("guest-agent privilege drop", source))
+}
+
+/// Drop the PID-1 guest agent to its fixed identity on hosts without Linux
+/// guest-agent capability syscalls.
+#[cfg(not(target_os = "linux"))]
+pub fn drop_guest_agent_privilege(uid: u32, gid: u32) -> Result<()> {
+    drop_privilege(uid, gid)
+}
+
+/// Ensure the preferred workload home exists before the agent drops privilege.
+#[cfg(target_os = "linux")]
+pub fn ensure_workload_home() -> Result<()> {
+    ensure_dir(WORKLOAD_HOME)?;
+    chown(WORKLOAD_HOME, WORKLOAD_UID, WORKLOAD_GID)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn ensure_workload_home() -> Result<()> {
+    Ok(())
+}
+
+/// Resolve the writable home directory for workload processes.
+pub fn workload_home() -> &'static str {
+    if Path::new(WORKLOAD_HOME).is_dir() {
+        WORKLOAD_HOME
+    } else {
+        WORKLOAD_HOME_FALLBACK
+    }
+}
+
 /// The privilege drop as bare syscalls, allocating nothing on any path.
 ///
 /// This is the single implementation; `drop_privilege` is the wrapper that
@@ -468,35 +507,126 @@ pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Return the workload home directory, creating it if necessary and possible.
-///
-/// This is intended to be called from PID-1 paths while still root, before the
-/// agent drops privilege or is spawned as UID 901. On a read-only rootfs the
-/// directory creation will fail; callers should log the failure and continue,
-/// because `workload_home()` will fall back to [`WORKLOAD_HOME_FALLBACK`] at
-/// exec time.
+/// Drop to the guest-agent identity while retaining only the fixed capabilities
+/// required for authenticated restore handling.
 #[cfg(target_os = "linux")]
-pub fn ensure_workload_home() -> Result<()> {
-    ensure_dir(WORKLOAD_HOME)?;
-    chown(WORKLOAD_HOME, WORKLOAD_UID, WORKLOAD_GID)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn ensure_workload_home() -> Result<()> {
+pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
+    if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::setgid(gid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::setuid(uid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    set_capabilities(RESTORE_AGENT_CAPABILITIES)?;
+    raise_ambient_capabilities(RESTORE_AGENT_CAPABILITIES)?;
+    if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::getuid() } == 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+    }
     Ok(())
 }
 
-/// Resolve the directory to use as `$HOME` for workload processes.
-///
-/// Prefer [`WORKLOAD_HOME`] when it was successfully prepared at boot; fall
-/// back to [`WORKLOAD_HOME_FALLBACK`] (always writable) otherwise.
-pub fn workload_home() -> &'static str {
-    if std::path::Path::new(WORKLOAD_HOME).is_dir() {
-        WORKLOAD_HOME
+#[cfg(target_os = "linux")]
+fn set_capabilities(capabilities: u32) -> std::io::Result<()> {
+    let header = CapHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let data = [
+        CapData {
+            effective: capabilities,
+            permitted: capabilities,
+            inheritable: capabilities,
+        },
+        CapData::default(),
+    ];
+    let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
+    if rc != 0 {
+        Err(std::io::Error::last_os_error())
     } else {
-        WORKLOAD_HOME_FALLBACK
+        Ok(())
     }
 }
+
+#[cfg(target_os = "linux")]
+fn raise_ambient_capabilities(capabilities: u32) -> std::io::Result<()> {
+    for capability in [CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SYS_TIME] {
+        if capabilities & (1u32 << capability) == 0 {
+            continue;
+        }
+        let rc = unsafe {
+            libc::prctl(
+                PR_CAP_AMBIENT,
+                PR_CAP_AMBIENT_RAISE,
+                capability as libc::c_ulong,
+                0,
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: libc::pid_t,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+// Layout contract with linux/capability.h `__user_cap_header_struct` and
+// `__user_cap_data_struct`. Both are passed to capset(2) by pointer; the
+// kernel reads each capability word by offset, so a Rust layout drift would
+// silently request the wrong privilege set.
+//
+// Derived on Linux 6.8 with cc sizeof/offsetof/_Alignof, not read from these
+// Rust definitions. `pid_t` is i32 on every Linux target mvm builds for.
+#[cfg(target_os = "linux")]
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<CapHeader>() == 8);
+    assert!(align_of::<CapHeader>() == 4);
+    assert!(offset_of!(CapHeader, version) == 0);
+    assert!(offset_of!(CapHeader, pid) == 4);
+
+    assert!(size_of::<CapData>() == 12);
+    assert!(align_of::<CapData>() == 4);
+    assert!(offset_of!(CapData, effective) == 0);
+    assert!(offset_of!(CapData, permitted) == 4);
+    assert!(offset_of!(CapData, inheritable) == 8);
+};
+
+#[cfg(target_os = "linux")]
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+#[cfg(target_os = "linux")]
+const PR_SET_KEEPCAPS: libc::c_int = 8;
+#[cfg(target_os = "linux")]
+const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
+#[cfg(target_os = "linux")]
+const PR_CAP_AMBIENT: libc::c_int = 47;
+#[cfg(target_os = "linux")]
+const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
 
 // ---------------------------------------------------------------------------
 // Low-level syscall wrappers (Linux)
@@ -1412,22 +1542,5 @@ mod tests {
         let err = probe_ext4_block_size(image.path().to_str().expect("temp path"))
             .expect_err("bad magic must fail");
         assert!(err.to_string().contains("magic mismatch"), "{err}");
-    }
-
-    #[test]
-    fn workload_home_falls_back_when_prepared_directory_missing() {
-        // In normal CI this path does not exist, so the function must return
-        // the fallback rather than a non-existent directory.
-        if !std::path::Path::new(WORKLOAD_HOME).is_dir() {
-            assert_eq!(workload_home(), WORKLOAD_HOME_FALLBACK);
-        }
-        let home = workload_home();
-        assert!(home == WORKLOAD_HOME || home == WORKLOAD_HOME_FALLBACK);
-    }
-
-    #[test]
-    fn workload_home_constants_are_non_empty() {
-        assert!(!WORKLOAD_HOME.is_empty());
-        assert!(!WORKLOAD_HOME_FALLBACK.is_empty());
     }
 }

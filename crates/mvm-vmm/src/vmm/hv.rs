@@ -34,6 +34,21 @@ pub enum SysReg {
     /// Multiprocessor Affinity Register — per-vCPU identity; must match the
     /// device tree's `cpu` reg and the GIC redistributor frame.
     MpidrEl1,
+    /// System control and translation state required to resume a running EL1.
+    SctlrEl1,
+    Ttbr0El1,
+    Ttbr1El1,
+    TcrEl1,
+    MairEl1,
+    VbarEl1,
+    EsrEl1,
+    FarEl1,
+    ElrEl1,
+    SpEl1,
+    SpsrEl1,
+    CntkctlEl1,
+    CntvCtlEl0,
+    CntvCvalEl0,
 }
 
 /// Guest-memory protection flags for [`HypervisorVm::map_ram`]. Portable bit

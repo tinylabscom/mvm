@@ -10,7 +10,7 @@
 //
 // - **Firecracker** (`backend::FirecrackerBackend`) + the `AnyBackend`
 //   dispatch enum — the production Tier 1 path.
-// - **HVF** (`backends::hvf::HvfBackend`) — the in-house Hypervisor.framework
+// - **HVF** (`hvf_backend::HvfBackend`) — the in-house Hypervisor.framework
 //   VMM; the macOS-26 workload default.
 // - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
 //   (Linux KVM / macOS HVF).
@@ -28,6 +28,9 @@ pub mod storage;
 pub mod vsock_transport;
 
 pub mod vm;
+pub mod warm_artifact_builder;
+pub mod warm_artifacts;
+pub mod warm_readiness;
 
 pub mod apple_container;
 pub mod apple_container_backend;
@@ -37,7 +40,7 @@ pub mod audit_substrate;
 /// (supervisors + the substitution endpoint); one impl, no drift.
 pub(crate) mod aux_bin;
 pub mod backend;
-/// Per-hypervisor backend implementations (HVF, Firecracker, libkrun, QEMU, etc.).
+/// Concrete hypervisor backend implementations.
 pub mod backends;
 pub mod base;
 /// Per-VM broker-services (`mvm-broker` / `mvm-audit-signer`) subprocess
@@ -60,7 +63,6 @@ pub mod egress_shared;
 pub mod firecracker;
 pub mod handle_registry;
 pub(crate) mod host_agent_spawn;
-
 pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification
 /// (the image analog of [`checkpoint`]). Reuses the shared `lineage` walk.
@@ -93,6 +95,8 @@ pub(crate) mod netd_spawn;
 pub mod netinit_audit;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;
+/// Process-local reservation and rollback for resident warm parents.
+pub mod resident_pool;
 /// Capability-aware backend selection (fail-closed, no silent downgrade).
 pub mod selection;
 /// Backend-agnostic supervisor standby pool registry (`~/.mvm/pool/`
@@ -103,11 +107,15 @@ pub mod standby_pool;
 pub(crate) mod substitution_spawn;
 #[cfg(test)]
 pub(crate) mod test_support;
+/// Resident owner for opaque trusted-snapshot publications.
+pub mod trusted_snapshot_service;
 /// Portable, hypervisor-agnostic VMM device model (guest memory, FDT, kernel
 /// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform
 /// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam.
 /// Shared host-side vsock egress support. Backend-agnostic; every VMM path uses
 /// the same gate/relay substrate while policy remains in the host endpoint.
+/// In-process Claim/Release/Prewarm ownership boundary for resident warm launches.
+pub mod warm_service;
 /// Plugs `mvm_fs`'s content-addressed `SnapshotStore` beneath the existing
 /// checkpoint lineage: stage a checkpoint's bytes into the snapshot store,
 /// then clone them only after the checkpoint's fail-closed lineage
@@ -131,12 +139,23 @@ mod workload_wait;
 
 /// Re-export the backend-agnostic VMM device model from `mvm-vmm`.
 pub use mvm_vmm::vmm;
-/// Re-export the vsock egress bridge substrate from `mvm-vmm`.
+/// Re-export the shared vsock egress bridge from `mvm-vmm`.
 pub use mvm_vmm::vsock_egress_bridge;
 
 // Embedded-library surface for the warm-lease ergonomics.
+pub use mvm_core::vm_backend::WarmPrewarmSource;
+pub use resident_pool::{ResidentPoolError, ResidentWarmLease, ResidentWarmPool};
 pub use vm::exec_builder::{ExecBuilder, ExecOutcome};
-pub use vm::lease::{AcquireSpec, WarmLease};
+pub use vm::lease::{AcquireSpec, WarmLease, WarmLeaseOrigin};
+pub use warm_artifact_builder::{
+    WarmArtifactBuildPlan, WarmArtifactPlanResolver, WarmArtifactSupportPaths, WarmArtifactWorker,
+    WarmGoldenVmReadinessVerifier,
+};
+pub use warm_artifacts::{
+    PrewarmJob, PrewarmJobState, PrewarmQueue, WarmArtifactFile, WarmArtifactInput,
+    WarmArtifactKey, WarmArtifactManifest, WarmArtifactSet, WarmArtifactStore,
+};
+pub use warm_readiness::{AuthenticatedWarmGoldenVmVerifier, WarmGoldenVmFactory};
 
 // The Machine product abstraction — the construction + capability-gate seam
 // the CLI, mvmd, and the SDKs share.
@@ -157,6 +176,7 @@ pub use libkrun::LibkrunBackend;
 #[cfg(feature = "test-support")]
 pub use mock::MockBackend;
 pub use qemu::QemuBackend;
+pub use warm_service::{PrewarmFn, WarmLaunchService};
 pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 
 /// The per-VM egress-TLS cert/key split helper. `mvmctl up`

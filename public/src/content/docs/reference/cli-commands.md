@@ -312,9 +312,9 @@ shell).
 | `mvmctl run --image <ref> --prod -- <cmd>...` | Production OCI-image policy: require `<ref>` to be digest-pinned and cosign-verified by the OCI policy before cache use or boot |
 | `mvmctl run --profile standard -- <cmd>` | Default profile: explicit env is allowed; host shares must be read-only |
 | `mvmctl run --profile restrictive -- <cmd>` | No env injection and no host directory shares |
-| `mvmctl run --profile dev --add-dir .:/work:rw -- <cmd>` | Dev profile: permits writable host shares for local iteration |
+| `mvmctl run --mount .:/work:ro -- <cmd>` | Attach a live read-only host-directory share |
 | `mvmctl run --profile permissive -- <cmd>` | Escape hatch; requires `MVM_ACK_PERMISSIVE_RUN=1` |
-| `mvmctl run --add-dir HOST:GUEST[:MODE] -- <cmd>` | Mount a host directory. `MODE` defaults to `ro`; `rw` requires `--profile dev` or `permissive` |
+| `mvmctl run --mount HOST:GUEST:ro -- <cmd>` | Attach a live read-only host-directory share |
 | `mvmctl run --env KEY=VAL -- <cmd>` | Inject an explicit environment variable. Repeatable; disabled by `--profile restrictive` |
 | `mvmctl run --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
 | `mvmctl run --timeout <secs> -- <cmd>` | Per-command timeout |
@@ -704,8 +704,7 @@ host endpoint.
 ```bash
 mvmctl run -- uname -a                                # default image
 mvmctl run --manifest minimal -- /bin/true            # named template
-mvmctl run --add-dir .:/work -- ls /work              # share current dir, RO
-mvmctl run --add-dir .:/work:rw -- touch /work/x      # writable, rsynced back
+mvmctl run --mount .:/work:ro -- ls /work            # share current dir, RO
 mvmctl run -e DEBUG=1 -- env | grep DEBUG             # env var injection
 mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
 ```
@@ -766,7 +765,7 @@ The snapshot path activates only when *all* of the following hold:
 
 - the image source is a **registered template** (the bundled default
   image has no template snapshot to restore from);
-- there are **no** `--add-dir` extras (extra drives would mismatch the
+- there are **no** live directory shares (extra drives would mismatch the
   snapshot's recorded drive layout);
 - the active backend reports snapshot support.
 

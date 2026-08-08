@@ -92,6 +92,11 @@ impl<'a> VsockHandlerContext<'a> {
         self.transport.flush_rx()
     }
 
+    pub(crate) fn rx_queue_state(&self) -> (u32, u32, usize) {
+        let queue = self.transport.queues[0];
+        (queue.ready, queue.num, self.transport.pending_rx.len())
+    }
+
     pub(crate) fn record_received(&mut self, payload: &[u8]) {
         self.lifecycle.received.extend_from_slice(payload);
     }
@@ -111,6 +116,9 @@ impl<'a> VsockHandlerContext<'a> {
 pub(crate) trait GuestPortHandler: Any + Send {
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn on_packet(&mut self, ctx: &mut VsockHandlerContext<'_>, hdr: VsockHdr, payload: &[u8]);
+    fn has_host_binding(&self) -> bool {
+        false
+    }
     fn drain(&mut self, _ctx: &mut VsockHandlerContext<'_>) -> Option<u32> {
         None
     }
@@ -124,6 +132,9 @@ pub(crate) trait HostInitiatedHandler: Any + Send {
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn accepts_stream(&self, conn_id: u32) -> bool;
     fn on_packet(&mut self, ctx: &mut VsockHandlerContext<'_>, hdr: VsockHdr, payload: &[u8]);
+    fn has_host_binding(&self) -> bool {
+        false
+    }
     fn drain(&mut self, ctx: &mut VsockHandlerContext<'_>) -> Option<u32>;
     fn cancel(&mut self) {}
     fn poll_fds(&self) -> Vec<RawFd> {
@@ -286,6 +297,10 @@ impl VsockHandlerRegistry {
         }
     }
 
+    pub(crate) fn clear_host_bindings(&mut self) {
+        *self = Self::new();
+    }
+
     pub(crate) fn poll_fds(&self) -> Vec<RawFd> {
         let mut fds = Vec::new();
         for handler in &self.host_initiated {
@@ -295,6 +310,16 @@ impl VsockHandlerRegistry {
             fds.extend(handler.poll_fds());
         }
         fds
+    }
+
+    pub(crate) fn has_host_bindings(&self) -> bool {
+        self.host_initiated
+            .iter()
+            .any(|handler| handler.has_host_binding())
+            || self
+                .guest_ports
+                .values()
+                .any(|handler| handler.has_host_binding())
     }
 
     #[cfg(test)]
@@ -415,6 +440,10 @@ impl GuestPortHandler for StreamRelayHandler {
         self
     }
 
+    fn has_host_binding(&self) -> bool {
+        self.bridge.has_binding()
+    }
+
     fn on_packet(&mut self, ctx: &mut VsockHandlerContext<'_>, hdr: VsockHdr, payload: &[u8]) {
         match hdr.op {
             OP_REQUEST => ctx.queue_reply(&hdr, OP_RESPONSE, &[]),
@@ -529,6 +558,10 @@ impl HostInitiatedHandler for AgentVsockHandler {
         self
     }
 
+    fn has_host_binding(&self) -> bool {
+        self.bridge.has_binding()
+    }
+
     fn accepts_stream(&self, conn_id: u32) -> bool {
         self.bridge.is_agent_stream(conn_id)
     }
@@ -584,7 +617,12 @@ impl HostInitiatedHandler for AgentVsockHandler {
             ctx.remove_recv(conn_id, mvm_agentd::vsock::GUEST_AGENT_PORT);
             ctx.queue_host_packet(conn_id, mvm_agentd::vsock::GUEST_AGENT_PORT, OP_RST, &[]);
         }
-        if ctx.flush_rx() { Some(0) } else { None }
+        let delivered = ctx.flush_rx();
+        let (ready, size, pending) = ctx.rx_queue_state();
+        agent_dbg(&format!(
+            "agent rx delivered={delivered} ready={ready} size={size} pending={pending}"
+        ));
+        if delivered { Some(0) } else { None }
     }
 
     fn cancel(&mut self) {
@@ -611,6 +649,10 @@ impl ConsoleVsockHandler {
 impl HostInitiatedHandler for ConsoleVsockHandler {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn has_host_binding(&self) -> bool {
+        self.bridge.has_binding()
     }
 
     fn accepts_stream(&self, conn_id: u32) -> bool {

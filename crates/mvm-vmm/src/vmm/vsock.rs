@@ -8,17 +8,27 @@
 //! in the guest's `QueueNotify` MMIO exit and completed by the backend raising
 //! the device's SPI line.
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::hvf_handoff::HvfHandoffRequest;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+use super::device_state::{
+    DeviceKind, DeviceStateError, SnapshotDeviceState, StateReader, StateWriter,
+};
 use super::vsock_handlers::{VsockHandlerContext, VsockHandlerRegistry, VsockLifecycleState};
 #[cfg(test)]
 use super::vsock_transport::{
-    GUEST_CID, HDR_LEN, HOST_BUF_ALLOC, HOST_CID, OP_SHUTDOWN, TYPE_STREAM, VIRTIO_ID_VSOCK,
-    VIRTIO_MAGIC, VIRTIO_VERSION,
+    GUEST_CID, HOST_BUF_ALLOC, HOST_CID, TYPE_STREAM, VIRTIO_ID_VSOCK, VIRTIO_MAGIC, VIRTIO_VERSION,
 };
 use super::vsock_transport::{
-    OP_CREDIT_UPDATE, OP_REQUEST, OP_RESPONSE, OP_RST, OP_RW, RegisterWrite, VsockHdr,
-    VsockTransportCore,
+    NUM_QUEUES, OP_CREDIT_UPDATE, OP_REQUEST, OP_RESPONSE, OP_RST, OP_RW, Queue, RegisterWrite,
+    VsockHdr, VsockTransportCore,
 };
 
 /// A guest interrupt line the host-I/O thread can assert on its own — the seam
@@ -30,6 +40,132 @@ pub trait IrqLine: Send + Sync {
     /// Assert the device's SPI to the guest (level-high; the guest acks via
     /// `INTERRUPT_ACK`). Called after the I/O thread delivers an rx packet.
     fn signal(&self, spi: u32);
+}
+
+/// Fresh host-owned paths supplied when a restored child reconnects its vsock
+/// channels. These bindings are deliberately external to snapshot bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VsockHostBindings {
+    /// Host agent RPC listener path.
+    pub agent_socket: Option<PathBuf>,
+    /// Host egress endpoint path.
+    pub substitution_endpoint: Option<PathBuf>,
+    /// Host broker endpoint path.
+    pub broker_endpoint: Option<PathBuf>,
+    /// Dev-only console listeners keyed by guest port.
+    pub console_sockets: Vec<(u32, PathBuf)>,
+}
+
+impl VsockHostBindings {
+    fn paths(&self) -> Vec<&Path> {
+        self.agent_socket
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(self.substitution_endpoint.iter().map(PathBuf::as_path))
+            .chain(self.broker_endpoint.iter().map(PathBuf::as_path))
+            .chain(self.console_sockets.iter().map(|(_, path)| path.as_path()))
+            .collect()
+    }
+}
+
+const HANDOFF_AGENT: u8 = 1 << 0;
+const HANDOFF_EGRESS: u8 = 1 << 1;
+const HANDOFF_BROKER: u8 = 1 << 2;
+const HANDOFF_CONSOLE: u8 = 1 << 3;
+
+fn valid_handoff_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+}
+
+fn canonical_child_bindings(
+    name: &str,
+    state_dir: &Path,
+    mask: u8,
+) -> std::io::Result<VsockHostBindings> {
+    let agent_socket =
+        (mask & HANDOFF_AGENT != 0).then(|| mvm_core::config::vm_hvf_agent_socket_at(state_dir));
+    let substitution_endpoint = (mask & HANDOFF_EGRESS != 0)
+        .then(|| mvm_core::config::vm_substitution_endpoint_socket(name));
+    let broker_path =
+        mvm_core::config::vm_vsock_port_socket_at(state_dir, mvm_agentd::vsock::BROKER_PORT);
+    let broker_endpoint = (mask & HANDOFF_BROKER != 0).then_some(broker_path);
+    let console_sockets = if mask & HANDOFF_CONSOLE != 0 {
+        mvm_agentd::vsock::dev_console_data_ports()
+            .map(|port| {
+                (
+                    port,
+                    mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, port),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(VsockHostBindings {
+        agent_socket,
+        substitution_endpoint,
+        broker_endpoint,
+        console_sockets,
+    })
+}
+
+fn validate_handoff_endpoint(path: &Path, root: &Path, socket_dir: &Path) -> std::io::Result<()> {
+    let socket_dir = std::fs::canonicalize(socket_dir)?;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "endpoint has no parent")
+    })?;
+    let parent = std::fs::canonicalize(parent)?;
+    if !parent.starts_with(root) && !parent.starts_with(&socket_dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "handoff endpoint is outside the trusted VM root",
+        ));
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "handoff endpoint is a directory",
+            ));
+        }
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(path)?;
+            let target = if target.is_absolute() {
+                target
+            } else {
+                parent.join(target)
+            };
+            let target = std::fs::canonicalize(target)?;
+            if !target.starts_with(root) && !target.starts_with(&socket_dir) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "handoff endpoint symlink escapes the trusted VM root",
+                ));
+            }
+        } else if !metadata.file_type().is_socket() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "handoff endpoint is not an owned socket",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn handoff_debug(message: &str) {
+    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    {
+        let _ = writeln!(file, "[vsock] {message}");
+    }
 }
 
 const R_CONFIG: u64 = 0x100; // guest_cid (u64) at +0
@@ -116,17 +252,11 @@ impl VsockShared {
             }
         }
         let flushed = self.transport.flush_rx();
-        // A guest TX notification may carry a credit update that unblocks
-        // host→guest data buffered in the handlers. Run host I/O here so the
-        // vCPU thread can make progress even if the dedicated host-I/O thread
-        // is blocked waiting for endpoint readability.
-        let host_io = self.service_host_io();
         let drained = self.transport.interrupt_status & 1 != 0;
-        drained || flushed || host_io
+        drained || flushed
     }
 
     fn handle_packet(&mut self, hdr: VsockHdr, payload: &[u8]) {
-        self.transport.record_tx_credit(&hdr);
         let mut ctx = VsockHandlerContext::new(&mut self.transport, &mut self.lifecycle);
         if self.handlers.dispatch_packet(&mut ctx, hdr, payload) {
             return;
@@ -164,10 +294,6 @@ impl VsockShared {
         self.transport.recv_cnt.clear();
         self.transport.pending_rx.clear();
     }
-    #[cfg(test)]
-    fn provide_rx_descriptor(&mut self, buf_addr: u64, buf_len: usize) {
-        self.transport.test_provide_rx_descriptor(buf_addr, buf_len);
-    }
 
     pub(super) fn poll_fds(&self) -> Vec<std::os::fd::RawFd> {
         self.handlers.poll_fds()
@@ -187,6 +313,12 @@ pub struct VirtioVsock {
     irq: u32,
     shared: Arc<Mutex<VsockShared>>,
     io: Option<super::vsock_io::IoHandle>,
+    irq_line: Option<Arc<dyn IrqLine>>,
+    handoff_listener: Option<UnixListener>,
+    handoff_root: Option<PathBuf>,
+    handoff_verify_key: Option<VerifyingKey>,
+    handoff_stop: Option<&'static AtomicBool>,
+    handoff_used: bool,
 }
 
 impl VirtioVsock {
@@ -201,6 +333,12 @@ impl VirtioVsock {
             irq,
             shared: Arc::new(Mutex::new(shared)),
             io: None,
+            irq_line: None,
+            handoff_listener: None,
+            handoff_root: None,
+            handoff_verify_key: None,
+            handoff_stop: None,
+            handoff_used: false,
         }
     }
 
@@ -264,8 +402,128 @@ impl VirtioVsock {
         self.notify_io();
     }
 
-    pub fn start_io(&mut self, irq_line: Arc<dyn IrqLine>) {
+    /// Rebind host channels after a child restores guest state.
+    ///
+    /// Existing listeners and I/O are stopped before the caller-supplied paths
+    /// are bound. The paths are never read from snapshot bytes; the caller must
+    /// derive and authorize them for the child identity first.
+    pub fn rebind_host_channels(
+        &mut self,
+        bindings: &VsockHostBindings,
+        irq_line: Arc<dyn IrqLine>,
+    ) -> std::io::Result<()> {
+        handoff_debug("rebind begin");
         self.shutdown();
+        let result = (|| {
+            if let Some(path) = &bindings.agent_socket {
+                self.set_agent_socket(path)?;
+            }
+            if let Some(path) = &bindings.substitution_endpoint {
+                self.set_substitution_endpoint(path);
+            }
+            if let Some(path) = &bindings.broker_endpoint {
+                self.set_broker_endpoint(path);
+            }
+            if !bindings.console_sockets.is_empty() {
+                self.set_console_sockets(
+                    bindings
+                        .console_sockets
+                        .iter()
+                        .map(|(port, path)| (*port, path.as_path())),
+                )?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            handoff_debug("rebind bind failed");
+            self.shutdown();
+            return result;
+        }
+        handoff_debug("rebind bindings installed");
+        self.start_io(irq_line);
+        handoff_debug("rebind io started");
+        Ok(())
+    }
+
+    /// Bind the fixed, supervisor-owned control socket used to authorize one
+    /// live standby handoff. The request contains only a child identity and is
+    /// authenticated by the host key pinned in the supervisor config.
+    pub fn set_handoff_control(
+        &mut self,
+        socket: Option<&Path>,
+        root: Option<&Path>,
+        verify_key: Option<&str>,
+        stop: &'static AtomicBool,
+    ) -> std::io::Result<()> {
+        let (Some(socket), Some(root), Some(verify_key)) = (socket, root, verify_key) else {
+            return Ok(());
+        };
+        let root = std::fs::canonicalize(root)?;
+        let parent = socket.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "handoff socket has no parent",
+            )
+        })?;
+        let parent = std::fs::canonicalize(parent)?;
+        if !parent.starts_with(&root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "handoff socket is outside the trusted VM root",
+            ));
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(socket) {
+            if metadata.file_type().is_dir()
+                || metadata.file_type().is_symlink()
+                || !metadata.file_type().is_socket()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "handoff socket path is not an owned socket",
+                ));
+            }
+            std::fs::remove_file(socket)?;
+        }
+        let listener = UnixListener::bind(socket)?;
+        listener.set_nonblocking(true)?;
+        let mut permissions = std::fs::metadata(socket)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+        }
+        std::fs::set_permissions(socket, permissions)?;
+        let key_bytes = hex::decode(verify_key).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid handoff public key",
+            )
+        })?;
+        let key_bytes: [u8; 32] = key_bytes.try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid handoff public key length",
+            )
+        })?;
+        let verifying_key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid handoff public key",
+            )
+        })?;
+        self.handoff_listener = Some(listener);
+        self.handoff_root = Some(root);
+        self.handoff_verify_key = Some(verifying_key);
+        self.handoff_stop = Some(stop);
+        Ok(())
+    }
+
+    pub fn start_io(&mut self, irq_line: Arc<dyn IrqLine>) {
+        handoff_debug("start_io");
+        if let Some(io) = self.io.take() {
+            io.stop();
+        }
+        self.irq_line = Some(Arc::clone(&irq_line));
         self.io = Some(super::vsock_io::spawn(
             Arc::clone(&self.shared),
             irq_line,
@@ -274,10 +532,33 @@ impl VirtioVsock {
     }
 
     pub fn shutdown(&mut self) {
+        handoff_debug("shutdown");
         if let Some(io) = self.io.take() {
             io.stop();
         }
         self.lock().cancel();
+    }
+
+    /// Stop host I/O and discard all host-owned bindings before serializing a
+    /// paused parent. Guest transport registers remain in place; a restored
+    /// child binds fresh authorized channels before it resumes.
+    pub fn prepare_snapshot(&mut self) {
+        let queue = self.lock().transport.queues[0];
+        handoff_debug(&format!(
+            "prepare_snapshot before ready={} size={} pending={}",
+            queue.ready,
+            queue.num,
+            self.lock().transport.pending_rx.len()
+        ));
+        self.shutdown();
+        self.lock().handlers.clear_host_bindings();
+        let queue = self.lock().transport.queues[0];
+        handoff_debug(&format!(
+            "prepare_snapshot after ready={} size={} pending={}",
+            queue.ready,
+            queue.num,
+            self.lock().transport.pending_rx.len()
+        ));
     }
 
     pub fn received(&self) -> Vec<u8> {
@@ -313,13 +594,294 @@ impl VirtioVsock {
         result
     }
 
-    pub fn poll(&self) -> Option<u32> {
-        if self.lock().service_host_io() {
+    pub fn poll(&mut self) -> Option<u32> {
+        let handoff = self.poll_handoff();
+        if handoff || self.lock().service_host_io() {
             Some(self.irq)
         } else {
             None
         }
     }
+
+    fn poll_handoff(&mut self) -> bool {
+        if self.handoff_used {
+            return false;
+        }
+        let Some(listener) = &self.handoff_listener else {
+            return false;
+        };
+        let (mut stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(error) => {
+                self.fail_handoff(None, error);
+                return false;
+            }
+        };
+        let result = self.accept_handoff(&mut stream);
+        match result {
+            Ok(()) => {
+                let _ = stream.write_all(b"OK\n");
+                self.handoff_used = true;
+                true
+            }
+            Err(error) => {
+                let _ = stream.write_all(b"ERR\n");
+                self.fail_handoff(Some(&mut stream), error);
+                false
+            }
+        }
+    }
+
+    fn accept_handoff(&mut self, stream: &mut UnixStream) -> std::io::Result<()> {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+        let mut line = String::new();
+        BufReader::new(stream.try_clone()?).read_line(&mut line)?;
+        let request: HvfHandoffRequest = serde_json::from_str(line.trim_end()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid handoff request")
+        })?;
+        if request.parent_pid != std::process::id() || !valid_handoff_name(&request.child_vm_name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "handoff identity is not bound to this supervisor",
+            ));
+        }
+        let signature_bytes = hex::decode(&request.signature).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid handoff signature")
+        })?;
+        let signature_bytes: [u8; 64] = signature_bytes.try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid handoff signature length",
+            )
+        })?;
+        let signature = Signature::from_bytes(&signature_bytes);
+        let key = self.handoff_verify_key.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "handoff verifier unavailable",
+            )
+        })?;
+        key.verify(
+            &HvfHandoffRequest::signing_message(
+                request.parent_pid,
+                &request.child_vm_name,
+                request.channel_mask,
+            ),
+            &signature,
+        )
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "handoff signature rejected",
+            )
+        })?;
+
+        let root = self.handoff_root.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "handoff root unavailable",
+            )
+        })?;
+        let child_dir = mvm_core::config::vm_state_dir(&request.child_vm_name);
+        let canonical_child_dir = std::fs::canonicalize(&child_dir)?;
+        if !canonical_child_dir.starts_with(root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "child state is outside the trusted VM root",
+            ));
+        }
+        let bindings =
+            canonical_child_bindings(&request.child_vm_name, &child_dir, request.channel_mask)?;
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&child_dir);
+        std::fs::create_dir_all(&socket_dir)?;
+        for path in bindings.paths() {
+            if let Err(error) = validate_handoff_endpoint(path, root, &socket_dir) {
+                if let Some(debug_path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
+                    && let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(debug_path)
+                {
+                    let _ = writeln!(
+                        file,
+                        "[handoff] endpoint={} root={} socket_dir={} error={error}",
+                        path.display(),
+                        root.display(),
+                        socket_dir.display()
+                    );
+                }
+                return Err(error);
+            }
+        }
+        let irq_line = self.irq_line.clone().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "handoff IRQ line unavailable",
+            )
+        })?;
+        self.rebind_host_channels(&bindings, irq_line)
+    }
+
+    fn fail_handoff(&self, _stream: Option<&mut UnixStream>, error: std::io::Error) {
+        if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
+            && let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+        {
+            let _ = writeln!(file, "[handoff] rejected: {error}");
+        }
+        if let Some(stop) = self.handoff_stop {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+impl VsockShared {
+    fn reject_snapshot_if_live(&self) -> Result<(), DeviceStateError> {
+        let kind = DeviceKind::VirtioVsock;
+        if self.handlers.has_host_bindings() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "host_endpoints_bound",
+            });
+        }
+        if !self.handlers.poll_fds().is_empty() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "host_io_fds",
+            });
+        }
+        if !self.transport.recv_cnt.is_empty() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "receive_credit_sessions",
+            });
+        }
+        if !self.transport.pending_rx.is_empty() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "pending_rx_packets",
+            });
+        }
+        if !self.lifecycle.received.is_empty() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "lifecycle_transcript",
+            });
+        }
+        if self.lifecycle.workload_exit_code.is_some() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "workload_exit",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl SnapshotDeviceState for VirtioVsock {
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::VirtioVsock
+    }
+
+    fn snapshot_state(&self) -> Result<Vec<u8>, DeviceStateError> {
+        if self.io.is_some() {
+            return Err(DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioVsock,
+                field: "host_io_active",
+            });
+        }
+        let shared = self.lock();
+        shared.reject_snapshot_if_live()?;
+        let mut writer = StateWriter::new(1);
+        writer.u32(shared.transport.device_features_sel);
+        writer.u32(shared.transport.status);
+        writer.u32(shared.transport.queue_sel);
+        writer.u32(shared.transport.interrupt_status);
+        for queue in shared.transport.queues {
+            write_queue_state(&mut writer, queue);
+        }
+        Ok(writer.finish())
+    }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceStateError> {
+        if self.io.is_some() {
+            return Err(DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioVsock,
+                field: "host_io_active",
+            });
+        }
+
+        let kind = DeviceKind::VirtioVsock;
+        let mut reader = StateReader::new(bytes);
+        let version = reader.version(kind)?;
+        if version != 1 {
+            return Err(DeviceStateError::UnsupportedVersion(version));
+        }
+        let device_features_sel = reader.u32(kind, "device_features_sel")?;
+        let status = reader.u32(kind, "status")?;
+        let queue_sel = reader.u32(kind, "queue_sel")?;
+        let interrupt_status = reader.u32(kind, "interrupt_status")?;
+        let mut queues = [Queue::default(); NUM_QUEUES];
+        for queue in &mut queues {
+            queue.num = reader.u32(kind, "queue_num")?;
+            queue.ready = reader.u32(kind, "queue_ready")?;
+            queue.desc = reader.u64(kind, "desc")?;
+            queue.avail = reader.u64(kind, "avail")?;
+            queue.used = reader.u64(kind, "used")?;
+            queue.last_avail = reader.u16(kind, "last_avail")?;
+            queue.next_used = reader.u16(kind, "next_used")?;
+        }
+        reader.finish()?;
+
+        if device_features_sel > 1 {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "device_features_sel",
+            });
+        }
+        if usize::try_from(queue_sel).map_or(true, |index| index >= NUM_QUEUES) {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "queue_sel",
+            });
+        }
+        for queue in &queues {
+            if queue.ready > 1 {
+                return Err(DeviceStateError::InvalidValue {
+                    kind,
+                    field: "queue_ready",
+                });
+            }
+            if queue.num != 0 && super::validated_queue_size(queue.num).is_none() {
+                return Err(DeviceStateError::InvalidValue {
+                    kind,
+                    field: "queue_num",
+                });
+            }
+        }
+
+        let mut shared = self.lock();
+        shared.reject_snapshot_if_live()?;
+        shared.transport.device_features_sel = device_features_sel;
+        shared.transport.status = status;
+        shared.transport.queue_sel = queue_sel;
+        shared.transport.queues = queues;
+        shared.transport.interrupt_status = interrupt_status;
+        Ok(())
+    }
+}
+
+fn write_queue_state(writer: &mut StateWriter, queue: Queue) {
+    writer.u32(queue.num);
+    writer.u32(queue.ready);
+    writer.u64(queue.desc);
+    writer.u64(queue.avail);
+    writer.u64(queue.used);
+    writer.u16(queue.last_avail);
+    writer.u16(queue.next_used);
 }
 
 impl Drop for VirtioVsock {
@@ -392,6 +954,78 @@ mod tests {
         let ram = crate::test_support::page_aligned_ram(0x1000);
         // SAFETY: page-aligned, zeroed, leaked for the test process lifetime.
         unsafe { VsockShared::new(49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
+    }
+
+    fn virtio_dev() -> VirtioVsock {
+        let ram = crate::test_support::page_aligned_ram(0x1000);
+        // SAFETY: page-aligned, zeroed, leaked for the test process lifetime.
+        unsafe { VirtioVsock::new(0x0a00_0000, 49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
+    }
+
+    #[test]
+    fn idle_control_state_roundtrips_without_host_state() {
+        let source = virtio_dev();
+        {
+            let mut shared = source.lock();
+            shared.transport.device_features_sel = 1;
+            shared.transport.status = 4;
+            shared.transport.queue_sel = 2;
+            shared.transport.interrupt_status = 1;
+            shared.transport.queues[0] = Queue {
+                num: 128,
+                ready: 1,
+                desc: 0x1000,
+                avail: 0x2000,
+                used: 0x3000,
+                last_avail: 7,
+                next_used: 9,
+            };
+        }
+
+        let encoded = source.snapshot_state().expect("idle vsock state captures");
+        let mut target = virtio_dev();
+        target
+            .restore_state(&encoded)
+            .expect("idle vsock state restores");
+        assert_eq!(target.snapshot_state().unwrap(), encoded);
+    }
+
+    #[test]
+    fn active_vsock_state_is_rejected_before_capture() {
+        let source = virtio_dev();
+        {
+            let mut shared = source.lock();
+            let hdr = VsockHdr {
+                src_port: 1000,
+                dst_port: 2000,
+                ..Default::default()
+            };
+            assert!(shared.transport.try_add_recv(&hdr, 1));
+            shared.transport.pending_rx.clear();
+        }
+        assert!(matches!(
+            source.snapshot_state(),
+            Err(DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioVsock,
+                field: "receive_credit_sessions"
+            })
+        ));
+    }
+
+    #[test]
+    fn host_endpoint_binding_is_rejected_before_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = virtio_dev();
+        source
+            .lock()
+            .set_substitution_endpoint(&dir.path().join("egress.sock"));
+        assert!(matches!(
+            source.snapshot_state(),
+            Err(DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioVsock,
+                field: "host_endpoints_bound"
+            })
+        ));
     }
 
     #[test]
@@ -529,7 +1163,6 @@ mod tests {
             len: raw.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
-            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, &raw);
@@ -638,7 +1271,6 @@ mod tests {
             len: raw.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
-            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, &raw);
@@ -794,7 +1426,6 @@ mod tests {
             len: 5,
             op: OP_RW,
             typ: TYPE_STREAM,
-            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, b"1.2.3");
@@ -973,205 +1604,53 @@ mod tests {
         assert!(!d.service_host_io());
         assert!(d.transport.pending_rx.is_empty());
     }
+
     #[test]
-    fn egress_port_relays_large_payload_without_loss() {
-        use std::io::{Read, Write};
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("subst.sock");
-
-        let Some(listener) = bind_unix_listener(&sock) else {
-            return;
-        };
-
-        // 10 MiB of deterministic payload.
-        let payload_len: usize = 10 * 1024 * 1024;
-        let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
-        let payload_for_server = payload.clone();
-
-        let server = std::thread::spawn(move || {
-            let (mut c, _) = listener.accept().unwrap();
-            // Read the raw-egress target line the guest sends.
-            let mut target_buf = Vec::new();
-            let mut byte = [0u8; 1];
-            loop {
-                c.read_exact(&mut byte).unwrap();
-                if byte[0] == b'\n' {
-                    break;
-                }
-                target_buf.push(byte[0]);
-            }
-            // Write the large payload.
-            c.write_all(&payload_for_server).unwrap();
-            // Hold the connection open briefly, then close gracefully.
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        });
-
-        let mut d = dev();
-        d.set_substitution_endpoint(&sock);
-
-        // Guest opens the stream with a raw-egress target line.
-        let raw = b"files.pythonhosted.org:443\n".to_vec();
-        let rw = VsockHdr {
-            src_cid: GUEST_CID,
-            dst_cid: HOST_CID,
-            src_port: 1500,
-            dst_port: mvm_agentd::vsock::EGRESS_PORT,
-            len: raw.len() as u32,
-            op: OP_RW,
-            typ: TYPE_STREAM,
-            buf_alloc: (payload_len as u32) + 1024,
-            ..Default::default()
-        };
-        d.handle_packet(rw, &raw);
-
-        // Repeatedly service host I/O and provide fresh RX buffers until the
-        // connection closes and no payload remains queued.
-        let mut received = Vec::new();
-        let mut shutdown_seen = false;
-        let rx_buf_addr = 0x6000_0000u64;
-        for _ in 0..2000 {
-            d.provide_rx_descriptor(rx_buf_addr, HDR_LEN + 65536);
-
-            let _ = d.service_host_io();
-
-            // Collect any OP_RW payloads addressed to our src_port.
-            let mut found = false;
-            let pending: Vec<_> = d.transport.pending_rx.drain(..).collect();
-            for (h, p) in pending {
-                if h.op == OP_RW && h.dst_port == 1500 {
-                    received.extend_from_slice(&p);
-                    found = true;
-                } else if h.op == OP_SHUTDOWN && h.dst_port == 1500 {
-                    shutdown_seen = true;
-                }
-            }
-
-            if shutdown_seen && !found {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+    fn host_channel_rebind_starts_a_fresh_io_owner_without_dropping_bindings() {
+        struct NoopIrq;
+        impl IrqLine for NoopIrq {
+            fn signal(&self, _spi: u32) {}
         }
 
-        // Wait for the server to finish writing and close.
-        server.join().unwrap();
-
-        assert!(
-            shutdown_seen,
-            "expected graceful SHUTDOWN for the egress stream"
-        );
-        assert_eq!(
-            received.len(),
-            payload_len,
-            "expected {payload_len} bytes, got {}",
-            received.len()
-        );
-        assert_eq!(received, payload, "payload mismatch");
+        let dir = tempfile::tempdir().unwrap();
+        let agent_socket = dir.path().join("agent.sock");
+        let mut device = virtio_dev();
+        device
+            .rebind_host_channels(
+                &VsockHostBindings {
+                    agent_socket: Some(agent_socket.clone()),
+                    ..VsockHostBindings::default()
+                },
+                Arc::new(NoopIrq),
+            )
+            .unwrap();
+        assert!(device.io.is_some());
+        assert!(agent_socket.exists());
+        let _client = std::os::unix::net::UnixStream::connect(agent_socket).unwrap();
+        device.shutdown();
+        assert!(device.io.is_none());
     }
 
     #[test]
-    fn host_honors_guest_tx_credit_for_large_endpoint_reply() {
-        use std::io::{Read, Write};
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("credit.sock");
+    fn handoff_names_cannot_escape_the_state_root() {
+        assert!(valid_handoff_name("child-123"));
+        assert!(!valid_handoff_name("../child"));
+        assert!(!valid_handoff_name("child/name"));
+        assert!(!valid_handoff_name(""));
+    }
 
-        let Some(listener) = bind_unix_listener(&sock) else {
-            return;
-        };
-
-        let reply_payload = vec![b'x'; 200];
-        let reply_for_server = reply_payload.clone();
-        let server = std::thread::spawn(move || {
-            let (mut c, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 64];
-            let _ = c.read(&mut buf).unwrap();
-            c.write_all(&reply_for_server).unwrap();
-            c.flush().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        });
-
-        let mut d = dev();
-        d.set_substitution_endpoint(&sock);
-
-        // Guest opens the stream advertising only 64 bytes of receive credit.
-        let raw = b"files.pythonhosted.org:443\n".to_vec();
-        let rw = VsockHdr {
-            src_cid: GUEST_CID,
-            dst_cid: HOST_CID,
-            src_port: 1700,
-            dst_port: mvm_agentd::vsock::EGRESS_PORT,
-            len: raw.len() as u32,
-            op: OP_RW,
-            typ: TYPE_STREAM,
-            buf_alloc: 64,
-            ..Default::default()
-        };
-        d.handle_packet(rw, &raw);
-
-        // Wait for the endpoint to accept and write the reply.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        let mut received = Vec::new();
-        let rx_buf_addr = 0x6000_0000u64;
-        for _ in 0..100 {
-            d.provide_rx_descriptor(rx_buf_addr, HDR_LEN + 256);
-            let _ = d.service_host_io();
-            let pending: Vec<_> = d.transport.pending_rx.drain(..).collect();
-            for (h, p) in pending {
-                if h.op == OP_RW && h.dst_port == 1700 {
-                    received.extend_from_slice(&p);
-                }
-            }
-            if !received.is_empty() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-
-        // The host must not send more than the advertised 64 bytes.
-        assert_eq!(
-            received.len(),
-            64,
-            "host sent {} bytes but guest advertised only 64",
-            received.len()
-        );
-
-        // Guest acknowledges the first 64 bytes.
-        let credit = VsockHdr {
-            src_cid: GUEST_CID,
-            dst_cid: HOST_CID,
-            src_port: 1700,
-            dst_port: mvm_agentd::vsock::EGRESS_PORT,
-            len: 0,
-            op: OP_CREDIT_UPDATE,
-            typ: TYPE_STREAM,
-            buf_alloc: 64,
-            fwd_cnt: 64,
-            ..Default::default()
-        };
-        d.handle_packet(credit, &[]);
-
-        for _ in 0..100 {
-            d.provide_rx_descriptor(rx_buf_addr, HDR_LEN + 256);
-            let _ = d.service_host_io();
-            let pending: Vec<_> = d.transport.pending_rx.drain(..).collect();
-            for (h, p) in pending {
-                if h.op == OP_RW && h.dst_port == 1700 {
-                    received.extend_from_slice(&p);
-                }
-            }
-            if received.len() >= 128 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-
-        assert_eq!(
-            received.len(),
-            128,
-            "host did not resume after credit update: got {} bytes",
-            received.len()
-        );
-
-        server.join().unwrap();
+    #[test]
+    fn handoff_endpoint_rejects_symlink_outside_state_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("vms");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).expect("child state dir");
+        let outside = dir.path().join("outside.sock");
+        let listener = UnixListener::bind(&outside).expect("outside listener");
+        let escape = child.join("escape.sock");
+        std::os::unix::fs::symlink(&outside, &escape).expect("escape symlink");
+        let result = validate_handoff_endpoint(&escape, &root, &child);
+        drop(listener);
+        assert!(result.is_err());
     }
 }

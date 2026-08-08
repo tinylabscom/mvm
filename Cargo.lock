@@ -2951,6 +2951,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-backends"
+version = "0.18.0"
+dependencies = [
+ "anyhow",
+ "mvm-agentd",
+ "mvm-core",
+ "mvm-net",
+ "mvm-vmm",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "mvm-build"
 version = "0.18.0"
 dependencies = [
@@ -2970,6 +2983,7 @@ dependencies = [
  "mvm-fs",
  "mvm-net",
  "mvm-sdk",
+ "mvm-vmm",
  "nix 0.29.0",
  "rand 0.8.6",
  "rayon",
@@ -3170,6 +3184,7 @@ dependencies = [
  "async-trait",
  "base64",
  "criterion",
+ "ed25519-dalek",
  "ext4-view",
  "flate2",
  "hex",
@@ -3218,6 +3233,7 @@ dependencies = [
  "mvm-build",
  "mvm-contract",
  "mvm-core",
+ "mvm-fs",
  "mvm-net",
  "mvm-runtime",
  "mvm-sdk",
@@ -3279,6 +3295,7 @@ dependencies = [
  "libkrun-sys",
  "mio",
  "mvm-agentd",
+ "mvm-backends",
  "mvm-build",
  "mvm-contract",
  "mvm-core",
@@ -3342,15 +3359,22 @@ dependencies = [
 name = "mvm-vmm"
 version = "0.18.0"
 dependencies = [
+ "anyhow",
+ "ed25519-dalek",
+ "hex",
  "libc",
  "mio",
  "mvm-agentd",
  "mvm-core",
+ "mvm-net",
  "rand 0.8.6",
+ "serde",
+ "serde_json",
  "tempfile",
  "virtio-queue",
  "virtio-vsock",
  "vm-memory",
+ "which",
 ]
 
 [[package]]

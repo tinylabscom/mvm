@@ -19,14 +19,14 @@ pub(crate) const HVF_PAGE_SIZE: usize = 16 * 1024;
 
 /// An owned demand-zero region sized for guest RAM. `munmap`s on drop, so the
 /// three hand-rolled free paths in the boot flow collapse into RAII.
-pub(crate) struct GuestRam {
+pub struct GuestRam {
     ptr: NonNull<u8>,
     len: usize,
 }
 
 impl GuestRam {
     /// Map `len` bytes of demand-zero anonymous memory for use as guest RAM.
-    pub(crate) fn new(len: usize) -> Result<Self, HvfError> {
+    pub fn new(len: usize) -> Result<Self, HvfError> {
         if len == 0 {
             return Err(HvfError::Alloc);
         }
@@ -59,6 +59,43 @@ impl GuestRam {
     /// Length of the mapped region in bytes.
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Copy the complete RAM mapping into an owned snapshot section.
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        // SAFETY: the mapping is live for `self`'s lifetime and covers exactly
+        // `self.len` readable bytes.
+        unsafe { std::slice::from_raw_parts(self.as_ptr().cast_const(), self.len).to_vec() }
+    }
+
+    /// Restore a complete RAM section into the existing mapping.
+    pub fn restore_bytes(&mut self, bytes: &[u8]) -> Result<(), HvfError> {
+        if bytes.len() != self.len {
+            return Err(HvfError::SnapshotState("guest RAM length mismatch"));
+        }
+        // SAFETY: the exact length was checked; `ptr::copy` also permits an
+        // overlapping source, so a caller may restore from an in-place view.
+        unsafe {
+            core::ptr::copy(bytes.as_ptr(), self.as_ptr(), self.len);
+        }
+        Ok(())
+    }
+
+    /// Replace the complete RAM mapping with a private file-backed mapping.
+    ///
+    /// The file must be exactly the guest RAM size and page-aligned in length.
+    /// Guest writes then use the kernel's private COW path, so a restored child
+    /// starts from the parent's bytes without modifying the snapshot file.
+    pub fn map_private_file(&mut self, path: &Path) -> Result<(), HvfError> {
+        let file_len = File::open(path)
+            .and_then(|file| file.metadata())
+            .map_err(|_| HvfError::BadKernel)?
+            .len();
+        let file_len = usize::try_from(file_len).map_err(|_| HvfError::BadKernel)?;
+        if file_len != self.len || !file_len.is_multiple_of(HVF_PAGE_SIZE) {
+            return Err(HvfError::SnapshotState("snapshot RAM file length mismatch"));
+        }
+        self.map_private_file_at(0, path, file_len)
     }
 
     /// Copy bytes into the owned guest RAM mapping after checking bounds.
@@ -185,6 +222,52 @@ mod tests {
         let mut ram = GuestRam::new(HVF_PAGE_SIZE).expect("mmap");
         ram.copy_at(HVF_PAGE_SIZE - 4, b"tail").unwrap();
         assert!(ram.copy_at(HVF_PAGE_SIZE - 3, b"tail").is_err());
+    }
+
+    #[test]
+    fn snapshot_bytes_roundtrip_mutated_pages() {
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).expect("mmap");
+        ram.copy_at(0, b"before").unwrap();
+        let snapshot = ram.snapshot_bytes();
+        ram.copy_at(0, b"changed").unwrap();
+        ram.restore_bytes(&snapshot).unwrap();
+        assert_eq!(&ram.snapshot_bytes()[..6], b"before");
+    }
+
+    #[test]
+    fn private_file_mapping_copies_on_guest_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ram.bin");
+        let original = vec![0x41_u8; HVF_PAGE_SIZE * 2];
+        std::fs::write(&path, &original).unwrap();
+
+        let mut ram = GuestRam::new(original.len()).unwrap();
+        ram.map_private_file(&path).unwrap();
+        assert_eq!(ram.snapshot_bytes(), original);
+        ram.copy_at(0, b"child").unwrap();
+        assert_eq!(&ram.snapshot_bytes()[..5], b"child");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn private_file_mapping_rejects_a_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ram.bin");
+        std::fs::write(&path, vec![0_u8; HVF_PAGE_SIZE]).unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).unwrap();
+        assert!(matches!(
+            ram.map_private_file(&path),
+            Err(HvfError::SnapshotState("snapshot RAM file length mismatch"))
+        ));
+    }
+
+    #[test]
+    fn restore_bytes_rejects_a_different_ram_size() {
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE).expect("mmap");
+        assert!(matches!(
+            ram.restore_bytes(&[0u8; 4]),
+            Err(HvfError::SnapshotState("guest RAM length mismatch"))
+        ));
     }
 
     #[test]

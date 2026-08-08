@@ -107,6 +107,7 @@ fn map_elf_kernel(world: &mut CliWorld) {
             log_path: state.path().join("console.log"),
         },
         shares: Vec::new(),
+        trusted_builder: false,
     };
     let (mapped_path, format) =
         mvm_runtime::driver::libkrun::map_kernel_for_test(&spec, state.path())

@@ -5,10 +5,21 @@
 //! Concrete backends (HVF, KVM, etc.) depend on this crate and implement the
 //! [`hv::HypervisorVm`] / [`hv::HypervisorVcpu`] traits, then drive the
 //! shared device model through [`run::run`].
+//!
+//! The driver seam ([`driver::VmmDriver`](driver::VmmDriver), [`VmmSpec`])
+//! and the backend-agnostic vsock transport also live here so that
+//! `mvm-backends` can implement backends without depending on the workload
+//! orchestration in `mvm-runtime`.
 
+pub mod checkpoint;
 pub mod dax;
+pub mod driver;
+pub mod host;
+pub mod hvf_handoff;
+pub mod post_restore;
 pub mod vmm;
 pub mod vsock_egress_bridge;
+pub mod vsock_transport;
 
 #[cfg(test)]
 pub(crate) mod test_support;

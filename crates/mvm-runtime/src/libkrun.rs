@@ -42,7 +42,7 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 /// libkrun backend (Linux KVM / macOS Hypervisor.framework).
 pub struct LibkrunBackend;
@@ -262,14 +262,6 @@ fn standby_attach_config(
             .as_ref()
             .map(|config| crate::egress_redirect::terminator_port_for_vm_name(&config.name)),
     })
-}
-
-/// Seconds since the Unix epoch (best-effort; clamps a pre-epoch clock to 0).
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 pub(crate) fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
@@ -1264,11 +1256,12 @@ impl VmBackend for LibkrunBackend {
             vcpus: spec.vcpus,
             mem_mib: spec.mem_mib,
             binding_nonce: spec.binding_nonce.clone(),
-            spawned_unix_secs: now_unix_secs(),
+            spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: None, // libkrun standbys are image-agnostic
             vsock_egress: spec.vsock_egress,
             parent_checkpoint: None, // this spawn path does not capture a checkpoint yet
+            preloaded_child_vm_name: None,
         })
     }
 
@@ -2391,7 +2384,7 @@ mod tests {
     /// age-based reaping built on it.
     #[test]
     fn now_unix_secs_is_a_real_clock() {
-        let observed = now_unix_secs();
+        let observed = mvm_core::time::now_unix_secs();
         // 2020-01-01, comfortably in the past and comfortably after any
         // constant a mutation would substitute.
         assert!(

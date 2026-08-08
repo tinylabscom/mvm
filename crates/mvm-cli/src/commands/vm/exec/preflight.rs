@@ -6,8 +6,7 @@
 //! types they read.
 
 use super::{
-    ReceiptAddDir, ReceiptCommand, ReceiptInput, ReceiptOutcome, RunArgs, parse_env_pair,
-    sha256_hex,
+    ReceiptCommand, ReceiptInput, ReceiptMount, ReceiptOutcome, RunArgs, parse_env_pair, sha256_hex,
 };
 use anyhow::{Context, Result};
 use mvm_core::util::parse_human_size;
@@ -52,7 +51,7 @@ pub(super) struct RunPreflightInvocation {
     pub(super) egress_enforcement: String,
     pub(super) command: ReceiptCommand,
     pub(super) env_keys: Vec<String>,
-    pub(super) add_dirs: Vec<ReceiptAddDir>,
+    pub(super) mounts: Vec<ReceiptMount>,
     pub(super) timeout_secs: u64,
 }
 
@@ -104,8 +103,8 @@ impl RunPreflightSummary {
         // Force mount parsing now so dry-run rejects the same malformed or
         // disallowed host-share specs as an actual run, without resolving an
         // image or touching the VM runtime.
-        for spec in &args.add_dir {
-            crate::exec::AddDir::parse(spec)?;
+        for spec in &args.mounts {
+            crate::commands::parse_dir_share_spec(spec)?;
         }
         let image = match args.manifest.as_ref() {
             _ if args.runtime_pack => RunPreflightImage::RuntimePack,
@@ -158,7 +157,7 @@ impl RunPreflightSummary {
                 egress_enforcement: receipt_input.egress_enforcement,
                 command: receipt_input.command,
                 env_keys: receipt_input.env_keys,
-                add_dirs: receipt_input.add_dirs,
+                mounts: receipt_input.mounts,
                 timeout_secs: receipt_input.timeout_secs,
             },
             resources: RunPreflightResources {
@@ -212,11 +211,11 @@ pub(super) fn print_run_preflight_human(summary: &RunPreflightSummary) {
     } else {
         println!("env keys: {}", summary.invocation.env_keys.join(","));
     }
-    if summary.invocation.add_dirs.is_empty() {
+    if summary.invocation.mounts.is_empty() {
         println!("host shares: none");
     } else {
         println!("host shares:");
-        for dir in &summary.invocation.add_dirs {
+        for dir in &summary.invocation.mounts {
             println!(
                 "  host_sha256={} -> {} ({})",
                 dir.host_path_sha256,

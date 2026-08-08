@@ -69,6 +69,8 @@ pub enum HvfError {
     BadKernel,
     /// In-kernel GICv3 creation failed (needs macOS 15+).
     GicCreate(hv_return_t),
+    /// Serialized HVF state failed structural validation.
+    SnapshotState(&'static str),
 }
 
 /// Whether this host can create an HVF VM right now: both the platform supports

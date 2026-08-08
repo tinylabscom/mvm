@@ -12,6 +12,7 @@ members = [
     "crates/deps/libkrun-sys",
     "crates/mvm-runtime",
     "crates/mvm-vmm",
+    "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
     "crates/mvm-cli",
@@ -357,6 +358,7 @@ mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0" }
+mvm-backends = { path = "crates/mvm-backends", version = "0.18.0" }
 mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
 mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
@@ -556,6 +558,15 @@ template-registry-s3 = [
 # in-process) needs it turned on. `mvm-runtime` is named directly too since
 # this crate depends on it straight, not only through `mvm-cli`.
 test-support = ["mvm-cli/test-support", "mvm-runtime/test-support"]
+# Debug-only Apple Silicon warm-restore validation. The runtime additionally
+# requires a debug build on macOS/aarch64 before advertising the capability.
+hvf-live-validation = [
+    "mvm-cli/hvf-live-validation",
+    "mvm-runtime/hvf-live-validation",
+]
+# Explicit Apple APFS trusted-publication provider for the host-only warm
+# validation lane. The normal binary remains fail-closed without it.
+trusted-apfs = ["mvm-cli/trusted-apfs", "mvm-runtime/trusted-apfs"]
 
 [profile.release]
 opt-level = 3

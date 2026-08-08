@@ -18,6 +18,7 @@ pub(super) use build_mode::BuildModeFlags;
 pub(super) use event::PhaseEvent;
 pub(super) use format::{human_age_secs, human_bytes};
 pub(super) use hints::with_hints;
+pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
 pub(super) use parse::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
     materialize_disk_volume, parse_port_spec, parse_volume_spec, vm_volume_from_spec_validated,

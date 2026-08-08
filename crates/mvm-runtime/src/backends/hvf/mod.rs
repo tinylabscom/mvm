@@ -14,10 +14,10 @@
 
 mod boot_smoke;
 mod console_smoke;
-mod dax_mapper;
 mod guest_ram;
 mod hv_impl;
 mod kernel_boot;
+pub mod snapshot;
 mod sys;
 mod vcpu;
 

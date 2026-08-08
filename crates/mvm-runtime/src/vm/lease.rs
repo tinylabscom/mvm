@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use crate::standby_pool::SupervisorStandbyPool;
 use anyhow::{Context, Result};
-use mvm_core::vm_backend::{StandbyClaim, StandbyCompat, VmBackend, VmId};
+use mvm_core::vm_backend::{
+    StandbyClaim, StandbyCompat, VmBackend, VmId, WarmClaimRefusal, WarmLaunchMode,
+};
 
 use crate::vsock_transport::{self, VsockTransport};
 
@@ -24,6 +26,8 @@ use crate::vsock_transport::{self, VsockTransport};
 pub struct AcquireSpec {
     /// Compat key for the standby match (kernel + fixed resources + image).
     pub want: StandbyCompat,
+    /// Whether the caller permits a cold boot when warm capacity is unavailable.
+    pub mode: WarmLaunchMode,
     /// The admitted, signed workload to attach. `claim.start_config` doubles
     /// as the cold-boot config used on a pool miss.
     pub claim: StandbyClaim,
@@ -42,49 +46,75 @@ enum ReleasePolicy {
     StopAndReplenish,
 }
 
+/// How a lease obtained its VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmLeaseOrigin {
+    /// The VM was claimed from a compatible standby parent.
+    WarmClaim,
+    /// The VM was started directly because warm capacity was not used.
+    ColdBoot,
+}
+
 /// An exclusively-held warm VM. Dropping it stops the VM (and replenishes the
 /// pool for a claimed lease); use [`WarmLease::release`] to surface errors that
 /// `Drop` deliberately swallows.
 pub struct WarmLease {
     backend: Arc<dyn VmBackend>,
     id: VmId,
+    origin: WarmLeaseOrigin,
     release_policy: ReleasePolicy,
     replenish: Option<ReplenishFn>,
     released: bool,
+    replenished: bool,
 }
 
 impl WarmLease {
-    /// Claim a compatible idle standby, or cold-boot on a miss.
+    /// Claim a compatible idle standby, or cold-boot when the mode permits it.
     ///
     /// On a hit: reserve (`mark_claimed`, so a concurrent acquire can't
     /// double-claim) → `claim_standby` → remove the pool entry (its control
-    /// socket is one-shot). A failed claim falls back to cold boot rather than
-    /// proceeding without the workload.
+    /// socket is one-shot). A failed claim is quarantined. Required warm mode
+    /// returns a typed refusal; optional mode may then cold-boot.
     pub fn acquire(
         backend: Arc<dyn VmBackend>,
         pool: &SupervisorStandbyPool,
         spec: &AcquireSpec,
         replenish: Option<ReplenishFn>,
     ) -> Result<Self> {
-        if backend.supports_standby_pool()
-            && let Some(handle) = pool.claim_idle_compatible(&spec.want)?
-        {
-            let claimed = backend.claim_standby(&handle, &spec.claim);
-            pool.remove(&handle.id)
-                .with_context(|| format!("removing claimed standby {}", handle.id))?;
-            match claimed {
-                Ok(id) => {
-                    return Ok(Self {
-                        backend,
-                        id,
-                        release_policy: ReleasePolicy::StopAndReplenish,
-                        replenish,
-                        released: false,
-                    });
+        if !matches!(spec.mode, WarmLaunchMode::Cold) {
+            if !backend.supports_standby_pool() {
+                if spec.mode.requires_warm() {
+                    return Err(anyhow::Error::new(WarmClaimRefusal::BackendUnsupported {
+                        backend: backend.name().to_string(),
+                    }));
                 }
-                Err(e) => {
-                    tracing::warn!("warm claim failed, falling back to cold boot: {e}");
+            } else if let Some(handle) = pool.claim_idle_compatible(&spec.want)? {
+                let claimed = backend.claim_standby(&handle, &spec.claim);
+                pool.remove(&handle.id)
+                    .with_context(|| format!("quarantining claimed standby {}", handle.id))?;
+                match claimed {
+                    Ok(id) => {
+                        return Ok(Self {
+                            backend,
+                            id,
+                            origin: WarmLeaseOrigin::WarmClaim,
+                            release_policy: ReleasePolicy::StopAndReplenish,
+                            replenish,
+                            released: false,
+                            replenished: false,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(standby = %handle.id, error = %e, "warm claim failed");
+                        if spec.mode.requires_warm() {
+                            return Err(anyhow::Error::new(WarmClaimRefusal::ClaimRejected {
+                                reason: e.to_string(),
+                            }));
+                        }
+                    }
                 }
+            } else if spec.mode.requires_warm() {
+                return Err(anyhow::Error::new(WarmClaimRefusal::NoCompatibleParent));
             }
         }
 
@@ -97,15 +127,22 @@ impl WarmLease {
         Ok(Self {
             backend,
             id,
+            origin: WarmLeaseOrigin::ColdBoot,
             release_policy: ReleasePolicy::Stop,
             replenish,
             released: false,
+            replenished: false,
         })
     }
 
     /// The booted VM's id.
     pub fn id(&self) -> &VmId {
         &self.id
+    }
+
+    /// Whether this lease came from a standby parent or a direct boot.
+    pub fn origin(&self) -> WarmLeaseOrigin {
+        self.origin
     }
 
     /// A vsock transport to the leased VM.
@@ -120,19 +157,22 @@ impl WarmLease {
 
     /// Stop the VM (and replenish for a claimed lease), surfacing errors that
     /// `Drop` would swallow.
-    pub fn release(mut self) -> Result<()> {
-        self.released = true; // claim teardown here so Drop does not repeat it
+    pub fn release(&mut self) -> Result<()> {
         self.teardown()
     }
 
-    fn teardown(&self) -> Result<()> {
-        self.backend
-            .stop(&self.id)
-            .with_context(|| format!("stopping warm-leased VM {}", self.id.0))?;
-        if self.release_policy == ReleasePolicy::StopAndReplenish
-            && let Some(replenish) = &self.replenish
-        {
-            replenish().context("replenishing the standby pool after release")?;
+    fn teardown(&mut self) -> Result<()> {
+        if !self.released {
+            self.backend
+                .stop(&self.id)
+                .with_context(|| format!("stopping warm-leased VM {}", self.id.0))?;
+            self.released = true;
+        }
+        if self.release_policy == ReleasePolicy::StopAndReplenish && !self.replenished {
+            if let Some(replenish) = &self.replenish {
+                replenish().context("replenishing the standby pool after release")?;
+            }
+            self.replenished = true;
         }
         Ok(())
     }
@@ -140,7 +180,9 @@ impl WarmLease {
 
 impl Drop for WarmLease {
     fn drop(&mut self) {
-        if self.released {
+        if self.released
+            && (self.release_policy != ReleasePolicy::StopAndReplenish || self.replenished)
+        {
             return;
         }
         // Best-effort, non-panicking: a dropped lease must never leave a VM
@@ -189,6 +231,7 @@ mod tests {
             image_sha256: c.image_sha256,
             parent_checkpoint: None,
             vsock_egress: c.vsock_egress,
+            preloaded_child_vm_name: None,
         }
     }
 
@@ -231,10 +274,11 @@ mod tests {
         let (rf, fired) = flag_replenish();
         let spec = AcquireSpec {
             want: compat(),
+            mode: WarmLaunchMode::Optional,
             claim: claim("cold-vm"),
         };
 
-        let lease = WarmLease::acquire(backend, &pool, &spec, Some(rf)).unwrap();
+        let mut lease = WarmLease::acquire(backend, &pool, &spec, Some(rf)).unwrap();
         assert_eq!(lease.id().0, "cold-vm");
         assert_eq!(mock.count(), 1, "cold boot should start one VM");
 
@@ -256,10 +300,11 @@ mod tests {
         let (rf, fired) = flag_replenish();
         let spec = AcquireSpec {
             want: compat(),
+            mode: WarmLaunchMode::Optional,
             claim: claim("unused-cold"),
         };
 
-        let lease = WarmLease::acquire(backend, &pool, &spec, Some(rf)).unwrap();
+        let mut lease = WarmLease::acquire(backend, &pool, &spec, Some(rf)).unwrap();
         assert_eq!(
             lease.id().0,
             "sb-1",
@@ -289,6 +334,7 @@ mod tests {
         let (rf, fired) = flag_replenish();
         let spec = AcquireSpec {
             want: compat(),
+            mode: WarmLaunchMode::Optional,
             claim: claim("unused-cold"),
         };
 
@@ -312,14 +358,57 @@ mod tests {
         let backend: Arc<dyn VmBackend> = mock.clone();
         let spec = AcquireSpec {
             want: compat(),
+            mode: WarmLaunchMode::Optional,
             claim: claim("cold-vm"),
         };
 
-        let lease = WarmLease::acquire(backend, &pool, &spec, None).unwrap();
+        let mut lease = WarmLease::acquire(backend, &pool, &spec, None).unwrap();
         let err = lease.release().unwrap_err();
         assert!(
             err.to_string().contains("stopping warm-leased VM"),
             "release surfaces the stop failure, got: {err}"
         );
+    }
+
+    #[test]
+    fn required_mode_refuses_when_backend_has_no_warm_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let backend: Arc<dyn VmBackend> = Arc::new(MockBackend::new());
+        let spec = AcquireSpec {
+            want: compat(),
+            mode: WarmLaunchMode::Required,
+            claim: claim("must-not-cold-boot"),
+        };
+
+        let err = match WarmLease::acquire(backend, &pool, &spec, None) {
+            Ok(_) => panic!("required warm mode must not cold-boot"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err.downcast_ref::<WarmClaimRefusal>(),
+            Some(WarmClaimRefusal::BackendUnsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn required_mode_refuses_pool_exhaustion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let backend: Arc<dyn VmBackend> = Arc::new(MockBackend::new().with_standby());
+        let spec = AcquireSpec {
+            want: compat(),
+            mode: WarmLaunchMode::Required,
+            claim: claim("must-not-cold-boot"),
+        };
+
+        let err = match WarmLease::acquire(backend, &pool, &spec, None) {
+            Ok(_) => panic!("required warm mode must refuse an empty pool"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err.downcast_ref::<WarmClaimRefusal>(),
+            Some(WarmClaimRefusal::NoCompatibleParent)
+        ));
     }
 }

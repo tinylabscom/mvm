@@ -59,6 +59,21 @@ const SIG_BYTES: usize = 64;
 
 /// Filename of the signature sidecar written next to the snapshot.
 pub const SIGNATURE_FILENAME: &str = "snapshot.sig";
+/// Filename of the signature over a checkpoint content manifest.
+pub const MANIFEST_SIGNATURE_FILENAME: &str = "checkpoint-manifest.sig";
+
+/// Ed25519 signature binding a staged snapshot to a verified checkpoint blob
+/// manifest. The staged bytes are sealed separately by the snapshot store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSignature {
+    /// The digest of the sorted checkpoint blob manifest.
+    pub manifest_digest: String,
+    /// Ed25519 signature over the versioned manifest-signing domain and digest.
+    pub signature: String,
+    /// Signer's Ed25519 public key, pinned at verification.
+    pub pubkey: String,
+}
 
 /// The host identity that signs snapshots: the attestation identity,
 /// resolved under the mvm **data dir** (`<data_dir>/attestation`) rather
@@ -149,6 +164,80 @@ fn signed_message(content_hash: &[u8; 32], epoch: u64) -> [u8; 40] {
     msg[..32].copy_from_slice(content_hash);
     msg[32..].copy_from_slice(&epoch.to_be_bytes());
     msg
+}
+
+fn signed_manifest_message(manifest_digest: &str) -> Vec<u8> {
+    let mut message = b"mvm.checkpoint.manifest.v1\0".to_vec();
+    message.extend_from_slice(manifest_digest.as_bytes());
+    message
+}
+
+/// Sign a checkpoint's already-computed content-manifest digest into its
+/// staged snapshot directory. This does not reread the captured files.
+pub fn sign_manifest(
+    snapshot_dir: &Path,
+    manifest_digest: &str,
+    signing_key: &SigningKey,
+) -> Result<ManifestSignature> {
+    let signature = signing_key.sign(&signed_manifest_message(manifest_digest));
+    let sidecar = ManifestSignature {
+        manifest_digest: manifest_digest.to_owned(),
+        signature: hex_encode(&signature.to_bytes()),
+        pubkey: hex_encode(signing_key.verifying_key().as_bytes()),
+    };
+    write_manifest_atomic(snapshot_dir, &sidecar)?;
+    Ok(sidecar)
+}
+
+/// Verify the host-authenticated checkpoint manifest binding in O(1).
+pub fn verify_manifest(
+    snapshot_dir: &Path,
+    expected_digest: &str,
+    trusted_signers: &[VerifyingKey],
+) -> Result<()> {
+    let path = snapshot_dir.join(MANIFEST_SIGNATURE_FILENAME);
+    let raw = std::fs::read(&path)
+        .with_context(|| format!("read manifest signature {}", path.display()))?;
+    let sidecar: ManifestSignature =
+        serde_json::from_slice(&raw).context("parse manifest signature")?;
+    if sidecar.manifest_digest != expected_digest {
+        anyhow::bail!("staged snapshot manifest digest does not match checkpoint");
+    }
+    let signer = decode_pubkey(&sidecar.pubkey)
+        .map_err(|e| anyhow::anyhow!("decode manifest signer: {e}"))?;
+    if !trusted_signers
+        .iter()
+        .any(|key| key.to_bytes() == signer.to_bytes())
+    {
+        anyhow::bail!("staged snapshot manifest signer is not trusted");
+    }
+    let signature = decode_signature(&sidecar.signature)
+        .map_err(|e| anyhow::anyhow!("decode manifest signature: {e}"))?;
+    signer
+        .verify(&signed_manifest_message(expected_digest), &signature)
+        .map_err(|_| anyhow::anyhow!("staged snapshot manifest signature is invalid"))
+}
+
+fn write_manifest_atomic(snapshot_dir: &Path, sidecar: &ManifestSignature) -> Result<()> {
+    let json = serde_json::to_vec_pretty(sidecar).context("serialize manifest signature")?;
+    let final_path = snapshot_dir.join(MANIFEST_SIGNATURE_FILENAME);
+    let tmp_path = snapshot_dir.join(format!("{MANIFEST_SIGNATURE_FILENAME}.tmp"));
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)
+            .with_context(|| format!("open {} for write", tmp_path.display()))?;
+        file.write_all(&json)
+            .with_context(|| format!("write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("fsync {}", tmp_path.display()))?;
+    }
+    std::fs::rename(&tmp_path, &final_path)
+        .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
+    Ok(())
 }
 
 /// Sign a snapshot: compute its content-address, sign `(sha256 ‖ epoch)`
@@ -428,5 +517,48 @@ mod tests {
         let files = make_snap(tmp.path());
         sign(tmp.path(), &files, 1, &id1.signing).unwrap();
         assert!(verify_signature(tmp.path(), &files, 1, &[id1.verifying_key()]).is_ok());
+    }
+
+    #[test]
+    fn manifest_signature_round_trips_without_reading_snapshot_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = key();
+        let digest = "sha256:checkpoint-manifest";
+
+        let written = sign_manifest(tmp.path(), digest, &signer).unwrap();
+        verify_manifest(tmp.path(), digest, &[signer.verifying_key()]).unwrap();
+
+        let stored: ManifestSignature = serde_json::from_slice(
+            &std::fs::read(tmp.path().join(MANIFEST_SIGNATURE_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored, written);
+    }
+
+    #[test]
+    fn manifest_signature_rejects_digest_and_signature_tampering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = key();
+        sign_manifest(tmp.path(), "sha256:original", &signer).unwrap();
+
+        let digest_error =
+            verify_manifest(tmp.path(), "sha256:changed", &[signer.verifying_key()]).unwrap_err();
+        assert!(
+            digest_error
+                .to_string()
+                .contains("does not match checkpoint")
+        );
+
+        let path = tmp.path().join(MANIFEST_SIGNATURE_FILENAME);
+        let mut stored: ManifestSignature =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut signature = hex_decode(&stored.signature).unwrap();
+        signature[0] ^= 1;
+        stored.signature = hex_encode(&signature);
+        std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let signature_error =
+            verify_manifest(tmp.path(), "sha256:original", &[signer.verifying_key()]).unwrap_err();
+        assert!(signature_error.to_string().contains("signature is invalid"));
     }
 }

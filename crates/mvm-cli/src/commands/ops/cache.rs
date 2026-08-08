@@ -484,7 +484,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             } else {
                 match mvm_runtime::standby_pool::SupervisorStandbyPool::open().and_then(|pool| {
-                    pool.reap_stale(STANDBY_POOL_TTL, mvm_runtime::standby_pool::now_unix_secs())
+                    pool.reap_stale(STANDBY_POOL_TTL, mvm_core::time::now_unix_secs())
                 }) {
                     Ok(reaped) if !reaped.is_empty() => {
                         removed += reaped.len() as u64;

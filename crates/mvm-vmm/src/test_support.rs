@@ -75,3 +75,9 @@ pub(crate) fn page_aligned_ram(size: usize) -> &'static mut [u8] {
     // intentionally leaked so it stays valid for the whole test process.
     unsafe { std::slice::from_raw_parts_mut(ptr, size) }
 }
+
+/// Process-wide mutex for tests that mutate process-global environment state
+/// (e.g., `MVM_HOME`). Holds the lock for the duration of the test so
+/// concurrent tests do not race on the shared environment.
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

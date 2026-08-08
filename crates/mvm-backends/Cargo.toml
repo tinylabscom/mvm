@@ -1,0 +1,27 @@
+[package]
+name = "mvm-backends"
+version.workspace = true
+edition.workspace = true
+description = "Concrete VMM backend implementations for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvm-vmm = { workspace = true }
+mvm-core = { workspace = true }
+mvm-net = { workspace = true }
+mvm-agentd = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+test-support = []
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

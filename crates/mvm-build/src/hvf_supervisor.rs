@@ -32,6 +32,16 @@ pub struct HvfDisk {
     pub ephemeral: bool,
 }
 
+/// One read-only host directory served as a guest virtio-fs volume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HvfVirtioFsShare {
+    /// Host directory to serve.
+    pub path: PathBuf,
+    /// Guest-visible virtio-fs tag, for example `uvol0`.
+    pub tag: String,
+}
+
 /// A host UDS that the supervisor binds on behalf of one guest vsock data port,
 /// allowing the console driver to connect and exchange PTY data with the guest.
 /// Populated only when `dev_console` is true; a sealed prod config carries none.
@@ -43,6 +53,8 @@ pub struct ConsoleDataSocket {
     /// Host UDS path the supervisor binds so the console driver can connect.
     pub host_socket: PathBuf,
 }
+
+pub use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
 /// Everything the supervisor needs to boot one guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +85,9 @@ pub struct HvfSupervisorConfig {
     /// `rootfstype=virtiofs root=mvmroot`.
     #[serde(default)]
     pub virtiofs_root: Option<PathBuf>,
+    /// Read-only live host-directory shares mounted after the image root.
+    #[serde(default)]
+    pub virtiofs_shares: Vec<HvfVirtioFsShare>,
     /// Attach a virtio-vsock device.
     #[serde(default)]
     pub vsock: bool,
@@ -85,6 +100,27 @@ pub struct HvfSupervisorConfig {
     /// when the guest reports it over the workload-exit vsock port — the transient
     /// run-to-exit result the backend's `wait` reads.
     pub workload_exit: PathBuf,
+    /// Marker written only after the vCPU has entered the pause hold. The
+    /// backend waits for this marker before treating pause as complete.
+    #[serde(default)]
+    pub pause_state: Option<PathBuf>,
+    /// Host-side request file used to ask a paused parent to serialize its
+    /// in-process HVF state into the requested RAM file and sibling frame.
+    #[serde(default)]
+    pub snapshot_request: Option<PathBuf>,
+    /// Fixed supervisor-owned raw RAM output for a parent snapshot.
+    #[serde(default)]
+    pub snapshot_ram: Option<PathBuf>,
+    /// Fixed supervisor-owned vCPU/device frame output for a parent snapshot.
+    #[serde(default)]
+    pub snapshot_frame: Option<PathBuf>,
+    /// Raw guest RAM backing file for a restored child. It is mapped private so
+    /// child writes never modify the saved parent bytes.
+    #[serde(default)]
+    pub restore_ram: Option<PathBuf>,
+    /// Complete HVF frame containing vCPU and deterministic device state.
+    #[serde(default)]
+    pub restore_frame: Option<PathBuf>,
     /// Run budget in seconds — a booting kernel never exits on its own, so the
     /// guest is forced out after this long. The backend sets it from the VM's
     /// requested lifetime.
@@ -119,6 +155,16 @@ pub struct HvfSupervisorConfig {
     /// Populated by the driver when `VmStartConfig.dev_console` is true.
     #[serde(default)]
     pub console_data_sockets: Vec<ConsoleDataSocket>,
+    /// Fixed supervisor-owned control socket for a live standby handoff.
+    /// `None` disables this privileged path for ordinary VMs.
+    #[serde(default)]
+    pub handoff_socket: Option<PathBuf>,
+    /// Trusted VM-state root from which child channel paths are derived.
+    #[serde(default)]
+    pub handoff_root: Option<PathBuf>,
+    /// Hex-encoded host identity key used to authenticate handoff requests.
+    #[serde(default)]
+    pub handoff_verify_key: Option<String>,
 }
 
 #[cfg(test)]
@@ -145,16 +191,26 @@ mod tests {
                 },
             ],
             virtiofs_root: None,
+            virtiofs_shares: vec![],
             vsock: true,
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
             workload_exit: "/state/workload.exit".into(),
+            pause_state: Some("/state/pause.state".into()),
+            snapshot_request: Some("/state/snapshot.request".into()),
+            snapshot_ram: Some("/state/snapshot.ram".into()),
+            snapshot_frame: Some("/state/snapshot.frame".into()),
+            restore_ram: None,
+            restore_frame: None,
             timeout_secs: 30,
             agent_socket: Some("/state/hvf-agent.sock".into()),
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
             broker_socket: Some("/state/hvf-broker.sock".into()),
             console_data_sockets: vec![],
+            handoff_socket: Some("/state/handoff.sock".into()),
+            handoff_root: Some("/state/vms".into()),
+            handoff_verify_key: Some("11".repeat(32)),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(
@@ -172,6 +228,10 @@ mod tests {
         assert_eq!(cfg.substitution_socket, None);
         assert_eq!(cfg.egress_relay_socket, None);
         assert_eq!(cfg.broker_socket, None);
+        assert_eq!(cfg.pause_state, None);
+        assert_eq!(cfg.handoff_socket, None);
+        assert_eq!(cfg.handoff_root, None);
+        assert_eq!(cfg.handoff_verify_key, None);
     }
 
     #[test]
@@ -201,10 +261,17 @@ mod tests {
             initramfs: None,
             disks: vec![],
             virtiofs_root: None,
+            virtiofs_shares: vec![],
             vsock: true,
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
             workload_exit: "/state/workload.exit".into(),
+            pause_state: None,
+            snapshot_request: None,
+            snapshot_ram: None,
+            snapshot_frame: None,
+            restore_ram: None,
+            restore_frame: None,
             timeout_secs: 30,
             agent_socket: None,
             substitution_socket: None,
@@ -220,6 +287,9 @@ mod tests {
                     host_socket: "/state/vsock/vsock-20002.sock".into(),
                 },
             ],
+            handoff_socket: None,
+            handoff_root: None,
+            handoff_verify_key: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let decoded: HvfSupervisorConfig = serde_json::from_str(&json).unwrap();
@@ -239,5 +309,14 @@ mod tests {
         let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.console_data_sockets.is_empty());
+    }
+
+    #[test]
+    fn handoff_signature_message_binds_channel_authority() {
+        let base = HvfHandoffRequest::signing_message(42, "child", 0b0011);
+        let other_pid = HvfHandoffRequest::signing_message(43, "child", 0b0011);
+        let other_channels = HvfHandoffRequest::signing_message(42, "child", 0b0111);
+        assert_ne!(base, other_pid);
+        assert_ne!(base, other_channels);
     }
 }

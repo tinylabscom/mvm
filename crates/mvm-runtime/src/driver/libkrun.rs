@@ -508,11 +508,12 @@ mod tests {
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,
+            shares: vec![],
             vsock,
             console: ConsoleCapture {
                 log_path: "/tmp/console.log".into(),
             },
-            shares: Vec::new(),
+            trusted_builder: false,
         }
     }
 
