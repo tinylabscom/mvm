@@ -5,6 +5,7 @@ mod apple_container;
 mod claim;
 pub(crate) mod cli;
 mod hvf_save_restore;
+mod cold_launch;
 mod initramfs;
 mod kernel_pin;
 mod l3_vsock;

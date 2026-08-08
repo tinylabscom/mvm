@@ -9,9 +9,14 @@
 
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
+use super::launch_sample::LaunchSubTimings;
+
 /// Whether the backend satisfied the launch from a warm standby or performed
 /// a normal boot/restore path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LaunchMode {
     /// A claimed standby child resumed from captured memory.
     Warm,
@@ -20,7 +25,8 @@ pub enum LaunchMode {
 }
 
 impl LaunchMode {
-    fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Warm => "warm",
             Self::Cold => "cold",
@@ -62,7 +68,8 @@ pub struct RunPhaseMarks {
 
 /// Per-phase host wall-clock spans, milliseconds. `total_ms` is the headline:
 /// `start` to `torn_down`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunPhaseTimings {
     pub launch_mode: LaunchMode,
     pub resolve_ms: f64,
@@ -87,6 +94,133 @@ pub struct WarmClaimMarks {
     pub pool_wait_started: Option<Instant>,
     /// When the backend claim began after pool maintenance.
     pub claim_started: Option<Instant>,
+}
+
+/// The sub-phases a launch can time below the coarse buckets above.
+///
+/// The three mount sub-phases have no producer on the live-share `--mount`
+/// path, which attaches a host directory over virtio-fs and materializes
+/// nothing; a content-addressed mount image is what records them. They are
+/// declared here because the prepared-cold lane gate has to be able to see
+/// mount materialization to refuse it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubPhase {
+    MountFingerprint,
+    MountCacheLookup,
+    MountMaterialize,
+    ArtifactVerify,
+    VmmCreate,
+    GuestKernelEntry,
+    AgentAuth,
+    FirstDispatch,
+    CleanupHandoff,
+}
+
+/// One optional sub-phase span.
+///
+/// A span with no marks collapses to `None`, never `0.0` — "did not happen"
+/// and "took no measurable time" are different facts, and a report that
+/// merges them cannot answer where a launch spent its milliseconds.
+#[derive(Debug, Default, Clone, Copy)]
+struct SpanMark {
+    started: Option<Instant>,
+    finished: Option<Instant>,
+}
+
+impl SpanMark {
+    fn elapsed_ms(self) -> Option<f64> {
+        let (start, end) = (self.started?, self.finished?);
+        Some(end.saturating_duration_since(start).as_secs_f64() * 1000.0)
+    }
+}
+
+/// Sub-phase marks for one launch. Construct with [`LaunchSubMarks::new`];
+/// when disabled every `start`/`finish` is a no-op and every span reports
+/// `None`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LaunchSubMarks {
+    enabled: bool,
+    mount_fingerprint: SpanMark,
+    mount_cache_lookup: SpanMark,
+    mount_materialize: SpanMark,
+    artifact_verify: SpanMark,
+    vmm_create: SpanMark,
+    guest_kernel_entry: SpanMark,
+    agent_auth: SpanMark,
+    first_dispatch: SpanMark,
+    cleanup_handoff: SpanMark,
+}
+
+impl LaunchSubMarks {
+    #[must_use]
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Self::default()
+        }
+    }
+
+    fn slot(&mut self, phase: SubPhase) -> &mut SpanMark {
+        match phase {
+            SubPhase::MountFingerprint => &mut self.mount_fingerprint,
+            SubPhase::MountCacheLookup => &mut self.mount_cache_lookup,
+            SubPhase::MountMaterialize => &mut self.mount_materialize,
+            SubPhase::ArtifactVerify => &mut self.artifact_verify,
+            SubPhase::VmmCreate => &mut self.vmm_create,
+            SubPhase::GuestKernelEntry => &mut self.guest_kernel_entry,
+            SubPhase::AgentAuth => &mut self.agent_auth,
+            SubPhase::FirstDispatch => &mut self.first_dispatch,
+            SubPhase::CleanupHandoff => &mut self.cleanup_handoff,
+        }
+    }
+
+    /// Open (or re-open) a span. Re-opening is deliberate: a retried phase —
+    /// a readiness handshake that failed and was polled again — reports the
+    /// attempt that finished, not the first one that started.
+    pub fn start(&mut self, phase: SubPhase) {
+        if !self.enabled {
+            return;
+        }
+        let slot = self.slot(phase);
+        slot.started = Some(Instant::now());
+        slot.finished = None;
+    }
+
+    /// Close a span. A close with no matching open is dropped, so an
+    /// error path that skipped the opening mark reports `None` rather than a
+    /// span measured from the wrong instant.
+    pub fn finish(&mut self, phase: SubPhase) {
+        if !self.enabled {
+            return;
+        }
+        let slot = self.slot(phase);
+        if slot.started.is_some() {
+            slot.finished = Some(Instant::now());
+        }
+    }
+
+    /// Whether `phase` recorded a complete span.
+    #[must_use]
+    pub fn recorded(&self, phase: SubPhase) -> bool {
+        let mut copy = *self;
+        copy.slot(phase).elapsed_ms().is_some()
+    }
+
+    /// Collapse every mark into the reported spans.
+    #[must_use]
+    pub fn to_timings(self) -> LaunchSubTimings {
+        LaunchSubTimings {
+            mount_fingerprint_ms: self.mount_fingerprint.elapsed_ms(),
+            mount_cache_lookup_ms: self.mount_cache_lookup.elapsed_ms(),
+            mount_materialize_ms: self.mount_materialize.elapsed_ms(),
+            artifact_verify_ms: self.artifact_verify.elapsed_ms(),
+            vmm_create_ms: self.vmm_create.elapsed_ms(),
+            guest_kernel_entry_ms: self.guest_kernel_entry.elapsed_ms(),
+            agent_auth_ms: self.agent_auth.elapsed_ms(),
+            first_dispatch_ms: self.first_dispatch.elapsed_ms(),
+            cleanup_handoff_ms: self.cleanup_handoff.elapsed_ms(),
+        }
+    }
 }
 
 impl RunPhaseMarks {
@@ -403,6 +537,81 @@ mod tests {
         approx(WARM_START_MAX_MS, 300.0);
         assert_eq!(WARM_START_P50_BUDGET_MS, 30);
         assert_eq!(WARM_START_P99_BUDGET_MS, 50);
+    }
+
+    /// Every sub-phase, so a mis-wired `slot()` arm shows up as one phase
+    /// overwriting another rather than as a silently wrong benchmark column.
+    const ALL_SUB_PHASES: [SubPhase; 9] = [
+        SubPhase::MountFingerprint,
+        SubPhase::MountCacheLookup,
+        SubPhase::MountMaterialize,
+        SubPhase::ArtifactVerify,
+        SubPhase::VmmCreate,
+        SubPhase::GuestKernelEntry,
+        SubPhase::AgentAuth,
+        SubPhase::FirstDispatch,
+        SubPhase::CleanupHandoff,
+    ];
+
+    #[test]
+    fn every_sub_phase_records_its_own_independent_span() {
+        let mut marks = LaunchSubMarks::new(true);
+        for phase in ALL_SUB_PHASES {
+            assert!(!marks.recorded(phase));
+            marks.start(phase);
+            marks.finish(phase);
+            assert!(marks.recorded(phase), "{phase:?} did not record a span");
+        }
+        let timings = marks.to_timings();
+        assert_eq!(
+            timings.recorded().len(),
+            ALL_SUB_PHASES.len(),
+            "each phase must map to its own field: {timings:?}"
+        );
+    }
+
+    #[test]
+    fn a_disabled_mark_set_records_nothing() {
+        let mut marks = LaunchSubMarks::new(false);
+        for phase in ALL_SUB_PHASES {
+            marks.start(phase);
+            marks.finish(phase);
+            assert!(!marks.recorded(phase));
+        }
+        assert_eq!(marks.to_timings(), LaunchSubTimings::default());
+    }
+
+    #[test]
+    fn a_finish_without_a_start_records_nothing() {
+        // An error path that skipped the opening mark must report "not
+        // measured", never a span measured from some unrelated instant.
+        let mut marks = LaunchSubMarks::new(true);
+        marks.finish(SubPhase::VmmCreate);
+        assert!(!marks.recorded(SubPhase::VmmCreate));
+        assert_eq!(marks.to_timings().vmm_create_ms, None);
+    }
+
+    #[test]
+    fn restarting_a_span_reports_the_attempt_that_finished() {
+        // The readiness handshake is polled: a failed attempt reopens the
+        // span, and the reported cost must be the attempt that succeeded.
+        let mut marks = LaunchSubMarks::new(true);
+        marks.start(SubPhase::AgentAuth);
+        std::thread::sleep(Duration::from_millis(20));
+        marks.start(SubPhase::AgentAuth);
+        assert!(
+            !marks.recorded(SubPhase::AgentAuth),
+            "reopening must clear the prior close"
+        );
+        marks.finish(SubPhase::AgentAuth);
+        let measured = marks
+            .to_timings()
+            .agent_auth_ms
+            .expect("the second attempt closed");
+        assert!(
+            measured < 20.0,
+            "reported {measured}ms includes the abandoned attempt"
+        );
     }
 
     #[test]

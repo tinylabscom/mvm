@@ -907,6 +907,8 @@ All commands accept these global options:
 | `MVM_OCI_BEARER_TOKEN_<HOST>` | Bearer token for one OCI registry host (`ghcr.io` -> `MVM_OCI_BEARER_TOKEN_GHCR_IO`) | Unset |
 | `MVM_OCI_BEARER_TOKEN` | Global fallback bearer token for OCI registry pulls | Unset |
 | `RUST_LOG` | Logging level (e.g., `debug`, `mvm=trace`) | `info` |
+| `MVM_PHASE_TIMING` | Set to `1`/`true` to print a transient run's per-phase launch breakdown to stderr: `[mvm] phase-timing:` for the coarse buckets, plus `[mvm] phase-timing-detail:` for whichever sub-phases were measured | Unset |
+| `MVM_LAUNCH_SAMPLE_JSON` | Path a transient run writes its machine-readable launch sample to — build profile, backend, guest sizing, artifact paths, the expensive work the launch performed, and every phase span. Read by the release-only cold-launch benchmark; setting it turns the measurement on without the stderr output. | Unset |
 | `MVM_DEV_FLAKE_URL` | Escape hatch for the dev-build's chained `--override-input mvm` target. When set, suppresses the default chained override. (Legacy from the previous iteration's dual-flake layout; today's same-flake-for-both-modes design rarely needs it.) | Unset |
 | `MVM_SRC` | Override the source repo path passed to `nix build` during dev builds | Workspace root |
 | `MVM_BUILDER_AGENT_BIN` | Override the path to the builder-agent binary baked into the builder VM image | Auto-detected from build closure |

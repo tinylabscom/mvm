@@ -1648,6 +1648,22 @@ Then unify + retire the old paths:
 
 **WS-DX-COLD — prepared cold-launch performance**
 
+- [~] **Trustworthy baseline (Plan 299 Phase 0):** the measurement substrate is
+  in. A transient run writes a machine-readable launch sample
+  (`MVM_LAUNCH_SAMPLE_JSON`) carrying its build profile, backend, guest sizing,
+  artifact paths, the expensive work it performed, and per-phase spans below the
+  coarse `drives`/`backend`/`vsock` buckets. The benchmark
+  (`mvm_cli::bench::cold_launch_runner`) invokes a built `mvmctl` directly —
+  never `cargo` — refuses a debug-built sample, refuses a prepared-cold sample
+  that pulled, built, materialized a mount image, or claimed a warm standby, and
+  reports raw samples alongside p50/p95/p99. 54 focused unit/integration tests
+  plus 7 BDD scenarios
+  (`features/suites/s5_lifecycle/prepared_cold_launch_lane.feature`) cover the
+  gate; workspace nextest (10,629 passed), doctests, workspace Clippy, the
+  hermetic BDD suite (153/153), the Lint-job xtask gates, and the Linux
+  cross-compile are green. **Open:** the ≥20-iteration live baseline per lane on
+  Apple Silicon/HVF and the Linux Firecracker host — no measured numbers are
+  claimed until it runs.
 - [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
   `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon

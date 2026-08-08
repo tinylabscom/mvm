@@ -64,6 +64,26 @@ for detailed scope and acceptance criteria.
         binding untouched; fresh child identity on every fork
   - [x] BDD suite `s11_snapshot/hvf_save_restore.feature` + benchmark evidence
 
+- [~] Plan 299 — Prepared cold-launch performance
+      (`specs/plans/299-cold-launch-performance.md`), branch
+      `plan/cold-launch-performance`
+  - [~] Phase 0 — freeze a trustworthy baseline. The substrate is in: a
+        release-only benchmark entry point that invokes a built `mvmctl`
+        directly, a machine-readable launch sample carrying build profile /
+        backend / guest sizing / artifact paths / work performed, nine
+        sub-phase spans below the coarse run buckets, raw-plus-p50/p95/p99
+        reporting, and a lane gate that refuses a prepared-cold sample which
+        pulled, built, materialized a mount image, or claimed a warm standby.
+        The ≥20-iteration live baseline per lane on Apple Silicon/HVF and the
+        Linux Firecracker host is the one open item.
+  - [ ] Phase 1 — content-addressed `--mount` image cache
+  - [ ] Phase 2 — artifact preparation outside the launch path
+  - [ ] Phase 3 — reduce backend cold-start latency
+  - [ ] Phase 4 — parallelize independent host work
+  - [ ] Phase 5 — event-driven guest readiness
+  - [ ] Phase 6 — move cleanup off the foreground critical path
+  - [ ] Phase 7 — live validation and regression gates
+
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader

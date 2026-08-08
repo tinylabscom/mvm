@@ -1,6 +1,7 @@
 # Plan 299 — Prepared cold-launch performance
 
-**Status:** Proposed.
+**Status:** Phase 0 in progress — the measurement substrate is implemented and
+gated; the live baseline measurement remains.
 
 ## Goal
 
@@ -95,28 +96,59 @@ rate, but are not silently included in the prepared-cold SLO.
 
 ## Phase 0 — Freeze a trustworthy baseline
 
-- [ ] Add a release-only benchmark entry point that invokes the built
+- [x] Add a release-only benchmark entry point that invokes the built
       `mvmctl` binary directly; `cargo run` compilation time must never enter a
       launch sample.
-- [ ] Extend phase timing below the current `drives` bucket with distinct
+      (`crates/mvm-cli/src/bench/cold_launch_runner.rs` —
+      `ColdLaunchBench::builder(...).build()?.run()` spawns the binary path and
+      refuses `cargo`/`rustc`/`just` outright. The release check is made
+      against the sample the binary writes, which reports its own
+      `cfg!(debug_assertions)` profile, so it cannot be spoofed by a path.)
+- [x] Extend phase timing below the current `drives` bucket with distinct
       marks for mount fingerprint, mount-cache lookup, mount-image materialize,
       artifact verification, backend process/VMM creation, guest kernel entry,
       agent authentication, first command dispatch, and cleanup handoff.
-- [ ] Record backend, host architecture, kernel digest, initramfs digest,
+      (`SubPhase` + `LaunchSubMarks` in
+      `crates/mvm-cli/src/commands/vm/phase_timing.rs`, collapsing to
+      `LaunchSubTimings`. Six have producers on the transient run path today;
+      the three mount spans do not, because the current `--mount` surface
+      attaches a live virtio-fs share and materializes nothing. Phase 1's
+      content-addressed mount cache is what records them, and the lane gate
+      already refuses a prepared-cold sample that reports one.)
+- [x] Record backend, host architecture, kernel digest, initramfs digest,
       overlay digest, rootfs digest, VMM version, CPU count, memory setting,
       filesystem, cache state, and run number with every sample.
-- [ ] Add a benchmark report format containing raw samples and p50/p95/p99;
+      (The launch writes artifact **paths**, not digests — hashing inside the
+      measured window would charge the launch for the measurement. The runner
+      resolves digests, filesystem, and cache state afterwards into
+      `LaunchContext`/`CacheState`. `vmm_version` is resolved only for the
+      in-house VMM, which ships inside `mvmctl`; a third-party VMM records
+      `None` rather than a fabricated number.)
+- [x] Add a benchmark report format containing raw samples and p50/p95/p99;
       do not store only summary numbers.
+      (`ColdLaunchReport` carries `raw: Vec<ColdLaunchSample>` alongside
+      `LaneStats`. A span no launch recorded reports `samples: 0` with `None`
+      percentiles, so "never measured" is distinguishable from "measured as
+      fast" and the report still round-trips through JSON.)
 - [ ] Measure at least 20 iterations per lane after two warm-up iterations on
       native Apple Silicon/HVF and the Linux Firecracker host. Measure libkrun
       where the supported Linux or macOS environment can run it.
-- [ ] Add a benchmark assertion that rejects a sample labeled `prepared_cold`
+- [x] Add a benchmark assertion that rejects a sample labeled `prepared_cold`
       when it performed an image pull, image build, mount-image materialize, or
       warm claim.
+      (`validate_lane` in `crates/mvm-cli/src/bench/cold_launch.rs`, called on
+      every warm-up and measured launch. It reads `LaunchWork` flags rather
+      than spans — an uninstrumented phase records no span, and refusing on a
+      missing span would pass exactly the contamination the gate exists to
+      catch. A warm claim is refused on the launch mode as well as the flag, so
+      one signal going missing cannot let it through.)
 
 **Exit gate:** the report can distinguish the 430-second mount-image cost from
 the actual approximately 1.2-second backend-start cost, and the baseline is
 reproducible from a release binary.
+
+**Exit-gate status:** the substrate is in place and gated; the gate itself is
+not met until the live baseline above is measured and recorded.
 
 ## Phase 1 — Content-addressed `--mount` image cache
 

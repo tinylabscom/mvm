@@ -360,6 +360,9 @@ fn build_flake(
             );
         }
 
+        // An image build is the other cost a launch measurement must never
+        // absorb; record it at the one site that starts one.
+        crate::commands::vm::launch_sample::record_image_build();
         let result = match mvm_build::dev_build::dev_build(env, &resolved, profile, mode) {
             Ok(r) => r,
             Err(e) => {

@@ -17,6 +17,7 @@ pub(super) mod group;
 mod host_services;
 pub(super) mod host_signer;
 pub(super) mod invoke;
+pub(crate) mod launch_sample;
 pub(super) mod logs;
 pub(super) mod managed_secrets;
 pub(super) mod pause;
