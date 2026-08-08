@@ -19,9 +19,11 @@
 pub mod digest;
 pub mod error;
 pub mod manifest_types;
+pub mod platform;
 pub mod reference;
 
 #[cfg(feature = "protocol")]
 pub use digest::verify_sha256_digest;
 pub use error::OciError;
+pub use platform::{LinuxPlatform, matches_linux_platform};
 pub use reference::ImageReference;

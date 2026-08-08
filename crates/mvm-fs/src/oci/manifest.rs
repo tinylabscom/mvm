@@ -15,10 +15,11 @@
 
 use crate::oci::OciError;
 use crate::oci::layer::LayerDescriptor;
-use crate::oci::manifest_types::{OciManifest, PlatformDescriptor};
+use crate::oci::manifest_types::OciManifest;
 use crate::oci::reference::ImageReference;
 use crate::oci::registry::{ClientConfig, RegistryAuthConfig, RegistryClient};
 use async_trait::async_trait;
+use mvm_contract::oci::{LinuxPlatform, matches_linux_platform};
 use sha2::{Digest, Sha256};
 
 /// Result of a manifest fetch. Bytes are kept verbatim because
@@ -42,54 +43,28 @@ pub struct FetchedManifest {
     pub media_type: String,
 }
 
-/// Linux platform selector for OCI image indexes / Docker manifest
-/// lists.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinuxPlatform {
-    /// OCI architecture string (`amd64`, `arm64`, ...).
-    pub architecture: String,
-    /// Optional architecture variant (`v8` for linux/arm64/v8).
-    pub variant: Option<String>,
-}
-
-impl LinuxPlatform {
-    /// Platform matching the current host CPU while explicitly
-    /// targeting Linux guests.
-    pub fn for_current_arch() -> Self {
-        if cfg!(target_arch = "aarch64") {
-            Self {
-                architecture: "arm64".to_string(),
-                variant: Some("v8".to_string()),
-            }
-        } else if cfg!(target_arch = "x86_64") {
-            Self {
-                architecture: "amd64".to_string(),
-                variant: None,
-            }
-        } else {
-            Self {
-                architecture: std::env::consts::ARCH.to_string(),
-                variant: None,
-            }
+/// Platform matching the current host CPU while explicitly targeting Linux
+/// guests.
+///
+/// A free function rather than an inherent method: `LinuxPlatform` lives in
+/// `mvm-contract` so a browser can select a platform, and "what architecture
+/// is this host" is a question only a host can answer.
+pub fn current_linux_platform() -> LinuxPlatform {
+    if cfg!(target_arch = "aarch64") {
+        LinuxPlatform {
+            architecture: "arm64".to_string(),
+            variant: Some("v8".to_string()),
         }
-    }
-}
-
-pub(crate) fn matches_linux_platform(
-    candidate: &PlatformDescriptor,
-    requested: &LinuxPlatform,
-) -> bool {
-    if candidate.os != "linux" || candidate.architecture != requested.architecture {
-        return false;
-    }
-    match (
-        candidate.variant.as_deref(),
-        requested.variant.as_deref(),
-        requested.architecture.as_str(),
-    ) {
-        (actual, wanted, _) if actual == wanted => true,
-        (None, Some("v8"), "arm64") => true,
-        _ => false,
+    } else if cfg!(target_arch = "x86_64") {
+        LinuxPlatform {
+            architecture: "amd64".to_string(),
+            variant: None,
+        }
+    } else {
+        LinuxPlatform {
+            architecture: std::env::consts::ARCH.to_string(),
+            variant: None,
+        }
     }
 }
 

@@ -65,8 +65,9 @@ pub use archive::{
 };
 pub use error::OciError;
 pub use layer::{LayerDescriptor, LayerFetchOptions, OciLayerFetcher};
-pub use manifest::{FetchedManifest, LinuxPlatform, ManifestFetcher, OciManifestFetcher};
+pub use manifest::{FetchedManifest, ManifestFetcher, OciManifestFetcher, current_linux_platform};
 pub use mvm_contract::oci::verify_sha256_digest;
+pub use mvm_contract::oci::{LinuxPlatform, matches_linux_platform};
 pub use reference::ImageReference;
 pub use registry::{ClientConfig, ClientProtocol, RegistryAuthConfig};
 pub use unpack::{
