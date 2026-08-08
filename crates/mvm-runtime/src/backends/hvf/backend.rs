@@ -830,7 +830,7 @@ mod tests {
 
     #[test]
     fn supervisor_launch_support_respects_override_path() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn degraded_host_still_advertises_failclosed_egress_caps() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
@@ -869,7 +869,7 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn launchable_supervisor_enables_virtiofs_root_dev_boot() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
@@ -1175,7 +1175,7 @@ mod tests {
     /// own tests).
     #[test]
     fn stop_reaps_host_agent_tenant_ref_marker() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn supervisor_path_env_must_point_at_a_file() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();

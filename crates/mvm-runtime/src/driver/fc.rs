@@ -1879,7 +1879,7 @@ mod tests {
         };
 
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
-        crate::base::runtime_meta::record_from_start_config(
+        mvm_vmm::host::runtime_meta::record_from_start_config(
             &spec.id,
             StartMode::Detached,
             &parent_cfg,

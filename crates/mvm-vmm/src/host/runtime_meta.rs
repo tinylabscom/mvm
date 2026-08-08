@@ -27,7 +27,7 @@ use anyhow::{Context, Result};
 use mvm_core::vm_backend::{RuntimeSourcePolicy, StartMode, VmStartConfig};
 use serde::{Deserialize, Serialize};
 
-pub use crate::base::observability_target::{
+pub use crate::host::observability_target::{
     ProcessTarget, VmObservabilityTarget, VmmTarget, VsockTarget,
 };
 
@@ -212,16 +212,38 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
     }
 }
 
-/// Build a `VmRuntimeMeta` from the `mvm-meta.json` `GuestSidecar`
-/// that the build pipeline emits next to a rootfs. When the sidecar
-/// is absent or unreadable, fall back to `accessible: true` to
-/// preserve backward-compatible behavior for artifacts predating the
-/// sidecar. Failures only surface when the sidecar exists and is
-/// malformed.
+const SIDECAR_FILENAME: &str = "mvm-meta.json";
+
+/// Minimal subset of the `mvm-meta.json` sidecar that runtime metadata
+/// needs. The full sidecar shape lives in `mvm-build`; this crate only
+/// reads the accessibility bit so it can stay below `mvm-runtime` and
+/// `mvm-build` in the dependency graph.
+#[derive(Debug, Clone, Deserialize)]
+struct AccessibleSidecar {
+    #[serde(default = "default_accessible")]
+    accessible: bool,
+}
+
+fn read_sidecar_accessible(rootfs_dir: &std::path::Path) -> Result<bool> {
+    let path = rootfs_dir.join(SIDECAR_FILENAME);
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e.into()),
+    };
+    let sidecar: AccessibleSidecar = serde_json::from_str(&body)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    Ok(sidecar.accessible)
+}
+
+/// Build a `VmRuntimeMeta` from the `mvm-meta.json` sidecar that the
+/// build pipeline emits next to a rootfs. When the sidecar is absent or
+/// unreadable, fall back to `accessible: true` to preserve backward-
+/// compatible behavior for artifacts predating the sidecar. Failures only
+/// surface when the sidecar exists and is malformed.
 pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmRuntimeMeta> {
-    let sidecar = mvm_build::builder_vm::GuestSidecar::read_from_dir(rootfs_dir)
+    let accessible = read_sidecar_accessible(rootfs_dir)
         .with_context(|| format!("reading mvm-meta.json sidecar in {}", rootfs_dir.display()))?;
-    let accessible = sidecar.map(|s| s.accessible).unwrap_or(true);
     Ok(VmRuntimeMeta {
         mode: mode.into(),
         accessible,

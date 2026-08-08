@@ -866,7 +866,7 @@ impl VmBackend for LibkrunBackend {
             rootfs_dir,
             config.runtime_source_policy,
         )?;
-        crate::base::runtime_meta::record_from_start_config(
+        mvm_vmm::host::runtime_meta::record_from_start_config(
             &config.name,
             StartMode::Detached,
             config,
@@ -1983,7 +1983,7 @@ mod tests {
     /// `HOME` (or `MVM_LIBKRUN_SUPERVISOR_PATH`) mid-call and corrupt
     /// our assertions.
     fn with_env<F: FnOnce()>(body: F) {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         body();
@@ -2268,7 +2268,7 @@ mod tests {
     /// an auto-fallback HVF→libkrun must not land on a backend that drops them.
     #[test]
     fn build_supervisor_config_cmdline_carries_all_three_grant_tokens() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();

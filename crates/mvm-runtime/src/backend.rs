@@ -1392,7 +1392,7 @@ mod tests {
     fn for_started_vm_resolves_owning_backend_by_marker() {
         // A started VM's owning backend is resolved from its state-dir pid
         // marker so `down`/`status`/`ls` dispatch to the right VMM.
-        let _legacy_guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _legacy_guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = mvm_core::util::test_env::TestEnv::new();

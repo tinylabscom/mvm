@@ -321,7 +321,7 @@ impl VmBackend for QemuBackend {
             rootfs_dir,
             config.runtime_source_policy,
         )?;
-        crate::base::runtime_meta::record_from_start_config(
+        mvm_vmm::host::runtime_meta::record_from_start_config(
             &config.name,
             StartMode::Detached,
             config,

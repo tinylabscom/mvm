@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     fn bundled_kernel_resolves_the_cached_builder_fallback() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();

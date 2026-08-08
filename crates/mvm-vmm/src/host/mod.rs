@@ -5,6 +5,8 @@
 
 pub mod aux_bin;
 pub mod boot_config;
+pub mod runtime_meta;
+pub mod observability_target;
 pub mod console_capture;
 pub mod broker_services_spawn;
 pub mod drive_file;

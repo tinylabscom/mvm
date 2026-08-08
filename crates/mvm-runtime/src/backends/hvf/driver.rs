@@ -727,7 +727,7 @@ impl VmFullControl for HvfVmFullControl {
     }
 
     fn rootfs_path(&self) -> Result<PathBuf> {
-        let meta = crate::base::runtime_meta::read(&self.vm_name)?
+        let meta = mvm_vmm::host::runtime_meta::read(&self.vm_name)?
             .ok_or_else(|| anyhow!("no runtime metadata for HVF VM '{}'", self.vm_name))?;
         meta.rootfs_path
             .map(PathBuf::from)
