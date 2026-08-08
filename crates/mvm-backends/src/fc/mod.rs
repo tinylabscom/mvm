@@ -4,15 +4,27 @@
 //! Implementation detail of the Firecracker backend. Items are `pub` only
 //! where something outside this crate genuinely names them.
 
+pub mod control;
 pub mod daemon;
 pub mod fc_api;
 pub mod fork_namespace;
+pub mod guards;
+pub mod host;
+pub mod io;
 pub mod lifecycle;
+pub mod observe;
+pub mod snapshot;
 
+pub use control::*;
 pub use daemon::*;
 pub use fc_api::*;
 pub use fork_namespace::*;
+pub use guards::*;
+pub use host::*;
+pub use io::*;
 pub use lifecycle::*;
+pub use observe::*;
+pub use snapshot::*;
 
 use anyhow::Result;
 

@@ -55,7 +55,9 @@ pub mod driver;
 /// Per-VM transparent egress redirect used by the legacy libkrun gateway path.
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by
 /// the libkrun + Firecracker substitution-endpoint spawn paths.
-pub mod firecracker;
+// Firecracker host mechanics moved to mvm-backends::fc; re-exported so
+// `mvm_runtime::firecracker::<name>` keeps resolving for mvm-cli.
+pub use mvm_backends::fc::host as firecracker;
 pub mod handle_registry;
 pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification
@@ -160,9 +162,10 @@ pub use base::{config, linux_env, shell, ui};
 // `mvmd-runtime` security modules).
 pub use base::shell_mock;
 
-pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
+pub use backend::{AnyBackend, FirecrackerConfig};
 #[cfg(feature = "test-support")]
 pub use mock::MockBackend;
+pub use mvm_backends::legacy::fc::FirecrackerBackend;
 pub use mvm_backends::legacy::libkrun::LibkrunBackend;
 pub use mvm_backends::legacy::qemu::QemuBackend;
 pub use warm_service::{PrewarmFn, WarmLaunchService};

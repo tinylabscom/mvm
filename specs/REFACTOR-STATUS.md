@@ -293,7 +293,7 @@ for detailed scope and acceptance criteria.
         stay refused at admission on the userspace backend, honestly and
         for a stated reason. ADR-039 status Rejected; reopening requires a
         workload with a demonstrated need
-- [~] Extract `mvm-backends` crate (`specs/plans/298-extract-mvm-backends-crate.md`)
+- [x] Extract `mvm-backends` crate (`specs/plans/298-extract-mvm-backends-crate.md`)
   - [x] Driver seam (`VmmDriver`, `VmmSpec`, `RunningVm`, snapshot types) moved to `mvm-vmm`
   - [x] Host `virtiofsd` helper moved to `mvm-vmm`
   - [x] Shared host helpers (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`, `process_liveness`) moved to `mvm-vmm::host`
@@ -301,7 +301,14 @@ for detailed scope and acceptance criteria.
   - [x] Substrate helpers (`open_console_capture`, `runtime_meta`/`observability_target`, `ui`) moved to `mvm-vmm::host`
   - [x] `mvm-backends` crate scaffolded; `MockDriver` lives under `test-support`
   - [x] Host command execution (`shell`, `linux_env`) moved to `mvm-vmm::host`
-  - [~] Move concrete drivers: `HvfDriver`, `LibkrunDriver`, `QemuDriver`, and `MockDriver` moved into `mvm-backends`; `FcDriver` remains in `mvm-runtime` pending extraction of FC-specific `microvm`/`firecracker`/`vm::instance_snapshot` mechanics — handed off to `specs/plans/298-extract-firecracker-driver.md`
+  - [x] Move concrete drivers: all five (`FcDriver`, `HvfDriver`, `LibkrunDriver`, `QemuDriver`, `MockDriver`) now live in `mvm-backends`
+- [x] Extract the Firecracker driver (`specs/plans/298-extract-firecracker-driver.md`)
+  - [x] Snapshot seam (`SnapshotIO`, guarded load paths, device-model guard, the single `CannedIO` double) lifted into `mvm-vmm`
+  - [x] `ForkVmFullRestorer` deleted — one method, one impl, one call site; now a callback
+  - [x] FC mechanics moved to `mvm-backends::fc` (API client, VMM process, control, observe, guards, snapshot, fork namespace, `FirecrackerIO`, `FcVmFullControl`)
+  - [x] `driver/fc.rs` and the legacy `FirecrackerBackend` moved; `mvm-runtime::driver` is re-exports only
+  - [x] `base/config.rs` moved to `mvm-vmm::host` (dependency-free leaf that pinned the FC modules)
+  - [x] Dead code removed: the retired raw flake launcher, the `require_linux_env` no-op, and the duplicate `bind_unix_listener`
   - [x] Move legacy `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`) into `mvm-backends`
   - [x] Wire `mvm-runtime` to depend on `mvm-backends` and re-export the driver surface; removed local HVF/libkrun/QEMU/Mock driver and legacy backend source files
 - [ ] Plan 298 — NANDA-style execution receipts and conformance badges

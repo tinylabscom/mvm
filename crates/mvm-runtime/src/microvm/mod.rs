@@ -6,40 +6,24 @@
 
 mod activation;
 mod boot_config;
-mod control;
 mod flake_run;
-mod guards;
-mod observe;
 mod run_info;
 mod snapshot;
 
 pub(crate) use activation::read_verb_grant_envelope;
 pub use activation::*;
 pub use boot_config::*;
-pub use control::*;
+pub use mvm_backends::fc::control::*;
 // The Firecracker API client and VMM process lifecycle now live in
 // mvm-backends::fc; re-exported so `crate::microvm::<name>` keeps resolving.
 pub use flake_run::*;
-pub use guards::*;
 pub use mvm_backends::fc::daemon::*;
-pub(crate) use mvm_backends::fc::fc_api::*;
-pub(crate) use mvm_backends::fc::fork_namespace::*;
+pub use mvm_backends::fc::guards::*;
 pub use mvm_backends::fc::lifecycle::*;
-pub use observe::*;
+pub use mvm_backends::fc::observe::*;
+pub use mvm_backends::fc::snapshot::*;
 pub use run_info::*;
 pub use snapshot::*;
-
-use anyhow::Result;
-
-/// Ensure we have a Linux execution environment.
-///
-/// Today this is always a no-op: native Linux runs Firecracker directly,
-/// macOS runs libkrun, and the Lima fallback is gone.
-/// Kept as a function so callers stay well-formed; remove once every
-/// callsite is audited and the call itself can be dropped.
-fn require_linux_env() -> Result<()> {
-    Ok(())
-}
 
 // The per-VM path layout moved to mvm-backends::fc with the Firecracker
 // mechanics that read it. Re-exported so `crate::microvm::<name>` and the

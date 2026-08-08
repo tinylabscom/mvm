@@ -91,7 +91,7 @@ Verify against the tree before trusting this list: `ls crates/mvm-backends/src/d
 
 **Files:** `crates/mvm-runtime/src/vm/instance_snapshot.rs`, `crates/mvm-runtime/src/checkpoint/mod.rs`, `crates/mvm-runtime/src/microvm/snapshot.rs`, `crates/mvm-vmm/src/checkpoint.rs`, `crates/mvm-vmm/src/lib.rs`
 
-- [ ] **Split the device-model guard from the Firecracker config view.**
+- [x] **Split the device-model guard from the Firecracker config view.**
       `SnapshotIO::restored_device_model` returns `RestoredDeviceModel`, so
       something must move before the trait can. The guard's entire body is
       `ensure!(config.network_interfaces.is_empty())` — it needs a count, not
@@ -107,32 +107,32 @@ Verify against the tree before trusting this list: `ls crates/mvm-backends/src/d
       right here despite the general newtype preference: the method name
       carries the unit and nothing else consumes the value.
 
-- [ ] **Move the `SnapshotIO` trait and the generic guard helpers** from
+- [x] **Move the `SnapshotIO` trait and the generic guard helpers** from
       `vm/instance_snapshot.rs` into `mvm-vmm`: `pause_and_seal`,
       `verify_and_resume`, `verify_and_resume_from_dir`, `guarded_load_resume`,
       `guarded_fork_load_resume`, `guarded_fork_load_paused`,
       `guard_and_resume`, `guard_loaded_device_model`. All are already generic
       over `IO: SnapshotIO + ?Sized`, so they move without signature change.
 
-- [ ] **Merge `SpyIO` into `CannedIO`** and move the single double with the
+- [x] **Merge `SpyIO` into `CannedIO`** and move the single double with the
       helpers it tests.
 
-- [ ] **Delete the `ForkVmFullRestorer` trait.** Change `fork_vm_full_fc`'s
+- [x] **Delete the `ForkVmFullRestorer` trait.** Change `fork_vm_full_fc`'s
       third parameter to `restore: &dyn Fn(&str, &Path) -> Result<()>`, delete
       the trait and `MockRestorer`, and pass a closure at the one call site.
       Verify it is genuinely single-use first (`rg 'ForkVmFullRestorer'`); if a
       second production impl has appeared, stop and re-decide.
 
-- [ ] **Keep in `mvm-runtime`:** the seal/verify/HMAC orchestration and on-disk
+- [x] **Keep in `mvm-runtime`:** the seal/verify/HMAC orchestration and on-disk
       layout helpers in `vm/instance_snapshot.rs` (`instance_dir`,
       `snapshot_dir`, `prepare_instance_snapshot_dir`,
       `list_instance_snapshots`, `delete_instance_snapshot`). Those are runtime
       policy, not backend substrate.
 
-- [ ] Re-export the moved types from `mvm-runtime::vm::instance_snapshot` and
+- [x] Re-export the moved types from `mvm-runtime::vm::instance_snapshot` and
       `mvm-runtime::checkpoint` so `mvm-cli` / `mvm-hostd` keep resolving.
 
-- [ ] `cargo nextest run -p mvm-vmm -p mvm-runtime` and `cargo clippy -p mvm-vmm -p mvm-runtime --all-targets -- -D warnings`.
+- [x] `cargo nextest run -p mvm-vmm -p mvm-runtime` and `cargo clippy -p mvm-vmm -p mvm-runtime --all-targets -- -D warnings`.
 
 ---
 
@@ -140,18 +140,18 @@ Verify against the tree before trusting this list: `ls crates/mvm-backends/src/d
 
 Create `crates/mvm-backends/src/fc/` for FC-specific implementation detail. Keep items `pub(crate)` unless something outside genuinely names them.
 
-- [ ] `fc/mod.rs` — path helpers (`resolve_running_vm_dir`, `fc_pid_path`, `firecracker_vsock_uds_path`) and re-exports.
-- [ ] `fc/api.rs` — body builders (`boot_source_body`, `drive_body`, `vsock_body`, `machine_config_body`, `logger_body`, `balloon_body`) and `api_put_socket`.
-- [ ] `fc/client.rs` — the HTTP-over-UDS client from `microvm/fc_api.rs`.
-- [ ] `fc/process.rs` — `start_vm_firecracker`, `start_vm_firecracker_for_snapshot`, `read_firecracker_pid`, `secure_vsock_socket_for_caller`.
-- [ ] `fc/control.rs` — `pause_vm`, `resume_vm`, balloon control.
-- [ ] `fc/guard.rs` — `FirecrackerGuard`.
-- [ ] `fc/snapshot.rs` — `create_snapshot_files`, `remap_paths_for_fork`, and `RestoredDeviceModel` (crate-private).
-- [ ] `fc/host.rs` — `is_vm_running`, `is_firecracker_pid_running`. Route these through `mvm_vmm::host::process_liveness` rather than open-coding a third `kill(0)`.
-- [ ] `fc/io.rs` — `FirecrackerIO`, the `SnapshotIO` impl, plus `FcVmFullControl`. The former `FcForkRestorer` body becomes a plain function here (its trait died in Task 1); prefer folding it straight into `FcDriver::fork_standby_child` if nothing else calls it.
-- [ ] Add `pub mod fc;` to `mvm-backends/src/lib.rs`.
-- [ ] Update imports to `mvm_vmm::host::shell`, `mvm_vmm::host::ui`, and `mvm_core::config` path helpers.
-- [ ] `cargo check -p mvm-backends -p mvm-runtime` + clippy.
+- [x] `fc/mod.rs` — path helpers (`resolve_running_vm_dir`, `fc_pid_path`, `firecracker_vsock_uds_path`) and re-exports.
+- [x] `fc/api.rs` — body builders (`boot_source_body`, `drive_body`, `vsock_body`, `machine_config_body`, `logger_body`, `balloon_body`) and `api_put_socket`.
+- [x] `fc/client.rs` — the HTTP-over-UDS client from `microvm/fc_api.rs`.
+- [x] `fc/process.rs` — `start_vm_firecracker`, `start_vm_firecracker_for_snapshot`, `read_firecracker_pid`, `secure_vsock_socket_for_caller`.
+- [x] `fc/control.rs` — `pause_vm`, `resume_vm`, balloon control.
+- [x] `fc/guard.rs` — `FirecrackerGuard`.
+- [x] `fc/snapshot.rs` — `create_snapshot_files`, `remap_paths_for_fork`, and `RestoredDeviceModel` (crate-private).
+- [x] `fc/host.rs` — `is_vm_running`, `is_firecracker_pid_running`. Route these through `mvm_vmm::host::process_liveness` rather than open-coding a third `kill(0)`.
+- [x] `fc/io.rs` — `FirecrackerIO`, the `SnapshotIO` impl, plus `FcVmFullControl`. The former `FcForkRestorer` body becomes a plain function here (its trait died in Task 1); prefer folding it straight into `FcDriver::fork_standby_child` if nothing else calls it.
+- [x] Add `pub mod fc;` to `mvm-backends/src/lib.rs`.
+- [x] Update imports to `mvm_vmm::host::shell`, `mvm_vmm::host::ui`, and `mvm_core::config` path helpers.
+- [x] `cargo check -p mvm-backends -p mvm-runtime` + clippy.
 
 **Do not move** the install/asset helpers in `mvm-runtime/src/firecracker.rs` (`is_installed`, `download_assets`, …). Those are runtime/CLI policy, not backend substrate, and they stay.
 
@@ -252,32 +252,56 @@ together (they are mutually referential), then split `snapshot.rs`, then
 
 ## Task 3: Move `driver/fc.rs` into `mvm-backends`
 
-- [ ] Move `crates/mvm-runtime/src/driver/fc.rs` → `crates/mvm-backends/src/driver/fc.rs`.
-- [ ] Update imports: `crate::backend::FirecrackerBackend` → `crate::legacy::fc::FirecrackerBackend`; `crate::microvm::*` / `crate::firecracker::*` → `crate::fc::*`; `crate::base::shell::*` → `mvm_vmm::host::shell::*`; `crate::checkpoint::VmFullControl` and the snapshot seam → `mvm_vmm::*`.
-- [ ] Add `pub mod fc;` to `mvm-backends/src/driver/mod.rs`.
-- [ ] Reduce `mvm-runtime/src/driver/mod.rs` to `pub use mvm_backends::driver::fc::FcDriver;` and delete the local module.
-- [ ] **Relocate the test-only couplings.** `fc.rs` tests reach `crate::wasm_backend::WasmBackend` (a capability-matrix assertion), `crate::workload_runner::{factory_parent_config, factory_parent_spec}`, and `crate::test_support::bind_unix_listener`. None can follow the driver down. Leave those specific tests in `mvm-runtime` (they assert things *about runtime orchestration*) and move the rest with the file. Do not weaken them by stubbing what they call.
-- [ ] `cargo nextest run -p mvm-backends -p mvm-runtime` + clippy.
+- [x] Move `crates/mvm-runtime/src/driver/fc.rs` → `crates/mvm-backends/src/driver/fc.rs`.
+- [x] Update imports: `crate::backend::FirecrackerBackend` → `crate::legacy::fc::FirecrackerBackend`; `crate::microvm::*` / `crate::firecracker::*` → `crate::fc::*`; `crate::base::shell::*` → `mvm_vmm::host::shell::*`; `crate::checkpoint::VmFullControl` and the snapshot seam → `mvm_vmm::*`.
+- [x] Add `pub mod fc;` to `mvm-backends/src/driver/mod.rs`.
+- [x] Reduce `mvm-runtime/src/driver/mod.rs` to `pub use mvm_backends::driver::fc::FcDriver;` and delete the local module.
+- [x] **Relocate the test-only couplings.** `fc.rs` tests reach `crate::wasm_backend::WasmBackend` (a capability-matrix assertion), `crate::workload_runner::{factory_parent_config, factory_parent_spec}`, and `crate::test_support::bind_unix_listener`. None can follow the driver down. Leave those specific tests in `mvm-runtime` (they assert things *about runtime orchestration*) and move the rest with the file. Do not weaken them by stubbing what they call.
+- [x] `cargo nextest run -p mvm-backends -p mvm-runtime` + clippy.
 
 ---
 
 ## Task 4: Update remaining runtime callers
 
-- [ ] `vm/instance_snapshot.rs` — keep seal/verify/HMAC orchestration; import the seam from `mvm_vmm` and `FirecrackerIO` from `mvm_backends::fc`.
-- [ ] `firecracker.rs` — keep install/asset helpers; import moved control/restorer entry points from `mvm_backends::fc`.
-- [ ] `microvm/*.rs` — remove moved helpers or reduce the modules to thin re-exports; delete `microvm/fc_api.rs` once emptied.
-- [ ] Confirm `selection.rs` needs no per-backend branch. Selection *policy* stays in `mvm-runtime`; per-backend *construction* lives in `mvm-backends`. Call those constructors directly — introduce a registry only if it removes a match arm that would otherwise be duplicated at a second call site, and say which one in the commit message.
+- [x] `vm/instance_snapshot.rs` — keep seal/verify/HMAC orchestration; import the seam from `mvm_vmm` and `FirecrackerIO` from `mvm_backends::fc`.
+- [x] `firecracker.rs` — keep install/asset helpers; import moved control/restorer entry points from `mvm_backends::fc`.
+- [x] `microvm/*.rs` — remove moved helpers or reduce the modules to thin re-exports; delete `microvm/fc_api.rs` once emptied.
+- [x] Confirm `selection.rs` needs no per-backend branch. Selection *policy* stays in `mvm-runtime`; per-backend *construction* lives in `mvm-backends`. Call those constructors directly — introduce a registry only if it removes a match arm that would otherwise be duplicated at a second call site, and say which one in the commit message.
 
 ---
 
 ## Task 5: Verification gates
 
-- [ ] `cargo nextest run --workspace` and `cargo test --workspace --doc` green.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` green.
-- [ ] `cargo run -p xtask -- check-claim-catalog`, `check-dormant-controls`, `check-uniform-vsock-egress`, `check-vsock-only-egress`, `check-no-vz` green.
-- [ ] `check-mutation-witnesses` — re-pin if the surface moved, and confirm the claim-bearing witnesses still resolve at their new paths before accepting the re-pin.
-- [ ] `just check-linux` — `microvm/` is the most Linux-gated tree in the workspace.
-- [ ] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` in the same change.
+- [x] `cargo nextest run --workspace` and `cargo test --workspace --doc` green.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` green.
+- [x] `cargo run -p xtask -- check-claim-catalog`, `check-dormant-controls`, `check-uniform-vsock-egress`, `check-vsock-only-egress`, `check-no-vz` green.
+- [x] `check-mutation-witnesses` — re-pin if the surface moved, and confirm the claim-bearing witnesses still resolve at their new paths before accepting the re-pin.
+- [x] `just check-linux` — `microvm/` is the most Linux-gated tree in the workspace.
+- [x] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` in the same change.
+
+## Outcome
+
+Complete. `mvm-runtime` holds no `driver/fc.rs`, no `firecracker.rs`, and no
+Firecracker `microvm` modules; `mvm-backends::fc` owns them and depends on
+neither `mvm-runtime` nor `mvm-build`.
+
+Two things the move surfaced that were not in the original plan:
+
+- **`require_linux_env` deleted.** A `fn(..) -> Result<()> { Ok(()) }` no-op
+  called at seven sites, documented as kept "so callers stay well-formed".
+  It asserted nothing; the calls went with it.
+- **`bind_unix_listener` de-duplicated.** `mvm-runtime` and `mvm-vmm` both
+  carried one; the runtime copy went dead when its last caller moved, so the
+  `mvm-vmm` one is now the only copy.
+
+One judgement call worth a reviewer's eye: `FirecrackerBackend::start`
+previously delegated to `fc_runner()`, which lives in `mvm-runtime` and would
+have inverted the dependency. `FcDriver` never calls it, nothing else
+constructs the type, and `AnyBackend` routes every real start through the
+runner — so it now refuses loudly instead. That is a refusal on an
+unreachable path, not a stub standing in for missing work; if a caller ever
+lands there it must be routed to the runner rather than handed a VM that
+skipped plan admission.
 
 ## Acceptance criteria
 
