@@ -1649,21 +1649,19 @@ Then unify + retire the old paths:
 **WS-DX-COLD — prepared cold-launch performance**
 
 - [~] **Trustworthy baseline (Plan 299 Phase 0):** the measurement substrate is
-  in. A transient run writes a machine-readable launch sample
-  (`MVM_LAUNCH_SAMPLE_JSON`) carrying its build profile, backend, guest sizing,
-  artifact paths, the expensive work it performed, and per-phase spans below the
-  coarse `drives`/`backend`/`vsock` buckets. The benchmark
-  (`mvm_cli::bench::cold_launch_runner`) invokes a built `mvmctl` directly —
-  never `cargo` — refuses a debug-built sample, refuses a prepared-cold sample
-  that pulled, built, materialized a mount image, or claimed a warm standby, and
-  reports raw samples alongside p50/p95/p99. 54 focused unit/integration tests
-  plus 7 BDD scenarios
-  (`features/suites/s5_lifecycle/prepared_cold_launch_lane.feature`) cover the
-  gate; workspace nextest (10,629 passed), doctests, workspace Clippy, the
-  hermetic BDD suite (153/153), the Lint-job xtask gates, and the Linux
-  cross-compile are green. **Open:** the ≥20-iteration live baseline per lane on
-  Apple Silicon/HVF and the Linux Firecracker host — no measured numbers are
-  claimed until it runs.
+  in, and the Apple Silicon/HVF baseline is measured. A transient run writes a
+  machine-readable launch sample (`MVM_LAUNCH_SAMPLE_JSON`); the backend records
+  its own phases into a state-dir sidecar so the caller can see inside
+  `VmBackend::start`; the benchmark invokes a built `mvmctl` directly, refuses a
+  debug build, refuses a contaminated lane, and reports raw samples with
+  p50/p95/p99. Measured (20 runs + 2 warm-ups, release): **prepared cold reaches
+  an authenticated agent in 114.1 ms p50 / 122.6 ms p99** and a **warm claim in
+  18.9 / 20.0 ms** — both already inside their dispatch budgets. The remaining
+  cost is foreground teardown: 139 ms of the 344 ms cold wall clock and 1086 ms
+  of the 1216 ms warm wall clock, the latter being inline pool replenish. Gates
+  green: workspace Clippy, 10,639 nextest, doctests, hermetic BDD 153/153, Lint
+  xtask gates, Linux cross-compile. **Open:** the Linux Firecracker and libkrun
+  lanes.
 - [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
   `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon

@@ -190,19 +190,19 @@ pub struct LaunchSubTimings {
     pub artifact_verify_ms: Option<f64>,
     /// The backend's own VM creation call, start to return.
     ///
-    /// How much of guest boot this contains is backend-defined, and on the
-    /// measured backends it contains most of it: HVF's `start` polls for the
-    /// supervisor's PID file, so it returns at *boot confirmed*, not at
-    /// vCPU-start. Separating VMM setup from guest boot is therefore not
-    /// possible at this seam — it needs marks inside the driver.
+    /// How much of guest boot this contains is backend-defined: HVF's `start`
+    /// returns once the supervisor confirms boot by writing its PID file, so
+    /// this covers VMM creation and the earliest part of guest boot but not
+    /// the wait for a serving agent. `backend_phases` breaks it down further.
     pub vmm_create_ms: Option<f64>,
     /// The backend's `start` returning to the start of the readiness attempt
-    /// that succeeded.
+    /// that succeeded — the remaining guest boot, bounded below by the
+    /// readiness poll interval.
     ///
-    /// This is the residual wait after `start` returns, so on a backend whose
-    /// `start` already confirms boot it collapses toward zero and a
-    /// near-zero value here means "the guest was already up", not "the kernel
-    /// booted instantly". Bounded below by the readiness poll interval.
+    /// A near-zero value means the guest was already serving by the time the
+    /// first poll ran, not that the kernel booted instantly. Slow post-boot
+    /// work between `start` and the first poll masks this span entirely, so
+    /// read it together with whatever ran in between.
     pub guest_kernel_entry_ms: Option<f64>,
     /// The successful agent handshake: connect plus authenticated ping.
     pub agent_auth_ms: Option<f64>,

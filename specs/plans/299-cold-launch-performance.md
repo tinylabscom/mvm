@@ -161,74 +161,71 @@ the lane gate. Raw samples in `$MVM_HOME/state/bench/cold-launch-*.json`.
 
 | span (p50 / p99) | prepared cold | warm claim |
 |---|---:|---:|
-| dispatch window | 780.2 / 797.1 ms | 740.5 / 755.9 ms |
-| `vmm_create` | 778.2 / 795.1 ms | — (no VMM created) |
-| `claim_ms` | — | 740.5 / 755.8 ms |
-| `pool_wait_ms` | — | 0.1 / 0.1 ms |
-| `agent_auth` | 1.6 / 5.7 ms | 2.1 / 4.1 ms |
-| artifact verify, kernel entry, first dispatch | ≤0.1 ms | ≤0.1 ms |
-| foreground teardown | 298.3 / 325.9 ms | 1102.0 / 1215.0 ms |
-| **total** | **1182.7 / 1218.4 ms** | **1940.1 / 2054.4 ms** |
+| **dispatch window** | **114.1 / 122.6 ms** | **18.9 / 20.0 ms** |
+| `vmm_create` | 58.8 / 63.4 ms | — (no VMM created) |
+| `guest_kernel_entry` | 54.1 / 59.3 ms | — |
+| `agent_auth` | 1.4 / 1.7 ms | 0.9 / 1.2 ms |
+| artifact verify, first dispatch | ≤0.1 ms | ≤0.1 ms |
+| foreground teardown | 139.1 / 148.0 ms | 1086.0 / 1135.6 ms |
+| **total** | **343.6 / 352.0 ms** | **1216.1 / 1271.9 ms** |
 
-Four things this establishes, none of which were visible before:
+Backend phases recorded inside `start_workload`, prepared-cold lane:
 
-1. **Prepared cold is 780 ms p50 against a 200 ms target, and 778 ms of it is
-   inside one call** — `VmBackend::start`. Artifact verification, guest-kernel
-   entry, agent authentication and first dispatch together account for under
-   2 ms. Any optimization that does not open up `start` is noise.
-2. **The warm claim is only 5% faster than a cold boot on this path** (740 vs
-   780 ms) and is *64% slower end to end* (1940 vs 1183 ms), because
-   replenishing the pool adds ~800 ms to foreground teardown. `pool_wait_ms` is
-   0.1 ms, so this is the claim itself, not pool maintenance.
-3. **740 ms exceeds `WARM_START_MAX_MS` (300 ms)**, the ceiling
-   `within_warm_start_slo` asserts against, on the shipped `machine run`
-   surface with an OCI image.
-4. **The default residency policy on this tier is `always_warm`**, so
-   back-to-back `machine run` invocations claim a standby rather than cold
-   boot. A cold measurement requires `MVM_RESIDENCY=cold`; the lane gate
-   caught this by refusing a contaminated warm-up rather than silently
-   reporting warm claims as cold launches.
+| backend phase | p50 | p99 |
+|---|---:|---:|
+| `endpoint_spawn` | 0.0 ms | 0.0 ms |
+| `spec_assembly` | 0.0 ms | 0.0 ms |
+| `driver_boot` | 53.7 ms | 55.5 ms |
+| `console_stream_start` | 2.3 ms | 3.4 ms |
+| `activate_workload` | 0.0 ms | 0.0 ms |
+| `broker_register` | 1.0 ms | 6.4 ms |
 
-### Where the 780 ms actually goes
+What this establishes:
 
-`VmBackend::start` for an admitted workload is `WorkloadRunner<HvfDriver>`, not
-the `HvfBackend` shim. Recording phases inside `start_workload` (same 20-run
-prepared-cold lane) breaks the span open:
+1. **Both lanes already meet their dispatch targets.** Prepared cold reaches an
+   authenticated agent in 114 ms p50 / 122.6 ms p99 against a ≤200 / ≤300 ms
+   budget, and a warm claim in 18.9 / 20.0 ms against the 300 ms
+   `WARM_START_MAX_MS` ceiling. The dispatch-window SLO is not where the
+   remaining work is.
+2. **Foreground teardown is now the dominant cost in both lanes** — 139 ms of
+   the 344 ms cold wall clock, and 1086 ms of the 1216 ms warm wall clock,
+   where it is 89% of the launch. The warm cost is pool replenish running
+   inline on the way out. Phase 6 is therefore the highest-value remaining
+   phase, ahead of Phase 3.
+3. **A cold launch splits evenly between VMM and guest.** `driver_boot` is
+   53.7 ms and the wait from `start` returning to an answering agent is
+   54.1 ms. Neither dominates, and together they are only a third of the cold
+   wall clock.
 
-| backend phase (p50 / p99) | |
-|---|---:|
-| `endpoint_spawn` | 0.0 / 0.0 ms |
-| `spec_assembly` | 0.0 / 0.0 ms |
-| **`driver_boot`** (VMM create + guest boot) | **54.3 / 192.8 ms** |
-| `console_stream_start` | 4.2 / 6.5 ms |
-| `activate_workload` | 0.0 / 0.0 ms |
-| **`broker_register`** | **711.1 / 715.7 ms** |
+### A fail-slow, fail-silent registration path
 
-**The VM boots in 54 ms. 92% of the cold-launch budget is host-services broker
-registration** — post-boot bookkeeping that runs after the guest is already up
-and activated.
+The first baseline recorded here was invalid, and the way it was wrong is
+worth keeping. It was measured against a build containing only the `mvmctl`
+binary, so `mvm-host-agent` was absent. That produced a prepared-cold figure of
+780 ms p50 — 6.8x the real number — with 711 ms attributed to broker
+registration.
 
-The mechanism is a readiness misjudgement, not slow work.
-`ensure_host_agent_daemon` treats a successful `UnixStream::connect` as "the
-daemon is ready", but the daemon binds its control socket before it can serve
-on it. The register RPC therefore fails transiently and the caller's retry
-ladder sleeps `100 + 200 + 400 = 700 ms` before the attempt that succeeds —
-which is the observed 711 ms p50 at a 4 ms spread. A socket becoming
-connectable is not readiness, which is the same rule Phase 5 states for the
-guest.
+The mechanism is a real defect, independent of the build mistake:
 
-Two conditions make every launch pay it: the per-tenant daemon is not staying
-resident between launches despite the code describing it as warm (no
-`mvm-host-agent` process survives a run), so each launch respawns it and then
-races its readiness.
+- `resolve_subprocess_bin` cannot find the daemon binary, so
+  `register_host_agent_services_if_admitted` fails.
+- `RealBrokerRegistrar::register` treats that as best-effort: it logs a warning
+  and continues, so **the workload runs with `host.audit.v1` unavailable and
+  nothing in the launch result says so**.
+- The armed rollback guard then attempts a deregister against a control socket
+  that does not exist. `is_transient_control_error` counts `NotFound` as
+  transient, so the retry ladder sleeps `100 + 200 + 400 = 700 ms` waiting for
+  a socket that can never appear.
 
-Warm claims show the same shape — 728.7 ms p50 dispatch, and the claim path
-registers the same broker — but `claim_standby` does not route through
-`start_workload`, so confirming it needs the same marks there.
+So an unavailable daemon costs 700 ms per launch and silently degrades a
+security-relevant capability. Both halves are worth fixing: a missing binary
+should fail fast rather than back off, and a launch that lost `host.audit.v1`
+should say so rather than report as clean.
 
-This retargets the remaining phases: the VMM and the kernel are not the cold
--start problem on this backend, and Phase 3's premise should be re-derived from
-these numbers rather than from the pre-decomposition 780 ms.
+That second half is also a gap in this plan's own measurement contract. The
+lane gate refuses a launch that did *too much* work (a pull, a build, a warm
+claim) but cannot see a launch that silently did *too little*. A degraded
+launch is not a valid sample of a healthy one.
 
 Kernel size is not a candidate lever here. The workload kernel is an 8.2 MiB
 arm64 `Image` (6.12.100, 936 options, zero modules, already ratcheted by

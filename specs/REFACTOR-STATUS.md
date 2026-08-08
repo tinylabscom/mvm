@@ -67,15 +67,12 @@ for detailed scope and acceptance criteria.
 - [~] Plan 299 — Prepared cold-launch performance
       (`specs/plans/299-cold-launch-performance.md`), branch
       `plan/cold-launch-performance`
-  - [~] Phase 0 — freeze a trustworthy baseline. The substrate is in: a
-        release-only benchmark entry point that invokes a built `mvmctl`
-        directly, a machine-readable launch sample carrying build profile /
-        backend / guest sizing / artifact paths / work performed, nine
-        sub-phase spans below the coarse run buckets, raw-plus-p50/p95/p99
-        reporting, and a lane gate that refuses a prepared-cold sample which
-        pulled, built, materialized a mount image, or claimed a warm standby.
-        The ≥20-iteration live baseline per lane on Apple Silicon/HVF and the
-        Linux Firecracker host is the one open item.
+  - [~] Phase 0 — freeze a trustworthy baseline. Substrate in; Apple
+        Silicon/HVF measured: prepared cold 114.1 ms p50 / 122.6 ms p99 to an
+        authenticated agent, warm claim 18.9 / 20.0 ms — both inside budget.
+        Foreground teardown is now the dominant cost (1086 ms of a 1216 ms warm
+        launch, from inline pool replenish), which promotes Phase 6 ahead of
+        Phase 3. Linux Firecracker + libkrun lanes remain.
   - [ ] Phase 1 — content-addressed `--mount` image cache
   - [ ] Phase 2 — artifact preparation outside the launch path
   - [ ] Phase 3 — reduce backend cold-start latency
