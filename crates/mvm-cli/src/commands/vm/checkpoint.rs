@@ -18,18 +18,22 @@ use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointId, Chec
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
+use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::{
     CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, capture_fs_quick,
-    capture_vm_full, checkpoint_carries_supervisor_config, fork_checkpoint, fork_vm_full_fc,
+    capture_vm_full, fork_checkpoint,
 };
 
 use super::Cli;
 use super::shared::clap_vm_name;
 use crate::ui;
 
+mod fork_vm_full;
 mod lineage;
 mod revert;
 mod timeline;
+use fork_vm_full::fork_vm_full_arm;
+pub(in crate::commands) use fork_vm_full::{ForkVmFullArmFcParams, fork_vm_full_arm_fc};
 pub(in crate::commands) use lineage::SignedChainAnchor;
 pub(in crate::commands) use revert::{
     AdvanceArgs, RevertArgs, RevertImageSource, RevertOutcome, RevertRunImage, run_advance,
@@ -319,15 +323,14 @@ fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Option<PathBuf>>
 }
 
 /// Best-effort liveness: a VM is "running" iff one of its per-backend PID
-/// files names a live process.
-///
-/// Every backend writes its marker into the same per-VM directory
-/// (`<mvm_home>/vms/<name>/`) under a backend-disjoint name, so one pass over
-/// the shared marker list covers all of them. Delegating also picks up the
-/// `EPERM`-means-alive rule, which matters for a root-owned Firecracker: a
-/// bare `kill(pid, 0) == 0` reads that as stopped.
+/// files names a live process. Delegates to the runtime's probe so this side
+/// cannot keep its own marker list — every registered backend's marker
+/// (`fc.pid`, `libkrun.pid`, `hvf.pid`, `qemu.pid`) is covered by one pass over
+/// the shared list, which is also where the `EPERM`-means-alive rule lives. A
+/// hand-kept list here is how a live HVF VM used to read as stopped, and a
+/// root-owned Firecracker with it.
 fn vm_is_running(name: &str) -> bool {
-    mvm_vmm::host::process_liveness::state_dir_has_live_process(&vm_state_dir(name))
+    mvm_runtime::checkpoint::vm_is_running(name)
 }
 
 /// fs_quick clones the instance rootfs, so the guest must not be writing:
@@ -340,7 +343,17 @@ fn vm_is_quiesced(name: &str) -> bool {
     if !vm_is_running(name) {
         return true;
     }
-    fc_pause_marker_matches_live_pid(name)
+    fc_pause_marker_matches_live_pid(name) || hvf_pause_marker_present(name)
+}
+
+/// The HVF supervisor writes `pause.state` only after its vCPU has entered the
+/// pause hold, and removes it on resume. Unlike Firecracker's marker this one is
+/// written by the process that owns the vCPU, so its presence beside a live
+/// `hvf.pid` is itself the acknowledgement — there is no pid to cross-check
+/// against a marker some other verb stamped.
+fn hvf_pause_marker_present(name: &str) -> bool {
+    let dir = vm_state_dir(name);
+    dir.join("hvf.pid").is_file() && dir.join("pause.state").is_file()
 }
 
 /// `machine pause` snapshot-seals FC but leaves the fc process running, so a
@@ -379,8 +392,17 @@ fn runtime_contract_for_checkpoint(
         .unwrap_or((None, None)))
 }
 
-fn ensure_save_restore_supported(action: &str) -> Result<()> {
-    let backend = mvm_runtime::backend::AnyBackend::auto_select();
+/// The backend that actually owns `name`, falling back to the host default for
+/// a VM with no live marker (a restore target that has not been started yet).
+fn backend_for_vm(name: &str) -> AnyBackend {
+    AnyBackend::for_started_vm(name).unwrap_or_else(AnyBackend::auto_select)
+}
+
+/// Refuse a memory-snapshot verb on a backend that cannot save and reload
+/// machine state. The check is against the backend that owns *this* VM, not the
+/// host default: on a host where several VMMs can run, the capability of the
+/// one holding the VM is the only one that matters.
+fn ensure_save_restore_supported(action: &str, backend: &AnyBackend) -> Result<()> {
     let available = backend.snapshot_capability();
     if !available.satisfies(SnapshotCapability::SaveRestore) {
         bail!(
@@ -438,37 +460,57 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Capture the vm_full triple for the running VM. Firecracker (the sole
-/// full-VM capture backend) drives the pause/save/resume window. The caller
-/// has already verified the VM is running.
-fn capture_vm_full_for_running_vm(
-    name: &str,
-    state_dir: &std::path::Path,
-    store: &CheckpointStore,
+/// Inputs for [`capture_vm_full_for_running_vm`]. Grouped so the call site
+/// reads as one value rather than a positional list.
+struct CaptureVmFullArgs<'a> {
+    name: &'a str,
+    state_dir: &'a std::path::Path,
+    store: &'a CheckpointStore,
+    backend: &'a AnyBackend,
     id: CheckpointId,
     tag: Option<String>,
     created_unix: u64,
+}
+
+/// Capture the vm_full triple for the running VM through the pause/save/resume
+/// control of the backend that owns it. The caller has already verified the VM
+/// is running and that the backend advertises save/restore.
+fn capture_vm_full_for_running_vm(
+    args: CaptureVmFullArgs<'_>,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
-    let (runtime_source_policy, runtime_overlay_version) = runtime_contract_for_checkpoint(name)?;
+    let (runtime_source_policy, runtime_overlay_version) =
+        runtime_contract_for_checkpoint(args.name)?;
+    let control = args.backend.vm_full_control(args.name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "backend '{}' has no full-VM capture control for '{}'",
+            args.backend.name(),
+            args.name
+        )
+    })?;
     let params = CaptureVmFullParams {
-        id,
-        vm_name: name.to_string(),
-        supervisor_config_digest: supervisor_config_digest(state_dir),
+        id: args.id,
+        vm_name: args.name.to_string(),
+        supervisor_config_digest: supervisor_config_digest(args.state_dir),
         runtime_source_policy,
         runtime_overlay_version,
-        supervisor_config_src: None,
-        tag,
-        created_unix,
+        // Backends that drive their VMM through a supervisor config (HVF) carry
+        // it into the checkpoint: a restore has to rebuild the launch shape the
+        // capture froze, and every stop reaps the live copy. Firecracker returns
+        // None and the blob is simply absent.
+        supervisor_config_src: control.supervisor_config_path()?,
+        tag: args.tag,
+        created_unix: args.created_unix,
+        retain_paused: false,
     };
-    let control = mvm_runtime::firecracker::FcVmFullControl::new(name);
-    capture_vm_full(store, params, &control)
+    capture_vm_full(args.store, params, control.as_ref())
 }
 
 /// `mvmctl checkpoint create --class vm-full <vm>`: capture a RUNNING VM's
 /// memory + rootfs in one pause window. The inverse of fs_quick — a vm_full
 /// checkpoint carries memory, so the VM must be live.
 fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
-    ensure_save_restore_supported("save")?;
+    let backend = backend_for_vm(name);
+    ensure_save_restore_supported("save", &backend)?;
     if !vm_is_running(name) {
         bail!("checkpoint --class vm-full requires a running VM; start '{name}' first");
     }
@@ -477,8 +519,16 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     let now = now_unix();
     let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
 
-    let meta = capture_vm_full_for_running_vm(name, &state_dir, &store, id, tag, now)
-        .with_context(|| format!("capturing vm_full checkpoint of {name:?}"))?;
+    let meta = capture_vm_full_for_running_vm(CaptureVmFullArgs {
+        name,
+        state_dir: &state_dir,
+        store: &store,
+        backend: &backend,
+        id,
+        tag,
+        created_unix: now,
+    })
+    .with_context(|| format!("capturing vm_full checkpoint of {name:?}"))?;
 
     // Best-effort audit binding, same policy as fs_quick capture.
     bind_checkpoint_created(name, &meta);
@@ -644,17 +694,71 @@ fn rm(id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// JSON shape of a completed same-identity restore.
+#[derive(Serialize)]
+struct CheckpointRestoreJson<'a> {
+    schema_version: u8,
+    action: &'static str,
+    id: &'a CheckpointId,
+    vm_name: &'a str,
+}
+
 /// `mvmctl vm checkpoint restore <id>`: same-identity resume of a vm_full
-/// checkpoint. The restore mechanism is being re-homed onto the in-house HVF
-/// VMM and is unavailable on the current macOS/Linux backends; a clear,
-/// tracked error is returned rather than a partial resume.
-fn restore(id: &str, _json: bool) -> Result<()> {
-    // Validate the id so an obviously bad argument still errors clearly.
-    let _ = validated_checkpoint_id(id)?;
-    bail!(
-        "vm restore requires full-VM save/restore, which is being re-homed onto \
-         the in-house HVF VMM and is unavailable on this backend for now"
-    );
+/// checkpoint.
+///
+/// The checkpoint is verified against the signed audit chain before a single
+/// byte is cloned, so a restore can never bring back a record that was edited
+/// after it was audited. The VM comes back under its own name from its own
+/// clone of the sealed content — the immutable checkpoint bytes are never
+/// booted against, because a resumed guest writes through to its rootfs.
+fn restore(id: &str, json: bool) -> Result<()> {
+    let id = validated_checkpoint_id(id)?;
+    let store = CheckpointStore::open();
+    let meta = store
+        .read_meta(&id)
+        .with_context(|| format!("reading checkpoint {}", id.as_str()))?;
+    if meta.class != CheckpointClass::VmFull {
+        bail!(
+            "checkpoint '{}' is class fs_quick; restore applies to vm_full checkpoints \
+             (fork an fs_quick checkpoint instead)",
+            id.as_str()
+        );
+    }
+    if vm_is_running(&meta.vm_name) {
+        bail!(
+            "cannot restore into '{}': it is still running; stop it first",
+            meta.vm_name
+        );
+    }
+    let restorer = mvm_runtime::checkpoint::vm_full_restorer_for(&meta)?;
+    let anchor = SignedChainAnchor::load()
+        .context("loading the signed audit chain to verify the restore source")?;
+    mvm_runtime::checkpoint::restore_checkpoint(
+        &store,
+        mvm_runtime::checkpoint::RestoreParams {
+            checkpoint: id.clone(),
+            target_vm: meta.vm_name.clone(),
+        },
+        restorer.as_ref(),
+        &anchor,
+    )
+    .with_context(|| format!("restoring checkpoint {}", id.as_str()))?;
+
+    if json {
+        crate::json_out::emit_json(&CheckpointRestoreJson {
+            schema_version: 1,
+            action: "restore",
+            id: &id,
+            vm_name: &meta.vm_name,
+        })?;
+    } else {
+        ui::success(&format!(
+            "restored {} into vm '{}'",
+            id.as_str(),
+            meta.vm_name
+        ));
+    }
+    Ok(())
 }
 
 fn fork(
@@ -778,359 +882,6 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
             ));
         }
     }
-    Ok(())
-}
-
-/// Inputs for [`fork_vm_full_arm`]. Grouped to stay under the
-/// `clippy::too_many_arguments` workspace ceiling.
-struct ForkVmFullArmParams<'a> {
-    store: &'a CheckpointStore,
-    checkpoint: &'a CheckpointId,
-    new_id: Option<String>,
-    /// Refused with a user-visible error: a vm_full fork restores the saved
-    /// machine state (cpu/mem baked into the snapshot), so the shape is fixed.
-    /// Use an fs_quick fork to boot a resized child.
-    cpus_override: Option<u32>,
-    /// Refused with a user-visible error for the same reason as `cpus_override`.
-    memory_override: Option<&'a str>,
-    json: bool,
-}
-
-/// vm_full fork: clone the captured triple into a new child identity, admit a
-/// fresh claim-8 plan for the child (using the parent's saved cpu/mem — the
-/// restore shape is fixed), rewrite the supervisor config, and boot the child
-/// in restore mode. The child's admitted plan is distinct from the parent's.
-/// Whether the experimental Firecracker vm_full fork restore is opted into.
-///
-/// Off by default: a forked child restores the parent's saved guest memory,
-/// which carries the parent's IP/MAC, and there is no per-child guest
-/// re-addressing yet — so a booted child collides with its parent on the
-/// shared bridge. The opt-in exercises the (proven-sound) restore mechanism
-/// on an isolated single-child network while that per-child network model is
-/// still being settled.
-fn fc_vm_full_fork_experimental_enabled() -> bool {
-    std::env::var_os("MVM_FORK_VMFULL_FC_EXPERIMENTAL").is_some()
-}
-
-fn fork_vm_full_arm(
-    store: &CheckpointStore,
-    checkpoint: &CheckpointId,
-    new_id: Option<String>,
-    cpus_override: Option<u32>,
-    memory_override: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    fork_vm_full_arm_inner(ForkVmFullArmParams {
-        store,
-        checkpoint,
-        new_id,
-        cpus_override,
-        memory_override,
-        json,
-    })
-}
-
-fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
-    // A vm_full fork restores a saved machine state whose cpu/mem are baked
-    // into the snapshot; a supervisor-config-bearing backend validated device config
-    // against the saved state and refused a mismatch. Accepting these flags
-    // would silently fail at restore time with a confusing hypervisor error
-    // — refuse early.
-    if p.cpus_override.is_some() {
-        anyhow::bail!(
-            "--cpus is not valid for a vm_full fork: a memory restore resumes the saved \
-             machine shape; use an fs_quick fork to resize"
-        );
-    }
-    if p.memory_override.is_some() {
-        anyhow::bail!(
-            "--memory is not valid for a vm_full fork: a memory restore resumes the saved \
-             machine shape; use an fs_quick fork to resize"
-        );
-    }
-
-    let now = now_unix();
-    let child_vm_name = p
-        .new_id
-        .unwrap_or_else(|| format!("{}-fork-{now}", p.checkpoint.as_str()));
-    let dest_dir = vm_state_dir(&child_vm_name);
-    let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
-
-    let parent_meta = p.store.read_meta(p.checkpoint)?;
-
-    fork_vm_full_arm_fc(ForkVmFullArmFcParams {
-        store: p.store,
-        checkpoint: p.checkpoint,
-        parent_meta,
-        child_vm_name,
-        dest_dir,
-        child_id,
-        now,
-        json: p.json,
-        bypass_experimental_guard: false,
-    })?;
-    Ok(())
-}
-
-/// Inputs for [`fork_vm_full_arm_fc`]. Grouped to stay under the
-/// `clippy::too_many_arguments` workspace ceiling.
-pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
-    pub(in crate::commands) store: &'a CheckpointStore,
-    pub(in crate::commands) checkpoint: &'a CheckpointId,
-    pub(in crate::commands) parent_meta: mvm_core::checkpoint::CheckpointMeta,
-    pub(in crate::commands) child_vm_name: String,
-    pub(in crate::commands) dest_dir: std::path::PathBuf,
-    pub(in crate::commands) child_id: CheckpointId,
-    pub(in crate::commands) now: u64,
-    pub(in crate::commands) json: bool,
-    /// When true, skip the `MVM_FORK_VMFULL_FC_EXPERIMENTAL` guard. The guard
-    /// stays on the lower-level `vm checkpoint fork` path; the user-facing
-    /// `machine warm-restore` verb opts in explicitly.
-    pub(in crate::commands) bypass_experimental_guard: bool,
-}
-
-/// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
-/// the child, rename `memory.bin` → `mem.bin`, and boot the child via a fresh
-/// Firecracker VMM loaded from the checkpoint snapshot.
-pub(in crate::commands) fn fork_vm_full_arm_fc(
-    p: ForkVmFullArmFcParams<'_>,
-) -> Result<mvm_core::checkpoint::CheckpointMeta> {
-    // FC vm_full fork loads a snapshot that still carries the parent's TAP
-    // name and guest MAC in bitcode. Remapping backing files is not enough to
-    // make a live-parent fork safe, so require the parent to be stopped first.
-    // The device-path remapping happens in a private mount namespace before
-    // the child Firecracker starts.
-    if vm_is_running(&p.parent_meta.vm_name) {
-        anyhow::bail!(
-            "Firecracker vm_full fork requires the parent VM '{}' to be stopped first;              live-parent fork would collide on the parent's TAP/MAC",
-            p.parent_meta.vm_name
-        );
-    }
-
-    // A supervisor-config.json blob means the capture rebuilds its VMM from a
-    // persisted supervisor config rather than from Firecracker's snapshot
-    // triple. Only the Firecracker fork path is implemented below, so refuse
-    // cleanly rather than misread the manifest.
-    if checkpoint_carries_supervisor_config(&p.parent_meta) {
-        anyhow::bail!(
-            "this vm_full checkpoint carries a supervisor config, so it was not \
-             captured under Firecracker; full-VM fork is only implemented for \
-             Firecracker captures. Use an fs_quick fork instead."
-        );
-    }
-
-    // Firecracker vm_full fork. A forked child restores the parent's saved guest
-    // memory verbatim, which carries the parent's IP/MAC. VMGenID reseeds the
-    // guest RNG on restore but does not re-address the network, so a booted child
-    // would collide with its parent on the shared dev-subnet bridge. The host-tap
-    // side is remappable, but re-IP'ing the guest is a per-child network-model
-    // decision that is not yet settled — refuse cleanly rather than boot a
-    // colliding child. The restore mechanism stays reachable behind an explicit
-    // opt-in for isolated single-child testing on that model, unless the caller
-    // has already opted in (the user-facing `machine warm-restore` path).
-    if !p.bypass_experimental_guard && !fc_vm_full_fork_experimental_enabled() {
-        anyhow::bail!(
-            "forking a vm_full checkpoint on Firecracker is not yet supported: the \
-             forked child inherits the parent's guest IP/MAC from the saved memory \
-             image and has no per-child network reconfiguration, so it would collide \
-             with the parent on the shared bridge. Use an fs_quick fork, or set \
-             MVM_FORK_VMFULL_FC_EXPERIMENTAL=1 to exercise the restore on an isolated \
-             single-child network."
-        );
-    }
-
-    // Use safe defaults for FC cpu/mem plan admission. The actual cpu/mem are
-    // baked into the snapshot and enforced by FC at load time; the plan values
-    // are used for claim-8 admission metadata only.
-    let user_cfg = mvm_core::user_config::load(None);
-    let cpus = user_cfg.default_cpus;
-    let mem_mib = user_cfg.default_memory_mib as u64;
-
-    // Admit a fresh plan for the child using the checkpoint's RECORDED rootfs sha.
-    let rootfs_blob = p.store.content_dir(p.checkpoint).join("rootfs.ext4");
-    let recorded_sha = p
-        .parent_meta
-        .content
-        .iter()
-        .find(|b| b.name == "rootfs.ext4")
-        .map(|b| b.sha256.clone());
-    let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
-    let tenant = super::tenant_resolution::resolve_tenant(None);
-    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
-    let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-        tenant: &tenant,
-        vm_name: &p.child_vm_name,
-        backend_name: "firecracker",
-        rootfs_path: &rootfs_blob,
-        precomputed_image_sha256: recorded_sha,
-        boot_artifact_identity: None,
-        cpus,
-        mem_mib,
-        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-        secrets: Vec::new(),
-        no_supervisor: false,
-        ledger: &ledger,
-        keys_dir: None,
-        audit_dir: None,
-        policy_dir: None,
-        bundle_pin: None,
-        deps_volume: None,
-        shares: Vec::new(),
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-        agent_verb_override: parent_agent_verbs.clone(),
-        // A restored child is never interactive, never carries ad-hoc argv, and
-        // is always prod-profile, so it qualifies for the attenuated grant.
-        restrict_agent_verbs: !parent_agent_verbs.is_empty()
-            || super::agent_verbs::grant_eligible(false, false, false),
-        services: Vec::new(),
-        entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-            "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
-        ),
-    })?;
-
-    let child_plan_json = admission.as_ref().map(|ctx| {
-        serde_json::to_string(ctx.admitted.signed()).expect("admitted plan is always serializable")
-    });
-    let child_tenant_id = admission
-        .as_ref()
-        .map(|ctx| ctx.admitted.plan().tenant.0.clone());
-
-    // Mint the child's verb-grant sidecar up front so it's readable below for
-    // post-restore delivery.
-    if let Some(ref plan_json_str) = child_plan_json {
-        let mint_cfg = mvm_core::vm_backend::VmStartConfig {
-            name: p.child_vm_name.clone(),
-            plan_json: Some(plan_json_str.clone()),
-            ..Default::default()
-        };
-        mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
-    }
-
-    // Verify the parent against the signed audit chain before cloning/restoring.
-    let parent_meta = p.store.read_meta(p.checkpoint)?;
-    let anchor = SignedChainAnchor::load()
-        .context("loading the signed audit chain to verify the fork parent")?;
-    let fork_result = fork_vm_full_fc(
-        p.store,
-        ForkParams {
-            checkpoint: p.checkpoint.clone(),
-            child_id: p.child_id,
-            child_vm_name: p.child_vm_name.clone(),
-            dest_dir: p.dest_dir,
-            created_unix: p.now,
-            child_plan_json,
-            child_tenant_id,
-        },
-        &|name, dir| mvm_runtime::firecracker::FcForkRestorer.restore_fork(name, dir),
-        &anchor,
-    );
-    if let Err(ref e) = fork_result {
-        super::up::emit_failed_if(&admission, "fork-vm-full-fc", e);
-    }
-    let meta = fork_result
-        .with_context(|| format!("forking FC vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
-
-    bind_checkpoint_forked(p.checkpoint, &meta, &p.child_vm_name, p.store)?;
-    super::up::emit_launched_if(&admission, "firecracker", true);
-
-    // Deliver the fresh generation token to every restored child. A grant is
-    // optional for dev/test forks, but identity rotation is not: the token is
-    // bound to the child's recorded snapshot identity, not its human-readable
-    // VM name. When a grant exists, re-pin it in the same PostRestore RPC.
-    let mut grant_env = read_grant_envelope_for(&p.child_vm_name);
-    if let Some(grant) = grant_env.as_mut()
-        && let Some(parent_vm_name) = p.store.read_meta(p.checkpoint).ok().map(|m| m.vm_name)
-        && let Some((session_id, plan_nonce)) = grant_predecessor_from_vm_name(&parent_vm_name)
-    {
-        grant.predecessor_session_id = Some(session_id);
-        grant.predecessor_plan_nonce_hex = Some(plan_nonce.as_hex().to_string());
-    }
-    if let Err(error) = deliver_fc_fork_post_restore(
-        &p.child_vm_name,
-        parent_meta.meta_digest.as_str(),
-        grant_env,
-    ) {
-        let stop_result = mvm_runtime::microvm::stop_vm(&p.child_vm_name);
-        return match stop_result {
-            Ok(()) => Err(error.context(format!(
-                "stopped forked child '{}' after post-restore hygiene failure",
-                p.child_vm_name
-            ))),
-            Err(stop_error) => Err(error.context(format!(
-                "post-restore hygiene failed for '{}' and stopping the child also failed: {}",
-                p.child_vm_name, stop_error
-            ))),
-        };
-    }
-
-    if p.json {
-        crate::json_out::emit_json(&CheckpointForkJson {
-            schema_version: 1,
-            action: "fork",
-            parent_id: p.checkpoint,
-            child_vm_name: &p.child_vm_name,
-            booted: true,
-            checkpoint: &meta,
-        })?;
-    } else {
-        ui::success(&format!(
-            "forked {} -> checkpoint {} (vm '{}', auto-booted on firecracker)",
-            p.checkpoint.as_str(),
-            meta.id.as_str(),
-            p.child_vm_name
-        ));
-    }
-    Ok(meta)
-}
-
-fn deliver_fc_fork_post_restore(
-    child_vm_name: &str,
-    parent_snapshot_digest: &str,
-    grant_env: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
-) -> Result<()> {
-    let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(child_vm_name)
-        .with_context(|| format!("resolving VM dir for '{child_vm_name}'"))?;
-    let vsock_path_str = mvm_runtime::microvm::firecracker_vsock_uds_path(&vm_dir);
-    const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
-    for _ in 0..POLL_ATTEMPTS {
-        if mvm_agentd::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
-            let token =
-                mvm_core::crypto::vmgenid::fresh_generation_token(parent_snapshot_digest).token;
-            let host_epoch_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .context("reading host wall clock for fork PostRestore")?
-                .as_secs();
-            let reply = mvm_agentd::vsock::post_restore_with_grant_and_clock_at(
-                &vsock_path_str,
-                token,
-                grant_env,
-                Some(host_epoch_secs),
-            )
-            .with_context(|| format!("sending PostRestore to '{child_vm_name}'"))?;
-            require_fork_post_restore_success(reply)?;
-            tracing::info!(
-                "FC fork post-restore identity rotation acknowledged for '{}'",
-                child_vm_name
-            );
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-    anyhow::bail!("guest agent not reachable for '{child_vm_name}' after fork restore")
-}
-
-fn require_fork_post_restore_success(reply: mvm_agentd::vsock::PostRestoreReply) -> Result<()> {
-    anyhow::ensure!(reply.acknowledged, "guest did not acknowledge PostRestore");
-    anyhow::ensure!(
-        reply.reseeded,
-        "guest acknowledged PostRestore without rotating its generation identity"
-    );
-    anyhow::ensure!(
-        reply.clock_resynced,
-        "guest acknowledged PostRestore without resynchronizing its wall clock"
-    );
     Ok(())
 }
 
@@ -1467,40 +1218,6 @@ mod tests {
     }
 
     #[test]
-    fn fork_post_restore_requires_acknowledgement_and_reseed() {
-        let acknowledged = mvm_agentd::vsock::PostRestoreReply {
-            acknowledged: true,
-            reseeded: true,
-            clock_resynced: true,
-        };
-        assert!(require_fork_post_restore_success(acknowledged).is_ok());
-
-        let not_reseeded = mvm_agentd::vsock::PostRestoreReply {
-            acknowledged: true,
-            reseeded: false,
-            clock_resynced: true,
-        };
-        let err = require_fork_post_restore_success(not_reseeded).unwrap_err();
-        assert!(err.to_string().contains("without rotating"));
-
-        let not_acknowledged = mvm_agentd::vsock::PostRestoreReply {
-            acknowledged: false,
-            reseeded: false,
-            clock_resynced: false,
-        };
-        let err = require_fork_post_restore_success(not_acknowledged).unwrap_err();
-        assert!(err.to_string().contains("did not acknowledge"));
-
-        let not_clock_resynced = mvm_agentd::vsock::PostRestoreReply {
-            acknowledged: true,
-            reseeded: true,
-            clock_resynced: false,
-        };
-        let err = require_fork_post_restore_success(not_clock_resynced).unwrap_err();
-        assert!(err.to_string().contains("wall clock"));
-    }
-
-    #[test]
     fn parent_agent_verb_override_inherits_parent_verbs() {
         use mvm_contract::plan::VerbId;
         use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
@@ -1560,23 +1277,6 @@ mod tests {
     }
 
     // ── FC vm_full fork gate ─────────────────────────────────────────────
-
-    /// The FC vm_full fork is refused by default (guest re-IP unsettled) and
-    /// only reachable behind the explicit experimental opt-in.
-    #[test]
-    fn fc_vm_full_fork_gated_off_without_optin() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.remove("MVM_FORK_VMFULL_FC_EXPERIMENTAL");
-        assert!(
-            !fc_vm_full_fork_experimental_enabled(),
-            "FC vm_full fork must be gated off unless explicitly opted in"
-        );
-        env.set("MVM_FORK_VMFULL_FC_EXPERIMENTAL", "1");
-        assert!(
-            fc_vm_full_fork_experimental_enabled(),
-            "opt-in must enable the experimental FC vm_full fork restore"
-        );
-    }
 
     // ── vm_is_quiesced ───────────────────────────────────────────────────
 
@@ -2138,50 +1838,6 @@ mod tests {
     }
 
     // ── vm_full fork: --cpus/--memory refused ────────────────────────────────
-
-    /// Passing --cpus to a vm_full fork is refused with a clear error message
-    /// that explains the memory-restore constraint and names the fs_quick
-    /// alternative.
-    #[test]
-    fn vm_full_fork_refuses_cpus_override() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = fork_vm_full_arm_inner(ForkVmFullArmParams {
-            store: &CheckpointStore::at(tmp.path()),
-            checkpoint: &CheckpointId::new("ck-unused"),
-            new_id: None,
-            cpus_override: Some(8),
-            memory_override: None,
-            json: false,
-        })
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("--cpus"), "error must name --cpus: {msg}");
-        assert!(
-            msg.contains("fs_quick") || msg.contains("fs-quick"),
-            "error must name the fs_quick alternative: {msg}"
-        );
-    }
-
-    /// Passing --memory to a vm_full fork is refused with a clear error message.
-    #[test]
-    fn vm_full_fork_refuses_memory_override() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = fork_vm_full_arm_inner(ForkVmFullArmParams {
-            store: &CheckpointStore::at(tmp.path()),
-            checkpoint: &CheckpointId::new("ck-unused"),
-            new_id: None,
-            cpus_override: None,
-            memory_override: Some("2G"),
-            json: false,
-        })
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("--memory"), "error must name --memory: {msg}");
-        assert!(
-            msg.contains("fs_quick") || msg.contains("fs-quick"),
-            "error must name the fs_quick alternative: {msg}"
-        );
-    }
 
     // ── vm_is_running / vm_is_quiesced: Firecracker fc.pid path ──────────
 

@@ -59,6 +59,10 @@ pub mod driver;
 // `mvm_runtime::firecracker::<name>` keeps resolving for mvm-cli.
 pub use mvm_backends::fc::host as firecracker;
 pub mod handle_registry;
+/// The HVF end of the checkpoint restore seams (fork into a fresh identity,
+/// same-identity resume) — the counterpart of the capture control the HVF
+/// driver hands back through `vm_full_control`.
+pub mod hvf_restore;
 pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification
 /// (the image analog of [`checkpoint`]). Reuses the shared `lineage` walk.

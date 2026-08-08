@@ -2,6 +2,7 @@
 
 pub mod fc;
 pub mod hvf;
+pub mod hvf_restore;
 pub mod libkrun;
 pub mod qemu;
 

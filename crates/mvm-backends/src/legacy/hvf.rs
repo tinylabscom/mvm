@@ -393,7 +393,11 @@ impl VmBackend for HvfBackend {
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
             pause_resume: true,
-            snapshot_capability: SnapshotCapability::Unsupported,
+            // The supervisor serializes guest RAM plus vCPU and deterministic
+            // device state under an acknowledged pause, and reloads both into a
+            // fresh VMM. That is coarse save/restore of machine state, not the
+            // incremental live-memory tier: a capture copies the whole mapping.
+            snapshot_capability: SnapshotCapability::SaveRestore,
             // The native resident handoff is the warm-launch implementation;
             // admission still requires the backend's ordinary availability and
             // security gates before a parent can be created or claimed.

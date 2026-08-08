@@ -61,6 +61,14 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "store surface: checkpoint / fork / restore over the CoW rootfs",
     ),
     (
+        "commands/vm/checkpoint/fork_vm_full.rs",
+        &[Rule::AnyBackend],
+        "same store surface as commands/vm/checkpoint.rs — the vm_full fork arms live in \
+         their own file only because the parent crossed the production file-size cap. \
+         Listed per file rather than by directory prefix deliberately: a prefix would \
+         silently exempt whatever lands beside it next",
+    ),
+    (
         "commands/vm/exec.rs",
         &[Rule::AnyBackend],
         "streaming exec-over-vsock: selects the backend for the transient exec VM",

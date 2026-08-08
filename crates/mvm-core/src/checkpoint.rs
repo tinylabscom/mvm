@@ -131,6 +131,60 @@ pub struct ContentBlob {
     pub sha256: String,
 }
 
+/// Saved guest memory image inside a vm_full checkpoint's content dir.
+pub const MEMORY_BLOB: &str = "memory.bin";
+/// Cloned rootfs image inside any checkpoint's content dir.
+pub const ROOTFS_BLOB: &str = "rootfs.ext4";
+/// dm-verity hash-tree sidecar carried beside a sealed rootfs.
+pub const ROOTFS_VERITY_BLOB: &str = "rootfs.verity";
+/// Absolute host paths the saved machine state embeds by path.
+pub const DEVICE_ANCHORS_BLOB: &str = "device-anchors.json";
+/// Persisted launch config of the VM a vm_full checkpoint was captured from.
+/// Present only for backends that drive their VMM through a supervisor config
+/// (HVF, and the removed Apple-Virtualization backend); Firecracker omits it.
+pub const SUPERVISOR_CONFIG_BLOB: &str = "supervisor-config.json";
+/// vCPU + deterministic device state the in-house HVF VMM writes beside
+/// [`MEMORY_BLOB`]. Its presence in a content manifest is what identifies a
+/// vm_full checkpoint as HVF-produced.
+pub const HVF_FRAME_BLOB: &str = "memory.bin.hvf-frame";
+/// Firecracker's machine-state blob, written beside [`MEMORY_BLOB`]. Its
+/// presence identifies a vm_full checkpoint as Firecracker-produced.
+pub const FC_VMSTATE_BLOB: &str = "vmstate.bin";
+
+/// Which VMM produced a `vm_full` checkpoint. Derived from the content
+/// manifest rather than stored, so it cannot drift from the bytes a restore
+/// would actually load: each VMM writes a machine-state blob only it produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmFullOrigin {
+    /// Firecracker: `memory.bin` + [`FC_VMSTATE_BLOB`].
+    Firecracker,
+    /// The in-house HVF VMM: `memory.bin` + [`HVF_FRAME_BLOB`].
+    Hvf,
+    /// A supervisor-config checkpoint with no recognizable machine-state blob —
+    /// the removed Apple-Virtualization backend. Nothing on this host can load
+    /// it, so every consumer must refuse rather than guess.
+    Retired,
+}
+
+/// Classify a checkpoint by the machine-state blob its content manifest names.
+///
+/// Returns `None` for a manifest that names no machine state at all, which is
+/// what an `fs_quick` checkpoint looks like — callers dispatching a full-VM
+/// restore treat that as "not a vm_full checkpoint" rather than a backend.
+#[must_use]
+pub fn vm_full_origin(meta: &CheckpointMeta) -> Option<VmFullOrigin> {
+    let named = |name: &str| meta.content.iter().any(|blob| blob.name == name);
+    if named(HVF_FRAME_BLOB) {
+        Some(VmFullOrigin::Hvf)
+    } else if named(FC_VMSTATE_BLOB) {
+        Some(VmFullOrigin::Firecracker)
+    } else if named(SUPERVISOR_CONFIG_BLOB) {
+        Some(VmFullOrigin::Retired)
+    } else {
+        None
+    }
+}
+
 /// Absolute host paths to resources a vm_full snapshot embeds by path.
 /// Captured at checkpoint time so a forked child can make those paths
 /// resolve to its own copies without editing the snapshot bitcode.

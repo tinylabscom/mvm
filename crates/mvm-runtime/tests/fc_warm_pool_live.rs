@@ -225,6 +225,7 @@ fn fc_warm_pool_spawn_and_claim() {
             supervisor_config_src: None,
             tag: None,
             created_unix: mvm_core::time::now_unix_secs(),
+            retain_paused: false,
         },
         control.as_ref(),
     )
