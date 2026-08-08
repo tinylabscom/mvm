@@ -361,23 +361,23 @@ jobs:
         # or rename — the count guard turns that into a red lane.
         run: ./scripts/check-sealed-prod-allowlist.sh
 
-  # ── Lane: jailer-lite-property (Plan 113 §Task 9 + Task 15) ───────
+  # ── Lane: jailer-property (Plan 113 §Task 9 + Task 15) ───────────
   # Runs the `#[ignore]`-gated seccomp + Landlock property tests in
-  # `crates/mvm-jailer-lite/tests/{seccomp_property,landlock_property}.rs`.
+  # `crates/mvm-hostd/tests/{seccomp_property,landlock_property}.rs`.
   # Both tests are integration-test binaries gated behind
   # `#![cfg(target_os = "linux")]` and `#[ignore = "..."]` so a
-  # plain `cargo test -p mvm-jailer-lite` is a no-op on Linux + a
+  # plain `cargo test -p mvm-hostd` is a no-op on Linux + a
   # zero-binary on macOS / Windows. This lane drives them explicitly
   # with `-- --ignored` on Ubuntu 24.04 (kernel 6.x, which strictly
   # satisfies Landlock ABI v2 best-effort installation — see
-  # `crates/mvm-jailer-lite/src/landlock.rs::install_landlock`).
+  # `crates/mvm-hostd/src/jailer/landlock.rs::apply`).
   # Ubuntu 22.04 ships kernel 5.15 (borderline for ABI v2) and lacks
   # passt in its default apt repos (passt landed in main archives only
   # in 24.04 / noble), so this lane targets 24.04 outright.
   #
   # Runtime: a few seconds. PR-time, every push.
-  jailer-lite-property:
-    name: jailer-lite property tests (seccomp + Landlock) (Plan 113 §Task 9)
+  jailer-property:
+    name: jailer property tests (seccomp + Landlock) (Plan 113 §Task 9)
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
@@ -388,7 +388,7 @@ jobs:
 
       - name: Install system build deps (see `test` job for why)
         # `lld` matches `.cargo/config.toml`'s linux-gnu link-arg
-        # override. mvm-jailer-lite itself doesn't link libcap-ng,
+        # override. the jailer itself does not link libcap-ng,
         # but the workspace's `mvm-supervisor` transitive does on
         # other crates the cache restores, so keep the apt set
         # aligned with the `test` lane to maximise cache reuse.
@@ -436,20 +436,30 @@ jobs:
         # availability as a step output; the combined property-test
         # step below gates on it so the lane *skips* (not fails) where
         # the LSM can't enforce.
+        # Probe the kernel's own list of active LSMs, not the securityfs
+        # directory. `/sys/kernel/security/landlock/` is absent on kernels
+        # where Landlock is active and enforcing — verified on a 6.8 host that
+        # carries `landlock` in the LSM list and passes both property tests
+        # while that directory does not exist. Gating on the directory made
+        # this lane skip itself on a working kernel, which is exactly the
+        # failure a skip-rather-than-fail gate is least able to surface.
         run: |
           set -euo pipefail
           uname -r
-          if [ ! -d /sys/kernel/security/landlock ]; then
-            echo "::warning::Landlock LSM not active on this runner — skipping the jailer-lite property tests (both seccomp and Landlock probes share confine_self, which applies Landlock first)."
+          echo "active LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo '(unreadable)')"
+          if ! grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
+            echo "::warning::Landlock LSM not active on this runner — skipping the jailer property tests (both seccomp and Landlock probes share confine_self, which applies Landlock first)."
             echo "available=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Landlock ABI versions exposed:"
-          cat /sys/kernel/security/landlock/abi_versions 2>/dev/null || echo "(file missing)"
+          # Informational only: the file is a later-kernel addition, and its
+          # absence says nothing about whether Landlock enforces.
+          cat /sys/kernel/security/landlock/abi_versions 2>/dev/null \
+            || echo "(abi_versions not exposed on this kernel)"
           echo "available=true" >> "$GITHUB_OUTPUT"
 
       - name: Run property tests (seccomp + Landlock)
-        # Both property tests share mvm_jailer_lite::confine_self, which
+        # Both property tests share mvm_hostd::jailer::confine_self, which
         # applies Landlock first then seccomp. On runners where Landlock
         # isn't fully enforced (Azure kernel on GitHub's stock
         # ubuntu-24.04, etc.), confine_self errors out before the
@@ -463,7 +473,7 @@ jobs:
         # readable in the log.
         if: steps.landlock_probe.outputs.available == 'true'
         run: |
-          cargo test -p mvm-jailer-lite \
+          cargo test -p mvm-hostd \
             --test seccomp_property \
             --test landlock_property \
             -- --ignored --nocapture
@@ -592,7 +602,12 @@ jobs:
             builder_vm:
               - 'nix/images/builder-vm/**'
               - 'nix/lib/**'
-              - 'crates/mvm-host-vm-init/**'
+              # `mvm-host-vm-init` is a [[bin]] of mvm-build, not a crate of
+              # its own — the standalone directory this used to name was
+              # absorbed. A filter on a path that cannot exist never matches,
+              # so edits to the builder VM's PID 1 stopped triggering this
+              # lane silently.
+              - 'crates/mvm-build/src/bin/mvm-host-vm-init/**'
 
       - name: Install Nix
         if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
@@ -904,7 +919,7 @@ jobs:
           MVM_FC_BOOT_SMOKE: "1"
           MVM_FC_SMOKE_KERNEL: ${{ github.workspace }}/ci-artifacts/vmlinux
           MVM_FC_SMOKE_ROOTFS: ${{ github.workspace }}/ci-artifacts/rootfs.ext4
-        run: cargo test -p mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture
+        run: cargo test -p mvm-build --bin mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture
 
   # ── Plan 85 finalization: named, path-gated OCI gates ─────────────
   #
