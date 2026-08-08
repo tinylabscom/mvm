@@ -10,6 +10,13 @@
 
 ## Current issue delivery
 
+- [~] Open issue closeout — **plan 300**. The 22 open issues were reconciled
+      on 2026-08-08 into explicit closure gates and dependency order in
+      `specs/plans/300-open-issue-closeout.md`. #2192 is now closed as completed;
+      #2101 and #2211 require scope split or narrowing; the remaining issues
+      retain active implementation, security, live-validation, or
+      cross-repository acceptance work.
+
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned
       `runtime-v0` schema and generated language models instead of duplicated
