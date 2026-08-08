@@ -325,6 +325,42 @@ contention risk. The measurement says the trade is now heavily one-sided, but
 it is a trade, and the alternatives (detach, defer to the next launch's start,
 make replenish cheaper, or make it opt-in) have not been compared here.
 
+### Phase 6 first change — replenish leaves the foreground
+
+`teardown_transient_vm` no longer refills the pool. Filling it is explicit
+(`mvmctl pool warm`), which is the conclusion the same reasoning had already
+reached for the image-bound rewarm; the difference is that the work is not done
+inline either now.
+
+Measured on the default residency (`always_warm`), 20 runs + 2 warm-ups:
+
+| default `machine run` | before | after |
+|---|---:|---:|
+| **total p50** | 1366.1 ms | **353.8 ms** |
+| foreground teardown | 1181.8 ms | 143.8 ms |
+| dispatch window | 27.1 ms (warm claim) | 117.2 ms (cold boot) |
+
+A launch is **3.9x faster end to end**, trading 90 ms of dispatch for 1012 ms
+of wall clock. Teardown is now `stop_transient` 142.9 ms plus `state_remove`
+0.7 ms — both genuinely this VM's cleanup, both under the ownership rules, and
+`pool_replenish` no longer appears in the sample at all.
+
+The behavioural consequence, stated plainly: nothing auto-fills the pool, so a
+default sequential run now cold-boots rather than claiming. That is the right
+default because a claim saved 90 ms of dispatch and cost 1026 ms to prepare —
+the pool only pays off when its refill overlaps idle time or launches are
+concurrent, and neither holds for back-to-back `machine run`. Residency still
+governs whether a claim is *attempted*, so a pool filled by `pool warm` is
+still claimed; it is the automatic refill that is gone.
+
+The remaining 142.9 ms `stop_transient` is real cleanup and stays synchronous:
+it is what confirms process exit before the state directory is removed.
+
+**Follow-up:** the resident per-tenant `mvm-host-agent` daemon is the right
+long-term owner of pool maintenance — it already outlives the CLI and is the
+host-side lifecycle seam this phase names. That would restore automatic warm
+claims without putting the refill on any launch's critical path.
+
 ## Phase 1 — Content-addressed `--mount` image cache
 
 - [ ] Add a reusable `mvm-fs` directory fingerprint helper covering relative

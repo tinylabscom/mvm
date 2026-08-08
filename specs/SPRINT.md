@@ -1660,7 +1660,10 @@ Then unify + retire the old paths:
   code path), so Phase 3 is now a Firecracker-path phase with HVF's number as
   its target. Foreground teardown is the other dominant cost (1086 ms of a
   1216 ms warm launch, from inline pool replenish), promoting Phase 6 ahead of
-  Phase 3. Two defects found and fixed on the way: a failed host-services
+  Phase 3. **Phase 6 first change landed:** teardown no longer refills the warm
+  pool, cutting a default `machine run` from 1366 ms to 353.8 ms p50 (3.9x) and
+  leaving teardown as this VM's own cleanup only. Two defects found and fixed on
+  the way: a failed host-services
   registration slept 700 ms and lost `host.audit.v1` silently. Gates green:
   workspace Clippy, 10,648 nextest, doctests, hermetic BDD 153/153, Lint xtask
   gates, Linux cross-compile.

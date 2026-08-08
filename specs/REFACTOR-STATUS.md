@@ -79,7 +79,11 @@ for detailed scope and acceptance criteria.
   - [ ] Phase 3 — reduce backend cold-start latency
   - [ ] Phase 4 — parallelize independent host work
   - [ ] Phase 5 — event-driven guest readiness
-  - [ ] Phase 6 — move cleanup off the foreground critical path
+  - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
+        decomposed and the warm-pool refill removed from it: a default
+        `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
+        `stop_transient` 142.9 ms, which is real cleanup. Follow-up: give pool
+        maintenance to the resident per-tenant daemon.
   - [ ] Phase 7 — live validation and regression gates
 
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch

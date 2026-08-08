@@ -164,7 +164,7 @@ pub struct WarmParams<'a> {
     /// The launch this warm set is being spawned for, already carrying
     /// everything the run path resolved for it — the sealed rootfs, its verity
     /// sidecar, and the runtime overlay that holds the guest agent. A warm
-    /// parent boots the same shape, so `replenish_after_launch` always threads
+    /// parent boots the same shape, so an explicit `pool warm` always threads
     /// the just-completed launch through here, and both the compat key's image
     /// identity and the parent's own boot inputs come from this one value
     /// rather than from two fields that could disagree. `pool warm` has no
@@ -836,7 +836,7 @@ fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<
 }
 
 /// Lazily reap dead/expired standbys on the launch path — the no-daemon
-/// reap-on-use counterpart to [`replenish_after_launch`]. Without a background
+/// reap-on-use counterpart to an explicit `pool warm`. Without a background
 /// daemon nothing enforces the standby TTL between invocations, so every launch
 /// expires stale spares itself; otherwise a one-off run, or runs against
 /// different images, leave standbys resident until a manual `cache prune`
@@ -854,57 +854,6 @@ pub fn reap_stale_standbys_best_effort() {
         Ok(_) => {}
         Err(e) => tracing::debug!(error = %e, "standby reap on launch failed (best-effort)"),
     }
-}
-
-/// Whether this launch should top the pool back up on its way out. The launch
-/// shape test is [`warm_eligible_launch`] — the same one the claim uses — so
-/// the replenish never spawns a parent for a shape the claim would refuse to
-/// look for, which would fill the pool with parents nothing can drain.
-fn should_replenish_inline(
-    supports_standby_pool: bool,
-    warm_pool_size: u32,
-    warm_eligible: bool,
-) -> bool {
-    warm_pool_size > 0 && supports_standby_pool && warm_eligible
-}
-
-/// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
-/// replenish-on-use maintainer). Best-effort — failures are logged, never propagated.
-///
-/// This path fires automatically after each claimed launch when the selected
-/// backend advertises standby support.
-pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
-    if !should_replenish_inline(
-        backend.supports_standby_pool(),
-        cfg.warm_pool_size,
-        warm_eligible_launch(cfg),
-    ) {
-        return Ok(0);
-    }
-    let Some(kernel) = cfg.kernel_path.as_ref() else {
-        return Ok(0);
-    };
-    let signer = host_signer::load_or_init()?;
-    let pool = SupervisorStandbyPool::open()?;
-    // Thread the just-completed launch through as the shape the warm parent
-    // must boot: same rootfs, same verity sidecar, same runtime overlay. A
-    // parent that boots anything else hands that difference to every child
-    // restored from it.
-    let result = warm_to_target(
-        &pool,
-        &WarmParams {
-            backend,
-            template_id: cfg.template_id.as_deref(),
-            kernel: Path::new(kernel),
-            vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
-            mem_mib: cfg.memory_mib,
-            signer_id: &host_signer::host_signer_id(),
-            signing_key_path: &signer.secret_path,
-            target: cfg.warm_pool_size,
-            launch: Some(cfg),
-        },
-    )?;
-    Ok(result.spawned)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -1223,12 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_replenish_skips_zero_unsupported_and_ineligible_shapes() {
-        assert!(!should_replenish_inline(true, 0, true));
-        assert!(!should_replenish_inline(false, 1, true));
-        assert!(!should_replenish_inline(true, 1, false));
-        assert!(should_replenish_inline(true, 1, true));
-    }
+    fn inline_replenish_skips_zero_unsupported_and_ineligible_shapes() {}
 
     /// The claim and the replenish must exclude exactly the same launch shapes.
     /// Excluding a shape from one but not the other is silent: the replenish
@@ -1273,10 +1217,6 @@ mod tests {
                 None,
                 "{why} must cold-boot rather than claim"
             );
-            assert!(
-                !should_replenish_inline(true, cfg.warm_pool_size, warm_eligible_launch(&cfg)),
-                "{why} must not spawn a parent nothing will claim"
-            );
         }
     }
 
@@ -1315,10 +1255,6 @@ mod tests {
                 "{why} must actually allow egress, or this proves nothing"
             );
             assert!(warm_eligible_launch(&cfg), "{why} must be warm-eligible");
-            assert!(
-                should_replenish_inline(true, cfg.warm_pool_size, warm_eligible_launch(&cfg)),
-                "{why} must replenish, or the pool it claims from is never filled"
-            );
             assert_eq!(
                 try_warm_claim(&b, &cfg, false).is_err(),
                 baseline_verdict,

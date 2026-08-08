@@ -1015,13 +1015,7 @@ fn run_inner(
     let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
 
     sub_marks.start(crate::commands::vm::phase_timing::SubPhase::CleanupHandoff);
-    teardown_transient_vm(
-        &backend,
-        &vm_name,
-        &start_config,
-        &requested_vm_name,
-        &mut sub_marks,
-    );
+    teardown_transient_vm(&backend, &vm_name, &requested_vm_name, &mut sub_marks);
     sub_marks.finish(crate::commands::vm::phase_timing::SubPhase::CleanupHandoff);
     let t_torn_down = timing.then(std::time::Instant::now);
 
@@ -1519,7 +1513,6 @@ fn install_ctrlc_teardown(
 fn teardown_transient_vm(
     backend: &AnyBackend,
     vm_name: &str,
-    start_config: &VmStartConfig,
     requested_vm_name: &str,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) {
@@ -1529,16 +1522,16 @@ fn teardown_transient_vm(
     let _ = backend.stop_transient(&VmId(vm_name.to_string()));
     sub.finish(SubPhase::StopTransient);
 
-    // Top the warm pool back toward target after the run (best-effort,
-    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; the
-    // image-bound boot+capture rewarm a supervisor-config backend used to do
-    // stays explicit via `pool warm` so teardown does not spawn background
-    // work that can contend with foreground launches.
-    sub.start(SubPhase::PoolReplenish);
-    if let Err(e) = crate::commands::pool::replenish_after_launch(backend, start_config) {
-        tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
-    }
-    sub.finish(SubPhase::PoolReplenish);
+    // Refilling the pool is not this VM's cleanup: it boots a standby parent
+    // for the *next* launch and holds nothing this launch owns. Doing it here
+    // cost a measured 1026ms p50 on a launch whose own dispatch window was
+    // 27ms, so a run spent three quarters of its wall clock provisioning for a
+    // successor that might never come. Filling the pool is explicit
+    // (`mvmctl pool warm`), which is what the same reasoning already settled on
+    // for the image-bound rewarm: teardown does not spawn background work that
+    // can contend with foreground launches, and it no longer does the work
+    // inline either. A launch that finds no claimable standby cold-boots, which
+    // is far cheaper than building one first.
 
     sub.start(SubPhase::StateRemove);
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
