@@ -49,7 +49,7 @@ pub(crate) fn cmdline_overflow(cmdline: &str) -> Option<String> {
 /// substitution endpoint for the shared egress port.
 fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
     (config.network_policy.allows_egress()
-        && !crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
+        && !mvm_vmm::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
     .then(|| "mvm.vsock_egress=1".to_string())
 }
 

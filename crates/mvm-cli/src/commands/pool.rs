@@ -698,7 +698,7 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
         // and its admitted plan through the same derivation the guest cmdline
         // token comes from — never re-expressed here, because a second
         // expression of it is free to drift from the token it must predict.
-        vsock_egress: mvm_runtime::egress_shared::effective_vsock_egress(cfg),
+        vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(cfg),
     })
 }
 
@@ -1356,7 +1356,7 @@ mod tests {
                 let want = compat_for_launch(fc.as_vm_backend(), &cfg).unwrap();
                 assert_eq!(
                     want.vsock_egress,
-                    mvm_runtime::egress_shared::effective_vsock_egress(&cfg),
+                    mvm_vmm::host::egress_shared::effective_vsock_egress(&cfg),
                     "the compat key must not re-derive the guest's egress enablement"
                 );
             }

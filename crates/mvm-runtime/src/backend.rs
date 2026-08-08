@@ -15,12 +15,13 @@ use crate::base::shell::run_in_vm_stdout;
 use crate::docker_backend::DockerBackend;
 use crate::driver::{FcDriver, LibkrunDriver, QemuDriver};
 use crate::image::RuntimeVolume;
-use crate::microvm::{DriveFile, FlakeRunConfig};
+use crate::microvm::FlakeRunConfig;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::wasm_backend::WasmBackend;
 use crate::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
+use mvm_vmm::host::drive_file::DriveFile;
 
 /// The hvf VMM driven through the unified workload-runner role over the driver
 /// seam — hvf's sole workload launch path (`--hypervisor hvf` and the macOS-26

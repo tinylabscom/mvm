@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 /// A per-VM helper binary and its path-override env var.
-pub(crate) struct AuxBin<'a> {
+pub struct AuxBin<'a> {
     /// Binary/file name, e.g. `mvm-hvf-supervisor`.
     pub bin: &'a str,
     /// Path-override env var, e.g. `MVM_HVF_SUPERVISOR_PATH`.
@@ -24,7 +24,7 @@ pub(crate) struct AuxBin<'a> {
 
 /// Resolve `spec` to an on-disk binary. Never builds — the build script
 /// produces these; a missing one is a hard error with a recovery hint.
-pub(crate) fn resolve(spec: &AuxBin) -> Result<PathBuf> {
+pub fn resolve(spec: &AuxBin) -> Result<PathBuf> {
     if let Some(p) = std::env::var_os(spec.env_var).map(PathBuf::from) {
         if p.is_file() {
             return Ok(p);

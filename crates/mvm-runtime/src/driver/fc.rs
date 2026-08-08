@@ -953,7 +953,7 @@ impl RunningVm for FcRunningVm {
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
-        Ok(crate::workload_wait::wait_for_workload_exit(
+        Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
             &self.state_dir,
         ))
     }
@@ -1456,7 +1456,7 @@ mod tests {
         let _ = client.read_exact(&mut ack);
 
         // wait_for_workload_exit reads the persisted code from the state dir.
-        let status = crate::workload_wait::wait_for_workload_exit(state_dir.path());
+        let status = mvm_vmm::host::workload_wait::wait_for_workload_exit(state_dir.path());
         assert_eq!(status.code, Some(3));
         assert!(!status.success);
     }
@@ -1875,7 +1875,7 @@ mod tests {
             vm_state_dir: tmp.path().join("standby-parent-1").display().to_string(),
             image_path: Some(image.display().to_string()),
             image_sha256: Some("c".repeat(64)),
-            vsock_egress: crate::egress_shared::effective_vsock_egress(&launch),
+            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(&launch),
         };
 
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
@@ -1944,7 +1944,7 @@ mod tests {
                 .to_string(),
             image_path: Some(image.display().to_string()),
             image_sha256: Some("c".repeat(64)),
-            vsock_egress: crate::egress_shared::effective_vsock_egress(launch),
+            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
         };
         let parent_boot = |launch: &VmStartConfig| {
             let spec = spec_for(launch);

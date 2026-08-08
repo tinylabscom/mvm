@@ -18,7 +18,7 @@ mvm-contract = { workspace = true, features = ["local", "volume"] }
 # Backend-agnostic VMM device model + hypervisor seam; split out so concrete
 # backends can depend on it without circular references to mvm-runtime.
 mvm-vmm = { workspace = true }
-mvm-backends = { workspace = true, optional = true, features = ["test-support"] }
+mvm-backends = { workspace = true, optional = true }
 # `egress-ca`: `substitution_spawn::build_egress_tls_delivery`
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
@@ -113,7 +113,7 @@ virtio-vsock = "0.12"
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
-mvm-backends = { workspace = true, features = ["test-support"] }
+mvm-vmm = { workspace = true, features = ["test-support"] }
 
 # KVM backend. Pre-generated bindings + safe ioctl wrappers;
 # the in-repo kvm::x86_boot logic is pure and platform-independent.
@@ -141,7 +141,7 @@ apple-container = []
 # rootfs, no isolation) — never compiles into a production `mvmctl`
 # binary; only an explicit `--hypervisor mock` (itself refused outside this
 # feature) or the workspace test suite reaches it.
-test-support = ["mvm-core/test-support", "dep:mvm-backends"]
+test-support = ["mvm-core/test-support", "dep:mvm-backends", "mvm-backends/test-support"]
 # Debug-only Apple Silicon validation lane. The capability also requires a
 # debug macOS/aarch64 build before it can advertise warm-claim support.
 hvf-live-validation = []

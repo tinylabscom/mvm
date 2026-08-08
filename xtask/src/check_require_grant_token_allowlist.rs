@@ -15,6 +15,7 @@ const TOKEN: &str = "mvm.require_grant=1";
 /// Files (workspace-relative) that are permitted to contain the token.
 const ALLOWLIST: &[&str] = &[
     "crates/mvm-runtime/src/microvm/egress_bridge.rs",
+    "crates/mvm-vmm/src/host/egress_bridge.rs",
     "crates/mvm-runtime/src/qemu.rs",
     "crates/mvm-runtime/src/libkrun.rs",
     "crates/mvm-agentd/src/vsock/verb_grant.rs",
@@ -92,7 +93,7 @@ mod tests {
     #[test]
     fn allowlisted_file_passes() {
         let tree = make_tree(&[(
-            "crates/mvm-runtime/src/microvm/egress_bridge.rs",
+            "crates/mvm-vmm/src/host/egress_bridge.rs",
             r#"fn foo() { let _ = "mvm.require_grant=1"; }"#,
         )]);
         run(tree.path()).expect("allowlisted path must pass");

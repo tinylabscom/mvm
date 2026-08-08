@@ -32,7 +32,7 @@ use crate::supervisor::substitution_proxy::SubstitutionService;
 /// [`spawn_substitution_endpoint`](mvm_runtime::spawn_substitution_endpoint)'s
 /// reader and re-exported here so the bin, its tests and the spawner share one
 /// wire definition without a dependency cycle.
-pub use mvm_runtime::EndpointHandshake;
+pub use mvm_vmm::host::substitution_spawn::EndpointHandshake;
 
 /// Default forward-leg timeout (host → real destination) in seconds.
 fn default_forward_timeout_secs() -> u64 {
@@ -56,7 +56,7 @@ pub fn build_egress_gate(
 /// `spawn_substitution_endpoint` writer) and re-exported here so the bin, its
 /// tests, and `EndpointConfig` share one wire definition without a dependency
 /// cycle (mvm-hostd → mvm-backend, never the reverse).
-pub use mvm_runtime::EndpointTransport;
+pub use mvm_vmm::host::substitution_spawn::EndpointTransport;
 
 /// Which egress protocol the guest speaks on the relayed EGRESS_PORT stream.
 /// A VM uses exactly one, fixed at admission (secrets ⇒ WireRequest, else raw),

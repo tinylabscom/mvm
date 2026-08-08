@@ -87,7 +87,7 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
   and every caller (drivers, tests, examples, builder VM). Note which
   methods drivers still delegate to.
 
-- [ ] **Step 3: Decide the `virtiofsd` helper location**
+- [x] **Step 3: Decide the `virtiofsd` helper location**
 
   The QEMU driver and the builder VM both need `virtiofsd`. Options:
   - Move it into `mvm-vmm` under a `host` module (recommended).
@@ -96,7 +96,7 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
     depend on `mvm-backends`). So this is only viable if `mvm-build`'s runtime
     dependency is inverted first — do not choose without explicit approval.
 
-- [ ] **Step 4: Decide `MockBackend` location**
+- [x] **Step 4: Decide `MockBackend` location**
 
   It is a test-only backend. Either move it into `mvm-backends` under a
   `test-support` feature or keep a minimal mock in `mvm-runtime` tests.
@@ -216,10 +216,38 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 
 - [x] **Step 1: Scaffold `mvm-backends`**
 
+  Also extracted shared boot/cmdline helpers (`microvm::boot_config`,
+  `microvm::egress_bridge`) into `mvm-vmm::host` so legacy backends can
+  build kernel cmdlines without depending on `mvm-runtime`.
+
   Create `crates/mvm-backends/Cargo.toml` with dependencies on `mvm-vmm`,
   `mvm-core`, `mvm-net`, `mvm-agentd`, and whatever small third-party crates
   the drivers use (`anyhow`, `serde`, `tokio`, etc.). Do **not** depend on
   `mvm-runtime` or `mvm-build`.
+
+- [ ] **Step 1b: Extract remaining shared dependencies**
+
+  The concrete drivers and legacy `VmBackend` shells still reference
+  `mvm-runtime`-local modules that must move (or be parameterized) before
+  the backends can live in `mvm-backends`:
+
+  - `libkrun::open_console_capture` → `mvm-vmm::host::console_capture`.
+  - `microvm::{pause_vm, resume_vm, secure_vsock_socket_for_caller}` →
+    `mvm-vmm::host`.
+  - `base::runtime_meta::{record_from_start_config, HOME_TEST_LOCK}` → a
+    small `mvm-vmm::host::runtime_meta` module (only the substrate parts;
+    policy stays in `mvm-runtime`).
+  - `base::ui` progress helpers → either move to `mvm-vmm::host` or pass
+    a callback so backends do not import UI code.
+  - `firecracker` module (pid checks, `FcVmFullControl`, `FcForkRestorer`,
+    `FirecrackerIO`) → keep backend-specific, so move it with the
+    Firecracker driver into `mvm-backends::firecracker` rather than into
+    `mvm-vmm`.
+  - `vm::instance_snapshot` orchestration used by warm-claim/fork paths →
+    parameterize through the `VmmDriver` seam or keep a thin runtime adapter.
+
+  Inventory produced by the rebase shows these couplings; resolve them
+  before Step 2.
 
 - [ ] **Step 2: Move driver modules**
 

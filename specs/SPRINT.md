@@ -144,6 +144,27 @@
       page and security docs now state the warm-millisecond promise alongside
       first-run behavior and the default-deny trust model.
 
+- [~] Extract `mvm-backends` crate — **plan 298**
+      (`specs/plans/298-extract-mvm-backends-crate.md`). Rebased
+      `feat/298-extract-mvm-backends` onto `origin/main` and resolved the
+      resulting conflicts in `Cargo.lock`, `mvm-runtime/Cargo.toml`,
+      `mvm-runtime/src/workload_runner/runner.rs`,
+      `mvm-runtime/src/lib.rs`,
+      `mvm-runtime/src/driver/spec.rs`,
+      `mvm-runtime/src/vsock_transport.rs`, and
+      `specs/REFACTOR-STATUS.md`. Host-side orchestration helpers
+      (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`,
+      `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`,
+      `process_liveness`, `boot_config`, `egress_bridge`) now live in
+      `mvm-vmm::host`. Workspace `cargo nextest run --workspace`, `cargo
+      clippy --workspace --all-targets -- -D warnings`,
+      `cargo xtask check-claim-catalog`, and `cargo xtask check-dormant-controls`
+      are green. Remaining: additional shared dependencies
+      (`libkrun::open_console_capture`, `microvm` pause/resume helpers,
+      `base::runtime_meta`, `base::ui`, backend-specific `firecracker`
+      snapshot helpers) must move or be parameterized before the concrete
+      drivers and legacy `VmBackend` shells can land in `mvm-backends`.
+
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
       approved, WS2 core types landed in `mvm-core`, WS3 read-only receipt

@@ -64,7 +64,7 @@ fn spawn_libkrun_egress_endpoint_if_needed(
         EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
     let default_redaction = mvm_core::policy::RedactionPolicy::default();
-    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let decoded = mvm_vmm::host::egress_shared::decode_plan_secrets_from_state(state_dir)?;
     let (secrets, redaction, tenant): (&[_], &mvm_core::policy::RedactionPolicy, &str) =
         match &decoded {
             Some((secrets, redaction, tenant)) => (secrets.as_slice(), redaction, tenant.as_str()),
@@ -104,7 +104,7 @@ fn spawn_libkrun_egress_endpoint_if_needed(
 /// substitution endpoint for the shared egress port.
 fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
     (config.network_policy.allows_egress()
-        && !crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
+        && !mvm_vmm::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
     .then(|| "mvm.vsock_egress=1".to_string())
 }
 
@@ -407,7 +407,7 @@ fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
     }
     // The L3 tunnel and the socket-aware egress client are alternatives, not
     // layers: the mode the plan admitted decides which one the guest starts.
-    if let Some(token) = crate::egress_shared::l3_cmdline_token(config) {
+    if let Some(token) = mvm_vmm::host::egress_shared::l3_cmdline_token(config) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -888,7 +888,7 @@ impl VmBackend for LibkrunBackend {
         // The L3 gateway is orthogonal to the substitution endpoint: a
         // launch may need one, the other, or neither. It goes first because
         // it must be listening before the guest boots and dials it.
-        crate::netd_spawn::spawn_netd_if_needed(
+        mvm_vmm::host::netd_spawn::spawn_netd_if_needed(
             config,
             &state_dir,
             mvm_core::vm_backend::BackendKind::Libkrun,
@@ -1061,7 +1061,7 @@ impl VmBackend for LibkrunBackend {
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
-        crate::netd_spawn::reap_netd(&vm_state_dir(&id.0));
+        mvm_vmm::host::netd_spawn::reap_netd(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer too (no-op when none spawned),
         // so they can't outlive the guest.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
@@ -1294,9 +1294,9 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn wait(&self, id: &VmId) -> Result<mvm_core::vm_backend::VmExitStatus> {
-        Ok(crate::workload_wait::wait_for_workload_exit(&vm_state_dir(
-            &id.0,
-        )))
+        Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
+            &vm_state_dir(&id.0),
+        ))
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
@@ -1414,9 +1414,9 @@ impl VmBackend for LibkrunBackend {
 // ─── helpers ───────────────────────────────────────────────────────
 
 /// Resolve the absolute path to the `mvm-libkrun-supervisor` binary. Compiled
-/// by mvmctl's build script; see [`crate::aux_bin`] for the search order.
+/// by mvmctl's build script; see [`mvm_vmm::host::aux_bin`] for the search order.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
+    mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvm-libkrun-supervisor",
         env_var: "MVM_LIBKRUN_SUPERVISOR_PATH",
     })

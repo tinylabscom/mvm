@@ -402,7 +402,7 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
-        Ok(crate::workload_wait::wait_for_workload_exit(
+        Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
             &self.state_dir,
         ))
     }

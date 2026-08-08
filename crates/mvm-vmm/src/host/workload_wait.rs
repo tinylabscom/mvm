@@ -14,11 +14,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Max time to wait for a one-shot workload to report its exit code.
-pub(crate) const WORKLOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+pub const WORKLOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Read the captured exit code from `<state_dir>/workload.exit`, or UNKNOWN when
 /// absent (guest was killed / backend doesn't capture).
-pub(crate) fn read_exit_status_from(state_dir: &Path) -> VmExitStatus {
+pub fn read_exit_status_from(state_dir: &Path) -> VmExitStatus {
     match mvm_core::exit_capture::read_captured(state_dir) {
         Some(code) => VmExitStatus {
             code: Some(code),
@@ -31,7 +31,7 @@ pub(crate) fn read_exit_status_from(state_dir: &Path) -> VmExitStatus {
 /// Block until the captured exit code appears under `state_dir`, or the bounded
 /// timeout elapses (→ UNKNOWN). Shared by the libkrun and hvf `VmBackend::wait`
 /// impls — both supervisors write the same `workload.exit` file.
-pub(crate) fn wait_for_workload_exit(state_dir: &Path) -> VmExitStatus {
+pub fn wait_for_workload_exit(state_dir: &Path) -> VmExitStatus {
     let deadline = Instant::now() + WORKLOAD_WAIT_TIMEOUT;
     loop {
         let status = read_exit_status_from(state_dir);

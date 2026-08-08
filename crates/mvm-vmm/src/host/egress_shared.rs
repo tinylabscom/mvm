@@ -199,8 +199,8 @@ mod tests {
 /// shape `plan.json` holds beside a secret-bearing workload. Shared with the
 /// warm-pool tests, which need the same plan on both the launch config and the
 /// state dir to compare a warm parent's boot against a cold one's.
-#[cfg(test)]
-pub(crate) fn plan_json_with_one_bound_secret() -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub fn plan_json_with_one_bound_secret() -> String {
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::plan::{SecretBinding, SecretSource};
 

@@ -7,26 +7,7 @@ use crate::base::config::VmSlot;
 use crate::base::shell::run_in_vm;
 use crate::image::RuntimeVolume;
 
-/// A file to inject onto a config or secrets drive before boot.
-#[derive(Debug, Clone)]
-pub struct DriveFile {
-    /// Destination filename inside the drive (e.g., "openclaw.json").
-    pub name: String,
-    /// File contents (inline).
-    pub content: String,
-    /// Unix permissions (octal). Config files: 0o444, secrets: 0o400.
-    pub mode: u32,
-}
-
-impl Default for DriveFile {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            content: String::new(),
-            mode: 0o444,
-        }
-    }
-}
+use mvm_vmm::host::drive_file::DriveFile;
 
 /// Configuration for running a Firecracker VM from flake-built artifacts.
 pub struct FlakeRunConfig {

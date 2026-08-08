@@ -360,7 +360,7 @@ mod tests {
             vm_state_dir: dir.join("standby-abc").display().to_string(),
             image_path: Some(launch.rootfs_path.clone()),
             image_sha256: Some("e".repeat(64)),
-            vsock_egress: crate::egress_shared::effective_vsock_egress(launch),
+            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
         }
     }
 
@@ -533,7 +533,7 @@ mod tests {
         launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
             mvm_core::network_policy::HostPort::new("api.example.com", 443),
         ]);
-        launch.plan_json = Some(crate::egress_shared::plan_json_with_one_bound_secret());
+        launch.plan_json = Some(mvm_vmm::host::egress_shared::plan_json_with_one_bound_secret());
         let spec = standby_spec_for(&launch, tmp.path());
         assert!(
             launch.network_policy.allows_egress(),

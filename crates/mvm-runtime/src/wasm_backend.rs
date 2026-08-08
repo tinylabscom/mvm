@@ -227,7 +227,7 @@ fn wasm_endpoint_plan(
     state_dir: &std::path::Path,
 ) -> Result<Option<WasmEndpointPlan>> {
     let default_redaction = mvm_core::policy::RedactionPolicy::default();
-    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let decoded = mvm_vmm::host::egress_shared::decode_plan_secrets_from_state(state_dir)?;
     let (secrets, redaction, tenant) = match decoded {
         Some((secrets, redaction, tenant)) => (secrets, redaction, tenant),
         None => (
@@ -360,7 +360,7 @@ impl VmBackend for WasmBackend {
             // no later `stop()` boundary to reap the endpoint at, so its
             // decrypted secrets must not outlive this call either way.
             crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &config.name);
-            crate::netd_spawn::reap_netd(&state_dir);
+            mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         }
         let exit = result?;
 

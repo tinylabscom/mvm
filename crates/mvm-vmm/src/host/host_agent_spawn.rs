@@ -1,6 +1,6 @@
 //! Backend seam for the per-tenant host-agent daemon.
 //!
-//! Replaces the per-VM `mvm-broker` *fork* ([`crate::broker_services_spawn`])
+//! Replaces the per-VM `mvm-broker` *fork* ([`crate::host::broker_services_spawn`])
 //! with registration against one resident `mvm-host-agent` daemon per tenant:
 //!
 //! - [`ensure_host_agent_daemon`] lazily spawns the tenant's daemon (idempotent
@@ -25,7 +25,7 @@ use mvm_core::protocol::broker_control::{
     self, ControlRequest, ControlResponse, DeregisterVm, RegisterVm,
 };
 
-use crate::broker_services_spawn::{
+use crate::host::broker_services_spawn::{
     AUDIT_SIGNER_HEAD_FILE, HOST_SIGNER_KEY, HOST_SIGNER_PUB, pid_alive, read_pid,
     resolve_subprocess_bin, spawn_detached_with_config,
 };
@@ -292,14 +292,15 @@ pub fn reap_host_agent_services(state_dir: &Path, tenant: &str, vm_name: &str) {
         // Best-effort: a missing daemon (already gone) is fine.
         let _ = deregister_vm(&control_socket, &key, vm_name);
     }
-    crate::broker_services_spawn::reap_audit_signer(state_dir);
+    crate::host::broker_services_spawn::reap_audit_signer(state_dir);
     let _ = std::fs::remove_file(state_dir.join(HOST_AGENT_TENANT_REF));
     let _ = std::fs::remove_file(state_dir.join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE));
 }
 
 fn write_host_agent_owner_ref(state_dir: &Path) -> Result<()> {
     let reference = state_dir.join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE);
-    let Some(owner_pid_path) = crate::vm::reconcile::live_process_pid_file(state_dir) else {
+    let Some(owner_pid_path) = crate::host::process_liveness::live_process_pid_file(state_dir)
+    else {
         let _ = std::fs::remove_file(reference);
         return Ok(());
     };
@@ -378,7 +379,7 @@ fn daemon_enabled_from(env: Option<&str>) -> bool {
 /// `start()` holds one value and `defuse`s it once the VM is up.
 pub enum ServicesGuard {
     /// The per-VM broker fork path.
-    Fork(crate::broker_services_spawn::BrokerServicesGuard),
+    Fork(crate::host::broker_services_spawn::BrokerServicesGuard),
     /// The per-tenant host-agent daemon path.
     Agent(HostAgentServicesGuard),
     /// Nothing armed (unadmitted, or a spawn failure that was logged).

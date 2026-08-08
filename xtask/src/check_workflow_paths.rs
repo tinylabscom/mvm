@@ -446,6 +446,8 @@ mod tests {
                 "crates/mvm-client/",
                 "crates/mvm-core/",
                 "crates/mvm-runtime/",
+                "crates/mvm-backends/",
+                "crates/mvm-vmm/",
                 "tests/audit_emissions_live.rs",
             ]
             .iter()

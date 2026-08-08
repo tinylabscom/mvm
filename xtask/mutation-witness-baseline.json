@@ -219,13 +219,6 @@
       ]
     },
     {
-      "path": "crates/mvm-runtime/src/substitution_spawn.rs",
-      "package": "mvm-runtime",
-      "claims": [
-        17
-      ]
-    },
-    {
       "path": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
       "package": "mvm-runtime",
       "claims": [
@@ -238,6 +231,13 @@
       "package": "mvm-sdk",
       "claims": [
         11
+      ]
+    },
+    {
+      "path": "crates/mvm-vmm/src/host/substitution_spawn.rs",
+      "package": "mvm-vmm",
+      "claims": [
+        17
       ]
     }
   ],

@@ -4,7 +4,7 @@
 //! This module remains as the shared low-level process-spawn scaffold and for
 //! tests that exercise the old `mvm-broker` / `mvm-audit-signer` binaries.
 //!
-//! The helpers mirror [`crate::substitution_spawn`]: locate the bin, hand it a
+//! The helpers mirror [`crate::host::substitution_spawn`]: locate the bin, hand it a
 //! JSON config on stdin, detach via `setsid`, wait for readiness, and write a
 //! PID file for direct reaping in tests. mvm-backend can't depend on mvm-hostd,
 //! so the config is emitted as raw JSON matching the bin's `deny_unknown_fields`
@@ -463,15 +463,15 @@ impl Drop for BrokerServicesGuard {
 
 #[cfg(test)]
 mod tests {
+    /// Serialize tests that mutate process-wide env / home.
+    static HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     use mvm_core::util::test_env::TestEnv;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn spawn_audit_signer_writes_chain_config_and_waits_for_uds() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-as-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -544,9 +544,7 @@ mod tests {
 
     #[test]
     fn spawn_audit_signer_fails_closed_when_uds_never_binds() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-as-nobind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -580,9 +578,7 @@ mod tests {
 
     #[test]
     fn spawn_audit_signer_errors_when_bin_override_missing() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-as-nobin-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -602,9 +598,7 @@ mod tests {
 
     #[test]
     fn spawn_broker_binds_broker_port_with_audit_signer_uds() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-broker-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -694,9 +688,7 @@ mod tests {
 
     #[test]
     fn broker_services_spawns_both_when_admitted() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-bs-admit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

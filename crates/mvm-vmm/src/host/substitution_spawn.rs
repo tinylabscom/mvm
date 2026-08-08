@@ -8,7 +8,7 @@
 //! secret never enters the guest. The converged Firecracker, libkrun, and HVF
 //! workload paths use the authenticated vsock/UDS endpoint transport.
 
-use crate::microvm::DriveFile;
+use crate::host::drive_file::DriveFile;
 use anyhow::{Result, anyhow, bail};
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::crypto::egress_ca::EgressCa;
@@ -183,9 +183,9 @@ pub const SUBST_PID_FILE: &str = "substitution.pid";
 pub const SUBST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Locate the `mvm-substitution-endpoint` binary. Compiled by mvmctl's build
-/// script; see [`crate::aux_bin`] for the search order.
+/// script; see [`mvm_vmm::host::aux_bin`] for the search order.
 fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
+    crate::host::aux_bin::resolve(&crate::host::aux_bin::AuxBin {
         bin: "mvm-substitution-endpoint",
         env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
     })
@@ -453,23 +453,23 @@ fn read_handshake_line(
 /// decrypted-secret process can't outlive a failed launch. Defused once the VM
 /// is fully up (the normal `stop` path then owns teardown). Shared by the
 /// libkrun and HVF backends — one definition so the spawn/reap moat can't drift.
-pub(crate) struct EndpointGuard {
+pub struct EndpointGuard {
     /// `Some(name)` while armed; `None` once defused. Read by backend tests to
     /// assert the no-secrets path yields a no-op guard.
-    pub(crate) vm_name: Option<String>,
+    pub vm_name: Option<String>,
 }
 
 impl EndpointGuard {
-    pub(crate) fn new(vm_name: &str) -> Self {
+    pub fn new(vm_name: &str) -> Self {
         Self {
             vm_name: Some(vm_name.to_string()),
         }
     }
     /// A guard for a VM that spawned no endpoint (no secrets) — Drop is a no-op.
-    pub(crate) fn defused() -> Self {
+    pub fn defused() -> Self {
         Self { vm_name: None }
     }
-    pub(crate) fn defuse(&mut self) {
+    pub fn defuse(&mut self) {
         self.vm_name = None;
     }
 }
@@ -522,6 +522,8 @@ mod tests {
     use mvm_contract::stream::secret_fingerprint::SecretCategory;
     use mvm_core::util::test_env::TestEnv;
 
+    static HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// What a stub endpoint prints as its ready line: a well-formed handshake
     /// with one placeholder and one fingerprint, so the spawn path exercises
     /// the real split rather than a shape it never sees in production.
@@ -547,9 +549,7 @@ mod tests {
     // for inspection and prints a one-line ready handshake.
     #[test]
     fn spawn_substitution_endpoint_emits_uds_transport() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-uds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -615,9 +615,7 @@ mod tests {
         // one where the other goes is the whole failure this split prevents:
         // the sidecar would carry a length-and-hash disclosure to every reader
         // of the state dir, and the gate would find nothing to scan for.
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-split-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -687,9 +685,7 @@ mod tests {
         // Fail closed. A line the spawner could not parse used to be written
         // to the env sidecar verbatim, so a broken endpoint produced a VM that
         // booted with no placeholders and no fingerprints and said nothing.
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-badline-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -732,9 +728,7 @@ mod tests {
 
     #[test]
     fn spawn_failure_after_pid_write_rolls_back_the_endpoint_sidecar() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-rollback-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

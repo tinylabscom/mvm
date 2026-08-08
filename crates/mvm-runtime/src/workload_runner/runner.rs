@@ -34,13 +34,7 @@ use crate::checkpoint::{
 use crate::driver::{
     ChildForkRequest, PreloadChildRequest, RunningVm, StandbyParentSpawn, VmmDriver,
 };
-use crate::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 use crate::standby_pool::SupervisorStandbyPool;
-use crate::substitution_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
-    spawn_substitution_endpoint,
-};
-use crate::vm::instance_snapshot::PostRestoreOutcome;
 use crate::vm::name_registry::{VmNameRegistry, acquire_registry_lock, generate_vm_name};
 use crate::warm_snapshot::{
     is_trusted_snapshot_id, materialize_child_from_parent, materialize_child_from_trusted_parent,
@@ -56,6 +50,12 @@ use crate::workload_runner::spec_map::{
     workload_spec, workload_vsock_ports,
 };
 use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
+use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
+use mvm_vmm::host::substitution_spawn::{
+    EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
+    spawn_substitution_endpoint,
+};
+use mvm_vmm::post_restore::PostRestoreOutcome;
 
 mod backend;
 mod warm_claim;
@@ -129,12 +129,12 @@ pub trait BrokerRegistrar: Send + Sync {
 /// RAII guard around the registered broker services: Drop reaps them until the
 /// VM is confirmed up and `defuse`d (the `stop` path then owns teardown). Wraps
 /// the existing `ServicesGuard` so no reaping logic is duplicated.
-pub struct BrokerGuard(crate::host_agent_spawn::ServicesGuard);
+pub struct BrokerGuard(mvm_vmm::host::host_agent_spawn::ServicesGuard);
 
 impl BrokerGuard {
     /// A guard that reaps nothing on drop — the unadmitted / spawn-failed path.
     fn defused() -> Self {
-        Self(crate::host_agent_spawn::ServicesGuard::None)
+        Self(mvm_vmm::host::host_agent_spawn::ServicesGuard::None)
     }
 
     /// Disarm: the VM is up; the `stop` path now owns teardown.
@@ -162,9 +162,9 @@ impl BrokerRegistrar for RealBrokerRegistrar {
         // Best-effort, matching the raw backends: an absent broker only disables
         // host.audit.v1 for this VM — the workload still runs and the host-side
         // audit chain is intact — so a spawn failure is logged, never a rollback.
-        let guard = if crate::host_agent_spawn::host_agent_daemon_enabled() {
-            match crate::host_agent_spawn::register_host_agent_services_if_admitted(
-                crate::host_agent_spawn::HostAgentServicesParams {
+        let guard = if mvm_vmm::host::host_agent_spawn::host_agent_daemon_enabled() {
+            match mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
+                mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
                     workload_id: req.vm_name,
                     tenant_id: Some(tenant),
                     vm_name: req.vm_name,
@@ -172,15 +172,15 @@ impl BrokerRegistrar for RealBrokerRegistrar {
                     broker_listen_socket,
                 },
             ) {
-                Ok(g) => crate::host_agent_spawn::ServicesGuard::Agent(g),
+                Ok(g) => mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent(g),
                 Err(e) => {
                     tracing::warn!(vm = %req.vm_name, error = %e, "host-agent registration failed; host.audit.v1 unavailable for this VM");
-                    crate::host_agent_spawn::ServicesGuard::None
+                    mvm_vmm::host::host_agent_spawn::ServicesGuard::None
                 }
             }
         } else {
-            match crate::broker_services_spawn::spawn_broker_services_if_admitted(
-                crate::broker_services_spawn::BrokerServicesSpawnParams {
+            match mvm_vmm::host::broker_services_spawn::spawn_broker_services_if_admitted(
+                mvm_vmm::host::broker_services_spawn::BrokerServicesSpawnParams {
                     workload_id: req.vm_name,
                     tenant_id: Some(tenant),
                     vm_name: req.vm_name,
@@ -188,10 +188,10 @@ impl BrokerRegistrar for RealBrokerRegistrar {
                     broker_listen_socket,
                 },
             ) {
-                Ok(g) => crate::host_agent_spawn::ServicesGuard::Fork(g),
+                Ok(g) => mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork(g),
                 Err(e) => {
                     tracing::warn!(vm = %req.vm_name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
-                    crate::host_agent_spawn::ServicesGuard::None
+                    mvm_vmm::host::host_agent_spawn::ServicesGuard::None
                 }
             }
         };
@@ -2894,7 +2894,7 @@ mod tests {
         launch: &VmStartConfig,
     ) -> mvm_core::vm_backend::StandbySpec {
         mvm_core::vm_backend::StandbySpec {
-            vsock_egress: crate::egress_shared::effective_vsock_egress(launch),
+            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
             ..sample_standby_spec(id, vm_state_dir, Path::new(&launch.rootfs_path))
         }
     }

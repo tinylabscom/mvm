@@ -33,7 +33,7 @@ const READY_MARKER: &str = "MVM_NETD_READY";
 /// Locate the `mvm-netd` binary. Compiled by mvmctl's build script
 /// alongside the other per-VM helpers.
 fn resolve_netd_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
+    crate::host::aux_bin::resolve(&crate::host::aux_bin::AuxBin {
         bin: "mvm-netd",
         env_var: "MVM_NETD_PATH",
     })
@@ -231,7 +231,7 @@ pub fn spawn_netd_if_needed(
     state_dir: &Path,
     backend_kind: BackendKind,
 ) -> Result<()> {
-    if crate::egress_shared::l3_cmdline_token(config).is_none() {
+    if crate::host::egress_shared::l3_cmdline_token(config).is_none() {
         return Ok(());
     }
     let netd_config = build_netd_config(config, backend_kind)?;
