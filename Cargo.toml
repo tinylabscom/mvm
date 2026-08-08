@@ -106,8 +106,8 @@ exclude = [
     # supervisor-config JSON fuzz harness. CI gate at
     # `.github/workflows/security.yml::fuzz`.
     "crates/deps/libkrun-sys/fuzz",
-    # Plan 97 / ADR-001 claim 5 — Vz supervisor JSON fuzz harness.
-    # Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
+    # Plan 97 / ADR-001 claim 5 — retired-backend supervisor JSON fuzz
+    # harness. Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
     # constraints apply.
     "crates/mvm-build/fuzz",
     # Plan 113 §Task 15 / ADR-003 — `BridgeConfigJson` JSON +
