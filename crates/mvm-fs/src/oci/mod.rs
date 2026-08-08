@@ -46,14 +46,13 @@
 // `mvm-cli`'s `run --image` can ingest a local archive through the same
 // digest-verified path as a registry pull. Filesystem-free (reads a `Read`).
 pub mod archive;
-pub mod error;
 pub mod layer;
 pub mod manifest;
 // The manifest DTOs live in `mvm-contract` so the browser slice can parse a
 // manifest without this crate's `tokio`/`reqwest`/`flate2` tree. Re-exported
 // under the original path so every call site here is unchanged.
 use mvm_contract::oci::manifest_types;
-pub mod reference;
+pub use mvm_contract::oci::{error, reference};
 mod registry;
 // Layer-to-tree unpacker. Public because callers outside this crate
 // (`mvm-build::rootfs::materialize_ext4`; `mvm-cli`'s `image run` verb)

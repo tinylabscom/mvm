@@ -12,4 +12,9 @@
 //! `std::io::{Read, Seek}` and a deflate implementation, and a browser has
 //! no block device to materialize onto regardless.
 
+pub mod error;
 pub mod manifest_types;
+pub mod reference;
+
+pub use error::OciError;
+pub use reference::ImageReference;

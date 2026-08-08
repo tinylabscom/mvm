@@ -21,8 +21,10 @@
 //! ingest.
 
 use crate::oci::OciError;
-use std::fmt;
-use std::str::FromStr;
+use alloc::format;
+use alloc::string::{String, ToString};
+use core::fmt;
+use core::str::FromStr;
 
 /// Default registry when the reference omits one. Matches Docker
 /// CLI behaviour.
