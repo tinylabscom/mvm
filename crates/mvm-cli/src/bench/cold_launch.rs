@@ -49,6 +49,15 @@ pub enum LaunchLane {
 }
 
 impl LaunchLane {
+    /// Every lane, in contract order.
+    pub const ALL: [Self; 5] = [
+        Self::PreparedCold,
+        Self::PreparedColdMountHit,
+        Self::MountMiss,
+        Self::ArtifactMiss,
+        Self::WarmClaim,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -58,6 +67,24 @@ impl LaunchLane {
             Self::ArtifactMiss => "artifact_miss",
             Self::WarmClaim => "warm_claim",
         }
+    }
+}
+
+impl std::str::FromStr for LaunchLane {
+    type Err = String;
+
+    /// Parse a lane by its wire name. An unknown name errors and lists the
+    /// real ones rather than falling back to `prepared_cold`: a mistyped lane
+    /// that quietly measured something else is worse than no measurement.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        Self::ALL
+            .into_iter()
+            .find(|lane| lane.as_str() == trimmed)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Self::ALL.iter().map(|lane| lane.as_str()).collect();
+                format!("unknown launch lane {trimmed:?}; expected one of {names:?}")
+            })
     }
 }
 
@@ -774,6 +801,20 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let back: ColdLaunchReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, report);
+    }
+
+    #[test]
+    fn lane_names_round_trip_and_reject_a_typo() {
+        for lane in LaunchLane::ALL {
+            assert_eq!(lane.as_str().parse::<LaunchLane>(), Ok(lane));
+        }
+        assert_eq!(
+            "  prepared_cold  ".parse::<LaunchLane>(),
+            Ok(LaunchLane::PreparedCold)
+        );
+        let err = "prepared-cold".parse::<LaunchLane>().unwrap_err();
+        assert!(err.contains("unknown launch lane"), "{err}");
+        assert!(err.contains("prepared_cold"), "{err}");
     }
 
     #[test]

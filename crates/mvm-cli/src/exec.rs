@@ -1442,8 +1442,10 @@ fn boot_transient_vm(
             remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
             return Err(e).context("starting transient microVM");
         }
-        // The VMM has started its vCPUs, so the guest kernel is entered here;
-        // what follows until the agent answers is guest boot.
+        // How far into guest boot `start` has already gone is backend-defined
+        // — a backend that confirms boot before returning leaves almost
+        // nothing for the span below. Splitting VMM setup from guest boot
+        // needs marks inside the driver, not here.
         sub.finish(SubPhase::VmmCreate);
         sub.start(SubPhase::GuestKernelEntry);
     }

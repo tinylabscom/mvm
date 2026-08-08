@@ -130,9 +130,11 @@ rate, but are not silently included in the prepared-cold SLO.
       `LaneStats`. A span no launch recorded reports `samples: 0` with `None`
       percentiles, so "never measured" is distinguishable from "measured as
       fast" and the report still round-trips through JSON.)
-- [ ] Measure at least 20 iterations per lane after two warm-up iterations on
+- [~] Measure at least 20 iterations per lane after two warm-up iterations on
       native Apple Silicon/HVF and the Linux Firecracker host. Measure libkrun
       where the supported Linux or macOS environment can run it.
+      (Apple Silicon/HVF done — see "Measured baseline" below. The Linux
+      Firecracker host and libkrun lanes remain.)
 - [x] Add a benchmark assertion that rejects a sample labeled `prepared_cold`
       when it performed an image pull, image build, mount-image materialize, or
       warm claim.
@@ -147,8 +149,55 @@ rate, but are not silently included in the prepared-cold SLO.
 the actual approximately 1.2-second backend-start cost, and the baseline is
 reproducible from a release binary.
 
-**Exit-gate status:** the substrate is in place and gated; the gate itself is
-not met until the live baseline above is measured and recorded.
+**Exit-gate status:** the substrate is in place and gated. The Apple
+Silicon/HVF baseline is measured and recorded below; the Linux Firecracker
+host remains.
+
+### Measured baseline — Apple Silicon / HVF
+
+Release `mvmctl`, `machine run --image alpine -- /bin/true`, prepared artifact
+cache, 20 measured iterations after 2 warm-ups per lane. Every sample cleared
+the lane gate. Raw samples in `$MVM_HOME/state/bench/cold-launch-*.json`.
+
+| span (p50 / p99) | prepared cold | warm claim |
+|---|---:|---:|
+| dispatch window | 780.2 / 797.1 ms | 740.5 / 755.9 ms |
+| `vmm_create` | 778.2 / 795.1 ms | — (no VMM created) |
+| `claim_ms` | — | 740.5 / 755.8 ms |
+| `pool_wait_ms` | — | 0.1 / 0.1 ms |
+| `agent_auth` | 1.6 / 5.7 ms | 2.1 / 4.1 ms |
+| artifact verify, kernel entry, first dispatch | ≤0.1 ms | ≤0.1 ms |
+| foreground teardown | 298.3 / 325.9 ms | 1102.0 / 1215.0 ms |
+| **total** | **1182.7 / 1218.4 ms** | **1940.1 / 2054.4 ms** |
+
+Four things this establishes, none of which were visible before:
+
+1. **Prepared cold is 780 ms p50 against a 200 ms target, and 778 ms of it is
+   inside one call** — `VmBackend::start`. Artifact verification, guest-kernel
+   entry, agent authentication and first dispatch together account for under
+   2 ms. Any optimization that does not open up `start` is noise.
+2. **The warm claim is only 5% faster than a cold boot on this path** (740 vs
+   780 ms) and is *64% slower end to end* (1940 vs 1183 ms), because
+   replenishing the pool adds ~800 ms to foreground teardown. `pool_wait_ms` is
+   0.1 ms, so this is the claim itself, not pool maintenance.
+3. **740 ms exceeds `WARM_START_MAX_MS` (300 ms)**, the ceiling
+   `within_warm_start_slo` asserts against, on the shipped `machine run`
+   surface with an OCI image.
+4. **The default residency policy on this tier is `always_warm`**, so
+   back-to-back `machine run` invocations claim a standby rather than cold
+   boot. A cold measurement requires `MVM_RESIDENCY=cold`; the lane gate
+   caught this by refusing a contaminated warm-up rather than silently
+   reporting warm claims as cold launches.
+
+Kernel size is not a candidate lever here. The workload kernel is an 8.2 MiB
+arm64 `Image` (6.12.100, 936 options, zero modules, already ratcheted by
+`check-kernel-config-budget`), loaded by direct copy — single-digit
+milliseconds against a 778 ms span. Two external reference runtimes were
+examined for prior art: one vendors a 29 MiB prebuilt kernel (3.5x larger than
+ours) and reports its headline figure for snapshot restore rather than a cold
+boot; the other uses its VMM's stock bundled kernel with a two-option
+filesystem tweak. Neither builds a smaller kernel than the one already shipped
+here.
 
 ## Phase 1 — Content-addressed `--mount` image cache
 
