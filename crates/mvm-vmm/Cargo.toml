@@ -55,4 +55,7 @@ workspace = true
 
 [features]
 default = []
-test-support = []
+# The test-support surface builds plan fixtures out of mvm-core, so it has to
+# turn that crate's feature on itself. Leaving it off only worked while every
+# consumer happened to enable mvm-core/test-support for its own reasons.
+test-support = ["mvm-core/test-support"]

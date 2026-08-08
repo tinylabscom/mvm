@@ -11,6 +11,10 @@ pub mod traits;
 
 pub use fc::FcDriver;
 pub use mvm_backends::driver::{HvfDriver, LibkrunDriver, QemuDriver};
+// The modules as well as the types: callers reach in for driver-local helpers
+// (`driver::libkrun::map_kernel_for_test`), so re-exporting only the driver
+// types leaves those paths unresolvable.
+pub use mvm_backends::driver::{hvf, libkrun, qemu};
 pub use spec::{
     BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
 };

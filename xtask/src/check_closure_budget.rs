@@ -98,7 +98,12 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// 284 (was 283): the `did:key` codec for receipt/conformance identity uses
 /// the audited `bs58` crate; it is zero-dependency and the only new crate in
 /// the default closure.
-const CLOSURE_BUDGET: usize = 285;
+///
+/// 286 (was 285): splitting the concrete VMM backends out of `mvm-runtime`
+/// into `mvm-backends`. Measured delta +1, and the new crate is our own
+/// workspace member, not a third-party dependency — the same code, one crate
+/// boundary further out.
+const CLOSURE_BUDGET: usize = 286;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;
