@@ -14,9 +14,12 @@
 //! ```
 //!
 //! Each receipt's `prev_receipt_id` points at the previous receipt emitted
-//! for the same tenant, forming a host-signer chain. Updates to `head.json`
-//! and receipt files are made under a per-tenant file lock so concurrent
-//! emitters cannot interleave sequences or lose the chain head.
+//! for the same tenant, forming a host-signer chain. Reading the chain head,
+//! linking a receipt to it, signing, and persisting all happen inside one
+//! exclusive per-tenant lock ([`ReceiptStore::append_chained`]) — the read is
+//! what has to be serialized, not just the write. Two writers that observe
+//! the same head produce two receipts naming the same parent, which every
+//! offline verifier is obliged to read as a deleted or reordered receipt.
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -24,6 +27,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mvm_core::receipt::SignedExecutionReceipt;
 use serde::{Deserialize, Serialize};
+
+use crate::audit::emitter::write_atomic;
+use crate::supervisor::audit_file::flock_exclusive;
 
 /// Head file content: the chain tip for one tenant's receipt store.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,36 +74,34 @@ impl ReceiptStore {
         })
     }
 
-    /// Append a signed receipt to the store, returning the assigned sequence
-    /// number. The caller is responsible for setting the receipt's
-    /// `prev_receipt_id` to the value returned by [`Self::head`] before
-    /// calling this method; this method only persists the receipt and bumps
-    /// the head.
+    /// Link a receipt to the current chain head, sign it, and persist it,
+    /// returning the assigned sequence number.
     ///
-    /// The write is atomic: the receipt is written to a temp file and
-    /// renamed, and the head is rewritten atomically under the tenant lock.
-    pub fn append(&self, receipt: &SignedExecutionReceipt) -> Result<u64> {
+    /// `build` receives the head's `prev_receipt_id` and returns the finished
+    /// signed receipt. It runs *inside* the tenant lock, which is the whole
+    /// point: the head a receipt commits to has to still be the head when the
+    /// receipt lands. Handing the caller a head to link against and taking the
+    /// lock only for the write leaves a window in which two writers claim one
+    /// parent — a fork, indistinguishable to a verifier from a deleted line.
+    ///
+    /// Signing happens under the lock because the parent is inside the signed
+    /// bytes; a receipt cannot be re-linked after the fact without re-signing.
+    pub fn append_chained<F>(&self, build: F) -> Result<u64>
+    where
+        F: FnOnce(Option<String>) -> Result<SignedExecutionReceipt>,
+    {
         let _guard = self.lock()?;
         let mut head = self.read_head();
+        let receipt = build(head.last_receipt_id.take())?;
+
         head.sequence += 1;
         let seq = head.sequence;
         let receipt_path = self.receipt_path(seq, &receipt.payload.receipt_type);
 
-        // Write receipt atomically.
-        let tmp_path = receipt_path.with_extension("tmp");
         let bytes =
-            serde_json::to_vec_pretty(receipt).context("serializing signed execution receipt")?;
-        std::fs::write(&tmp_path, bytes)
-            .with_context(|| format!("writing receipt temp file {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &receipt_path).with_context(|| {
-            format!(
-                "renaming receipt file {} -> {}",
-                tmp_path.display(),
-                receipt_path.display()
-            )
-        })?;
+            serde_json::to_vec_pretty(&receipt).context("serializing signed execution receipt")?;
+        write_atomic(&receipt_path, &bytes)?;
 
-        // Update head atomically.
         head.last_receipt_id = Some(receipt.payload.receipt_id.clone());
         self.write_head(&head)?;
 
@@ -132,47 +136,24 @@ impl ReceiptStore {
     }
 
     fn write_head(&self, head: &Head) -> Result<()> {
-        let tmp_path = self.head_path.with_extension("tmp");
         let bytes = serde_json::to_vec_pretty(head).context("serializing receipt head")?;
-        std::fs::write(&tmp_path, bytes)
-            .with_context(|| format!("writing head temp file {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &self.head_path).with_context(|| {
-            format!(
-                "renaming head file {} -> {}",
-                tmp_path.display(),
-                self.head_path.display()
-            )
-        })?;
-        Ok(())
+        write_atomic(&self.head_path, &bytes)
     }
 
-    #[cfg(unix)]
+    /// Take the exclusive per-tenant lock, blocking until it is available.
+    /// Released when the returned guard drops.
     fn lock(&self) -> Result<LockGuard> {
-        use std::os::fd::AsRawFd;
         let file = OpenOptions::new()
             .create(true)
-            .truncate(true)
+            // The file is a lock, never a payload — its contents are
+            // irrelevant and truncating it would be pointless churn.
+            .truncate(false)
             .write(true)
             .open(&self.lock_path)
             .with_context(|| format!("opening lock file {}", self.lock_path.display()))?;
-        let fd = file.as_raw_fd();
-        // SAFETY: fcntl flock is safe when fd is valid and we hold the file
-        // object for the lifetime of the guard.
-        unsafe {
-            let mut flock: libc::flock = std::mem::zeroed();
-            flock.l_type = libc::F_WRLCK as _;
-            flock.l_whence = libc::SEEK_SET as _;
-            if libc::fcntl(fd, libc::F_SETLKW, &flock) != 0 {
-                anyhow::bail!("failed to acquire receipt store lock");
-            }
-        }
+        flock_exclusive(&file)
+            .with_context(|| format!("locking receipt store {}", self.lock_path.display()))?;
         Ok(LockGuard { _file: file })
-    }
-
-    #[cfg(not(unix))]
-    fn lock(&self) -> Result<LockGuard> {
-        // Non-Unix platforms get a best-effort guard with no locking.
-        Ok(LockGuard)
     }
 }
 
@@ -185,13 +166,12 @@ pub struct ReceiptHead {
     pub sequence: u64,
 }
 
-#[cfg(unix)]
+/// Holds the receipt store's exclusive lock for as long as it is alive. The
+/// `flock` is advisory and released by the kernel when the fd closes, so a
+/// crashed writer cannot wedge the store behind a lock nobody holds.
 struct LockGuard {
     _file: std::fs::File,
 }
-
-#[cfg(not(unix))]
-struct LockGuard;
 
 #[cfg(test)]
 mod tests {
@@ -235,40 +215,165 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(dir.path(), "local").unwrap();
 
-        let r1 = sample_receipt(None, 1);
-        let seq1 = store.append(&r1).unwrap();
+        // The store supplies the parent; the first receipt gets none.
+        let mut first_id = None;
+        let seq1 = store
+            .append_chained(|prev| {
+                assert_eq!(prev, None, "a fresh store has no head to chain to");
+                let r = sample_receipt(prev, 1);
+                first_id = Some(r.payload.receipt_id.clone());
+                Ok(r)
+            })
+            .unwrap();
         assert_eq!(seq1, 1);
+        let first_id = first_id.unwrap();
 
         let head = store.head().unwrap();
         assert_eq!(head.sequence, 1);
-        assert_eq!(head.last_receipt_id, Some(r1.payload.receipt_id.clone()));
+        assert_eq!(head.last_receipt_id, Some(first_id.clone()));
 
-        let r2 = sample_receipt(Some(r1.payload.receipt_id.clone()), 2);
-        let seq2 = store.append(&r2).unwrap();
+        let seq2 = store
+            .append_chained(|prev| {
+                assert_eq!(prev.as_deref(), Some(first_id.as_str()));
+                Ok(sample_receipt(prev, 2))
+            })
+            .unwrap();
         assert_eq!(seq2, 2);
 
         let head = store.head().unwrap();
         assert_eq!(head.sequence, 2);
-        assert_eq!(head.last_receipt_id, Some(r2.payload.receipt_id.clone()));
+        assert_ne!(head.last_receipt_id, Some(first_id));
+    }
+
+    /// Concurrent writers must extend one chain, never fork it.
+    ///
+    /// A fork — two receipts naming the same parent — is what an offline
+    /// verifier reads as "a preceding receipt was deleted or reordered". It
+    /// can only be created at write time, by two writers that both observed
+    /// the same head, so the head read and the link it produces have to sit
+    /// inside one lock rather than two.
+    #[test]
+    fn concurrent_writers_extend_one_chain_without_forking() {
+        const WRITERS: u64 = 8;
+        const EACH: u64 = 12;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(dir.path(), "local").unwrap();
+
+        std::thread::scope(|scope| {
+            for w in 0..WRITERS {
+                let store = store.clone();
+                scope.spawn(move || {
+                    for i in 0..EACH {
+                        store
+                            .append_chained(|prev| Ok(sample_receipt(prev, w * EACH + i)))
+                            .unwrap();
+                    }
+                });
+            }
+        });
+
+        let total = WRITERS * EACH;
+        assert_eq!(store.head().unwrap().sequence, total);
+
+        // Walk the store in sequence order: each receipt must name exactly its
+        // predecessor, and the genesis receipt must name nobody.
+        let chain: Vec<SignedExecutionReceipt> = (1..=total)
+            .map(|seq| {
+                let path = store.receipt_path(seq, receipt_type::PLAN_ADMITTED);
+                let bytes = std::fs::read(&path)
+                    .unwrap_or_else(|e| panic!("receipt {seq} missing at {}: {e}", path.display()));
+                serde_json::from_slice(&bytes).expect("stored receipt parses")
+            })
+            .collect();
+
+        assert_eq!(
+            chain[0].payload.prev_receipt_id, None,
+            "genesis has no parent"
+        );
+        for (idx, pair) in chain.windows(2).enumerate() {
+            assert_eq!(
+                pair[1].payload.prev_receipt_id.as_deref(),
+                Some(pair[0].payload.receipt_id.as_str()),
+                "receipt at sequence {} must chain to sequence {}",
+                idx + 2,
+                idx + 1,
+            );
+        }
+
+        // State the fork property directly: no parent is ever claimed twice.
+        let mut parents: Vec<&str> = chain
+            .iter()
+            .filter_map(|r| r.payload.prev_receipt_id.as_deref())
+            .collect();
+        let claimed = parents.len();
+        parents.sort_unstable();
+        parents.dedup();
+        assert_eq!(
+            parents.len(),
+            claimed,
+            "a parent was claimed by two receipts"
+        );
     }
 
     #[test]
     fn receipt_files_are_written_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(dir.path(), "local").unwrap();
-        let receipt = sample_receipt(None, 3);
-        store.append(&receipt).unwrap();
+        let mut expected_id = None;
+        store
+            .append_chained(|prev| {
+                let r = sample_receipt(prev, 3);
+                expected_id = Some(r.payload.receipt_id.clone());
+                Ok(r)
+            })
+            .unwrap();
 
         let path = store.receipt_path(1, receipt_type::PLAN_ADMITTED);
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
         let loaded: SignedExecutionReceipt = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(loaded.payload.receipt_id, receipt.payload.receipt_id);
+        assert_eq!(Some(loaded.payload.receipt_id), expected_id);
+
+        // No temp file survives a successful write, whatever it was named.
+        let leftovers: Vec<_> = std::fs::read_dir(&store.tenant_dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .filter(|n| n.to_string_lossy().contains(".tmp"))
+            .collect();
         assert!(
-            !store
-                .tenant_dir
-                .join("00000001-plan.admitted.json.tmp")
-                .exists()
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
         );
+    }
+
+    /// A failure inside `build` must leave the store exactly as it was: no
+    /// sequence burned, no head moved, no partial receipt on disk. A receipt
+    /// that could not be signed is a receipt that never happened.
+    #[test]
+    fn a_failed_build_advances_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(dir.path(), "local").unwrap();
+        store
+            .append_chained(|prev| Ok(sample_receipt(prev, 1)))
+            .unwrap();
+        let before = store.head().unwrap();
+
+        let err = store
+            .append_chained(|_| anyhow::bail!("signing key unavailable"))
+            .unwrap_err();
+        assert!(err.to_string().contains("signing key unavailable"));
+
+        assert_eq!(store.head().unwrap(), before, "head must not have moved");
+        assert!(
+            !store.receipt_path(2, receipt_type::PLAN_ADMITTED).exists(),
+            "no receipt file for the sequence that was never assigned"
+        );
+
+        // And the next real append takes the sequence the failure did not.
+        let seq = store
+            .append_chained(|prev| Ok(sample_receipt(prev, 2)))
+            .unwrap();
+        assert_eq!(seq, 2);
     }
 }

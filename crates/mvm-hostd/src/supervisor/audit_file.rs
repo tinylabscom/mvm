@@ -188,7 +188,12 @@ impl AuditSigner for FileAuditSigner {
 /// Take an exclusive advisory lock on `file`. Blocks until acquired.
 /// Released when the OwnedFd backing `file` is dropped. This is what
 /// gives the per-tenant audit chain cross-process integrity.
-fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+///
+/// `flock` is held per open file description rather than per process, so two
+/// threads that each opened the file are serialized against one another the
+/// same way two processes are. `fcntl` record locks are not — they are owned
+/// by the process and grant a second thread the lock it is already holding.
+pub(crate) fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
     use rustix::fs::{FlockOperation, flock};
     use std::os::fd::AsFd;
     flock(file.as_fd(), FlockOperation::LockExclusive).map_err(std::io::Error::from)

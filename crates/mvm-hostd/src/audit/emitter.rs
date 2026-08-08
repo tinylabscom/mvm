@@ -912,34 +912,18 @@ impl AuditEmitter {
             Some(r) => r,
             None => return,
         };
-        let head = match store.head() {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(event = entry.event, error = %e, "failed to read receipt store head");
-                return;
-            }
-        };
-        receipt.prev_receipt_id = head.last_receipt_id;
-        receipt.receipt_id = match receipt.compute_id() {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(event = entry.event, error = %e, "failed to compute receipt id");
-                return;
-            }
-        };
-        let signed_at = chrono::Utc::now().to_rfc3339();
-        let signed = match mvm_core::receipt::SignedExecutionReceipt::sign(
-            receipt,
-            &self.signing_key,
-            signed_at,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(event = entry.event, error = %e, "failed to sign execution receipt");
-                return;
-            }
-        };
-        if let Err(e) = store.append(&signed) {
+        // Link, identify, and sign inside the store's lock. The parent is part
+        // of the receipt id and of the signed bytes, so reading the head out
+        // here and appending afterwards would let a concurrent emitter claim
+        // the same parent between the two.
+        let appended = store.append_chained(|prev| {
+            receipt.prev_receipt_id = prev;
+            receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
+            let signed_at = chrono::Utc::now().to_rfc3339();
+            mvm_core::receipt::SignedExecutionReceipt::sign(receipt, &self.signing_key, signed_at)
+                .context("signing execution receipt")
+        });
+        if let Err(e) = appended {
             tracing::warn!(event = entry.event, error = %e, "failed to append execution receipt");
         }
     }
@@ -972,7 +956,7 @@ impl AuditEmitter {
 /// written, fsync'd, then `rename`d over `path`. A concurrent reader sees
 /// either the old file or the complete new one, never a torn write. The
 /// temp name carries the pid so two publishers don't collide on it.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let dir = path
         .parent()

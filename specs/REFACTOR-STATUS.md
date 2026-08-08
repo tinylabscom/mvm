@@ -750,3 +750,16 @@ for detailed scope and acceptance criteria.
         restore and live Apple Silicon witnesses remain open.
   - [ ] Typed-connector egress-policy enrichment
   - [ ] OCI-image template build path and CLI facade completion
+
+- [~] Plan 302 — audit-chain write-path hardening
+  (`specs/plans/302-audit-chain-write-path-hardening.md`)
+  - [x] `ReceiptStore` links and signs under one lock — the head read was
+        outside it, so two emitters could claim one parent
+  - [x] Receipt lock switched from process-scoped `fcntl` to `flock`, which
+        actually excludes two threads
+  - [x] `audit_signer::Chain` takes a sole-writer lock, writes each line in
+        one `write_all`, and re-seeds its head after a failed append
+  - [ ] Audit emission fails closed under `--prod` (currently advisory, so a
+        missing entry leaves no gap to detect)
+  - [ ] Converge the primary chain on JCS canonical bytes so no verifier has
+        to reproduce serde field order
