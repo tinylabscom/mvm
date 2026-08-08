@@ -1,10 +1,11 @@
 //! Chain-signed file-backed [`AuditSigner`].
 //!
-//! Each emitted [`AuditEntry`] is wrapped in a [`SignedEnvelope`] that
-//! carries the SHA-256 hash of the previous envelope on disk plus an
-//! Ed25519 signature over `serde_json(entry) || prev_hash`. Tampering
-//! with any entry — re-ordering, modifying, deleting, or swapping
-//! between tenants — breaks either the chain or the signature, both
+//! Each emitted [`AuditEntry`] is wrapped in a [`SignedEnvelope`] that carries
+//! the exact bytes the signature covers, the SHA-256 hash of the previous
+//! envelope on disk, and an Ed25519 signature over
+//! `signed_bytes || prev_hash`. Tampering with any entry — re-ordering,
+//! modifying, deleting, or swapping between tenants — breaks the chain, the
+//! signature, or the agreement between an entry and the bytes beside it, all
 //! of which are checked by [`verify_audit_chain`].
 //!
 //! Per-tenant streams live at `<audit_dir>/<tenant>.jsonl`. The chain
@@ -28,18 +29,44 @@ use thiserror::Error;
 
 use crate::supervisor::audit::{AuditEntry, AuditError, AuditSigner};
 
-/// On-disk representation of one audit line: the original entry, the
-/// hash of the previous envelope (genesis = 32 zero bytes), and an
-/// Ed25519 signature over `serde_json(entry) || prev_hash`.
+/// On-disk representation of one audit line: the entry, the exact bytes that
+/// were signed, the hash of the previous envelope (genesis = 32 zero bytes),
+/// and an Ed25519 signature over `signed_bytes || prev_hash`.
+///
+/// ## Why the signed bytes are stored
+///
+/// A verifier that re-derives the signed bytes by re-serializing `entry` is
+/// committing every future reader to reproducing this crate's serializer
+/// exactly and forever. It also makes the entry schema unchangeable in
+/// practice: add one field that always serializes, and every historical line
+/// re-serializes differently and stops verifying — the log would accuse
+/// itself of tampering because a struct grew.
+///
+/// So the bytes that were signed are written down. Verification reads them
+/// and never re-derives anything, which is what makes the signature a fact
+/// about the past rather than a fact about the current struct definition.
+///
+/// `entry` stays alongside them, decoded, because an audit log nobody can
+/// `grep` is an audit log nobody reads. The verifier checks the two agree, so
+/// the readable copy cannot drift from the signed one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignedEnvelope {
     pub entry: AuditEntry,
+    /// base64 url-safe-no-pad of the exact entry bytes covered by
+    /// `signature`.
+    ///
+    /// `None` on lines written before this field existed. Those verify by the
+    /// original rule — re-serializing `entry` — which is kept indefinitely:
+    /// evidence somebody already holds must not stop verifying because the
+    /// writer improved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<String>,
     /// base64 url-safe-no-pad of the 32-byte SHA-256 of the previous
     /// envelope's full JSON line. Genesis is 32 zero bytes.
     pub prev_hash: String,
     /// base64 url-safe-no-pad of the 64-byte Ed25519 signature over
-    /// `serde_json::to_vec(entry) || prev_hash_bytes`.
+    /// `signed_entry_bytes || prev_hash_bytes`.
     pub signature: String,
 }
 
@@ -162,12 +189,15 @@ impl AuditSigner for FileAuditSigner {
         }
 
         let entry_bytes = serde_json::to_vec(entry).map_err(|e| AuditError::Io(e.to_string()))?;
-        let mut to_sign = entry_bytes;
+        let mut to_sign = entry_bytes.clone();
         to_sign.extend_from_slice(&prev_hash);
         let signature = self.signing_key.sign(&to_sign);
 
         let envelope = SignedEnvelope {
             entry: entry.clone(),
+            // Written down rather than left to be re-derived: this is what the
+            // signature covers, and a verifier should never have to guess it.
+            canonical: Some(URL_SAFE_NO_PAD.encode(&entry_bytes)),
             prev_hash: URL_SAFE_NO_PAD.encode(prev_hash),
             signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
         };
@@ -209,6 +239,40 @@ pub enum VerifyError {
     PrevHashMismatch { line: usize },
     #[error("signature invalid at line {line}")]
     SignatureInvalid { line: usize },
+    #[error("line {line}: the readable entry disagrees with the bytes that were signed")]
+    EntryCanonicalMismatch { line: usize },
+}
+
+/// The bytes a line's signature covers.
+///
+/// Post-`canonical` lines carry them verbatim; the readable `entry` is checked
+/// against them so the copy a human reads cannot say something different from
+/// the copy the signature protects. Pre-`canonical` lines are verified by the
+/// original rule, re-serializing `entry`, which stays supported forever —
+/// there is no cutover and no flag day, because a log written last year is
+/// evidence and must keep verifying.
+fn signed_bytes_for(envelope: &SignedEnvelope, line: usize) -> Result<Vec<u8>, VerifyError> {
+    let Some(encoded) = envelope.canonical.as_deref() else {
+        return serde_json::to_vec(&envelope.entry).map_err(|e| VerifyError::Malformed {
+            line,
+            reason: format!("entry reserialize: {e}"),
+        });
+    };
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|e| VerifyError::Malformed {
+            line,
+            reason: format!("canonical b64: {e}"),
+        })?;
+    let decoded: AuditEntry =
+        serde_json::from_slice(&bytes).map_err(|e| VerifyError::Malformed {
+            line,
+            reason: format!("canonical entry parse: {e}"),
+        })?;
+    if decoded != envelope.entry {
+        return Err(VerifyError::EntryCanonicalMismatch { line });
+    }
+    Ok(bytes)
 }
 
 /// Walk a chain-signed audit file, verifying each envelope's
@@ -264,12 +328,7 @@ pub fn verify_audit_chain_entries(
                     reason: "signature must be 64 bytes".to_string(),
                 })?;
         let signature = Signature::from_bytes(&sig_arr);
-        let entry_bytes =
-            serde_json::to_vec(&envelope.entry).map_err(|e| VerifyError::Malformed {
-                line: idx,
-                reason: format!("entry reserialize: {e}"),
-            })?;
-        let mut to_verify = entry_bytes;
+        let mut to_verify = signed_bytes_for(&envelope, idx)?;
         to_verify.extend_from_slice(&prev_hash);
         verifying_key
             .verify(&to_verify, &signature)
@@ -471,13 +530,53 @@ mod tests {
             (content, vk_hex)
         }
 
+        /// The v1 corpus was written before the signed bytes were stored on
+        /// the line. It must keep verifying forever, unchanged.
+        ///
+        /// This is the whole no-cutover promise, in one assertion: a log
+        /// somebody already holds does not stop being evidence because the
+        /// writer got better. Note it is asserted by *verifying*, not by
+        /// byte-comparing against what today's signer emits — today's signer
+        /// no longer emits this shape, and that is fine.
+        #[test]
+        fn the_pre_stored_bytes_corpus_still_verifies() {
+            let committed = std::fs::read_to_string(vectors_dir().join("audit-chain-v1.jsonl"))
+                .expect("v1 corpus is committed");
+            assert!(
+                !committed.contains("\"canonical\""),
+                "the v1 corpus must stay in its original shape; regenerating it would \
+                 destroy the only evidence that old logs still verify"
+            );
+            let vk_hex = std::fs::read_to_string(vectors_dir().join("audit-chain-v1.pubkey"))
+                .expect("v1 corpus key is committed");
+            let vk = VerifyingKey::from_bytes(
+                &<[u8; 32]>::try_from(hex::decode(vk_hex.trim()).unwrap().as_slice()).unwrap(),
+            )
+            .unwrap();
+
+            let dir = tempfile::tempdir().unwrap();
+            let written = dir.path().join("v1.jsonl");
+            std::fs::write(&written, &committed).unwrap();
+            assert_eq!(
+                verify_audit_chain(&written, &vk).expect("the host verifier accepts the v1 corpus"),
+                3
+            );
+            assert_eq!(
+                mvm_contract::verify::verify_audit_chain_bytes(&committed, &vk)
+                    .expect("the wasm verifier accepts the v1 corpus")
+                    .count,
+                3,
+                "both verifiers must keep accepting pre-stored-bytes logs"
+            );
+        }
+
         #[tokio::test]
         async fn frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts() {
             let dir = tempfile::tempdir().unwrap();
             let (content, vk_hex) = build_chain(dir.path()).await;
 
-            let chain_path = vectors_dir().join("audit-chain-v1.jsonl");
-            let key_path = vectors_dir().join("audit-chain-v1.pubkey");
+            let chain_path = vectors_dir().join("audit-chain-v2.jsonl");
+            let key_path = vectors_dir().join("audit-chain-v2.pubkey");
 
             if std::env::var_os("MVM_REGEN_AUDIT_CORPUS").is_some() {
                 std::fs::create_dir_all(vectors_dir()).unwrap();
@@ -579,12 +678,23 @@ mod tests {
             Some(format!("sha256:{}", "c".repeat(64)).as_str())
         );
 
-        // And it must reject a tampered stream just like the native path.
+        // And it must reject a tampered stream just like the native path. An
+        // in-place edit reaches the readable entry but not the base64 bytes
+        // beside it, so the two stop agreeing — a sharper refusal than a bad
+        // signature, and the same verdict both verifiers now reach.
         let tampered = content.replacen("plan.launched", "plan.hijacked", 1);
-        let err = mvm_contract::verify::verify_audit_chain_bytes(&tampered, &vk).unwrap_err();
         assert_eq!(
-            err,
-            mvm_contract::verify::AuditVerifyError::SignatureInvalid { line: 0 }
+            mvm_contract::verify::verify_audit_chain_bytes(&tampered, &vk).unwrap_err(),
+            mvm_contract::verify::AuditVerifyError::EntryCanonicalMismatch { line: 0 }
+        );
+        let tampered_path = dir.path().join("tampered.jsonl");
+        std::fs::write(&tampered_path, &tampered).unwrap();
+        assert!(
+            matches!(
+                verify_audit_chain(&tampered_path, &vk),
+                Err(VerifyError::EntryCanonicalMismatch { line: 0 })
+            ),
+            "the host verifier must reach the same verdict as the wasm one"
         );
     }
 
@@ -603,10 +713,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Flip a byte in the first line's `event` field. The chain
-        // hash on the second line was computed over the *original*
-        // first line, so verification of the *first* line should fail
-        // on signature first (signature was over the original entry).
+        // Flip a byte in the first line's `event` field. The edit lands in the
+        // readable entry; the base64 copy of the signed bytes beside it is
+        // untouched, so the line is refused for the two disagreeing — which
+        // names the tamper more precisely than a bad signature would.
         let path = signer.tenant_path("tenant-a");
         let content = std::fs::read_to_string(&path).unwrap();
         let tampered = content.replacen("real-event", "fake-event", 1);
@@ -614,6 +724,38 @@ mod tests {
 
         let err = verify_audit_chain(&path, &vk).expect_err("tamper must break verify");
         match err {
+            VerifyError::EntryCanonicalMismatch { line } => assert_eq!(line, 0),
+            other => panic!("expected EntryCanonicalMismatch at line 0, got {other:?}"),
+        }
+    }
+
+    /// A forger who rewrites *both* copies consistently still cannot sign
+    /// them. The disagreement check is a sharper diagnostic, not the security
+    /// boundary — the signature is.
+    #[tokio::test]
+    async fn a_consistently_rewritten_line_still_fails_the_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let signer = FileAuditSigner::open(key, dir.path()).unwrap();
+        signer
+            .sign_and_emit(&make_entry("tenant-a", "real-event"))
+            .await
+            .unwrap();
+
+        let path = signer.tenant_path("tenant-a");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: SignedEnvelope = serde_json::from_str(content.trim()).unwrap();
+        envelope.entry.event = "fake-event".to_string();
+        envelope.canonical =
+            Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&envelope.entry).unwrap()));
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&envelope).unwrap()),
+        )
+        .unwrap();
+
+        match verify_audit_chain(&path, &vk).expect_err("a forgery must not verify") {
             VerifyError::SignatureInvalid { line } => assert_eq!(line, 0),
             other => panic!("expected SignatureInvalid at line 0, got {other:?}"),
         }

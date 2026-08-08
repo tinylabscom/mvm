@@ -183,6 +183,7 @@ fn explain(err: &VerifyError, path: &Path) -> String {
     let line_no = match err {
         VerifyError::PrevHashMismatch { line }
         | VerifyError::SignatureInvalid { line }
+        | VerifyError::EntryCanonicalMismatch { line }
         | VerifyError::Malformed { line, .. } => Some(*line),
         VerifyError::Io(_) => None,
     };

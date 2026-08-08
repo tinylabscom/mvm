@@ -1,6 +1,6 @@
 # Plan 302 — Audit-chain write-path hardening
 
-**Status: PARTIAL — WS1–WS3 landed, WS4–WS5 open**
+**Status: WS1–WS3 + WS5 landed; WS4 in review (#2242)**
 
 ## Why
 
@@ -61,15 +61,54 @@ writer processes — a same-process test cannot stand in for two supervisors),
       warn-and-continue behaviour. Needs a decision on whether a chain that is
       unreachable at boot should block the boot.
 
-- [ ] **WS5 — two canonicalization schemes for one job.**
-      `supervisor/audit_file.rs` signs `serde_json::to_vec(entry) || prev_hash`,
-      so every verifier must reproduce serde's field order forever and any
-      future field-layout change silently invalidates history.
-      `audit_signer/chain.rs` signs JCS bytes and stores them base64, so its
-      verifier never re-serializes anything. The second is strictly better and
-      the two should converge on it. This is a format change to the primary
-      chain, so it needs a migration story for existing on-disk logs — which is
-      the reason it is not folded into this pass.
+- [x] **WS5 — the primary chain re-derived its signed bytes at verify time.**
+
+      The original framing of this workstream was "converge on JCS", and that
+      was wrong twice over. Recorded here because the wrong version is the
+      tempting one:
+
+      1. *There was no second implementation to converge with.* The browser
+         verifier is not an independent reimplementation — `web/audit-verify`
+         is a `wasm_bindgen` shim over `mvm-contract`, the same Rust code. The
+         cross-language divergence this was meant to fix did not exist.
+      2. *Our JCS is not JCS.* `serde_jcs` 0.1.0 orders object keys by UTF-8
+         byte value; RFC 8785 mandates UTF-16 code units. They disagree on
+         astral-plane keys — `mvm-core`'s `canonicalizer_equivalence` module
+         documents this, and `audit_chain_spine.rs` exercises a `U+1F600` key.
+         Adopting it would have replaced "reproduce serde's field order" with
+         "reproduce a non-conformant JCS", which is worse for looking standard.
+
+      The actual defect was re-derivation itself. `verify_audit_chain` re-ran
+      `serde_json::to_vec(entry)` on the parsed entry and checked the signature
+      against the result, so the signature was a claim about the *current
+      struct definition* rather than about the past. Add one always-serialized
+      field to `AuditEntry` and every historical line stops verifying — the log
+      accuses itself of tampering because a struct grew.
+
+      `SignedEnvelope` now carries `canonical`: the exact bytes the signature
+      covers. Verification reads them and re-derives nothing. The readable
+      `entry` stays beside them — an audit log nobody can `grep` is an audit
+      log nobody reads — and both verifiers check the two agree, so the
+      readable copy cannot drift from the attested one. Because the stored
+      bytes are never re-sorted by a reader, the canonicalizer ordering
+      problem above becomes structurally unreachable rather than merely
+      unlikely; no key-charset restriction was needed.
+
+      No cutover. Lines without `canonical` verify by the original rule
+      indefinitely, pinned by `the_pre_stored_bytes_corpus_still_verifies`
+      against the committed v1 fixture, which must never be regenerated. The
+      v2 fixture pins today's shape.
+
+      Witnesses: `a_line_whose_signed_bytes_differ_from_our_serializer_still_verifies`
+      (the decisive one — a genuine line whose signed bytes differ from what
+      this crate would emit verifies now and did not before),
+      `a_chain_written_without_stored_bytes_still_verifies`,
+      `a_readable_entry_that_disagrees_with_the_signed_bytes_is_refused`,
+      `tampering_with_either_copy_of_the_entry_is_refused`,
+      `a_consistently_rewritten_line_still_fails_the_signature`.
+
+      `audit_signer/chain.rs` was already right on this point — it stores its
+      canonical bytes and its verifier never re-serializes. It is unchanged.
 
 ## Not in scope
 

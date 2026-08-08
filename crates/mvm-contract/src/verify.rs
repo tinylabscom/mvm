@@ -13,15 +13,22 @@
 //! tab (see `web/audit-verify/`) and lets anyone audit a downloaded
 //! log with no host and no trust in a server.
 //!
-//! Byte-exactness: the signed payload is `serde_json::to_vec(entry)`.
-//! [`MirrorEntry`] reproduces `mvm_hostd::supervisor::audit::AuditEntry`'s
+//! Byte-exactness: a line carries the bytes its signature covers, in
+//! `canonical`, and verification reads them rather than re-deriving them. The
+//! readable `entry` is checked against those bytes so the copy a human reads
+//! cannot differ from the copy that was attested.
+//!
+//! Lines written before `canonical` existed carry no such copy, and are
+//! verified the original way — by re-serializing `entry`, which requires
+//! [`MirrorEntry`] to reproduce `mvm_hostd::supervisor::audit::AuditEntry`'s
 //! serde shape field-for-field (declaration order, `#[serde(transparent)]`
-//! string ids flattened to `String`, `skip_serializing_if` on the
-//! bundle fields, `deny_unknown_fields`) so re-serializing here yields
-//! the identical bytes that were signed — without depending on the
-//! supervisor's types or on chrono. `mvm-supervisor`'s
-//! `mvm_verify_matches_supervisor_chain` test pins this equivalence so
-//! a field added upstream trips CI here.
+//! string ids flattened to `String`, `skip_serializing_if` on the bundle
+//! fields, `deny_unknown_fields`). That path is kept indefinitely: a log
+//! written before the writer improved is still evidence. `mvm-hostd`'s
+//! `mvm_verify_matches_supervisor_chain` test pins the equivalence so a field
+//! added upstream trips CI here, and
+//! `frozen_corpus::the_pre_stored_bytes_corpus_still_verifies` pins the old
+//! shape against a committed fixture.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -34,13 +41,19 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Mirror of `mvm_hostd::supervisor::audit::AuditEntry`. Field order and serde
-/// attributes MUST match the upstream struct byte-for-byte — the
-/// signature is computed over `serde_json::to_vec(entry)`, so any
-/// divergence (reordered field, different skip rule) makes a genuine,
-/// untampered line fail to verify. The `#[serde(transparent)]` newtype
-/// ids upstream serialize as bare strings, so they are `String` here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Mirror of `mvm_hostd::supervisor::audit::AuditEntry`.
+///
+/// For lines that carry `canonical`, this no longer has to re-serialize
+/// byte-for-byte like upstream: the signed bytes are read off the line, and
+/// this type only has to *parse* them to the same value. That is a far weaker
+/// obligation than reproducing another crate's serializer, and it is what lets
+/// the entry schema evolve without invalidating history.
+///
+/// Pre-`canonical` lines still depend on byte-exact agreement — field order
+/// and serde attributes must match upstream exactly, or a genuine untampered
+/// line fails to verify. The `#[serde(transparent)]` newtype ids upstream
+/// serialize as bare strings, so they are `String` here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MirrorEntry {
     /// RFC 3339 timestamp, passed through verbatim (no chrono parse).
@@ -73,13 +86,18 @@ pub struct MirrorEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedEnvelope {
-    /// The audit entry that was signed.
+    /// The audit entry that was signed, decoded for reading.
     pub entry: MirrorEntry,
+    /// base64 url-safe-no-pad of the exact entry bytes covered by
+    /// `signature`. `None` on lines written before this field existed, which
+    /// are verified by re-serializing `entry` instead — indefinitely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<String>,
     /// base64 url-safe-no-pad of the previous line's SHA-256 (genesis
     /// is 32 zero bytes).
     pub prev_hash: String,
     /// base64 url-safe-no-pad of the 64-byte Ed25519 signature over
-    /// `serde_json::to_vec(entry) || prev_hash_bytes`.
+    /// `signed_entry_bytes || prev_hash_bytes`.
     pub signature: String,
 }
 
@@ -131,6 +149,11 @@ pub enum AuditVerifyError {
         /// 0-based line index.
         line: usize,
     },
+    /// A line's readable entry disagrees with the bytes that were signed.
+    EntryCanonicalMismatch {
+        /// 0-based line index.
+        line: usize,
+    },
     /// The supplied public key could not be decoded.
     KeyDecode(String),
 }
@@ -145,6 +168,10 @@ impl fmt::Display for AuditVerifyError {
                 write!(f, "prev_hash mismatch at line {line}: chain broken")
             }
             Self::SignatureInvalid { line } => write!(f, "signature invalid at line {line}"),
+            Self::EntryCanonicalMismatch { line } => write!(
+                f,
+                "line {line}: the readable entry disagrees with the bytes that were signed"
+            ),
             Self::KeyDecode(reason) => write!(f, "public key decode failed: {reason}"),
         }
     }
@@ -166,6 +193,41 @@ pub fn verifying_key_from_hex(hex: &str) -> Result<VerifyingKey, AuditVerifyErro
 /// Returns the verified entries on success; stops at the first failure
 /// and reports its line index. This is the byte-for-byte counterpart of
 /// `mvm_hostd::supervisor::verify_audit_chain`, operating on a string.
+/// The bytes a line's signature covers.
+///
+/// Post-`canonical` lines carry them verbatim, and the readable `entry` is
+/// checked against them so the copy a human reads cannot say something
+/// different from the copy the signature protects. Pre-`canonical` lines fall
+/// back to re-serializing `entry`, which stays supported indefinitely: a log
+/// written before this field existed is evidence, and evidence does not stop
+/// verifying because the writer improved.
+///
+/// Byte-for-byte counterpart of
+/// `mvm_hostd::supervisor::audit_file::signed_bytes_for`.
+fn signed_bytes_for(envelope: &SignedEnvelope, line: usize) -> Result<Vec<u8>, AuditVerifyError> {
+    let Some(encoded) = envelope.canonical.as_deref() else {
+        return serde_json::to_vec(&envelope.entry).map_err(|e| AuditVerifyError::Malformed {
+            line,
+            reason: format!("entry reserialize: {e}"),
+        });
+    };
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|e| AuditVerifyError::Malformed {
+            line,
+            reason: format!("canonical b64: {e}"),
+        })?;
+    let decoded: MirrorEntry =
+        serde_json::from_slice(&bytes).map_err(|e| AuditVerifyError::Malformed {
+            line,
+            reason: format!("canonical entry parse: {e}"),
+        })?;
+    if decoded != envelope.entry {
+        return Err(AuditVerifyError::EntryCanonicalMismatch { line });
+    }
+    Ok(bytes)
+}
+
 pub fn verify_audit_chain_bytes(
     content: &str,
     verifying_key: &VerifyingKey,
@@ -208,12 +270,7 @@ pub fn verify_audit_chain_bytes(
                 })?;
         let signature = Signature::from_bytes(&sig_arr);
 
-        let entry_bytes =
-            serde_json::to_vec(&envelope.entry).map_err(|e| AuditVerifyError::Malformed {
-                line: idx,
-                reason: format!("entry reserialize: {e}"),
-            })?;
-        let mut to_verify = entry_bytes;
+        let mut to_verify = signed_bytes_for(&envelope, idx)?;
         to_verify.extend_from_slice(&prev_hash);
         verifying_key
             .verify(&to_verify, &signature)
@@ -328,19 +385,33 @@ mod tests {
         }
     }
 
-    /// Re-implement the supervisor's writer so tests produce genuine
-    /// chains: sign `to_vec(entry) || prev_hash`, then emit the
-    /// envelope and advance the chain by hashing the written line.
-    fn build_chain(key: &SigningKey, entries: &[MirrorEntry]) -> String {
+    /// Which on-disk shape a fixture chain is written in.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Shape {
+        /// Pre-`canonical`: the signed bytes are not written down, so a
+        /// verifier has to re-derive them. Still on disk in the wild.
+        Legacy,
+        /// The signed bytes are stored on the line.
+        Stored,
+    }
+
+    /// Re-implement the supervisor's writer so tests produce genuine chains:
+    /// sign `to_vec(entry) || prev_hash`, then emit the envelope and advance
+    /// the chain by hashing the written line.
+    fn build_chain_shaped(key: &SigningKey, entries: &[MirrorEntry], shape: Shape) -> String {
         let mut prev_hash = [0u8; 32];
         let mut out = String::new();
         for e in entries {
             let entry_bytes = serde_json::to_vec(e).unwrap();
-            let mut to_sign = entry_bytes;
+            let mut to_sign = entry_bytes.clone();
             to_sign.extend_from_slice(&prev_hash);
             let sig = key.sign(&to_sign);
             let env = SignedEnvelope {
                 entry: e.clone(),
+                canonical: match shape {
+                    Shape::Legacy => None,
+                    Shape::Stored => Some(URL_SAFE_NO_PAD.encode(&entry_bytes)),
+                },
                 prev_hash: URL_SAFE_NO_PAD.encode(prev_hash),
                 signature: URL_SAFE_NO_PAD.encode(sig.to_bytes()),
             };
@@ -350,6 +421,10 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    fn build_chain(key: &SigningKey, entries: &[MirrorEntry]) -> String {
+        build_chain_shaped(key, entries, Shape::Stored)
     }
 
     #[test]
@@ -388,14 +463,45 @@ mod tests {
         assert_eq!(err, AuditVerifyError::SignatureInvalid { line: 0 });
     }
 
+    /// Editing a line in place is refused whichever copy of the entry the
+    /// editor reaches.
+    ///
+    /// A blind edit hits the readable `entry` and the stored bytes are
+    /// base64, so it is caught as a disagreement between the two rather than
+    /// as a bad signature — a sharper answer to the same question. An editor
+    /// who decodes and rewrites the stored bytes hits the signature instead.
+    /// Both are refused; neither can produce a line that verifies.
     #[test]
-    fn tampered_entry_breaks_signature() {
+    fn tampering_with_either_copy_of_the_entry_is_refused() {
         let key = signing_key();
         let chain = build_chain(&key, &[entry("plan.admitted", None)]);
-        // Flip the event value in place without re-signing.
-        let tampered = chain.replace("plan.admitted", "plan.ADMITTED");
-        let err = verify_audit_chain_bytes(&tampered, &key.verifying_key()).unwrap_err();
-        assert_eq!(err, AuditVerifyError::SignatureInvalid { line: 0 });
+
+        let readable_edit = chain.replace("plan.admitted", "plan.ADMITTED");
+        assert_eq!(
+            verify_audit_chain_bytes(&readable_edit, &key.verifying_key()).unwrap_err(),
+            AuditVerifyError::EntryCanonicalMismatch { line: 0 },
+            "editing the readable half must be caught"
+        );
+
+        // Now rewrite the signed bytes too, so both halves agree on the lie.
+        let mut env: SignedEnvelope = serde_json::from_str(chain.trim()).unwrap();
+        env.entry.event = "plan.ADMITTED".to_string();
+        env.canonical = Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&env.entry).unwrap()));
+        let both_edited = format!("{}\n", serde_json::to_string(&env).unwrap());
+        assert_eq!(
+            verify_audit_chain_bytes(&both_edited, &key.verifying_key()).unwrap_err(),
+            AuditVerifyError::SignatureInvalid { line: 0 },
+            "a consistent forgery must still fail the signature"
+        );
+
+        // And the same edit on a pre-`canonical` line still fails the way it
+        // always did.
+        let legacy = build_chain_shaped(&key, &[entry("plan.admitted", None)], Shape::Legacy)
+            .replace("plan.admitted", "plan.ADMITTED");
+        assert_eq!(
+            verify_audit_chain_bytes(&legacy, &key.verifying_key()).unwrap_err(),
+            AuditVerifyError::SignatureInvalid { line: 0 },
+        );
     }
 
     #[test]
@@ -427,6 +533,100 @@ mod tests {
     fn empty_input_verifies_to_zero() {
         let out = verify_audit_chain_bytes("\n\n", &signing_key().verifying_key()).unwrap();
         assert_eq!(out.count, 0);
+    }
+
+    /// Logs written before the signed bytes were stored keep verifying. There
+    /// is no cutover: evidence somebody already holds must not stop verifying
+    /// because the writer improved.
+    #[test]
+    fn a_chain_written_without_stored_bytes_still_verifies() {
+        let key = signing_key();
+        let chain = build_chain_shaped(&key, &[entry("plan.admitted", None)], Shape::Legacy);
+        assert!(
+            !chain.contains("canonical"),
+            "the fixture must be in the old shape"
+        );
+        let out = verify_audit_chain_bytes(&chain, &key.verifying_key()).unwrap();
+        assert_eq!(out.count, 1);
+    }
+
+    /// The whole point of storing the bytes: verification no longer depends on
+    /// this crate re-serializing an entry the way the writer did.
+    ///
+    /// The fixture signs a permutation of the entry's field order — semantically
+    /// identical, byte-different from what `serde_json::to_vec` emits here. Under
+    /// the old re-serialize rule this genuine line is rejected; reading the bytes
+    /// off the line accepts it. That is exactly the failure a future field
+    /// addition would cause across a whole historical log.
+    #[test]
+    fn a_line_whose_signed_bytes_differ_from_our_serializer_still_verifies() {
+        let key = signing_key();
+        let e = entry("plan.admitted", None);
+
+        // Re-emit the same entry with keys in a different order.
+        let value: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&e).unwrap())
+            .expect("entry as a json object");
+        let map = value.as_object().expect("object");
+        let permuted: serde_json::Map<String, serde_json::Value> = map
+            .iter()
+            .rev()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let signed_bytes = serde_json::to_vec(&serde_json::Value::Object(permuted)).unwrap();
+        assert_ne!(
+            signed_bytes,
+            serde_json::to_vec(&e).unwrap(),
+            "the fixture must differ from our own serialization"
+        );
+
+        let prev_hash = [0u8; 32];
+        let mut to_sign = signed_bytes.clone();
+        to_sign.extend_from_slice(&prev_hash);
+        let sig = key.sign(&to_sign);
+        let env = SignedEnvelope {
+            entry: e,
+            canonical: Some(URL_SAFE_NO_PAD.encode(&signed_bytes)),
+            prev_hash: URL_SAFE_NO_PAD.encode(prev_hash),
+            signature: URL_SAFE_NO_PAD.encode(sig.to_bytes()),
+        };
+        let line = format!("{}\n", serde_json::to_string(&env).unwrap());
+
+        let out = verify_audit_chain_bytes(&line, &key.verifying_key())
+            .expect("a genuine line must verify from the bytes it carries");
+        assert_eq!(out.count, 1);
+
+        // And the same line without its stored bytes is rejected — which is
+        // what every historical line would have done after a schema change.
+        let mut legacy = env.clone();
+        legacy.canonical = None;
+        let legacy_line = format!("{}\n", serde_json::to_string(&legacy).unwrap());
+        assert!(
+            matches!(
+                verify_audit_chain_bytes(&legacy_line, &key.verifying_key()),
+                Err(AuditVerifyError::SignatureInvalid { line: 0 })
+            ),
+            "without the stored bytes the same entry cannot be verified"
+        );
+    }
+
+    /// The readable copy cannot say something the signature does not cover.
+    #[test]
+    fn a_readable_entry_that_disagrees_with_the_signed_bytes_is_refused() {
+        let key = signing_key();
+        let chain = build_chain(&key, &[entry("plan.admitted", None)]);
+        let mut env: SignedEnvelope = serde_json::from_str(chain.trim()).unwrap();
+
+        // Rewrite only the human-readable half.
+        env.entry.event = "plan.launched".to_string();
+        let line = format!("{}\n", serde_json::to_string(&env).unwrap());
+
+        assert!(
+            matches!(
+                verify_audit_chain_bytes(&line, &key.verifying_key()),
+                Err(AuditVerifyError::EntryCanonicalMismatch { line: 0 })
+            ),
+            "a doctored readable entry must be caught, not silently ignored"
+        );
     }
 
     #[test]

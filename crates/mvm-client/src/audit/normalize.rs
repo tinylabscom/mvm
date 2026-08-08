@@ -137,6 +137,14 @@ pub(crate) fn refusal_from_lifecycle(
         LifecycleVerifyError::SignatureInvalid { line } => {
             (AuditRefusalKind::SignatureInvalid, Some(*line as u64))
         }
+        // The readable entry disagrees with the bytes the signature covers, so
+        // what the line displays is not what was attested. That is an
+        // authenticity failure, not a parse failure — the caller must treat it
+        // exactly as it treats a bad signature. The distinct cause survives in
+        // the refusal's message.
+        LifecycleVerifyError::EntryCanonicalMismatch { line } => {
+            (AuditRefusalKind::SignatureInvalid, Some(*line as u64))
+        }
     };
     refusal(source, kind, line, &err.to_string())
 }
