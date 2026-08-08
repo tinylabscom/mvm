@@ -136,9 +136,15 @@ pub trait SnapshotIO {
     /// this variant must not re-create the host vsock socket underneath them.
     fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()>;
 
-    /// The restored VM's device model, read after load, before
-    /// resume — the input to `assert_vsock_only_device_model`.
-    fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel>;
+    /// How many network interfaces the restored VM's device model carries,
+    /// read after load and before resume — the input to
+    /// `assert_vsock_only_device_model`.
+    ///
+    /// A count rather than a parsed model: each backend spells its device
+    /// model differently, and the guard only ever asks "how many NICs?".
+    /// Keeping the format on the backend side of the seam stops a
+    /// hypervisor's wire schema leaking into the shared contract.
+    fn restored_network_interface_count(&self) -> Result<usize>;
 
     /// Resume vCPUs. Only called after the device-model guard passes;
     /// calling this before the guard runs would let a NIC-carrying
@@ -342,11 +348,11 @@ fn guard_and_resume<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
 }
 
 fn guard_loaded_device_model<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
-    let model = match io
-        .restored_device_model()
+    let count = match io
+        .restored_network_interface_count()
         .with_context(|| "reading restored device model")
     {
-        Ok(m) => m,
+        Ok(n) => n,
         Err(e) => {
             // The paused VMM has an unreadable device model; tear it down
             // before surfacing the error so it never resumes unchecked.
@@ -354,7 +360,7 @@ fn guard_loaded_device_model<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
             return Err(e);
         }
     };
-    if let Err(e) = crate::microvm::assert_vsock_only_device_model(&model) {
+    if let Err(e) = crate::microvm::assert_vsock_only_device_model(count) {
         let _ = io.teardown_paused();
         return Err(e).context("restore refused by device-model guard");
     }
@@ -582,16 +588,45 @@ fn map_verify_error(err: VerifyError, dir: &Path) -> anyhow::Error {
 // Test-only IO impls
 // ============================================================================
 
-/// `SnapshotIO` impl that just writes canned bytes. Used by the
-/// unit tests below and by integration tests that want to exercise
-/// the seal/verify flow without a live Firecracker. Always reports a
-/// vsock-only (no-NIC) restored device model — tests that need to
-/// drive the guard's refusal path use the `SpyIO` double instead,
-/// since exercising the refuse/teardown/no-resume ordering needs
-/// call-order observation `CannedIO` doesn't provide.
+/// The one `SnapshotIO` double: writes canned bytes, reports a configurable
+/// restored NIC count, and records call order. Used by the unit tests below
+/// and by integration tests exercising the seal/verify flow without a live
+/// Firecracker.
+///
+/// Defaults to a vsock-only (no-NIC) restore. Call
+/// [`with_network_interfaces`](Self::with_network_interfaces) to drive the
+/// guard's refusal path, and [`calls`](Self::calls) to assert the
+/// load → guard → resume ordering (and that a refusal tears down without
+/// ever resuming).
 pub struct CannedIO {
     pub vmstate_bytes: Vec<u8>,
     pub mem_bytes: Vec<u8>,
+    restored_network_interfaces: usize,
+    calls: std::cell::RefCell<Vec<&'static str>>,
+}
+
+impl CannedIO {
+    /// A no-NIC double over the given snapshot payloads.
+    pub fn new(vmstate_bytes: impl Into<Vec<u8>>, mem_bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            vmstate_bytes: vmstate_bytes.into(),
+            mem_bytes: mem_bytes.into(),
+            restored_network_interfaces: 0,
+            calls: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Report `n` network interfaces on restore, so a test can drive the
+    /// device-model guard's refusal.
+    pub fn with_network_interfaces(mut self, n: usize) -> Self {
+        self.restored_network_interfaces = n;
+        self
+    }
+
+    /// The `SnapshotIO` methods called so far, in order.
+    pub fn calls(&self) -> Vec<&'static str> {
+        self.calls.borrow().clone()
+    }
 }
 
 impl SnapshotIO for CannedIO {
@@ -601,20 +636,23 @@ impl SnapshotIO for CannedIO {
         Ok(())
     }
     fn load_snapshot_paused(&self, _dir: &Path) -> Result<()> {
+        self.calls.borrow_mut().push("load_paused");
         Ok(())
     }
     fn load_snapshot_for_fork_paused(&self, _dir: &Path) -> Result<()> {
+        self.calls.borrow_mut().push("load_fork_paused");
         Ok(())
     }
-    fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
-        Ok(crate::microvm::RestoredDeviceModel {
-            network_interfaces: Vec::new(),
-        })
+    fn restored_network_interface_count(&self) -> Result<usize> {
+        self.calls.borrow_mut().push("restored_device_model");
+        Ok(self.restored_network_interfaces)
     }
     fn resume(&self) -> Result<()> {
+        self.calls.borrow_mut().push("resume");
         Ok(())
     }
     fn teardown_paused(&self) -> Result<()> {
+        self.calls.borrow_mut().push("teardown_paused");
         Ok(())
     }
 }
@@ -732,11 +770,13 @@ impl SnapshotIO for FirecrackerIO {
         self.load_snapshot_inner(dir, false)
     }
 
-    fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
+    fn restored_network_interface_count(&self) -> Result<usize> {
         self.ensure_socket()?;
         let body = crate::microvm::call(&self.socket_path, "GET", "/vm/config", None)
             .with_context(|| "GET /vm/config")?;
-        serde_json::from_str(&body).with_context(|| "parsing GET /vm/config response")
+        let model: crate::microvm::RestoredDeviceModel =
+            serde_json::from_str(&body).with_context(|| "parsing GET /vm/config response")?;
+        Ok(model.network_interfaces.len())
     }
 
     fn resume(&self) -> Result<()> {
@@ -805,10 +845,7 @@ mod tests {
     }
 
     fn canned() -> CannedIO {
-        CannedIO {
-            vmstate_bytes: b"vmstate-bytes".to_vec(),
-            mem_bytes: b"memory-image".to_vec(),
-        }
+        CannedIO::new(b"vmstate-bytes".to_vec(), b"memory-image".to_vec())
     }
 
     #[test]
@@ -906,67 +943,12 @@ mod tests {
     // Device-model guard ordering (load_paused → guard → resume)
     // ──────────────────────────────────────────────────────────────
 
-    /// `SnapshotIO` double that logs call order and lets a test force a
-    /// NIC-carrying restored device model — so the guard's refusal path
-    /// (teardown, never resume) and the load→guard→resume ordering are
-    /// unit-testable without a live Firecracker. `CannedIO` can't do this: it
-    /// always reports a no-NIC model and doesn't observe call order.
-    struct SpyIO {
-        nic_on_restore: bool,
-        calls: std::cell::RefCell<Vec<&'static str>>,
-    }
-
-    impl SpyIO {
-        fn new(nic_on_restore: bool) -> Self {
-            Self {
-                nic_on_restore,
-                calls: std::cell::RefCell::new(Vec::new()),
-            }
-        }
-
-        fn calls(&self) -> Vec<&'static str> {
-            self.calls.borrow().clone()
-        }
-    }
-
-    impl SnapshotIO for SpyIO {
-        fn create_snapshot(&self, dir: &Path) -> Result<()> {
-            std::fs::write(dir.join(VMSTATE_FILENAME), b"spy-vmstate")?;
-            std::fs::write(dir.join(MEM_FILENAME), b"spy-mem")?;
-            Ok(())
-        }
-        fn load_snapshot_paused(&self, _dir: &Path) -> Result<()> {
-            self.calls.borrow_mut().push("load_paused");
-            Ok(())
-        }
-        fn load_snapshot_for_fork_paused(&self, _dir: &Path) -> Result<()> {
-            self.calls.borrow_mut().push("load_fork_paused");
-            Ok(())
-        }
-        fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
-            self.calls.borrow_mut().push("restored_device_model");
-            let network_interfaces = if self.nic_on_restore {
-                vec![serde_json::json!({"iface_id": "eth0", "host_dev_name": "tap0"})]
-            } else {
-                Vec::new()
-            };
-            Ok(crate::microvm::RestoredDeviceModel { network_interfaces })
-        }
-        fn resume(&self) -> Result<()> {
-            self.calls.borrow_mut().push("resume");
-            Ok(())
-        }
-        fn teardown_paused(&self) -> Result<()> {
-            self.calls.borrow_mut().push("teardown_paused");
-            Ok(())
-        }
-    }
-
     #[test]
     fn verify_and_resume_refuses_nic_on_restore() {
         let _g = DataDirGuard::new();
         pause_and_seal("vm-nic", &canned()).unwrap();
-        let spy = SpyIO::new(true);
+        let spy =
+            CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec()).with_network_interfaces(1);
         let err = verify_and_resume("vm-nic", &spy).unwrap_err();
         assert!(err.to_string().contains("device-model guard"), "got: {err}");
         let calls = spy.calls();
@@ -984,7 +966,7 @@ mod tests {
     fn verify_and_resume_resumes_vsock_only_restore() {
         let _g = DataDirGuard::new();
         pause_and_seal("vm-clean", &canned()).unwrap();
-        let spy = SpyIO::new(false);
+        let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         verify_and_resume("vm-clean", &spy).expect("a no-NIC restore must resume");
         let calls = spy.calls();
         assert!(
@@ -1001,7 +983,7 @@ mod tests {
     fn load_guard_resume_ordering() {
         let _g = DataDirGuard::new();
         pause_and_seal("vm-order", &canned()).unwrap();
-        let spy = SpyIO::new(false);
+        let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         verify_and_resume("vm-order", &spy).unwrap();
         assert_eq!(
             spy.calls(),
@@ -1020,7 +1002,8 @@ mod tests {
 
     #[test]
     fn fork_restore_refuses_nic() {
-        let spy = SpyIO::new(true);
+        let spy =
+            CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec()).with_network_interfaces(1);
         let dir = tempfile::tempdir().unwrap();
         let err = guarded_load_resume(&spy, dir.path()).unwrap_err();
         assert!(err.to_string().contains("device-model guard"), "got: {err}");
@@ -1037,7 +1020,7 @@ mod tests {
 
     #[test]
     fn guarded_load_resume_resumes_when_vsock_only() {
-        let spy = SpyIO::new(false);
+        let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         let dir = tempfile::tempdir().unwrap();
         guarded_load_resume(&spy, dir.path()).expect("a no-NIC restore must resume");
         let calls = spy.calls();
@@ -1053,7 +1036,7 @@ mod tests {
     /// vsock path, which is why it is a distinct call from `load_paused`.
     #[test]
     fn guarded_fork_load_resume_resumes_when_vsock_only() {
-        let spy = SpyIO::new(false);
+        let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         let dir = tempfile::tempdir().unwrap();
         guarded_fork_load_resume(&spy, dir.path()).expect("a no-NIC fork must resume");
         let calls = spy.calls();
@@ -1066,7 +1049,7 @@ mod tests {
 
     #[test]
     fn guarded_fork_load_paused_leaves_clean_child_paused() {
-        let spy = SpyIO::new(false);
+        let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         let dir = tempfile::tempdir().unwrap();
         guarded_fork_load_paused(&spy, dir.path()).expect("a no-NIC fork must stay paused");
         assert_eq!(
@@ -1081,7 +1064,8 @@ mod tests {
     /// userspace carrying an unaudited NIC.
     #[test]
     fn guarded_fork_load_resume_refuses_nic_on_restore() {
-        let spy = SpyIO::new(true);
+        let spy =
+            CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec()).with_network_interfaces(1);
         let dir = tempfile::tempdir().unwrap();
         let err = guarded_fork_load_resume(&spy, dir.path()).unwrap_err();
         assert!(err.to_string().contains("device-model guard"), "got: {err}");

@@ -127,10 +127,10 @@ impl LocalBackend {
                     dir.display()
                 )));
             }
-            return Ok(Box::new(CannedIO {
-                vmstate_bytes: b"mock-vmstate".to_vec(),
-                mem_bytes: b"mock-mem".to_vec(),
-            }));
+            return Ok(Box::new(CannedIO::new(
+                b"mock-vmstate".to_vec(),
+                b"mock-mem".to_vec(),
+            )));
         }
         let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(vm_name)
             .map_err(|e| backend_err(format!("VM {vm_name:?} is not running: {e:#}")))?;

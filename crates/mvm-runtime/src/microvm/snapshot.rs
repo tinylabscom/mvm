@@ -199,15 +199,20 @@ pub struct RestoredDeviceModel {
 /// A restored VMM reconstructs whatever devices the snapshot captured. Any
 /// network interface would let guest traffic reach a device outside the
 /// vsock transport, bypassing the sole auditable egress boundary — so a
-/// non-empty `network-interfaces` list is a hard refusal, not a warning.
+/// non-zero count is a hard refusal, not a warning.
 ///
-/// Pure: inspects only the passed-in config. No I/O, no VM, no clock.
-pub fn assert_vsock_only_device_model(config: &RestoredDeviceModel) -> Result<()> {
-    let count = config.network_interfaces.len();
+/// Takes the count rather than a parsed config so the decision stays one
+/// function with one implementation, independent of how any given backend
+/// spells its device model on the wire. Backends report the count through
+/// `SnapshotIO`; the parsing stays with the backend that owns the format.
+///
+/// Pure: inspects only the passed-in count. No I/O, no VM, no clock.
+pub fn assert_vsock_only_device_model(network_interface_count: usize) -> Result<()> {
     anyhow::ensure!(
-        count == 0,
-        "restore refused: the snapshot's device model carries {count} network \
-         interface(s) — a network interface would bypass the vsock-only egress boundary"
+        network_interface_count == 0,
+        "restore refused: the snapshot's device model carries \
+         {network_interface_count} network interface(s) — a network interface would \
+         bypass the vsock-only egress boundary"
     );
     Ok(())
 }
@@ -233,8 +238,8 @@ mod tests {
             "iface_id": "eth0",
             "host_dev_name": "tap0",
         })]);
-        let err =
-            assert_vsock_only_device_model(&config).expect_err("a NIC in the model must refuse");
+        let err = assert_vsock_only_device_model(config.network_interfaces.len())
+            .expect_err("a NIC in the model must refuse");
         assert!(
             err.to_string().contains("vsock-only egress boundary"),
             "expected the vsock-boundary refusal, got: {err}"
@@ -244,7 +249,8 @@ mod tests {
     #[test]
     fn restore_accepts_vsock_only_device_model() {
         let config = device_model_with(Vec::new());
-        assert_vsock_only_device_model(&config).expect("no NIC must be admitted");
+        assert_vsock_only_device_model(config.network_interfaces.len())
+            .expect("no NIC must be admitted");
     }
 
     #[test]
@@ -253,7 +259,7 @@ mod tests {
             serde_json::json!({"iface_id": "eth0"}),
             serde_json::json!({"iface_id": "eth1"}),
         ]);
-        let err = assert_vsock_only_device_model(&config)
+        let err = assert_vsock_only_device_model(config.network_interfaces.len())
             .expect_err("multiple NICs in the model must refuse");
         assert!(err.to_string().contains('2'), "count in message: {err}");
     }
@@ -274,7 +280,7 @@ mod tests {
 
         let config: RestoredDeviceModel = serde_json::from_str(&raw).unwrap();
         assert_eq!(config.network_interfaces.len(), 1);
-        assert!(assert_vsock_only_device_model(&config).is_err());
+        assert!(assert_vsock_only_device_model(config.network_interfaces.len()).is_err());
     }
 
     #[test]
@@ -289,6 +295,6 @@ mod tests {
 
         let config: RestoredDeviceModel = serde_json::from_str(&raw).unwrap();
         assert!(config.network_interfaces.is_empty());
-        assert!(assert_vsock_only_device_model(&config).is_ok());
+        assert!(assert_vsock_only_device_model(config.network_interfaces.len()).is_ok());
     }
 }

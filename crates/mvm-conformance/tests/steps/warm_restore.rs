@@ -32,10 +32,7 @@ fn isolated_mvm_home() -> (tempfile::TempDir, MvmHomeGuard) {
 #[given(expr = "a sealed warm snapshot for VM {string}")]
 fn sealed_warm_snapshot(world: &mut CliWorld, vm_name: String) {
     let (home, guard) = isolated_mvm_home();
-    let io = CannedIO {
-        vmstate_bytes: b"vmstate-for-seal".to_vec(),
-        mem_bytes: b"mem-for-seal".to_vec(),
-    };
+    let io = CannedIO::new(b"vmstate-for-seal".to_vec(), b"mem-for-seal".to_vec());
     let sidecar = pause_and_seal(&vm_name, &io).expect("seal the warm snapshot");
     let dir = mvm_runtime::vm::instance_snapshot::snapshot_dir(&vm_name);
     world.warm_restore_home_guard = Some(guard);
@@ -50,10 +47,7 @@ fn sealed_warm_snapshot_epoch_one(world: &mut CliWorld, vm_name: String) {
     // Capture the first sealed snapshot into a stable directory before a
     // second seal bumps the per-instance epoch high-water mark.
     let (home, guard) = isolated_mvm_home();
-    let io = CannedIO {
-        vmstate_bytes: b"vmstate-epoch1".to_vec(),
-        mem_bytes: b"mem-epoch1".to_vec(),
-    };
+    let io = CannedIO::new(b"vmstate-epoch1".to_vec(), b"mem-epoch1".to_vec());
     let sidecar = pause_and_seal(&vm_name, &io).expect("seal the first warm snapshot");
     assert_eq!(sidecar.epoch, 1, "first seal must produce epoch 1");
     let live_dir = mvm_runtime::vm::instance_snapshot::snapshot_dir(&vm_name);
@@ -68,10 +62,7 @@ fn sealed_warm_snapshot_epoch_one(world: &mut CliWorld, vm_name: String) {
 #[given(expr = "the same VM is sealed again at a newer epoch")]
 fn same_vm_sealed_again(_world: &mut CliWorld) {
     let vm_name = "epoch-vm";
-    let io = CannedIO {
-        vmstate_bytes: b"vmstate-epoch2".to_vec(),
-        mem_bytes: b"mem-epoch2".to_vec(),
-    };
+    let io = CannedIO::new(b"vmstate-epoch2".to_vec(), b"mem-epoch2".to_vec());
     let sidecar = pause_and_seal(vm_name, &io).expect("seal the second warm snapshot");
     assert!(
         sidecar.epoch > 1,
@@ -108,10 +99,7 @@ fn warm_restore_from_that_snapshot(world: &mut CliWorld) {
         .as_ref()
         .expect("a Given step must create a sealed snapshot first")
         .clone();
-    let io = CannedIO {
-        vmstate_bytes: b"ignored-by-verify".to_vec(),
-        mem_bytes: b"ignored-by-verify".to_vec(),
-    };
+    let io = CannedIO::new(b"ignored-by-verify".to_vec(), b"ignored-by-verify".to_vec());
     world.warm_restore_result = Some(
         verify_and_resume_from_dir(&dir, &io)
             .map(|sidecar| format!("restored epoch {}", sidecar.epoch))
@@ -132,10 +120,7 @@ fn warm_restore_from_dir(world: &mut CliWorld) {
     // artifacts with an older-epoch copy, while the per-instance
     // high-water mark keeps advancing.
     copy_snapshot_dir(&saved_dir, &live_dir).expect("stage older-epoch snapshot over live dir");
-    let io = CannedIO {
-        vmstate_bytes: b"ignored-by-verify".to_vec(),
-        mem_bytes: b"ignored-by-verify".to_vec(),
-    };
+    let io = CannedIO::new(b"ignored-by-verify".to_vec(), b"ignored-by-verify".to_vec());
     world.warm_restore_result = Some(
         verify_and_resume(vm_name, &io)
             .map(|sidecar| format!("restored epoch {}", sidecar.epoch))
