@@ -12,9 +12,16 @@
 //! `std::io::{Read, Seek}` and a deflate implementation, and a browser has
 //! no block device to materialize onto regardless.
 
+// Gated on `protocol` only because it reuses that feature's `encode_hex32`
+// rather than carrying a second hex encoder. `protocol` is a default
+// feature, so the browser build gets digest verification either way.
+#[cfg(feature = "protocol")]
+pub mod digest;
 pub mod error;
 pub mod manifest_types;
 pub mod reference;
 
+#[cfg(feature = "protocol")]
+pub use digest::verify_sha256_digest;
 pub use error::OciError;
 pub use reference::ImageReference;
