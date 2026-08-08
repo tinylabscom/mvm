@@ -223,8 +223,30 @@ It guards nothing today, but it is the kind of stub someone added on
 purpose; a reviewer should agree it is redundant with the two egress gates
 rather than discovering later that it was load-bearing prose.
 
-Do not start the remaining moves until this is settled — the modules are
-mutually entangled, so a wrong call has to be unwound all at once.
+**Settled: option 3, and the tree already says so.** With the dead launcher
+deleted, `flake_run.rs` is 207 lines of descriptor plus `validate()`, and
+`boot_config.rs`'s own module doc reads "`FlakeRunConfig`-dependent helpers
+that still need `mvm-runtime` types" — a previous author drew this boundary
+and labelled it. The split is therefore:
+
+**Stays in `mvm-runtime`** (the "which flake, which volumes, how much RAM"
+layer — orchestration, not FC mechanics):
+`flake_run.rs` (`FlakeRunConfig` + `validate`), `boot_config.rs`,
+`run_info.rs`, `activation.rs`, and the one `snapshot.rs` function that
+takes a `FlakeRunConfig`.
+
+**Moves to `mvm-backends::fc`** (how Firecracker actually works):
+`control.rs` (`pause_vm`, `resume_vm`), `observe.rs`, `guards.rs`,
+`firecracker.rs`, `FirecrackerIO`, and the rest of `snapshot.rs`
+(`create_snapshot_files`, `remap_paths_for_fork`).
+
+Neither `RuntimeVolume` nor `VmSlot` needs to move, which is what made
+options 1 and 2 expensive. `snapshot.rs` is the only file needing a split
+rather than a move.
+
+Remaining order: `firecracker.rs` + `control.rs` + `observe.rs` + `guards.rs`
+together (they are mutually referential), then split `snapshot.rs`, then
+`driver/fc.rs` itself.
 
 ---
 
