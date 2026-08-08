@@ -48,7 +48,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
             StartMode::Detached,
             config,
         )?;
-        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
+        mvm_vmm::host::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
 
         let default_redaction = RedactionPolicy::default();
         let decoded = decode_plan_secrets_from_state(&state_dir)?;
@@ -81,7 +81,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         match self.start_workload(&inputs) {
             Ok(_vm) => Ok(VmId(config.name.clone())),
             Err(e) => {
-                crate::netd_spawn::reap_netd(&state_dir);
+                mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
                 Err(e)
             }
         }
@@ -100,9 +100,12 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
             }
         };
         reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
-        crate::netd_spawn::reap_netd(&vm_state_dir(&id.0));
-        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
-        crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
+        mvm_vmm::host::netd_spawn::reap_netd(&vm_state_dir(&id.0));
+        mvm_vmm::host::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
+        mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(
+            &vm_state_dir(&id.0),
+            &id.0,
+        );
         let killed = vm.kill();
         self.console_streamer.stop(&id.0);
         killed

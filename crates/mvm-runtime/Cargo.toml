@@ -142,6 +142,12 @@ apple-container = []
 # binary; only an explicit `--hypervisor mock` (itself refused outside this
 # feature) or the workspace test suite reaches it.
 test-support = ["mvm-core/test-support", "dep:mvm-backends", "mvm-backends/test-support"]
+# Debug-only Apple Silicon validation lane. The capability also requires a
+# debug macOS/aarch64 build before it can advertise warm-claim support.
+hvf-live-validation = []
+# Explicit opt-in to the Apple APFS immutable snapshot provider. The normal
+# build remains fail-closed until live mount and tamper validation is complete.
+trusted-apfs = ["mvm-fs/trusted-apfs"]
 
 [lints]
 workspace = true
