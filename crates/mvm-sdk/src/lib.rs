@@ -63,6 +63,9 @@ pub mod machine;
 /// here unchanged so the SDK's authoring API keeps `mvm_sdk::ir::…`
 /// working. Authoring + runtime SDKs lower to these types.
 pub use mvm_contract::ir;
+/// Durable agent session identifiers, commands, events, cursors, and the
+/// transport-neutral reference journal.
+pub use mvm_contract::protocol::agent_session;
 
 /// Author-side machinery for composable attested addons. Exposes
 /// `addon::{manifest, lockfile, validator, registry, archive, sbom,

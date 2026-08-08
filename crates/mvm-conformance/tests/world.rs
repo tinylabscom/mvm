@@ -321,6 +321,23 @@ pub struct CliWorld {
     pub warm_restore_verify_result: Option<Result<String, String>>,
     /// Checkpoint id captured by the most recent `machine vm checkpoint create`.
     pub warm_restore_checkpoint_id: Option<String>,
+    /// Reference agent-session journal used by the durable contract BDD
+    /// scenarios. The journal is pure protocol state, not a second store.
+    pub agent_session_journal: Option<mvm_contract::protocol::agent_session::AgentSessionJournal>,
+    /// Most recent agent command result.
+    pub agent_session_outcome: Option<mvm_contract::protocol::agent_session::AgentCommandOutcome>,
+    /// Most recent bounded history page.
+    pub agent_session_history:
+        Option<mvm_contract::protocol::agent_session::AgentSessionHistoryPage>,
+    /// State reconstructed from durable history after a simulated adapter
+    /// restart.
+    pub agent_session_restarted_state:
+        Option<mvm_contract::protocol::agent_session::AgentSessionState>,
+    /// Most recent live-only event.
+    pub agent_session_live:
+        Option<mvm_contract::protocol::agent_session::AgentSessionEventEnvelope>,
+    /// Sanitized serialized history captured by a security assertion.
+    pub agent_session_history_json: Option<String>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`

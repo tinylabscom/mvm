@@ -18,6 +18,7 @@ const STREAM_RECORD_PREFIX: u8 = 0x02;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum StreamSource {
     /// The interactive dev console (PTY-over-vsock).
     Console = 0,
@@ -32,6 +33,7 @@ pub enum StreamSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum StreamKind {
     /// Standard output bytes.
     Stdout = 0,

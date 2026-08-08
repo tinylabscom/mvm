@@ -6,6 +6,15 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [x] Plan 2167 — durable agent session and event contract
+      (`specs/plans/2167-agent-session-contract.md`)
+  - [x] Versioned public IDs, lifecycle commands, durable/ephemeral event
+        envelopes, typed errors, and bounded retention/cursor semantics
+  - [x] Idempotent prompt delivery, cancellation confirmation, restart replay,
+        and committed transcript/audit output references
+  - [x] Client/SDK re-exports, contract serialization/security tests, and
+        three non-`@wip` BDD scenarios
+
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader

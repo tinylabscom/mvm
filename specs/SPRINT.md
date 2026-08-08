@@ -17,6 +17,16 @@
       retain active implementation, security, live-validation, or
       cross-repository acceptance work.
 
+- [x] Durable agent session and event contract — **issue #2167**, plan
+      `specs/plans/2167-agent-session-contract.md`. Added the versioned
+      transport-neutral contract in `mvm-contract`, with strict public IDs,
+      lifecycle commands, durable/ephemeral event envelopes, bounded cursor
+      history, retention, idempotent retries, cancellation confirmation,
+      adapter-restart replay, and committed transcript/audit references.
+      Prompt and output bytes never enter durable history. `mvm-client` and
+      `mvm-sdk` re-export the shared surface. Serialization/security tests and
+      three non-`@wip` BDD scenarios pass.
+
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned
       `runtime-v0` schema and generated language models instead of duplicated
