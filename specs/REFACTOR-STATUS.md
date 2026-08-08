@@ -304,6 +304,23 @@ for detailed scope and acceptance criteria.
   - [~] Move concrete drivers: `HvfDriver`, `LibkrunDriver`, `QemuDriver`, and `MockDriver` moved into `mvm-backends`; `FcDriver` remains in `mvm-runtime` pending extraction of FC-specific `microvm`/`firecracker`/`vm::instance_snapshot` mechanics — handed off to `specs/plans/298-extract-firecracker-driver.md`
   - [x] Move legacy `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`) into `mvm-backends`
   - [x] Wire `mvm-runtime` to depend on `mvm-backends` and re-export the driver surface; removed local HVF/libkrun/QEMU/Mock driver and legacy backend source files
+- [ ] Plan 301 — Finish WS11: `WasmBackend` completion + the P4 browser slice
+      (`specs/plans/301-wasm-backend-completion-and-browser-slice.md`) — plan
+      landed, execution not started. Bound by ADR-024's three constraints;
+      adds no numbered claim.
+  - [ ] Part A (host tier): A1 end-to-end `start()`→endpoint-subprocess
+        coverage; A2 = P3c TLS-terminating substitution (http-only today);
+        A3 transparent WASI socket interception; A4 resolve the Preview 1 vs
+        "target Preview 2" divergence; A5 ADR-024 Status is stale (claims no
+        implementation has landed — false since P2) + `deny.toml` review;
+        A6 run one governance witness across all workload backends
+  - [ ] Part B (P4 browser): B1 extract the `no_std` OCI decoders — **the long
+        pole; they do not exist today** (`mvm-fs` is std-heavy), via the
+        Increment 3 verbatim-relocation method; B2 Worker + thin proxy;
+        B3 OPFS content-addressed cache with verify-on-read; B4 `wasm-opt -Oz`
+        + gzipped-size budget in the existing wasm lane; B5 delete
+        `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
+        `mvmctl audit pubkey`
 - [ ] Plan 298 — NANDA-style execution receipts and conformance badges
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`)
   - [x] WS1 RFC approved: `ExecutionReceipt` and `ConformanceBadge` envelopes,
