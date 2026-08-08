@@ -18,7 +18,7 @@ use cucumber::{given, then, when};
 use mvm_core::checkpoint::{CheckpointDigest, CheckpointId, CheckpointMeta};
 use mvm_core::crypto::vmgenid::GENID_BYTES;
 use mvm_core::vm_backend::{StandbyClaim, StandbyHandle, StandbyState, VmStartConfig};
-use mvm_fs::snapshot_store::FsSnapshotStore;
+use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_runtime::checkpoint::{
     CaptureFsQuickParams, CheckpointChainAnchor, CheckpointStore, capture_fs_quick,
 };
@@ -69,6 +69,21 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
         },
     )
     .expect("capture the clean parent checkpoint");
+    let snapshot_id = format!(
+        "checkpoint-{}-content-{}",
+        parent_meta.id,
+        parent_meta.compute_content_digest()
+    );
+    snapshots
+        .create(
+            &SnapshotId::new(snapshot_id.clone()),
+            &checkpoints.content_dir(&parent_meta.id),
+        )
+        .expect("stage the clean parent snapshot");
+    let parent_meta = parent_meta.with_snapshot_id(snapshot_id);
+    checkpoints
+        .write_meta(&parent_meta)
+        .expect("bind the staged parent snapshot");
 
     let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
     let handle = StandbyHandle {
