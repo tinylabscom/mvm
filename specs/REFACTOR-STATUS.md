@@ -78,7 +78,10 @@ for detailed scope and acceptance criteria.
   - [ ] Phase 2 — artifact preparation outside the launch path
   - [ ] Phase 3 — reduce backend cold-start latency
   - [ ] Phase 4 — parallelize independent host work
-  - [ ] Phase 5 — event-driven guest readiness
+  - [~] Phase 5 — event-driven guest readiness. The flat 50 ms readiness poll
+        was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
+        from 53.8 ms to 18.0 ms p50 and HVF dispatch from 117.2 ms to 81.4 ms.
+        The authenticated readiness notification itself remains.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
         decomposed and the warm-pool refill removed from it: a default
         `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is

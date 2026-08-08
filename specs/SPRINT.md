@@ -1662,7 +1662,10 @@ Then unify + retire the old paths:
   1216 ms warm launch, from inline pool replenish), promoting Phase 6 ahead of
   Phase 3. **Phase 6 first change landed:** teardown no longer refills the warm
   pool, cutting a default `machine run` from 1366 ms to 353.8 ms p50 (3.9x) and
-  leaving teardown as this VM's own cleanup only. Two defects found and fixed on
+  leaving teardown as this VM's own cleanup only. **Phase 5 first change
+  landed:** the readiness poll's flat 50 ms tick was a floor under every
+  reported wait — adaptive backoff cut HVF dispatch from 117.2 ms to 81.4 ms
+  p50, 2.5x inside the ≤200 ms budget. Two defects found and fixed on
   the way: a failed host-services
   registration slept 700 ms and lost `host.audit.v1` silently. Gates green:
   workspace Clippy, 10,648 nextest, doctests, hermetic BDD 153/153, Lint xtask

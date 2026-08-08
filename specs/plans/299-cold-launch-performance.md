@@ -361,6 +361,34 @@ long-term owner of pool maintenance — it already outlives the CLI and is the
 host-side lifecycle seam this phase names. That would restore automatic warm
 claims without putting the refill on any launch's critical path.
 
+### Phase 5 first change — the readiness cadence was reporting itself
+
+`wait_for_agent` polled on a flat 50 ms tick. Readiness can only be observed on
+a probe, so that tick is a floor under every reported wait — and the HVF
+baseline showed `guest_kernel_entry` at 53.8 ms p50 / 59.3 ms p99, clustered
+just above the tick on a backend whose entire VM creation takes 53.8 ms. The
+number was a readout of the cadence, not of the guest.
+
+Replaced with backoff from 1 ms doubling to a 25 ms ceiling (the shape the
+control-retry path already uses). Same lane, 20 runs + 2 warm-ups:
+
+| HVF (p50 / p99) | before | after |
+|---|---:|---:|
+| `guest_kernel_entry` | 53.8 / 59.3 ms | **18.0 / 19.3 ms** |
+| **dispatch window** | 117.2 / 125.3 ms | **81.4 / 83.5 ms** |
+
+So 36 ms of what the baseline attributed to guest boot was quantization, and
+the guest is actually serving ~18 ms after `start` returns. Prepared cold now
+clears the ≤200 ms p50 / ≤300 ms p99 budget with a 2.5x margin on this backend.
+
+This does not help Firecracker, whose `start` already returns after the guest
+is up (`guest_kernel_entry` 0.0 ms there) — its 623.6 ms is inside `driver_boot`
+and is Phase 3's subject.
+
+Full event-driven readiness — one authenticated notification rather than any
+polling — remains this phase's actual task; this removes the quantization the
+polling was adding in the meantime.
+
 ## Phase 1 — Content-addressed `--mount` image cache
 
 - [ ] Add a reusable `mvm-fs` directory fingerprint helper covering relative
