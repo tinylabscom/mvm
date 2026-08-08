@@ -193,29 +193,10 @@ pub struct RestoredDeviceModel {
     pub network_interfaces: Vec<serde_json::Value>,
 }
 
-/// Refuse to restore a snapshot whose device model carries a network
-/// interface.
-///
-/// A restored VMM reconstructs whatever devices the snapshot captured. Any
-/// network interface would let guest traffic reach a device outside the
-/// vsock transport, bypassing the sole auditable egress boundary — so a
-/// non-zero count is a hard refusal, not a warning.
-///
-/// Takes the count rather than a parsed config so the decision stays one
-/// function with one implementation, independent of how any given backend
-/// spells its device model on the wire. Backends report the count through
-/// `SnapshotIO`; the parsing stays with the backend that owns the format.
-///
-/// Pure: inspects only the passed-in count. No I/O, no VM, no clock.
-pub fn assert_vsock_only_device_model(network_interface_count: usize) -> Result<()> {
-    anyhow::ensure!(
-        network_interface_count == 0,
-        "restore refused: the snapshot's device model carries \
-         {network_interface_count} network interface(s) — a network interface would \
-         bypass the vsock-only egress boundary"
-    );
-    Ok(())
-}
+// The device-model guard lives in mvm-vmm so every backend shares one
+// implementation of the refusal. Re-exported here for callers that still
+// reach for it by its original path.
+pub use mvm_vmm::snapshot::assert_vsock_only_device_model;
 
 #[cfg(test)]
 mod tests {
