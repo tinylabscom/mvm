@@ -1,11 +1,22 @@
 # Refactor status
 
-Last updated: 2026-08-07
+Last updated: 2026-08-08
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+
+- [~] Security lane mutation-witness repair — **issue #2135**
+  - [x] Add direct witnesses for the security-sensitive admission,
+        verification, lease, and substitution cleanup invariants
+  - [x] Run focused mutation shards for `mvm-cli`, `mvm-core`, `mvm-agentd`,
+        `mvm-hostd`, and `mvm-vmm`
+  - [x] Pass workspace check, all-target Clippy, formatting, and the mutation
+        surface gate on the dedicated fix branch
+  - [ ] Merge the fix and rerun the exact Linux Security workflow before
+        closing the issue
+
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader

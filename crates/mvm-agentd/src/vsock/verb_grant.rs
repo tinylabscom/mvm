@@ -124,18 +124,19 @@ pub fn write_host_signer_anchor(root: &std::path::Path, hex: &str) -> anyhow::Re
     Ok(())
 }
 
-/// Provision the anchor from `/proc/cmdline` into the live root.
+/// Provision the anchor from a kernel cmdline into the live root.
 ///
 /// Returns `Ok(false)` when the cmdline carries no token — a launch that ships
 /// no anchor is a valid (if unreachable) boot, not an error. Requires `/proc`
-/// to be mounted, so PID 1 must call this after its early mounts.
-pub fn provision_host_signer_anchor_from_cmdline() -> anyhow::Result<bool> {
-    let cmdline = std::fs::read_to_string("/proc/cmdline")
-        .map_err(|e| anyhow::anyhow!("read /proc/cmdline: {e}"))?;
-    let Some(hex) = host_signer_pub_token(&cmdline) else {
+/// to be mounted, so PID 1 must read `/proc/cmdline` after its early mounts.
+pub fn provision_host_signer_anchor_from_cmdline(
+    cmdline: &str,
+    root: &std::path::Path,
+) -> anyhow::Result<bool> {
+    let Some(hex) = host_signer_pub_token(cmdline) else {
         return Ok(false);
     };
-    write_host_signer_anchor(std::path::Path::new("/"), hex)?;
+    write_host_signer_anchor(root, hex)?;
     Ok(true)
 }
 
@@ -264,9 +265,9 @@ pub fn load_pinned_verb_grant(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<mvm_core::plan::VerbGrant> {
     // Grant file absent → no grant on this boot.
-    let raw = match std::fs::read(grant_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+    let raw = match read_grant_bytes(grant_path) {
+        Ok(Some(b)) => b,
+        Ok(None) => return None,
         Err(e) => {
             eprintln!("mvm-guest-agent: could not read verb-grant file: {e}");
             return None;
@@ -294,6 +295,14 @@ pub fn load_pinned_verb_grant(
         }
     };
     verify_envelope_with_anchor(&envelope, &host_key, now)
+}
+
+fn read_grant_bytes(path: &std::path::Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(anyhow::anyhow!("read {}: {error}", path.display())),
+    }
 }
 
 /// Well-known guest path for the dm-verity-measured verb-trust policy baked
@@ -360,19 +369,16 @@ pub fn trust_decision(
 }
 
 /// Whether the kernel cmdline carries the launcher's `mvm.require_grant=1`
-/// enforcement assertion. Pure over the cmdline string for testability.
+/// enforcement assertion.
 pub fn parse_require_grant_cmdline(cmdline: &str) -> bool {
     cmdline
         .split_whitespace()
         .any(|tok| tok == "mvm.require_grant=1")
 }
 
-/// Read `/proc/cmdline` and return whether enforcement is launch-asserted.
-/// Absent/unreadable cmdline implies no assertion, so no launch-gated fail-close.
-pub fn launch_requires_grant() -> bool {
-    std::fs::read_to_string("/proc/cmdline")
-        .map(|s| parse_require_grant_cmdline(&s))
-        .unwrap_or(false)
+/// Return whether enforcement is launch-asserted for `cmdline`.
+pub fn launch_requires_grant(cmdline: &str) -> bool {
+    parse_require_grant_cmdline(cmdline)
 }
 
 #[cfg(test)]
@@ -533,6 +539,60 @@ mod tests {
         let bad = dir.path().join("bad.pub");
         std::fs::write(&bad, "not-hex").unwrap();
         assert!(load_host_signer_verifying_key(&bad).is_err());
+
+        let directory = dir.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(
+            load_host_signer_verifying_key(&directory).is_err(),
+            "an unreadable host-signer path must not be treated as absent"
+        );
+    }
+
+    #[test]
+    fn verifying_key_hex_roundtrip_combines_high_and_low_nibbles() {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[17u8; 32]);
+        let hex = signer
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        let parsed = verifying_key_from_hex(&hex).expect("a signer key round-trips from hex");
+        assert_eq!(parsed, signer.verifying_key());
+    }
+
+    #[test]
+    fn provisioning_helper_handles_missing_and_valid_cmdline_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!provision_host_signer_anchor_from_cmdline("console=ttyS0", dir.path()).unwrap());
+        assert!(
+            !dir.path()
+                .join(HOST_SIGNER_PUBKEY_PATH.trim_start_matches('/'))
+                .exists()
+        );
+
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[18u8; 32]);
+        let hex = signer
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert!(
+            provision_host_signer_anchor_from_cmdline(
+                &format!("mvm.host_signer_pub={hex}"),
+                dir.path()
+            )
+            .unwrap()
+        );
+        let path = dir
+            .path()
+            .join(HOST_SIGNER_PUBKEY_PATH.trim_start_matches('/'));
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            signer.verifying_key().to_bytes()
+        );
     }
 
     // ---- pin_verb_grant ----
@@ -769,6 +829,17 @@ mod tests {
             result.is_none(),
             "malformed config-drive pubkey must return None"
         );
+    }
+
+    #[test]
+    fn grant_file_reader_distinguishes_absent_from_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing-grant.json");
+        assert_eq!(read_grant_bytes(&missing).unwrap(), None);
+
+        let directory = dir.path().join("grant-directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(read_grant_bytes(&directory).is_err());
     }
 
     /// The vsock-only payoff: when the host-signer pubkey is present (as the
@@ -1166,6 +1237,8 @@ mod tests {
         // Substring of another token does not match: false.
         assert!(!parse_require_grant_cmdline("foo=mvm.require_grant=1bar"));
         assert!(!parse_require_grant_cmdline("xmvm.require_grant=1"));
+        assert!(launch_requires_grant("mvm.require_grant=1 quiet"));
+        assert!(!launch_requires_grant("quiet"));
     }
 
     #[test]
@@ -1175,6 +1248,14 @@ mod tests {
         assert!(load_verb_trust_policy(&p).is_none()); // absent
         std::fs::write(&p, b"{ not json").unwrap();
         assert!(load_verb_trust_policy(&p).is_none()); // malformed => None (dev-default)
+
+        let policy = mvm_core::plan::VerbTrustPolicy {
+            version: 1,
+            require_grant: true,
+            grant_key_source: mvm_core::plan::GrantKeySource::LaunchProvisioned,
+        };
+        std::fs::write(&p, serde_json::to_vec(&policy).unwrap()).unwrap();
+        assert_eq!(load_verb_trust_policy(&p), Some(policy));
     }
 
     // ---- PostRestore re-pin adversarial (resume-path authority) ----
@@ -1351,6 +1432,48 @@ mod tests {
             result.is_none(),
             "a host-signed grant for another VM must not re-pin when its \
              predecessor lineage does not match the currently pinned grant"
+        );
+    }
+
+    #[test]
+    fn re_pin_verb_grant_rejects_each_lineage_component_independently() {
+        let host = ed25519_dalek::SigningKey::from_bytes(&[50u8; 32]);
+        let current_nonce = mvm_core::plan::Nonce::from_bytes([51u8; 16]);
+        let next_nonce = mvm_core::plan::Nonce::from_bytes([52u8; 16]);
+        let now = chrono::Utc::now();
+        let current = self_signed_envelope(
+            &host,
+            "current-session",
+            &current_nonce,
+            &["update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        )
+        .grant;
+
+        let mut wrong_session = self_signed_envelope(
+            &host,
+            "child-session",
+            &next_nonce,
+            &["run-entrypoint"],
+            now + chrono::Duration::minutes(10),
+        );
+        wrong_session.predecessor_session_id = Some("wrong-session".into());
+        wrong_session.predecessor_plan_nonce_hex = Some(current.plan_nonce.as_hex().to_string());
+        assert!(
+            re_pin_verb_grant(&wrong_session, Some(&current), &host.verifying_key(), now).is_none()
+        );
+
+        let mut wrong_nonce = self_signed_envelope(
+            &host,
+            "child-session",
+            &next_nonce,
+            &["run-entrypoint"],
+            now + chrono::Duration::minutes(10),
+        );
+        wrong_nonce.predecessor_session_id = Some(current.session_id.clone());
+        wrong_nonce.predecessor_plan_nonce_hex = Some(next_nonce.as_hex().to_string());
+        assert!(
+            re_pin_verb_grant(&wrong_nonce, Some(&current), &host.verifying_key(), now).is_none()
         );
     }
 

@@ -484,6 +484,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_kernel_digest_that_is_not_sha256_length() {
+        let mut inp = input("myvm");
+        let kernel = "a".repeat(63);
+        inp.kernel_sha256 = Some(&kernel);
+
+        let err = synthesize_plan(&inp).expect_err("short kernel digests must be refused");
+        assert!(err.to_string().contains("kernel_sha256"));
+    }
+
+    #[test]
     fn defaults_tenant_to_local() {
         let plan = synthesize_plan(&input("myvm")).unwrap();
         assert_eq!(plan.tenant.0, DEFAULT_TENANT);

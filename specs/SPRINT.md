@@ -26,6 +26,13 @@
       unreachable pull-request guards, and aligned the claim descriptions with
       the workflows that actually run them.
 
+- [~] Security mutation-witness repair — **issue #2135**. Restored executable
+      witnesses for the security-sensitive boot admission, kernel-digest,
+      host-signer/grant, lease-expiry, and substitution-endpoint cleanup
+      invariants. Focused mutation runs now catch every actionable mutant in
+      those paths; the exact Linux Security workflow rerun remains the final
+      merge-and-close gate.
+
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
       refuses tampered or unpinned source volumes, and can emit the canonical

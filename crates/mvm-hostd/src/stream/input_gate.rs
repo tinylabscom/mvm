@@ -1388,11 +1388,11 @@ mod tests {
         let vm = unique_vm("vm-lease-expiry");
         InputGate::bind(
             &vm,
-            InputBinding::new().with_lease_ttl(Duration::from_millis(20)),
+            InputBinding::new().with_lease_ttl(Duration::from_millis(100)),
         );
         let plan = admitted_with(vec![stream_service()]);
         let mut stale = InputGate::open(&vm, &plan).expect("first session");
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(150));
 
         assert_eq!(InputGate::lease_holder(&vm), None, "the lease lapsed");
         let mut fresh = InputGate::open(&vm, &plan).expect("a lapsed lease is takeable");
@@ -1413,6 +1413,19 @@ mod tests {
             fresh.take_admitted().expect("its lease is live"),
             b"mine now"
         );
+    }
+
+    #[test]
+    fn a_lease_is_not_live_at_its_exact_expiry() {
+        let now = Instant::now();
+        let lease = Lease {
+            holder: "holder".into(),
+            expires_at: now + Duration::from_secs(1),
+        };
+
+        assert!(lease.is_live(now));
+        assert!(lease.is_live(now + Duration::from_millis(999)));
+        assert!(!lease.is_live(lease.expires_at));
     }
 
     #[test]
@@ -1446,7 +1459,7 @@ mod tests {
         let vm = unique_vm("vm-interleave");
         InputGate::bind(
             &vm,
-            InputBinding::new().with_lease_ttl(Duration::from_millis(20)),
+            InputBinding::new().with_lease_ttl(Duration::from_millis(100)),
         );
         let plan = admitted_with(vec![stream_service()]);
         let mut stalled = InputGate::open(&vm, &plan).expect("first session");
@@ -1457,7 +1470,7 @@ mod tests {
             })
             .expect("cleared while the lease was live");
 
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(150));
         let mut successor = InputGate::open(&vm, &plan).expect("a lapsed lease is takeable");
         successor
             .write(InputFrame {
@@ -1752,6 +1765,23 @@ mod tests {
     }
 
     #[test]
+    fn idle_release_happens_at_the_exact_threshold() {
+        let mut session = session_bound_to(LONG_SECRET, Duration::from_secs(1));
+        let line = &LONG_SECRET.as_bytes()[..1];
+        session
+            .write(InputFrame {
+                seq: 0,
+                payload: line.to_vec(),
+            })
+            .expect("the prefix is not a complete secret");
+        assert!(session.take_admitted().unwrap().is_empty());
+
+        let exact_deadline = session.last_admitted_at + session.idle_flush_after;
+        session.release_if_idle(exact_deadline);
+        assert_eq!(session.outbox, line);
+    }
+
+    #[test]
     fn the_idle_release_does_not_depend_on_what_the_withheld_bytes_are() {
         // The property the whole design rests on. A release that fired only
         // for tails which could not still become a secret would be a prefix
@@ -1896,7 +1926,7 @@ mod tests {
             InputBinding::new()
                 .with_fingerprint(fingerprint(LONG_SECRET))
                 .with_idle_flush_after(Duration::ZERO)
-                .with_lease_ttl(Duration::from_millis(20)),
+                .with_lease_ttl(Duration::from_millis(100)),
         );
         let plan = admitted_with(vec![stream_service()]);
         let mut stalled = InputGate::open(&vm, &plan).expect("the plan grants input");
@@ -1906,7 +1936,7 @@ mod tests {
                 payload: b"hello\n".to_vec(),
             })
             .expect("cleared while the lease was live");
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(150));
 
         assert!(matches!(stalled.refresh(), Err(InputRefusal::LeaseExpired)));
         assert!(matches!(

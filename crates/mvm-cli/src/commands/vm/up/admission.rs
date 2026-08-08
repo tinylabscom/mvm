@@ -839,6 +839,49 @@ mod host_signer_pubkey_config_tests {
     }
 
     #[test]
+    fn replacing_pubkey_preserves_other_config_files_and_removes_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let pubkey = signer.verifying_key().to_bytes();
+        std::fs::write(&pubkey_path, pubkey).unwrap();
+        let mut plan = PlanFixture::new().build();
+        plan.agent_verbs = Some(vec![VerbId::new("ping").unwrap()]);
+        let mut start_config = VmStartConfig {
+            config_files: vec![
+                mvm_core::vm_backend::VmFile {
+                    name: "other-config".into(),
+                    content: "keep".into(),
+                    mode: 0o444,
+                },
+                mvm_core::vm_backend::VmFile {
+                    name: PUBLIC_FILENAME.into(),
+                    content: "stale".into(),
+                    mode: 0o444,
+                },
+            ],
+            ..VmStartConfig::default()
+        };
+
+        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
+
+        assert_eq!(
+            start_config
+                .config_files
+                .iter()
+                .filter(|file| file.name == PUBLIC_FILENAME)
+                .count(),
+            1
+        );
+        assert!(
+            start_config
+                .config_files
+                .iter()
+                .any(|file| file.name == "other-config" && file.content == "keep")
+        );
+    }
+
+    #[test]
     fn skips_pubkey_when_plan_has_no_agent_verbs() {
         let dir = tempfile::tempdir().unwrap();
         let pubkey_path = dir.path().join(PUBLIC_FILENAME);
@@ -885,6 +928,33 @@ mod host_signer_pubkey_config_tests {
         assert_eq!(policy.profile, AgentProfile::Dev);
         assert!(!policy.require_auth);
         assert!(policy.access.console);
+    }
+
+    #[test]
+    fn builder_security_policy_preserves_the_builder_profile() {
+        assert_eq!(
+            security_policy_for_profile(AgentProfile::Builder).profile,
+            AgentProfile::Builder
+        );
+    }
+
+    #[test]
+    fn guest_profile_requires_both_dev_override_and_sealed_image_checks() {
+        use mvm_build::builder_vm::GuestSidecar;
+
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        let mut sidecar = GuestSidecar::for_oci_run("test", false, false);
+        sidecar.accessible = false;
+        sidecar.sealed = true;
+        sidecar.write_to_dir(dir.path()).unwrap();
+
+        assert_eq!(
+            guest_profile_for_boot(false, &rootfs),
+            AgentProfile::SealedProd
+        );
+        assert_eq!(guest_profile_for_boot(true, &rootfs), AgentProfile::Dev);
     }
 }
 
@@ -1485,7 +1555,14 @@ mod admit_plan_tests {
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
-            shares: Vec::new(),
+            shares: vec![mvm_core::plan::HostShareGrant {
+                tag: "uvol0".into(),
+                host_path: "/tmp".into(),
+                guest_path: "/data".into(),
+                kind: mvm_core::plan::ShareKind::DirShare,
+                read_only: true,
+                encrypted: false,
+            }],
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -1500,6 +1577,13 @@ mod admit_plan_tests {
         .expect("Some when admission ran");
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
+        let verbs = ctx
+            .admitted
+            .plan()
+            .agent_verbs
+            .as_ref()
+            .expect("restricted boots receive a default verb grant");
+        assert!(verbs.iter().any(|verb| verb.as_str() == "mount-volume"));
     }
 
     #[test]
