@@ -458,7 +458,7 @@ impl VmBackend for HvfBackend {
         let pid_file = state_dir.join(PID_FILE_NAME);
         let console_log = state_dir.join("console.log");
         // Create/truncate the console capture file up front.
-        let _ = crate::libkrun::open_console_capture(&console_log);
+        let _ = mvm_vmm::host::console_capture::open_console_capture(&console_log);
 
         // Clear any prior run's exit code so `wait` reads only this launch's.
         let workload_exit = state_dir.join("workload.exit");

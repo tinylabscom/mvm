@@ -57,7 +57,6 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::base::ui;
-use crate::libkrun::open_console_capture;
 
 /// QEMU workload backend (Linux dev/test; KVM where present, TCG fallback).
 pub struct QemuBackend;
@@ -349,7 +348,7 @@ impl VmBackend for QemuBackend {
         // write-only opener so the invariant + truncate-on-boot match the
         // other backends.
         drop(
-            open_console_capture(&console_log)
+            mvm_vmm::host::console_capture::open_console_capture(&console_log)
                 .map_err(|e| anyhow!("open console sink {}: {e}", console_log.display()))?,
         );
 

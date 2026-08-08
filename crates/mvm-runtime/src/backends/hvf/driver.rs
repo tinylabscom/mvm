@@ -247,7 +247,7 @@ fn boot_with_handoff(
     let state_dir = vm_state_dir(&spec.name);
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-    let _ = crate::libkrun::open_console_capture(&state_dir.join("console.log"));
+    let _ = mvm_vmm::host::console_capture::open_console_capture(&state_dir.join("console.log"));
     let timeout_secs = std::env::var("MVM_HVF_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())

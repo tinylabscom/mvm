@@ -273,7 +273,7 @@ impl VmmDriver for LibkrunDriver {
         // launch's, and the console capture so a stale panic isn't mistaken for
         // this boot's.
         let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
-        let _ = crate::libkrun::open_console_capture(&console_log);
+        let _ = mvm_vmm::host::console_capture::open_console_capture(&console_log);
 
         let cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
 
@@ -285,10 +285,10 @@ impl VmmDriver for LibkrunDriver {
             .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;
 
         let supervisor = crate::libkrun::resolve_supervisor_path()?;
-        let stdout = crate::libkrun::open_console_capture(&console_log)
+        let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
-        let stderr = crate::libkrun::open_console_capture(&state_dir.join("supervisor.stderr.log"))
+        let stderr = mvm_vmm::host::console_capture::open_console_capture(&state_dir.join("supervisor.stderr.log"))
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::inherit());
         let mut child = Command::new(&supervisor)

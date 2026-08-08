@@ -137,17 +137,6 @@ pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// construction (write-only, create+truncate): the guest console
 /// streams here and NO host-readable fd is ever attached as console
 /// input. The sole interactive path into a guest is the interactive-gated
-/// agent vsock console (claim 15 — no interactive access to a sealed prod
-/// microVM), absent from sealed prod agents. Centralized so the write-only
-/// invariant lives in one place.
-pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-}
-
 /// Default kernel cmdline for libkrun-launched guests.
 /// `console=hvc0` matches libkrun's virtio-console wiring;
 /// `root=/dev/vda rw init=/init` matches Apple Container's
@@ -919,10 +908,10 @@ impl VmBackend for LibkrunBackend {
         // per-VM log so a boot failure / kernel panic is diagnosable
         // (mirrors firecracker.log). Best-effort: fall back to null if
         // the file can't be created.
-        let console_log = open_console_capture(&vm_console_log(&config.name))
+        let console_log = mvm_vmm::host::console_capture::open_console_capture(&vm_console_log(&config.name))
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
-        let supervisor_stderr = open_console_capture(&state_dir.join("supervisor.stderr.log"))
+        let supervisor_stderr = mvm_vmm::host::console_capture::open_console_capture(&state_dir.join("supervisor.stderr.log"))
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::inherit());
         let mut child = Command::new(&supervisor_path)
@@ -1521,7 +1510,7 @@ mod tests {
         use std::io::{Read, Write};
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = tmp.path().join("console.log");
-        let mut f = open_console_capture(&p).expect("open sink");
+        let mut f = mvm_vmm::host::console_capture::open_console_capture(&p).expect("open sink");
         f.write_all(b"boot log line\n")
             .expect("console capture must accept output");
         let mut buf = String::new();

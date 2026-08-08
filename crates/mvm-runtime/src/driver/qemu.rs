@@ -31,7 +31,6 @@ use mvm_net::channel::GuestService;
 use crate::base::ui;
 use crate::driver::spec::KernelImage;
 use crate::driver::{DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection, VsockPort};
-use crate::libkrun::open_console_capture;
 use crate::qemu::{
     self, QEMU_LOG_FILE, QEMU_PID_FILE, QemuBackend, QemuBridgeGuestDial, QemuBridgeHostDial,
     QemuBridgeSpec,
@@ -330,7 +329,7 @@ impl VmmDriver for QemuDriver {
         // invariant + truncate-on-boot match the other backends.
         let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
         drop(
-            open_console_capture(&spec.console.log_path).map_err(|e| {
+            mvm_vmm::host::console_capture::open_console_capture(&spec.console.log_path).map_err(|e| {
                 anyhow!("open console sink {}: {e}", spec.console.log_path.display())
             })?,
         );
