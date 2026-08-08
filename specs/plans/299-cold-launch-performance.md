@@ -293,6 +293,38 @@ boot; the other uses its VMM's stock bundled kernel with a two-option
 filesystem tweak. Neither builds a smaller kernel than the one already shipped
 here.
 
+### Phase 6 evidence — what foreground teardown actually is
+
+Teardown decomposed on the warm lane (HVF, 20 runs + 2 warm-ups), where it is
+largest:
+
+| teardown span | p50 | p99 | share of teardown |
+|---|---:|---:|---:|
+| `stop_transient` | 152.5 ms | 168.5 ms | 13% |
+| **`pool_replenish`** | **1025.9 ms** | **1573.1 ms** | **87%** |
+| `state_remove` | 0.5 ms | 14.7 ms | <1% |
+| cleanup total | 1181.8 ms | 1719.4 ms | |
+
+The launch's own dispatch window was 27.1 ms. So a warm `machine run` does
+27 ms of useful work and returns to the user after 1366 ms, and three quarters
+of that wait is provisioning the standby for the *next* launch.
+
+That reframes Phase 6. Only `stop_transient` and `state_remove` are cleanup of
+this VM, and together they are 153 ms; the plan's ownership rules (confirm
+process exit, protect the state dir and PID until it does) apply to them.
+`pool_replenish` is not cleanup at all — it is next-launch provisioning that
+happens to be executed on this launch's critical path, and it holds no
+resource this launch owns.
+
+Moving it is a deliberate decision to revisit rather than an oversight. The
+code comment on the call says the removed backend's image-bound rewarm was
+kept explicit "so teardown does not spawn background work that can contend
+with foreground launches" — so inline execution was chosen to avoid
+contention, and detaching it trades a 1 s foreground stall for exactly that
+contention risk. The measurement says the trade is now heavily one-sided, but
+it is a trade, and the alternatives (detach, defer to the next launch's start,
+make replenish cheaper, or make it opt-in) have not been compared here.
+
 ## Phase 1 — Content-addressed `--mount` image cache
 
 - [ ] Add a reusable `mvm-fs` directory fingerprint helper covering relative

@@ -423,7 +423,7 @@ pub struct ColdLaunchReport {
 }
 
 /// Every sub-phase name a report summarises, in the order they occur.
-const SUB_PHASE_NAMES: [&str; 9] = [
+const SUB_PHASE_NAMES: [&str; 12] = [
     "mount_fingerprint",
     "mount_cache_lookup",
     "mount_materialize",
@@ -433,6 +433,9 @@ const SUB_PHASE_NAMES: [&str; 9] = [
     "agent_auth",
     "first_dispatch",
     "cleanup_handoff",
+    "stop_transient",
+    "pool_replenish",
+    "state_remove",
 ];
 
 /// Build a lane report from its measured samples.

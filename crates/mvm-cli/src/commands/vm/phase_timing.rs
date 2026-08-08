@@ -114,6 +114,12 @@ pub enum SubPhase {
     AgentAuth,
     FirstDispatch,
     CleanupHandoff,
+    /// Stopping the backend VM, inside cleanup.
+    StopTransient,
+    /// Topping the warm pool back up, inside cleanup.
+    PoolReplenish,
+    /// Removing the VM state directories, inside cleanup.
+    StateRemove,
 }
 
 /// One optional sub-phase span.
@@ -149,6 +155,9 @@ pub struct LaunchSubMarks {
     agent_auth: SpanMark,
     first_dispatch: SpanMark,
     cleanup_handoff: SpanMark,
+    stop_transient: SpanMark,
+    pool_replenish: SpanMark,
+    state_remove: SpanMark,
 }
 
 impl LaunchSubMarks {
@@ -171,6 +180,9 @@ impl LaunchSubMarks {
             SubPhase::AgentAuth => &mut self.agent_auth,
             SubPhase::FirstDispatch => &mut self.first_dispatch,
             SubPhase::CleanupHandoff => &mut self.cleanup_handoff,
+            SubPhase::StopTransient => &mut self.stop_transient,
+            SubPhase::PoolReplenish => &mut self.pool_replenish,
+            SubPhase::StateRemove => &mut self.state_remove,
         }
     }
 
@@ -219,6 +231,9 @@ impl LaunchSubMarks {
             agent_auth_ms: self.agent_auth.elapsed_ms(),
             first_dispatch_ms: self.first_dispatch.elapsed_ms(),
             cleanup_handoff_ms: self.cleanup_handoff.elapsed_ms(),
+            stop_transient_ms: self.stop_transient.elapsed_ms(),
+            pool_replenish_ms: self.pool_replenish.elapsed_ms(),
+            state_remove_ms: self.state_remove.elapsed_ms(),
         }
     }
 }
@@ -541,7 +556,7 @@ mod tests {
 
     /// Every sub-phase, so a mis-wired `slot()` arm shows up as one phase
     /// overwriting another rather than as a silently wrong benchmark column.
-    const ALL_SUB_PHASES: [SubPhase; 9] = [
+    const ALL_SUB_PHASES: [SubPhase; 12] = [
         SubPhase::MountFingerprint,
         SubPhase::MountCacheLookup,
         SubPhase::MountMaterialize,
@@ -551,6 +566,9 @@ mod tests {
         SubPhase::AgentAuth,
         SubPhase::FirstDispatch,
         SubPhase::CleanupHandoff,
+        SubPhase::StopTransient,
+        SubPhase::PoolReplenish,
+        SubPhase::StateRemove,
     ];
 
     #[test]

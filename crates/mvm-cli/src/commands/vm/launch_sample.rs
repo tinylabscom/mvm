@@ -182,8 +182,14 @@ pub struct LaunchSubTimings {
     /// Establishing the channel the first guest command is dispatched over,
     /// excluding the command's own runtime.
     pub first_dispatch_ms: Option<f64>,
-    /// Foreground teardown of the backend VM.
+    /// Foreground teardown, end to end. The three spans below partition it.
     pub cleanup_handoff_ms: Option<f64>,
+    /// Stopping the backend VM.
+    pub stop_transient_ms: Option<f64>,
+    /// Topping the warm pool back up toward its target.
+    pub pool_replenish_ms: Option<f64>,
+    /// Removing the VM state directories.
+    pub state_remove_ms: Option<f64>,
 }
 
 impl LaunchSubTimings {
@@ -212,6 +218,9 @@ impl LaunchSubTimings {
             ("agent_auth", self.agent_auth_ms),
             ("first_dispatch", self.first_dispatch_ms),
             ("cleanup_handoff", self.cleanup_handoff_ms),
+            ("stop_transient", self.stop_transient_ms),
+            ("pool_replenish", self.pool_replenish_ms),
+            ("state_remove", self.state_remove_ms),
         ]
         .into_iter()
         .filter_map(|(name, value)| value.map(|ms| (name, ms)))
