@@ -17,7 +17,7 @@ content hash), not a Nix build.
 > it is Swift with no prebuilt artifact, so the backend runs the identical
 > initramfs/activation stack as every other runner backend, differing only
 > in the kernel image. The backend is now 100% Rust-native: zero Swift
-> anywhere, zero VZ/Virtualization.framework anywhere (guarded by
+> anywhere, zero Virtualization.framework anywhere (guarded by
 > `xtask check-no-vz`).
 
 ## Goal
