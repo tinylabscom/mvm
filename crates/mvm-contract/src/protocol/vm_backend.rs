@@ -1295,9 +1295,55 @@ pub enum BackendKind {
     AppleContainer,
 }
 
+impl BackendKind {
+    /// A stable label for this backend, for diagnostics and reports.
+    ///
+    /// This renders the typed discriminant; it is not a selector. Nothing may
+    /// compare against it to decide behaviour — dispatch stays on the enum so
+    /// a new variant remains a compile error at every site that must handle
+    /// it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Firecracker => "firecracker",
+            Self::Libkrun => "libkrun",
+            Self::Qemu => "qemu",
+            Self::Mock => "mock",
+            Self::Hvf => "hvf",
+            Self::Wasm => "wasm",
+            Self::Docker => "docker",
+            Self::AppleContainer => "apple-container",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_backend_kind_has_a_distinct_stable_label() {
+        let kinds = [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+            BackendKind::Docker,
+            BackendKind::AppleContainer,
+        ];
+        // Pin the labels a report is read against.
+        assert_eq!(BackendKind::Hvf.as_str(), "hvf");
+        assert_eq!(BackendKind::Firecracker.as_str(), "firecracker");
+        assert_eq!(BackendKind::AppleContainer.as_str(), "apple-container");
+        // Two backends sharing a label would silently merge their samples.
+        for (i, a) in kinds.iter().enumerate() {
+            for b in &kinds[i + 1..] {
+                assert_ne!(a.as_str(), b.as_str(), "{a:?} and {b:?} share a label");
+            }
+        }
+    }
 
     #[test]
     fn warm_launch_mode_defaults_to_optional_and_round_trips() {

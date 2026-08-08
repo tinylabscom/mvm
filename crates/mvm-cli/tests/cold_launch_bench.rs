@@ -105,6 +105,14 @@ fn prepared_cold_launch_baseline() {
             );
         }
     }
+    for (name, stats) in &report.stats.backend_phases {
+        eprintln!(
+            "[cold-launch]   backend/{name}: n={} p50={} p99={}",
+            stats.samples,
+            ms(stats.p50),
+            ms(stats.p99)
+        );
+    }
 
     let path = write_report_with_latest(&report, None, "cold-launch").expect("persist report");
     eprintln!("[cold-launch] report at {}", path.display());

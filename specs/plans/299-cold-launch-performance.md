@@ -189,6 +189,47 @@ Four things this establishes, none of which were visible before:
    caught this by refusing a contaminated warm-up rather than silently
    reporting warm claims as cold launches.
 
+### Where the 780 ms actually goes
+
+`VmBackend::start` for an admitted workload is `WorkloadRunner<HvfDriver>`, not
+the `HvfBackend` shim. Recording phases inside `start_workload` (same 20-run
+prepared-cold lane) breaks the span open:
+
+| backend phase (p50 / p99) | |
+|---|---:|
+| `endpoint_spawn` | 0.0 / 0.0 ms |
+| `spec_assembly` | 0.0 / 0.0 ms |
+| **`driver_boot`** (VMM create + guest boot) | **54.3 / 192.8 ms** |
+| `console_stream_start` | 4.2 / 6.5 ms |
+| `activate_workload` | 0.0 / 0.0 ms |
+| **`broker_register`** | **711.1 / 715.7 ms** |
+
+**The VM boots in 54 ms. 92% of the cold-launch budget is host-services broker
+registration** — post-boot bookkeeping that runs after the guest is already up
+and activated.
+
+The mechanism is a readiness misjudgement, not slow work.
+`ensure_host_agent_daemon` treats a successful `UnixStream::connect` as "the
+daemon is ready", but the daemon binds its control socket before it can serve
+on it. The register RPC therefore fails transiently and the caller's retry
+ladder sleeps `100 + 200 + 400 = 700 ms` before the attempt that succeeds —
+which is the observed 711 ms p50 at a 4 ms spread. A socket becoming
+connectable is not readiness, which is the same rule Phase 5 states for the
+guest.
+
+Two conditions make every launch pay it: the per-tenant daemon is not staying
+resident between launches despite the code describing it as warm (no
+`mvm-host-agent` process survives a run), so each launch respawns it and then
+races its readiness.
+
+Warm claims show the same shape — 728.7 ms p50 dispatch, and the claim path
+registers the same broker — but `claim_standby` does not route through
+`start_workload`, so confirming it needs the same marks there.
+
+This retargets the remaining phases: the VMM and the kernel are not the cold
+-start problem on this backend, and Phase 3's premise should be re-derived from
+these numbers rather than from the pre-decomposition 780 ms.
+
 Kernel size is not a candidate lever here. The workload kernel is an 8.2 MiB
 arm64 `Image` (6.12.100, 936 options, zero modules, already ratcheted by
 `check-kernel-config-budget`), loaded by direct copy — single-digit

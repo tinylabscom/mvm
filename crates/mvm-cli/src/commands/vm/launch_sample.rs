@@ -15,12 +15,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
+use mvm_core::launch_trace::TracePhase;
 use serde::{Deserialize, Serialize};
 
 use super::phase_timing::{LaunchMode, RunPhaseTimings};
 
-/// Env var naming the file this process writes its launch sample to.
-pub const LAUNCH_SAMPLE_ENV: &str = "MVM_LAUNCH_SAMPLE_JSON";
+/// Env var naming the file this process writes its launch sample to. Shared
+/// with the backend-side trace gate so the two can never disagree about
+/// whether a launch is being measured.
+pub use mvm_core::launch_trace::LAUNCH_SAMPLE_ENV;
 
 /// Sample schema version. A consumer that reads a different version refuses
 /// the sample as incomparable rather than mis-reading it.
@@ -261,6 +264,12 @@ pub struct LaunchSample {
     pub work: LaunchWork,
     pub phases: RunPhaseTimings,
     pub sub_phases: LaunchSubTimings,
+    /// Phases the backend recorded inside its own `start`, read back from the
+    /// sidecar it dropped in the VM state directory. Empty when the backend
+    /// does not trace itself yet — the coarse `vmm_create` span still stands,
+    /// it just cannot be broken down.
+    #[serde(default)]
+    pub backend_phases: Vec<TracePhase>,
 }
 
 /// The path this process should write its launch sample to, if the operator
@@ -346,6 +355,10 @@ mod tests {
                 agent_auth_ms: Some(1.25),
                 ..LaunchSubTimings::default()
             },
+            backend_phases: vec![TracePhase {
+                name: "boot_confirm".to_string(),
+                ms: 2.0,
+            }],
         }
     }
 

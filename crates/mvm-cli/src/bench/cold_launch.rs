@@ -20,6 +20,7 @@ pub use crate::commands::vm::launch_sample::{
 pub use crate::commands::vm::phase_timing::{
     LaunchMode, LaunchSubMarks, RunPhaseTimings, SubPhase,
 };
+pub use mvm_core::launch_trace::TracePhase;
 
 use super::stats::percentile;
 
@@ -328,6 +329,9 @@ pub struct ColdLaunchSample {
     pub launch_mode: LaunchMode,
     pub phases: RunPhaseTimings,
     pub sub_phases: LaunchSubTimings,
+    /// Phases the backend recorded inside its own `start`.
+    #[serde(default)]
+    pub backend_phases: Vec<TracePhase>,
 }
 
 /// Percentile summary for one span across a lane's samples.
@@ -377,6 +381,11 @@ pub struct LaneStats {
     pub teardown_ms: SpanStats,
     /// One entry per sub-phase, in declaration order.
     pub sub_phases: Vec<(String, SpanStats)>,
+    /// One entry per backend-recorded phase, in the order the backend reported
+    /// them. Names are backend-defined, so this is derived from the samples
+    /// rather than from a fixed list.
+    #[serde(default)]
+    pub backend_phases: Vec<(String, SpanStats)>,
 }
 
 /// A lane's full result: raw samples first, percentiles derived from them.
@@ -449,9 +458,43 @@ pub fn build_cold_launch_report(
                 .iter()
                 .map(|name| ((*name).to_string(), sub(name)))
                 .collect(),
+            backend_phases: backend_phase_stats(&raw),
         },
         raw,
     }
+}
+
+/// Summarise the backend-recorded phases across a lane's samples.
+///
+/// The name set is discovered from the samples, in first-seen order, because
+/// each backend names its own phases; a fixed list here would silently drop a
+/// phase the moment a second backend is traced.
+fn backend_phase_stats(raw: &[ColdLaunchSample]) -> Vec<(String, SpanStats)> {
+    let mut order: Vec<String> = Vec::new();
+    for sample in raw {
+        for phase in &sample.backend_phases {
+            if !order.contains(&phase.name) {
+                order.push(phase.name.clone());
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|name| {
+            let values: Vec<f64> = raw
+                .iter()
+                .filter_map(|sample| {
+                    sample
+                        .backend_phases
+                        .iter()
+                        .find(|phase| phase.name == name)
+                        .map(|phase| phase.ms)
+                })
+                .collect();
+            let stats = SpanStats::from_samples(&values);
+            (name, stats)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -493,6 +536,7 @@ mod tests {
             work: LaunchWork::default(),
             phases: phases(148.0),
             sub_phases: LaunchSubTimings::default(),
+            backend_phases: Vec::new(),
         }
     }
 
@@ -526,6 +570,10 @@ mod tests {
                 vmm_create_ms: Some(total_ms / 2.0),
                 ..LaunchSubTimings::default()
             },
+            backend_phases: vec![TracePhase {
+                name: "boot_confirm".to_string(),
+                ms: total_ms / 4.0,
+            }],
         }
     }
 

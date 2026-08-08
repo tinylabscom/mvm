@@ -982,6 +982,15 @@ fn run_inner(
     )?;
     let t_backend_started = timing.then(std::time::Instant::now);
 
+    // Read the backend's own phase sidecar now: teardown removes the state
+    // directory that holds it, and by the time the sample is assembled it is
+    // gone. A backend that does not trace itself yields nothing here.
+    let backend_phases = timing
+        .then(|| mvm_core::launch_trace::read_trace(&mvm_core::config::vm_state_dir(&vm_name)))
+        .flatten()
+        .map(|trace| trace.phases)
+        .unwrap_or_default();
+
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
 
@@ -1054,6 +1063,7 @@ fn run_inner(
                     .recorded(crate::commands::vm::phase_timing::SubPhase::MountMaterialize),
                 phases,
                 sub_phases,
+                backend_phases: backend_phases.clone(),
             });
             if let Err(e) = crate::commands::vm::launch_sample::write_sample(path, &sample) {
                 // A measurement that cannot be recorded must be loud: a
@@ -1079,6 +1089,9 @@ struct LaunchSampleInputs<'a> {
     mount_materialized: bool,
     phases: crate::commands::vm::phase_timing::RunPhaseTimings,
     sub_phases: crate::commands::vm::launch_sample::LaunchSubTimings,
+    /// Phases the backend recorded inside `start`, read from its sidecar
+    /// before teardown removed the state directory holding it.
+    backend_phases: Vec<mvm_core::launch_trace::TracePhase>,
 }
 
 /// Assemble the machine-readable sample for a finished launch.
@@ -1116,6 +1129,7 @@ fn build_launch_sample(
         ),
         phases: inputs.phases,
         sub_phases: inputs.sub_phases,
+        backend_phases: inputs.backend_phases,
     }
 }
 

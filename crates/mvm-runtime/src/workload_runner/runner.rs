@@ -460,6 +460,12 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // `workload_blocks`.
         ensure_dir_share_support(inputs.config, self.driver.supports_directory_shares())?;
 
+        // A caller times this call from outside and cannot see past it, yet the
+        // VMM boot and every post-boot registration happen in here. Off unless
+        // a measurement asked for it.
+        let mut trace =
+            mvm_core::launch_trace::LaunchTraceRecorder::new(self.driver.kind().as_str());
+
         let state_dir = vm_state_dir(&inputs.config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
@@ -479,6 +485,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 network_policy: inputs.network_policy,
             },
         )?;
+        trace.mark("endpoint_spawn");
 
         let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
@@ -488,7 +495,10 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             console_log: socks.console_log.clone(),
         });
 
+        trace.mark("spec_assembly");
+
         let vm = self.driver.boot(&spec)?;
+        trace.mark("driver_boot");
 
         // Unconditional and best-effort, and before the fallible activation
         // handshake below rather than after it: the console is the only
@@ -500,6 +510,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         });
+        trace.mark("console_stream_start");
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
         // ActivateEnvironment before exposing operational RPCs. Send it now,
@@ -510,6 +521,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             crate::microvm::activate_workload(&*vm, inputs.config)
                 .context("activate workload after boot")?;
         }
+        trace.mark("activate_workload");
 
         // Register the per-VM host-services broker (host.audit.v1 /
         // host.secrets.v1) for an admitted workload — the same registration the
@@ -525,6 +537,8 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         })?;
         endpoint.defuse();
         broker_guard.defuse();
+        trace.mark("broker_register");
+        trace.write_to(&state_dir);
         Ok(vm)
     }
 

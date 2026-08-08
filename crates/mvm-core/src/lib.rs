@@ -58,6 +58,8 @@ pub mod kernel_artifact;
 pub mod kernel_format;
 /// Flat launch-metadata parsers for `mvm-init` (no JSON in PID 1).
 pub mod launch_metadata;
+/// Backend-recorded launch phases, so a caller can see inside `start`.
+pub mod launch_trace;
 // Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host
 // contract) are a pure-DTO leaf that now lives in `mvm-contract`;
 // re-exported here as a module alias so every existing
