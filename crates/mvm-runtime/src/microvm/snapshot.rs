@@ -28,8 +28,8 @@ use crate::vm::instance_snapshot::{
     signal_post_restore,
 };
 
-use super::daemon::api_put_socket;
 use super::{abs_vms_dir, require_linux_env};
+use mvm_backends::fc::daemon::api_put_socket;
 
 /// Refuse template snapshot restore.
 ///
