@@ -29,6 +29,14 @@
       ]
     },
     {
+      "path": "crates/mvm-backends/src/legacy/libkrun.rs",
+      "package": "mvm-backends",
+      "claims": [
+        1,
+        15
+      ]
+    },
+    {
       "path": "crates/mvm-build/src/app_deps_gate.rs",
       "package": "mvm-build",
       "claims": [
@@ -201,14 +209,6 @@
       "package": "mvm-hostd",
       "claims": [
         17
-      ]
-    },
-    {
-      "path": "crates/mvm-runtime/src/libkrun.rs",
-      "package": "mvm-runtime",
-      "claims": [
-        1,
-        15
       ]
     },
     {

@@ -54,7 +54,7 @@ pub struct ConsoleDataSocket {
     pub host_socket: PathBuf,
 }
 
-pub use mvm_vmm::hvf_handoff::HvfHandoffRequest;
+pub use crate::hvf_handoff::HvfHandoffRequest;
 
 /// Everything the supervisor needs to boot one guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

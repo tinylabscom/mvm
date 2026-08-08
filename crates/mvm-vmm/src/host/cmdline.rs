@@ -19,6 +19,14 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::vm_backend::VmStartConfig;
 
+use crate::host::boot_config::{
+    booted_with_universal_initramfs, build_runtime_overlay_cmdline_args, build_verity_cmdline_args,
+    non_verity_overlay_ext4,
+};
+use crate::host::egress_bridge::{
+    host_signer_pub_cmdline_token, require_grant_cmdline_token, verb_grant_cmdline_token,
+};
+
 /// Bytes the guest kernel reserves for its command line (`COMMAND_LINE_SIZE`,
 /// 2048 on both x86_64 and arm64), including the trailing NUL.
 const KERNEL_CMDLINE_LIMIT: usize = 2048;
@@ -32,7 +40,7 @@ const KERNEL_CMDLINE_LIMIT: usize = 2048;
 /// guest can therefore come up silently missing its trust anchor or its egress
 /// policy, and the only visible symptom is an unrelated-looking readiness
 /// timeout. Callers refuse the boot instead.
-pub(crate) fn cmdline_overflow(cmdline: &str) -> Option<String> {
+pub fn cmdline_overflow(cmdline: &str) -> Option<String> {
     (cmdline.len() + 1 > KERNEL_CMDLINE_LIMIT).then(|| {
         format!(
             "assembled kernel cmdline is {} bytes, past the guest kernel's \
@@ -47,9 +55,9 @@ pub(crate) fn cmdline_overflow(cmdline: &str) -> Option<String> {
 /// Emitted only when the run actually allows outbound egress and the workload
 /// carries no bound secrets, so the raw SOCKS path never contends with the
 /// substitution endpoint for the shared egress port.
-fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
+pub fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
     (config.network_policy.allows_egress()
-        && !mvm_vmm::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
+        && !crate::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
     .then(|| "mvm.vsock_egress=1".to_string())
 }
 
@@ -68,7 +76,7 @@ fn verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
 
 /// The initramfs this boot uses: an explicit `--initrd` override, or (for a
 /// verity-sealed boot) the sibling `rootfs.initrd` next to the rootfs image.
-pub(crate) fn effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
+pub fn effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
     config
         .initrd_path
         .as_ref()
@@ -78,13 +86,13 @@ pub(crate) fn effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
 
 /// Whether this boot has everything dm-verity needs: a verity sidecar, a
 /// roothash, and a resolvable initramfs to run the verification logic.
-pub(crate) fn verity_enabled(config: &VmStartConfig) -> bool {
+pub fn verity_enabled(config: &VmStartConfig) -> bool {
     config.verity_path.is_some() && config.roothash.is_some() && effective_initrd(config).is_some()
 }
 
 /// The resolved runtime-overlay artifact triple, when the launch config
 /// carries all three parts.
-pub(crate) fn runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
+pub fn runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
     Some((
         config.runtime_overlay_path.as_deref()?,
         config.runtime_overlay_verity_path.as_deref()?,
@@ -98,16 +106,23 @@ pub(crate) fn runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &st
 ///
 /// `base_bootargs` supplies the VMM-specific console/earlycon/root base
 /// (`VmmDriver::workload_base_bootargs` for a runner driver, or
-/// `crate::backends::hvf::workload_bootargs` directly for the raw HVF
+/// `hvf_like_workload_bootargs` directly for the raw HVF
 /// backend, which has no driver to call through) — every other token here is
 /// shared across VMMs.
-pub(crate) fn workload_cmdline(
+pub fn workload_cmdline(
     config: &VmStartConfig,
     state_dir: &Path,
     base_bootargs: impl Fn(bool, bool) -> String,
 ) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
-    let grants = crate::backends::hvf::bootargs::grant_tokens(&config.name);
+    let grants: Vec<String> = [
+        verb_grant_cmdline_token(&config.name),
+        require_grant_cmdline_token(&config.name),
+        host_signer_pub_cmdline_token(&config.name),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
     let verity_is_enabled = verity_enabled(config);
@@ -137,8 +152,8 @@ pub(crate) fn workload_cmdline(
     // kernel panics on a dead PID 1. Hosts that cannot yet resolve the universal
     // artifact still boot the legacy initramfs, so both shapes stay live.
     if verity_is_enabled
-        && !crate::microvm::booted_with_universal_initramfs(config)
-        && let Some(verity_args) = crate::microvm::build_verity_cmdline_args(
+        && !booted_with_universal_initramfs(config)
+        && let Some(verity_args) = build_verity_cmdline_args(
             config.roothash.as_deref(),
             runtime_overlay(config).map(|(_, _, roothash)| roothash),
         )
@@ -152,10 +167,8 @@ pub(crate) fn workload_cmdline(
     // above.
     if !verity_is_enabled
         && has_disk
-        && let Some(overlay_args) = crate::microvm::build_runtime_overlay_cmdline_args(
-            None,
-            crate::microvm::non_verity_overlay_ext4(config).is_some(),
-        )
+        && let Some(overlay_args) =
+            build_runtime_overlay_cmdline_args(None, non_verity_overlay_ext4(config).is_some())
     {
         cmdline.push(' ');
         cmdline.push_str(&overlay_args);
@@ -183,7 +196,7 @@ pub(crate) fn workload_cmdline(
 /// `workload_cmdline`'s non-shortcut branch would have produced (via the same
 /// `base_bootargs` closure) and appends the token to that instead of to
 /// nothing.
-pub(crate) fn runner_cmdline(
+pub fn runner_cmdline(
     config: &VmStartConfig,
     state_dir: &Path,
     base_bootargs: impl Fn(bool, bool) -> String,
@@ -194,7 +207,7 @@ pub(crate) fn runner_cmdline(
         // HVF/libkrun workload guests have no RTC. Seed their wall clock before
         // image processes perform TLS validation (for example, pip contacting
         // PyPI), using the same host epoch captured at boot time as the builder.
-        tokens.push(mvm_build::builder_vm::builder_hostepoch_cmdline_token());
+        tokens.push(crate::host::boot_config::builder_hostepoch_cmdline_token());
     }
     if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
         tokens.push(uvols);
@@ -221,12 +234,12 @@ pub(crate) fn runner_cmdline(
 }
 
 /// Materialize an initramfs inside the shared initramfs cache that
-/// [`crate::microvm::booted_with_universal_initramfs`] recognizes, and return its
+/// [`booted_with_universal_initramfs`] recognizes, and return its
 /// path. `home` must already be the active `MVM_HOME`. Shared by the boot-shape
 /// tests here and in [`crate::workload_runner::standby_boot`], which both need a
 /// launch config that resolves as a universal-initramfs boot.
-#[cfg(test)]
-pub(crate) fn seed_universal_initramfs(home: &Path) -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_universal_initramfs(home: &Path) -> String {
     let dir = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     assert!(
         dir.starts_with(home),
@@ -241,6 +254,20 @@ pub(crate) fn seed_universal_initramfs(home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HVF-like base bootargs for tests (pl011 UART console). Keeps the
+    /// cmdline tests independent of the HVF backend module.
+    fn hvf_like_workload_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+        const UART_BASE: u64 = 0x9000000; // matches fdt::SERIAL_MMIO_BASE historically
+        let mut args =
+            format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8");
+        if virtiofs_root {
+            args.push_str(" rootfstype=virtiofs root=mvmroot rw init=/init");
+        } else if has_disk {
+            args.push_str(" root=/dev/vda rw init=/init");
+        }
+        args
+    }
 
     #[test]
     fn cmdline_within_the_kernel_limit_is_accepted() {
@@ -265,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {
+    pub fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {
         let dir = tempfile::tempdir().unwrap();
         let deny_all = VmStartConfig::default();
         assert_eq!(vsock_egress_cmdline_token(&deny_all, dir.path()), None);
@@ -294,8 +321,7 @@ mod tests {
             ..Default::default()
         };
         let cmdline =
-            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
-                .expect("cmdline");
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
         assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
         assert!(cmdline.contains("mvm.runtime_source_policy=rootfs_only"));
@@ -307,7 +333,7 @@ mod tests {
     /// via `ActivateEnvironment`, so the kernel cmdline must not carry them.
     #[test]
     fn workload_cmdline_for_universal_initramfs_verity_boot_emits_console_and_policy_only() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
@@ -330,10 +356,9 @@ mod tests {
             ..Default::default()
         };
         let cmdline =
-            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
-                .expect("cmdline");
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
         assert!(
-            crate::microvm::booted_with_universal_initramfs(&config),
+            booted_with_universal_initramfs(&config),
             "fixture must resolve as a universal-initramfs boot"
         );
         assert!(!cmdline.contains("root=/dev/vda"));
@@ -354,7 +379,7 @@ mod tests {
     /// cmdline") and panics the guest before userspace.
     #[test]
     fn workload_cmdline_for_legacy_verity_initramfs_boot_carries_the_roothash_tokens() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
@@ -380,12 +405,11 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !crate::microvm::booted_with_universal_initramfs(&config),
+            !booted_with_universal_initramfs(&config),
             "fixture must resolve as a legacy-initramfs boot"
         );
         let cmdline =
-            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
-                .expect("cmdline");
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
         for token in [
             format!("mvm.roothash={rootfs_hash}"),
             "mvm.data=/dev/vda".to_string(),
@@ -451,7 +475,7 @@ mod tests {
 
     #[test]
     fn runner_cmdline_matches_workload_cmdline_when_no_volumes_are_present() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
@@ -459,15 +483,14 @@ mod tests {
         env.set("MVM_HOME", dir.path());
         let config = VmStartConfig::default();
         assert_eq!(
-            runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs),
-            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
-                .unwrap_or_default()
+            runner_cmdline(&config, dir.path(), hvf_like_workload_bootargs),
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).unwrap_or_default()
         );
     }
 
     #[test]
     fn runner_cmdline_appends_uvols_to_a_non_trivial_base() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
@@ -482,9 +505,9 @@ mod tests {
         };
         // The egress token forces workload_cmdline's non-shortcut branch, so
         // this exercises the `Some(base)` arm of runner_cmdline's match.
-        let base = workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
+        let base = workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs)
             .expect("non-trivial base");
-        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), hvf_like_workload_bootargs);
         assert!(
             cmdline.starts_with(&base),
             "base: {base}\ncmdline: {cmdline}"
@@ -513,10 +536,10 @@ mod tests {
         // shortcut), so runner_cmdline must not silently drop the base
         // bootargs the volume token needs to ride on.
         assert_eq!(
-            workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs),
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs),
             None
         );
-        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), hvf_like_workload_bootargs);
         assert!(cmdline.contains("root=/dev/vda"), "cmdline: {cmdline}");
         assert!(cmdline.contains("init=/init"), "cmdline: {cmdline}");
         assert!(
@@ -541,7 +564,7 @@ mod tests {
             volumes: vec![disk_volume("/vol/data.img", "/data")],
             ..Default::default()
         };
-        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), hvf_like_workload_bootargs);
         assert!(
             !cmdline.contains("mvm.sdk_dev="),
             "a workload with no SDK sidecar must carry no sidecar token: {cmdline}"
@@ -561,7 +584,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), hvf_like_workload_bootargs);
         // Two disks after the rootfs on an unsealed boot: the user volume takes
         // /dev/vdb, so the sidecar is /dev/vdc. The token must match the block
         // list, not a baked constant.
@@ -586,7 +609,7 @@ mod tests {
         env.set("MVM_HOME", dir.path());
         let config = VmStartConfig::default();
         assert_eq!(
-            runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs),
+            runner_cmdline(&config, dir.path(), hvf_like_workload_bootargs),
             String::new()
         );
     }
@@ -598,7 +621,7 @@ mod tests {
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
         };
-        let cmdline = runner_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs);
+        let cmdline = runner_cmdline(&config, dir.path(), hvf_like_workload_bootargs);
         let epoch = cmdline
             .split_whitespace()
             .find_map(|token| token.strip_prefix("mvm.hostepoch="))

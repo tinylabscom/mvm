@@ -482,7 +482,7 @@ fn remove_pid_marker_if_matches(pid_file: &Path, pid: u32) {
 /// for liveness or signal delivery.
 pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -> Result<()> {
     let outcome = escalate_kill(
-        crate::libkrun::STOP_TIMEOUT,
+        mvm_backends::legacy::libkrun::STOP_TIMEOUT,
         Duration::from_millis(100),
         || crate::firecracker::is_firecracker_pid_running(pid),
         |signal| fc_sudo_signal(pid, signal),
@@ -788,7 +788,7 @@ impl VmmDriver for FcDriver {
         // Convert the workload kernel to an FC-loadable image (x86_64 bzImage →
         // extracted ELF; aarch64 Image passthrough), reusing the same helper the
         // raw path calls so the driver never diverges from host kernel-prep.
-        let kernel_for_boot = mvm_build::fc_kernel::ensure_fc_loadable_kernel(&kernel_path)
+        let kernel_for_boot = mvm_vmm::host::fc_kernel::ensure_fc_loadable_kernel(&kernel_path)
             .with_context(|| {
                 format!(
                     "preparing FC-loadable kernel from {}",
@@ -1204,10 +1204,10 @@ mod tests {
     /// resumes that child only after fresh channel wiring.
     #[test]
     fn firecracker_and_hvf_advertise_the_live_standby_pool() {
-        use crate::backends::hvf::driver::HvfDriver;
         use crate::driver::{LibkrunDriver, MockDriver};
-        use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
+        use mvm_backends::driver::hvf::HvfDriver;
+        use mvm_backends::legacy::qemu::QemuBackend;
 
         assert!(FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
@@ -1842,7 +1842,7 @@ mod tests {
     #[test]
     fn the_parent_metadata_the_spawn_path_writes_resolves_through_the_capture_control() {
         use crate::checkpoint::VmFullControl as _;
-        use crate::workload_runner::standby_boot::factory_parent_config;
+        use crate::workload_runner::factory_parent_config;
         use mvm_core::util::test_env::TestEnv;
         use mvm_core::vm_backend::{StandbySpec, StartMode, VmStartConfig};
 
@@ -1879,7 +1879,7 @@ mod tests {
         };
 
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
-        crate::base::runtime_meta::record_from_start_config(
+        mvm_vmm::host::runtime_meta::record_from_start_config(
             &spec.id,
             StartMode::Detached,
             &parent_cfg,

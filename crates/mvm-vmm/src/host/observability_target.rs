@@ -4,12 +4,14 @@
 //! telemetry collectors (eBPF, procfs pollers, etc.) attach to the right
 //! host processes for a given VM without knowing backend-specific file
 //! layouts. It is persisted as part of `mode.json` by
-//! `crate::base::runtime_meta`.
+//! `crate::host::runtime_meta`.
 
 use std::path::PathBuf;
 
 use mvm_core::vm_backend::BackendKind;
 use serde::{Deserialize, Serialize};
+
+use crate::host::{egress_shared, netd_spawn, substitution_spawn};
 
 /// Identifies a process that an observability probe may attach to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,15 +179,15 @@ pub fn build_from_start_config(
     let mut helpers = vec![ProcessTarget {
         role: "substitution".to_string(),
         process_name: "mvm-substitution-endpoint".to_string(),
-        pid_file: state_dir.join(crate::substitution_spawn::SUBST_PID_FILE),
+        pid_file: state_dir.join(substitution_spawn::SUBST_PID_FILE),
         pid: None,
     }];
 
-    if mvm_vmm::host::egress_shared::l3_cmdline_token(start_config).is_some() {
+    if egress_shared::l3_cmdline_token(start_config).is_some() {
         helpers.push(ProcessTarget {
             role: "netd".to_string(),
             process_name: "mvm-netd".to_string(),
-            pid_file: state_dir.join(mvm_vmm::host::netd_spawn::NETD_PID_FILE),
+            pid_file: state_dir.join(netd_spawn::NETD_PID_FILE),
             pid: None,
         });
     }
@@ -208,7 +210,7 @@ pub fn build_from_start_config(
             socket_dir,
         },
         network: NetworkTarget {
-            has_netd: mvm_vmm::host::egress_shared::l3_cmdline_token(start_config).is_some(),
+            has_netd: egress_shared::l3_cmdline_token(start_config).is_some(),
             substitution_socket,
         },
         cgroup_path: None,

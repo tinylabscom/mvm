@@ -20,17 +20,17 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_build::hvf_supervisor::{
-    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
-};
 use mvm_core::config::{vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
     VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
+use mvm_vmm::host::hvf_supervisor::{
+    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
+};
 
-use crate::base::ui;
-use crate::workload_runner::cmdline;
+use mvm_vmm::host::cmdline;
+use mvm_vmm::host::ui;
 
 /// PID file the supervisor writes inside `vm_state_dir`. Distinct from the other
 /// backends' markers so HVF VMs coexist under the same `~/.mvm/vms/` root.
@@ -44,7 +44,7 @@ const PAUSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct HvfBackend;
 
 fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<ConsoleDataSocket> {
-    crate::workload_runner::spec_map::console_data_sockets(state_dir, dev_console)
+    mvm_vmm::host::spec_map::console_data_sockets(state_dir, dev_console)
         .into_iter()
         .map(|(guest_port, host_socket)| ConsoleDataSocket {
             guest_port,
@@ -150,7 +150,7 @@ pub(crate) fn wait_for_pause_state(path: &Path, paused: bool) -> Result<()> {
 
 /// Locate the per-VM HVF supervisor binary. Compiled by mvmctl's build script;
 /// see [`mvm_vmm::host::aux_bin`] for the search order.
-pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
+pub fn resolve_supervisor_path() -> Result<PathBuf> {
     mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvm-hvf-supervisor",
         env_var: "MVM_HVF_SUPERVISOR_PATH",
@@ -189,11 +189,14 @@ fn spawn_hvf_gating_endpoint_if_needed(
     state_dir: &Path,
     network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
     config_tenant: &str,
-) -> Result<(crate::substitution_spawn::EndpointGuard, Option<PathBuf>)> {
-    use crate::substitution_spawn::{
+) -> Result<(
+    mvm_vmm::host::substitution_spawn::EndpointGuard,
+    Option<PathBuf>,
+)> {
+    use mvm_core::policy::RedactionPolicy;
+    use mvm_vmm::host::substitution_spawn::{
         EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
-    use mvm_core::policy::RedactionPolicy;
 
     if !hvf_endpoint_needed(network_policy, state_dir) {
         return Ok((EndpointGuard::defused(), None));
@@ -289,7 +292,7 @@ fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
     // `mvm.runtime_data=` cmdline token. Only when the rootfs disk is present,
     // so the overlay never slides down to /dev/vda.
     if !disks.is_empty()
-        && let Some(overlay) = crate::microvm::non_verity_overlay_ext4(config)
+        && let Some(overlay) = mvm_vmm::host::boot_config::non_verity_overlay_ext4(config)
     {
         disks.push(HvfDisk {
             path: PathBuf::from(overlay),
@@ -324,7 +327,7 @@ fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
         if cmdline::runtime_overlay(config).is_none() {
             bail!("required-overlay hvf boot requires the runtime overlay artifact triple");
         }
-    } else if crate::microvm::non_verity_overlay_ext4(config).is_none() {
+    } else if mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_none() {
         bail!(
             "required-overlay hvf boot requires the runtime overlay artifact triple \
              (a non-verity boot mounts it as a plain read-only /dev/vdb)"
@@ -458,7 +461,7 @@ impl VmBackend for HvfBackend {
         let pid_file = state_dir.join(PID_FILE_NAME);
         let console_log = state_dir.join("console.log");
         // Create/truncate the console capture file up front.
-        let _ = crate::libkrun::open_console_capture(&console_log);
+        let _ = mvm_vmm::host::console_capture::open_console_capture(&console_log);
 
         // Clear any prior run's exit code so `wait` reads only this launch's.
         let workload_exit = state_dir.join("workload.exit");
@@ -527,7 +530,7 @@ impl VmBackend for HvfBackend {
             cmdline: cmdline::workload_cmdline(
                 config,
                 &state_dir,
-                crate::backends::hvf::workload_bootargs,
+                crate::legacy::hvf_bootargs::workload_bootargs,
             ),
             memory_mib: config.memory_mib,
             initramfs: cmdline::effective_initrd(config),
@@ -634,8 +637,8 @@ impl VmBackend for HvfBackend {
         // fails; defused once the VM is confirmed up (the stop path then owns
         // teardown).
         let mut host_agent_guard =
-            match crate::host_agent_spawn::register_host_agent_services_if_admitted(
-                crate::host_agent_spawn::HostAgentServicesParams {
+            match mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
+                mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
                     workload_id: &config.name,
                     tenant_id: config.tenant_id.as_deref(),
                     vm_name: &config.name,
@@ -646,7 +649,7 @@ impl VmBackend for HvfBackend {
                 Ok(g) => g,
                 Err(e) => {
                     tracing::warn!(vm = %config.name, error = %e, "host-agent registration failed for this VM");
-                    crate::host_agent_spawn::HostAgentServicesGuard::defused()
+                    mvm_vmm::host::host_agent_spawn::HostAgentServicesGuard::defused()
                 }
             };
 
@@ -677,12 +680,12 @@ impl VmBackend for HvfBackend {
         // Reap the per-VM substitution endpoint first (before the not-running
         // check), so a crashed VM's decrypted-secret process can't outlive the
         // guest. Idempotent + no-op when the VM spawned none (no secrets).
-        crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
+        mvm_vmm::host::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
         mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         // Deregister from the per-tenant host-agent daemon (no-op if this VM
         // never registered — an unadmitted dev VM, or a failed registration
         // that was already logged). The daemon itself stays warm.
-        crate::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
+        mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
         let pid_path = state_dir.join(PID_FILE_NAME);
         if let Some(pid) = read_pid(&pid_path) {
             terminate_pid(pid);
@@ -830,7 +833,7 @@ mod tests {
 
     #[test]
     fn supervisor_launch_support_respects_override_path() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
@@ -847,7 +850,7 @@ mod tests {
 
     #[test]
     fn degraded_host_still_advertises_failclosed_egress_caps() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
@@ -869,7 +872,7 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn launchable_supervisor_enables_virtiofs_root_dev_boot() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
@@ -1054,9 +1057,12 @@ mod tests {
         assert!(!disks[1].ephemeral);
 
         let dir = tempfile::tempdir().unwrap();
-        let assembled =
-            cmdline::workload_cmdline(&config, dir.path(), crate::backends::hvf::workload_bootargs)
-                .expect("cmdline");
+        let assembled = cmdline::workload_cmdline(
+            &config,
+            dir.path(),
+            crate::legacy::hvf_bootargs::workload_bootargs,
+        )
+        .expect("cmdline");
         assert!(
             assembled.contains("mvm.runtime_data=/dev/vdb"),
             "got: {assembled}"
@@ -1175,7 +1181,7 @@ mod tests {
     /// own tests).
     #[test]
     fn stop_reaps_host_agent_tenant_ref_marker() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -1221,7 +1227,7 @@ mod tests {
 
     #[test]
     fn supervisor_path_env_must_point_at_a_file() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();

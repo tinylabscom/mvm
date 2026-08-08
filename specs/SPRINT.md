@@ -147,23 +147,33 @@
 - [~] Extract `mvm-backends` crate — **plan 298**
       (`specs/plans/298-extract-mvm-backends-crate.md`). Rebased
       `feat/298-extract-mvm-backends` onto `origin/main` and resolved the
-      resulting conflicts in `Cargo.lock`, `mvm-runtime/Cargo.toml`,
-      `mvm-runtime/src/workload_runner/runner.rs`,
-      `mvm-runtime/src/lib.rs`,
-      `mvm-runtime/src/driver/spec.rs`,
-      `mvm-runtime/src/vsock_transport.rs`, and
-      `specs/REFACTOR-STATUS.md`. Host-side orchestration helpers
+      resulting conflicts. Host-side orchestration helpers
       (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`,
       `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`,
       `process_liveness`, `boot_config`, `egress_bridge`) now live in
-      `mvm-vmm::host`. Workspace `cargo nextest run --workspace`, `cargo
-      clippy --workspace --all-targets -- -D warnings`,
+      `mvm-vmm::host`, and substrate helpers
+      (`open_console_capture`, `runtime_meta`/`observability_target`, `ui`)
+      have also moved there. The new `mvm-backends` crate now owns the
+      HVF, libkrun, QEMU, and Mock `VmmDriver` implementations plus the
+      legacy `FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, and
+      `QemuBackend` shells; `mvm-runtime` depends on `mvm-backends` and
+      re-exports the driver surface for backward compatibility. Workspace
+      `cargo nextest run --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo xtask check-claim-catalog`, and `cargo xtask check-dormant-controls`
-      are green. Remaining: additional shared dependencies
-      (`libkrun::open_console_capture`, `microvm` pause/resume helpers,
-      `base::runtime_meta`, `base::ui`, backend-specific `firecracker`
-      snapshot helpers) must move or be parameterized before the concrete
-      drivers and legacy `VmBackend` shells can land in `mvm-backends`.
+      are green. Host command execution (`shell`, `linux_env`) also moved to
+      `mvm-vmm::host`, closing the last non-FC back-edge from the legacy
+      backends into `mvm-runtime`.
+
+      Remaining: `FcDriver` still lives in `mvm-runtime/src/driver/fc.rs`
+      because it couples to `crate::microvm`, `crate::firecracker`, and
+      `crate::vm::instance_snapshot` — it is the only backend whose snapshot
+      and fork mechanics were never expressed through the `VmmDriver` seam.
+      `specs/plans/298-extract-firecracker-driver.md` carries that work: one
+      `VmmDriver` trait for every backend with no Firecracker-shaped sibling,
+      the generic snapshot seam lifted into `mvm-vmm`, the FC mechanics made
+      private to `mvm-backends`, and a hard budget of zero new traits and zero
+      new structs (deleting `ForkVmFullRestorer`, whose one method, one impl
+      and one call site make it a closure rather than a trait).
 
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC

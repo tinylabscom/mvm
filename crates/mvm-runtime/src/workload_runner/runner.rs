@@ -44,13 +44,13 @@ use crate::workload_runner::child_grant::{ChildGrantIssuer, issue_child_grant};
 use crate::workload_runner::claim::{
     ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_plan_to_parent, parent_rootfs_digest,
 };
-use crate::workload_runner::cmdline;
-use crate::workload_runner::spec_map::{
+use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
+use mvm_vmm::host::cmdline;
+use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
+use mvm_vmm::host::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_dir_share_support,
     workload_spec, workload_vsock_ports,
 };
-use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
-use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 use mvm_vmm::host::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
     spawn_substitution_endpoint,
@@ -2238,7 +2238,7 @@ mod tests {
         assert_eq!(specs.len(), 1);
         let cmdline = &specs[0].cmdline;
 
-        let require_grant = crate::microvm::require_grant_cmdline_token(vm_name)
+        let require_grant = mvm_vmm::host::egress_bridge::require_grant_cmdline_token(vm_name)
             .expect("sidecar present ⇒ enforcement token");
         // Roothash and block-device tokens travel over vsock via
         // ActivateEnvironment, so the kernel cmdline only carries policy,

@@ -28,9 +28,9 @@ use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{RuntimeSourcePolicy, StandbyError, StandbySpec, VmStartConfig};
 
 use crate::driver::VmmSpec;
-use crate::workload_runner::cmdline;
-use crate::workload_runner::spec_map::workload_device_spec;
-use crate::workload_runner::spec_map::{WorkloadSockets, workload_vsock_ports};
+use mvm_vmm::host::cmdline;
+use mvm_vmm::host::spec_map::workload_device_spec;
+use mvm_vmm::host::spec_map::{WorkloadSockets, workload_vsock_ports};
 
 /// Refuse a factory parent whose boot inputs describe a guest that cannot reach
 /// an agent, naming the missing piece.
@@ -232,6 +232,7 @@ pub fn factory_parent_spec(
 
 /// Build the factory parent shape for the native HVF live handoff. The stable
 /// paths are inert until a claim links them to the child's own host channels.
+#[cfg(test)]
 pub fn factory_parent_spec_live(
     config: &VmStartConfig,
     state_dir: &Path,
@@ -280,7 +281,7 @@ mod tests {
     use mvm_core::vm_backend::{RuntimeSourcePolicy, VmVolume, VmVolumeKind};
     use mvm_net::channel::GuestService;
 
-    use crate::workload_runner::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
+    use mvm_vmm::host::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
 
     /// Point `MVM_HOME` at an empty directory for the caller's lifetime.
     ///

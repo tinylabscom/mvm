@@ -35,7 +35,6 @@ pub mod warm_readiness;
 pub mod apple_container;
 pub mod apple_container_backend;
 pub mod artifacts;
-pub mod audit_substrate;
 /// Shared resolve-or-build for the per-VM helper binaries `mvmctl` spawns
 /// (supervisors + the substitution endpoint); one impl, no drift.
 pub mod backend;
@@ -54,7 +53,6 @@ pub mod compat;
 pub mod docker_backend;
 pub mod driver;
 /// Per-VM transparent egress redirect used by the legacy libkrun gateway path.
-pub mod egress_redirect;
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by
 /// the libkrun + Firecracker substitution-endpoint spawn paths.
 pub mod firecracker;
@@ -67,7 +65,6 @@ pub mod image_lineage;
 /// the [`vmm::hv`] seam. `kvm::x86_boot` is pure logic
 /// (compiles + tests everywhere); the ioctl glue is Linux-only.
 pub mod kvm;
-pub mod libkrun;
 /// Namespace-agnostic hash-linked lineage walk + read-only enumeration shared by
 /// [`checkpoint`] and [`image_lineage`]. The walk traits stay crate-private (the
 /// stores provide concrete wrappers); the enumeration result types
@@ -89,7 +86,6 @@ pub mod mock_guest_agent;
 /// guest channels bound.
 pub mod netinit_audit;
 /// QEMU workload runtime backend (dev/test).
-pub mod qemu;
 /// Process-local reservation and rollback for resident warm parents.
 pub mod resident_pool;
 /// Capability-aware backend selection (fail-closed, no silent downgrade).
@@ -165,10 +161,10 @@ pub use base::{config, linux_env, shell, ui};
 pub use base::shell_mock;
 
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
-pub use libkrun::LibkrunBackend;
 #[cfg(feature = "test-support")]
 pub use mock::MockBackend;
-pub use qemu::QemuBackend;
+pub use mvm_backends::legacy::libkrun::LibkrunBackend;
+pub use mvm_backends::legacy::qemu::QemuBackend;
 pub use warm_service::{PrewarmFn, WarmLaunchService};
 pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 

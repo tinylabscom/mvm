@@ -563,6 +563,7 @@ jobs:
       matrix:
         package:
           - mvm-agentd
+          - mvm-backends
           - mvm-build
           - mvm-cli
           - mvm-core

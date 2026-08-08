@@ -47,7 +47,7 @@ fn main() {
 
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
-    use mvm_runtime::backends::hvf::driver::HvfDriver;
+    use mvm_runtime::driver::HvfDriver;
     use mvm_runtime::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
 
     let lan = discover_lan_ipv4().expect(

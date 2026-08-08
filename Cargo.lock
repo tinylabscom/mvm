@@ -2955,12 +2955,19 @@ name = "mvm-backends"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "ed25519-dalek",
+ "hex",
+ "libc",
+ "libkrun-sys",
  "mvm-agentd",
  "mvm-core",
  "mvm-net",
  "mvm-vmm",
+ "serde",
+ "serde_json",
  "tempfile",
  "tracing",
+ "which",
 ]
 
 [[package]]
@@ -3019,6 +3026,7 @@ dependencies = [
  "libc",
  "libkrun-sys",
  "mvm-agentd",
+ "mvm-backends",
  "mvm-build",
  "mvm-client",
  "mvm-contract",
@@ -3363,6 +3371,7 @@ version = "0.18.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
+ "flate2",
  "hex",
  "libc",
  "mio",

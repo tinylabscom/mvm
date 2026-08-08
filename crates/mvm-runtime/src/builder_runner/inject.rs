@@ -13,10 +13,10 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 use mvm_build::rootfs_inject::{InjectBinary, build_inject_initramfs};
+use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
-use crate::backends::hvf::backend::resolve_supervisor_path;
+use mvm_backends::legacy::hvf::resolve_supervisor_path;
 
 /// A rootfs-injection request.
 pub struct InjectRequest<'a> {

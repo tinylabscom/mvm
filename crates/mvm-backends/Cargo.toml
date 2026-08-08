@@ -8,6 +8,12 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+# Not a new category: this is the same "per-VM provider plumbing" mvm-runtime
+# already declares. The backend-local vsock listeners moved here with the
+# drivers, so only the crate that owns them changed.
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM provider plumbing (backend-local vsock listeners)"
+
 [dependencies]
 mvm-vmm = { workspace = true }
 mvm-core = { workspace = true }
@@ -15,6 +21,13 @@ mvm-net = { workspace = true }
 mvm-agentd = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+libkrun-sys = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+which = { workspace = true }
 
 [features]
 default = []
@@ -24,4 +37,5 @@ test-support = []
 workspace = true
 
 [dev-dependencies]
+mvm-vmm = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

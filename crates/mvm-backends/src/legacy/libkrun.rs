@@ -23,8 +23,6 @@
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
 
-use crate::base::ui;
-use crate::storage::volume::snapshot::SnapshotUpper;
 use anyhow::{Context, Result, anyhow, bail};
 use libkrun_sys::{
     BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
@@ -38,6 +36,8 @@ use mvm_core::vm_backend::{
     StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError,
     WarmStartOutcome,
 };
+use mvm_vmm::host::snapshot_upper::SnapshotUpper;
+use mvm_vmm::host::ui;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 /// libkrun backend (Linux KVM / macOS Hypervisor.framework).
 pub struct LibkrunBackend;
 
-use crate::substitution_spawn::EndpointGuard;
+use mvm_vmm::host::substitution_spawn::EndpointGuard;
 
 /// Spawn the per-VM egress endpoint for libkrun workloads. Secret-bound runs
 /// get the WireRequest substitution path; secret-free runs can opt into the
@@ -60,7 +60,7 @@ fn spawn_libkrun_egress_endpoint_if_needed(
     config_tenant: &str,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> Result<EndpointGuard> {
-    use crate::substitution_spawn::{
+    use mvm_vmm::host::substitution_spawn::{
         EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
     let default_redaction = mvm_core::policy::RedactionPolicy::default();
@@ -131,23 +131,12 @@ pub(crate) const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 /// the always-escalate cargo-spawn / launchd path a shorter timeout
 /// means `mvmctl stop` returns in 2 s instead of 5 s. Shared with the libkrun
 /// driver's `kill` escalation.
-pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+pub const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Open the per-VM guest-console capture sink. OUTPUT-ONLY by
 /// construction (write-only, create+truncate): the guest console
 /// streams here and NO host-readable fd is ever attached as console
 /// input. The sole interactive path into a guest is the interactive-gated
-/// agent vsock console (claim 15 — no interactive access to a sealed prod
-/// microVM), absent from sealed prod agents. Centralized so the write-only
-/// invariant lives in one place.
-pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-}
-
 /// Default kernel cmdline for libkrun-launched guests.
 /// `console=hvc0` matches libkrun's virtio-console wiring;
 /// `root=/dev/vda rw init=/init` matches Apple Container's
@@ -257,17 +246,16 @@ fn standby_attach_config(
         plan,
         bundle,
         network_policy,
-        transparent_terminator_port: claim
-            .start_config
-            .as_ref()
-            .map(|config| crate::egress_redirect::terminator_port_for_vm_name(&config.name)),
+        transparent_terminator_port: claim.start_config.as_ref().map(|config| {
+            mvm_vmm::host::egress_redirect::terminator_port_for_vm_name(&config.name)
+        }),
     })
 }
 
 pub(crate) fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
     let path = Path::new(kernel);
     if cfg!(target_arch = "x86_64") && path.exists() {
-        let loadable = mvm_build::fc_kernel::ensure_fc_loadable_kernel(path)
+        let loadable = mvm_vmm::host::fc_kernel::ensure_fc_loadable_kernel(path)
             .with_context(|| format!("preparing x86_64 libkrun-loadable kernel from {kernel}"))?;
         return Ok((loadable.to_string_lossy().into_owned(), KernelFormat::Elf));
     }
@@ -339,7 +327,7 @@ fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result<()>
         if libkrun_runtime_overlay(config).is_none() {
             bail!("required-overlay libkrun boot requires the runtime overlay artifact triple");
         }
-    } else if crate::microvm::non_verity_overlay_ext4(config).is_none() {
+    } else if mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_none() {
         bail!(
             "required-overlay libkrun boot requires the runtime overlay artifact triple \
              (a non-verity boot mounts it as a plain read-only /dev/vdb)"
@@ -364,11 +352,11 @@ fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
         cmdline.push(' ');
         cmdline.push_str(&uvols);
     }
-    if let Some(token) = crate::microvm::verb_grant_cmdline_token(&config.name) {
+    if let Some(token) = mvm_vmm::host::egress_bridge::verb_grant_cmdline_token(&config.name) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
+    if let Some(token) = mvm_vmm::host::egress_bridge::require_grant_cmdline_token(&config.name) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -383,9 +371,9 @@ fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
     // `/dev/vdb`; emit the token its `/init` mounts from. Verity boots already
     // emitted the dm-verity variant above.
     if !libkrun_verity_enabled(config)
-        && let Some(overlay_args) = crate::microvm::build_runtime_overlay_cmdline_args(
+        && let Some(overlay_args) = mvm_vmm::host::boot_config::build_runtime_overlay_cmdline_args(
             None,
-            crate::microvm::non_verity_overlay_ext4(config).is_some(),
+            mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_some(),
         )
     {
         cmdline.push(' ');
@@ -397,7 +385,7 @@ fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
     ));
     // Vsock-only guests have no config drive, so the grant trust anchor rides
     // the cmdline instead.
-    if let Some(token) = crate::microvm::host_signer_pub_cmdline_token(&config.name) {
+    if let Some(token) = mvm_vmm::host::egress_bridge::host_signer_pub_cmdline_token(&config.name) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -445,7 +433,7 @@ fn attach_workload_rootfs(mut krun: KrunContext, config: &VmStartConfig) -> Krun
         // so attach it as a plain read-only virtio-blk device. `rootfs_path`
         // takes /dev/vda, so this first extra disk is /dev/vdb — the device the
         // `mvm.runtime_data=` token names for the guest `/init`.
-        if let Some(overlay) = crate::microvm::non_verity_overlay_ext4(config) {
+        if let Some(overlay) = mvm_vmm::host::boot_config::non_verity_overlay_ext4(config) {
             krun = krun.add_disk("runtime", overlay.to_string(), true);
         }
     }
@@ -554,14 +542,17 @@ fn build_workload_krun_context(
 /// harmless after the guard above.)
 fn resolve_audit_substrate(
     config: &VmStartConfig,
-) -> Result<crate::audit_substrate::AuditSubstrate> {
+) -> Result<mvm_vmm::host::audit_substrate::AuditSubstrate> {
     if let Some(tenant) = config.tenant_id.as_deref() {
-        crate::audit_substrate::validate_tenant_id(tenant)?;
+        mvm_vmm::host::audit_substrate::validate_tenant_id(tenant)?;
     }
     Ok(if config.plan_json.is_some() {
-        crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?
+        mvm_vmm::host::audit_substrate::compute_audit_substrate(
+            &config.name,
+            config.tenant_id.as_deref(),
+        )?
     } else {
-        crate::audit_substrate::AuditSubstrate::default()
+        mvm_vmm::host::audit_substrate::AuditSubstrate::default()
     })
 }
 
@@ -626,9 +617,9 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         // explicit while a future change can introduce policy-driven
         // selection.
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
-        transparent_terminator_port: Some(crate::egress_redirect::terminator_port_for_vm_name(
-            &config.name,
-        )),
+        transparent_terminator_port: Some(
+            mvm_vmm::host::egress_redirect::terminator_port_for_vm_name(&config.name),
+        ),
         egress_relay_socket: None,
     })
 }
@@ -873,11 +864,11 @@ impl VmBackend for LibkrunBackend {
         // `/mvm/runtime` mount point. Fires before the supervisor
         // spawn so a refusal leaves no PID file or krun handle behind.
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_build::builder_vm::admit_runtime_overlay_contract(
+        mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(
             rootfs_dir,
             config.runtime_source_policy,
         )?;
-        crate::base::runtime_meta::record_from_start_config(
+        mvm_vmm::host::runtime_meta::record_from_start_config(
             &config.name,
             StartMode::Detached,
             config,
@@ -919,12 +910,15 @@ impl VmBackend for LibkrunBackend {
         // per-VM log so a boot failure / kernel panic is diagnosable
         // (mirrors firecracker.log). Best-effort: fall back to null if
         // the file can't be created.
-        let console_log = open_console_capture(&vm_console_log(&config.name))
-            .map(Stdio::from)
-            .unwrap_or_else(|_| Stdio::null());
-        let supervisor_stderr = open_console_capture(&state_dir.join("supervisor.stderr.log"))
-            .map(Stdio::from)
-            .unwrap_or_else(|_| Stdio::inherit());
+        let console_log =
+            mvm_vmm::host::console_capture::open_console_capture(&vm_console_log(&config.name))
+                .map(Stdio::from)
+                .unwrap_or_else(|_| Stdio::null());
+        let supervisor_stderr = mvm_vmm::host::console_capture::open_console_capture(
+            &state_dir.join("supervisor.stderr.log"),
+        )
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::inherit());
         let mut child = Command::new(&supervisor_path)
             .stdin(Stdio::piped())
             .stdout(console_log)
@@ -1011,9 +1005,9 @@ impl VmBackend for LibkrunBackend {
         // (the default; opt out with MVM_HOST_AGENT_DAEMON=0).
         let broker_listen_socket =
             mvm_core::config::vm_vsock_port_socket(&config.name, mvm_agentd::vsock::BROKER_PORT);
-        let mut broker_guard = if crate::host_agent_spawn::host_agent_daemon_enabled() {
-            match crate::host_agent_spawn::register_host_agent_services_if_admitted(
-                crate::host_agent_spawn::HostAgentServicesParams {
+        let mut broker_guard = if mvm_vmm::host::host_agent_spawn::host_agent_daemon_enabled() {
+            match mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
+                mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
                     workload_id: &config.name,
                     tenant_id: config.tenant_id.as_deref(),
                     vm_name: &config.name,
@@ -1021,15 +1015,15 @@ impl VmBackend for LibkrunBackend {
                     broker_listen_socket: &broker_listen_socket,
                 },
             ) {
-                Ok(g) => crate::host_agent_spawn::ServicesGuard::Agent(g),
+                Ok(g) => mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent(g),
                 Err(e) => {
                     tracing::warn!(vm = %config.name, error = %e, "host-agent registration failed; host.audit.v1 unavailable for this VM");
-                    crate::host_agent_spawn::ServicesGuard::None
+                    mvm_vmm::host::host_agent_spawn::ServicesGuard::None
                 }
             }
         } else {
-            match crate::broker_services_spawn::spawn_broker_services_if_admitted(
-                crate::broker_services_spawn::BrokerServicesSpawnParams {
+            match mvm_vmm::host::broker_services_spawn::spawn_broker_services_if_admitted(
+                mvm_vmm::host::broker_services_spawn::BrokerServicesSpawnParams {
                     workload_id: &config.name,
                     tenant_id: config.tenant_id.as_deref(),
                     vm_name: &config.name,
@@ -1037,10 +1031,10 @@ impl VmBackend for LibkrunBackend {
                     broker_listen_socket: &broker_listen_socket,
                 },
             ) {
-                Ok(guard) => crate::host_agent_spawn::ServicesGuard::Fork(guard),
+                Ok(guard) => mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork(guard),
                 Err(e) => {
                     tracing::warn!(vm = %config.name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
-                    crate::host_agent_spawn::ServicesGuard::None
+                    mvm_vmm::host::host_agent_spawn::ServicesGuard::None
                 }
             }
         };
@@ -1060,16 +1054,19 @@ impl VmBackend for LibkrunBackend {
         // spawned) so a crashed VM's decrypted-secret process can't outlive the
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
-        crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        mvm_vmm::host::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
         mvm_vmm::host::netd_spawn::reap_netd(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer too (no-op when none spawned),
         // so they can't outlive the guest.
-        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
+        mvm_vmm::host::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
         // If this VM registered with a per-tenant host-agent daemon instead of
         // forking a broker, deregister it + reap its audit-signer (no-op for the
         // fork path; the daemon stays warm). The two reaps compose — each is a
         // no-op for the other path.
-        crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
+        mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(
+            &vm_state_dir(&id.0),
+            &id.0,
+        );
 
         let pid_path = vm_libkrun_pid(&id.0);
         let pid = match read_pid(&pid_path) {
@@ -1415,7 +1412,7 @@ impl VmBackend for LibkrunBackend {
 
 /// Resolve the absolute path to the `mvm-libkrun-supervisor` binary. Compiled
 /// by mvmctl's build script; see [`mvm_vmm::host::aux_bin`] for the search order.
-pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
+pub fn resolve_supervisor_path() -> Result<PathBuf> {
     mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvm-libkrun-supervisor",
         env_var: "MVM_LIBKRUN_SUPERVISOR_PATH",
@@ -1521,7 +1518,7 @@ mod tests {
         use std::io::{Read, Write};
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = tmp.path().join("console.log");
-        let mut f = open_console_capture(&p).expect("open sink");
+        let mut f = mvm_vmm::host::console_capture::open_console_capture(&p).expect("open sink");
         f.write_all(b"boot log line\n")
             .expect("console capture must accept output");
         let mut buf = String::new();
@@ -1994,7 +1991,7 @@ mod tests {
     /// `HOME` (or `MVM_LIBKRUN_SUPERVISOR_PATH`) mid-call and corrupt
     /// our assertions.
     fn with_env<F: FnOnce()>(body: F) {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         body();
@@ -2218,7 +2215,7 @@ mod tests {
         // No pidfile was written (nothing spawned).
         assert!(
             !tmp.path()
-                .join(crate::substitution_spawn::SUBST_PID_FILE)
+                .join(mvm_vmm::host::substitution_spawn::SUBST_PID_FILE)
                 .exists()
         );
     }
@@ -2279,7 +2276,7 @@ mod tests {
     /// an auto-fallback HVF→libkrun must not land on a backend that drops them.
     #[test]
     fn build_supervisor_config_cmdline_carries_all_three_grant_tokens() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
@@ -2309,7 +2306,9 @@ mod tests {
             "verb grant token missing: {cmdline}"
         );
         assert!(
-            cmdline.contains(&crate::microvm::require_grant_cmdline_token(vm_name).unwrap()),
+            cmdline.contains(
+                &mvm_vmm::host::egress_bridge::require_grant_cmdline_token(vm_name).unwrap()
+            ),
             "require_grant token missing: {cmdline}"
         );
         assert!(

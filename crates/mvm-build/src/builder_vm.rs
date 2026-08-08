@@ -688,13 +688,7 @@ impl BuilderVm for StubBuilderVm {
 /// clock from it, otherwise a cold Nix store's HTTPS fetch fails cert validation
 /// ("certificate is not yet valid"). Appended fresh at each launch so the clock
 /// tracks real time, not a stale image constant.
-pub fn builder_hostepoch_cmdline_token() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("mvm.hostepoch={secs}")
-}
+pub use mvm_vmm::host::boot_config::builder_hostepoch_cmdline_token;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderVmRunConfig {
@@ -1088,47 +1082,7 @@ pub fn admit_overlay_aware(rootfs_dir: &Path) -> Result<(), anyhow::Error> {
 /// overlay-awareness claim. `RequiredOverlay` additionally requires a
 /// runtime-lean rootfs so the boot contract cannot silently degrade back to a
 /// baked agent/netinit pair.
-pub fn admit_runtime_overlay_contract(
-    rootfs_dir: &Path,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-) -> Result<(), anyhow::Error> {
-    let sidecar = GuestSidecar::read_from_dir(rootfs_dir)?;
-    match sidecar {
-        None => Err(anyhow::anyhow!(
-            "refusing to start VM: rootfs at {} has no `mvm-meta.json` sidecar. \
-             The build pipeline that produced this rootfs predates the W6.2 \
-             sidecar emit, which means it also predates W1.4b runtime overlay \
-             (no `/mvm/runtime` mount point in the rootfs). Rebuild the image \
-             with current mkGuest, or drop the cached template.",
-            rootfs_dir.display()
-        )),
-        Some(s) if !s.is_overlay_aware() => Err(anyhow::anyhow!(
-            "refusing to start VM: rootfs at {} has `overlay_aware: false` \
-             in its `mvm-meta.json` sidecar. Pre-W1.4b cached templates have \
-             no `/mvm/runtime` mount point; attaching the runtime overlay disk \
-             to them would either fail or silently degrade to the baked-in \
-             agent. Rebuild the image with current mkGuest \
-             (`passthru.mvm.overlayAware = true`).",
-            rootfs_dir.display()
-        )),
-        Some(s)
-            if runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-                && !s.is_runtime_lean() =>
-        {
-            Err(anyhow::anyhow!(
-                "refusing to start VM: rootfs at {} is marked `overlayAware: true` but \
-                 not `runtimeLean: true` in its `mvm-meta.json` sidecar. Required-overlay \
-                 boots must use a rootfs that intentionally omits the baked \
-                 `/usr/local/bin/mvm-guest-agent` + `mvm-guest-netinit` fallback so the \
-                 boot contract cannot silently degrade. Rebuild the image with the \
-                 sealed/required-overlay mkGuest shape.",
-                rootfs_dir.display()
-            ))
-        }
-        Some(_) => Ok(()),
-    }
-}
+pub use mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract;
 
 #[cfg(test)]
 mod tests {

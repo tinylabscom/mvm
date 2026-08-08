@@ -26,5 +26,5 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(args: &Args) -> Result<()> {
-    mvm_runtime::qemu::run_vsock_bridge_from_spec_file(&args.spec)
+    mvm_backends::legacy::qemu::run_vsock_bridge_from_spec_file(&args.spec)
 }

@@ -56,8 +56,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::base::ui;
-use crate::libkrun::open_console_capture;
+use mvm_vmm::host::ui;
 
 /// QEMU workload backend (Linux dev/test; KVM where present, TCG fallback).
 pub struct QemuBackend;
@@ -153,7 +152,7 @@ fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
         if qemu_runtime_overlay(config).is_none() {
             bail!("required-overlay qemu boot requires the runtime overlay artifact triple");
         }
-    } else if crate::microvm::non_verity_overlay_ext4(config).is_none() {
+    } else if mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_none() {
         bail!(
             "required-overlay qemu boot requires the runtime overlay artifact triple \
              (a non-verity boot mounts it as a plain read-only /dev/vdb)"
@@ -172,15 +171,15 @@ fn qemu_cmdline(config: &VmStartConfig) -> String {
         cmdline.push(' ');
         cmdline.push_str(&uvols);
     }
-    if let Some(token) = crate::microvm::verb_grant_cmdline_token(&config.name) {
+    if let Some(token) = mvm_vmm::host::egress_bridge::verb_grant_cmdline_token(&config.name) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
+    if let Some(token) = mvm_vmm::host::egress_bridge::require_grant_cmdline_token(&config.name) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    if let Some(verity_args) = crate::microvm::build_verity_cmdline_args(
+    if let Some(verity_args) = mvm_vmm::host::boot_config::build_verity_cmdline_args(
         config.roothash.as_deref(),
         if qemu_verity_enabled(config) {
             qemu_runtime_overlay(config).map(|(_, _, roothash)| roothash)
@@ -195,9 +194,9 @@ fn qemu_cmdline(config: &VmStartConfig) -> String {
     // `/dev/vdb`; emit the token its `/init` mounts from. Verity boots already
     // emitted the dm-verity variant above.
     if !qemu_verity_enabled(config)
-        && let Some(overlay_args) = crate::microvm::build_runtime_overlay_cmdline_args(
+        && let Some(overlay_args) = mvm_vmm::host::boot_config::build_runtime_overlay_cmdline_args(
             None,
-            crate::microvm::non_verity_overlay_ext4(config).is_some(),
+            mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_some(),
         )
     {
         cmdline.push(' ');
@@ -241,7 +240,7 @@ fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
     // attach it as a plain read-only virtio-blk device right after the rootfs
     // (=> /dev/vdb). The guest `/init` mounts it from the matching
     // `mvm.runtime_data=` cmdline token.
-    if let Some(overlay) = crate::microvm::non_verity_overlay_ext4(config) {
+    if let Some(overlay) = mvm_vmm::host::boot_config::non_verity_overlay_ext4(config) {
         drives.push(format!("file={overlay},if=virtio,format=raw,readonly=on"));
     }
     append_qemu_user_disks(&mut drives, config);
@@ -318,11 +317,11 @@ impl VmBackend for QemuBackend {
         // overlay-aware contract hold on QEMU-launched VMs too.
         let rootfs = Path::new(&config.rootfs_path);
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_build::builder_vm::admit_runtime_overlay_contract(
+        mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(
             rootfs_dir,
             config.runtime_source_policy,
         )?;
-        crate::base::runtime_meta::record_from_start_config(
+        mvm_vmm::host::runtime_meta::record_from_start_config(
             &config.name,
             StartMode::Detached,
             config,
@@ -349,7 +348,7 @@ impl VmBackend for QemuBackend {
         // write-only opener so the invariant + truncate-on-boot match the
         // other backends.
         drop(
-            open_console_capture(&console_log)
+            mvm_vmm::host::console_capture::open_console_capture(&console_log)
                 .map_err(|e| anyhow!("open console sink {}: {e}", console_log.display()))?,
         );
 

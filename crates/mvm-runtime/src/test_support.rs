@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 use std::error::Error;
 #[cfg(test)]
 use std::os::unix::net::UnixListener;
@@ -13,7 +13,7 @@ fn is_permission_denied_io(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::PermissionDenied
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) fn error_chain_has_permission_denied(err: &(dyn Error + 'static)) -> bool {
     if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
         return is_permission_denied_io(io_err);

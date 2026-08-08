@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-07
+Last updated: 2026-08-08
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -298,11 +298,12 @@ for detailed scope and acceptance criteria.
   - [x] Host `virtiofsd` helper moved to `mvm-vmm`
   - [x] Shared host helpers (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`, `process_liveness`) moved to `mvm-vmm::host`
   - [x] Microvm boot/cmdline helpers (`boot_config`, `egress_bridge`) moved to `mvm-vmm::host`
+  - [x] Substrate helpers (`open_console_capture`, `runtime_meta`/`observability_target`, `ui`) moved to `mvm-vmm::host`
   - [x] `mvm-backends` crate scaffolded; `MockDriver` lives under `test-support`
-  - [ ] Move remaining shared dependencies (`libkrun::open_console_capture`, `microvm` pause/resume helpers, `base::runtime_meta`, `base::ui`, backend-specific `firecracker` snapshot helpers) so `mvm-backends` can stay acyclic
-  - [ ] Move concrete drivers (`FcDriver`, `HvfDriver`, `LibkrunDriver`, `QemuDriver`) into `mvm-backends`
-  - [ ] Move legacy `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`) into `mvm-backends`
-  - [ ] Wire `mvm-runtime` to depend on `mvm-backends` and remove local driver/backend source files
+  - [x] Host command execution (`shell`, `linux_env`) moved to `mvm-vmm::host`
+  - [~] Move concrete drivers: `HvfDriver`, `LibkrunDriver`, `QemuDriver`, and `MockDriver` moved into `mvm-backends`; `FcDriver` remains in `mvm-runtime` pending extraction of FC-specific `microvm`/`firecracker`/`vm::instance_snapshot` mechanics — handed off to `specs/plans/298-extract-firecracker-driver.md`
+  - [x] Move legacy `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`) into `mvm-backends`
+  - [x] Wire `mvm-runtime` to depend on `mvm-backends` and re-export the driver surface; removed local HVF/libkrun/QEMU/Mock driver and legacy backend source files
 - [ ] Plan 298 — NANDA-style execution receipts and conformance badges
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`)
   - [x] WS1 RFC approved: `ExecutionReceipt` and `ConformanceBadge` envelopes,
