@@ -225,6 +225,30 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
   the drivers use (`anyhow`, `serde`, `tokio`, etc.). Do **not** depend on
   `mvm-runtime` or `mvm-build`.
 
+- [ ] **Step 1b: Extract remaining shared dependencies**
+
+  The concrete drivers and legacy `VmBackend` shells still reference
+  `mvm-runtime`-local modules that must move (or be parameterized) before
+  the backends can live in `mvm-backends`:
+
+  - `libkrun::open_console_capture` → `mvm-vmm::host::console_capture`.
+  - `microvm::{pause_vm, resume_vm, secure_vsock_socket_for_caller}` →
+    `mvm-vmm::host`.
+  - `base::runtime_meta::{record_from_start_config, HOME_TEST_LOCK}` → a
+    small `mvm-vmm::host::runtime_meta` module (only the substrate parts;
+    policy stays in `mvm-runtime`).
+  - `base::ui` progress helpers → either move to `mvm-vmm::host` or pass
+    a callback so backends do not import UI code.
+  - `firecracker` module (pid checks, `FcVmFullControl`, `FcForkRestorer`,
+    `FirecrackerIO`) → keep backend-specific, so move it with the
+    Firecracker driver into `mvm-backends::firecracker` rather than into
+    `mvm-vmm`.
+  - `vm::instance_snapshot` orchestration used by warm-claim/fork paths →
+    parameterize through the `VmmDriver` seam or keep a thin runtime adapter.
+
+  Inventory produced by the rebase shows these couplings; resolve them
+  before Step 2.
+
 - [ ] **Step 2: Move driver modules**
 
   Move `driver/fc.rs`, `driver/hvf.rs`, `driver/libkrun.rs`, `driver/qemu.rs`,

@@ -299,6 +299,7 @@ for detailed scope and acceptance criteria.
   - [x] Shared host helpers (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`, `process_liveness`) moved to `mvm-vmm::host`
   - [x] Microvm boot/cmdline helpers (`boot_config`, `egress_bridge`) moved to `mvm-vmm::host`
   - [x] `mvm-backends` crate scaffolded; `MockDriver` lives under `test-support`
+  - [ ] Move remaining shared dependencies (`libkrun::open_console_capture`, `microvm` pause/resume helpers, `base::runtime_meta`, `base::ui`, backend-specific `firecracker` snapshot helpers) so `mvm-backends` can stay acyclic
   - [ ] Move concrete drivers (`FcDriver`, `HvfDriver`, `LibkrunDriver`, `QemuDriver`) into `mvm-backends`
   - [ ] Move legacy `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`) into `mvm-backends`
   - [ ] Wire `mvm-runtime` to depend on `mvm-backends` and remove local driver/backend source files
