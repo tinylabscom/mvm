@@ -2,6 +2,8 @@
 
 **Status: OPEN — no workstream started**
 
+Tracking: #2256
+
 ## Why
 
 An external agent-supervision substrate (reviewed 2026-08-08; a Python
