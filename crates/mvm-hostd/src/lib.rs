@@ -58,6 +58,9 @@ pub mod netd;
 /// about its own networking. Node-local by construction: it answers only
 /// from state this node owns, scoped to the caller the kernel identifies.
 pub mod nodectl;
+/// Redacting panic hook for the daemon bins. A panic payload is the one
+/// string the no-`Display`-on-secret-types gate cannot reach.
+pub mod panic_hook;
 /// Child-side parent-death watchdog: each subprocess-moat bin exits the
 /// instant its supervisor dies, closing the macOS / abnormal-death gap the
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.

@@ -564,6 +564,23 @@ opt-level = 3
 strip = true
 lto = true
 codegen-units = 1
+# Wrapping arithmetic is not a safe default for this workspace. The ext4
+# writer, the OCI unpacker, the vsock frame parser and the datapath ingress all
+# do length arithmetic over bytes an attacker chooses, and all four are fuzzed
+# — under a profile that traps overflow, against a shipped binary that did not.
+# A wrapped length is a bounds check that silently passes. Trapping costs a few
+# percent on the hot paths and turns that class of bug into a fail-closed abort
+# instead of a memory-safety-adjacent surprise.
+overflow-checks = true
+
+# `release` semantics (no debug assertions, trapping overflow) without paying
+# fat LTO and single-codegen-unit linking on a ~4,350-test suite. This is what
+# the release-profile witness lane builds with; it is not a shipping profile.
+[profile.release-witness]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
 
 # Speed up `cargo test --workspace` by giving the test profile more
 # parallel codegen units and dropping debug info to line tables only.

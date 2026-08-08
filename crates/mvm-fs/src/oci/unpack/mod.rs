@@ -248,6 +248,22 @@ pub struct UnpackOptions {
     /// [`SetidPolicy::RefuseUnsigned`]; production callers with a
     /// valid cosign result use [`SetidPolicy::PreserveVerified`].
     pub setid_policy: SetidPolicy,
+
+    /// Refuse a layer whose entries sum to more than this many bytes.
+    ///
+    /// This is the *decompressed* bound. The fetcher's `max_size` counts bytes
+    /// as they come off the wire, which is the wrong quantity for a compressed
+    /// layer: gzip will happily turn a megabyte the cap accepts into a
+    /// terabyte on disk. The default (8 GiB) clears the largest plausible real
+    /// image by a wide margin while keeping the ratio an attacker can exploit
+    /// finite.
+    pub max_total_bytes: u64,
+
+    /// Refuse a layer holding more than this many tar entries. Bounds the
+    /// many-small-files variant, where no single entry is suspicious and the
+    /// count is the attack. The default (2,000,000) is roughly two orders of
+    /// magnitude above a large distro image.
+    pub max_entries: u64,
 }
 
 impl Default for UnpackOptions {
@@ -257,6 +273,8 @@ impl Default for UnpackOptions {
             strip_timestamps: true,
             xattr_policy: XattrPolicy::PreserveAllowlisted,
             setid_policy: SetidPolicy::PreserveDev,
+            max_total_bytes: 8 * 1024 * 1024 * 1024,
+            max_entries: 2_000_000,
         }
     }
 }
@@ -500,6 +518,21 @@ pub enum UnpackError {
     /// subset of `output_root`'s subtree.
     #[error("output_root must exist as a directory; got {0:?}")]
     OutputRootNotADir(PathBuf),
+
+    /// The layer's entries sum to more bytes than
+    /// [`UnpackOptions::max_total_bytes`]. This is the decompressed bound: the
+    /// fetcher's size cap counts bytes off the wire, which a compressed layer
+    /// expands past by whatever ratio the attacker chooses. Aborts the unpack
+    /// rather than refusing one entry — once the total is over, the tarball is
+    /// not a thing we want to keep reading.
+    #[error("layer expands to more than the {cap}-byte unpack cap")]
+    TotalBytesExceeded { cap: u64 },
+
+    /// The layer holds more entries than [`UnpackOptions::max_entries`].
+    /// Bounds the small-file variant of the same attack, where each entry is
+    /// harmless and the count is the payload.
+    #[error("layer holds more than the {cap}-entry unpack cap")]
+    EntryCountExceeded { cap: u64 },
 }
 
 /// Unpack a single layer tarball under `output_root`, applying the
@@ -590,7 +623,22 @@ fn unpack_layer_inner<R: Read>(
     let mut current_layer_paths = HashSet::new();
     let mut case_fold_index = CaseFoldIndex::new(folding, prior_layer_paths);
 
+    // Decompressed-side resource bounds. Counted per entry so an over-cap
+    // layer is refused as it streams, rather than after it has already been
+    // written to disk. The tar framing means `entry.size()` is authoritative
+    // for how many payload bytes this entry will yield — the reader consumes
+    // exactly that many — so summing headers bounds the real write volume
+    // without buffering anything to find out.
+    let mut total_bytes: u64 = 0;
+    let mut entry_count: u64 = 0;
+
     for entry_result in archive.entries()? {
+        entry_count += 1;
+        if entry_count > options.max_entries {
+            return Err(UnpackError::EntryCountExceeded {
+                cap: options.max_entries,
+            });
+        }
         let mut entry = match entry_result {
             Ok(e) => e,
             Err(_) => {
@@ -606,6 +654,16 @@ fn unpack_layer_inner<R: Read>(
                 continue;
             }
         };
+
+        // Charge the entry's declared payload against the total before any of
+        // it is materialized. `saturating_add` so a header claiming u64::MAX
+        // trips the cap instead of wrapping past it.
+        total_bytes = total_bytes.saturating_add(entry.size());
+        if total_bytes > options.max_total_bytes {
+            return Err(UnpackError::TotalBytesExceeded {
+                cap: options.max_total_bytes,
+            });
+        }
 
         let raw_path = entry.path_bytes().to_vec();
 
@@ -984,6 +1042,124 @@ mod tests {
             &HashSet::new(),
             folding,
         )
+    }
+
+    /// The fetcher's size cap counts bytes off the wire, so a compressed
+    /// layer can clear it and still expand without bound. This is the cap on
+    /// the side that matters: what actually lands on disk.
+    #[test]
+    fn a_layer_over_the_total_byte_cap_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let layer = build_tar(|b| {
+            add_file(b, "a", b"0123456789");
+            add_file(b, "b", b"0123456789");
+        });
+        let options = UnpackOptions {
+            max_total_bytes: 15,
+            ..UnpackOptions::default()
+        };
+        let err = unpack_layer_inner(
+            Cursor::new(layer),
+            tmp.path(),
+            &options,
+            &HashSet::new(),
+            HostCaseFolding::Sensitive,
+        )
+        .expect_err("20 bytes of entries must not pass a 15-byte cap");
+        assert!(
+            matches!(err, UnpackError::TotalBytesExceeded { cap: 15 }),
+            "got {err:?}"
+        );
+    }
+
+    /// The shape an actual bomb takes: a header declaring far more payload
+    /// than the layer could ever hold, so the cost lands before any of it is
+    /// read.
+    ///
+    /// A header claiming `u64::MAX` is *not* the case to test — the tar
+    /// crate's own validation rejects that one first and it arrives as a
+    /// `MalformedHeader` refusal, never reaching the accumulator. The
+    /// `saturating_add` in the loop covers that arithmetic regardless; this
+    /// test drives the size a bomb can actually get past the framing.
+    #[test]
+    fn a_header_declaring_more_than_the_cap_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        const ONE_TIB: u64 = 1 << 40;
+        let layer = build_tar(|b| {
+            let mut header = tar::Header::new_gnu();
+            header.set_path("bomb").unwrap();
+            header.set_size(ONE_TIB);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            b.append(&header, std::io::empty()).unwrap();
+        });
+        let err = unpack_layer_inner(
+            Cursor::new(layer),
+            tmp.path(),
+            &UnpackOptions::default(),
+            &HashSet::new(),
+            HostCaseFolding::Sensitive,
+        )
+        .expect_err("a 1 TiB declared entry must not pass the default 8 GiB cap");
+        assert!(
+            matches!(err, UnpackError::TotalBytesExceeded { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// The many-small-files variant, where no single entry looks wrong and
+    /// the count is the payload.
+    #[test]
+    fn a_layer_over_the_entry_count_cap_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let layer = build_tar(|b| {
+            for i in 0..10 {
+                add_file(b, &format!("f{i}"), b"x");
+            }
+        });
+        let options = UnpackOptions {
+            max_entries: 4,
+            ..UnpackOptions::default()
+        };
+        let err = unpack_layer_inner(
+            Cursor::new(layer),
+            tmp.path(),
+            &options,
+            &HashSet::new(),
+            HostCaseFolding::Sensitive,
+        )
+        .expect_err("10 entries must not pass a 4-entry cap");
+        assert!(
+            matches!(err, UnpackError::EntryCountExceeded { cap: 4 }),
+            "got {err:?}"
+        );
+    }
+
+    /// The caps must not fire on ordinary layers — otherwise the three tests
+    /// above would pass no matter what the unpacker did.
+    #[test]
+    fn an_ordinary_layer_passes_the_default_caps() {
+        let tmp = TempDir::new().unwrap();
+        let layer = build_tar(|b| {
+            add_dir(b, "usr");
+            add_file(b, "usr/hello", b"contents");
+            add_file(b, "usr/world", b"more contents");
+        });
+        let report = unpack_layer_inner(
+            Cursor::new(layer),
+            tmp.path(),
+            &UnpackOptions::default(),
+            &HashSet::new(),
+            HostCaseFolding::Sensitive,
+        )
+        .expect("a normal layer must unpack under the default caps");
+        assert!(report.refused.is_empty(), "{:?}", report.refused);
+        assert_eq!(report.files_written, 2);
+        assert_eq!(
+            std::fs::read(tmp.path().join("usr/hello")).unwrap(),
+            b"contents"
+        );
     }
 
     #[test]

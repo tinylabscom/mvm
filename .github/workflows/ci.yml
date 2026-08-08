@@ -341,7 +341,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [test-workspace, test-linux]
+    needs: [test-workspace, test-linux, test-release-witness]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -349,9 +349,10 @@ jobs:
         env:
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
+          RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
         run: |
           set -euo pipefail
-          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT"; do
+          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT"; do
             if [ "$result" != success ]; then
               echo "A test lane did not pass: $result"
               exit 1
@@ -410,6 +411,51 @@ jobs:
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
+
+  test-release-witness:
+    name: Test release profile (overflow + no debug assertions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
+          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Run tests under the release profile
+        # Every other lane runs in a debug profile: debug assertions on,
+        # integer overflow trapped by the profile default. The shipped binary
+        # is neither of those things, so a test suite that only ever runs in
+        # debug cannot witness the behaviour users get.
+        #
+        # `release-witness` is `release` minus fat LTO and single-codegen-unit
+        # linking, which keeps the semantics under test (trapping overflow, no
+        # debug assertions) without the link times.
+        #
+        # Deliberately scoped rather than workspace-wide: these are the crates
+        # doing length arithmetic over bytes an attacker chooses — the ext4
+        # writer and OCI unpacker, the plan/crypto core, the audit-log
+        # verifier, the datapath and supervisor, and the vsock frame parser.
+        # The rest of the workspace is covered in debug by `test-workspace`;
+        # widening this lane costs CI minutes for code that does not parse
+        # hostile input.
+        run: |
+          cargo nextest run --cargo-profile release-witness \
+            -p mvm-fs -p mvm-core -p mvm-contract -p mvm-hostd -p mvm-agentd
 
   test-linux:
     name: Test Linux and conformance

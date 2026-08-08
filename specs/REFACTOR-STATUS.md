@@ -6,6 +6,34 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] Runtime hardening for production — plan 303, branch
+      `feat/plan-303-runtime-hardening`
+  - [x] WS1 — `overflow-checks = true` in `[profile.release]`, a
+        `release-witness` profile, and a CI lane running the untrusted-input
+        crates under it (wired into the `test` aggregate and pinned by
+        `check_workflow_paths`)
+  - [x] WS2 — audit-chain appends land as one `write_all` + `sync_data`; a
+        torn tail reports as truncation rather than tampering
+        (`AuditError::TruncatedTail`, `VerifyError::TruncatedTail`,
+        `AuditRefusalKind::Truncated`)
+  - [x] WS3 — manifest body capped before buffering; decompressed-byte and
+        entry-count caps on `UnpackOptions`
+  - [x] WS5 — a panicking `payload_tap` observer kills the flow; telemetry
+        observers keep today's isolation (scope corrected from the original
+        write-up — see the plan)
+  - [x] WS4 — redacting panic hook wired into seven daemon bins; observes and
+        redacts only (exiting would break three `catch_unwind` isolation
+        sites, and signing from a hook can deadlock or double-panic)
+  - [~] WS6 — **not** "add Landlock": the jailer already implements it
+        (`jailer/landlock.rs` + `LANDLOCK.md` + a live property test). Real
+        gap is that `confine_self` is called by only two bins, leaving
+        `mvm-host-signer`, `mvm-audit-signer`, `mvm-signer-helper` and
+        `mvm-broker` unconfined. Blocked on per-role seccomp allowlists,
+        which need live-Linux validation and should follow `feat/seccomp-audit`
+  - [x] WS7 — Miri lane over `mvm-contract`, advisory (nightly + dispatch,
+        `continue-on-error`). 511 tests, no UB, ~4m25s with `merkle::` skipped
+        — those sweeps ran past 30 min under the interpreter. Widening to
+        `mvm-core` crypto and the `mvm-fs` ext4 writer deferred
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader
