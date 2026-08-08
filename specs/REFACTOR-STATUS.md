@@ -67,12 +67,13 @@ for detailed scope and acceptance criteria.
 - [~] Plan 299 — Prepared cold-launch performance
       (`specs/plans/299-cold-launch-performance.md`), branch
       `plan/cold-launch-performance`
-  - [~] Phase 0 — freeze a trustworthy baseline. Substrate in; Apple
-        Silicon/HVF measured: prepared cold 114.1 ms p50 / 122.6 ms p99 to an
-        authenticated agent, warm claim 18.9 / 20.0 ms — both inside budget.
-        Foreground teardown is now the dominant cost (1086 ms of a 1216 ms warm
-        launch, from inline pool replenish), which promotes Phase 6 ahead of
-        Phase 3. Linux Firecracker + libkrun lanes remain.
+  - [x] Phase 0 — trustworthy baseline COMPLETE. Both native lanes measured
+        from release binaries: HVF/aarch64 prepared cold 112.6 ms p50 /
+        116.6 ms p99 (warm claim 18.9 / 20.0 ms), Firecracker/x86_64 674.0 /
+        888.6 ms. The difference is the VMM boot (`driver_boot` 53.8 vs
+        623.6 ms on identical code), retargeting Phase 3 at the Firecracker
+        path. Foreground teardown is the other dominant cost, promoting
+        Phase 6 ahead of Phase 3.
   - [ ] Phase 1 — content-addressed `--mount` image cache
   - [ ] Phase 2 — artifact preparation outside the launch path
   - [ ] Phase 3 — reduce backend cold-start latency

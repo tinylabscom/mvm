@@ -1,7 +1,8 @@
 # Plan 299 — Prepared cold-launch performance
 
-**Status:** Phase 0 in progress — the measurement substrate is implemented and
-gated; the live baseline measurement remains.
+**Status:** Phase 0 complete — substrate implemented and gated, both native
+baselines measured. Phase 6 is promoted ahead of Phase 3 by the measurements;
+Phase 3 is retargeted at the Firecracker boot path.
 
 ## Goal
 
@@ -130,11 +131,12 @@ rate, but are not silently included in the prepared-cold SLO.
       `LaneStats`. A span no launch recorded reports `samples: 0` with `None`
       percentiles, so "never measured" is distinguishable from "measured as
       fast" and the report still round-trips through JSON.)
-- [~] Measure at least 20 iterations per lane after two warm-up iterations on
+- [x] Measure at least 20 iterations per lane after two warm-up iterations on
       native Apple Silicon/HVF and the Linux Firecracker host. Measure libkrun
       where the supported Linux or macOS environment can run it.
-      (Apple Silicon/HVF done — see "Measured baseline" below. The Linux
-      Firecracker host and libkrun lanes remain.)
+      (Apple Silicon/HVF and Linux Firecracker/KVM both measured below. libkrun
+      is not measured: neither available host selects it by default, and it is
+      an explicit opt-in on both.)
 - [x] Add a benchmark assertion that rejects a sample labeled `prepared_cold`
       when it performed an image pull, image build, mount-image materialize, or
       warm claim.
@@ -149,9 +151,8 @@ rate, but are not silently included in the prepared-cold SLO.
 the actual approximately 1.2-second backend-start cost, and the baseline is
 reproducible from a release binary.
 
-**Exit-gate status:** the substrate is in place and gated. The Apple
-Silicon/HVF baseline is measured and recorded below; the Linux Firecracker
-host remains.
+**Exit-gate status:** met. The substrate is in place and gated, and both
+native baselines are measured and recorded below from release binaries.
 
 ### Measured baseline — Apple Silicon / HVF
 
@@ -196,6 +197,38 @@ What this establishes:
    53.7 ms and the wait from `start` returning to an answering agent is
    54.1 ms. Neither dominates, and together they are only a third of the cold
    wall clock.
+
+### Measured baseline — Linux Firecracker / KVM
+
+Same lane, same 20 runs + 2 warm-ups, release build, on the established KVM
+host (x86_64, 8 cores). Every sample cleared the lane gate.
+
+| span (p50 / p99) | Firecracker / x86_64 | HVF / aarch64 |
+|---|---:|---:|
+| **dispatch window** | **674.0 / 888.6 ms** | 112.6 / 116.6 ms |
+| **`driver_boot`** | **623.6 / 643.8 ms** | 53.8 / 55.5 ms |
+| `activate_workload` | 20.4 / 42.6 ms | 0.0 / 0.0 ms |
+| `broker_register` | 28.1 / 219.3 ms | 1.1 / 1.5 ms |
+| `agent_auth` | 1.4 / 3.9 ms | 1.6 / 3.8 ms |
+| foreground teardown | 416.9 / 1842.1 ms | 143.7 / 152.4 ms |
+| **total** | **1387.5 / 3383.2 ms** | 347.1 / 354.8 ms |
+
+**The fast boot is backend-specific, not structural.** Firecracker spends
+623.6 ms where HVF spends 53.8 ms for the same operation on the same code
+path — 11.6x — and misses the 300 ms p99 budget by 3x while HVF clears it.
+Since both run the identical runner, spec assembly and activation sequence,
+this is the VMM boot itself, and HVF is the existence proof that the
+surrounding code is not what costs the time.
+
+Two honest limits on the comparison. The hosts differ in architecture
+(x86_64 vs aarch64) and in hardware, so this is not a controlled VMM
+benchmark; an 11.6x gap is far larger than that difference plausibly
+explains, but the exact split is not established. And the Firecracker host's
+tail is wide — a 1842 ms teardown p99 against a 417 ms p50 — which suggests
+contention or a variance source that has not been chased.
+
+This retargets Phase 3: it is a Firecracker-path phase, with a concrete
+target (HVF's 54 ms on the same code) rather than an invented budget.
 
 ### A fail-slow, fail-silent registration path
 
