@@ -250,8 +250,14 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 
   HVF, libkrun, QEMU, and Mock drivers moved into `crates/mvm-backends/src/driver/`.
   `FcDriver` remains in `mvm-runtime/src/driver/fc.rs` because it still couples to
-  `crate::microvm`, `crate::firecracker`, and `crate::base::shell`; those FC-specific
-  mechanics need their own extraction pass before the file can land in `mvm-backends`.
+  `crate::microvm`, `crate::firecracker`, and `crate::vm::instance_snapshot`; those
+  FC-specific mechanics need their own extraction pass before the file can land in
+  `mvm-backends`. **Handed off to `specs/plans/298-extract-firecracker-driver.md`**,
+  which records the seam decision (`VmmDriver` stays the single backend trait) and a
+  hard trait/type budget for the move.
+
+  The `base::shell` coupling is resolved: host command execution (`shell`,
+  `linux_env`) moved to `mvm-vmm::host`.
 
 - [x] **Step 3: Move legacy backend impls**
 
@@ -298,7 +304,8 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 
   `mvm-backends` is wired as an optional dependency; HVF, libkrun, QEMU, and Mock driver
   source files were removed from `mvm-runtime`. `driver/fc.rs` remains until the FC-specific
-  mechanics it depends on are extracted.
+  mechanics it depends on are extracted — the follow-up plan's Task 3, which also makes the
+  dependency non-optional.
 
 - [x] **Step 2: Re-export the driver surface from `mvm-backends`**
 

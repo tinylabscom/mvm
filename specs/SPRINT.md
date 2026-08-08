@@ -160,10 +160,20 @@
       re-exports the driver surface for backward compatibility. Workspace
       `cargo nextest run --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo xtask check-claim-catalog`, and `cargo xtask check-dormant-controls`
-      are green. Remaining: `FcDriver` still lives in `mvm-runtime/src/driver/fc.rs`
+      are green. Host command execution (`shell`, `linux_env`) also moved to
+      `mvm-vmm::host`, closing the last non-FC back-edge from the legacy
+      backends into `mvm-runtime`.
+
+      Remaining: `FcDriver` still lives in `mvm-runtime/src/driver/fc.rs`
       because it couples to `crate::microvm`, `crate::firecracker`, and
-      `crate::base::shell`; those FC-specific mechanics need extraction or
-      parameterization before the Firecracker driver can land in `mvm-backends`.
+      `crate::vm::instance_snapshot` — it is the only backend whose snapshot
+      and fork mechanics were never expressed through the `VmmDriver` seam.
+      `specs/plans/298-extract-firecracker-driver.md` carries that work: one
+      `VmmDriver` trait for every backend with no Firecracker-shaped sibling,
+      the generic snapshot seam lifted into `mvm-vmm`, the FC mechanics made
+      private to `mvm-backends`, and a hard budget of zero new traits and zero
+      new structs (deleting `ForkVmFullRestorer`, whose one method, one impl
+      and one call site make it a closure rather than a trait).
 
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
