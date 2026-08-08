@@ -4,9 +4,6 @@
 //! so concrete VMM backends can build kernel cmdlines and Firecracker API
 //! bodies without depending on `mvm-runtime`.
 
-use anyhow::Result;
-
-
 /// Probe the directory containing `rootfs_path` for the dm-verity sidecar
 /// files emitted by mkGuest when `verifiedBoot = true`. The rootfs and its
 /// sidecars are host files the VMM attaches as block devices, so the probe
@@ -104,7 +101,6 @@ pub fn non_verity_overlay_ext4(config: &mvm_core::vm_backend::VmStartConfig) -> 
     config.runtime_overlay_path.as_deref()
 }
 
-
 // ── Firecracker per-device API PUT body builders ─────────────────────────────
 //
 // One scalar-parameterized builder per device body, shared by the raw flake
@@ -173,12 +169,9 @@ pub fn balloon_body(amount_mib: u32) -> String {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::config::VmSlot;
-
 
     // ------------------------------------------------------------------
     // Firecracker API body builders — byte-identical pins
@@ -465,72 +458,5 @@ mod tests {
         std::fs::write(dir.path().join("rootfs.verity"), b"hash-tree").unwrap();
         std::fs::write(dir.path().join("rootfs.roothash"), b"not-a-hex-roothash").unwrap();
         assert_eq!(probe_verity_sidecar(rootfs.to_str().unwrap()), (None, None));
-    }
-
-    #[test]
-
-    #[test]
-
-    // ──── Verity ──────────────────────────────────────────────────────
-    //
-    // The host-side cmdline shape and DM-table construction now live in
-    // `mvm-verity-init` (initramfs PID 1). The unit tests below cover the
-    // host-side helper still running on the cold-boot path: the sidecar probe.
-
-    #[test]
-    fn probe_verity_sidecar_returns_none_for_path_without_parent() {
-        let (v, h) = probe_verity_sidecar("rootfs.ext4");
-        assert!(v.is_none());
-        assert!(h.is_none());
-    }
-
-    #[test]
-    fn probe_verity_sidecar_reads_valid_host_sidecars() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let rootfs = dir.path().join("rootfs.ext4");
-        let verity = dir.path().join("rootfs.verity");
-        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
-        std::fs::write(&verity, b"verity").expect("write verity");
-        std::fs::write(
-            dir.path().join("rootfs.roothash"),
-            format!("{ROOTFS_HASH}\n"),
-        )
-        .expect("write roothash");
-
-        let (v, h) = probe_verity_sidecar(&rootfs.to_string_lossy());
-
-        assert_eq!(v.as_deref(), Some(verity.to_string_lossy().as_ref()));
-        assert_eq!(h.as_deref(), Some(ROOTFS_HASH));
-    }
-
-    #[test]
-    fn probe_verity_sidecar_returns_none_when_sidecar_missing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
-        std::fs::write(
-            dir.path().join("rootfs.roothash"),
-            format!("{ROOTFS_HASH}\n"),
-        )
-        .expect("write roothash");
-
-        let (v, h) = probe_verity_sidecar(&rootfs.to_string_lossy());
-
-        assert!(v.is_none());
-        assert!(h.is_none());
-    }
-
-    #[test]
-    fn probe_verity_sidecar_returns_none_for_malformed_roothash() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
-        std::fs::write(dir.path().join("rootfs.verity"), b"verity").expect("write verity");
-        std::fs::write(dir.path().join("rootfs.roothash"), b"abc\n").expect("write roothash");
-
-        let (v, h) = probe_verity_sidecar(&rootfs.to_string_lossy());
-
-        assert!(v.is_none());
-        assert!(h.is_none());
     }
 }

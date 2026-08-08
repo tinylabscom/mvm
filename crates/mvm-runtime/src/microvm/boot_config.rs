@@ -29,11 +29,7 @@ pub fn resolved_runtime_overlay(config: &FlakeRunConfig) -> Option<(&str, &str, 
 
 /// Configure a flake-built microVM via the Firecracker API (multi-VM).
 #[instrument(skip_all, fields(name = %config.name))]
-pub fn configure_flake_microvm(
-    config: &FlakeRunConfig,
-    abs_dir: &str,
-    socket: &str,
-) -> Result<()> {
+pub fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str) -> Result<()> {
     let _ = (config, abs_dir, socket);
     anyhow::bail!("raw Firecracker flake configuration is disabled; use the vsock workload runner")
 }
@@ -86,7 +82,8 @@ mod tests {
     #[test]
     fn resolved_runtime_overlay_requires_all_three_fields() {
         let mut cfg = baseline_run_config(None);
-        const ROOTFS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+        const ROOTFS_HASH: &str =
+            "0000000000000000000000000000000000000000000000000000000000000001";
         cfg.roothash = Some(ROOTFS_HASH.into());
         assert!(resolved_runtime_overlay(&cfg).is_none());
 

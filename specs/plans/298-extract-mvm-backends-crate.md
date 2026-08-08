@@ -216,6 +216,10 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 
 - [x] **Step 1: Scaffold `mvm-backends`**
 
+  Also extracted shared boot/cmdline helpers (`microvm::boot_config`,
+  `microvm::egress_bridge`) into `mvm-vmm::host` so legacy backends can
+  build kernel cmdlines without depending on `mvm-runtime`.
+
   Create `crates/mvm-backends/Cargo.toml` with dependencies on `mvm-vmm`,
   `mvm-core`, `mvm-net`, `mvm-agentd`, and whatever small third-party crates
   the drivers use (`anyhow`, `serde`, `tokio`, etc.). Do **not** depend on
