@@ -1646,6 +1646,39 @@ Then unify + retire the old paths:
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.
 
+**WS-DX-COLD — prepared cold-launch performance**
+
+- [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
+  set and a new guest identity, reach authenticated guest readiness and run
+  `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon
+  HVF and Linux Firecracker/KVM. This is a prepared-cold requirement, not a
+  warm-pool or snapshot-restore claim.
+- [ ] **Separate the cold lanes:** report prepared cold, prepared cold with a
+  mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
+  distributions. A first-use image pull, build, digest, or ext4 materialization
+  may not be hidden inside the launch SLO.
+- [ ] **Content-addressed mount cache:** fingerprint source content and mount
+  policy, publish immutable images atomically under `MVM_HOME`, verify the
+  manifest and image digest before attach, support read-only direct attach and
+  writable copy-on-write, and remove obsolete internal add-directory naming.
+- [ ] **Explicit artifact preparation:** move image, kernel, initramfs, and
+  optional verity preparation out of the launch critical path. Prepared
+  manifests must be local, digest-verified, and free of host-path or network
+  dependencies when launch begins.
+- [ ] **Backend cold path:** profile and reduce VMM creation, memory mapping,
+  vCPU/device setup, and first-instruction latency for HVF, Firecracker/KVM,
+  and libkrun where supported. Reuse immutable host mappings and a resident
+  control plane only; every launch still gets a fresh guest identity and
+  authenticated channel.
+- [ ] **Readiness and cleanup:** replace polling with event-driven authenticated
+  readiness, preserve generation/key checks, and measure command completion and
+  teardown separately. Foreground cleanup must remain bounded without weakening
+  reaper, state-retention, egress, or crash-recovery guarantees.
+- [ ] **Live evidence:** run release-built matrices on Apple Silicon/HVF and
+  the Linux Firecracker host, attach signed timing evidence, add BDD and
+  hermetic regression coverage, and fail CI on prepared-cold p99 regressions.
+  The complete work is tracked in [Plan 299](plans/299-cold-launch-performance.md).
+
 ### Phase 4 — Docs, close-out, stretch
 
 **WS12 — ADRs alive + website docs**
