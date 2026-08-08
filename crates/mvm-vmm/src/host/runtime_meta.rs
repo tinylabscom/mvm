@@ -386,21 +386,11 @@ mod tests {
     #[test]
     fn from_sidecar_present_uses_recorded_value() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sidecar = mvm_build::builder_vm::GuestSidecar {
-            name: "sealed-vm".to_string(),
-            accessible: false,
-            sealed: true,
-            entrypoint_kind: "command".to_string(),
-            entrypoint_argv: Vec::new(),
-            init_system: "busybox".to_string(),
-            expected_boot_ms: 300,
-            agent_binary: "real".to_string(),
-            rootless_entrypoint: true,
-            hypervisor: "firecracker".to_string(),
-            overlay_aware: true,
-            runtime_lean: true,
-        };
-        sidecar.write_to_dir(tmp.path()).expect("write sidecar");
+        std::fs::write(
+            tmp.path().join(SIDECAR_FILENAME),
+            r#"{"accessible": false}"#,
+        )
+        .expect("write sidecar");
         let meta = from_sidecar(StartMode::Detached, tmp.path()).expect("ok");
         assert!(!meta.accessible);
         assert_eq!(meta.mode, StartModeKind::Detached);
@@ -410,7 +400,7 @@ mod tests {
     fn from_sidecar_malformed_propagates_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
-            tmp.path().join(mvm_build::builder_vm::SIDECAR_FILENAME),
+            tmp.path().join(SIDECAR_FILENAME),
             "{not json",
         )
         .expect("write malformed");
