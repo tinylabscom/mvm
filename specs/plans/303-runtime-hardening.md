@@ -31,12 +31,12 @@ Turning it on converts silent wraparound into a panic. In the host daemons that
 is fail-closed and correct. In the guest agent it is a crash, which is why WS4
 lands the panic hook.
 
-- [ ] `overflow-checks = true` in `[profile.release]`
-- [ ] Add a `release-witness` profile inheriting `release` with `lto = false`
+- [x] `overflow-checks = true` in `[profile.release]`
+- [x] Add a `release-witness` profile inheriting `release` with `lto = false`
       and `codegen-units = 16`, so the lane pays for overflow checks and
       `debug_assertions = false` without paying LTO on a ~4,350-test suite
-- [ ] CI lane running the claim-witness tests under that profile
-- [ ] Triage every overflow the lane surfaces; fix, don't suppress
+- [x] CI lane running the claim-witness tests under that profile
+- [x] Triage every overflow the lane surfaces; fix, don't suppress
 
 ### WS2 — Audit-chain appends are neither atomic nor durable
 
@@ -50,9 +50,9 @@ indistinguishable from tampering.
 This is the substrate for claims 8, 12 and 14. A crash must not be able to
 forge the signature of an attack.
 
-- [ ] Build `line + '\n'` into one buffer and `write_all` it
-- [ ] `sync_data()` before releasing the flock
-- [ ] Test: a torn final line (no trailing newline) is rejected as truncation,
+- [x] Build `line + '\n'` into one buffer and `write_all` it
+- [x] `sync_data()` before releasing the flock
+- [x] Test: a torn final line (no trailing newline) is rejected as truncation,
       not silently concatenated into the next entry
 
 Note: PR #2239 (`fix/audit-chain-fork-races`) touches this file to widen
@@ -72,10 +72,10 @@ that cap counts *compressed* bytes. `UnpackOptions`
 (`crates/mvm-fs/src/oci/unpack/mod.rs`) bounds path length and xattrs and
 nothing else, so a gzip bomb passes the cap and writes unbounded bytes to disk.
 
-- [ ] Cap the manifest body before it is buffered (OCI manifests are KBs;
+- [x] Cap the manifest body before it is buffered (OCI manifests are KBs;
       a few MB is generous) and reject over-cap before hashing
-- [ ] Add decompressed-byte and entry-count caps to `UnpackOptions`
-- [ ] Tests: over-cap manifest rejected before hashing; gzip bomb rejected at
+- [x] Add decompressed-byte and entry-count caps to `UnpackOptions`
+- [x] Tests: over-cap manifest rejected before hashing; gzip bomb rejected at
       the decompressed cap; entry-count bomb rejected
 
 ### WS4 — Panic hygiene in the host daemons
@@ -146,41 +146,92 @@ class that can return `Drop`; its panic fails closed. A telemetry observer
 keeps today's isolate-and-forward, because it was never in a position to
 withhold approval.
 
-- [ ] Panic in a `payload_tap` observer maps to `PacketDecision::Kill` with an
+- [x] Panic in a `payload_tap` observer maps to `PacketDecision::Kill` with an
       `ObserverPanic` reason
-- [ ] Panic in a telemetry observer stays isolated (existing behaviour, kept
+- [x] Panic in a telemetry observer stays isolated (existing behaviour, kept
       deliberately rather than by omission)
-- [ ] Tests for both halves, so neither can regress into the other
+- [x] Tests for both halves, so neither can regress into the other
 
-### WS6 — Landlock self-sandboxing for the process moat (Linux)
+### WS6 — Extend confinement to the unconfined moat roles (Linux)
 
-The `mvm-hostd` roles are separate processes precisely so that compromising one
-does not yield the others. Today that containment is convention. Landlock makes
-it kernel-enforced: `mvm-host-signer` needs only `~/.mvm/keys/`,
-`mvm-audit-signer` only `~/.mvm/audit/`, `mvm-broker` needs no filesystem at
-all.
+**The original framing of this workstream was wrong and is corrected here.**
+Landlock is not missing: `crates/mvm-hostd/src/jailer/landlock.rs` implements
+it, `jailer/LANDLOCK.md` documents the review process, `ConfinementSpec`
+carries per-role path allowlists alongside a seccomp syscall allowlist,
+`jailer::confine_self` applies both, and `tests/landlock_property.rs` is a
+live same-process property test. This is a mature subsystem.
 
-Linux-only, kernel 5.13+, and it must be applied after the role knows which
-paths it needs but before it accepts any input. Degrade to a warning where the
-kernel lacks support — never fail a launch over a missing LSM.
+The actual gap is narrower: `confine_self` is called by exactly two bins —
+`mvm-bridge` (`ConfinementSpec::firecracker_bridge`) and
+`mvm-substitution-endpoint` (`ConfinementSpec::substitution_endpoint`). Four
+moat roles run unconfined, three of which touch key material:
 
-- [ ] Per-role path allowlists derived from `mvm-core::config` helpers, not
-      inline `$HOME` joins
-- [ ] Applied early in each role's `main`, before threads or sockets
-- [ ] Absent/unsupported kernel degrades with a `doctor`-visible warning
-- [ ] `mvmctl doctor` reports the resolved sandbox state per role
-- [ ] Tests: allowlisted path opens; non-allowlisted path is denied
+- `mvm-host-signer` — holds the host Ed25519 signing key
+- `mvm-audit-signer` — holds the audit chain signing key
+- `mvm-signer-helper` — holds key material on the host-agent path
+- `mvm-broker` — needs no filesystem at all, so it is the cheapest win
+
+**Why this is not landed in this plan.** `confine_self` applies Landlock
+*and* seccomp; there is no Landlock-only path, and a spec with an empty
+`allowed_syscalls` installs a filter that denies everything. So each new role
+needs its own audited syscall table next to `seccomp::BRIDGE_SYSCALLS`. A
+wrong entry does not degrade — it SIGSYSes the daemon, and `confine_self`'s
+own contract requires the caller to hard-exit on partial confinement. That
+table can only be validated by running the real binary on Linux; it cannot be
+derived by reading code on a macOS host.
+
+Sequencing note: the unmerged `feat/seccomp-audit` branch adds a `mvmctl
+seccomp-audit` command and a shared syscall table. That tooling is the natural
+way to *derive* these allowlists, so this workstream should follow it rather
+than hand-write four tables in parallel.
+
+- [ ] Land or rebase `feat/seccomp-audit` first
+- [ ] Derive per-role syscall allowlists with it, one role per change
+- [ ] `ConfinementSpec::{host_signer, audit_signer, signer_helper, broker}`,
+      paths from `mvm-core::config` helpers rather than inline `$HOME` joins
+- [ ] Validate each on live Linux before wiring `confine_self` into its `main`
+- [ ] `mvmctl doctor` reports resolved confinement state per role
 
 ### WS7 — Miri over the pure-Rust crates
 
 ~750 unsafe blocks, concentrated in FFI and the VMM device models, which Miri
-cannot cross. The tractable targets are the pure-Rust ones on the untrusted
-input path.
+cannot cross — it does not execute foreign functions. The tractable target is
+the pure-Rust code on the untrusted-input path.
 
-- [ ] Miri lane over `mvm-contract`, `mvm-core` crypto, and the `mvm-fs` ext4
-      writer
-- [ ] Nightly + manual dispatch, pinned toolchain, `continue-on-error` until a
-      clean baseline holds
+Scoped to `mvm-contract` (`no_std` + alloc, `forbid(unsafe_code)`, carrying the
+audit-log verifier and the wire DTOs). `mvm-core`'s crypto and the `mvm-fs`
+ext4 writer were in the original scope and are deferred: both pull backends
+that Miri either cannot run or runs so slowly the lane stops being a nightly.
+Widening is a follow-up, not a silent omission.
+
+- [x] Miri lane over `mvm-contract`, run to completion locally before shipping
+      the workflow: **511 passed across three targets, 0 failed, no UB, ~4m25s**
+- [x] Nightly + manual dispatch, `continue-on-error` until a clean baseline
+      holds — Miri reports UB in dependencies as readily as first-party code,
+      and an advisory lane cannot block unrelated work
+- [ ] Widen to `mvm-core` crypto and the `mvm-fs` ext4 writer
+- [ ] Flip `continue-on-error` off once a baseline has held
+
+Two flags and one exclusion, all measured rather than assumed:
+
+- `--skip merkle::` — those tests sweep proof generation and ed25519
+  verification across many tree sizes. Under the interpreter the run passed
+  30 minutes without finishing; skipping them takes the rest to ~4m20s. An
+  unbounded nightly reports nothing, so this is what makes the lane exist.
+  It also drops the lowest-value target: pure arithmetic over vetted crypto
+  crates, versus the DTO and frame parsers that are the untrusted-input
+  surface.
+- `-Zmiri-ignore-leaks` — `l3::frame::tests::roundtrip` deliberately
+  `Box::leak`s an encoded frame to hand `decode` a `&'static [u8]`. Miri
+  correctly flags those; failing the lane on intentional test-only behaviour
+  would be noise. Leak *checking* off, every UB check on.
+- `-Zmiri-disable-isolation` — the DTO round-trips read the clock and
+  filesystem. Costs determinism, not UB detection.
+- `--lib --tests` — Miri cannot run doctests at all; the doctest runner
+  rejects the nightly `-Z` flags `cargo-miri` passes it. Without this the lane
+  fails *after* every test has already passed, which reads as a red lane and
+  is not. Doctests stay covered natively by `cargo test --workspace --doc` in
+  `ci.yml`.
 
 ## Sequencing
 

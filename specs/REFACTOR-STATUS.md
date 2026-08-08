@@ -24,8 +24,16 @@ for detailed scope and acceptance criteria.
   - [x] WS4 — redacting panic hook wired into seven daemon bins; observes and
         redacts only (exiting would break three `catch_unwind` isolation
         sites, and signing from a hook can deadlock or double-panic)
-  - [ ] WS6 — Landlock self-sandboxing for the `mvm-hostd` process moat
-  - [ ] WS7 — Miri lane over the pure-Rust crates
+  - [~] WS6 — **not** "add Landlock": the jailer already implements it
+        (`jailer/landlock.rs` + `LANDLOCK.md` + a live property test). Real
+        gap is that `confine_self` is called by only two bins, leaving
+        `mvm-host-signer`, `mvm-audit-signer`, `mvm-signer-helper` and
+        `mvm-broker` unconfined. Blocked on per-role seccomp allowlists,
+        which need live-Linux validation and should follow `feat/seccomp-audit`
+  - [x] WS7 — Miri lane over `mvm-contract`, advisory (nightly + dispatch,
+        `continue-on-error`). 511 tests, no UB, ~4m25s with `merkle::` skipped
+        — those sweeps ran past 30 min under the interpreter. Widening to
+        `mvm-core` crypto and the `mvm-fs` ext4 writer deferred
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader

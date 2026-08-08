@@ -26,9 +26,14 @@
       decompressed-byte / entry-count caps on layer unpack; fail-closed
       handling of a panicking payload-tapping observer. WS5's scope was
       corrected during implementation — the blanket version would have let a
-      panicking metrics counter take down builder-VM networking. Remaining:
-      panic hook with secret sanitization (WS4), Landlock for the `mvm-hostd`
-      process moat (WS6), Miri lane (WS7).
+      panicking metrics counter take down builder-VM networking. Also landed: a
+      redacting panic hook across seven daemon bins, reusing the existing
+      `SecretsScanner` (a panic payload is the one string the
+      no-`Display`-on-secret-types gate cannot reach), and an advisory Miri
+      lane over `mvm-contract`. Remaining: extending `jailer::confine_self` to
+      the four unconfined moat roles — the Landlock machinery already exists,
+      but each role needs an audited seccomp allowlist validated on live Linux,
+      which should follow the `feat/seccomp-audit` tooling.
 
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned
