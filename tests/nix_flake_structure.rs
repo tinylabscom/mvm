@@ -240,8 +240,8 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         );
     }
 
-    const KERNEL_VERSION: &str = "6.12.100";
-    const KERNEL_HASH: &str = "sha256-Z/lzUzQGSS6Gd0usvO+uUNUNXDTL9wPEfsUmpe/c7pA=";
+    const KERNEL_VERSION: &str = "6.12.102";
+    const KERNEL_HASH: &str = "sha256-aUu19JNxMjq5wrcEC9NY7YG/++gLNy12UHBFgo9lWAM=";
     assert!(
         libkrunfw.contains(&format!("linux-{KERNEL_VERSION}.tar.xz"))
             && libkrunfw.contains(&format!("hash = \"{KERNEL_HASH}\""))

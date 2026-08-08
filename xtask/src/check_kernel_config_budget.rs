@@ -37,7 +37,7 @@ use std::path::Path;
 /// The current subtraction pass removes selector-pinned input/VT, radio,
 /// physical-network, SoC, filesystem, tracing/debug, kexec/hibernate, legacy
 /// crypto, power-management, task-accounting, NetLabel and unprovisioned
-/// swap/huge-page families. Resolved Linux 6.12.100 configs contain exactly
+/// swap/huge-page families. The pinned Linux 6.12 configs contain exactly
 /// 943 aarch64 and 916 x86_64 built-ins after enabling the virtio-fs DAX
 /// dependency chain (MIGRATION, MEMORY_HOTPLUG/REMOVE, SPARSEMEM_VMEMMAP,
 /// ZONE_DEVICE, FS_DAX, FUSE_DAX) in the workload kernel. PCI, virtio-net,

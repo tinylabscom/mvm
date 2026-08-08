@@ -17,6 +17,12 @@
       retain active implementation, security, live-validation, or
       cross-repository acceptance work.
 
+- [x] Kernel pin freshness — **issue #2128**. Synchronized the libkrunfw
+      bundle and custom guest kernel on the verified Linux 6.12.102 LTS
+      tarball, replacing the stale 6.12.100 pin. Structural parity tests keep
+      both consumers on one version/hash, and the existing freshness check
+      refuses a point release that trails kernel.org.
+
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned
       `runtime-v0` schema and generated language models instead of duplicated
