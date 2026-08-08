@@ -16,6 +16,12 @@
 **Branch:** `feat/298-extract-mvm-backends`  
 **Worktree:** `../.worktrees/mvm-298-extract-mvm-backends`
 
+## Current status (2026-08-08)
+
+PR #2231 merged. `mvm-vmm` now owns the `VmmDriver` seam, `VmmSpec`, post-restore/primed-barrier helpers, `VmFullControl`, console capture, and the shared host helpers (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`, `process_liveness`, `boot_config`, `egress_bridge`). `mvm-backends` is scaffolded and `MockDriver` lives under `test-support`.
+
+Remaining: move the remaining shared dependencies (see Phase 4 below), move the concrete drivers and legacy `VmBackend` shells into `mvm-backends`, and flip `mvm-runtime` to depend on `mvm-backends`.
+
 ## Target crate graph
 
 ```text

@@ -293,7 +293,7 @@ for detailed scope and acceptance criteria.
         stay refused at admission on the userspace backend, honestly and
         for a stated reason. ADR-039 status Rejected; reopening requires a
         workload with a demonstrated need
-- [~] Extract `mvm-backends` crate (`specs/plans/298-extract-mvm-backends-crate.md`)
+- [~] Extract `mvm-backends` crate (PR #2231 landed; `specs/plans/298-extract-mvm-backends-crate.md`)
   - [x] Driver seam (`VmmDriver`, `VmmSpec`, `RunningVm`, snapshot types) moved to `mvm-vmm`
   - [x] Host `virtiofsd` helper moved to `mvm-vmm`
   - [x] Shared host helpers (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`, `process_liveness`) moved to `mvm-vmm::host`

@@ -76,19 +76,17 @@
       hosts. The follow-up extraction of an `mvm-backends` crate is captured in
       `specs/plans/298-extract-mvm-backends-crate.md`.
 
-- [~] Extract `mvm-backends` crate — **plan 298**, branch
-      `feat/298-extract-mvm-backends`. Moved the `VmmDriver`/`RunningVm`
-      seam, post-restore signal/primed-barrier helpers, `VmFullControl`, and
-      the host `virtiofsd` helper into `mvm-vmm`; `mvm-runtime` and
-      `mvm-build` keep compiling via re-exports. Also moved `DeviceAnchors`
-      to `mvm-core::checkpoint` so the seam stays substrate-clean.
-      `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and
-      per-crate `cargo test --lib` (single-threaded for `mvm-runtime` to avoid
-      a pre-existing cross-crate `MVM_HOME` env race) are green on macOS.
-      The `mvm-backends` crate is scaffolded and the test-only `MockDriver` has
-      moved under a `test-support` feature; the remaining concrete drivers
-      (Fc, Hvf, Libkrun, QEMU) and legacy `VmBackend` shells are still in
-      `mvm-runtime`. Tracked in `specs/plans/298-extract-mvm-backends-crate.md`.
+- [x] Extract `mvm-backends` crate — **plan 298**, PR #2231 merged.
+      `mvm-vmm` now hosts the `VmmDriver`/`RunningVm` seam, post-restore
+      signal/primed-barrier helpers, `VmFullControl`, console capture, and
+      shared host helpers (`host_agent_spawn`, `substitution_spawn`,
+      `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`,
+      `workload_wait`, `drive_file`, `process_liveness`, `boot_config`,
+      `egress_bridge`). `mvm-backends` is scaffolded with `MockDriver`
+      under a `test-support` feature. `mvm-runtime` and `mvm-build` keep
+      compiling via re-exports. Remaining concrete driver/legacy backend
+      moves and the `mvm-runtime → mvm-backends` dependency flip are
+      tracked in `specs/plans/298-extract-mvm-backends-crate.md`.
 
 - [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
@@ -143,27 +141,6 @@
       while `MVM_KERNEL_SOURCE=download|auto` remains explicit. The landing
       page and security docs now state the warm-millisecond promise alongside
       first-run behavior and the default-deny trust model.
-
-- [~] Extract `mvm-backends` crate — **plan 298**
-      (`specs/plans/298-extract-mvm-backends-crate.md`). Rebased
-      `feat/298-extract-mvm-backends` onto `origin/main` and resolved the
-      resulting conflicts in `Cargo.lock`, `mvm-runtime/Cargo.toml`,
-      `mvm-runtime/src/workload_runner/runner.rs`,
-      `mvm-runtime/src/lib.rs`,
-      `mvm-runtime/src/driver/spec.rs`,
-      `mvm-runtime/src/vsock_transport.rs`, and
-      `specs/REFACTOR-STATUS.md`. Host-side orchestration helpers
-      (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`,
-      `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`,
-      `process_liveness`, `boot_config`, `egress_bridge`) now live in
-      `mvm-vmm::host`. Workspace `cargo nextest run --workspace`, `cargo
-      clippy --workspace --all-targets -- -D warnings`,
-      `cargo xtask check-claim-catalog`, and `cargo xtask check-dormant-controls`
-      are green. Remaining: additional shared dependencies
-      (`libkrun::open_console_capture`, `microvm` pause/resume helpers,
-      `base::runtime_meta`, `base::ui`, backend-specific `firecracker`
-      snapshot helpers) must move or be parameterized before the concrete
-      drivers and legacy `VmBackend` shells can land in `mvm-backends`.
 
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
