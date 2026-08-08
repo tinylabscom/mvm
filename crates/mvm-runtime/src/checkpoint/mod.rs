@@ -13,8 +13,9 @@ use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
 /// Filename of the persisted supervisor launch config inside a vm_full
 /// checkpoint's content dir. Present only on checkpoints captured from a
-/// backend that writes a supervisor config (legacy captures); Firecracker
-/// checkpoints omit it, which is how [`checkpoint_is_vz`] distinguishes them.
+/// backend that writes a supervisor config (today, HVF); Firecracker
+/// checkpoints omit it, which is how
+/// [`checkpoint_carries_supervisor_config`] distinguishes them.
 pub const SUPERVISOR_CONFIG_FILE_NAME: &str = "supervisor-config.json";
 
 /// Filesystem-backed registry over `config::checkpoints_dir()` (or any root,
@@ -322,17 +323,19 @@ const FORK_ALLOW_PARENT_RUNNING: bool = false;
 /// Boots a forked child from its staged snapshot files. Abstracted so
 /// `fork_vm_full_fc` is testable without a live hypervisor; the FC impl
 /// (`FcForkRestorer`) lives in `crate::firecracker` and is the only current
-/// non-Vz implementation.
+/// implementation.
 pub trait ForkVmFullRestorer {
     /// Stage the child's snapshot into position and start the VM. `child_dir`
     /// is the child's state dir with all checkpoint blobs already cloned there.
     fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> Result<()>;
 }
 
-/// Returns `true` when the checkpoint was captured from a Vz VM (its content
-/// manifest carries a `supervisor-config.json` blob). FC checkpoints do not
-/// include that blob — use this to dispatch fork to the right path.
-pub fn checkpoint_is_vz(meta: &mvm_core::checkpoint::CheckpointMeta) -> bool {
+/// Returns `true` when the checkpoint's content manifest carries a
+/// `supervisor-config.json` blob — i.e. it was captured from a backend that
+/// rebuilds its VMM from a persisted supervisor config (today, HVF).
+/// Firecracker checkpoints omit that blob, so this dispatches fork to the
+/// right path.
+pub fn checkpoint_carries_supervisor_config(meta: &mvm_core::checkpoint::CheckpointMeta) -> bool {
     meta.content
         .iter()
         .any(|b| b.name == SUPERVISOR_CONFIG_FILE_NAME)
@@ -568,18 +571,14 @@ fn validate_child_fork_plan(params: &ForkParams) -> Result<()> {
 
 /// Liveness probe for a VM by name: any backend pid marker whose process still
 /// exists. Missing or malformed markers are treated as stopped.
+///
+/// Delegates to the shared marker list so a backend cannot be live here and
+/// stopped elsewhere. This gates the refuse-to-fork-a-live-parent rule, so a
+/// marker this probe does not know reads as stopped and lets a fork through.
 fn vm_is_running(vm_name: &str) -> bool {
-    ["fc.pid", "vz.pid"].into_iter().any(|marker| {
-        let pid_file = mvm_core::config::vm_state_dir(vm_name).join(marker);
-        let Ok(s) = std::fs::read_to_string(pid_file) else {
-            return false;
-        };
-        let Ok(pid) = s.trim().parse::<libc::pid_t>() else {
-            return false;
-        };
-        // kill(pid, 0) → 0 if the process exists, -1/ESRCH if not.
-        unsafe { libc::kill(pid, 0) == 0 }
-    })
+    mvm_vmm::host::process_liveness::state_dir_has_live_process(&mvm_core::config::vm_state_dir(
+        vm_name,
+    ))
 }
 
 pub use mvm_core::checkpoint::DeviceAnchors;
@@ -593,7 +592,7 @@ pub struct CaptureVmFullParams {
     pub runtime_overlay_version: Option<String>,
     /// The live VM's persisted supervisor config, copied into the checkpoint so
     /// restore can rebuild the state dir (every stop reaps the live one).
-    /// `None` for backends that do not use a Vz-style supervisor config (the
+    /// `None` for backends that do not persist a supervisor config (the
     /// blob is omitted from the checkpoint manifest and restore is handled
     /// differently by those backends).
     pub supervisor_config_src: Option<PathBuf>,
@@ -660,7 +659,7 @@ fn capture_vm_full_inner(
         let live_rootfs = control.rootfs_path()?;
         crate::base::cow::clone_rootfs_for_instance(&live_rootfs, &rootfs_dst)
             .context("cloning rootfs in the pause window")?;
-        // Collect the machine-id sidecar when the backend wrote one (e.g. Vz).
+        // Collect the machine-id sidecar when the backend wrote one.
         // Backends that do not have a machine-id concept (e.g. Firecracker) skip
         // this step — the blob is absent from the manifest and restore does not
         // require it.
@@ -707,7 +706,7 @@ fn capture_vm_full_inner(
 
     // Persist the launch config into the checkpoint when the backend provides one.
     // Restore needs it to rebuild the state dir the stop reaped. Backends that do
-    // not use a Vz-style supervisor config omit this blob.
+    // not persist a supervisor config omit this blob.
     if let Some(ref src) = params.supervisor_config_src {
         let config_dst = content_dir.join(SUPERVISOR_CONFIG_FILE_NAME);
         std::fs::copy(src, &config_dst).with_context(|| {
@@ -2112,26 +2111,26 @@ mod tests {
         );
     }
 
-    // ── checkpoint_is_vz ────────────────────────────────────────────────────
+    // ── checkpoint_carries_supervisor_config ────────────────────────────────
 
     #[test]
-    fn checkpoint_is_vz_true_when_supervisor_config_blob_present() {
+    fn supervisor_config_detected_when_the_blob_is_present() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
-        let meta = seed_vm_full_checkpoint(&store, tmp.path(), "vz1");
+        let meta = seed_vm_full_checkpoint(&store, tmp.path(), "supcfg1");
         assert!(
-            checkpoint_is_vz(&meta),
-            "Vz checkpoint carries the supervisor-config.json blob"
+            checkpoint_carries_supervisor_config(&meta),
+            "a supervisor-config-bearing checkpoint is detected by the blob"
         );
     }
 
     #[test]
-    fn checkpoint_is_vz_false_for_fc_checkpoint() {
+    fn supervisor_config_absent_for_fc_checkpoint() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let meta = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fc1");
         assert!(
-            !checkpoint_is_vz(&meta),
+            !checkpoint_carries_supervisor_config(&meta),
             "FC checkpoint has no supervisor-config.json blob"
         );
     }
@@ -2181,19 +2180,31 @@ mod tests {
         assert!(same_vm.to_string().contains("child VM name"));
     }
 
+    /// Every workload backend's marker counts, not just Firecracker's. This
+    /// probe gates the refuse-to-fork-a-live-parent rule, so a backend whose
+    /// marker went unrecognised would read as stopped and let a fork proceed
+    /// against a running VM.
     #[test]
-    fn vm_is_running_detects_firecracker_and_legacy_pid_markers() {
+    fn vm_is_running_detects_every_workload_backend_pid_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set("MVM_HOME", tmp.path());
         let state = mvm_core::config::vm_state_dir("pid-check");
         std::fs::create_dir_all(&state).unwrap();
-        std::fs::write(state.join("fc.pid"), std::process::id().to_string()).unwrap();
-        assert!(vm_is_running("pid-check"));
 
-        std::fs::remove_file(state.join("fc.pid")).unwrap();
-        std::fs::write(state.join("vz.pid"), std::process::id().to_string()).unwrap();
-        assert!(vm_is_running("pid-check"));
+        for marker in ["fc.pid", "hvf.pid", "libkrun.pid", "qemu.pid"] {
+            std::fs::write(state.join(marker), std::process::id().to_string()).unwrap();
+            assert!(
+                vm_is_running("pid-check"),
+                "{marker} must read as a live parent"
+            );
+            std::fs::remove_file(state.join(marker)).unwrap();
+        }
+
+        assert!(
+            !vm_is_running("pid-check"),
+            "no marker left means the VM is stopped"
+        );
     }
 
     #[test]
@@ -2320,7 +2331,7 @@ mod tests {
         )
         .unwrap();
 
-        // The FC triple is cloned into the child's state dir; no Vz supervisor
+        // The FC triple is cloned into the child's state dir; no supervisor
         // config or machine-id ever existed for this checkpoint.
         for name in ["rootfs.ext4", "memory.bin", "vmstate.bin"] {
             assert!(dest.join(name).exists(), "{name} not cloned");

@@ -1,6 +1,6 @@
 //! Self-hosting builder-rootfs bootstrap: inject the freshly
 //! cross-compiled `mvm-host-vm-init` into a builder rootfs using ONLY the hvf
-//! VMM — no vz, no legacy builder. Thin driver over
+//! VMM — no legacy builder. Thin driver over
 //! `mvm_runtime::builder_runner::inject_host_binaries`. Output: a patched rootfs
 //! at `$OUT` (default `/tmp/mvm-patched-rootfs.ext4`).
 //!
@@ -66,7 +66,7 @@ fn main() {
 
     println!(
         "PROOF: the hvf VMM patched a builder rootfs with the current \
-         mvm-host-vm-init — no vz, no legacy builder. Patched rootfs: {}",
+         mvm-host-vm-init — no legacy builder. Patched rootfs: {}",
         out.display()
     );
 }

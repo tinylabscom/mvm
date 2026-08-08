@@ -774,7 +774,7 @@ fn shared_kernel_base_forces_hvc0_console_support() {
     assert!(
         content.contains("\"VIRTIO_CONSOLE\"") && content.contains("\"HVC_DRIVER\""),
         "the shared microVM kernel base must force both VIRTIO_CONSOLE and \
-         HVC_DRIVER when libkrun/vz workloads boot with `console=hvc0`; \
+         HVC_DRIVER when libkrun workloads boot with `console=hvc0`; \
          otherwise the kernel can boot silently even though the backend \
          wires a virtio-console."
     );

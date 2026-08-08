@@ -761,7 +761,7 @@ mod tests {
         let root = tmp.path();
         let dir = root.join("hvf-vm");
         std::fs::create_dir_all(&dir).unwrap();
-        // Only hvf.pid present (no libkrun.pid / vz.pid), pointing at us.
+        // Only hvf.pid present (no libkrun.pid / fc.pid), pointing at us.
         std::fs::write(dir.join("hvf.pid"), std::process::id().to_string()).unwrap();
 
         let view = FsRuntimeView::new(root);

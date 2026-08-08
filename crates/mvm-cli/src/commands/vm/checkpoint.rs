@@ -20,7 +20,7 @@ use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
 use mvm_runtime::checkpoint::{
     CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, capture_fs_quick,
-    capture_vm_full, checkpoint_is_vz, fork_checkpoint, fork_vm_full_fc,
+    capture_vm_full, checkpoint_carries_supervisor_config, fork_checkpoint, fork_vm_full_fc,
 };
 
 use super::Cli;
@@ -319,38 +319,15 @@ fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Option<PathBuf>>
 }
 
 /// Best-effort liveness: a VM is "running" iff one of its per-backend PID
-/// files names a live process. Mirrors the per-backend `kill(pid, 0)` probe.
+/// files names a live process.
 ///
-/// NOTE: libkrun writes `libkrun.pid` and Firecracker writes `fc.pid`, both
-/// into the shared per-VM directory (`<mvm_home>/vms/<name>/`). The file
-/// names are backend-disjoint, so both probes read the same tree.
+/// Every backend writes its marker into the same per-VM directory
+/// (`<mvm_home>/vms/<name>/`) under a backend-disjoint name, so one pass over
+/// the shared marker list covers all of them. Delegating also picks up the
+/// `EPERM`-means-alive rule, which matters for a root-owned Firecracker: a
+/// bare `kill(pid, 0) == 0` reads that as stopped.
 fn vm_is_running(name: &str) -> bool {
-    let state_dir = vm_state_dir(name);
-    // libkrun.pid lives under vm_state_dir (the host metadata store).
-    let state_dir_running = ["libkrun.pid"]
-        .iter()
-        .filter_map(|f| std::fs::read_to_string(state_dir.join(f)).ok())
-        .filter_map(|s| s.trim().parse::<libc::pid_t>().ok())
-        // SAFETY: signal 0 only probes existence; it delivers nothing.
-        .any(|pid| unsafe { libc::kill(pid, 0) == 0 });
-
-    if state_dir_running {
-        return true;
-    }
-
-    // Firecracker's fc.pid is written via fc_pid_path() (strict resolver —
-    // None in hermetic environments). Probe it so a live FC VM is detected.
-    if let Some(fc_pid_path) = mvm_runtime::microvm::fc_pid_path(name)
-        && let Ok(s) = std::fs::read_to_string(&fc_pid_path)
-        && let Ok(pid) = s.trim().parse::<libc::pid_t>()
-    {
-        // SAFETY: signal 0 only probes existence; it delivers nothing.
-        if unsafe { libc::kill(pid, 0) } == 0 {
-            return true;
-        }
-    }
-
-    false
+    mvm_vmm::host::process_liveness::state_dir_has_live_process(&vm_state_dir(name))
 }
 
 /// fs_quick clones the instance rootfs, so the guest must not be writing:
@@ -855,7 +832,7 @@ fn fork_vm_full_arm(
 
 fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     // A vm_full fork restores a saved machine state whose cpu/mem are baked
-    // into the snapshot; the removed Vz backend validated device config
+    // into the snapshot; a supervisor-config-bearing backend validated device config
     // against the saved state and refused a mismatch. Accepting these flags
     // would silently fail at restore time with a confusing hypervisor error
     // — refuse early.
@@ -930,14 +907,15 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         );
     }
 
-    // Checkpoints captured under the removed Apple-Virtualization backend carry
-    // a supervisor-config.json blob. Their full-VM fork is being re-homed onto
-    // the in-house HVF VMM and is unavailable for now — refuse cleanly.
-    if checkpoint_is_vz(&p.parent_meta) {
+    // A supervisor-config.json blob means the capture rebuilds its VMM from a
+    // persisted supervisor config rather than from Firecracker's snapshot
+    // triple. Only the Firecracker fork path is implemented below, so refuse
+    // cleanly rather than misread the manifest.
+    if checkpoint_carries_supervisor_config(&p.parent_meta) {
         anyhow::bail!(
-            "this vm_full checkpoint was captured under a backend that has been removed; \
-             its full-VM fork is being re-homed onto the in-house HVF VMM and is \
-             unavailable for now. Use an fs_quick fork instead."
+            "this vm_full checkpoint carries a supervisor config, so it was not \
+             captured under Firecracker; full-VM fork is only implemented for \
+             Firecracker captures. Use an fs_quick fork instead."
         );
     }
 
@@ -1020,7 +998,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         .map(|ctx| ctx.admitted.plan().tenant.0.clone());
 
     // Mint the child's verb-grant sidecar up front so it's readable below for
-    // post-restore delivery. Mirrors the former Vz backend's fork path.
+    // post-restore delivery.
     if let Some(ref plan_json_str) = child_plan_json {
         let mint_cfg = mvm_core::vm_backend::VmStartConfig {
             name: p.child_vm_name.clone(),
@@ -1745,7 +1723,7 @@ mod tests {
 
     /// When mode.json carries `rootfs_path` but the file no longer exists on
     /// disk, the error mentions the pause workflow (same user-visible guidance
-    /// as the former Vz backend's supervisor-config path).
+    /// as a supervisor-config-bearing capture).
     #[test]
     fn mode_json_rootfs_path_missing_on_disk_produces_actionable_error() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
