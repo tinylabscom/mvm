@@ -227,6 +227,29 @@ lane gate refuses a launch that did *too much* work (a pull, a build, a warm
 claim) but cannot see a launch that silently did *too little*. A degraded
 launch is not a valid sample of a healthy one.
 
+**Both halves are fixed.**
+
+*Fail fast.* `should_retry_control` now requires the control socket to exist on
+disk before a transient error is retried. The ladder exists so the register
+path can wait out a daemon that has bound but is not yet serving; it cannot
+wait a socket that is not there into existence. Measured against the same
+absent-daemon scenario, `broker_register` fell from 711 ms to 0.5 ms.
+
+*Fail loud.* `ServicesGuard::is_registered` reports whether host services
+actually registered, `LaunchTraceRecorder::degrade_unless` records the loss
+into the trace sidecar, and the launch sample carries a `degraded` list.
+`validate_lane` refuses a sample with a non-empty list **for every lane, before
+the per-lane rules**, so a degraded launch cannot be reported as a measurement
+of a healthy one. Verified live: hiding the daemon binary produces
+`degraded: ["host_services"]`.
+
+A third gap surfaced while verifying this. A run that spent 59.9 s
+cross-compiling the guest agent reported `image_build: false`, because the work
+recorder was only wired to the flake-build site — so the prepared-cold gate
+would have accepted a one-minute sample. The acquisition recorder now lives in
+`mvm_core::launch_trace`, where the crates that actually pull and build can
+reach it, and `build_guest_binaries` records itself.
+
 Kernel size is not a candidate lever here. The workload kernel is an 8.2 MiB
 arm64 `Image` (6.12.100, 936 options, zero modules, already ratcheted by
 `check-kernel-config-budget`), loaded by direct copy — single-digit

@@ -109,6 +109,8 @@ pub enum LaneViolation {
         lane: LaunchLane,
         expected: &'static str,
     },
+    /// The launch came up without a capability it should have had.
+    Degraded { missing: Vec<String> },
 }
 
 impl std::fmt::Display for LaneViolation {
@@ -140,6 +142,11 @@ impl std::fmt::Display for LaneViolation {
                 "lane {} requires {expected} and the launch did not perform it",
                 lane.as_str()
             ),
+            Self::Degraded { missing } => write!(
+                f,
+                "launch came up without {}; a degraded launch is not a sample of a healthy one",
+                missing.join(", ")
+            ),
         }
     }
 }
@@ -164,6 +171,15 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
     if sample.build_profile != BuildProfile::Release {
         return Err(LaneViolation::NotReleaseBuild {
             profile: sample.build_profile,
+        });
+    }
+    // Refused for every lane, before the per-lane rules. The work flags catch a
+    // launch that did more than its lane allows; this catches one that quietly
+    // did less than a launch is supposed to. Both produce a plausible number
+    // from a launch that was not the launch being measured.
+    if !sample.degraded.is_empty() {
+        return Err(LaneViolation::Degraded {
+            missing: sample.degraded.clone(),
         });
     }
     let work = sample.work;
@@ -332,6 +348,9 @@ pub struct ColdLaunchSample {
     /// Phases the backend recorded inside its own `start`.
     #[serde(default)]
     pub backend_phases: Vec<TracePhase>,
+    /// Capabilities the launch came up without.
+    #[serde(default)]
+    pub degraded: Vec<String>,
 }
 
 /// Percentile summary for one span across a lane's samples.
@@ -537,6 +556,7 @@ mod tests {
             phases: phases(148.0),
             sub_phases: LaunchSubTimings::default(),
             backend_phases: Vec::new(),
+            degraded: Vec::new(),
         }
     }
 
@@ -574,6 +594,7 @@ mod tests {
                 name: "boot_confirm".to_string(),
                 ms: total_ms / 4.0,
             }],
+            degraded: Vec::new(),
         }
     }
 
@@ -670,6 +691,40 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn a_degraded_launch_is_refused_by_every_lane() {
+        // The failure this exists for: a launch whose host-services
+        // registration silently failed still runs and still produces a
+        // perfectly plausible timing, so nothing about the number reveals that
+        // it measured a launch missing a security-relevant capability.
+        for lane in LaunchLane::ALL {
+            let mut sample = launch_sample();
+            sample.work.warm_claim = true;
+            sample.launch_mode = LaunchMode::Warm;
+            sample.work.mount_materialize = true;
+            sample.work.image_pull = true;
+            sample.degraded = vec!["host_services".to_string()];
+            assert_eq!(
+                validate_lane(lane, &sample),
+                Err(LaneViolation::Degraded {
+                    missing: vec!["host_services".to_string()]
+                }),
+                "lane {} must refuse a degraded launch",
+                lane.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn degradation_is_refused_before_the_per_lane_rules() {
+        // Otherwise a degraded launch that also belongs in its lane would pass.
+        let mut sample = launch_sample();
+        sample.degraded = vec!["host_services".to_string()];
+        let err = validate_lane(LaunchLane::PreparedCold, &sample).unwrap_err();
+        assert!(err.to_string().contains("host_services"), "{err}");
+        assert!(err.to_string().contains("degraded launch"), "{err}");
     }
 
     #[test]

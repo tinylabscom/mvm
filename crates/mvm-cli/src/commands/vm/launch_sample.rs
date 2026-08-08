@@ -12,7 +12,6 @@
 //! pays nothing.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use mvm_core::launch_trace::TracePhase;
@@ -108,41 +107,15 @@ impl LaunchWork {
     }
 }
 
-/// Process-wide record of expensive acquisition work.
-///
-/// The registry fetch and the flake build sit many layers away from the
-/// runner that reports the sample, and threading a flag back through every
-/// one of them would be a wide refactor in service of a diagnostic. Two
-/// atomics, set once and never cleared, keep the report honest instead. Set
-/// once means a sample can only ever over-report work, never under-report it,
-/// which is the safe direction for a gate that refuses contaminated samples.
-struct WorkRecorder {
-    image_pull: AtomicBool,
-    image_build: AtomicBool,
-}
-
-static WORK: WorkRecorder = WorkRecorder {
-    image_pull: AtomicBool::new(false),
-    image_build: AtomicBool::new(false),
-};
-
-/// Record that this process fetched image bytes from a registry.
-pub fn record_image_pull() {
-    WORK.image_pull.store(true, Ordering::Relaxed);
-}
-
-/// Record that this process ran an image/flake build.
-pub fn record_image_build() {
-    WORK.image_build.store(true, Ordering::Relaxed);
-}
-
-/// Collapse the recorded acquisition work with the two flags the launch
-/// itself observes.
+/// Collapse the process-wide acquisition record with the two flags the launch
+/// itself observes. The acquisition half lives in `mvm-core` so the crates that
+/// actually pull and build can report it.
 #[must_use]
 pub fn recorded_work(mount_materialize: bool, warm_claim: bool) -> LaunchWork {
+    let acquired = mvm_core::launch_trace::recorded_acquisition();
     LaunchWork {
-        image_pull: WORK.image_pull.load(Ordering::Relaxed),
-        image_build: WORK.image_build.load(Ordering::Relaxed),
+        image_pull: acquired.image_pull,
+        image_build: acquired.image_build,
         mount_materialize,
         warm_claim,
     }
@@ -270,6 +243,10 @@ pub struct LaunchSample {
     /// it just cannot be broken down.
     #[serde(default)]
     pub backend_phases: Vec<TracePhase>,
+    /// Capabilities the launch came up without, as the backend reported them.
+    /// A non-empty list means this launch is not a sample of a healthy one.
+    #[serde(default)]
+    pub degraded: Vec<String>,
 }
 
 /// The path this process should write its launch sample to, if the operator
@@ -359,6 +336,7 @@ mod tests {
                 name: "boot_confirm".to_string(),
                 ms: 2.0,
             }],
+            degraded: Vec::new(),
         }
     }
 
@@ -425,25 +403,6 @@ mod tests {
         assert_eq!(
             contaminated.performed(),
             vec!["image_pull", "mount_materialize"]
-        );
-    }
-
-    #[test]
-    fn recorded_work_reflects_the_process_recorder() {
-        // One test owns the process-wide recorder: the flags are set-once by
-        // design, so a second test asserting "unset" would race this one.
-        assert!(!recorded_work(false, false).image_build);
-        record_image_pull();
-        record_image_build();
-        let work = recorded_work(true, true);
-        assert_eq!(
-            work,
-            LaunchWork {
-                image_pull: true,
-                image_build: true,
-                mount_materialize: true,
-                warm_claim: true,
-            }
         );
     }
 

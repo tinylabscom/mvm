@@ -985,10 +985,15 @@ fn run_inner(
     // Read the backend's own phase sidecar now: teardown removes the state
     // directory that holds it, and by the time the sample is assembled it is
     // gone. A backend that does not trace itself yields nothing here.
-    let backend_phases = timing
+    let backend_trace = timing
         .then(|| mvm_core::launch_trace::read_trace(&mvm_core::config::vm_state_dir(&vm_name)))
-        .flatten()
-        .map(|trace| trace.phases)
+        .flatten();
+    let backend_phases = backend_trace
+        .as_ref()
+        .map(|trace| trace.phases.clone())
+        .unwrap_or_default();
+    let degraded = backend_trace
+        .map(|trace| trace.degraded)
         .unwrap_or_default();
 
     // Install Ctrl-C handler that tears the VM down.
@@ -1064,6 +1069,7 @@ fn run_inner(
                 phases,
                 sub_phases,
                 backend_phases: backend_phases.clone(),
+                degraded: degraded.clone(),
             });
             if let Err(e) = crate::commands::vm::launch_sample::write_sample(path, &sample) {
                 // A measurement that cannot be recorded must be loud: a
@@ -1092,6 +1098,8 @@ struct LaunchSampleInputs<'a> {
     /// Phases the backend recorded inside `start`, read from its sidecar
     /// before teardown removed the state directory holding it.
     backend_phases: Vec<mvm_core::launch_trace::TracePhase>,
+    /// Capabilities the backend reported coming up without.
+    degraded: Vec<String>,
 }
 
 /// Assemble the machine-readable sample for a finished launch.
@@ -1130,6 +1138,7 @@ fn build_launch_sample(
         phases: inputs.phases,
         sub_phases: inputs.sub_phases,
         backend_phases: inputs.backend_phases,
+        degraded: inputs.degraded,
     }
 }
 

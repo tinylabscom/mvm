@@ -227,6 +227,7 @@ fn cold_launch_sample(lane: LaunchLane, number: u32, sample: &LaunchSample) -> C
         phases: sample.phases,
         sub_phases: sample.sub_phases,
         backend_phases: sample.backend_phases.clone(),
+        degraded: sample.degraded.clone(),
     }
 }
 
@@ -363,6 +364,7 @@ mod tests {
                 ..LaunchSubTimings::default()
             },
             backend_phases: Vec::new(),
+            degraded: Vec::new(),
         }
     }
 

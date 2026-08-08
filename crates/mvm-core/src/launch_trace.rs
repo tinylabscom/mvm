@@ -19,6 +19,7 @@
 //! diagnostic.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,14 @@ pub struct TracePhase {
 pub struct BackendLaunchTrace {
     pub backend: String,
     pub phases: Vec<TracePhase>,
+    /// Capabilities the launch came up without.
+    ///
+    /// A launch can succeed with a best-effort subsystem unregistered, which
+    /// makes it a poor sample of a healthy launch and, worse, a silent loss of
+    /// something a caller believed it had. Naming it here is what lets a
+    /// consumer refuse the sample instead of averaging it in.
+    #[serde(default)]
+    pub degraded: Vec<String>,
 }
 
 impl BackendLaunchTrace {
@@ -96,6 +105,7 @@ pub struct LaunchTraceRecorder {
     enabled: bool,
     last: Instant,
     phases: Vec<TracePhase>,
+    degraded: Vec<String>,
 }
 
 impl LaunchTraceRecorder {
@@ -113,6 +123,17 @@ impl LaunchTraceRecorder {
             enabled,
             last: Instant::now(),
             phases: Vec::new(),
+            degraded: Vec::new(),
+        }
+    }
+
+    /// Record that `what` is unavailable for this launch unless `healthy`.
+    ///
+    /// Phrased as the negative because the caller holds the health signal and
+    /// the interesting case is the one that is easy to drop on the floor.
+    pub fn degrade_unless(&mut self, what: &'static str, healthy: bool) {
+        if self.enabled && !healthy {
+            self.degraded.push(what.to_string());
         }
     }
 
@@ -138,6 +159,7 @@ impl LaunchTraceRecorder {
         Some(BackendLaunchTrace {
             backend: self.backend,
             phases: self.phases,
+            degraded: self.degraded,
         })
     }
 
@@ -150,6 +172,49 @@ impl LaunchTraceRecorder {
         if let Ok(json) = serde_json::to_string_pretty(&trace) {
             let _ = std::fs::write(trace_path(state_dir), json);
         }
+    }
+}
+
+/// Expensive acquisition work a launch performed, recorded process-wide.
+///
+/// The registry fetch and the guest/image builds sit in crates far below the
+/// one that reports the sample, and threading a flag back through every layer
+/// between them would be a wide refactor in service of a diagnostic. Two
+/// atomics, set once and never cleared, keep the report honest instead. Set
+/// once means a sample can only over-report work, never under-report it, which
+/// is the safe direction for a gate that refuses contaminated samples.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AcquisitionWork {
+    pub image_pull: bool,
+    pub image_build: bool,
+}
+
+struct AcquisitionRecorder {
+    image_pull: AtomicBool,
+    image_build: AtomicBool,
+}
+
+static ACQUISITION: AcquisitionRecorder = AcquisitionRecorder {
+    image_pull: AtomicBool::new(false),
+    image_build: AtomicBool::new(false),
+};
+
+/// Record that this process fetched image bytes from a registry.
+pub fn record_image_pull() {
+    ACQUISITION.image_pull.store(true, Ordering::Relaxed);
+}
+
+/// Record that this process built an image or a guest artifact.
+pub fn record_image_build() {
+    ACQUISITION.image_build.store(true, Ordering::Relaxed);
+}
+
+/// What acquisition work this process has performed so far.
+#[must_use]
+pub fn recorded_acquisition() -> AcquisitionWork {
+    AcquisitionWork {
+        image_pull: ACQUISITION.image_pull.load(Ordering::Relaxed),
+        image_build: ACQUISITION.image_build.load(Ordering::Relaxed),
     }
 }
 
@@ -228,6 +293,7 @@ mod tests {
         let expected = {
             let mut copy = LaunchTraceRecorder::with_enabled("hvf", true);
             copy.phases = rec.phases.clone();
+            copy.degraded = rec.degraded.clone();
             copy.finish().unwrap()
         };
         rec.write_to(tmp.path());
@@ -260,6 +326,46 @@ mod tests {
         let mut rec = LaunchTraceRecorder::with_enabled("hvf", true);
         rec.mark("preflight");
         rec.write_to(&tmp.path().join("absent"));
+    }
+
+    #[test]
+    fn a_healthy_launch_records_no_degradation() {
+        let mut rec = LaunchTraceRecorder::with_enabled("hvf", true);
+        rec.degrade_unless("host_services", true);
+        assert!(rec.finish().expect("enabled").degraded.is_empty());
+    }
+
+    #[test]
+    fn an_unhealthy_subsystem_is_named() {
+        let mut rec = LaunchTraceRecorder::with_enabled("hvf", true);
+        rec.degrade_unless("host_services", false);
+        assert_eq!(
+            rec.finish().expect("enabled").degraded,
+            vec!["host_services".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_disabled_recorder_records_no_degradation_either() {
+        let mut rec = LaunchTraceRecorder::with_enabled("hvf", false);
+        rec.degrade_unless("host_services", false);
+        assert!(rec.finish().is_none());
+    }
+
+    #[test]
+    fn recorded_acquisition_reflects_the_process_recorder() {
+        // One test owns the process-wide recorder: the flags are set-once by
+        // design, so a second test asserting "unset" would race this one.
+        assert!(!recorded_acquisition().image_build);
+        record_image_pull();
+        record_image_build();
+        assert_eq!(
+            recorded_acquisition(),
+            AcquisitionWork {
+                image_pull: true,
+                image_build: true
+            }
+        );
     }
 
     #[test]

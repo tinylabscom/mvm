@@ -207,7 +207,7 @@ fn pull_image_ref(
     // Reaching here means the cache did not answer and bytes are coming off a
     // registry. A launch measurement that hides an acquisition is not a launch
     // measurement, so it is recorded where the fetch actually happens.
-    crate::commands::vm::launch_sample::record_image_pull();
+    mvm_core::launch_trace::record_image_pull();
     let prod_policy = if prod {
         let policy = load_oci_registry_policy()?;
         enforce_registry_allowlist(&image_ref, &policy)?;

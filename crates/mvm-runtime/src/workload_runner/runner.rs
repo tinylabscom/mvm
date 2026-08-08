@@ -496,7 +496,6 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         });
 
         trace.mark("spec_assembly");
-
         let vm = self.driver.boot(&spec)?;
         trace.mark("driver_boot");
 
@@ -538,6 +537,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         endpoint.defuse();
         broker_guard.defuse();
         trace.mark("broker_register");
+        trace.degrade_unless("host_services", broker_guard.0.is_registered());
         trace.write_to(&state_dir);
         Ok(vm)
     }
