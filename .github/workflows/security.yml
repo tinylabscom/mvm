@@ -570,6 +570,7 @@ jobs:
           - mvm-contract
           - mvm-runtime
           - mvm-sdk
+          - mvm-vmm
     steps:
       - uses: actions/checkout@v6
 
