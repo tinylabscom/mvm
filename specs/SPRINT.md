@@ -27,6 +27,16 @@
       `mvm-sdk` re-export the shared surface. Serialization/security tests and
       three non-`@wip` BDD scenarios pass.
 
+- [x] Unified runtime policy and human approval — **issue #2168**, plan
+      `specs/plans/2168-runtime-approval.md`. Added typed fail-closed policy
+      evaluation bound to signed admission, deterministic rule precedence,
+      digest-only approval metadata, and durable approval lifecycle events on
+      the agent-session cursor. Authorization, first-valid-response, expiry,
+      cancellation, replay, duplicate, and stale-response paths are covered
+      by contract tests and three non-`@wip` BDD scenarios. `mvm-client` and
+      `mvm-sdk` re-export the shared policy surface; existing network, secret,
+      sealed-production, guest, and command-gate enforcement remains in force.
+
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned
       `runtime-v0` schema and generated language models instead of duplicated

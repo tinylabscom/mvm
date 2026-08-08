@@ -537,7 +537,7 @@ pub struct LocalAuditEvent {
 }
 
 /// Audit event types for per-tenant audit logging.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuditAction {
     // -- Instance lifecycle --
     InstanceCreated,
@@ -568,6 +568,24 @@ pub enum AuditAction {
     CommandBlocked,
     CommandApproved,
     CommandDenied,
+    /// A typed policy evaluation allowed an already-admitted capability.
+    PolicyAllowed,
+    /// A typed policy evaluation denied a capability.
+    PolicyDenied,
+    /// A typed policy evaluation requires human approval.
+    PolicyApprovalRequired,
+    /// An operator approval request was durably created.
+    ApprovalRequested,
+    /// An authorized operator approved a pending request.
+    ApprovalApproved,
+    /// An authorized operator denied a pending request.
+    ApprovalDenied,
+    /// A pending approval reached its deadline.
+    ApprovalExpired,
+    /// A pending approval was canceled before release.
+    ApprovalCanceled,
+    /// A response or request was refused without changing approval state.
+    ApprovalRefused,
     ThreatDetected,
     RateLimitExceeded,
     SessionRecycled,
@@ -684,6 +702,15 @@ mod tests {
             AuditAction::CommandBlocked,
             AuditAction::CommandApproved,
             AuditAction::CommandDenied,
+            AuditAction::PolicyAllowed,
+            AuditAction::PolicyDenied,
+            AuditAction::PolicyApprovalRequired,
+            AuditAction::ApprovalRequested,
+            AuditAction::ApprovalApproved,
+            AuditAction::ApprovalDenied,
+            AuditAction::ApprovalExpired,
+            AuditAction::ApprovalCanceled,
+            AuditAction::ApprovalRefused,
             AuditAction::ThreatDetected,
             AuditAction::RateLimitExceeded,
             AuditAction::SessionRecycled,

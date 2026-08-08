@@ -15,6 +15,16 @@ for detailed scope and acceptance criteria.
   - [x] Client/SDK re-exports, contract serialization/security tests, and
         three non-`@wip` BDD scenarios
 
+- [x] Plan 2168 — unified runtime policy and human approval
+      (`specs/plans/2168-runtime-approval.md`)
+  - [x] Typed fail-closed policy evaluation requires signed admission and
+        applies deterministic specificity/priority/effect precedence
+  - [x] Approval requests, authorized first responses, expiry, cancellation,
+        replay, and terminal-state refusal share the durable agent-session
+        cursor
+  - [x] Bounded digest-only metadata, audit action mappings, client/SDK
+        re-exports, unit tests, and three non-`@wip` BDD scenarios
+
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader
