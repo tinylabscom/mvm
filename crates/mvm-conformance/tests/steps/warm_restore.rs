@@ -174,8 +174,8 @@ fn no_nic_guard_refuses(world: &mut CliWorld) {
         .warm_restore_device_model
         .as_ref()
         .expect("a When step must stage a device model first");
-    let err =
-        assert_vsock_only_device_model(model).expect_err("NIC-carrying model must be refused");
+    let err = assert_vsock_only_device_model(model.network_interfaces.len())
+        .expect_err("NIC-carrying model must be refused");
     assert!(
         err.to_string().contains("network") || err.to_string().contains("NIC"),
         "expected a NIC refusal, got: {err}"
