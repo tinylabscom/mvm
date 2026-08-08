@@ -9,6 +9,7 @@
 //! `xtask check-no-display-on-secret-types` lint, so this enum can
 //! stay plain until then.
 
+use alloc::string::String;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
