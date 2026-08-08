@@ -800,3 +800,5 @@ in
     mkKernel
     ;
 }
+
+# Control: no-op comment to trigger the path-filtered kernel build gate.
