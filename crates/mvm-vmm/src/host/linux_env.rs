@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 
 use mvm_core::linux_env::LinuxEnv;
 use mvm_core::platform;
+/// Builder VM name.
+pub const VM_NAME: &str = "mvm-builder";
 
 /// Native Linux execution environment.
 ///
@@ -14,7 +16,7 @@ pub struct NativeEnv;
 
 impl LinuxEnv for NativeEnv {
     fn run(&self, script: &str) -> Result<Output> {
-        if let Some(output) = crate::base::shell_mock::intercept(script) {
+        if let Some(output) = crate::host::shell::mock::intercept(script) {
             return Ok(output);
         }
 
@@ -25,7 +27,7 @@ impl LinuxEnv for NativeEnv {
     }
 
     fn run_visible(&self, script: &str) -> Result<()> {
-        if let Some(output) = crate::base::shell_mock::intercept(script) {
+        if let Some(output) = crate::host::shell::mock::intercept(script) {
             if output.status.success() {
                 return Ok(());
             }
@@ -38,7 +40,7 @@ impl LinuxEnv for NativeEnv {
         let output = Command::new("bash")
             .args(["-c", script])
             .stdin(Stdio::inherit())
-            .stdout(if crate::base::ui::is_chrome_routed_to_stderr() {
+            .stdout(if crate::host::ui::is_chrome_routed_to_stderr() {
                 Stdio::piped()
             } else {
                 Stdio::inherit()
@@ -47,7 +49,7 @@ impl LinuxEnv for NativeEnv {
             .output()
             .with_context(|| "Failed to run command on host")?;
 
-        if crate::base::ui::is_chrome_routed_to_stderr() && !output.stdout.is_empty() {
+        if crate::host::ui::is_chrome_routed_to_stderr() && !output.stdout.is_empty() {
             std::io::stderr().write_all(&output.stdout).ok();
         }
 
@@ -66,7 +68,7 @@ impl LinuxEnv for NativeEnv {
     }
 
     fn run_capture(&self, script: &str) -> Result<Output> {
-        if let Some(output) = crate::base::shell_mock::intercept(script) {
+        if let Some(output) = crate::host::shell::mock::intercept(script) {
             return Ok(output);
         }
 
@@ -239,14 +241,14 @@ impl DevVmEnv {
 
 impl LinuxEnv for DevVmEnv {
     fn run(&self, script: &str) -> Result<Output> {
-        if let Some(output) = crate::base::shell_mock::intercept(script) {
+        if let Some(output) = crate::host::shell::mock::intercept(script) {
             return Ok(output);
         }
         self.exec_via_vsock(script, 60)
     }
 
     fn run_visible(&self, script: &str) -> Result<()> {
-        if let Some(output) = crate::base::shell_mock::intercept(script) {
+        if let Some(output) = crate::host::shell::mock::intercept(script) {
             if output.status.success() {
                 return Ok(());
             }
@@ -260,7 +262,7 @@ impl LinuxEnv for DevVmEnv {
         let output = self.exec_via_vsock(script, 300)?;
         // Print stdout/stderr to the terminal (visible execution)
         if !output.stdout.is_empty() {
-            if crate::base::ui::is_chrome_routed_to_stderr() {
+            if crate::host::ui::is_chrome_routed_to_stderr() {
                 std::io::stderr().write_all(&output.stdout).ok();
             } else {
                 std::io::stdout().write_all(&output.stdout).ok();
@@ -285,7 +287,7 @@ impl LinuxEnv for DevVmEnv {
     }
 
     fn run_capture(&self, script: &str) -> Result<Output> {
-        if let Some(output) = crate::base::shell_mock::intercept(script) {
+        if let Some(output) = crate::host::shell::mock::intercept(script) {
             return Ok(output);
         }
         self.exec_via_vsock(script, 60)
@@ -403,7 +405,7 @@ mod tests {
 
     #[test]
     fn dev_vm_connects_via_libkrun_per_port_socket() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = TestEnv::new();

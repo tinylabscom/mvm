@@ -4,17 +4,21 @@
 //! `mvm` so the concrete `VmBackend` impls can live in `mvm-backend`
 //! without a back-edge into `mvm`.
 //!
-//! ## What lives here
+//! ## What still lives here
 //!
-//! | Module                 | Purpose                                                |
-//! |------------------------|--------------------------------------------------------|
-//! | `ui`                   | `[mvm]` printing + spinners + interactive prompts      |
-//! | `runtime_meta`         | Per-VM `~/.mvm/vms/<name>/mode.json` (console gate)    |
-//! | `observability_target` | Per-VM host-side probe metadata (eBPF/procfs)          |
-//! | `cow`                  | Reflink (CoW) file cloning + `clone_rootfs_for_instance` |
-//! | `config`        | Builder VM name, FC network/path constants, wire types |
-//! | `shell`         | Host + Linux-env command execution helpers             |
-//! | `linux_env`     | Dispatch trait impls (NativeEnv, DevVmEnv)             |
+//! | Module               | Purpose                                                  |
+//! |----------------------|----------------------------------------------------------|
+//! | `cow`                | Reflink (CoW) file cloning + `clone_rootfs_for_instance`  |
+//! | `config`             | Builder VM name, FC network/path constants, wire types    |
+//! | `snapshot_integrity` | Snapshot seal/verify helpers                              |
+//!
+//! ## What moved down into `mvm-vmm::host`
+//!
+//! `ui`, `runtime_meta`, `observability_target`, `shell`, and `linux_env`
+//! now live in `mvm-vmm::host` so `mvm-backends` can use them without a
+//! back-edge into `mvm-runtime`. They are re-exported below at their old
+//! `crate::base::*` paths so in-crate callers and the mvmd contract
+//! surface keep resolving.
 //!
 //! ## Re-exports kept by `mvm`
 //!
@@ -25,10 +29,10 @@
 
 pub mod config;
 pub mod cow;
-pub mod linux_env;
+pub use mvm_vmm::host::linux_env;
 pub use mvm_vmm::host::observability_target;
 pub use mvm_vmm::host::runtime_meta;
-pub mod shell;
+pub use mvm_vmm::host::shell;
 pub mod snapshot_integrity;
 pub use mvm_vmm::host::ui;
 
