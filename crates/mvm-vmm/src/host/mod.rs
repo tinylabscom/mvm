@@ -13,3 +13,5 @@ pub mod process_liveness;
 pub mod substitution_spawn;
 pub mod virtiofsd;
 pub mod workload_wait;
+pub mod boot_config;
+pub mod egress_bridge;
