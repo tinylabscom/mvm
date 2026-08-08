@@ -25,7 +25,6 @@ pub mod contract;
 pub mod local;
 pub mod mount_provider;
 pub mod provider;
-pub mod snapshot;
 
 // At-rest-encrypted `StorageProvider` — two arms, one `encrypted::EncryptedStorage`
 // type so callers never branch on platform:
@@ -44,7 +43,6 @@ pub use mount_provider::{
     HostPathFs, MountError, MountProvider, MountRegistry, Mountable, TmpfsFs, VolumeFs,
 };
 pub use provider::{AttachedVolume, LocalStorage, StorageProvider, VolumeHandle, VolumeSpec};
-pub use snapshot::SnapshotUpper;
 
 pub use encrypted::EncryptedStorage;
 

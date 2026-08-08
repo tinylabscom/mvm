@@ -1,16 +1,16 @@
 //! The `VmmDriver` seam: VMM mechanics written once per VMM, with role policy
 //! (workload admission/egress/audit, builder orchestration) living in the role
 //! runners above it.
+//!
+//! The concrete driver implementations now live in `mvm-backends`; this module
+//! is a compatibility re-export layer while downstream callers migrate.
 
 pub mod fc;
-pub mod libkrun;
-pub mod qemu;
 pub mod spec;
 pub mod traits;
 
 pub use fc::FcDriver;
-pub use libkrun::LibkrunDriver;
-pub use qemu::QemuDriver;
+pub use mvm_backends::driver::{HvfDriver, LibkrunDriver, QemuDriver};
 pub use spec::{
     BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
 };

@@ -21,5 +21,5 @@ pub mod vmm;
 pub mod vsock_egress_bridge;
 pub mod vsock_transport;
 
-#[cfg(test)]
-pub(crate) mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;

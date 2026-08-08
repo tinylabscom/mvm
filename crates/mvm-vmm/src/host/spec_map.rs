@@ -10,7 +10,7 @@ use mvm_core::config::vm_hvf_vsock_port_socket_at;
 use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 use mvm_net::channel::GuestService;
 
-use crate::driver::{
+use crate::driver::spec::{
     BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
 };
 
@@ -101,9 +101,7 @@ pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
         .filter(|volume| matches!(volume.kind, VmVolumeKind::Disk))
         .count();
     let first_user_block = blocks.len().saturating_sub(disk_count);
-    let mut block_devices = blocks[first_user_block..]
-        .iter()
-        .map(crate::driver::BlockDev::device_node);
+    let mut block_devices = blocks[first_user_block..].iter().map(BlockDev::device_node);
 
     config
         .volumes

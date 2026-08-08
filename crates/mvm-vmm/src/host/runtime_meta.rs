@@ -23,7 +23,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use mvm_core::vm_backend::{RuntimeSourcePolicy, StartMode, VmStartConfig};
 use serde::{Deserialize, Serialize};
 
@@ -224,6 +224,71 @@ struct AccessibleSidecar {
     accessible: bool,
 }
 
+/// Minimal subset of the `mvm-meta.json` sidecar needed to admit the
+/// runtime-overlay contract. The full sidecar shape lives in `mvm-build`;
+/// this crate only reads the overlay bits so it can stay below `mvm-runtime`
+/// and `mvm-build` in the dependency graph.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OverlayAwareSidecar {
+    #[serde(default)]
+    overlay_aware: bool,
+    #[serde(default)]
+    runtime_lean: bool,
+}
+
+/// Admission gate for the runtime-overlay contract.
+///
+/// `PreferOverlay` / `RootfsOnly` require only the original overlay-awareness
+/// claim. `RequiredOverlay` additionally requires a runtime-lean rootfs so the
+/// boot contract cannot silently degrade back to a baked agent/netinit pair.
+pub fn admit_runtime_overlay_contract(
+    rootfs_dir: &std::path::Path,
+    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+) -> Result<()> {
+    let path = rootfs_dir.join(SIDECAR_FILENAME);
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "refusing to start VM: rootfs at {} has no `mvm-meta.json` sidecar. \
+                 The build pipeline that produced this rootfs predates the W6.2 \
+                 sidecar emit, which means it also predates W1.4b runtime overlay \
+                 (no `/mvm/runtime` mount point in the rootfs). Rebuild the image \
+                 with current mkGuest, or drop the cached template.",
+                rootfs_dir.display()
+            )
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let sidecar: OverlayAwareSidecar =
+        serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
+    if !sidecar.overlay_aware {
+        bail!(
+            "refusing to start VM: rootfs at {} has `overlay_aware: false` \
+             in its `mvm-meta.json` sidecar. Pre-W1.4b cached templates have no \
+                 `/mvm/runtime` mount point; attaching the runtime overlay disk to \
+                 them would either fail or silently degrade to the baked-in agent. \
+                 Rebuild the image with current mkGuest (`passthru.mvm.overlayAware = true`).",
+            rootfs_dir.display()
+        )
+    }
+    if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+        && !sidecar.runtime_lean
+    {
+        bail!(
+            "refusing to start VM: rootfs at {} is marked `overlayAware: true` but \
+                 not `runtimeLean: true` in its `mvm-meta.json` sidecar. Required-overlay \
+                 boots must use a rootfs that intentionally omits the baked \
+                 `/usr/local/bin/mvm-guest-agent` + `mvm-guest-netinit` fallback so the \
+                 boot contract cannot silently degrade. Rebuild the image with the \
+                 sealed/required-overlay mkGuest shape.",
+            rootfs_dir.display()
+        )
+    }
+    Ok(())
+}
+
 fn read_sidecar_accessible(rootfs_dir: &std::path::Path) -> Result<bool> {
     let path = rootfs_dir.join(SIDECAR_FILENAME);
     let body = match std::fs::read_to_string(&path) {
@@ -231,8 +296,8 @@ fn read_sidecar_accessible(rootfs_dir: &std::path::Path) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(e) => return Err(e.into()),
     };
-    let sidecar: AccessibleSidecar = serde_json::from_str(&body)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let sidecar: AccessibleSidecar =
+        serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
     Ok(sidecar.accessible)
 }
 
@@ -399,11 +464,7 @@ mod tests {
     #[test]
     fn from_sidecar_malformed_propagates_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join(SIDECAR_FILENAME),
-            "{not json",
-        )
-        .expect("write malformed");
+        std::fs::write(tmp.path().join(SIDECAR_FILENAME), "{not json").expect("write malformed");
         let result = from_sidecar(StartMode::Attached, tmp.path());
         assert!(result.is_err(), "malformed sidecar should error");
     }

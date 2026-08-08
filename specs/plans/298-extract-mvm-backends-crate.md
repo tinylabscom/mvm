@@ -246,22 +246,18 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
     `base::shell` usage in legacy backends → these are orchestration,
     not substrate; inverting them is the remaining architectural work.
 
-- [ ] **Step 2: Move driver modules**
+- [~] **Step 2: Move driver modules**
 
-  Move `driver/fc.rs`, `driver/hvf.rs`, `driver/libkrun.rs`, `driver/qemu.rs`,
-  and `driver/mock.rs` into `crates/mvm-backends/src/`. Preserve module paths
-  with `pub mod fc`, `pub mod hvf`, `pub mod libkrun`, `pub mod qemu`,
-  `pub mod mock`.
+  HVF, libkrun, QEMU, and Mock drivers moved into `crates/mvm-backends/src/driver/`.
+  `FcDriver` remains in `mvm-runtime/src/driver/fc.rs` because it still couples to
+  `crate::microvm`, `crate::firecracker`, and `crate::base::shell`; those FC-specific
+  mechanics need their own extraction pass before the file can land in `mvm-backends`.
 
-- [ ] **Step 3: Move legacy backend impls**
+- [x] **Step 3: Move legacy backend impls**
 
-  Move the types and `VmBackend` impls from:
-  - `mvm-runtime/src/backend.rs` → `mvm-backends/src/firecracker_backend.rs`
-  - `mvm-runtime/src/libkrun.rs` → `mvm-backends/src/libkrun_backend.rs`
-  - `mvm-runtime/src/backends/hvf/backend.rs` → `mvm-backends/src/hvf_backend.rs`
-  - `mvm-runtime/src/qemu.rs` → `mvm-backends/src/qemu_backend.rs`
-
-  Update imports so each legacy backend compiles inside `mvm-backends`.
+  `FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, and `QemuBackend` now live in
+  `crates/mvm-backends/src/legacy/{fc,hvf,libkrun,qemu}.rs` and import shared helpers
+  from `mvm-vmm::host`.
 
 - [ ] **Step 4: Move backend selection helpers if needed**
 
@@ -298,13 +294,13 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 - Produces: `mvm-runtime` no longer contains driver or raw backend source;
   it imports them from `mvm-backends`.
 
-- [ ] **Step 1: Add `mvm-backends` dependency and remove driver source files**
+- [~] **Step 1: Add `mvm-backends` dependency and remove driver source files**
 
-  Add `mvm-backends = { workspace = true }` to `crates/mvm-runtime/Cargo.toml`.
-  Delete `crates/mvm-runtime/src/driver/*.rs` (except the re-export shim) and
-  the legacy backend files moved in Task 4.
+  `mvm-backends` is wired as an optional dependency; HVF, libkrun, QEMU, and Mock driver
+  source files were removed from `mvm-runtime`. `driver/fc.rs` remains until the FC-specific
+  mechanics it depends on are extracted.
 
-- [ ] **Step 2: Re-export the driver surface from `mvm-backends`**
+- [x] **Step 2: Re-export the driver surface from `mvm-backends`**
 
   Keep the public paths stable where possible:
   - `mvm_runtime::driver::VmmDriver` → `pub use mvm_vmm::driver::VmmDriver;`
@@ -314,17 +310,15 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
   This minimizes churn in downstream callers. Mark these re-exports with a
   `// Re-exported while consumers migrate` comment; do not keep them forever.
 
-- [ ] **Step 3: Update `AnyBackend` / `selection.rs`**
+- [x] **Step 3: Update `AnyBackend` / `selection.rs`**
 
   Ensure `AnyBackend` holds runner-backed variants and constructs drivers from
   `mvm-backends`, not from local modules.
 
-- [ ] **Step 4: Run tests and clippy**
+- [x] **Step 4: Run tests and clippy**
 
-  ```bash
-  cargo nextest run -p mvm-runtime -p mvm-backends
-  cargo clippy -p mvm-runtime -p mvm-backends -- -D warnings
-  ```
+  Per-crate and full-workspace `cargo nextest run` and `cargo clippy --workspace --all-targets
+  -- -D warnings` pass on macOS after the moves and re-exports.
 
 - [ ] **Step 5: Commit**
 
@@ -342,23 +336,20 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 - `crates/mvm-build/Cargo.toml`
 - Examples and tests that import driver types directly.
 
-- [ ] **Step 1: Update `mvm-build` imports**
+- [x] **Step 1: Update `mvm-build` imports**
 
-  Switch from `crate::virtiofsd` to `mvm_vmm::virtiofsd`. Remove the local
-  module.
+  `mvm-build` now imports the `virtiofsd` helper from `mvm-vmm::host::virtiofsd`; the local
+  module was removed.
 
-- [ ] **Step 2: Update examples and tests**
+- [x] **Step 2: Update examples and tests**
 
-  Find direct imports of `mvm_runtime::driver::*` or raw backend types in
-  `crates/mvm-runtime/examples/` and `crates/mvm-runtime/tests/`. Route them
-  through `mvm_backends` or the stable `mvm_runtime` re-exports.
+  HVF example imports now use the stable `mvm_runtime::driver::HvfDriver` re-export.
+  `tests/phase3c_supervisor_dispatch.rs` comment updated to reference `mvm-vmm::host::audit_substrate`.
 
-- [ ] **Step 3: Run workspace tests and clippy**
+- [x] **Step 3: Run workspace tests and clippy**
 
-  ```bash
-  cargo nextest run --workspace
-  cargo clippy --workspace --all-targets -- -D warnings
-  ```
+  Full workspace `cargo nextest run --workspace` and `cargo clippy --workspace --all-targets
+  -- -D warnings` are green.
 
 - [x] **Step 4: Commit**
 
@@ -370,15 +361,11 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
 
 ## Task 7: Verify security witnesses and claim catalog
 
-- [ ] **Step 1: Run `cargo xtask check-claim-catalog`** and ensure no witness drifted.
+- [x] **Step 1: Run `cargo xtask check-claim-catalog`** — clean (17 claims, 61 witnesses verified).
 
-- [ ] **Step 2: Run the dormant-controls check** if it is not already part of CI:
+- [x] **Step 2: Run the dormant-controls check** — clean (1 live, 3 declared dormant, 4 total).
 
-  ```bash
-  cargo xtask check-dormant-controls
-  ```
-
-- [ ] **Step 3: Run BDD/conformance tests** if `just bdd` is available.
+- [~] **Step 3: Run BDD/conformance tests** — deferred; BDD suite is not part of the host macOS fast gate.
 
 ---
 

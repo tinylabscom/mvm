@@ -15,24 +15,25 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
-use mvm_build::hvf_supervisor::{
-    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
-};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyError, StandbyHandle,
     StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
+use mvm_vmm::host::hvf_supervisor::{
+    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
+};
 use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
-use super::backend::{
+use crate::legacy::hvf::{
     self as hvf_backend, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
 };
-use crate::checkpoint::{DeviceAnchors, VmFullControl};
-use crate::driver::spec::KernelImage;
-use crate::driver::{
-    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver, VmmSpec,
+use mvm_core::checkpoint::DeviceAnchors;
+use mvm_vmm::checkpoint::VmFullControl;
+use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
+use mvm_vmm::driver::traits::{
+    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
 };
 
 /// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
@@ -118,7 +119,7 @@ fn relay_supervisor_config_with_handoff(
     // file-served with hypervisor-enforced RO; an ephemeral block is RAM-backed
     // (writes dropped on exit); a writable non-ephemeral block persists to the
     // host file (the builder's nix-store / output disks).
-    let mut ordered: Vec<&crate::driver::BlockDev> = spec.blocks.iter().collect();
+    let mut ordered: Vec<&BlockDev> = spec.blocks.iter().collect();
     ordered.sort_by_key(|b| b.slot);
     let disks = ordered
         .iter()
@@ -517,7 +518,7 @@ impl VmmDriver for HvfDriver {
     }
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        super::bootargs::workload_bootargs(virtiofs_root, has_disk)
+        crate::legacy::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
     }
 }
 
@@ -827,8 +828,8 @@ impl RunningVm for HvfRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
     use mvm_core::vm_backend::SnapshotCapability;
+    use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
 
     #[test]
     fn handoff_response_reader_handles_a_ready_unix_stream() {
@@ -907,11 +908,11 @@ mod tests {
         let d = HvfDriver::new();
         assert_eq!(
             d.workload_base_bootargs(false, true),
-            crate::backends::hvf::bootargs::workload_bootargs(false, true)
+            crate::legacy::hvf_bootargs::workload_bootargs(false, true)
         );
         assert_eq!(
             d.workload_base_bootargs(true, false),
-            crate::backends::hvf::bootargs::workload_bootargs(true, false)
+            crate::legacy::hvf_bootargs::workload_bootargs(true, false)
         );
     }
 
@@ -999,8 +1000,8 @@ mod tests {
 
         // What the host reaches the guest agent through.
         let resolver = mvm_core::config::vm_hvf_agent_socket(name);
-        let transport =
-            crate::vsock_transport::DevConsoleTransport::for_vm(name).socket_path(GUEST_AGENT_PORT);
+        let transport = mvm_vmm::vsock_transport::DevConsoleTransport::for_vm(name)
+            .socket_path(GUEST_AGENT_PORT);
 
         assert_eq!(
             binder, resolver,
@@ -1144,7 +1145,7 @@ mod tests {
 
     #[test]
     fn vsock_connect_reaches_the_agent_socket_and_rejects_other_ports() {
-        use crate::test_support::bind_unix_listener;
+        use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
         let dir = tempfile::tempdir().unwrap();
@@ -1210,7 +1211,7 @@ mod tests {
 
     #[test]
     fn vsock_connect_console_port_resolves_to_vsock_subdir() {
-        use crate::test_support::bind_unix_listener;
+        use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
         let dir = tempfile::tempdir().unwrap();

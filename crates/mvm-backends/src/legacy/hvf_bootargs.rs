@@ -4,12 +4,12 @@
 //! string assembly and is shared by cfg-free backend glue that still compiles on
 //! Linux CI. Keep that helper out of the macOS-only `crate::hvf` module.
 
-use crate::vmm::fdt;
+use mvm_vmm::vmm::fdt;
 
 const UART_BASE: u64 = fdt::SERIAL_MMIO_BASE;
 
 /// Cmdline used for block-rootfs workload boots.
-pub(crate) fn default_bootargs(has_disk: bool) -> String {
+pub fn default_bootargs(has_disk: bool) -> String {
     let mut args =
         format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8");
     if has_disk {
@@ -19,7 +19,7 @@ pub(crate) fn default_bootargs(has_disk: bool) -> String {
 }
 
 /// Cmdline used for virtiofs-root dev boots.
-pub(crate) fn default_virtiofs_bootargs() -> String {
+pub fn default_virtiofs_bootargs() -> String {
     format!(
         "earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8 \
          rootfstype=virtiofs root=mvmroot rw init=/init"
@@ -35,25 +35,18 @@ pub fn workload_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     }
 }
 
-/// Plan-bound grant cmdline tokens for `vm_name`, in the order the libkrun
-/// supervisor cmdline carries them: the verb grant envelope, the enforcement
-/// assertion, and the out-of-band host-signer trust anchor. HVF is a vsock-only
-/// backend with no config drive, so all three ride the cmdline to reach parity
-/// with libkrun. Empty when the plan minted no grant sidecar.
-pub(crate) fn grant_tokens(vm_name: &str) -> Vec<String> {
-    [
-        crate::microvm::verb_grant_cmdline_token(vm_name),
-        crate::microvm::require_grant_cmdline_token(vm_name),
-        crate::microvm::host_signer_pub_cmdline_token(vm_name),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    fn grant_tokens(vm_name: &str) -> Vec<String> {
+        [
+            mvm_vmm::host::egress_bridge::verb_grant_cmdline_token(vm_name),
+            mvm_vmm::host::egress_bridge::require_grant_cmdline_token(vm_name),
+            mvm_vmm::host::egress_bridge::host_signer_pub_cmdline_token(vm_name),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
 
     fn seed_grant_sidecar_and_key(vm_name: &str) {
         use mvm_core::plan::{Nonce, VerbGrant, VerbId};
@@ -100,7 +93,7 @@ mod tests {
         assert!(tokens[0].starts_with("mvm.verb_grant="), "verb grant first");
         assert_eq!(
             tokens[1],
-            crate::microvm::require_grant_cmdline_token(vm_name).unwrap(),
+            mvm_vmm::host::egress_bridge::require_grant_cmdline_token(vm_name).unwrap(),
             "enforcement token matches the canonical emitter"
         );
         assert!(

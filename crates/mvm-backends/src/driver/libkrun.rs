@@ -22,9 +22,10 @@ use mvm_core::vm_backend::{
 };
 use mvm_net::channel::GuestService;
 
-use crate::driver::spec::KernelImage;
-use crate::driver::{BlockDev, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection};
-use crate::libkrun::LibkrunBackend;
+use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec, VsockDirection};
+use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
+
+use crate::legacy::libkrun::LibkrunBackend;
 
 /// DAX window size exported to libkrun for any virtio-fs share that
 /// requests DAX. 256 MiB matches the HVF DAX window and is large enough
@@ -62,11 +63,11 @@ fn libkrun_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
         // Dev virtiofs-root boot: hvc0 console + the virtiofs guest root.
         "console=hvc0 rootfstype=virtiofs root=mvmroot rw init=/init".to_string()
     } else if has_disk {
-        crate::libkrun::DEFAULT_CMDLINE.to_string()
+        crate::legacy::libkrun::DEFAULT_CMDLINE.to_string()
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
         // so only the console base is emitted here.
-        crate::libkrun::VERITY_CMDLINE.to_string()
+        crate::legacy::libkrun::VERITY_CMDLINE.to_string()
     }
 }
 
@@ -98,7 +99,7 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // shared helper rather than forking it: on x86_64 this converts the workload
     // kernel to a libkrun-loadable ELF and reports the format; on aarch64 it is a
     // passthrough at Raw. The driver must not diverge from the host kernel-prep.
-    let (kernel, kernel_format) = crate::libkrun::libkrun_kernel_for_host(&kernel_path)?;
+    let (kernel, kernel_format) = crate::legacy::libkrun::libkrun_kernel_for_host(&kernel_path)?;
 
     let vcpus = u8::try_from(spec.vcpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
     let state_dir_str = state_dir.to_string_lossy().into_owned();
@@ -284,13 +285,15 @@ impl VmmDriver for LibkrunDriver {
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;
 
-        let supervisor = crate::libkrun::resolve_supervisor_path()?;
+        let supervisor = crate::legacy::libkrun::resolve_supervisor_path()?;
         let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
-        let stderr = mvm_vmm::host::console_capture::open_console_capture(&state_dir.join("supervisor.stderr.log"))
-            .map(Stdio::from)
-            .unwrap_or_else(|_| Stdio::inherit());
+        let stderr = mvm_vmm::host::console_capture::open_console_capture(
+            &state_dir.join("supervisor.stderr.log"),
+        )
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::inherit());
         let mut child = Command::new(&supervisor)
             .stdin(Stdio::piped())
             .stdout(stdout)
@@ -306,7 +309,7 @@ impl VmmDriver for LibkrunDriver {
 
         // Poll for the PID file (boot confirmed). If the supervisor exits first,
         // surface that — its console capture carries the actionable detail.
-        let deadline = Instant::now() + crate::libkrun::PID_FILE_TIMEOUT;
+        let deadline = Instant::now() + crate::legacy::libkrun::PID_FILE_TIMEOUT;
         loop {
             if pid_file.exists() {
                 break;
@@ -324,7 +327,7 @@ impl VmmDriver for LibkrunDriver {
                 let _ = child.kill();
                 bail!(
                     "libkrun supervisor did not confirm boot within {:?}; see {}",
-                    crate::libkrun::PID_FILE_TIMEOUT,
+                    crate::legacy::libkrun::PID_FILE_TIMEOUT,
                     console_log.display()
                 );
             }
@@ -336,7 +339,7 @@ impl VmmDriver for LibkrunDriver {
         // attach / shell_exec that immediately follows doesn't race a
         // not-yet-bound socket and report the VM "not running".
         let agent_socket = vm_vsock_port_socket_at(&state_dir, GUEST_AGENT_PORT);
-        let sock_deadline = Instant::now() + crate::libkrun::VSOCK_SOCKET_TIMEOUT;
+        let sock_deadline = Instant::now() + crate::legacy::libkrun::VSOCK_SOCKET_TIMEOUT;
         while !agent_socket.exists() {
             if let Some(status) = child
                 .try_wait()
@@ -353,7 +356,7 @@ impl VmmDriver for LibkrunDriver {
                 bail!(
                     "libkrun supervisor did not bind vsock socket {} within {:?}; killed; see {}",
                     agent_socket.display(),
-                    crate::libkrun::VSOCK_SOCKET_TIMEOUT,
+                    crate::legacy::libkrun::VSOCK_SOCKET_TIMEOUT,
                     console_log.display()
                 );
             }
@@ -411,16 +414,16 @@ impl RunningVm for LibkrunRunningVm {
         // SIGTERM → grace → SIGKILL, the escalation LibkrunBackend::stop uses:
         // SIGTERM gives libkrun a chance to close its virtio-blk fds, then
         // SIGKILL if it ignores us within the grace window.
-        if let Some(pid) = crate::libkrun::read_pid(&self.pid_file)
-            && crate::libkrun::pid_alive(pid)
+        if let Some(pid) = crate::legacy::libkrun::read_pid(&self.pid_file)
+            && crate::legacy::libkrun::pid_alive(pid)
         {
-            crate::libkrun::send_signal(pid, libc::SIGTERM);
-            let deadline = Instant::now() + crate::libkrun::STOP_TIMEOUT;
-            while Instant::now() < deadline && crate::libkrun::pid_alive(pid) {
+            crate::legacy::libkrun::send_signal(pid, libc::SIGTERM);
+            let deadline = Instant::now() + crate::legacy::libkrun::STOP_TIMEOUT;
+            while Instant::now() < deadline && crate::legacy::libkrun::pid_alive(pid) {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            if crate::libkrun::pid_alive(pid) {
-                crate::libkrun::send_signal(pid, libc::SIGKILL);
+            if crate::legacy::libkrun::pid_alive(pid) {
+                crate::legacy::libkrun::send_signal(pid, libc::SIGKILL);
             }
         }
         let _ = std::fs::remove_file(&self.pid_file);
@@ -440,8 +443,8 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        Ok(match crate::libkrun::read_pid(&self.pid_file) {
-            Some(pid) if crate::libkrun::pid_alive(pid) => VmStatus::Running,
+        Ok(match crate::legacy::libkrun::read_pid(&self.pid_file) {
+            Some(pid) if crate::legacy::libkrun::pid_alive(pid) => VmStatus::Running,
             _ => VmStatus::Stopped,
         })
     }
@@ -478,9 +481,9 @@ impl RunningVm for LibkrunRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::{ConsoleCapture, VirtioFsShare, VsockPort};
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, WORKLOAD_EXIT_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
+    use mvm_vmm::driver::spec::{ConsoleCapture, VirtioFsShare, VsockPort};
 
     fn host_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
@@ -847,7 +850,7 @@ mod tests {
         let cfg = relay(&spec);
         assert_eq!(
             cfg.krun.kernel_cmdline.as_deref(),
-            Some(crate::libkrun::DEFAULT_CMDLINE)
+            Some(crate::legacy::libkrun::DEFAULT_CMDLINE)
         );
 
         // Empty + an initramfs (no disk root) ⇒ the console-only verity base.
@@ -857,7 +860,7 @@ mod tests {
         let cfg = relay(&spec);
         assert_eq!(
             cfg.krun.kernel_cmdline.as_deref(),
-            Some(crate::libkrun::VERITY_CMDLINE)
+            Some(crate::legacy::libkrun::VERITY_CMDLINE)
         );
     }
 
@@ -892,7 +895,7 @@ mod tests {
 
     #[test]
     fn vsock_connect_reaches_the_agent_socket_and_rejects_other_ports() {
-        use crate::test_support::bind_unix_listener;
+        use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
         let dir = tempfile::tempdir().unwrap();
@@ -931,7 +934,7 @@ mod tests {
 
     #[test]
     fn vsock_connect_reaches_a_dev_console_data_port() {
-        use crate::test_support::bind_unix_listener;
+        use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
         let dir = tempfile::tempdir().unwrap();

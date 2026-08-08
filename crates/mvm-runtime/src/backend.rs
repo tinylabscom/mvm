@@ -9,11 +9,10 @@ use mvm_core::vm_backend::{
 // `microvm`, `image` are siblings under `crate::`; the substrate
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::apple_container_backend::AppleContainerBackend;
-use crate::backends::hvf::driver::HvfDriver;
 use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
 use crate::docker_backend::DockerBackend;
-use crate::driver::{FcDriver, LibkrunDriver, QemuDriver};
+use crate::driver::FcDriver;
 use crate::image::RuntimeVolume;
 use crate::microvm::FlakeRunConfig;
 #[cfg(feature = "test-support")]
@@ -21,6 +20,8 @@ use crate::mock::MockBackend;
 use crate::wasm_backend::WasmBackend;
 use crate::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
+use mvm_backends::driver::hvf::HvfDriver;
+use mvm_backends::driver::{LibkrunDriver, QemuDriver};
 use mvm_vmm::host::drive_file::DriveFile;
 
 /// The hvf VMM driven through the unified workload-runner role over the driver

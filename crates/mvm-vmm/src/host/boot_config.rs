@@ -12,6 +12,17 @@
 /// every run. Returns `(Some(verity_path), Some(roothash))` when both files
 /// are present and the roothash decodes to a 64-char hex string; otherwise
 /// `(None, None)` so callers fall back to the unverified-boot path.
+/// The host's current wall clock as an `mvm.hostepoch=<unix_seconds>` cmdline
+/// token. The libkrun + hvf builder VMMs expose no RTC, so the guest boots with a
+/// ~1970 clock; PID 1 reads this token and seeds the wall clock from it.
+pub fn builder_hostepoch_cmdline_token() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("mvm.hostepoch={secs}")
+}
+
 pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String>) {
     use std::path::Path;
 
@@ -75,6 +86,19 @@ pub fn build_runtime_overlay_cmdline_args(
         Some(_) => Some("mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd".to_string()),
         None => Some("mvm.runtime_data=/dev/vdb".to_string()),
     }
+}
+
+/// Whether this boot attached the universal initramfs (as opposed to a
+/// legacy per-rootfs verity initramfs or no initramfs at all).  The CLI
+/// resolves the artifact out of the shared initramfs cache, so the path
+/// itself is the discriminant — a cold-cache legacy boot keeps its
+/// `rootfs.initrd` sibling and is never sent `ActivateEnvironment`.
+pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
+    let Some(initrd) = &config.initrd_path else {
+        return false;
+    };
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+    std::path::Path::new(initrd).starts_with(&cache_root)
 }
 
 /// The runtime-overlay ext4 to attach as a plain read-only virtio-blk device

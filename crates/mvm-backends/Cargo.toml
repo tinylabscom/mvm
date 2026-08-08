@@ -15,6 +15,13 @@ mvm-net = { workspace = true }
 mvm-agentd = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+libkrun-sys = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+which = { workspace = true }
 
 [features]
 default = []
@@ -24,4 +31,5 @@ test-support = []
 workspace = true
 
 [dev-dependencies]
+mvm-vmm = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

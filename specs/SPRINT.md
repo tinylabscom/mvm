@@ -153,14 +153,17 @@
       `process_liveness`, `boot_config`, `egress_bridge`) now live in
       `mvm-vmm::host`, and substrate helpers
       (`open_console_capture`, `runtime_meta`/`observability_target`, `ui`)
-      have also moved there. Workspace `cargo nextest run --workspace`,
-      `cargo clippy --workspace --all-targets -- -D warnings`,
+      have also moved there. The new `mvm-backends` crate now owns the
+      HVF, libkrun, QEMU, and Mock `VmmDriver` implementations plus the
+      legacy `FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, and
+      `QemuBackend` shells; `mvm-runtime` depends on `mvm-backends` and
+      re-exports the driver surface for backward compatibility. Workspace
+      `cargo nextest run --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo xtask check-claim-catalog`, and `cargo xtask check-dormant-controls`
-      are green. Remaining: deeper coupling (`microvm` pause/resume,
-      backend-specific `firecracker` snapshot helpers, and legacy-backend
-      orchestration such as `workload_runner`/`base::shell`) must be
-      inverted or parameterized before the concrete drivers and legacy
-      `VmBackend` shells can land in `mvm-backends`.
+      are green. Remaining: `FcDriver` still lives in `mvm-runtime/src/driver/fc.rs`
+      because it couples to `crate::microvm`, `crate::firecracker`, and
+      `crate::base::shell`; those FC-specific mechanics need extraction or
+      parameterization before the Firecracker driver can land in `mvm-backends`.
 
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC

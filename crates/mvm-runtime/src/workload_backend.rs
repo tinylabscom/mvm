@@ -3,10 +3,10 @@
 //! implement it; the admitted launch path accepts `&dyn WorkloadBackend`
 //! only, so a non-workload backend cannot reach it.
 use crate::backend::AnyBackend;
-use crate::backends::hvf::HvfBackend;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use anyhow::{Result, anyhow};
+use mvm_backends::legacy::hvf::HvfBackend;
 use mvm_core::vm_backend::VmBackend;
 
 /// Declares how a workload backend carries the egress secret-substitution

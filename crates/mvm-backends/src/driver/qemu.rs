@@ -28,13 +28,13 @@ use mvm_core::vm_backend::{
 };
 use mvm_net::channel::GuestService;
 
-use mvm_vmm::host::ui;
-use crate::driver::spec::KernelImage;
-use crate::driver::{DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection, VsockPort};
-use crate::qemu::{
+use crate::legacy::qemu::{
     self, QEMU_LOG_FILE, QEMU_PID_FILE, QemuBackend, QemuBridgeGuestDial, QemuBridgeHostDial,
     QemuBridgeSpec,
 };
+use mvm_vmm::driver::spec::{KernelImage, VmmSpec, VsockDirection, VsockPort};
+use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
+use mvm_vmm::host::ui;
 use mvm_vmm::host::virtiofsd::{SpawnParams, VirtiofsdGuard, locate_virtiofsd};
 
 /// The QEMU VMM driver: pure VMM mechanics, no policy and no admission. It
@@ -138,7 +138,7 @@ fn qemu_boot_argv(
     // serves every disk from its host file — there is no RAM-backed mode, so
     // `BlockDev::ephemeral` is not representable here; workload blocks are
     // read-only + non-ephemeral, so nothing is dropped.
-    let mut ordered: Vec<&crate::driver::BlockDev> = spec.blocks.iter().collect();
+    let mut ordered: Vec<&mvm_vmm::driver::spec::BlockDev> = spec.blocks.iter().collect();
     ordered.sort_by_key(|b| b.slot);
     for block in ordered {
         let mut drive = format!("file={},if=virtio,format=raw", block.source.display());
@@ -329,9 +329,9 @@ impl VmmDriver for QemuDriver {
         // invariant + truncate-on-boot match the other backends.
         let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
         drop(
-            mvm_vmm::host::console_capture::open_console_capture(&spec.console.log_path).map_err(|e| {
-                anyhow!("open console sink {}: {e}", spec.console.log_path.display())
-            })?,
+            mvm_vmm::host::console_capture::open_console_capture(&spec.console.log_path).map_err(
+                |e| anyhow!("open console sink {}: {e}", spec.console.log_path.display()),
+            )?,
         );
 
         let kvm = qemu::kvm_available();
@@ -547,9 +547,9 @@ impl RunningVm for QemuRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::{BlockDev, ConsoleCapture, VirtioFsShare};
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
+    use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VirtioFsShare};
 
     fn host_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn vsock_connect_reaches_the_bridge_socket_and_rejects_other_ports() {
-        use crate::test_support::bind_unix_listener;
+        use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
         let dir = tempfile::tempdir().unwrap();

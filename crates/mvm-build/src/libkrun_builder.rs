@@ -2136,7 +2136,7 @@ fn page_aligned_kernel(kernel_path: &Path) -> Result<PathBuf, BuilderVmError> {
 
 fn builder_kernel_for_host(kernel_path: &Path) -> Result<(PathBuf, KernelFormat), BuilderVmError> {
     let normalized = if cfg!(target_arch = "x86_64") && kernel_path.exists() {
-        crate::fc_kernel::ensure_fc_loadable_kernel(kernel_path).map_err(|e| {
+        mvm_vmm::host::fc_kernel::ensure_fc_loadable_kernel(kernel_path).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
                 "prepare x86_64 libkrun-builder kernel from {}: {e}",
                 kernel_path.display()

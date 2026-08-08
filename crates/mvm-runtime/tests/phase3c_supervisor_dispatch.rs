@@ -33,7 +33,7 @@
 //! Self-skips on non-macos-aarch64 (the only platform with libkrun +
 //! supervisor binary out of the box; Linux contributors get the same
 //! coverage via the unit tests in `libkrun.rs` and
-//! `audit_substrate.rs`). Set `MVM_LIBKRUN_SUPERVISOR_PATH` to point
+//! `mvm-vmm::host::audit_substrate`). Set `MVM_LIBKRUN_SUPERVISOR_PATH` to point
 //! at a non-default binary location.
 
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -59,7 +59,7 @@ fn supervisor_takes_bridge_path_when_tenant_id_some() {
     // Build a populated VmStartConfig and run it through Phase 3c's
     // shared substrate helper.
     let substrate =
-        mvm_runtime::audit_substrate::compute_audit_substrate("phase3c-smoke", Some("smoke"))
+        mvm_vmm::host::audit_substrate::compute_audit_substrate("phase3c-smoke", Some("smoke"))
             .expect("compute substrate");
 
     let state_dir = std::path::PathBuf::from("/tmp/phase3c-smoke");

@@ -790,7 +790,8 @@ pub fn try_warm_claim(
     let make_claim = |handle: &StandbyHandle| {
         // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
         // under the standby-id, so compute it for `handle.id`.
-        let sub = mvm_runtime::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
+        let sub =
+            mvm_vmm::host::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
         let mut start_config = claim_start_config.clone();
         start_config.name = handle.id.clone();
         start_config.rootfs_path = rootfs.clone();
