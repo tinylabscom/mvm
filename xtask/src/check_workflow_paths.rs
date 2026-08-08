@@ -332,7 +332,26 @@ mod tests {
 
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
-        assert!(test.contains("needs: [test-workspace, test-linux]"));
+        assert!(test.contains("needs: [test-workspace, test-linux, test-release-witness]"));
+
+        // The release-profile lane is the only one that runs with trapping
+        // overflow and debug assertions off, i.e. the only one that witnesses
+        // what actually ships. A lane that runs but is not in the aggregate's
+        // `needs` is a lane that cannot fail the merge, so pin both halves.
+        let release_witness = job_block(&workflow, "test-release-witness");
+        assert!(release_witness.contains("--cargo-profile release-witness"));
+        for expected in [
+            "-p mvm-fs",
+            "-p mvm-core",
+            "-p mvm-contract",
+            "-p mvm-hostd",
+        ] {
+            assert!(
+                release_witness.contains(expected),
+                "release-witness lane must cover {expected:?}"
+            );
+        }
+
         let test_workspace = job_block(&workflow, "test-workspace");
         assert!(!test_workspace.contains("uses: actions/cache@v5"));
         assert!(test_workspace.contains("cargo nextest run -p xtask --features man"));

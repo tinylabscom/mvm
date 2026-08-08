@@ -16,6 +16,19 @@
       #2101 and #2211 require scope split or narrowing; the remaining issues
       retain active implementation, security, live-validation, or
       cross-repository acceptance work.
+- [~] Runtime hardening for production — **plan 303**. Closes gaps between the
+      binary CI witnesses and the binary that ships. Landed: trapping integer
+      overflow in `[profile.release]` plus a `release-witness` CI lane over the
+      crates that parse hostile input (until now every test ran under different
+      arithmetic than production); audit-chain appends as a single `write_all`
+      + `sync_data`, with a torn tail reported as truncation instead of
+      tampering; a cap on the OCI manifest body before it is buffered, and
+      decompressed-byte / entry-count caps on layer unpack; fail-closed
+      handling of a panicking payload-tapping observer. WS5's scope was
+      corrected during implementation — the blanket version would have let a
+      panicking metrics counter take down builder-VM networking. Remaining:
+      panic hook with secret sanitization (WS4), Landlock for the `mvm-hostd`
+      process moat (WS6), Miri lane (WS7).
 
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned

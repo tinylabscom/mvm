@@ -51,6 +51,15 @@ pub enum OciError {
     #[error("layer size {declared} bytes exceeds cap of {cap} bytes")]
     LayerTooLarge { declared: u64, cap: u64 },
 
+    /// The manifest body ran past the cap before it could be buffered.
+    /// Manifests are kilobytes and an index for a large multi-arch image is
+    /// still well under a megabyte, so anything past the cap is broken or
+    /// hostile. The digest check runs on the buffered bytes, which means
+    /// without this bound the registry chooses how much memory we allocate
+    /// before we are in a position to reject it.
+    #[error("manifest body exceeds cap of {cap} bytes")]
+    ManifestTooLarge { cap: u64 },
+
     /// The layer tarball could not be unpacked to the caller-supplied
     /// output root. The wrapped string is the underlying unpack error.
     #[error("layer unpack failed: {0}")]
