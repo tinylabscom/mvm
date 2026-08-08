@@ -225,29 +225,26 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
   the drivers use (`anyhow`, `serde`, `tokio`, etc.). Do **not** depend on
   `mvm-runtime` or `mvm-build`.
 
-- [ ] **Step 1b: Extract remaining shared dependencies**
+- [x] **Step 1b: Extract remaining shared dependencies (substrate helpers)**
 
-  The concrete drivers and legacy `VmBackend` shells still reference
-  `mvm-runtime`-local modules that must move (or be parameterized) before
-  the backends can live in `mvm-backends`:
-
+  Moved the substrate helpers that concrete backends need:
   - `libkrun::open_console_capture` → `mvm-vmm::host::console_capture`.
-  - `microvm::{pause_vm, resume_vm, secure_vsock_socket_for_caller}` →
-    `mvm-vmm::host`.
-  - `base::runtime_meta::{record_from_start_config, HOME_TEST_LOCK}` → a
-    small `mvm-vmm::host::runtime_meta` module (only the substrate parts;
-    policy stays in `mvm-runtime`).
-  - `base::ui` progress helpers → either move to `mvm-vmm::host` or pass
-    a callback so backends do not import UI code.
+  - `base::runtime_meta::{record_from_start_config, HOME_TEST_LOCK}` and
+    `base::observability_target` → `mvm-vmm::host::runtime_meta` /
+    `mvm-vmm::host::observability_target`.
+  - `base::ui` progress helpers → `mvm-vmm::host::ui`.
+
+  Still coupled to `mvm-runtime` and blocking Step 2:
+  - `microvm::{pause_vm, resume_vm, secure_vsock_socket_for_caller}` (need
+    FC socket/shell helpers; probably belong with the Firecracker driver).
   - `firecracker` module (pid checks, `FcVmFullControl`, `FcForkRestorer`,
-    `FirecrackerIO`) → keep backend-specific, so move it with the
-    Firecracker driver into `mvm-backends::firecracker` rather than into
-    `mvm-vmm`.
+    `FirecrackerIO`) → keep backend-specific; move with the Firecracker
+    driver into `mvm-backends::firecracker`.
   - `vm::instance_snapshot` orchestration used by warm-claim/fork paths →
     parameterize through the `VmmDriver` seam or keep a thin runtime adapter.
-
-  Inventory produced by the rebase shows these couplings; resolve them
-  before Step 2.
+  - `workload_runner::{cmdline, spec_map, standby_boot}` and
+    `base::shell` usage in legacy backends → these are orchestration,
+    not substrate; inverting them is the remaining architectural work.
 
 - [ ] **Step 2: Move driver modules**
 
