@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_fs::oci::{
-    ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
-    OciManifestFetcher, UnpackOptions, UnpackReport, unpack_layer_with_prior_paths,
+    ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
+    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer_with_prior_paths,
 };
 use mvm_runtime::AnyBackend;
 
@@ -469,7 +469,7 @@ async fn pull_image_to_dir(reference: &str, dest: &Path) -> Result<Vec<mvm_fs::e
         .map_err(|e| backend_err(format!("parse image reference {reference:?}: {e}")))?;
     let manifest_fetcher = OciManifestFetcher::new();
     let manifest = manifest_fetcher
-        .fetch_linux_platform_manifest(&image_ref, &LinuxPlatform::for_current_arch())
+        .fetch_linux_platform_manifest(&image_ref, &current_linux_platform())
         .await
         .map_err(|e| backend_err(format!("fetch manifest for {reference}: {e}")))?;
     let layers = manifest

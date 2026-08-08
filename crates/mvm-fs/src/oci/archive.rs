@@ -15,9 +15,9 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::oci::layer::{HashingReader, LayerDescriptor};
-use crate::oci::manifest::{LinuxPlatform, matches_linux_platform};
 use crate::oci::manifest_types::OciManifest;
 use crate::oci::{OciError, verify_sha256_digest};
+use mvm_contract::oci::{LinuxPlatform, matches_linux_platform};
 use serde::Deserialize;
 
 /// Hard cap on the total bytes buffered from one archive. Blobs are
@@ -446,6 +446,7 @@ fn select_manifest_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oci::manifest::current_linux_platform;
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
 
@@ -470,7 +471,7 @@ mod tests {
 
     impl Default for ArchiveFixture {
         fn default() -> Self {
-            let p = LinuxPlatform::for_current_arch();
+            let p = current_linux_platform();
             Self {
                 arch: p.architecture,
                 os: "linux".to_string(),
@@ -564,7 +565,7 @@ mod tests {
     }
 
     fn read(bytes: &[u8]) -> Result<OciArchiveImage, OciError> {
-        read_oci_archive(bytes, &LinuxPlatform::for_current_arch())
+        read_oci_archive(bytes, &current_linux_platform())
     }
 
     #[test]
@@ -597,10 +598,7 @@ mod tests {
     fn reads_a_valid_single_arch_archive() {
         let img = read(&ArchiveFixture::default().build()).expect("valid archive parses");
         assert_eq!(img.os, "linux");
-        assert_eq!(
-            img.architecture,
-            LinuxPlatform::for_current_arch().architecture
-        );
+        assert_eq!(img.architecture, current_linux_platform().architecture);
         assert_eq!(img.layers.len(), 1);
         assert_eq!(img.layers[0].bytes, b"layer-bytes-pretend-tar-gz");
         assert!(img.manifest_digest.starts_with("sha256:"));
@@ -653,7 +651,7 @@ mod tests {
 
     #[test]
     fn wrong_architecture_is_rejected() {
-        let other = if LinuxPlatform::for_current_arch().architecture == "amd64" {
+        let other = if current_linux_platform().architecture == "amd64" {
             "arm64"
         } else {
             "amd64"
@@ -720,7 +718,7 @@ mod tests {
         let mut layers: Vec<Vec<u8>> = Vec::new();
         let metadata = stream_oci_archive(
             Cursor::new(bytes.to_vec()),
-            &LinuxPlatform::for_current_arch(),
+            &current_linux_platform(),
             |descriptor, raw| {
                 assert_eq!(
                     descriptor.media_type,
@@ -741,10 +739,7 @@ mod tests {
         let bytes = ArchiveFixture::default().build();
         let (metadata, layers) = stream(&bytes).expect("stream valid archive parses");
         assert_eq!(metadata.os, "linux");
-        assert_eq!(
-            metadata.architecture,
-            LinuxPlatform::for_current_arch().architecture
-        );
+        assert_eq!(metadata.architecture, current_linux_platform().architecture);
         assert_eq!(layers.len(), 1);
         assert_eq!(layers[0], b"layer-bytes-pretend-tar-gz");
         assert!(metadata.manifest_digest.starts_with("sha256:"));
@@ -790,7 +785,7 @@ mod tests {
         let layer_digest = digest_of(&layer);
         let config = format!(
             r#"{{"architecture":"{}","os":"linux","rootfs":{{"type":"layers","diff_ids":["{}"]}}}}"#,
-            LinuxPlatform::for_current_arch().architecture, layer_digest
+            current_linux_platform().architecture, layer_digest
         )
         .into_bytes();
         let config_digest = digest_of(&config);
@@ -804,7 +799,7 @@ mod tests {
         let index = format!(
             r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"{IMAGE_MANIFEST_MEDIA}","digest":"{manifest_digest}","size":{mf_sz},"platform":{{"architecture":"{arch}","os":"linux"}}}}]}}"#,
             mf_sz = manifest.len(),
-            arch = LinuxPlatform::for_current_arch().architecture,
+            arch = current_linux_platform().architecture,
         )
         .into_bytes();
 
