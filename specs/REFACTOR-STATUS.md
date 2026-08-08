@@ -81,7 +81,11 @@ for detailed scope and acceptance criteria.
   - [~] Phase 5 — event-driven guest readiness. The flat 50 ms readiness poll
         was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
         from 53.8 ms to 18.0 ms p50 and HVF dispatch from 117.2 ms to 81.4 ms.
-        The authenticated readiness notification itself remains.
+        Three further fixed 50 ms polls (driver PID-file wait, standby agent
+        wait, teardown pid-exit) now share one backoff in
+        `mvm_core::poll_backoff`: VM creation reads 4.6 ms rather than 53.8 ms
+        of tick, and total is 310.1 ms p50. The authenticated readiness
+        notification itself remains.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
         decomposed and the warm-pool refill removed from it: a default
         `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is

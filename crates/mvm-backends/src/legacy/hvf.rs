@@ -72,6 +72,7 @@ fn reap_child_if_exited(pid: libc::pid_t) -> bool {
 
 fn wait_for_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
+    let mut attempt = 0u32;
     loop {
         if reap_child_if_exited(pid) || !pid_alive(pid) {
             return true;
@@ -79,7 +80,10 @@ fn wait_for_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        // A supervisor that already exited must not be reported as taking a
+        // full tick to do it — this wait is on the teardown critical path.
+        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        attempt = attempt.saturating_add(1);
     }
 }
 

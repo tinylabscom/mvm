@@ -2056,55 +2056,15 @@ fn wait_for_agent_timed(
         // fine and backing off keeps a fast guest cheap to notice while a slow
         // one still costs few attempts. The probes are connect+hello and fail
         // fast while the guest is still booting.
-        std::thread::sleep(readiness_poll_delay(attempt));
+        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
     false
 }
 
-/// Backoff between guest-readiness probes: 1ms doubling to a 25ms ceiling.
-///
-/// The ceiling matters more than the floor. Readiness can only be seen on a
-/// probe, so the delay before the probe that succeeds is added to every
-/// reported launch — a cadence coarser than the guest's own boot turns the
-/// measurement into a readout of the cadence.
-fn readiness_poll_delay(attempt: u32) -> std::time::Duration {
-    const BASE_MS: u64 = 1;
-    const CAP_MS: u64 = 25;
-    let scaled = BASE_MS.saturating_mul(1u64 << attempt.min(16));
-    std::time::Duration::from_millis(scaled.min(CAP_MS))
-}
-
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn readiness_backoff_starts_fine_and_caps() {
-        let ms = |a: u32| readiness_poll_delay(a).as_millis() as u64;
-        assert_eq!(ms(0), 1, "the first retry must not round a fast guest up");
-        assert_eq!(ms(1), 2);
-        assert_eq!(ms(2), 4);
-        assert_eq!(ms(3), 8);
-        assert_eq!(ms(4), 16);
-        assert_eq!(ms(5), 25, "capped");
-        assert_eq!(
-            ms(64),
-            25,
-            "a large attempt count cannot overflow the shift"
-        );
-    }
-
-    #[test]
-    fn readiness_backoff_reaches_a_slow_guest_without_many_attempts() {
-        // A guest that takes a second must not cost a thousand probes.
-        let mut elapsed = 0u64;
-        let mut attempts = 0u32;
-        while elapsed < 1000 {
-            elapsed += readiness_poll_delay(attempts).as_millis() as u64;
-            attempts += 1;
-        }
-        assert!(attempts < 50, "1s of waiting took {attempts} probes");
-    }
     use super::*;
 
     use mvm_core::util::test_env::TestEnv;

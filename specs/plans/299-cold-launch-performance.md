@@ -389,6 +389,37 @@ Full event-driven readiness — one authenticated notification rather than any
 polling — remains this phase's actual task; this removes the quantization the
 polling was adding in the meantime.
 
+### The same cadence bug, three more times
+
+Three further fixed 50 ms polls were quantizing the same way: the supervisor
+PID-file wait inside the HVF driver's boot, the guest-agent wait on the
+standby path, and `wait_for_pid_exit` on teardown. All four sites now share
+one backoff (`mvm_core::poll_backoff`) rather than four copies of a constant.
+
+| HVF (p50) | flat tick | readiness fixed | all four fixed |
+|---|---:|---:|---:|
+| `driver_boot` | 53.8 ms | 53.8 ms | **4.6 ms** |
+| `guest_kernel_entry` | 53.8 ms | 18.0 ms | 65.1 ms |
+| **VMM + guest boot** | 107.6 ms | 71.8 ms | **69.7 ms** |
+| dispatch window | 117.2 ms | 81.4 ms | **79.2 ms** |
+| total | — | 352.1 ms | **310.1 ms** |
+
+Read this honestly. The readiness fix was a real 36 ms. This one is worth
+about 2 ms of wall clock; what it actually buys is a true number — VM creation
+on this backend costs **4.6 ms**, not the 53.8 ms the tick reported, and the
+~65 ms is genuinely the guest booting to a serving agent. The work did not
+move off the launch, it moved to the span that was always doing it.
+
+It also widened the tail (dispatch p99 83.5 ms -> 156.7 ms). The flat tick had
+been rounding every launch up to the same value and so *hiding* variance; the
+distribution was never that tight. A tighter-looking p99 that comes from
+quantization is not a better launch.
+
+Two consequences for the rest of the plan. Phase 3's target on HVF is now
+known to be guest boot rather than VMM setup — 65 ms of the 70 ms. And the
+Firecracker `driver_boot` of 623.6 ms should be re-measured against these
+fixes before being decomposed, since it contains a poll of its own.
+
 ## Phase 1 — Content-addressed `--mount` image cache
 
 - [ ] Add a reusable `mvm-fs` directory fingerprint helper covering relative
