@@ -7,6 +7,5 @@
 pub mod libkrun;
 pub mod qemu;
 
-pub mod fc;
 pub mod hvf;
 pub mod hvf_bootargs;

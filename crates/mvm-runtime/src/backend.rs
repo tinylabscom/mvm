@@ -1,9 +1,10 @@
 use crate::catalog;
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, SnapshotCapability, VmBackend, VmCapabilities, VmId,
-    VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
+    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
+    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
 };
+use mvm_vmm::host::shell::run_in_vm_stdout;
 
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
@@ -92,6 +93,154 @@ type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistra
 /// selector all call.
 pub(crate) fn fc_runner() -> FcRunner {
     WorkloadRunner::new(FcDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
+}
+
+/// Firecracker backend implementation.
+///
+/// Wraps the existing free functions in [`crate::fc`] and [`crate::fc`]
+/// behind the [`VmBackend`] trait. This is a thin adapter — all real
+/// work is delegated to the existing implementation.
+pub struct FirecrackerBackend;
+
+impl VmBackend for FirecrackerBackend {
+    fn name(&self) -> &str {
+        "firecracker"
+    }
+
+    fn kind(&self) -> BackendKind {
+        BackendKind::Firecracker
+    }
+
+    fn capabilities(&self) -> VmCapabilities {
+        // Firecracker ships a virtio-balloon device with PATCH-able
+        // target via `/balloon`; the start path attaches it whenever
+        // `VmStartConfig::mem_initial_mib` is `Some`. Capability is
+        // advertised unconditionally so the host-side controller can
+        // discover support before deciding to plumb a workload.
+        VmCapabilities {
+            pause_resume: true,
+            snapshots: false,
+            snapshot_capability: SnapshotCapability::Unsupported,
+            standby_pool: false,
+            vsock: true,
+            tap_networking: false,
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
+            balloon: true,
+            fs_quick_checkpoint: false,
+            ..VmCapabilities::default()
+        }
+    }
+
+    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        fc_runner().start(config)
+    }
+
+    fn stop(&self, id: &VmId) -> Result<()> {
+        mvm_backends::fc::stop_vm(&id.0)
+    }
+
+    fn stop_all(&self) -> Result<()> {
+        mvm_backends::fc::stop_all_vms()
+    }
+
+    fn pause(&self, id: &VmId) -> Result<()> {
+        mvm_backends::fc::pause_vm(&id.0)
+    }
+
+    fn resume(&self, id: &VmId) -> Result<()> {
+        mvm_backends::fc::resume_vm(&id.0)
+    }
+
+    fn balloon_set_target(&self, id: &VmId, target_inflate_mib: u32) -> Result<()> {
+        mvm_backends::fc::balloon_set_target(&id.0, target_inflate_mib)
+    }
+
+    fn balloon_state(&self, id: &VmId) -> Result<mvm_core::vm_backend::BalloonState> {
+        let inflated = mvm_backends::fc::balloon_state(&id.0)?;
+        // FC reports the inflation amount via /balloon; the cap is
+        // tracked host-side in the VM's runtime metadata (RunInfo).
+        // List the VM to recover its declared cap.
+        let vms = mvm_backends::fc::list_vms()?;
+        let info = vms
+            .into_iter()
+            .find(|i| i.name.as_deref() == Some(&*id.0))
+            .ok_or_else(|| anyhow::anyhow!("balloon_state: VM '{}' not found in list", id.0))?;
+        let max_mib = info.memory;
+        Ok(mvm_core::vm_backend::BalloonState {
+            max_mib,
+            inflated_mib: inflated,
+            host_committed_mib: max_mib.saturating_sub(inflated),
+        })
+    }
+
+    fn status(&self, id: &VmId) -> Result<VmStatus> {
+        let vms = mvm_backends::fc::list_vms()?;
+        match vms.iter().find(|info| info.name.as_deref() == Some(&*id.0)) {
+            Some(_) => Ok(VmStatus::Running),
+            None => Ok(VmStatus::Stopped),
+        }
+    }
+
+    fn list(&self) -> Result<Vec<VmInfo>> {
+        let vms = mvm_backends::fc::list_vms()?;
+        Ok(vms
+            .into_iter()
+            .filter_map(|info| {
+                let name = info.name.clone()?;
+                Some(VmInfo {
+                    id: VmId(name.clone()),
+                    name,
+                    status: VmStatus::Running,
+                    guest_ip: info.guest_ip,
+                    cpus: info.cpus,
+                    memory_mib: info.memory,
+                    profile: info.profile,
+                    revision: info.revision,
+                    flake_ref: info.flake_ref,
+                    ports: Vec::new(),
+                })
+            })
+            .collect())
+    }
+
+    fn logs(&self, id: &VmId, lines: u32, hypervisor: bool) -> Result<String> {
+        let abs_vms = mvm_backends::fc::abs_vms_dir();
+        let abs_vms = abs_vms.trim();
+        let filename = if hypervisor {
+            "firecracker.log"
+        } else {
+            "console.log"
+        };
+        let log_file = format!("{}/{}/{}", abs_vms, id.0, filename);
+        run_in_vm_stdout(&format!(
+            "tail -n {} {} 2>/dev/null || true",
+            lines, log_file
+        ))
+    }
+
+    fn is_available(&self) -> Result<bool> {
+        mvm_backends::fc::host::is_installed()
+    }
+
+    fn install(&self) -> Result<()> {
+        mvm_backends::fc::host::install()
+    }
+
+    fn security_profile(&self) -> BackendSecurityProfile {
+        // Tier 1: full security posture. All seven CI-enforced claims
+        // hold. Hardware isolation via KVM; verified boot via
+        // dm-verity.
+        BackendSecurityProfile {
+            claims: [ClaimStatus::Holds; 7],
+            layer_coverage: LayerCoverage::all_layers(),
+            tier: "Tier 1",
+            notes: &[
+                "Full ADR-002 — all seven CI-enforced claims hold.",
+                "Hardware isolation via KVM. Verified boot via dm-verity (W3).",
+            ],
+        }
+    }
 }
 
 /// Compatibility wrapper for the retired raw Firecracker configuration.
@@ -869,7 +1018,6 @@ fn dedup_by_owning_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_backends::legacy::fc::FirecrackerBackend;
     use mvm_core::vm_backend::ClaimStatus;
 
     fn vm_named(name: &str, cpus: u32) -> VmInfo {

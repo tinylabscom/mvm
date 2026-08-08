@@ -162,10 +162,9 @@ pub use base::{config, linux_env, shell, ui};
 // `mvmd-runtime` security modules).
 pub use base::shell_mock;
 
-pub use backend::{AnyBackend, FirecrackerConfig};
+pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 #[cfg(feature = "test-support")]
 pub use mock::MockBackend;
-pub use mvm_backends::legacy::fc::FirecrackerBackend;
 pub use mvm_backends::legacy::libkrun::LibkrunBackend;
 pub use mvm_backends::legacy::qemu::QemuBackend;
 pub use warm_service::{PrewarmFn, WarmLaunchService};

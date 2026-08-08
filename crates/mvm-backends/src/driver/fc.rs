@@ -1,7 +1,7 @@
-//! `FcDriver` — the `VmmDriver` for Firecracker (Linux KVM). Identity delegates
-//! to the proven `FirecrackerBackend`, but capabilities are the flipped,
-//! NIC-less profile: the converged Firecracker path carries no routable guest
-//! NIC and routes egress solely over vsock, exactly like libkrun and hvf.
+//! `FcDriver` — the `VmmDriver` for Firecracker (Linux KVM). It reports its own
+//! identity and capabilities: the NIC-less profile, where the converged
+//! Firecracker path carries no routable guest NIC and routes egress solely
+//! over vsock, exactly like libkrun and hvf.
 //!
 //! `boot` assembles a NIC-less Firecracker launch from a policy-free `VmmSpec`
 //! using the shared `microvm` primitives — the FC-loadable kernel prep, the
@@ -21,8 +21,9 @@ use mvm_agentd::vsock::{
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
-    StandbyHandle, StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
+    SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
@@ -30,7 +31,6 @@ use crate::fc::{
     FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
     read_firecracker_pid, start_vm_firecracker,
 };
-use crate::legacy::fc::FirecrackerBackend;
 use mvm_vmm::driver::spec::KernelImage;
 use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
 use mvm_vmm::driver::traits::{
@@ -57,15 +57,11 @@ const GUEST_STOP_DRAIN_TIMEOUT_SECS: u64 = 10;
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge,
 /// not here.
-pub struct FcDriver {
-    backend: FirecrackerBackend,
-}
+pub struct FcDriver {}
 
 impl FcDriver {
     pub fn new() -> Self {
-        Self {
-            backend: FirecrackerBackend,
-        }
+        Self {}
     }
 }
 
@@ -531,15 +527,15 @@ fn firecracker_status_with(
 
 impl VmmDriver for FcDriver {
     fn name(&self) -> &str {
-        self.backend.name()
+        "firecracker"
     }
 
     fn kind(&self) -> BackendKind {
-        self.backend.kind()
+        BackendKind::Firecracker
     }
 
     fn is_available(&self) -> Result<bool> {
-        self.backend.is_available()
+        crate::fc::host::is_installed()
     }
 
     fn capabilities(&self) -> VmCapabilities {
@@ -577,7 +573,18 @@ impl VmmDriver for FcDriver {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        self.backend.security_profile()
+        // Tier 1: full security posture. All seven CI-enforced claims
+        // hold. Hardware isolation via KVM; verified boot via
+        // dm-verity.
+        BackendSecurityProfile {
+            claims: [ClaimStatus::Holds; 7],
+            layer_coverage: LayerCoverage::all_layers(),
+            tier: "Tier 1",
+            notes: &[
+                "Full ADR-002 — all seven CI-enforced claims hold.",
+                "Hardware isolation via KVM. Verified boot via dm-verity (W3).",
+            ],
+        }
     }
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
@@ -893,8 +900,8 @@ impl VmmDriver for FcDriver {
         }))
     }
 
-    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
-        self.backend.guest_channel_info(id)
+    fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
+        anyhow::bail!("firecracker does not provide guest channel info")
     }
 }
 
@@ -1190,13 +1197,10 @@ mod tests {
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(!caps.tap_networking);
-        assert!(!FirecrackerBackend.capabilities().tap_networking);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
-        // Security tier still delegates to the raw backend (same claims).
-        assert_eq!(
-            d.security_profile().tier,
-            FirecrackerBackend.security_profile().tier
-        );
+        // The driver reports the claim-bearing tier itself now, rather than
+        // asking a legacy shell for it.
+        assert_eq!(d.security_profile().tier, "Tier 1");
     }
 
     #[test]
@@ -1229,17 +1233,15 @@ mod tests {
     }
 
     #[test]
-    fn guest_channel_info_delegates_to_the_firecracker_backend() {
+    fn guest_channel_info_is_unsupported_for_firecracker() {
+        // Firecracker exposes no guest channel; the driver says so directly
+        // instead of routing the question through a legacy shell.
         let d = FcDriver::new();
         let id = VmId("fc-guest-channel-info-test-vm".into());
-        assert_eq!(
-            format!("{:?}", d.guest_channel_info(&id).map_err(|e| e.to_string())),
-            format!(
-                "{:?}",
-                FirecrackerBackend
-                    .guest_channel_info(&id)
-                    .map_err(|e| e.to_string())
-            )
+        let err = d.guest_channel_info(&id).expect_err("no guest channel");
+        assert!(
+            err.to_string().contains("guest channel info"),
+            "expected the no-guest-channel refusal, got: {err}"
         );
     }
 
