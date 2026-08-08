@@ -320,15 +320,11 @@ pub fn checkpoint_children(
 /// resources while the parent is running.
 const FORK_ALLOW_PARENT_RUNNING: bool = false;
 
-/// Boots a forked child from its staged snapshot files. Abstracted so
-/// `fork_vm_full_fc` is testable without a live hypervisor; the FC impl
-/// (`FcForkRestorer`) lives in `crate::firecracker` and is the only current
-/// implementation.
-pub trait ForkVmFullRestorer {
-    /// Stage the child's snapshot into position and start the VM. `child_dir`
-    /// is the child's state dir with all checkpoint blobs already cloned there.
-    fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> Result<()>;
-}
+/// Stages a forked child's snapshot into position and starts the VM, given the
+/// child's VM name and its state dir (with all checkpoint blobs already cloned
+/// there). Taken as a callback so [`fork_vm_full_fc`] is testable without a
+/// live hypervisor.
+pub type ForkRestore<'a> = dyn Fn(&str, &Path) -> Result<()> + 'a;
 
 /// Returns `true` when the checkpoint's content manifest carries a
 /// `supervisor-config.json` blob — i.e. it was captured from a backend that
@@ -410,7 +406,7 @@ pub fn fork_checkpoint(
 pub fn fork_vm_full_fc(
     store: &CheckpointStore,
     params: ForkParams,
-    restorer: &dyn ForkVmFullRestorer,
+    restore: &ForkRestore<'_>,
     anchor: &dyn CheckpointChainAnchor,
 ) -> Result<CheckpointMeta> {
     let parent = store.read_meta(&params.checkpoint)?;
@@ -463,7 +459,7 @@ pub fn fork_vm_full_fc(
 
     validate_fork_verity_binding(&parent, &params.dest_dir)?;
 
-    restorer.restore_fork(&params.child_vm_name, &params.dest_dir)?;
+    restore(&params.child_vm_name, &params.dest_dir)?;
 
     let child = CheckpointMeta::builder(
         params.child_id,
@@ -2152,9 +2148,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
-            &MockRestorer {
-                seen: RefCell::new(None),
-            },
+            &|_: &str, _: &Path| Ok(()),
             &AgreeingAnchor,
         )
         .unwrap_err();
@@ -2171,9 +2165,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
-            &MockRestorer {
-                seen: RefCell::new(None),
-            },
+            &|_: &str, _: &Path| Ok(()),
             &AgreeingAnchor,
         )
         .unwrap_err();
@@ -2294,13 +2286,19 @@ mod tests {
         )
     }
 
-    struct MockRestorer {
+    /// Records what the fork restore callback was handed, so a test can assert
+    /// the child's identity and staged dir without a live hypervisor.
+    #[derive(Default)]
+    struct RecordedRestore {
         seen: RefCell<Option<(String, PathBuf)>>,
     }
-    impl ForkVmFullRestorer for MockRestorer {
-        fn restore_fork(&self, child_vm_name: &str, child_dir: &Path) -> Result<()> {
-            *self.seen.borrow_mut() = Some((child_vm_name.to_string(), child_dir.to_path_buf()));
-            Ok(())
+    impl RecordedRestore {
+        fn restore(&self) -> impl Fn(&str, &Path) -> Result<()> + '_ {
+            |child_vm_name: &str, child_dir: &Path| {
+                *self.seen.borrow_mut() =
+                    Some((child_vm_name.to_string(), child_dir.to_path_buf()));
+                Ok(())
+            }
         }
     }
 
@@ -2312,9 +2310,7 @@ mod tests {
         let (child_plan_json, child_tenant_id) = admitted_child_plan();
 
         let dest = tmp.path().join("childvm-state");
-        let restorer = MockRestorer {
-            seen: RefCell::new(None),
-        };
+        let restorer = RecordedRestore::default();
         let child = fork_vm_full_fc(
             &store,
             ForkParams {
@@ -2326,7 +2322,7 @@ mod tests {
                 child_plan_json: Some(child_plan_json),
                 child_tenant_id: Some(child_tenant_id),
             },
-            &restorer,
+            &restorer.restore(),
             &AgreeingAnchor,
         )
         .unwrap();
@@ -2355,9 +2351,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv-missing-plan");
-        let restorer = MockRestorer {
-            seen: RefCell::new(None),
-        };
+        let restorer = RecordedRestore::default();
         let err = fork_vm_full_fc(
             &store,
             ForkParams {
@@ -2369,7 +2363,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
-            &restorer,
+            &restorer.restore(),
             &AgreeingAnchor,
         )
         .unwrap_err();
@@ -2425,9 +2419,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let fsq = seed_fs_quick_checkpoint(&store, tmp.path(), "fcp1");
-        let restorer = MockRestorer {
-            seen: RefCell::new(None),
-        };
+        let restorer = RecordedRestore::default();
         let err = fork_vm_full_fc(
             &store,
             ForkParams {
@@ -2439,7 +2431,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
-            &restorer,
+            &restorer.restore(),
             &AgreeingAnchor,
         )
         .unwrap_err();

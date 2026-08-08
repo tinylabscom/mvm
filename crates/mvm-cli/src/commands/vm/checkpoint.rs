@@ -1012,7 +1012,6 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     let parent_meta = p.store.read_meta(p.checkpoint)?;
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the fork parent")?;
-    let restorer = mvm_runtime::firecracker::FcForkRestorer;
     let fork_result = fork_vm_full_fc(
         p.store,
         ForkParams {
@@ -1024,7 +1023,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             child_plan_json,
             child_tenant_id,
         },
-        &restorer,
+        &|name, dir| mvm_runtime::firecracker::FcForkRestorer.restore_fork(name, dir),
         &anchor,
     );
     if let Err(ref e) = fork_result {

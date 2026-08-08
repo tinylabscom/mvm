@@ -749,12 +749,9 @@ impl VmmDriver for FcDriver {
         // own identity. The device-model guard between load and resume refuses
         // any snapshot carrying a network interface, so a restored child cannot
         // reintroduce a path off the box that bypasses vsock.
-        crate::checkpoint::ForkVmFullRestorer::restore_fork(
-            &crate::firecracker::FcForkRestorer,
-            req.child_vm_name,
-            req.child_dir,
-        )
-        .map_err(|e| StandbyError::ClaimFailed(format!("restore forked child: {e}")))?;
+        crate::firecracker::FcForkRestorer
+            .restore_fork(req.child_vm_name, req.child_dir)
+            .map_err(|e| StandbyError::ClaimFailed(format!("restore forked child: {e}")))?;
         Ok(())
     }
 

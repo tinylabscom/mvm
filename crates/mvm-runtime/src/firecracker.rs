@@ -447,7 +447,7 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
 }
 
 /// Boots a forked child from a Firecracker checkpoint triple cloned into
-/// `child_dir`. Implements [`crate::checkpoint::ForkVmFullRestorer`] for the
+/// `child_dir`. Supplies the fork-restore callback for the
 /// FC path.
 ///
 /// On `restore_fork`:
@@ -553,8 +553,14 @@ impl FcForkRestorer {
     }
 }
 
-impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
-    fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> anyhow::Result<()> {
+impl FcForkRestorer {
+    /// Stage the child's snapshot and resume it. The fork-restore callback
+    /// `fork_vm_full_fc` takes.
+    pub fn restore_fork(
+        &self,
+        child_vm_name: &str,
+        child_dir: &std::path::Path,
+    ) -> anyhow::Result<()> {
         let io = self.prepare_fork_load(child_vm_name, child_dir)?;
         crate::vm::instance_snapshot::guarded_fork_load_resume(&io, child_dir)
             .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
