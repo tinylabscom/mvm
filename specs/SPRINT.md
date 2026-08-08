@@ -1069,7 +1069,7 @@ The bar: a codebase an **expert human can read and navigate**, fully tested, fol
 | **mvm-client**   | `mvm-client`                                                             | Facade (`MvmClient`). **Every CLI command routes through it.** The stable surface mvmd consumes.                                                              | no                           |
 | **mvm-cli**      | `mvm-cli`                                                                | `mvmctl`. Thin; delegates to `mvm-client`.                                                                                                                    | no                           |
 
-Kept as-is: `crates/deps/libkrun-sys` (FFI), `xtask`. **Dropped/folded:** `mvm-ext4`, `mvm-network`, `mvm-verify`, `mvm-guest-helpers`, `mvm-vm-host`, `mvm-host-services-ffi`, `mvm-mcp` (folded into `mvmctl serve` behind an `AgentProtocol` trait — MCP now, ACP later, no per-protocol crate; see WS7), orphan Swift `mvm-vz-supervisor`, `qemu` backend, dead deps (`colored`, `names`, `hickory-server`, stale `mvm-egress-proxy` path).
+Kept as-is: `crates/deps/libkrun-sys` (FFI), `xtask`. **Dropped/folded:** `mvm-ext4`, `mvm-network`, `mvm-verify`, `mvm-guest-helpers`, `mvm-vm-host`, `mvm-host-services-ffi`, `mvm-mcp` (folded into `mvmctl serve` behind an `AgentProtocol` trait — MCP now, ACP later, no per-protocol crate; see WS7), the orphan Swift supervisor dir, `qemu` backend, dead deps (`colored`, `names`, `hickory-server`, stale `mvm-egress-proxy` path).
 
 Logging is **`mvm-core::log`** (a module, not a crate): structured `tracing` for operational logs (→ `~/.mvm/logs`) **and** the seam that emits chain-signed, tamper-evident entries to the audit log for every security-relevant action. Secrets/PII are redacted at the boundary — never logged. "Auditable everywhere" means every guest↔host RPC and every egress byte is traceable through the vsock seam and the chain-signed audit log.
 
@@ -1112,7 +1112,7 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 ### 2.5 Backend & egress model
 
 - Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload), and **wasm** (`WasmBackend` — WASI wasm-container; core goal, see §1 + WS11). QEMU **dropped**. `mock` behind `test-support`.
-- Selected via the existing `BackendKind` enum + `backend_catalog!` registry — **never string-matched**. The ~6 remaining `backend.name() == "…"` sites in `mvm-cli` and the dead `"vz"` arms are removed.
+- Selected via the existing `BackendKind` enum + `backend_catalog!` registry — **never string-matched**. The ~6 remaining `backend.name() == "…"` sites in `mvm-cli` and the dead retired-backend arms are removed.
 - **One host-mediated, default-deny, audited egress boundary on every workload backend**, transport-abstracted via `VmDuplexTransport`: vsock/UDS for the microVM backends, WASI host-calls for the wasm backend. Firecracker, libkrun, and HVF all use the `WorkloadRunner` endpoint seam; any backend that cannot mediate egress through the host fails closed on `--network-allow`.
 - Mount ordering is `rootfs → runtime-overlay → custom`, with an **explicit no-shadow rule**: a later mount may never shadow an earlier target; `/mvm` and `/mvm/runtime` join the deny-prefix set.
 
@@ -1289,7 +1289,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 
 **WS6 — trait dispatch + zero hardcoding**
 
-- [x] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete dead `"vz"` arms. `VmBackend::kind()` is now a required trait method (every backend implements it); `xtask check-no-string-backend-dispatch` guards the regression.
+- [x] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete the dead retired-backend arms. `VmBackend::kind()` is now a required trait method (every backend implements it); `xtask check-no-string-backend-dispatch` guards the regression.
 - [x] Remove baked network literals (`172.16.x`, `127.0.0.1:1080`, `/tmp/firecracker.socket`); inject via config; name `DEFAULT_MEM_MIB`/`DEFAULT_CPUS`; add a CI lint for hardcoded IPs/ports. _(**WS6.2 landed `3d098ecb0` (sweep) + `30a531141` (lint)**, subagent-driven, spec ✅ + quality Approved, value-preservation reviewer-verified byte-for-byte per const: dev subnet `172.16.x` → `mvm_core::dev_network` consts (`DEFAULT_SUBNET_CIDR`/`DEFAULT_GATEWAY_IP`/`DEFAULT_GUEST_IP`/`DEFAULT_GATEWAY_CIDR` + `default_guest_ip_for_index`); `127.0.0.1:1080` → `mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN`/`_URL` (5 sites); `DEFAULT_MEM_MIB=2048`/`DEFAULT_CPUS=2` named at the image-manifest defaults (other differently-valued mem/cpu defaults deliberately left); the `API_SOCKET="/tmp/firecracker.socket"` process-global DELETED → per-VM `firecracker_api_socket_path(dir)="{dir}/fc.socket"` (start/stop resolve the same socket; matches the per-VM start path + `FirecrackerGuard` cleanup that already expected it). New `xtask check-no-network-literals` (3 rule classes: subnet/egress-port/fixed-tmp-socket; skips test code incl. whole-file `#![cfg(test)]`; per-instance `{…}` sockets allowed; narrow rule-scoped exemptions for the 2 definition sites + 1 dev smoke example; CI-wired). Controller-takeover (implementer wedged): I ran all gates + FIXED 2 real lint bugs — a whole-file `#![cfg(test)]` skip gap and a line-continuation newline-counting desync that under-counted hit line numbers (both now regression-tested). 7543/7543 nextest, workspace clippy, fmt, wasm32 all green. Zero mvm-contract diff.)_
 - Gate: hardcoding lint green; no string-typed backend dispatch remains. **WS6 COMPLETE.**
 
@@ -1555,7 +1555,7 @@ Then unify + retire the old paths:
 **WS12 — ADRs alive + website docs**
 
 - [ ] Keep the consolidated ADRs authoritative; update `CLAUDE.md`/`AGENTS.md` to the new crate/binary/dir/feature/backend reality.
-- [ ] Update the website docs (`public/src/content/docs/**`) — CLI reference, architecture diagram, backend list (drop QEMU/Vz), single-dir, install/upgrade/clean.
+- [ ] Update the website docs (`public/src/content/docs/**`) — CLI reference, architecture diagram, backend list (drop QEMU and the retired macOS backend), single-dir, install/upgrade/clean.
 - [ ] Sweep stale `specs/{claims,compliance,threat-models,references,contracts,runbooks}` path references out of `SECURITY.md`, `README.md`, `ops/`, other ADRs, and `public/src/content/docs/**` (flagged by WS0.2a — they now live in ADR-002/050/067/090).
 - Gate: docs match the shipped CLI + architecture; no dangling `specs/` paths; `#1637` (one-command microVM) becomes accurate.
 
@@ -1933,7 +1933,7 @@ change.
 | 1283     | issue      | **Closed** — landed via #1786 (boot-probe strip done)               |
 | 1264     | issue      | **Closed** — #1786 documents upstream-blocked pin bump; no action   |
 | 1716     | PR         | Superseded by this sprint — close                                   |
-| 1718     | PR         | Folded (dev_vz→builder_vm rename subsumed by WS1) — close           |
+| 1718     | PR         | Folded (dev-builder rename subsumed by WS1) — close           |
 | 1713     | PR         | Contradicts consolidation (splits SDK) — close                      |
 
 ## Appendix C — biggest confirmed removals
@@ -1941,5 +1941,5 @@ change.
 - Userspace network gateways — passt, gvproxy, and the opt-in native/rvproxy `native_gateway` subsystem (~1,281 lines); replaced by the one vsock seam (WS-NET).
 - `crates/mvm-runtime/src/vm/egress_proxy.rs` L7 stub — removed (WS8).
 - `crates/mvm-runtime/src/storage/{pool,thin}.rs` dm-thin substrate — **NOT dead**: backs the live `mvmctl storage info`/`gc` verbs (`ThinPoolImpl`/`DeviceMapperBackend`), kept (WS8).
-- QEMU backend (WS1e), Vz remnants, `mvm-vz-supervisor` Swift dir (WS0.4).
+- QEMU backend (WS1e), retired-backend remnants, the Swift supervisor dir (WS0.4).
 - 28 member features → 2 (WS5); ~24 `#[cfg]`-heavy gates collapse.
