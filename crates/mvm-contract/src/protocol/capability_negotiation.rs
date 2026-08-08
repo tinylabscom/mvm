@@ -178,6 +178,41 @@ impl VmCapabilities {
     }
 }
 
+/// A backend's identity and capability matrix, together.
+///
+/// This is what a client facade hands back so a caller can decide *before*
+/// invoking a lifecycle method that the backend cannot serve. Both halves are
+/// needed: an alternative depends on the pair, so a matrix without its
+/// backend cannot be negotiated against.
+///
+/// Serializable on purpose. A remote client answers this over the wire, and
+/// [`negotiate`](Self::negotiate) then runs locally against the answer — so
+/// negotiation costs no round trip and a gateway needs no negotiation
+/// endpoint, only a capability one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackendCapabilityReport {
+    /// Which backend answered.
+    pub kind: BackendKind,
+    /// What it advertises.
+    pub capabilities: VmCapabilities,
+}
+
+impl BackendCapabilityReport {
+    pub fn new(kind: BackendKind, capabilities: VmCapabilities) -> Self {
+        Self { kind, capabilities }
+    }
+
+    /// Check `required` against this report, naming a substitute for every
+    /// capability the backend cannot serve.
+    ///
+    /// Pure: no I/O, so a caller holding a report fetched once can negotiate
+    /// as many requirement sets against it as it likes.
+    pub fn negotiate(&self, required: &RequiredCapabilities) -> Result<(), Vec<CapabilityGap>> {
+        self.capabilities.negotiate(required, self.kind)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +381,74 @@ mod tests {
                 gap.capability
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn a_report_round_trips_through_json() {
+        let report = BackendCapabilityReport::new(
+            BackendKind::Wasm,
+            VmCapabilities {
+                vsock: false,
+                pty_exec: false,
+                ..VmCapabilities::default()
+            },
+        );
+        let json = serde_json::to_string(&report).expect("report serializes");
+        let back: BackendCapabilityReport =
+            serde_json::from_str(&json).expect("report deserializes");
+        assert_eq!(back, report, "a remote answer must survive the wire");
+    }
+
+    #[test]
+    fn an_unknown_field_is_refused_rather_than_ignored() {
+        // A gateway that grows a field this client does not know about must
+        // fail loudly: silently dropping it is how a caller ends up reasoning
+        // about a capability matrix that is not the one the server meant.
+        let json = r#"{"kind":"mock","capabilities":{"pause_resume":true}}"#;
+        let err = serde_json::from_str::<BackendCapabilityReport>(json);
+        assert!(err.is_err(), "a partial capability matrix must not decode");
+    }
+
+    #[test]
+    fn a_report_negotiates_without_touching_its_backend() {
+        let report = BackendCapabilityReport::new(BackendKind::Wasm, VmCapabilities::default());
+        let required = RequiredCapabilities {
+            vsock: true,
+            ..RequiredCapabilities::default()
+        };
+        let gaps = report
+            .negotiate(&required)
+            .expect_err("the wasm tier has no vsock device");
+        assert_eq!(
+            gaps,
+            vec![CapabilityGap {
+                capability: "vsock",
+                alternative: CapabilityAlternative::SubstitutionEndpointOverWasmImport,
+            }],
+            "the report must resolve the same alternative the backend would"
+        );
+    }
+
+    #[test]
+    fn one_fetched_report_answers_many_requirement_sets() {
+        // The reason the trait returns a report rather than taking a
+        // requirement set: a remote caller pays one round trip, not one per
+        // question.
+        let report = BackendCapabilityReport::new(BackendKind::Qemu, VmCapabilities::default());
+        assert!(report.negotiate(&RequiredCapabilities::default()).is_ok());
+        assert!(
+            report
+                .negotiate(&RequiredCapabilities {
+                    pty_exec: true,
+                    ..RequiredCapabilities::default()
+                })
+                .is_err()
+        );
     }
 }

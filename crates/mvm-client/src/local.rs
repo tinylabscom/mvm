@@ -27,6 +27,7 @@ use mvm_fs::oci::{
 };
 use mvm_runtime::AnyBackend;
 
+use mvm_core::client::BackendCapabilityReport;
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
     PauseOpts, PauseOutcome, PortMapping, ResumeOpts, ResumeOutcome,
@@ -539,6 +540,15 @@ pub(crate) fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<Str
 
 #[async_trait]
 impl MvmClient for LocalBackend {
+    async fn backend_capabilities(&self) -> Result<BackendCapabilityReport> {
+        // Straight from the backend that will actually run the workload, so
+        // the report cannot drift from the thing it describes.
+        Ok(BackendCapabilityReport::new(
+            self.backend.kind(),
+            self.backend.capabilities(),
+        ))
+    }
+
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
         let registry = load_name_registry();
 
