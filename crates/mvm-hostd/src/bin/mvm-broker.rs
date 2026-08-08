@@ -51,6 +51,9 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
 }
 
 fn main() -> Result<()> {
+    // First statement in the process: a panic before this line would
+    // print its payload unredacted.
+    mvm_hostd::panic_hook::install("broker");
     // Spawn-contract step 5: exit when the supervisor dies. This is the
     // "defensive double-attach in this binary" the contract above promises —
     // the child-side half that also covers macOS and abnormal parent death.
