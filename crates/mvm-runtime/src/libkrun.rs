@@ -23,7 +23,7 @@
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
 
-use crate::base::ui;
+use mvm_vmm::host::ui;
 use crate::storage::volume::snapshot::SnapshotUpper;
 use anyhow::{Context, Result, anyhow, bail};
 use libkrun_sys::{

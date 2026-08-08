@@ -29,7 +29,7 @@ use mvm_core::vm_backend::{
     VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
-use crate::base::ui;
+use mvm_vmm::host::ui;
 use crate::workload_runner::cmdline;
 
 /// PID file the supervisor writes inside `vm_state_dir`. Distinct from the other

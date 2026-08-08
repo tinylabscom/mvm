@@ -30,7 +30,7 @@ pub use mvm_vmm::host::observability_target;
 pub use mvm_vmm::host::runtime_meta;
 pub mod shell;
 pub mod snapshot_integrity;
-pub mod ui;
+pub use mvm_vmm::host::ui;
 
 // Legacy re-export: `crate::base::shell_mock::*` matches the older
 // `mvm::shell_mock::*` path that mvmd's quic_integration test relies

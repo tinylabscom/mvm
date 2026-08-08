@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::base::ui;
+use mvm_vmm::host::ui;
 
 /// QEMU workload backend (Linux dev/test; KVM where present, TCG fallback).
 pub struct QemuBackend;

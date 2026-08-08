@@ -8,6 +8,7 @@ pub mod boot_config;
 pub mod runtime_meta;
 pub mod observability_target;
 pub mod console_capture;
+pub mod ui;
 pub mod broker_services_spawn;
 pub mod drive_file;
 pub mod egress_bridge;

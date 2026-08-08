@@ -28,7 +28,7 @@ use mvm_core::vm_backend::{
 };
 use mvm_net::channel::GuestService;
 
-use crate::base::ui;
+use mvm_vmm::host::ui;
 use crate::driver::spec::KernelImage;
 use crate::driver::{DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection, VsockPort};
 use crate::qemu::{
