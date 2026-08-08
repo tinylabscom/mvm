@@ -1,6 +1,6 @@
 //! Shared audit-substrate resolution for backends that own a
 //! `SupervisorConfig`-shaped audit surface. Currently used by libkrun
-//! only; the removed Vz backend used to share it too, and the hvf
+//! only; a removed backend used to share it too, and the hvf
 //! backend may adopt it as its own audit surface lands.
 //!
 //! Lifts the path-derivation + `vm_name` / `tenant_id` allowlist

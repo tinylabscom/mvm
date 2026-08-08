@@ -4284,19 +4284,6 @@ fn builder_flag_accepts_libkrun() {
 }
 
 #[test]
-fn builder_flag_rejects_vz() {
-    // The vz backend was removed; `--builder vz` must no longer parse.
-    let err = Cli::try_parse_from(["mvmctl", "--builder", "vz", "doctor"]).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("invalid value")
-            || msg.contains("possible values")
-            || msg.contains("one of the values isn't valid for an argument"),
-        "expected clap to reject `--builder vz`, got: {msg}"
-    );
-}
-
-#[test]
 fn builder_flag_rejects_unknown_value() {
     // Clap's `value_parser = ["libkrun", "qemu", "hvf"]` should refuse
     // anything outside that set. Catches typos like `=vmz` early

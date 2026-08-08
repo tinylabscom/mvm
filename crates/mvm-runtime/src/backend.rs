@@ -1212,13 +1212,16 @@ mod tests {
     }
 
     #[test]
-    fn from_hypervisor_vz_falls_back_to_default_not_vz() {
-        // The Vz backend is deleted: the `vz` / `virtualization` selectors no
-        // longer resolve to a distinct Vz backend and fall through to the
-        // default like any unrecognised hypervisor value.
-        for alias in ["vz", "virtualization"] {
+    fn from_hypervisor_falls_back_to_default_for_unrecognised_selectors() {
+        // An unknown selector must resolve to the default backend rather than
+        // silently naming itself, so a typo cannot conjure a backend.
+        for alias in ["virtualization", "not-a-hypervisor", ""] {
             let backend = AnyBackend::from_hypervisor(alias);
-            assert_ne!(backend.name(), "vz", "alias {alias} must not resolve to Vz");
+            assert_ne!(
+                backend.name(),
+                alias,
+                "unrecognised selector {alias:?} must fall through to the default"
+            );
         }
     }
 
