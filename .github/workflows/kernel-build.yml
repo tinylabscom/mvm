@@ -19,6 +19,14 @@ on:
     paths:
       - "nix/images/kernel/**"
       - "nix/images/builder-vm/flake.nix"
+      # The lock is as much an input to the resolved config as the flake is:
+      # this workflow builds `./nix/images/builder-vm#...`, so a nixpkgs bump
+      # here moves the toolchain that runs `olddefconfig`.
+      - "nix/images/builder-vm/flake.lock"
+      # The budget this job enforces. Editing the ceiling without rebuilding
+      # the kernel it describes is how the ceiling drifts below the real
+      # count: the number is only meaningful against a measured config.
+      - "xtask/src/check_kernel_config_budget.rs"
       - ".github/workflows/kernel-build.yml"
   workflow_dispatch: {}
   push:
@@ -116,9 +124,16 @@ jobs:
           du -h vmlinux-${ARCH}-*
 
       - name: Upload kernel artifacts (CI visibility)
+        # `always()` because the budget gate above exits non-zero on a
+        # regression, and that is precisely the run whose resolved `.config`
+        # you need in order to see which symbol was added. Without this, a
+        # budget failure reports a count and discards the only evidence that
+        # explains it. Partial output is fine: the step globs what exists.
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: kernels-${{ matrix.arch }}
+          if-no-files-found: ignore
           path: |
             staging/vmlinux-${{ matrix.arch }}-builder
             staging/vmlinux-${{ matrix.arch }}-workload
