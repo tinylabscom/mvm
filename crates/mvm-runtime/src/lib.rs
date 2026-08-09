@@ -194,7 +194,7 @@ pub use mvm_vmm::host::substitution_spawn::{EndpointHandshake, record_secret_fin
 /// remote-resolver spawn config — re-exported at the crate root so fleet
 /// callers outside this crate (mvmd's tenant-secrets vault, Phase 1 egress
 /// broker / D8 spawn-wiring, reaching them via `mvmctl::backend`) can drive the
-/// same per-VM endpoint the libkrun/Vz/Firecracker backends use, instead of
+/// same per-VM endpoint the libkrun/HVF/Firecracker backends use, instead of
 /// duplicating the subprocess spawn/handshake/PID-file logic. The
 /// `substitution_spawn` module is also re-exported above; these root aliases
 /// mirror the original `mvm-backend` crate-root surface those callers named.
