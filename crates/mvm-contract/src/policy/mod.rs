@@ -6,6 +6,7 @@
 //! `mvm-core::policy`, which re-exports these modules at their existing
 //! paths.
 
+pub mod approval;
 pub mod audit;
 pub mod bundle;
 pub mod dns_pin;

@@ -27,6 +27,7 @@ pub mod stream;
 pub mod stream_tracing;
 pub mod volume;
 
+pub use mvm_contract::policy::approval;
 pub use mvm_contract::protocol::agent_session;
 pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{

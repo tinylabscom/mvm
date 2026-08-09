@@ -6,6 +6,7 @@
 //! to the existing transcript/audit records; prompt and live-output bytes
 //! never enter the durable event model.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
@@ -316,6 +317,11 @@ pub enum DurableAgentSessionEvent {
     OutputAvailable {
         output: CommittedOutput,
     },
+    /// Policy and approval lifecycle data shares the session cursor instead
+    /// of creating a second request/response stream.
+    Approval {
+        event: Box<crate::policy::approval::AgentApprovalEvent>,
+    },
 }
 
 /// Result class for a completed prompt. Error detail is intentionally a
@@ -388,12 +394,17 @@ impl AgentSessionEventEnvelope {
             ));
         }
         match &self.event {
-            AgentSessionEvent::Durable { .. } => {
+            AgentSessionEvent::Durable { event } => {
                 if self.durable_sequence.is_none() || self.live_sequence.is_some() {
                     return Err(AgentSessionError::new(
                         AgentSessionErrorCode::MalformedEvent,
                         "durable events require only a durable sequence",
                     ));
+                }
+                if let DurableAgentSessionEvent::Approval { event } = event {
+                    event
+                        .validate()
+                        .map_err(|code| AgentSessionError::new(code, "malformed approval event"))?;
                 }
             }
             AgentSessionEvent::Ephemeral { event } => {
@@ -848,6 +859,28 @@ impl AgentSessionJournal {
         )
     }
 
+    /// Append a policy or approval event to this session's durable history.
+    /// The event shares the same monotonic cursor as every other durable
+    /// session event and cannot be appended after deletion.
+    pub fn record_approval_event(
+        &mut self,
+        event: crate::policy::approval::AgentApprovalEvent,
+        now_unix_ms: u64,
+    ) -> Result<AgentSessionEventEnvelope, AgentSessionError> {
+        if matches!(self.state, AgentSessionState::Deleted) {
+            return Err(AgentSessionError::new(
+                AgentSessionErrorCode::SessionDeleted,
+                "session has been deleted",
+            ));
+        }
+        self.append_durable(
+            DurableAgentSessionEvent::Approval {
+                event: Box::new(event),
+            },
+            now_unix_ms,
+        )
+    }
+
     /// Produce a live-only event. It is never retained by this journal.
     pub fn live_delta(
         &mut self,
@@ -1185,6 +1218,7 @@ impl AgentSessionJournal {
                 AgentSessionErrorCode::MalformedEvent,
                 "output was recorded after session deletion",
             )),
+            DurableAgentSessionEvent::Approval { .. } => Ok(()),
         }
     }
 

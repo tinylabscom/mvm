@@ -338,6 +338,18 @@ pub struct CliWorld {
         Option<mvm_contract::protocol::agent_session::AgentSessionEventEnvelope>,
     /// Sanitized serialized history captured by a security assertion.
     pub agent_session_history_json: Option<String>,
+    /// Typed policy evaluation used by the runtime-approval scenarios.
+    pub approval_evaluation: Option<mvm_contract::policy::approval::PolicyEvaluation>,
+    /// Durable approval ledger reconstructed from the agent-session journal.
+    pub approval_ledger: Option<mvm_contract::policy::approval::ApprovalLedger>,
+    /// Approval id used by the current runtime-approval scenario.
+    pub approval_id: Option<mvm_contract::policy::approval::ApprovalRequestId>,
+    /// Most recent approval operation failure, retained as a stable message.
+    pub approval_error: Option<String>,
+    /// Most recent approval lifecycle state.
+    pub approval_state: Option<mvm_contract::policy::approval::ApprovalState>,
+    /// Approval state reconstructed after a simulated restart.
+    pub approval_restarted_state: Option<mvm_contract::policy::approval::ApprovalState>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`
