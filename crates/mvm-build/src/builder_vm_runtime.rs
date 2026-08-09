@@ -1584,7 +1584,7 @@ mod tests {
         std::fs::write(vm_state_dir.join("supervisor.stdout.log"), b"").unwrap();
         std::fs::write(
             vm_state_dir.join("supervisor.lifecycle.log"),
-            b"dispatch_route: legacy\n",
+            b"dispatch_route: direct\n",
         )
         .unwrap();
         std::fs::write(
@@ -1616,7 +1616,7 @@ mod tests {
         assert!(msg.contains("supervisor.stderr.log:"));
         assert!(msg.contains("stderr line"));
         assert!(msg.contains("supervisor.lifecycle.log:"));
-        assert!(msg.contains("dispatch_route: legacy"));
+        assert!(msg.contains("dispatch_route: direct"));
         assert!(msg.contains("supervisor-config.json:"));
         assert!(msg.contains("mvm-host-vm-init.lifecycle.log:"));
         assert!(msg.contains("virtiofs_mount_ok: job->/job"));

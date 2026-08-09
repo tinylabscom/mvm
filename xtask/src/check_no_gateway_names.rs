@@ -50,8 +50,18 @@ const EXEMPT: &[&str] = &[
     "CHANGELOG.md",
 ];
 
-/// Directories never worth walking.
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".worktrees"];
+/// Directories never worth walking: VCS internals and build output. The
+/// generated ones matter because they are not gitignore-aware from here — a
+/// locally-built docs bundle under `public/dist/` mirrors `public/src/` and
+/// would fail the gate on prose that has already been corrected at the source.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    ".worktrees",
+    "dist",
+    ".astro",
+];
 
 pub fn run(workspace: &Path) -> Result<()> {
     let pattern = format!(r"\b({})\b", FORBIDDEN.join("|"));
@@ -133,9 +143,22 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
+            // `file_type()` does NOT follow symlinks, and `Path::is_dir()`
+            // does. That difference is the whole point: `nix build` drops a
+            // `result` symlink into the repo root pointing at `/nix/store`,
+            // and following it would walk the store — millions of files, and
+            // matches from code that is not ours. A symlink cycle would not
+            // terminate at all. Nothing in the tree is reachable only through
+            // a symlink, so skipping them loses no coverage.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
+            if file_type.is_dir() {
                 if SKIP_DIRS.contains(&name.as_str()) {
                     continue;
                 }
@@ -162,6 +185,37 @@ mod tests {
     fn the_workspace_is_free_of_gateway_names() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         run(&root).expect("no references to a removed network gateway");
+    }
+
+    /// A symlinked directory is not descended into.
+    ///
+    /// `nix build` drops a `result` symlink pointing at `/nix/store`; walking
+    /// through it would scan the store — enormous, and full of third-party
+    /// text this gate has no business judging. A symlink cycle would not
+    /// terminate. `Path::is_dir()` follows symlinks and `DirEntry::file_type()`
+    /// does not, which is why the walker uses the latter.
+    #[test]
+    fn a_symlinked_directory_is_not_followed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("leak.txt"), "gvproxy\n").expect("write");
+        std::fs::write(root.join("clean.txt"), "nothing here\n").expect("write");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("result")).expect("symlink");
+        #[cfg(not(unix))]
+        return;
+
+        let found = walk(&root).expect("walk");
+        assert!(
+            found.iter().all(|p| !p.ends_with("leak.txt")),
+            "walker followed a symlink out of the tree: {found:?}"
+        );
+        // ...and the gate itself passes despite the planted name behind it.
+        run(&root).expect("a symlinked tree must not fail the gate");
     }
 
     /// `passthru` is a Nix attribute used throughout the builder pipeline and
