@@ -1170,11 +1170,17 @@ fn refuse(refusal: ClaimRefusal) -> StandbyError {
     StandbyError::ClaimFailed(refusal.to_string())
 }
 
-/// Distinguish an un-audited parent (no signed creation entry) from a tampered
-/// one (drift or a chain mismatch) by the lineage verifier's own message, so the
-/// caller sees the specific fail-closed reason.
+/// Distinguish the three fail-closed reasons by the lineage verifier's own
+/// message, so the caller sees the specific one: a parent with no signed
+/// creation entry, a ledger too damaged to say either way, or a parent that
+/// drifted from its sealed content. The unverifiable-ledger arm must come first
+/// — it is the case that used to be reported as un-audited, which sent the
+/// operator to re-capture a parent when the real finding was a broken chain.
 fn map_lineage_refusal(err: &anyhow::Error) -> ClaimRefusal {
-    if err.to_string().contains("no signed audit entry") {
+    let msg = err.to_string();
+    if msg.contains(crate::lineage::LEDGER_UNVERIFIABLE) {
+        ClaimRefusal::LedgerUnverifiable
+    } else if msg.contains(crate::lineage::NO_SIGNED_ENTRY) {
         ClaimRefusal::ParentUnaudited
     } else {
         ClaimRefusal::ParentTampered
@@ -4480,6 +4486,39 @@ mod tests {
             "no child dir on a quarantine refusal"
         );
         assert!(runner.driver.forked_children().is_empty());
+    }
+
+    /// The three fail-closed reasons must stay distinguishable, and the
+    /// unverifiable-ledger one must not collapse into either neighbour. It used
+    /// to be reported as un-audited, which sends the operator to re-capture a
+    /// parent when the real finding is a damaged chain; falling through to
+    /// tampered would be the opposite error, blaming a parent that may be fine.
+    #[test]
+    fn lineage_refusals_separate_an_unreadable_ledger_from_unaudited_and_tampered() {
+        let unreadable = anyhow::anyhow!(
+            "{}: 1 audit chain(s) unverifiable: /audit-root/local.jsonl",
+            crate::lineage::LEDGER_UNVERIFIABLE
+        );
+        assert!(matches!(
+            map_lineage_refusal(&unreadable),
+            ClaimRefusal::LedgerUnverifiable
+        ));
+
+        let unaudited = anyhow::anyhow!(
+            "checkpoint 'cp-1' has {} to anchor its content-address",
+            crate::lineage::NO_SIGNED_ENTRY
+        );
+        assert!(matches!(
+            map_lineage_refusal(&unaudited),
+            ClaimRefusal::ParentUnaudited
+        ));
+
+        let tampered =
+            anyhow::anyhow!("checkpoint 'cp-1' meta_digest drift: stored abc, recomputed def");
+        assert!(matches!(
+            map_lineage_refusal(&tampered),
+            ClaimRefusal::ParentTampered
+        ));
     }
 
     /// A plan whose bound image digest does not match the parent's own verified

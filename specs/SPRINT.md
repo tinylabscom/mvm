@@ -10,6 +10,22 @@
 
 ## Current issue delivery
 
+- [x] Audit-chain verification failure no longer reports as "never audited" —
+      **issue #2258, plan 302 WS6**. `SignedChainAnchor` remembers the chains
+      that failed verification and returns `Err` naming them when a lookup
+      misses, instead of an `Ok(None)` the caller renders as "this checkpoint
+      has no signed audit entry". The record may well be audited; the ledger is
+      what cannot be read, and the two call for opposite responses. A miss with
+      every chain clean keeps the old message, which is then true. The verdict
+      is fail-closed either way — only the reason changes. `NO_SIGNED_ENTRY` and
+      `LEDGER_UNVERIFIABLE` are now shared sentinels rather than retyped
+      literals, the warm-pool seam gained `ClaimRefusal::LedgerUnverifiable`
+      (an unreadable ledger used to fall through to "parent tampered"), and
+      `mvmctl doctor` grows an `audit chain` line that fails when a chain does
+      not verify. No repair/reset verb: a chain that can be reset on demand
+      cannot detect tampering. 12 new tests, all against a synthesized and
+      deliberately damaged chain in a temp `MVM_HOME`.
+
 - [~] Open issue closeout — **plan 300**. The 22 open issues were reconciled
       on 2026-08-08 into explicit closure gates and dependency order in
       `specs/plans/300-open-issue-closeout.md`. #2192 is now closed as completed;

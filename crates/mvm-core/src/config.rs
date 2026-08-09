@@ -786,6 +786,22 @@ pub fn workload_audit_path(tenant: &str, vm_name: &str) -> std::path::PathBuf {
     mvm_audit_dir().join(format!("{tenant}.{vm_name}{WORKLOAD_AUDIT_SUFFIX}"))
 }
 
+/// Whether a path in the audit dir is a per-tenant *lifecycle* chain
+/// (`<tenant>.jsonl`) rather than a per-VM workload chain
+/// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`).
+///
+/// The two carry different envelope formats, so a verifier for one cannot parse
+/// the other. Lives here, beside the suffix it keys on, because more than one
+/// sweep needs it: the lineage anchor indexes lifecycle chains, and doctor
+/// reports their verification status. Two copies of this predicate could
+/// disagree about which files are in scope, which would let doctor report a
+/// posture the anchor does not act on.
+pub fn is_host_lifecycle_chain(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl") && !name.ends_with(WORKLOAD_AUDIT_SUFFIX))
+}
+
 /// If `file_name` is a workload audit chain for `tenant`
 /// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`), return its VM name. Lets
 /// `mvmctl audit verify` enumerate a tenant's per-VM workload chains from a
@@ -869,6 +885,35 @@ mod tests {
         );
         // Wrong suffix.
         assert_eq!(workload_audit_vm_name("local.vm.jsonl", "local"), None);
+    }
+
+    /// The lifecycle/workload split has to be exact in both directions: a
+    /// workload chain fed to the lifecycle verifier fails on a format it was
+    /// never meant to parse, and a lifecycle chain skipped by a sweep goes
+    /// unverified without anyone noticing.
+    #[test]
+    fn is_host_lifecycle_chain_accepts_only_the_per_tenant_chain() {
+        let p = std::path::Path::new;
+        assert!(is_host_lifecycle_chain(p("/a/audit/local.jsonl")));
+        assert!(is_host_lifecycle_chain(p("/a/audit/other-tenant.jsonl")));
+        // Per-VM workload chains carry a different envelope format.
+        assert!(!is_host_lifecycle_chain(p(
+            "/a/audit/local.vm-1.workload.jsonl"
+        )));
+        // Non-chain files in the same directory.
+        assert!(!is_host_lifecycle_chain(p("/a/audit/local.jsonl.bak")));
+        assert!(!is_host_lifecycle_chain(p("/a/audit/notes.txt")));
+        assert!(!is_host_lifecycle_chain(p("/a/audit")));
+    }
+
+    /// A quarantined chain must drop out of scope. Renaming the file is the
+    /// documented recovery step, so if the sweep still picked it up the
+    /// operator could never clear the finding without deleting evidence.
+    #[test]
+    fn a_quarantined_chain_is_out_of_scope() {
+        assert!(!is_host_lifecycle_chain(std::path::Path::new(
+            "/a/audit/local.jsonl.forked-2026-05-12"
+        )));
     }
 
     // Tests here mutate process-global env vars (`MVM_*`, `HOME`).
