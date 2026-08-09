@@ -234,6 +234,8 @@ fn spawn_hvf_gating_endpoint_if_needed(
         tls_intermediate: None,
         network_policy: Some(network_policy),
         raw_egress: secrets.is_empty(),
+        resolver_remote: None,
+        binding_store_dir: None,
     })?;
     Ok((EndpointGuard::new(vm_name), Some(socket)))
 }

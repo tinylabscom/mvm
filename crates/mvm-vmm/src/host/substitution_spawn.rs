@@ -191,6 +191,23 @@ fn resolve_substitution_endpoint_path() -> Result<PathBuf> {
     })
 }
 
+/// `resolver_remote` config for [`SubstitutionSpawnParams`]: resolve secret
+/// *values* over a UDS to a remote fleet-secrets daemon (mvmd's tenant
+/// vault) instead of the endpoint's local encrypted secret store. Mirrors
+/// `mvm_hostd::supervisor::substitution_endpoint::ResolverBackend::Remote`'s
+/// two fields exactly — but is defined here (not imported from `mvm-hostd`)
+/// because `mvm-hostd` depends on `mvm-vmm`, never the reverse; a shared
+/// field-shape (not a shared type) is how the two stay in sync without a
+/// dependency cycle, the same trick already used for [`EndpointTransport`]
+/// (defined here, re-exported by `mvm-hostd`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteResolverSpawnConfig<'a> {
+    /// Path to the daemon's UDS.
+    pub uds_path: &'a Path,
+    /// Round-trip timeout, seconds.
+    pub timeout_secs: u64,
+}
+
 /// Inputs to [`spawn_substitution_endpoint`]. Grouped into a struct (rather
 /// than threading bare positional args) so the backend-shaped fields —
 /// `transport` (vsock vs UDS), `terminator_listen`, `tls_intermediate` — read
@@ -223,6 +240,14 @@ pub struct SubstitutionSpawnParams<'a> {
     /// endpoint serves `egress_mode: "raw"`; false ⇒ the WireRequest substitution
     /// protocol (`"wire"`, the default). A VM's mode is fixed at admission.
     pub raw_egress: bool,
+    /// `Some` ⇒ the endpoint resolves secret *values* remotely (see
+    /// [`RemoteResolverSpawnConfig`]) instead of its local encrypted store.
+    /// `None` preserves today's `Local` (unchanged) resolver behavior.
+    pub resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
+    /// Override the endpoint's binding-store dir (where `allowed_hosts`/
+    /// `auth_type` per secret name are read from at `assemble()` time).
+    /// `None` preserves today's host-default dir.
+    pub binding_store_dir: Option<&'a Path>,
 }
 
 /// Build the EndpointConfig JSON the endpoint reads on stdin. Pure (no spawn)
@@ -266,6 +291,28 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         // byte-identical to before (the in-loop gate stays the enforcer).
         cfg["network_policy"] =
             serde_json::to_value(policy).expect("NetworkPolicy serializes to JSON");
+    }
+    if let Some(RemoteResolverSpawnConfig {
+        uds_path,
+        timeout_secs,
+    }) = params.resolver_remote
+    {
+        // `EndpointConfig.resolver`: internally tagged on `backend` (see
+        // `ResolverBackend`'s `#[serde(tag = "backend", rename_all =
+        // "snake_case")]`) — `Remote { uds_path, timeout_secs }` becomes
+        // `{"backend":"remote","uds_path":...,"timeout_secs":...}`. Built by
+        // hand (not by depending on `mvm_hostd::ResolverBackend`) for the same
+        // reason `RemoteResolverSpawnConfig` isn't that type: the dependency
+        // only runs `mvm-hostd -> mvm-vmm`, never back. Omitted when `None` so
+        // legacy configs land on `EndpointConfig`'s `#[serde(default)]` Local.
+        cfg["resolver"] = serde_json::json!({
+            "backend": "remote",
+            "uds_path": uds_path,
+            "timeout_secs": timeout_secs,
+        });
+    }
+    if let Some(dir) = params.binding_store_dir {
+        cfg["binding_store_dir"] = serde_json::json!(dir);
     }
     cfg
 }
@@ -709,6 +756,8 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             raw_egress: false,
+            resolver_remote: None,
+            binding_store_dir: None,
         });
 
         res.expect("spawn with stub endpoint should succeed");
@@ -766,6 +815,8 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             raw_egress: false,
+            resolver_remote: None,
+            binding_store_dir: None,
         })
         .expect("spawn with stub endpoint should succeed");
 
@@ -828,6 +879,8 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             raw_egress: false,
+            resolver_remote: None,
+            binding_store_dir: None,
         })
         .expect_err("an unparseable handshake is not a ready endpoint");
         assert!(
@@ -891,6 +944,8 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             raw_egress: false,
+            resolver_remote: None,
+            binding_store_dir: None,
         });
 
         assert!(result.is_err(), "invalid MVM_HOME must fail sidecar setup");
@@ -948,6 +1003,8 @@ mod tests {
             tls_intermediate: None,
             network_policy,
             raw_egress,
+            resolver_remote: None,
+            binding_store_dir: None,
         }
     }
 
@@ -969,6 +1026,45 @@ mod tests {
         assert_eq!(cfg["tenant_id"], "tenant-x");
         assert_eq!(cfg["secrets"], serde_json::json!([]));
         assert_eq!(cfg["transport"]["kind"], "uds");
+        // No remote resolver / binding_store_dir requested ⇒ the keys must be
+        // entirely absent (not `null`) so `EndpointConfig`'s `#[serde(default)]`
+        // fields fall back to `Local` / host-default, exactly like before these
+        // two fields existed.
+        assert!(cfg.get("resolver").is_none());
+        assert!(cfg.get("binding_store_dir").is_none());
+    }
+
+    // mvmd's tenant-secrets vault (D8 wiring) needs the endpoint to resolve
+    // values over a UDS to its per-VM resolver daemon, and to read
+    // allowed_hosts/auth_type bindings from a per-VM binding-store dir — not the
+    // host defaults. Assert both land in the JSON exactly as
+    // `mvm_hostd::supervisor::substitution_endpoint::EndpointConfig`'s
+    // `#[serde(tag = "backend", rename_all = "snake_case")]` `ResolverBackend`
+    // and `binding_store_dir` fields expect them shaped. Pure (no subprocess).
+    #[test]
+    fn endpoint_config_json_emits_remote_resolver_and_binding_store_dir() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let resolver_uds = Path::new("/run/mvmd/tenant-x/resolver.sock");
+        let binding_dir = Path::new("/var/lib/mvm/tenant-x/secret-bindings");
+        let mut params = minimal_params(&redaction, sock, None, false);
+        params.resolver_remote = Some(RemoteResolverSpawnConfig {
+            uds_path: resolver_uds,
+            timeout_secs: 5,
+        });
+        params.binding_store_dir = Some(binding_dir);
+        let cfg = build_endpoint_config_json(&params);
+
+        assert_eq!(cfg["resolver"]["backend"], "remote");
+        assert_eq!(
+            cfg["resolver"]["uds_path"],
+            resolver_uds.to_string_lossy().as_ref()
+        );
+        assert_eq!(cfg["resolver"]["timeout_secs"], 5);
+        assert_eq!(
+            cfg["binding_store_dir"],
+            binding_dir.to_string_lossy().as_ref()
+        );
     }
 
     // The relay path: `Some(policy)` + `raw_egress: true` must land the policy in

@@ -500,6 +500,20 @@ mod tests {
 
     use crate::stream::input_gate::InputBinding;
 
+    /// A lease already lapsed when it is taken, so nothing sleeps to watch one
+    /// expire. Reach for this first; it only fails to fit when something has to
+    /// be written through the lease before it lapses.
+    const ALREADY_LAPSED: std::time::Duration = std::time::Duration::ZERO;
+    /// For that case: the lease has to be live for the write, so the TTL is
+    /// also the window the write has to land in. On a loaded host the gap
+    /// between two adjacent statements measured up to 298ms, so the previous
+    /// 20ms expired mid-setup and refused a write the test required to succeed.
+    /// See `input_gate::tests::LAPSING_LEASE_TTL` for the measurement.
+    const LAPSING_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+    const PAST_THE_LEASE: std::time::Duration = std::time::Duration::from_millis(1300);
+    /// For a lease nothing waits out, so jitter cannot reach it.
+    const LIVE_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// The fingerprint of `secret`, as the substitution endpoint computes it.
     fn fingerprint(secret: &str) -> SecretFingerprint {
         SecretFingerprint::of(secret.as_bytes(), SecretCategory::HostSecret)
@@ -839,10 +853,9 @@ mod tests {
     #[test]
     fn a_route_that_lost_its_lease_delivers_nothing_further() {
         let vm = unique_vm("route-lease");
-        InputGate::bind(
-            &vm,
-            InputBinding::new().with_lease_ttl(std::time::Duration::from_millis(20)),
-        );
+        // Nothing is written before the lapse here, so the lease can simply
+        // start lapsed rather than be waited out.
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(ALREADY_LAPSED));
         let carried = Recorder::default();
         let mut stalled = InputRoute::open(
             &vm,
@@ -851,7 +864,6 @@ mod tests {
             WireSequence::default(),
         )
         .expect("the plan grants input");
-        std::thread::sleep(std::time::Duration::from_millis(40));
 
         assert!(matches!(
             stalled.write(frame(0, b"too late")),
@@ -987,10 +999,7 @@ mod tests {
         // successor that restarted numbering would be refused for its
         // predecessor's sequence and the stdin would be wedged for good.
         let vm = unique_vm("route-resume");
-        InputGate::bind(
-            &vm,
-            InputBinding::new().with_lease_ttl(std::time::Duration::from_millis(20)),
-        );
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(LAPSING_LEASE_TTL));
         let wire_seq = WireSequence::default();
         let carried = Recorder::default();
         let mut first = InputRoute::open(
@@ -1004,9 +1013,12 @@ mod tests {
             .write(frame(0, b"first"))
             .expect("the gate cleared it");
         first.write(frame(1, b"more")).expect("and this one");
-        std::thread::sleep(std::time::Duration::from_millis(40));
+        std::thread::sleep(PAST_THE_LEASE);
         let _ = first.displace();
 
+        // Only the predecessor's lease is meant to lapse; the successor has to
+        // survive the deliveries this test then checks.
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(LIVE_LEASE_TTL));
         let mut second = InputRoute::open(
             &vm,
             &admitted(vec![stream_service()]),
