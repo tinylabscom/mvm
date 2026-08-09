@@ -7,6 +7,7 @@ pub mod agent_session;
 pub mod audit_signer;
 pub mod broker;
 pub mod broker_control;
+pub mod capability_negotiation;
 pub mod dns;
 pub mod handler;
 pub mod host_audit;

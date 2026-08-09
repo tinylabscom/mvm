@@ -17,7 +17,7 @@ What happens to the open issue/PR backlog as this sprint absorbs it, and the big
 | 1283 | issue | Fold → WS10 (kernel boot-probe strip), then close |
 | 1264 | issue | Fold → WS10 (kernel pin bump), then close |
 | 1716 | PR | Superseded by this sprint — close |
-| 1718 | PR | Folded (dev_vz→builder_vm rename subsumed by WS1) — close |
+| 1718 | PR | Folded (dev-builder rename subsumed by WS1) — close |
 | 1713 | PR | Contradicts consolidation (splits SDK) — close |
 
 Note: SPRINT.md's Appendix B table refers to "WS3" for the vsock-tunnel-related fold targets (1701, 1717, 1601); this document set's workstream list renamed that workstream to **WS-NET** (it absorbs the old WS3 — see [06-execution-plan.md](06-execution-plan.md)), so the fold targets above point at WS-NET. The underlying disposition is unchanged.
@@ -29,7 +29,7 @@ Per [06-execution-plan.md](06-execution-plan.md) WS13: fold each still-relevant 
 - **Userspace network gateways** — passt, gvproxy, and the opt-in native/rvproxy `native_gateway` subsystem (~1,281 lines); all replaced by the one vsock seam (WS-NET).
 - **`mvm/src/vm/egress_proxy.rs`** L7 stub — dead (WS8).
 - **`mvm/src/storage/`** dm-thin substrate — every method returns "phase-2 work" (WS8).
-- **QEMU backend** (WS1e), Vz remnants, `mvm-vz-supervisor` Swift dir (WS0.4).
+- **QEMU backend** (WS1e), retired-backend remnants, the Swift supervisor dir (WS0.4).
 - **28 member features → 2** (WS5); ~24 `#[cfg]`-heavy gates collapse.
 
 These removals are what backs several of the headline metrics in [01-goals.md](01-goals.md) — the feature-count target, the files-over-1500-lines target, and part of the crate-count reduction all come directly from this list.

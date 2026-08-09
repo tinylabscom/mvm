@@ -1238,7 +1238,7 @@ shellcheck -S warning install.sh packaging/homebrew/render-formula.sh
 
 Expected: all green.
 
-- [ ] **Smoke the heartbeat/verbose manually (this Mac builds via Vz/libkrun)**
+- [ ] **Smoke the heartbeat/verbose manually (this Mac builds via libkrun)**
 
 Run (background + timeout per the never-run-unbounded rule):
 ```bash

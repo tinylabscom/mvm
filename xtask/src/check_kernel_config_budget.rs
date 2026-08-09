@@ -25,9 +25,9 @@ use std::path::Path;
 /// SoC-errata and other off-the-boot-path subsystems), each cut boot-validated
 /// under libkrun.
 ///
-/// PCI was re-added after the initial shrink dropped it: vz (Apple
-/// Virtualization.framework) presents virtio over PCI, not MMIO, so a PCI-less
-/// kernel boots blind under vz (no console/net/block). Re-enabling PCI +
+/// PCI was re-added after the initial shrink dropped it: a backend that
+/// presents virtio over PCI rather than MMIO leaves a PCI-less kernel booting
+/// blind (no console/net/block). Re-enabling PCI +
 /// PCI_MSI + VIRTIO_PCI raised x86_64 by 73 (1130 → 1203, measured). aarch64 is
 /// set to a comparable delta (core PCI is arch-shared; the SoC PCIe host
 /// controllers stay off since their deps are disabled) and is confirmed by CI's
@@ -43,8 +43,16 @@ use std::path::Path;
 /// ZONE_DEVICE, FS_DAX, FUSE_DAX) in the workload kernel. PCI, virtio-net,
 /// virtio-balloon, KVM time, and x86 ACPI core remain because supported
 /// backends exercise them.
+///
+/// Both figures then rose by exactly one when the workload kernel gained IPv6,
+/// so the guest can hold the v6 half of the pair its plan leases. The
+/// additional IPv6-only tunnel plumbing is dropped in `workload.nix`; the guest
+/// has one point-to-point link and no tunnel endpoint to encapsulate toward.
+/// The v6 IPsec families remain in the required-disable set, so XFRM is not
+/// absorbed into this budget. These values are measured from resolved configs
+/// on the native CI architectures — x86_64 measures 917, confirmed by CI.
 const BUDGET_AARCH64: usize = 944;
-const BUDGET_X86_64: usize = 916;
+const BUDGET_X86_64: usize = 917;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
 /// the larger budget (fail-open on the ceiling, never a false pass on a real

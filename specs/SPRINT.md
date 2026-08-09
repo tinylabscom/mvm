@@ -16,6 +16,24 @@
       #2101 and #2211 require scope split or narrowing; the remaining issues
       retain active implementation, security, live-validation, or
       cross-repository acceptance work.
+- [~] Runtime hardening for production — **plan 303**. Closes gaps between the
+      binary CI witnesses and the binary that ships. Landed: trapping integer
+      overflow in `[profile.release]` plus a `release-witness` CI lane over the
+      crates that parse hostile input (until now every test ran under different
+      arithmetic than production); audit-chain appends as a single `write_all`
+      + `sync_data`, with a torn tail reported as truncation instead of
+      tampering; a cap on the OCI manifest body before it is buffered, and
+      decompressed-byte / entry-count caps on layer unpack; fail-closed
+      handling of a panicking payload-tapping observer. WS5's scope was
+      corrected during implementation — the blanket version would have let a
+      panicking metrics counter take down builder-VM networking. Also landed: a
+      redacting panic hook across seven daemon bins, reusing the existing
+      `SecretsScanner` (a panic payload is the one string the
+      no-`Display`-on-secret-types gate cannot reach), and an advisory Miri
+      lane over `mvm-contract`. Remaining: extending `jailer::confine_self` to
+      the four unconfined moat roles — the Landlock machinery already exists,
+      but each role needs an audited seccomp allowlist validated on live Linux,
+      which should follow the `feat/seccomp-audit` tooling.
 
 - [x] Durable agent session and event contract — **issue #2167**, plan
       `specs/plans/2167-agent-session-contract.md`. Added the versioned
@@ -191,16 +209,26 @@
       `mvm-vmm::host`, closing the last non-FC back-edge from the legacy
       backends into `mvm-runtime`.
 
-      Remaining: `FcDriver` still lives in `mvm-runtime/src/driver/fc.rs`
-      because it couples to `crate::microvm`, `crate::firecracker`, and
-      `crate::vm::instance_snapshot` — it is the only backend whose snapshot
-      and fork mechanics were never expressed through the `VmmDriver` seam.
-      `specs/plans/298-extract-firecracker-driver.md` carries that work: one
-      `VmmDriver` trait for every backend with no Firecracker-shaped sibling,
-      the generic snapshot seam lifted into `mvm-vmm`, the FC mechanics made
-      private to `mvm-backends`, and a hard budget of zero new traits and zero
-      new structs (deleting `ForkVmFullRestorer`, whose one method, one impl
-      and one call site make it a closure rather than a trait).
+      The Firecracker extraction that finishes this is complete —
+      `specs/plans/298-extract-firecracker-driver.md`. All five drivers now
+      live in `mvm-backends`; `mvm-runtime::driver` is re-exports only, and
+      `mvm-backends` depends on neither `mvm-runtime` nor `mvm-build`. The
+      backend-agnostic snapshot seam (`SnapshotIO`, the guarded load paths,
+      the vsock-only device-model guard, one merged `CannedIO` double) sits
+      in `mvm-vmm`; the Firecracker mechanics sit in `mvm-backends::fc`.
+
+      Held to zero new traits and zero new structs and came out negative:
+      `ForkVmFullRestorer` became a callback, the two `SnapshotIO` doubles
+      became one, and the guard takes a count rather than gaining a view
+      trait. Deleted along the way: the retired raw flake launcher (four
+      functions, no callers), the `require_linux_env` no-op (seven call
+      sites, asserted nothing), and a duplicate `bind_unix_listener`.
+      `base/config.rs` moved to `mvm-vmm::host` — the dependency-free leaf
+      that was pinning the FC modules — so neither `RuntimeVolume` nor
+      `VmSlot` had to move.
+
+      Workspace tests (10,582), doctests, `clippy --workspace --all-targets
+      -- -D warnings`, and eleven xtask gates are green.
 
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC
@@ -1106,7 +1134,7 @@ The bar: a codebase an **expert human can read and navigate**, fully tested, fol
 | **mvm-client**   | `mvm-client`                                                             | Facade (`MvmClient`). **Every CLI command routes through it.** The stable surface mvmd consumes.                                                              | no                           |
 | **mvm-cli**      | `mvm-cli`                                                                | `mvmctl`. Thin; delegates to `mvm-client`.                                                                                                                    | no                           |
 
-Kept as-is: `crates/deps/libkrun-sys` (FFI), `xtask`. **Dropped/folded:** `mvm-ext4`, `mvm-network`, `mvm-verify`, `mvm-guest-helpers`, `mvm-vm-host`, `mvm-host-services-ffi`, `mvm-mcp` (folded into `mvmctl serve` behind an `AgentProtocol` trait — MCP now, ACP later, no per-protocol crate; see WS7), orphan Swift `mvm-vz-supervisor`, `qemu` backend, dead deps (`colored`, `names`, `hickory-server`, stale `mvm-egress-proxy` path).
+Kept as-is: `crates/deps/libkrun-sys` (FFI), `xtask`. **Dropped/folded:** `mvm-ext4`, `mvm-network`, `mvm-verify`, `mvm-guest-helpers`, `mvm-vm-host`, `mvm-host-services-ffi`, `mvm-mcp` (folded into `mvmctl serve` behind an `AgentProtocol` trait — MCP now, ACP later, no per-protocol crate; see WS7), the orphan Swift supervisor dir, `qemu` backend, dead deps (`colored`, `names`, `hickory-server`, stale `mvm-egress-proxy` path).
 
 Logging is **`mvm-core::log`** (a module, not a crate): structured `tracing` for operational logs (→ `~/.mvm/logs`) **and** the seam that emits chain-signed, tamper-evident entries to the audit log for every security-relevant action. Secrets/PII are redacted at the boundary — never logged. "Auditable everywhere" means every guest↔host RPC and every egress byte is traceable through the vsock seam and the chain-signed audit log.
 
@@ -1149,7 +1177,7 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 ### 2.5 Backend & egress model
 
 - Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload), and **wasm** (`WasmBackend` — WASI wasm-container; core goal, see §1 + WS11). QEMU **dropped**. `mock` behind `test-support`.
-- Selected via the existing `BackendKind` enum + `backend_catalog!` registry — **never string-matched**. The ~6 remaining `backend.name() == "…"` sites in `mvm-cli` and the dead `"vz"` arms are removed.
+- Selected via the existing `BackendKind` enum + `backend_catalog!` registry — **never string-matched**. The ~6 remaining `backend.name() == "…"` sites in `mvm-cli` and the dead retired-backend arms are removed.
 - **One host-mediated, default-deny, audited egress boundary on every workload backend**, transport-abstracted via `VmDuplexTransport`: vsock/UDS for the microVM backends, WASI host-calls for the wasm backend. Firecracker, libkrun, and HVF all use the `WorkloadRunner` endpoint seam; any backend that cannot mediate egress through the host fails closed on `--network-allow`.
 - Mount ordering is `rootfs → runtime-overlay → custom`, with an **explicit no-shadow rule**: a later mount may never shadow an earlier target; `/mvm` and `/mvm/runtime` join the deny-prefix set.
 
@@ -1326,7 +1354,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 
 **WS6 — trait dispatch + zero hardcoding**
 
-- [x] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete dead `"vz"` arms. `VmBackend::kind()` is now a required trait method (every backend implements it); `xtask check-no-string-backend-dispatch` guards the regression.
+- [x] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete the dead retired-backend arms. `VmBackend::kind()` is now a required trait method (every backend implements it); `xtask check-no-string-backend-dispatch` guards the regression.
 - [x] Remove baked network literals (`172.16.x`, `127.0.0.1:1080`, `/tmp/firecracker.socket`); inject via config; name `DEFAULT_MEM_MIB`/`DEFAULT_CPUS`; add a CI lint for hardcoded IPs/ports. _(**WS6.2 landed `3d098ecb0` (sweep) + `30a531141` (lint)**, subagent-driven, spec ✅ + quality Approved, value-preservation reviewer-verified byte-for-byte per const: dev subnet `172.16.x` → `mvm_core::dev_network` consts (`DEFAULT_SUBNET_CIDR`/`DEFAULT_GATEWAY_IP`/`DEFAULT_GUEST_IP`/`DEFAULT_GATEWAY_CIDR` + `default_guest_ip_for_index`); `127.0.0.1:1080` → `mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN`/`_URL` (5 sites); `DEFAULT_MEM_MIB=2048`/`DEFAULT_CPUS=2` named at the image-manifest defaults (other differently-valued mem/cpu defaults deliberately left); the `API_SOCKET="/tmp/firecracker.socket"` process-global DELETED → per-VM `firecracker_api_socket_path(dir)="{dir}/fc.socket"` (start/stop resolve the same socket; matches the per-VM start path + `FirecrackerGuard` cleanup that already expected it). New `xtask check-no-network-literals` (3 rule classes: subnet/egress-port/fixed-tmp-socket; skips test code incl. whole-file `#![cfg(test)]`; per-instance `{…}` sockets allowed; narrow rule-scoped exemptions for the 2 definition sites + 1 dev smoke example; CI-wired). Controller-takeover (implementer wedged): I ran all gates + FIXED 2 real lint bugs — a whole-file `#![cfg(test)]` skip gap and a line-continuation newline-counting desync that under-counted hit line numbers (both now regression-tested). 7543/7543 nextest, workspace clippy, fmt, wasm32 all green. Zero mvm-contract diff.)_
 - Gate: hardcoding lint green; no string-typed backend dispatch remains. **WS6 COMPLETE.**
 
@@ -1592,7 +1620,7 @@ Then unify + retire the old paths:
 **WS12 — ADRs alive + website docs**
 
 - [ ] Keep the consolidated ADRs authoritative; update `CLAUDE.md`/`AGENTS.md` to the new crate/binary/dir/feature/backend reality.
-- [ ] Update the website docs (`public/src/content/docs/**`) — CLI reference, architecture diagram, backend list (drop QEMU/Vz), single-dir, install/upgrade/clean.
+- [ ] Update the website docs (`public/src/content/docs/**`) — CLI reference, architecture diagram, backend list (drop QEMU and the retired macOS backend), single-dir, install/upgrade/clean.
 - [ ] Sweep stale `specs/{claims,compliance,threat-models,references,contracts,runbooks}` path references out of `SECURITY.md`, `README.md`, `ops/`, other ADRs, and `public/src/content/docs/**` (flagged by WS0.2a — they now live in ADR-002/050/067/090).
 - Gate: docs match the shipped CLI + architecture; no dangling `specs/` paths; `#1637` (one-command microVM) becomes accurate.
 
@@ -1612,6 +1640,7 @@ Then unify + retire the old paths:
   - [x] **P3b.1** (`45b1db3e6`): `WasmBackend::start()` spawns the substitution endpoint mirroring libkrun — `wasm_endpoint_plan` (skip iff no-secrets + deny-all) + `wasm_substitution_spawn_params` (`EndpointTransport::Uds` via shared `vm_substitution_endpoint_socket`, `terminator_listen`/`tls_intermediate` `None` [http-only POC], `network_policy: Some`, **`raw_egress: false`** — wasm is always wire-mode, the required deviation from libkrun) + thin `spawn_wasm_egress_endpoint_if_needed` reusing `spawn_substitution_endpoint`; wires the UDS into the P3a host-import + reaps after the synchronous run. Decision/params unit-tested (no subprocess), 26/26, all gates green. **KNOWN FOLLOW-UP**: P2's `reject_unsupported_start_config` still fails `--network-allow` closed (`NetworkingNotSupported`), so the governed-egress path is built + unit-tested but NOT reachable in production `start()` until P3b.2 proves the witness + relaxes that gate (correct fail-closed posture — don't enable governed egress until proven).
   - [x] **P3b.2 DONE** (`e669bcc5d` gate-relax + `4d709d196` allow + `8c270214d` deny) — the **data-governance witness** passes; POC gate met. Executed subagent-plan `specs/plans/13-ws11-wasm-egress-poc.md`. **Home deviation (improved on the plan):** the witness lands in **mvm-hostd** tests (`crates/mvm-hostd/tests/wasm_egress_witness.rs`), not mvm-runtime — mvm-hostd already deps mvm-runtime (`WasmBackend`) + owns `SubstitutionService`/`Recorder`/`verify_audit_chain`, so it drives the REAL governance types **in-process** with NO dependency inversion and NO subprocess. A mvm-hostd `wasm-backend` feature forwards to mvm-runtime's; the test is `#![cfg(feature = "wasm-backend")]` so a default build pulls no wasmtime. **Two tests, four properties each:** allow path — a `.wat` module drives the `mvm:egress` host-import, observes `WireResponse::Ok{200}` through the REAL claim-10 gate, the destination receives the real secret while the module only ever held the placeholder, and a chain-signed `secret.substituted` entry verifies (no secret in it, claim 13); deny path — a claim-12 bind-check drop (destination network-admitted but not in the secret's binding) yields a refusal, the destination is never contacted, and a chain-signed `secret.placeholder_dropped` entry verifies. **Hermetic concession (documented in-file):** the production forward leg refuses loopback (SSRF hardening), so the test swaps ONLY the outbound TCP dial for a `Forwarder` test double — the crate's own test seam — and decouples the policy destination (a public IP the gate admits; loopback is mandatory-denied regardless of allow-list) from the physical loopback dial. Task 1 relaxed P2's networking gate so an allow-egress `VmStartConfig` is no longer rejected by `reject_unsupported_start_config` (config-level unit test `start_config_with_egress_policy_is_now_allowed`; the dead `NetworkingNotSupported` variant then removed — final-review Minor). **Scope honesty (final-review Important):** the witness drives the governance seam directly via `WasmBackend::with_egress_endpoint` + an in-process `SubstitutionService`, so it proves substitution + audit but NOT the full `start()` → `spawn_wasm_egress_endpoint_if_needed` → real-subprocess wiring (both tests use `VmStartConfig::default()` = `deny_all`, so the relaxed gate never fires in them). That decision layer is unit-tested per P3b.1; an end-to-end spawn-path test is a **deferred follow-up** (§below — it hits the same SSRF-refuses-loopback wall). All gates green (workspace clippy, runtime+hostd wasm-backend clippy, 27 wasm_backend units + 2 witnesses, 0 wasmtime in non-dev graph, 4 xtask gates, wasm32 protocol build, fmt). (Full TLS-terminating substitution for HTTPS dests → P3c; browser → P4 — each its own subsequent plan.)
 - [ ] **P4**: browser POC — `mvm-contract` + `no_std` OCI decoders run in the browser (image inspect/verify).
+- [ ] **REMAINING WS11 WORK — design of record is `specs/plans/301-wasm-backend-completion-and-browser-slice.md`** (plan landed, execution not started). Covers both open halves. **Part A (host tier):** A1 end-to-end `start()`→`spawn_wasm_egress_endpoint_if_needed`→real-subprocess coverage (the P3b.2 deferred follow-up; same SSRF-refuses-loopback wall); A2 = P3c TLS-terminating substitution (P3b.1 shipped http-only, `tls_intermediate`/`terminator_listen` both `None`, so https destinations must fail closed until it lands); A3 transparent WASI socket interception (Fork 1's eventual goal — the explicit `mvm:egress` host-import stays the supported path); A4 resolve the Preview 1 vs doc-11's "target Preview 2" divergence (amend one or the other, don't leave them disagreeing); A5 **ADR-024's Status paragraph is STALE** — it still says no implementation has landed and no `wasmtime` is in the workspace, both false since P2 (constraints untouched) + confirm the P2-assigned `deny.toml` review actually happened; A6 generalize the witness across all workload backends ("the same witness" was the whole argument for the subprocess route and is currently true only wasm-side). **Part B (P4 browser):** B1 = **the long pole** — the `no_std` OCI decoders P4 assumes DO NOT EXIST (`mvm-fs` is std-heavy: tokio/reqwest/rustls/rayon/libc/rustix/xattr/tar/flate2), so `oci/{manifest_types,manifest,reference,layer,archive}` must be cut decode-vs-fetch and the pure half relocated **verbatim** to `mvm-contract` by the Increment 3 method (leaf-first, byte-identical serde, green+wasm-clean each step); open question = gzip/tar under no_std (`flate2` defaults to a C backend) or scope to manifest-level inspection; B2 Worker + thin main-thread proxy (no verify work on the main thread — the current `web/audit-verify/index.html` jank-locks the tab); B3 OPFS content-addressed cache with **verify-on-read** eviction, `postcard` for the local unsigned record envelope ONLY (JCS stays the signing input — ADR-031 byte-identity with mvmd is untouchable); B4 `wasm-opt -Oz` + a gzipped-size budget in the existing wasm lane (`scripts/ci-linux-coverage.sh`) — Increment 3 moved the entire signed plan into the crate the bundle is built from and nobody is measuring it; B5 delete `web/audit-verify/` once B4 covers verify+Merkle, fix the stale `mvm-verify` crate refs in ADR-031, add `mvmctl audit pubkey` (without it the page can't be run against a user's own logs). Execution model for B2/B3/B4 is taken from ferrovec (in-browser Rust/wasm vector store; Worker + OPFS + ~33 KB gzipped) as prior art — not a dependency. ADR-024's three constraints bind throughout: **no numbered claim is added**.
 - Gate: `mvm-contract` wasm build+tests green; no_std-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
 
 **Semantic address (UOR-ADDR) pilot — IMPLEMENTED (orthogonal to WS11; do NOT weave into P3)**
@@ -1970,7 +1999,7 @@ change.
 | 1283     | issue      | **Closed** — landed via #1786 (boot-probe strip done)               |
 | 1264     | issue      | **Closed** — #1786 documents upstream-blocked pin bump; no action   |
 | 1716     | PR         | Superseded by this sprint — close                                   |
-| 1718     | PR         | Folded (dev_vz→builder_vm rename subsumed by WS1) — close           |
+| 1718     | PR         | Folded (dev-builder rename subsumed by WS1) — close           |
 | 1713     | PR         | Contradicts consolidation (splits SDK) — close                      |
 
 ## Appendix C — biggest confirmed removals
@@ -1978,5 +2007,5 @@ change.
 - Userspace network gateways — passt, gvproxy, and the opt-in native/rvproxy `native_gateway` subsystem (~1,281 lines); replaced by the one vsock seam (WS-NET).
 - `crates/mvm-runtime/src/vm/egress_proxy.rs` L7 stub — removed (WS8).
 - `crates/mvm-runtime/src/storage/{pool,thin}.rs` dm-thin substrate — **NOT dead**: backs the live `mvmctl storage info`/`gc` verbs (`ThinPoolImpl`/`DeviceMapperBackend`), kept (WS8).
-- QEMU backend (WS1e), Vz remnants, `mvm-vz-supervisor` Swift dir (WS0.4).
+- QEMU backend (WS1e), retired-backend remnants, the Swift supervisor dir (WS0.4).
 - 28 member features → 2 (WS5); ~24 `#[cfg]`-heavy gates collapse.

@@ -2,14 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-const PID_FILE_NAMES: &[&str] = &[
-    "libkrun.pid",
-    "vz.pid",
-    "hvf.pid",
-    "fc.pid",
-    "qemu.pid",
-    "pid",
-];
+/// Supervisor PID markers, one per workload backend plus the generic `pid`
+/// fallback. This is the single list every liveness probe reads — a backend
+/// missing here reads as stopped everywhere at once.
+const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid", "qemu.pid", "pid"];
 
 /// `kill(pid, 0)` existence probe — delivers no signal, just checks the
 /// process is alive. `EPERM` is a positive existence result for a supervisor

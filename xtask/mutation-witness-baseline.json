@@ -212,13 +212,6 @@
       ]
     },
     {
-      "path": "crates/mvm-runtime/src/microvm/snapshot.rs",
-      "package": "mvm-runtime",
-      "claims": [
-        10
-      ]
-    },
-    {
       "path": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
       "package": "mvm-runtime",
       "claims": [
@@ -238,6 +231,13 @@
       "package": "mvm-vmm",
       "claims": [
         17
+      ]
+    },
+    {
+      "path": "crates/mvm-vmm/src/snapshot.rs",
+      "package": "mvm-vmm",
+      "claims": [
+        10
       ]
     }
   ],

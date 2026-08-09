@@ -1,7 +1,6 @@
 #[cfg(all(test, feature = "test-support"))]
 use std::error::Error;
 #[cfg(test)]
-use std::os::unix::net::UnixListener;
 #[cfg(test)]
 use std::path::Path;
 
@@ -31,36 +30,6 @@ pub(crate) fn error_chain_has_permission_denied(err: &(dyn Error + 'static)) -> 
 }
 
 #[cfg(test)]
-pub(crate) fn bind_unix_listener(path: &Path) -> Option<UnixListener> {
-    if let Some(parent) = path.parent()
-        && let Err(err) = std::fs::create_dir_all(parent)
-    {
-        if is_permission_denied_io(&err) {
-            eprintln!(
-                "skipping test: sandbox denied creating Unix socket parent {}: {err}",
-                parent.display()
-            );
-            return None;
-        }
-        panic!(
-            "creating Unix socket parent {} failed: {err}",
-            parent.display()
-        );
-    }
-    let _ = std::fs::remove_file(path);
-    match UnixListener::bind(path) {
-        Ok(listener) => Some(listener),
-        Err(err) if is_permission_denied_io(&err) => {
-            eprintln!(
-                "skipping test: sandbox denied binding Unix socket {}: {err}",
-                path.display()
-            );
-            None
-        }
-        Err(err) => panic!("binding Unix socket {} failed: {err}", path.display()),
-    }
-}
-
 #[cfg(all(test, feature = "test-support"))]
 pub(crate) fn start_mock_guest_agent(vm_dir: &Path) -> Option<MockGuestAgent> {
     match MockGuestAgent::start(vm_dir) {

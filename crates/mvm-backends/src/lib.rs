@@ -5,6 +5,7 @@
 //! mechanics.
 
 pub mod driver;
+pub mod fc;
 pub mod legacy;
 
 pub mod mock;

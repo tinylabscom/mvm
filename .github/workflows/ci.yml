@@ -45,6 +45,8 @@ jobs:
 
       - uses: ./.github/actions/install-zigbuild
 
+      - uses: ./.github/actions/rust-cache
+
       - name: Check formatting
         run: cargo fmt -- --check
 
@@ -95,6 +97,8 @@ jobs:
           node-version: "22"
 
       - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
 
       - name: ADR coverage (informational)
         continue-on-error: true
@@ -284,6 +288,8 @@ jobs:
 
       - uses: ./.github/actions/install-zigbuild
 
+      - uses: ./.github/actions/rust-cache
+
       - name: Clippy (mvm-client tracing-bridge)
         run: cargo clippy -p mvm-client --all-targets --features tracing-bridge -- -D warnings
 
@@ -341,7 +347,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [test-workspace, test-linux]
+    needs: [test-workspace, test-linux, test-release-witness]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -349,9 +355,10 @@ jobs:
         env:
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
+          RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
         run: |
           set -euo pipefail
-          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT"; do
+          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT"; do
             if [ "$result" != success ]; then
               echo "A test lane did not pass: $result"
               exit 1
@@ -376,6 +383,8 @@ jobs:
           sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -411,6 +420,51 @@ jobs:
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
 
+  test-release-witness:
+    name: Test release profile (overflow + no debug assertions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
+          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Run tests under the release profile
+        # Every other lane runs in a debug profile: debug assertions on,
+        # integer overflow trapped by the profile default. The shipped binary
+        # is neither of those things, so a test suite that only ever runs in
+        # debug cannot witness the behaviour users get.
+        #
+        # `release-witness` is `release` minus fat LTO and single-codegen-unit
+        # linking, which keeps the semantics under test (trapping overflow, no
+        # debug assertions) without the link times.
+        #
+        # Deliberately scoped rather than workspace-wide: these are the crates
+        # doing length arithmetic over bytes an attacker chooses — the ext4
+        # writer and OCI unpacker, the plan/crypto core, the audit-log
+        # verifier, the datapath and supervisor, and the vsock frame parser.
+        # The rest of the workspace is covered in debug by `test-workspace`;
+        # widening this lane costs CI minutes for code that does not parse
+        # hostile input.
+        run: |
+          cargo nextest run --cargo-profile release-witness \
+            -p mvm-fs -p mvm-core -p mvm-contract -p mvm-hostd -p mvm-agentd
+
   test-linux:
     name: Test Linux and conformance
     runs-on: ubuntu-latest
@@ -437,6 +491,8 @@ jobs:
           sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
 
       - name: Install pinned no_std toolchain and targets
         run: |
@@ -473,6 +529,13 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
           sudo apt-get install -y libcap-ng-dev lld
 
+      # This lane compiles a different crate set from the shared workspace key
+      # and builds bpf-linker from source, so it gets its own entry rather than
+      # diluting the one every other lane restores.
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: ebpf
+
       - name: Install bpf-linker
         run: cargo +nightly install --locked bpf-linker
 
@@ -495,14 +558,63 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The scope decision below needs both ends of the range.
+          fetch-depth: 0
+
+      # This lane costs ~30 minutes and, being merge_group-only, spends all of
+      # it on the queue's critical path where nobody sees it during review.
+      # Three merges in four change nothing it evaluates, so those three spent
+      # half an hour re-deriving an unchanged answer while the queue waited.
+      #
+      # Gating the steps rather than the job keeps the required check reporting
+      # on every entry — a check that can be absent cannot stay required.
+      - name: Decide whether anything Nix evaluates changed
+        id: scope
+        env:
+          # `merge_group` carries its own base/head, and neither is a ref the
+          # runner has checked out, so both come from the event payload.
+          EVENT: ${{ github.event_name }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          # An explicit dispatch is an explicit ask, not a diff.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch — evaluating"
+            exit 0
+          fi
+
+          # Fail closed: an unresolvable range evaluates rather than assumes
+          # the change was irrelevant.
+          if ! CHANGED=$(git diff --name-only "$MG_BASE" "$MG_HEAD" 2>/dev/null); then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "could not diff $MG_BASE..$MG_HEAD — evaluating to stay safe"
+            exit 0
+          fi
+
+          # Everything the flakes read. Deliberately wider than `nix/`: the
+          # runtime overlay builds guest binaries out of the Rust workspace, so
+          # a crate or lockfile change can move what these checks produce.
+          if printf '%s\n' "$CHANGED" | grep -qE '^(nix/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|\.github/workflows/ci\.yml$)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "Nix inputs changed — evaluating"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "nothing Nix evaluates changed — skipping the eval"
+          fi
 
       - name: Install Nix
+        if: steps.scope.outputs.relevant == 'true'
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Install Rust toolchain
+        if: steps.scope.outputs.relevant == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Eval-check every flake
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           set -euo pipefail
           find nix -name flake.nix -type f -print0 | sort -z | while IFS= read -r -d '' flake; do
@@ -515,6 +627,7 @@ jobs:
       # here; the aarch64-linux variant stays defined for parity and for a
       # future arm64 runner.
       - name: Baked guest rootfs closure stays lean and glibc-free
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           set -euo pipefail
           nix build --print-build-logs \
@@ -522,6 +635,7 @@ jobs:
             ./nix#checks.x86_64-linux.guest-rootfs-package-budget
 
       - name: Runtime overlay uses static-musl guest binaries
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           set -euo pipefail
           nix build --print-build-logs \
@@ -543,6 +657,7 @@ jobs:
       # change that deleted the SDK cdylib outright would satisfy every
       # no-glibc assertion and read as a footprint win.
       - name: Runtime overlay is glibc-free and the SDK closure moved to the sidecar
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           set -euo pipefail
           overlay=./nix/images/runtime-overlay
@@ -577,6 +692,7 @@ jobs:
 
 
       - name: Nix-built guest artifacts fit the 50 MB footprint
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           set -euo pipefail
           nix build --print-build-logs --impure --no-link --print-out-paths \

@@ -44,7 +44,7 @@ The clear single-verb wins are `attest`/`receipt`/`audit`.)
 **`ops/`** — `ops metrics` · `bench` · `config`.
 
 **`env/`** (D5) — `env bootstrap` · `cleanup` · `uninstall` · `update`
-· `sign` (`env::sign` — re-sign mvmctl+supervisors with VZ entitlements).
+· `sign` (`env::sign` — re-sign mvmctl+supervisors with the VMM entitlements).
 Lift `dev`/`doctor`/`init` OUT of `env/` to their own top-level modules so
 `env/` = the `env` group 1:1.
 

@@ -237,7 +237,7 @@ impl FlowDirection {
 /// catch / I/O error / drop guard. `PolicyDropped` is the
 /// `FlowPolicy` hook returning `FlowAction::Drop` — the substrate
 /// enforcement plugs into. `Shutdown` covers graceful
-/// supervisor teardown (Vz Swift bridge cancellation, libkrun
+/// supervisor teardown (libkrun
 /// `exit()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -267,6 +267,14 @@ pub enum AuditError {
 
     #[error("io error writing audit entry: {0}")]
     Io(String),
+
+    /// The tenant stream's last record has no terminating newline, so a
+    /// previous append died mid-write. Chaining onto it would hash a partial
+    /// record, and every later entry would then verify against a prefix no
+    /// signer ever produced. Refuse rather than extend a chain from a record
+    /// that was never completed.
+    #[error("audit stream {path} ends mid-record; refusing to chain onto a partial write")]
+    TruncatedTail { path: String },
 }
 
 #[async_trait]
