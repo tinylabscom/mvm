@@ -34,7 +34,7 @@
 # Prerequisites (only needed once MVM_SP4_LIVE=1 is set):
 #   - `mvmctl dev up` works on this host (builder-VM backend available:
 #     libkrun on macOS 13-25 / HVF on macOS 26+ Apple Silicon / KVM on
-#     Linux; gvproxy or passt installed per platform).
+#     Linux).
 #   - A quiet, uncontended host — cold `dev up` numbers are meaningless
 #     under contention from other builds, VMs, or heavy background load.
 #   - `jq` on PATH (optional — falls back to python3 if absent).

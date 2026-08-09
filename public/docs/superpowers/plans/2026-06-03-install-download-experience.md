@@ -841,7 +841,7 @@ class Mvmctl < Formula
   def caveats
     <<~EOS
       macOS (non-Apple-Silicon-26+) needs the libkrun trio:
-        brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy
+        brew install slp/krun/libkrun slp/krun/libkrunfw
       Run `mvmctl doctor` to verify your host.
     EOS
   end

@@ -585,9 +585,8 @@ is no way to construct one.
 
 **The builder VM is the deliberate exception.** It runs `nix build` and does
 have a NIC, because it must reach package mirrors. It carries no untrusted
-tenant workload — a different tier with a different contract. `MVM_NETWORKING`,
-gvproxy, and passt configure *that* VM's networking and are never consulted by
-any workload backend.
+tenant workload — a different tier with a different contract, and its network
+configuration is never consulted by any workload backend.
 
 ## Security model
 

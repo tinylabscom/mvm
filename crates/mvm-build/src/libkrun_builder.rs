@@ -149,54 +149,6 @@ const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
 const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
 const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 3;
 
-/// Caller-visible libkrun transport preference.
-///
-/// The active transport is now direct vsock on every backend. `MVM_NETWORKING`
-/// is retained only as a compatibility knob so stale shells produce a warning
-/// instead of silently reopening legacy guest-NIC code paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkingPreference {
-    /// libkrun with the explicit vsock device and no guest-NIC gateway.
-    VsockDirect,
-}
-
-/// Apply the resolved [`NetworkingPreference`] to a [`KrunContext`].
-/// All active builder lanes are vsock-only, so the only valid transport is the
-/// explicit direct-vsock device path.
-fn apply_networking_mode(krun: KrunContext) -> KrunContext {
-    match resolve_networking_mode() {
-        NetworkingPreference::VsockDirect => krun.with_vsock_direct(),
-    }
-}
-
-/// The active libkrun transport is backend-independent: everything uses the
-/// direct-vsock path.
-pub fn default_networking_mode() -> NetworkingPreference {
-    NetworkingPreference::VsockDirect
-}
-
-/// Read `MVM_NETWORKING` from the env.
-///
-/// Non-empty values are ignored with a warning: the runtime no longer switches
-/// among gateway binaries and instead always uses the direct-vsock path.
-pub fn resolve_networking_mode() -> NetworkingPreference {
-    if let Some(value) = std::env::var("MVM_NETWORKING")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-        && !value.is_empty()
-    {
-        tracing::warn!(
-            value,
-            "MVM_NETWORKING is ignored; libkrun networking is now direct-vsock only"
-        );
-    }
-
-    default_networking_mode()
-}
-
 /// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
 /// its guest binaries from, failing closed when it cannot be produced.
 ///
@@ -1172,7 +1124,7 @@ impl LibkrunBuilderVm {
         // Builder VMs are NIC-less: egress goes over the vsock relay below, so
         // the libkrun networking mode must be the disconnected sink — the
         // supervisor rejects anything else. Matches the Stage 0 path.
-        krun = apply_networking_mode(krun);
+        krun = krun.with_vsock_direct();
 
         // A lean Rootfs builder always carries the runtime overlay here
         // (resolution failed closed above), so the disk-transport cmdline is
@@ -1184,7 +1136,7 @@ impl LibkrunBuilderVm {
                 .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
-            krun = apply_networking_mode(krun);
+            krun = krun.with_vsock_direct();
             None
         };
 
@@ -1500,7 +1452,7 @@ fn builder_shell_krun_context(
         );
     }
 
-    Ok(apply_networking_mode(krun))
+    Ok(krun.with_vsock_direct())
 }
 
 /// Reject a path that isn't UTF-8 representable. Internal helper —
@@ -1680,7 +1632,7 @@ impl BuilderVm for LibkrunBuilderVm {
         // Builder VMs are NIC-less: egress goes over the vsock relay below, so
         // the libkrun networking mode must be the disconnected sink — the
         // supervisor rejects anything else. Matches the Stage 0 path.
-        krun = apply_networking_mode(krun);
+        krun = krun.with_vsock_direct();
 
         // A lean Rootfs builder always carries the runtime overlay here
         // (resolution failed closed above), so the disk-transport cmdline is
@@ -1692,7 +1644,7 @@ impl BuilderVm for LibkrunBuilderVm {
                 .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
-            krun = apply_networking_mode(krun);
+            krun = krun.with_vsock_direct();
             None
         };
 
@@ -1816,7 +1768,7 @@ impl BuilderVm for LibkrunBuilderVm {
 //
 // Lives in the same file as the private helpers it calls
 // (`resolve_supervisor_path`, `ensure_builder_vm_image`,
-// `krun_context_for_image`, `apply_networking_mode`, `path_to_str`,
+// `krun_context_for_image`, `path_to_str`,
 // `spawn_supervisor_in_background`, `wait_with_panic_detector_until`,
 // `WaitOutcome`, `DEFAULT_PANIC_POLL_INTERVAL`). Putting it here
 // avoids widening those helpers' visibility for a single new caller.
@@ -1936,7 +1888,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         let egress_endpoint = if builder_uses_vsock_egress(&self.image) {
             BuilderVsockEgressEndpoint::spawn(&config.vm_state_dir).map(Some)?
         } else {
-            krun = apply_networking_mode(krun);
+            krun = krun.with_vsock_direct();
             None
         };
 
@@ -2952,7 +2904,7 @@ const SUPERVISOR_BUILD_LOG_FILENAME: &str = "mvm-supervisor-build.log";
 /// Where [`resolve_supervisor_path`] found the supervisor binary. The source
 /// matters because a PATH hit is an installed copy (`cargo install`) that a
 /// source-checkout `cargo build` never refreshes — so it can silently lag the
-/// driver and reintroduce stale-supervisor failures (gvproxy-orphan teardown
+/// driver and reintroduce stale-supervisor failures (orphan teardown
 /// noise, `deny_unknown_fields` rejects of newer `SupervisorConfig` fields).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupervisorSource {
@@ -3593,7 +3545,7 @@ fn spawn_supervisor_and_wait(
     // poweroff (libkrun's internal `exit()`), or panic/timeout where we
     // SIGKILL'd it above. None of those run `GvproxyHandle::Drop` (no
     // unwind) or the supervisor's SIGTERM handler (SIGKILL is uncatchable,
-    // exit() skips it), so the per-VM gvproxy is left "waiting for clients"
+    // exit() skips it), so the per-VM helper is left "waiting for clients"
     // and reparented to the init process. Reap it here: we (the spawning
     // host) have observed the supervisor exit, so this is the one place
     // teardown is guaranteed regardless of how libkrun terminated.
@@ -4479,7 +4431,7 @@ impl LibkrunPersistentHostVm {
                 .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
-            krun = apply_networking_mode(krun);
+            krun = krun.with_vsock_direct();
             None
         };
 
@@ -4881,43 +4833,6 @@ mod tests {
         // fails fast.
         assert_eq!(vm.memory_mib, 16384);
         assert_eq!(vm.nix_store_mib, 65536);
-    }
-
-    #[test]
-    fn resolve_networking_mode_always_resolves_to_vsock_direct() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.remove("MVM_NETWORKING");
-        env.remove("MVM_GATEWAY_BIN");
-        assert_eq!(resolve_networking_mode(), default_networking_mode());
-
-        for variant in [
-            "",
-            "passt",
-            "GVPROXY",
-            " gvproxy ",
-            "native",
-            " tsi ",
-            "vmnet-helper",
-        ] {
-            env.set("MVM_NETWORKING", variant);
-            assert_eq!(
-                resolve_networking_mode(),
-                NetworkingPreference::VsockDirect,
-                "MVM_NETWORKING={variant:?} must not reopen legacy gateway selection"
-            );
-        }
-
-        env.set("MVM_GATEWAY_BIN", "/path/to/ignored-gateway");
-        assert_eq!(resolve_networking_mode(), NetworkingPreference::VsockDirect);
-
-        env.remove("MVM_NETWORKING");
-        env.remove("MVM_GATEWAY_BIN");
-    }
-
-    #[test]
-    fn default_networking_mode_is_vsock_direct() {
-        assert_eq!(default_networking_mode(), NetworkingPreference::VsockDirect);
     }
 
     #[test]
@@ -7140,20 +7055,6 @@ mod tests {
         assert!(!vm.verbose, "default is quiet");
         let vm = LibkrunBuilderVm::default().with_verbose(true);
         assert!(vm.verbose, "with_verbose(true) flips the flag");
-    }
-
-    #[test]
-    fn apply_networking_mode_switches_libkrun_builder_to_vsock_direct() {
-        let krun = KrunContext::new("builder-smoke", "/tmp/kernel", "/tmp/rootfs");
-        let configured = apply_networking_mode(krun);
-
-        assert!(
-            matches!(
-                configured.networking,
-                libkrun_sys::NetworkingMode::VsockDirect
-            ),
-            "builder contexts must resolve to the direct-vsock networking mode"
-        );
     }
 
     #[test]

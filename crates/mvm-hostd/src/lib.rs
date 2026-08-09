@@ -8,7 +8,7 @@
 //! - [`supervisor`] — the trusted host-side supervisor library (egress
 //!   proxy, tool gate, key release, audit signing, plan execution state
 //!   machine). Run in-process by this crate's per-VM supervisor bins
-//!   (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`, `mvm-bridge`), not as a
+//!   (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`), not as a
 //!   standalone process.
 //! - [`broker`] — host services broker subprocess (vsock dispatch).
 //! - [`host_signer`] — Ed25519 host-key signer subprocess.
@@ -25,14 +25,8 @@
 
 pub mod audit;
 pub mod audit_signer;
-/// Unified per-VM bridge-sidecar stdin contract. The shared `mvm-bridge`
-/// sidecar parses [`bridge::parse::BridgeConfigJson`] and dispatches on its
-/// endpoint discriminant; reuses the `firecracker_bridge::parse` plan-decode +
-/// passt-hash helpers verbatim.
-pub mod bridge;
 pub mod broker;
 pub mod exit_capture;
-pub mod firecracker_bridge;
 /// Length-prefixed message framing (4-byte BE length + body,
 /// cap-before-alloc) for the same-uid UDS control channels. Relocated
 /// from `mvm_core::framing` so `mvm-core`'s default build pulls no

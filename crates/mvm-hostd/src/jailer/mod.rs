@@ -3,8 +3,8 @@
 //!
 //! Wraps `seccompiler` (Firecracker-maintained) + `landlock` (official
 //! Rust LSM binding) behind a single `confine_self(&ConfinementSpec)`
-//! entry point. Non-Linux targets compile as inert stubs (the bridge
-//! that calls `confine_self` is Linux-only at runtime; the stub keeps
+//! entry point. Non-Linux targets compile as inert stubs (the roles that
+//! call `confine_self` are Linux-only at runtime; the stub keeps
 //! workspace `cargo check` green on macOS / Windows contributor hosts).
 //!
 //! The `dead_code` allow below is gated to non-Linux targets because
@@ -32,9 +32,9 @@ pub enum JailerError {
     SeccompUnavailable,
     /// A path in the `ConfinementSpec` could not be opened to install a
     /// Landlock rule. Carries the failing path so the operator sees
-    /// which directory needs to exist (the bridge's audit-dir is the
+    /// which directory needs to exist (the audit dir is the
     /// most common cause: `~/.mvm/audit/` must be pre-created with
-    /// mode 0700 by the supervisor's bootstrap before the bridge spawns).
+    /// mode 0700 by the supervisor's bootstrap before the role spawns).
     #[error("landlock path missing: {path}: {source}")]
     PathNotFound {
         path: PathBuf,
@@ -50,32 +50,6 @@ pub struct ConfinementSpec {
 }
 
 impl ConfinementSpec {
-    /// Canonical spec for the `mvm-bridge` sidecar. `SECCOMP.md` and
-    /// `LANDLOCK.md` in the crate root document the rationale + review
-    /// process for syscall additions.
-    ///
-    /// The syscall allowlist is sourced from the canonical
-    /// `seccomp::BRIDGE_SYSCALLS` table on Linux, so a contributor can
-    /// only extend it in one place — adding a name here without the
-    /// matching `libc::SYS_*` row would fail to compile. On non-Linux
-    /// targets the list is empty (the stub `confine_self` is a no-op /
-    /// error path; callers must hard-exit before reaching it in
-    /// production), keeping the type API parity across hosts.
-    pub fn firecracker_bridge(audit_dir: PathBuf, keys_dir: PathBuf, passt_path: PathBuf) -> Self {
-        #[cfg(target_os = "linux")]
-        let allowed_syscalls: Vec<&'static str> = crate::jailer::seccomp::BRIDGE_SYSCALLS
-            .iter()
-            .map(|(name, _)| *name)
-            .collect();
-        #[cfg(not(target_os = "linux"))]
-        let allowed_syscalls: Vec<&'static str> = Vec::new();
-        Self {
-            readable_paths: vec![passt_path, keys_dir],
-            read_write_paths: vec![audit_dir],
-            allowed_syscalls,
-        }
-    }
-
     /// Canonical spec for `mvm-substitution-endpoint` — the per-VM process
     /// that holds the workload's decrypted secrets AND parses untrusted guest
     /// bytes over vsock/UDS. Confining it bounds the blast radius of a parser
@@ -92,7 +66,7 @@ impl ConfinementSpec {
     /// (`audit_dir`), so the key is readable and the audit dir is read-write.
     ///
     /// The syscall allowlist comes from the same canonical
-    /// `seccomp::BRIDGE_SYSCALLS` table the bridge uses — extended with the
+    /// `seccomp::CONFINED_ROLE_SYSCALLS` table — extended with the
     /// extra syscalls the tokio multi-thread runtime + rustls TLS forward leg
     /// touch (see the table's comments). On non-Linux targets the list is
     /// empty (the stub `confine_self` errors; the bin hard-exits before
@@ -132,7 +106,7 @@ impl ConfinementSpec {
         resolver_uds: Option<&Path>,
     ) -> Self {
         #[cfg(target_os = "linux")]
-        let allowed_syscalls: Vec<&'static str> = crate::jailer::seccomp::BRIDGE_SYSCALLS
+        let allowed_syscalls: Vec<&'static str> = crate::jailer::seccomp::CONFINED_ROLE_SYSCALLS
             .iter()
             .map(|(name, _)| *name)
             .collect();
@@ -205,10 +179,9 @@ fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 /// process on any error — there is no `disengage` API in either
 /// kernel LSM, and a half-confined process running attacker-influenced
 /// code is strictly worse than a confined one. The
-/// `mvm-bridge` sidecar honours this contract by returning
-/// the error up to `main`, which logs and exits nonzero; the
-/// supervisor's `BridgeRestartPolicy::HardFail` is the cleanup
-/// mechanism that turns the exit into a VM teardown.
+/// `mvm-substitution-endpoint` honours this contract by returning the error
+/// up to `main`, which logs and exits nonzero; the supervisor turns that exit
+/// into a VM teardown.
 #[cfg(target_os = "linux")]
 pub fn confine_self(spec: &ConfinementSpec) -> Result<(), JailerError> {
     crate::jailer::landlock::apply(spec)?;
@@ -235,42 +208,64 @@ pub mod seccomp;
 mod tests {
     use super::*;
 
+    /// Distinct dirs per role, so a read-only grant is distinguishable from a
+    /// writable one.
+    ///
+    /// The sibling tests pass one directory for all four arguments, which
+    /// cannot tell those apart: the signer key landing in `read_write_paths`
+    /// would let a compromised endpoint replace the key it signs with, and
+    /// every existing assertion would still pass.
     #[test]
-    fn firecracker_bridge_spec_has_audit_write_paths() {
-        let spec = ConfinementSpec::firecracker_bridge(
-            "/tmp/audit".into(),
-            "/tmp/keys".into(),
-            "/usr/bin/passt".into(),
+    fn substitution_endpoint_spec_keeps_the_signer_key_read_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let secrets = tmp.path().join("secrets");
+        let bindings = tmp.path().join("bindings");
+        let audit = tmp.path().join("audit");
+        let keys = tmp.path().join("keys");
+        for d in [&secrets, &bindings, &audit, &keys] {
+            std::fs::create_dir_all(d).expect("create spec dir");
+        }
+
+        // `None` resolver backend: this test is about the key grant, and a
+        // resolver socket would add an unrelated write path.
+        let spec = ConfinementSpec::substitution_endpoint(
+            secrets.clone(),
+            bindings.clone(),
+            audit.clone(),
+            keys.clone(),
+            None,
+        );
+
+        assert!(
+            spec.readable_paths.iter().any(|p| p == &keys),
+            "keys dir must be readable: {:?}",
+            spec.readable_paths
         );
         assert!(
+            !spec.read_write_paths.iter().any(|p| p == &keys),
+            "keys dir must NOT be writable: {:?}",
             spec.read_write_paths
-                .iter()
-                .any(|p| p == std::path::Path::new("/tmp/audit"))
         );
         assert!(
-            spec.readable_paths
-                .iter()
-                .any(|p| p == std::path::Path::new("/tmp/keys"))
-        );
-        assert!(
-            spec.readable_paths
-                .iter()
-                .any(|p| p == std::path::Path::new("/usr/bin/passt"))
+            spec.read_write_paths.iter().any(|p| p == &audit),
+            "audit dir is the only write grant: {:?}",
+            spec.read_write_paths
         );
     }
 
     /// On Linux the syscall allowlist is populated from the canonical
-    /// `seccomp::BRIDGE_SYSCALLS` table. We assert the contents here
+    /// `seccomp::CONFINED_ROLE_SYSCALLS` table. We assert the contents here
     /// (positive + negative) rather than in seccomp.rs because the
     /// allowlist is the security-policy surface — a future contributor
     /// editing the table touches this test, which is the audit point.
     #[cfg(target_os = "linux")]
     #[test]
-    fn firecracker_bridge_allowlist_includes_required_syscalls() {
-        let spec = ConfinementSpec::firecracker_bridge(
+    fn confined_role_allowlist_includes_required_syscalls() {
+        let spec = ConfinementSpec::substitution_endpoint(
+            "/tmp/secrets".into(),
+            "/tmp/bindings".into(),
             "/tmp/audit".into(),
             "/tmp/keys".into(),
-            "/usr/bin/passt".into(),
         );
         assert!(spec.allowed_syscalls.contains(&"splice"));
         assert!(spec.allowed_syscalls.contains(&"fsync"));
@@ -278,11 +273,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn firecracker_bridge_allowlist_rejects_dangerous_syscalls() {
-        let spec = ConfinementSpec::firecracker_bridge(
+    fn confined_role_allowlist_rejects_dangerous_syscalls() {
+        let spec = ConfinementSpec::substitution_endpoint(
+            "/tmp/secrets".into(),
+            "/tmp/bindings".into(),
             "/tmp/audit".into(),
             "/tmp/keys".into(),
-            "/usr/bin/passt".into(),
         );
         assert!(!spec.allowed_syscalls.contains(&"execve"));
         assert!(!spec.allowed_syscalls.contains(&"setuid"));
@@ -418,7 +414,7 @@ mod tests {
         );
     }
 
-    /// On Linux the endpoint allowlist is the bridge table plus the tokio +
+    /// On Linux the endpoint allowlist is the shared table plus the tokio +
     /// TLS-forward additions. Assert the additions are present (the egress
     /// path needs them) and the dangerous names still absent.
     #[cfg(target_os = "linux")]

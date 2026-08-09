@@ -82,7 +82,7 @@ const fn target_ioctl_request_max() -> u64 {
 /// Parse the first usable `nameserver` entry from a resolv.conf body.
 ///
 /// Comments, blank lines, and malformed addresses are ignored. Returns the
-/// first valid IPv4 resolver because the Linux passt flow on the host exposes a
+/// first valid IPv4 resolver because the Linux host flow exposes a
 /// single DNS-forward target to the guest.
 pub fn first_nameserver_from_resolv_conf(body: &str) -> Option<String> {
     body.lines().find_map(|line| {

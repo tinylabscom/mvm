@@ -110,8 +110,8 @@ the guest kernel a normal routed interface with none of it: no MAC, no
 ARP, no DHCP, no bridge, no broadcast domain. The guest's own stack does
 TCP; we carry IP.
 
-**Why not an existing proxy runtime.** `gvproxy`, `passt`/`pasta`,
-`slirp`, `vpnkit`, and QEMU user networking all terminate guest flows in
+**Why not an existing proxy runtime.** The userspace gateway runtimes —
+`slirp`, `vpnkit`, QEMU user networking and their kin — all terminate guest flows in
 a process that knows nothing about mvm's signed plans, policy epochs, or
 chain-signed audit log. Bolting one in would mean a second, unaudited
 policy engine. The gateway here is an mvm component that consumes the
@@ -333,7 +333,7 @@ platform-neutral unprivileged one.** What shipped with *this* ADR was a
 placeholder, `MacosUserspaceGateway` — a capability declaration plus a
 refusal at `is_available()`, so that `l3-vsock` on macOS was refused at
 admission with a stated reason rather than degraded or routed through
-`gvproxy`.
+a userspace gateway.
 
 That placeholder is **deleted**. `host_datapath()` now returns
 `UserspaceSocketDatapath`, which serves the flows the declaration always

@@ -69,7 +69,7 @@ serde_json.workspace = true
 # `mvm-providers` + `serde_json` deps that previously gated the bin
 # moved with it. `serde_json` is still needed in `[dev-dependencies]`
 # for the `SupervisorConfig` / `KrunContext` serde-roundtrip tests.
-# The `passt` module probes $PATH for the `passt` binary before
+# The supervisor probes $PATH for helper binaries before
 # spawning it. `which` is already in the workspace dep tree
 # (mvm-cli/mvm-build); pulling it in here keeps the dep graph
 # uniform and avoids reinventing PATH search.
@@ -86,9 +86,9 @@ default = []
 libkrun-sys = []
 
 [dev-dependencies]
-# passt supervisor tests stage scratch dirs.
+# Supervisor tests stage scratch dirs.
 tempfile.workspace = true
-# `TestEnv` env-var guard for the passt/native-gateway PATH + MVM_GATEWAY_BIN tests.
+# `TestEnv` env-var guard for PATH-sensitive supervisor tests.
 mvm-core = { workspace = true, features = ["test-support"] }
 # The smoke example shares `GUEST_AGENT_PORT` with the production vsock
 # plumbing.

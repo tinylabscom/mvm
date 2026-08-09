@@ -18,7 +18,7 @@ const TARGET_ARCH: TargetArch = TargetArch::x86_64;
 const TARGET_ARCH: TargetArch = TargetArch::aarch64;
 
 /// Canonical (name, syscall-number) table for the
-/// `mvm-bridge` sidecar. This is the single source of
+/// confined roles. This is the single source of
 /// truth for the bridge's syscall allowlist:
 /// `ConfinementSpec::firecracker_bridge()` derives its
 /// `allowed_syscalls` from the names here, and `syscall_name_to_nr`
@@ -36,7 +36,7 @@ const TARGET_ARCH: TargetArch = TargetArch::aarch64;
 /// `SYS_epoll_pwait` on aarch64 for the same reason. The fold happens
 /// here so the policy layer (`ConfinementSpec`) stays arch-agnostic.
 #[cfg(target_arch = "x86_64")]
-pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
+pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("read", libc::SYS_read),
     ("write", libc::SYS_write),
     ("fsync", libc::SYS_fsync),
@@ -143,7 +143,7 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
 ];
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
+pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("read", libc::SYS_read),
     ("write", libc::SYS_write),
     ("fsync", libc::SYS_fsync),
@@ -244,15 +244,15 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
 ];
 
 /// Resolve a syscall by name to its `libc::SYS_*` number on the current
-/// architecture. Returns `None` for any name not in `BRIDGE_SYSCALLS`.
+/// architecture. Returns `None` for any name not in `CONFINED_ROLE_SYSCALLS`.
 ///
 /// Every entry in `ConfinementSpec::firecracker_bridge()`'s
-/// `allowed_syscalls` must have a row in `BRIDGE_SYSCALLS`; because
+/// `allowed_syscalls` must have a row in `CONFINED_ROLE_SYSCALLS`; because
 /// the spec is derived from that table, the discipline is structural
 /// (you can't add a name without a number, you can't add a number
 /// without a name).
 fn syscall_name_to_nr(name: &str) -> Option<libc::c_long> {
-    BRIDGE_SYSCALLS
+    CONFINED_ROLE_SYSCALLS
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, nr)| *nr)
@@ -263,7 +263,7 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
     for name in &spec.allowed_syscalls {
         let nr = syscall_name_to_nr(name).ok_or_else(|| {
             JailerError::SeccompInstall(format!(
-                "unknown syscall name {name:?}; extend BRIDGE_SYSCALLS in mvm-jailer-lite::seccomp"
+                "unknown syscall name {name:?}; extend CONFINED_ROLE_SYSCALLS in mvm_hostd::jailer::seccomp"
             ))
         })?;
         rules.insert(nr, vec![]);
@@ -320,14 +320,14 @@ mod tests {
         // Defense against a future arch-block edit accidentally
         // shipping two rows for the same name (which would silently
         // shadow the first under `find()`).
-        let mut seen: Vec<&str> = BRIDGE_SYSCALLS.iter().map(|(n, _)| *n).collect();
+        let mut seen: Vec<&str> = CONFINED_ROLE_SYSCALLS.iter().map(|(n, _)| *n).collect();
         seen.sort_unstable();
         let original_len = seen.len();
         seen.dedup();
         assert_eq!(
             original_len,
             seen.len(),
-            "BRIDGE_SYSCALLS contains duplicate name"
+            "CONFINED_ROLE_SYSCALLS contains duplicate name"
         );
     }
 }
