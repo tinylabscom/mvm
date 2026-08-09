@@ -58,9 +58,26 @@ pub(crate) trait LineageGraph {
 /// Resolves the signature-authenticated content-address a record's creation was
 /// recorded under in the chain-signed audit log. An implementation MUST verify
 /// the audit chain's signatures before trusting any digest it returns.
+///
+/// `Ok(None)` is a positive finding — "the chains are readable and none of them
+/// records this creation". An implementation that cannot read a chain must
+/// return `Err` carrying [`LEDGER_UNVERIFIABLE`], not `Ok(None)`: the two mean
+/// opposite things to whoever reads the refusal.
 pub(crate) trait LineageAnchor<R> {
     fn recorded_creation_digest(&self, record: &R) -> Result<Option<CheckpointDigest>>;
 }
+
+/// Sentinel phrase in the refusal for a record with no signed creation entry.
+/// Callers that must tell fail-closed reasons apart match on it, so it lives
+/// beside the message that emits it rather than being retyped at each site.
+pub const NO_SIGNED_ENTRY: &str = "no signed audit entry";
+
+/// Sentinel phrase for the other empty answer: the ledger could not be read, so
+/// whether the record was audited is unknown. Distinct from [`NO_SIGNED_ENTRY`]
+/// because the operator's response is opposite — investigate a damaged chain,
+/// rather than re-capture something that was never audited. Emitted by the
+/// anchor implementation that reads the on-disk chains.
+pub const LEDGER_UNVERIFIABLE: &str = "cannot determine whether this was audited";
 
 /// Verify one record against the signed chain: its stored digest must equal a
 /// recomputation of its own fields (catches a post-seal edit that left the
@@ -95,7 +112,7 @@ where
             record.id_label()
         ),
         None => anyhow::bail!(
-            "{} '{}' has no signed audit entry to anchor its content-address; \
+            "{} '{}' has {NO_SIGNED_ENTRY} to anchor its content-address; \
              refusing to treat an un-audited record as verified",
             record.kind(),
             record.id_label()
