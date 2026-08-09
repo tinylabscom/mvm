@@ -77,6 +77,8 @@ fn run_probe() {
         "/tmp/mvm-seccomp-probe-bindings".into(),
         "/tmp/mvm-seccomp-probe-audit".into(),
         "/tmp/mvm-seccomp-probe-keys".into(),
+        // Local resolver backend — see the landlock probe.
+        None,
     );
     if let Err(e) = mvm_hostd::jailer::confine_self(&spec) {
         eprintln!("confine_self failed: {e}");
