@@ -15,10 +15,11 @@
 
 use crate::oci::OciError;
 use crate::oci::layer::LayerDescriptor;
-use crate::oci::manifest_types::{OciManifest, PlatformDescriptor};
+use crate::oci::manifest_types::OciManifest;
 use crate::oci::reference::ImageReference;
 use crate::oci::registry::{ClientConfig, RegistryAuthConfig, RegistryClient};
 use async_trait::async_trait;
+use mvm_contract::oci::{LinuxPlatform, matches_linux_platform};
 use sha2::{Digest, Sha256};
 
 /// Result of a manifest fetch. Bytes are kept verbatim because
@@ -42,54 +43,28 @@ pub struct FetchedManifest {
     pub media_type: String,
 }
 
-/// Linux platform selector for OCI image indexes / Docker manifest
-/// lists.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinuxPlatform {
-    /// OCI architecture string (`amd64`, `arm64`, ...).
-    pub architecture: String,
-    /// Optional architecture variant (`v8` for linux/arm64/v8).
-    pub variant: Option<String>,
-}
-
-impl LinuxPlatform {
-    /// Platform matching the current host CPU while explicitly
-    /// targeting Linux guests.
-    pub fn for_current_arch() -> Self {
-        if cfg!(target_arch = "aarch64") {
-            Self {
-                architecture: "arm64".to_string(),
-                variant: Some("v8".to_string()),
-            }
-        } else if cfg!(target_arch = "x86_64") {
-            Self {
-                architecture: "amd64".to_string(),
-                variant: None,
-            }
-        } else {
-            Self {
-                architecture: std::env::consts::ARCH.to_string(),
-                variant: None,
-            }
+/// Platform matching the current host CPU while explicitly targeting Linux
+/// guests.
+///
+/// A free function rather than an inherent method: `LinuxPlatform` lives in
+/// `mvm-contract` so a browser can select a platform, and "what architecture
+/// is this host" is a question only a host can answer.
+pub fn current_linux_platform() -> LinuxPlatform {
+    if cfg!(target_arch = "aarch64") {
+        LinuxPlatform {
+            architecture: "arm64".to_string(),
+            variant: Some("v8".to_string()),
         }
-    }
-}
-
-pub(crate) fn matches_linux_platform(
-    candidate: &PlatformDescriptor,
-    requested: &LinuxPlatform,
-) -> bool {
-    if candidate.os != "linux" || candidate.architecture != requested.architecture {
-        return false;
-    }
-    match (
-        candidate.variant.as_deref(),
-        requested.variant.as_deref(),
-        requested.architecture.as_str(),
-    ) {
-        (actual, wanted, _) if actual == wanted => true,
-        (None, Some("v8"), "arm64") => true,
-        _ => false,
+    } else if cfg!(target_arch = "x86_64") {
+        LinuxPlatform {
+            architecture: "amd64".to_string(),
+            variant: None,
+        }
+    } else {
+        LinuxPlatform {
+            architecture: std::env::consts::ARCH.to_string(),
+            variant: None,
+        }
     }
 }
 
@@ -370,171 +345,5 @@ fn manifest_media_type(manifest: &OciManifest) -> &'static str {
     match manifest {
         OciManifest::Image(_) => "application/vnd.oci.image.manifest.v1+json",
         OciManifest::ImageIndex(_) => "application/vnd.oci.image.index.v1+json",
-    }
-}
-
-/// Verify that `bytes` hashes to `expected` (a `sha256:<hex>`
-/// string). Used by callers that already have manifest bytes in
-/// hand (e.g. from a cache) and want to assert content integrity
-/// without going through the full fetcher.
-///
-/// Always fails closed. Returns [`OciError::DigestMismatch`] on
-/// content drift, [`OciError::MalformedDigest`] if `expected` does
-/// not match `sha256:<64 lowercase hex chars>`,
-/// [`OciError::UnsupportedDigestAlgorithm`] for non-sha256 inputs.
-pub fn verify_sha256_digest(bytes: &[u8], expected: &str) -> Result<(), OciError> {
-    let (alg, hex_part) = expected.split_once(':').ok_or_else(|| {
-        OciError::MalformedDigest(format!("missing algorithm prefix: {expected:?}"))
-    })?;
-    if alg != "sha256" {
-        return Err(OciError::UnsupportedDigestAlgorithm(alg.to_string()));
-    }
-    if hex_part.len() != 64 {
-        return Err(OciError::MalformedDigest(format!(
-            "sha256 digest must be 64 hex chars, got {} in {expected:?}",
-            hex_part.len()
-        )));
-    }
-    if !hex_part
-        .bytes()
-        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
-        return Err(OciError::MalformedDigest(format!(
-            "digest hex must be lowercase ascii: {expected:?}"
-        )));
-    }
-
-    let computed = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
-    if computed != expected {
-        return Err(OciError::DigestMismatch {
-            expected: expected.to_string(),
-            computed,
-        });
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A registry that declares an oversized body is rejected before we read
-    /// any of it.
-    #[test]
-    fn a_declared_length_over_the_cap_is_refused_before_reading() {
-        let err = declared_length_within_cap(Some(4097), 4096)
-            .expect_err("an over-cap Content-Length must be refused");
-        assert!(matches!(err, OciError::ManifestTooLarge { cap: 4096 }));
-    }
-
-    /// A missing or understated `Content-Length` must not be treated as
-    /// permission — it is a hint, and the accumulator is the real bound.
-    #[test]
-    fn a_missing_declared_length_is_not_treated_as_permission() {
-        declared_length_within_cap(None, 4096).expect("absent length is not itself a refusal");
-        // ...and the accumulator still refuses the body that header omitted.
-        let mut body = CappedBody::new(8);
-        body.push(b"12345678").expect("exactly at the cap is fine");
-        let err = body
-            .push(b"9")
-            .expect_err("one byte past the cap must be refused");
-        assert!(matches!(err, OciError::ManifestTooLarge { cap: 8 }));
-    }
-
-    /// The bound is on the running total, so a body dribbled out in small
-    /// chunks is capped the same as one delivered in a single read.
-    #[test]
-    fn many_small_chunks_are_bounded_by_the_total_not_the_chunk() {
-        let mut body = CappedBody::new(4);
-        for _ in 0..4 {
-            body.push(b"x").expect("within cap");
-        }
-        let err = body
-            .push(b"x")
-            .expect_err("the fifth byte crosses a 4-byte cap");
-        assert!(matches!(err, OciError::ManifestTooLarge { cap: 4 }));
-    }
-
-    /// An ordinary manifest passes and round-trips its bytes unchanged —
-    /// without this the tests above would hold for an accumulator that
-    /// refused everything.
-    #[test]
-    fn an_ordinary_body_passes_through_unchanged() {
-        let mut body = CappedBody::new(MAX_MANIFEST_BYTES);
-        body.push(br#"{"schemaVersion":2,"#).unwrap();
-        body.push(br#""layers":[]}"#).unwrap();
-        assert_eq!(body.into_inner(), br#"{"schemaVersion":2,"layers":[]}"#);
-    }
-
-    const KNOWN_BYTES: &[u8] = b"hello mvm";
-    // sha256("hello mvm") — kept as a constant so the test for
-    // `known_digest_constant_is_self_consistent` flags any
-    // accidental edit. Recompute via:
-    //   printf 'hello mvm' | shasum -a 256
-    const KNOWN_DIGEST: &str =
-        "sha256:790aa64759a490e14bb0197b875b2d41d7ecea8d73fedcaea7eb88b6d59b691d";
-
-    fn computed_digest(bytes: &[u8]) -> String {
-        format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
-    }
-
-    #[test]
-    fn verify_digest_accepts_matching_content() {
-        let digest = computed_digest(KNOWN_BYTES);
-        verify_sha256_digest(KNOWN_BYTES, &digest).expect("matching content must verify");
-    }
-
-    #[test]
-    fn verify_digest_rejects_tampered_content() {
-        let digest = computed_digest(KNOWN_BYTES);
-        let tampered: Vec<u8> = KNOWN_BYTES
-            .iter()
-            .copied()
-            .chain(std::iter::once(b'!'))
-            .collect();
-        let err = verify_sha256_digest(&tampered, &digest).unwrap_err();
-        match err {
-            OciError::DigestMismatch { .. } => {}
-            other => panic!("expected DigestMismatch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn verify_digest_rejects_unsupported_algorithm() {
-        let err = verify_sha256_digest(KNOWN_BYTES, "sha512:abc").unwrap_err();
-        match err {
-            OciError::UnsupportedDigestAlgorithm(alg) => assert_eq!(alg, "sha512"),
-            other => panic!("expected UnsupportedDigestAlgorithm, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn verify_digest_rejects_missing_algorithm_prefix() {
-        let err = verify_sha256_digest(KNOWN_BYTES, "abc").unwrap_err();
-        assert!(matches!(err, OciError::MalformedDigest(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn verify_digest_rejects_wrong_hex_length() {
-        let err = verify_sha256_digest(KNOWN_BYTES, "sha256:abc").unwrap_err();
-        assert!(matches!(err, OciError::MalformedDigest(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn verify_digest_rejects_uppercase_hex() {
-        // 64 uppercase hex chars — wrong-case rather than wrong-length.
-        let upper = format!("sha256:{}", "A".repeat(64));
-        let err = verify_sha256_digest(KNOWN_BYTES, &upper).unwrap_err();
-        assert!(matches!(err, OciError::MalformedDigest(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn known_digest_constant_is_self_consistent() {
-        // Guard against future edits to KNOWN_DIGEST breaking the
-        // other tests silently. If this fires, recompute the
-        // constant via:
-        //   echo -n "hello mvm" | shasum -a 256
-        let computed = computed_digest(KNOWN_BYTES);
-        assert_eq!(computed, KNOWN_DIGEST);
     }
 }

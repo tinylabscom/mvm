@@ -12,7 +12,7 @@ use flate2::read::GzDecoder;
 use mvm_build::rootfs::MaterializeExt4Input;
 use mvm_core::domain::manifest::canonical_key_for_path;
 use mvm_fs::oci::{
-    LinuxPlatform, UnpackOptions, read_oci_archive, stream_oci_archive,
+    UnpackOptions, current_linux_platform, read_oci_archive, stream_oci_archive,
     unpack_layer_with_prior_paths,
 };
 
@@ -112,7 +112,7 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
     source_label: &str,
     source_descr: &str,
 ) -> Result<ResolvedOciRunImage> {
-    let platform = LinuxPlatform::for_current_arch();
+    let platform = current_linux_platform();
     let unpacked_parent = cache_root.join("unpacked");
     fs::create_dir_all(&unpacked_parent)
         .with_context(|| format!("create {}", unpacked_parent.display()))?;
@@ -220,7 +220,7 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
     source_label: &str,
     source_descr: &str,
 ) -> Result<ResolvedOciRunImage> {
-    let image = read_oci_archive(reader, &LinuxPlatform::for_current_arch())
+    let image = read_oci_archive(reader, &current_linux_platform())
         .with_context(|| format!("read {source_descr}"))?;
 
     let manifest_hex = sha256_hex(&image.manifest_digest)?;
@@ -498,7 +498,7 @@ mod tests {
     }
 
     fn oci_archive_with_layer(layer: &[u8]) -> Vec<u8> {
-        let platform = LinuxPlatform::for_current_arch();
+        let platform = current_linux_platform();
         let layer_digest = digest_of(layer);
         let config = format!(
             r#"{{"architecture":"{}","os":"linux","rootfs":{{"type":"layers","diff_ids":["{}"]}}}}"#,

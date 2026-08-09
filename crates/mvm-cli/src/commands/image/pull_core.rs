@@ -13,8 +13,8 @@ use flate2::read::GzDecoder;
 use serde_json::Value;
 
 use mvm_fs::oci::{
-    ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
-    OciManifestFetcher, UnpackOptions, UnpackReport, unpack_layer_with_prior_paths,
+    ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
+    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer_with_prior_paths,
 };
 
 use super::cache::{find_image, layer_blob_path, load_index, read_verified_cache_file, save_index};
@@ -221,8 +221,7 @@ fn pull_image_ref(
     let manifest_fetcher = OciManifestFetcher::with_auth(registry_auth.auth);
     let manifest = runtime
         .block_on(
-            manifest_fetcher
-                .fetch_linux_platform_manifest(&image_ref, &LinuxPlatform::for_current_arch()),
+            manifest_fetcher.fetch_linux_platform_manifest(&image_ref, &current_linux_platform()),
         )
         .context("fetch OCI image manifest")?;
     let layers = manifest.layers().context("parse OCI image layers")?;

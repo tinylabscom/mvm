@@ -46,11 +46,13 @@
 // `mvm-cli`'s `run --image` can ingest a local archive through the same
 // digest-verified path as a registry pull. Filesystem-free (reads a `Read`).
 pub mod archive;
-pub mod error;
 pub mod layer;
 pub mod manifest;
-mod manifest_types;
-pub mod reference;
+// The manifest DTOs live in `mvm-contract` so the browser slice can parse a
+// manifest without this crate's `tokio`/`reqwest`/`flate2` tree. Re-exported
+// under the original path so every call site here is unchanged.
+use mvm_contract::oci::manifest_types;
+pub use mvm_contract::oci::{error, reference};
 mod registry;
 // Layer-to-tree unpacker. Public because callers outside this crate
 // (`mvm-build::rootfs::materialize_ext4`; `mvm-cli`'s `image run` verb)
@@ -63,9 +65,9 @@ pub use archive::{
 };
 pub use error::OciError;
 pub use layer::{LayerDescriptor, LayerFetchOptions, OciLayerFetcher};
-pub use manifest::{
-    FetchedManifest, LinuxPlatform, ManifestFetcher, OciManifestFetcher, verify_sha256_digest,
-};
+pub use manifest::{FetchedManifest, ManifestFetcher, OciManifestFetcher, current_linux_platform};
+pub use mvm_contract::oci::verify_sha256_digest;
+pub use mvm_contract::oci::{LinuxPlatform, matches_linux_platform};
 pub use reference::ImageReference;
 pub use registry::{ClientConfig, ClientProtocol, RegistryAuthConfig};
 pub use unpack::{
