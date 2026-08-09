@@ -197,7 +197,7 @@ impl Pending {
             let size = chunk_len(&event) as u64;
             let admission = self.bound_mut(stream).ring.admit(size);
             if let Admission::AcceptAfterPruning { pruned_seqs, .. } = &admission {
-                evict_oldest(&mut self.events, stream, pruned_seqs.len());
+                let _examined = evict_oldest(&mut self.events, stream, pruned_seqs.len());
             }
             self.bound_mut(stream).gap.record(&admission);
         }
@@ -249,8 +249,20 @@ impl BoundedStream {
 /// is over its bound, which for a chatty workload is every event it writes. A
 /// pass over the whole queue there costs the queue's length per event, and the
 /// drain loop stops keeping up with the reader threads feeding it.
-fn evict_oldest(events: &mut VecDeque<EntrypointEvent>, stream: CapturedStream, count: usize) {
+/// Returns how many events the walk examined.
+///
+/// That count is the work done, and it is what makes the cost observable to a
+/// test without timing anything: a walk that stops at its targets examines
+/// `count` events plus whatever it stepped over, while one that filters the
+/// whole queue examines all of it. Callers have no use for the number and
+/// discard it.
+fn evict_oldest(
+    events: &mut VecDeque<EntrypointEvent>,
+    stream: CapturedStream,
+    count: usize,
+) -> usize {
     let mut left = count;
+    let mut examined = 0usize;
     // What the walk passed over to reach its targets — the other byte stream's
     // events, and control records, which are never evicted. All older than
     // everything dropped, so they go back at the front in the order they came.
@@ -259,6 +271,7 @@ fn evict_oldest(events: &mut VecDeque<EntrypointEvent>, stream: CapturedStream, 
         let Some(event) = events.pop_front() else {
             break;
         };
+        examined += 1;
         if CapturedStream::of(&event) == Some(stream) {
             left -= 1;
         } else {
@@ -268,6 +281,7 @@ fn evict_oldest(events: &mut VecDeque<EntrypointEvent>, stream: CapturedStream, 
     for event in stepped_over.into_iter().rev() {
         events.push_front(event);
     }
+    examined
 }
 
 /// Bytes an event holds. Zero for anything that is not a byte-stream chunk —
@@ -309,7 +323,6 @@ mod tests {
     use super::*;
     use crate::stream_pump::{GAP_RECORD_KIND, MIN_RETENTION_CHUNKS, RETENTION_BYTES_PER_CHUNK};
     use std::sync::mpsc::Receiver;
-    use std::time::Instant;
 
     #[test]
     fn every_run_outcome_maps_to_exactly_one_terminal_event() {
@@ -477,42 +490,41 @@ mod tests {
         );
     }
 
-    /// Hold a queue at `queued` events and time `evictions` single-event
-    /// evictions against it, pushing one back after each so the length the
-    /// eviction sees never changes.
-    fn time_evictions(queued: usize, evictions: usize) -> Duration {
+    /// Work one eviction does against a queue held at `queued` events: the
+    /// number of events the walk examines.
+    fn eviction_work(queued: usize) -> usize {
         let mut events: VecDeque<EntrypointEvent> = std::iter::repeat_with(|| stdout(b"x"))
             .take(queued)
             .collect();
-        let started = Instant::now();
-        for _ in 0..evictions {
-            evict_oldest(&mut events, CapturedStream::Stdout, 1);
-            events.push_back(stdout(b"x"));
-        }
-        started.elapsed()
+        evict_oldest(&mut events, CapturedStream::Stdout, 1)
     }
 
+    /// Complexity, asserted directly rather than inferred from a clock.
+    ///
+    /// The property is that eviction stops at its target instead of filtering
+    /// the queue: fifty times the queue must not cost fifty times the work.
+    ///
+    /// This was previously timed — `long <= short * 8 + 50ms` over two 50,000
+    /// eviction runs. That could not fail for the reason it named. With every
+    /// event on one stream the walk pops exactly `count` from the front, so
+    /// the cost is already independent of length by construction, and what the
+    /// clock actually compared was cache locality on a 50k deque against a 1k
+    /// one. On a machine where the larger deque falls out of cache it failed
+    /// deterministically — observed red on `main`, on hardware that had
+    /// nothing to do with the change under test.
     #[test]
     fn evicting_one_event_costs_the_same_on_a_long_queue_as_on_a_short_one() {
-        // Complexity, asserted as a ratio so the answer does not depend on how
-        // fast the machine is: fifty times the queue must not cost fifty times
-        // the eviction. Anything that filters the whole queue does exactly
-        // that, and the drain loop is what pays — a stream over its bound
-        // evicts once per event it writes, so the cost lands between the
-        // reader threads and the consumer at the producer's own rate.
-        const EVICTIONS: usize = 50_000;
-        let short = time_evictions(1_000, EVICTIONS);
-        let long = time_evictions(50_000, EVICTIONS);
+        let short = eviction_work(1_000);
+        let long = eviction_work(50_000);
 
-        // Eight times the shorter run, plus a floor so jitter between two runs
-        // that are both a couple of milliseconds cannot decide the outcome. A
-        // per-eviction full pass overshoots this by more than an order of
-        // magnitude; a walk that stops at the evicted event lands near parity.
-        let budget = short * 8 + Duration::from_millis(50);
-        assert!(
-            long <= budget,
-            "eviction cost scaled with queue length: {long:?} on a 50k-event queue against \
-             {short:?} on a 1k-event one"
+        assert_eq!(
+            short, 1,
+            "one eviction on a single-stream queue examines exactly its target"
+        );
+        assert_eq!(
+            long, short,
+            "eviction work scaled with queue length: {long} examined on a 50k-event queue \
+             against {short} on a 1k-event one — the walk is filtering rather than stopping"
         );
     }
 
