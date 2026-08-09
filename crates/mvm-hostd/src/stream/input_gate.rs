@@ -1385,16 +1385,27 @@ mod tests {
     fn a_holder_that_stops_refreshing_loses_the_lease() {
         // The reason the lease has an expiry at all: a consumer that took it
         // and died must not hold a VM's stdin until teardown.
+        //
+        // Decided by degenerate TTLs rather than by a wall clock, the same way
+        // the idle-flush tests above are: a zero TTL has lapsed the moment it
+        // is taken, an hour has not lapsed by the end of the test. Sleeping
+        // past a short TTL makes the outcome depend on scheduler luck — this
+        // test failed exactly that way on a loaded CI runner, at a 20ms TTL
+        // with a 40ms sleep.
         let vm = unique_vm("vm-lease-expiry");
-        InputGate::bind(
-            &vm,
-            InputBinding::new().with_lease_ttl(Duration::from_millis(20)),
-        );
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(Duration::ZERO));
         let plan = admitted_with(vec![stream_service()]);
         let mut stale = InputGate::open(&vm, &plan).expect("first session");
-        std::thread::sleep(Duration::from_millis(40));
 
         assert_eq!(InputGate::lease_holder(&vm), None, "the lease lapsed");
+
+        // Re-bind before the second open so the taker gets a live lease.
+        // `bind` replaces the binding and leaves the lease table alone (only
+        // `unbind` clears it), so the lapsed lease is still there to take over.
+        InputGate::bind(
+            &vm,
+            InputBinding::new().with_lease_ttl(Duration::from_secs(3600)),
+        );
         let mut fresh = InputGate::open(&vm, &plan).expect("a lapsed lease is takeable");
         assert!(matches!(
             stale.write(InputFrame {
