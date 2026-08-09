@@ -47,7 +47,7 @@ Measured 2026-07-08 on the macOS release-bundle set that
 [`.github/workflows/release.yml`](../../.github/workflows/release.yml) currently
 ships. This replaces the stale historical binary list in Plan 156: today's
 bundle is the Linux-shared pair `mvm-bridge` + `mvm-substitution-endpoint`,
-plus the macOS-only supervisors `mvm-vz-supervisor`, `mvm-hvf-supervisor`, and
+plus the macOS-only supervisors `mvm-hvf-supervisor` and
 `mvm-libkrun-supervisor`.
 
 Commands:
@@ -55,7 +55,7 @@ Commands:
 ```sh
 CARGO_TARGET_DIR=/tmp/mvm-size-target \
   cargo build --release --locked --offline -p mvm-vm-host \
-    --bin mvm-bridge --bin mvm-vz-supervisor --bin mvm-hvf-supervisor
+    --bin mvm-bridge --bin mvm-hvf-supervisor
 
 CARGO_TARGET_DIR=/tmp/mvm-size-target \
   cargo build --release --locked --offline -p mvm-vm-host \
@@ -75,7 +75,6 @@ Measured file sizes:
 |---|---|---:|
 | `mvm-bridge` | shipped on Linux + macOS | **4,091,160 bytes** |
 | `mvm-substitution-endpoint` | shipped on Linux + macOS | **8,052,440 bytes** |
-| `mvm-vz-supervisor` | shipped on macOS only | **4,431,232 bytes** |
 | `mvm-hvf-supervisor` | shipped on macOS only | **755,952 bytes** |
 | `mvm-libkrun-supervisor` | shipped on macOS only | **4,448,008 bytes** |
 
@@ -85,7 +84,6 @@ Top crate-attribution snapshot (`cargo bloat --crates -n 8`):
 |---|---|
 | `mvm-bridge` | `std` 868.9 KiB; `regex_automata` 313.3 KiB; `mvm_hostd` 221.7 KiB; `regex_syntax` 145.1 KiB |
 | `mvm-substitution-endpoint` | `std` 875.6 KiB; `aws_lc_sys` 675.5 KiB; `[Unknown]` 547.6 KiB; `rustls` 412.7 KiB |
-| `mvm-vz-supervisor` | `std` 888.4 KiB; `regex_automata` 313.3 KiB; `mvm_hostd` 219.5 KiB; `tokio` 185.2 KiB |
 | `mvm-hvf-supervisor` | `std` 279.3 KiB; `mvm_backend` 75.8 KiB; `serde_json` 35.7 KiB; `mvm_hvf_supervisor` 19.8 KiB |
 | `mvm-libkrun-supervisor` | `std` 1.0 MiB; `regex_automata` 311.4 KiB; `mvm_hostd` 230.3 KiB; `serde_json` 153.6 KiB |
 

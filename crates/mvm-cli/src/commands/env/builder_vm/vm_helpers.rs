@@ -22,13 +22,12 @@ pub(in crate::commands) struct ReapOutcome {
 ///
 /// The dir traversal below is **prefix-agnostic**: it iterates every
 /// subdirectory of `~/.mvm/cache/builder-vm/vms/` regardless of naming, so
-/// `mvm-builder-vm-<job_id>` (libkrun) state dirs, any HVF builder state
-/// dirs, and leftover `mvm-builder-vz-<job_id>` (the removed Vz backend)
-/// state dirs are all picked up by the same loop, and the sidecar PID
-/// names (`builder.pid` / `stage0.pid`) are shared across backends. The
-/// `reap_picks_up_orphaned_vz_builder_state_dir` test pins the
-/// leftover-Vz-dir case: a future refactor that narrows the traversal or
-/// renames the sidecar must update that test.
+/// `mvm-builder-vm-<job_id>` (libkrun) and HVF builder state dirs are picked
+/// up by the same loop, and the sidecar PID names (`builder.pid` /
+/// `stage0.pid`) are shared across backends. The
+/// `reap_picks_up_orphaned_builder_state_dir_regardless_of_prefix` test pins
+/// that: a future refactor narrowing the traversal or renaming the sidecar
+/// must update it.
 ///
 /// The persistent builder egress wrapper is the one exception to root-scoped
 /// discovery. Its exact argv identifies an internal process whose owner is
@@ -42,7 +41,7 @@ pub(in crate::commands) struct ReapOutcome {
 /// liveness signal, so the sweep runs in two phases per dir:
 ///
 /// 1. **Supervisor phase.** Read the supervisor sidecars (`builder.pid` /
-///    `stage0.pid` / `vz.pid` / `libkrun.pid` / `hvf.pid`: see
+///    `stage0.pid` / `libkrun.pid` / `hvf.pid`: see
 ///    [`is_supervisor_sidecar`]). On a managed dir (the persistent dev
 ///    builder `mvm-persistent-builder-*`, or any named workload under
 ///    `~/.mvm/vms/`) an alive supervisor is the running VM, spared:
@@ -103,11 +102,10 @@ pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
 pub(super) const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 
 /// Sidecar PID file names a workload VM dir under `~/.mvm/vms/<name>/`.
-/// `vz.pid` stays recognised so a leftover from the removed Vz backend still
-/// gets reaped. Keep this aligned with the workload supervisor markers in
-/// mvm-runtime's reconciliation pass so every live backend protects its
-/// associated helper processes.
-pub(super) const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid", "fc.pid"];
+/// Keep this aligned with the workload supervisor markers in mvm-runtime's
+/// reconciliation pass so every live backend protects its associated helper
+/// processes.
+pub(super) const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid"];
 
 /// Dir-name prefix of the persistent dev builder VM.
 const PERSISTENT_BUILDER_DIR_PREFIX: &str = "mvm-persistent-builder-";
@@ -334,7 +332,7 @@ fn reap_or_track(
 fn is_supervisor_sidecar(name: &str) -> bool {
     matches!(
         name,
-        "builder.pid" | "stage0.pid" | "vz.pid" | "libkrun.pid" | "hvf.pid" | "fc.pid"
+        "builder.pid" | "stage0.pid" | "libkrun.pid" | "hvf.pid" | "fc.pid"
     )
 }
 

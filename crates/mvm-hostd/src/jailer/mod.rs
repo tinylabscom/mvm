@@ -18,7 +18,7 @@
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum JailerError {
@@ -99,11 +99,37 @@ impl ConfinementSpec {
     /// reaching it). `existing_paths` filters to paths that exist on this host
     /// — `/etc/pki`, `/etc/resolv.conf`, etc. are distro-dependent, and a
     /// missing readable path makes the Landlock `open` step fail closed.
+    ///
+    /// `resolver_uds` threads in the M2 `ResolverBackend::Remote { uds_path,
+    /// .. }` socket path: `Some(path)` when the endpoint config selects the
+    /// remote fleet-secrets daemon, additionally permitting connect +
+    /// read/write on that ONE socket so `RemoteResolver` can reach it after
+    /// confinement. `None` (the `Local` backend, and the default) leaves the
+    /// confinement identical to before this parameter existed — no socket
+    /// egress at all.
+    ///
+    /// Deliberately **not** run through `existing_paths` like the TLS/DNS
+    /// grants above: `Remote` mode is useless without the resolver reachable,
+    /// so a socket path that doesn't (yet) exist should make Landlock's own
+    /// `PathNotFound` refuse to serve — not silently vanish into an empty
+    /// grant that "succeeds" while leaving `Remote` unable to resolve
+    /// anything. That would be confinement quietly defeating the feature it
+    /// was supposed to permit.
+    ///
+    /// No seccomp change accompanies this: `socket` / `connect` / `read` /
+    /// `write` / `setsockopt` are already unconditionally in this spec's
+    /// `allowed_syscalls` (the same `BRIDGE_SYSCALLS` rows the TLS forward
+    /// leg's TCP egress already relies on) — seccomp here filters by syscall
+    /// number only, with no per-call argument/address-family predicate, so
+    /// there is nothing narrower to add for AF_UNIX specifically. The
+    /// confinement narrowing for `Remote` is entirely a Landlock (path)
+    /// concern.
     pub fn substitution_endpoint(
         secret_store_dir: PathBuf,
         binding_store_dir: PathBuf,
         audit_dir: PathBuf,
         keys_dir: PathBuf,
+        resolver_uds: Option<&Path>,
     ) -> Self {
         #[cfg(target_os = "linux")]
         let allowed_syscalls: Vec<&'static str> = crate::jailer::seccomp::BRIDGE_SYSCALLS
@@ -136,12 +162,20 @@ impl ConfinementSpec {
         let mut readable_paths = vec![secret_store_dir, binding_store_dir, keys_dir];
         readable_paths.extend(tls_dns_paths);
 
+        let mut read_write_paths = existing_paths(vec![audit_dir]);
+        if let Some(uds) = resolver_uds {
+            // NOT filtered by `existing_paths` — see the doc comment above:
+            // this grant must fail closed (via Landlock's `PathNotFound`) if
+            // the socket isn't there, rather than silently drop out.
+            read_write_paths.push(uds.to_path_buf());
+        }
+
         Self {
             // Filter to extant paths: /etc/pki / /etc/resolv.conf are distro-
             // dependent, and Landlock's `open` on a missing path fails closed
             // (PathNotFound), which would abort an otherwise-healthy endpoint.
             readable_paths: existing_paths(readable_paths),
-            read_write_paths: existing_paths(vec![audit_dir]),
+            read_write_paths,
             allowed_syscalls,
         }
     }
@@ -268,6 +302,7 @@ mod tests {
             bindings.clone(),
             store.clone(),
             store.clone(),
+            None,
         );
         assert!(
             spec.readable_paths.iter().any(|p| p == &store),
@@ -289,6 +324,7 @@ mod tests {
             dir.clone(),
             dir.clone(),
             dir.clone(),
+            None,
         );
         assert!(
             spec.read_write_paths.iter().any(|p| p == &dir),
@@ -306,10 +342,79 @@ mod tests {
             missing.clone(),
             missing.clone(),
             missing.clone(),
+            None,
         );
         assert!(
             !spec.readable_paths.iter().any(|p| p == &missing),
             "nonexistent store dir must be filtered out"
+        );
+    }
+
+    /// M3: `Local` (`None`) must leave the confinement byte-for-byte
+    /// identical to before the resolver-UDS grant existed — no socket path
+    /// anywhere in either grant set.
+    #[test]
+    fn substitution_endpoint_spec_local_backend_grants_no_socket() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let spec = ConfinementSpec::substitution_endpoint(
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            None,
+        );
+        assert_eq!(
+            spec.read_write_paths,
+            vec![dir],
+            "Local must add nothing beyond the audit dir"
+        );
+    }
+
+    /// M3: `Remote { uds_path, .. }` (`Some(uds)`) additionally permits
+    /// connect + read/write on that ONE socket — the exact extra grant this
+    /// task adds, and nothing more.
+    #[test]
+    fn substitution_endpoint_spec_remote_backend_grants_resolver_uds() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let uds = dir.join("Cargo.toml");
+        let spec = ConfinementSpec::substitution_endpoint(
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            Some(uds.as_path()),
+        );
+        assert!(
+            spec.read_write_paths.contains(&uds),
+            "resolver UDS path must be read-write granted under Remote"
+        );
+        assert_eq!(
+            spec.read_write_paths.len(),
+            2,
+            "exactly audit dir + resolver uds, nothing broader"
+        );
+    }
+
+    /// M3: unlike the best-effort TLS/DNS grants, the resolver UDS grant must
+    /// NOT be silently dropped when the path doesn't exist (yet) — `Remote`
+    /// mode is useless without it, so a missing socket should surface as
+    /// Landlock's own `PathNotFound` (fail-closed) rather than a quietly
+    /// empty grant that lets confinement "succeed" while leaving `Remote`
+    /// unable to resolve anything.
+    #[test]
+    fn substitution_endpoint_spec_keeps_resolver_uds_even_if_missing() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let missing = PathBuf::from("/definitely/not/a/real/resolver/socket/xyzzy.sock");
+        let spec = ConfinementSpec::substitution_endpoint(
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            Some(missing.as_path()),
+        );
+        assert!(
+            spec.read_write_paths.contains(&missing),
+            "resolver uds path must survive even when absent from disk"
         );
     }
 
@@ -325,6 +430,7 @@ mod tests {
             store.clone(),
             store.clone(),
             store.clone(),
+            None,
         );
         // Thread creation for tokio workers / blocking pool.
         assert!(spec.allowed_syscalls.contains(&"clone"));
@@ -348,6 +454,7 @@ mod tests {
             store.clone(),
             store.clone(),
             store.clone(),
+            None,
         );
         assert!(spec.allowed_syscalls.is_empty());
     }

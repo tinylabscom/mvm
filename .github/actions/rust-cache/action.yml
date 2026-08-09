@@ -1,0 +1,48 @@
+name: Rust build cache
+description: >
+  Restore the shared Rust build cache for this workspace. Restore-only by
+  default; only the cache-warm workflow on main writes it.
+
+inputs:
+  save:
+    description: >
+      Whether this job may write the cache. Leave false everywhere except the
+      warm job — see the note below on why writers are centralised.
+    required: false
+    default: "false"
+  key:
+    description: >
+      Extra discriminator for jobs whose target dir is genuinely different
+      (a cross-compiled target, a different feature set). Jobs sharing a value
+      share a cache.
+    required: false
+    default: "workspace"
+
+runs:
+  using: composite
+  steps:
+    # Why one writer:
+    #
+    # GitHub scopes a cache to the ref that wrote it, and only caches written on
+    # the default branch are readable from every other ref. Merge-queue refs are
+    # ephemeral — one run each, then gone — so an entry written by a queue run
+    # can never be read again. Pull-request runs can only ever hit their own
+    # branch's entries.
+    #
+    # So the useful cache is the one main writes, and every other job restores
+    # it. Letting PR jobs write as well would not help them (they already
+    # restore main's) and would actively hurt: the repo cache is capped at 10 GB
+    # with LRU eviction, and a Rust target directory this size means a busy day
+    # of PR writes would evict the very entry everything else depends on.
+    - name: Restore Rust build cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.key }}
+        # The toolchain and lockfile are already part of the key that
+        # rust-cache computes, so nightly and stable jobs never collide.
+        save-if: ${{ inputs.save }}
+        # Dependencies only — rust-cache already drops this workspace's own
+        # crates from the saved tree, which is what keeps the entry small
+        # enough to stay under the repo cache cap. `cache-bin` stays on so the
+        # eBPF lane's `cargo install bpf-linker` is not rebuilt every run.
+        cache-all-crates: "false"

@@ -279,6 +279,8 @@ fn wasm_substitution_spawn_params<'a>(
         tls_intermediate: None,
         network_policy: Some(network_policy),
         raw_egress: false,
+        resolver_remote: None,
+        binding_store_dir: None,
     }
 }
 
@@ -859,6 +861,69 @@ mod engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The uniform negotiation entry point, exercised through the real trait
+    /// on a real backend rather than a hand-built capability matrix. This is
+    /// what a library consumer holding an `AnyBackend` actually calls.
+    #[test]
+    fn negotiating_unsupported_capabilities_names_the_wasm_alternatives() {
+        use mvm_core::protocol::vm_backend::{CapabilityAlternative, RequiredCapabilities};
+
+        let backend = WasmBackend::new();
+        let required = RequiredCapabilities {
+            vsock: true,
+            pty_exec: true,
+            vcpu_state_snapshot: true,
+            ..RequiredCapabilities::default()
+        };
+
+        let gaps = backend
+            .negotiate(&required)
+            .expect_err("the wasm tier serves none of these");
+
+        let by_name = |want: &str| {
+            gaps.iter()
+                .find(|g| g.capability == want)
+                .unwrap_or_else(|| panic!("no gap reported for {want}: {gaps:?}"))
+                .clone()
+        };
+
+        // Egress still reaches the same substitution endpoint, just through
+        // the host import rather than a vsock device.
+        assert_eq!(
+            by_name("vsock").alternative,
+            CapabilityAlternative::SubstitutionEndpointOverWasmImport
+        );
+        // No vCPU state to restore, so the substitute is a cold start driven
+        // by the same signed plan.
+        assert_eq!(
+            by_name("vcpu_state_snapshot").alternative,
+            CapabilityAlternative::ColdStartFromSignedPlan
+        );
+        // No PTY, and the stdin route is explicitly not one.
+        assert_eq!(
+            by_name("pty_exec").alternative,
+            CapabilityAlternative::WorkloadStdinRoute
+        );
+
+        assert!(
+            gaps.iter().all(|g| g.is_actionable()),
+            "every gap here has a real substitute: {gaps:?}"
+        );
+    }
+
+    /// A backend that serves the request must not manufacture gaps.
+    #[test]
+    fn negotiating_a_request_the_backend_serves_returns_ok() {
+        use mvm_core::protocol::vm_backend::RequiredCapabilities;
+
+        let backend = WasmBackend::new();
+        assert_eq!(
+            backend.negotiate(&RequiredCapabilities::default()),
+            Ok(()),
+            "an empty requirement set is served by every backend"
+        );
+    }
 
     fn cfg(name: &str, module_path: &str) -> VmStartConfig {
         VmStartConfig {

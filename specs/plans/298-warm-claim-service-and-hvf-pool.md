@@ -6,7 +6,7 @@
 
 Make a warmed `machine run` claim complete in strictly less than 300ms from
 admission completion to authenticated guest readiness on Apple Silicon and
-Linux KVM, without using Virtualization.framework/VZ and without silently
+Linux KVM, without using Apple Virtualization.framework and without silently
 falling back to a cold launch.
 
 The existing sub-300ms contract remains defined by Plan 297. This plan turns
@@ -63,7 +63,7 @@ backend cannot provide this operation, the claim is refused as cold-only.
    content-addressed prewarm pipeline.
 3. [ ] [#2194](https://github.com/tinylabscom/mvm/issues/2194) — Implement the
    Apple Silicon libkrun/HVF in-process golden VM pool and child restore path.
-   Virtualization.framework/VZ is excluded.
+   Apple Virtualization.framework is excluded.
 4. [ ] [#2195](https://github.com/tinylabscom/mvm/issues/2195) — Implement fixed
    virtio-fs share slots and claim-time read-only host binding.
 5. [~] [#2196](https://github.com/tinylabscom/mvm/issues/2196) — Complete and

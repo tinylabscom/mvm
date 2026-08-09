@@ -55,7 +55,9 @@ pub mod driver;
 /// Per-VM transparent egress redirect used by the legacy libkrun gateway path.
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by
 /// the libkrun + Firecracker substitution-endpoint spawn paths.
-pub mod firecracker;
+// Firecracker host mechanics moved to mvm-backends::fc; re-exported so
+// `mvm_runtime::firecracker::<name>` keeps resolving for mvm-cli.
+pub use mvm_backends::fc::host as firecracker;
 pub mod handle_registry;
 pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification
@@ -189,6 +191,19 @@ pub use mvm_vmm::host::host_agent_spawn::{
 /// Substitution-endpoint helpers used by integration tests and the
 /// `mvmctl` secrets-drive path. Re-exported from `mvm-vmm::host::substitution_spawn`.
 pub use mvm_vmm::host::substitution_spawn::{EndpointHandshake, record_secret_fingerprints};
+
+/// Spawn/reap the per-VM substitution-endpoint moat, its params, and the
+/// remote-resolver spawn config — re-exported at the crate root so fleet
+/// callers outside this crate (mvmd's tenant-secrets vault, Phase 1 egress
+/// broker / D8 spawn-wiring, reaching them via `mvmctl::backend`) can drive the
+/// same per-VM endpoint the libkrun/HVF/Firecracker backends use, instead of
+/// duplicating the subprocess spawn/handshake/PID-file logic. The
+/// `substitution_spawn` module is also re-exported above; these root aliases
+/// mirror the original `mvm-backend` crate-root surface those callers named.
+pub use mvm_vmm::host::substitution_spawn::{
+    RemoteResolverSpawnConfig, SubstitutionSpawnParams, reap_substitution_endpoint,
+    spawn_substitution_endpoint,
+};
 
 /// Crate-wide test serialization for tests that mutate `HOME` or
 /// other process-global env vars. Re-exported from

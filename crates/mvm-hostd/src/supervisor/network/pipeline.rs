@@ -1,8 +1,11 @@
 //! Synchronous observer fan-out runner. Pure: takes
 //! a raw frame + the observer slice, returns a `PacketDecision`. Reuses
 //! the `catch_unwind` panic-isolation pattern from `signer_task`
-//! (`gateway_bridge::signer_task`): a panicking observer is logged and
-//! treated as `Forward`; siblings continue.
+//! (`gateway_bridge::signer_task`) to keep a panicking observer from taking
+//! down the bridge — but isolation decides who survives, not what happens to
+//! the packet. An observer that declared `payload_tap` can return `Drop`, so
+//! its panic kills the flow; a telemetry observer never could, so its panic is
+//! logged and siblings continue.
 //!
 //! Verdict semantics:
 //! - Observers run in policy order; `Modify` chains (observer N+1 sees N's
@@ -29,6 +32,9 @@ pub enum KillReason {
     Drop,
     ModifyOverMtu,
     ModifyUnserializable,
+    /// An observer panicked instead of returning a verdict. An observer that
+    /// could not decide has not decided to allow.
+    ObserverPanic,
 }
 
 impl KillReason {
@@ -37,6 +43,7 @@ impl KillReason {
             KillReason::Drop => "drop",
             KillReason::ModifyOverMtu => "modify_over_mtu",
             KillReason::ModifyUnserializable => "modify_unserializable",
+            KillReason::ObserverPanic => "observer_panic",
         }
     }
 }
@@ -148,12 +155,37 @@ pub fn run_packet_pipeline<'a>(
         let verdict = match verdict {
             Ok(v) => v,
             Err(panic) => {
+                // Whether a panic is a fault to isolate or a verdict to
+                // respect depends on what the observer was there to do, and
+                // the observer already told us: `payload_tap` is the
+                // declaration that it inspects packet contents.
+                //
+                // A payload-tapping observer is the kind that can return
+                // `Drop`, so treating its panic as Forward would let a crash
+                // silently disarm an enforcement point — the same inversion
+                // this loop refuses twenty lines up, where an unparseable
+                // rebuild fails closed. A telemetry observer cannot make an
+                // informed drop decision in the first place; killing the flow
+                // because a counter panicked would be a self-inflicted
+                // outage, so that one stays isolated.
+                //
+                // `catch_unwind` keeps either case from taking down the
+                // bridge. It is not what decides the packet.
+                let enforcing = obs.required_capabilities().payload_tap;
                 tracing::warn!(
                     observer = obs.name(),
                     flow_id = ctx.flow_id,
+                    enforcing,
                     panic = %downcast_panic(&panic),
-                    "on_packet panicked; isolated via catch_unwind, treated as Forward"
+                    "on_packet panicked; isolated via catch_unwind"
                 );
+                if enforcing {
+                    return PacketDecision::Kill {
+                        observer: obs.name(),
+                        reason: KillReason::ObserverPanic,
+                        flow_key,
+                    };
+                }
                 continue;
             }
         };
@@ -272,6 +304,29 @@ mod tests {
         }
     }
 
+    /// An observer that declares no payload access — the shape of every
+    /// real observer wired today, all of which are counters.
+    struct TelemetryObs<F: Fn() + Send + Sync>(F, Directions);
+    impl<F: Fn() + Send + Sync> Observer for TelemetryObs<F> {
+        fn name(&self) -> &'static str {
+            "telemetry-obs"
+        }
+        fn required_capabilities(&self) -> RequiredCapabilities {
+            RequiredCapabilities {
+                flow_events: true,
+                payload_tap: false,
+            }
+        }
+        fn on_flow_event(&self, _: &crate::supervisor::gateway_bridge::FlowEvent) {}
+        fn directions(&self) -> Directions {
+            self.1
+        }
+        fn on_packet(&self, _c: &PacketCtx<'_>, _p: &ParsedPacket<'_>) -> Verdict {
+            (self.0)();
+            Verdict::Forward
+        }
+    }
+
     #[test]
     fn empty_observers_forwards_unmodified() {
         let f = frame(b"hello-SECRET");
@@ -289,6 +344,68 @@ mod tests {
                 assert_eq!(&*frame, &f[..]);
                 assert!(flow_key.is_some());
             }
+            other => panic!("expected Forward, got {other:?}"),
+        }
+    }
+
+    /// A panicking *payload-tapping* observer must kill the flow, not leak
+    /// the packet.
+    ///
+    /// This is the inversion the pipeline used to carry: `catch_unwind`
+    /// followed by `continue`, which reads as "isolate the fault" but means
+    /// "forward the packet nobody approved". An observer that asked for
+    /// payload access is one that can return `Drop`, so its panic has to be
+    /// treated the way every other unusable verdict in this loop is.
+    #[test]
+    fn panicking_payload_observer_kills_the_flow_instead_of_forwarding() {
+        let f = frame(b"hello-SECRET");
+        let obs: Vec<Arc<dyn Observer>> = vec![Arc::new(PayloadObs(
+            |_| panic!("observer exploded"),
+            Directions::Egress,
+        ))];
+
+        // Silence the default hook for the duration — the panic is the point
+        // of the test, and its backtrace is noise in the test log.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let decision = run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        );
+        std::panic::set_hook(prev);
+
+        match decision {
+            PacketDecision::Kill { reason, .. } => {
+                assert_eq!(reason, KillReason::ObserverPanic);
+            }
+            other => panic!("a panicking observer must not forward; got {other:?}"),
+        }
+    }
+
+    /// The kill must come from the panic, not from the pipeline refusing
+    /// everything — otherwise the test above would pass vacuously.
+    #[test]
+    fn a_healthy_observer_on_the_same_path_still_forwards() {
+        let f = frame(b"hello-SECRET");
+        let obs: Vec<Arc<dyn Observer>> = vec![Arc::new(PayloadObs(
+            |_| Verdict::Forward,
+            Directions::Egress,
+        ))];
+        match run_packet_pipeline(
+            &obs,
+            &NoopSubstitution,
+            &NoopScan,
+            ctx(FlowDirection::Egress),
+            &f,
+            1514,
+            &lat(),
+        ) {
+            PacketDecision::Forward { frame, .. } => assert_eq!(&*frame, &f[..]),
             other => panic!("expected Forward, got {other:?}"),
         }
     }
@@ -426,13 +543,19 @@ mod tests {
         assert!(matches!(d, PacketDecision::Forward { .. }));
     }
 
+    /// A telemetry observer's panic stays a fault to isolate. It never had
+    /// payload access, so it was never in a position to withhold approval
+    /// from this packet, and killing the flow because a counter panicked
+    /// would be an outage we inflicted on ourselves.
     #[test]
-    fn panicking_observer_is_isolated_and_forwards() {
+    fn panicking_telemetry_observer_is_isolated_and_forwards() {
         let f = frame(b"hello-SECRET");
         let obs: Vec<Arc<dyn Observer>> = vec![
-            Arc::new(PayloadObs(|_| panic!("boom"), Directions::Egress)),
+            Arc::new(TelemetryObs(|| panic!("boom"), Directions::Egress)),
             Arc::new(PayloadObs(|_| Verdict::Forward, Directions::Egress)),
         ];
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
         let d = run_packet_pipeline(
             &obs,
             &NoopSubstitution,
@@ -442,9 +565,10 @@ mod tests {
             1514,
             &lat(),
         );
+        std::panic::set_hook(prev);
         assert!(
             matches!(d, PacketDecision::Forward { .. }),
-            "panic must be isolated -> Forward"
+            "a telemetry panic must be isolated -> Forward"
         );
     }
 

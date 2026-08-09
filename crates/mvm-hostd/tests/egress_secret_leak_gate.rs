@@ -105,6 +105,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
         )
         .unwrap();
     let secret_store: Arc<dyn SecretStore> = Arc::new(store);
+    let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new("local", secret_store));
 
     let plan = [SecretBinding {
         name: "OPENAI_API_KEY".into(),
@@ -116,7 +117,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
         plan_secrets: &plan,
         tenant: "local",
         bindings: &bindings,
-        secret_store,
+        resolver,
         forward_timeout_secs: 30,
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),

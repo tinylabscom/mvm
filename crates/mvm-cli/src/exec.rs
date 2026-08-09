@@ -1400,7 +1400,7 @@ fn teardown_transient_vm(
 
     // Top the warm pool back toward target after the run (best-effort,
     // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; the
-    // image-bound boot+capture rewarm the removed Vz backend used to do
+    // image-bound boot+capture rewarm a supervisor-config backend used to do
     // stays explicit via `pool warm` so teardown does not spawn background
     // work that can contend with foreground launches.
     if let Err(e) = crate::commands::pool::replenish_after_launch(backend, start_config) {

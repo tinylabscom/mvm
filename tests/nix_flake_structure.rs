@@ -240,8 +240,8 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         );
     }
 
-    const KERNEL_VERSION: &str = "6.12.100";
-    const KERNEL_HASH: &str = "sha256-Z/lzUzQGSS6Gd0usvO+uUNUNXDTL9wPEfsUmpe/c7pA=";
+    const KERNEL_VERSION: &str = "6.12.102";
+    const KERNEL_HASH: &str = "sha256-aUu19JNxMjq5wrcEC9NY7YG/++gLNy12UHBFgo9lWAM=";
     assert!(
         libkrunfw.contains(&format!("linux-{KERNEL_VERSION}.tar.xz"))
             && libkrunfw.contains(&format!("hash = \"{KERNEL_HASH}\""))
@@ -774,7 +774,7 @@ fn shared_kernel_base_forces_hvc0_console_support() {
     assert!(
         content.contains("\"VIRTIO_CONSOLE\"") && content.contains("\"HVC_DRIVER\""),
         "the shared microVM kernel base must force both VIRTIO_CONSOLE and \
-         HVC_DRIVER when libkrun/vz workloads boot with `console=hvc0`; \
+         HVC_DRIVER when libkrun workloads boot with `console=hvc0`; \
          otherwise the kernel can boot silently even though the backend \
          wires a virtio-console."
     );

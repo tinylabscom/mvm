@@ -19,12 +19,14 @@ All notable changes to mvm are documented in this file.
 ## [0.17.0] — 2026-07-08
 
 ### Removed
-- **backend**: Removed the Vz (Apple Virtualization.framework) backend — its
-  supervisor bin, builder, `vz_objc`/`vz_control`, `mvm_build::vz` +
-  Vz-only `host_gvproxy`, and the objc2/Virtualization dependency cluster.
-  HVF is the sole macOS workload backend, with libkrun as the fallback;
-  libkrun (+ gvproxy) and passt are untouched (Plan 226 R1P1). `--hypervisor vz`
-  / `--builder vz` are gone (fall through to auto-detect). `machine
+- **backend**: Removed the Apple Virtualization.framework backend — its
+  supervisor bin, builder, objc bindings and control shim, its builder module,
+  its private `host_gvproxy` path, and the objc2/Virtualization dependency
+  cluster. HVF is the sole macOS workload backend, with libkrun as the
+  fallback; libkrun (+ gvproxy) and passt are untouched (Plan 226 R1P1). Its
+  `--hypervisor` and `--builder` values are gone (they now fall through to
+  auto-detect), and `xtask check-no-vz` fails the build if the backend or its
+  name returns. `machine
   checkpoint/fork` is temporarily unsupported on macOS pending HVF save/restore
   (Plan 226 WS-E); the macOS-26 dev VM temporarily falls back to libkrun.
 
@@ -139,10 +141,8 @@ All notable changes to mvm are documented in this file.
 - **sdk-py**: Egress-binding secret() + retire in-guest substitution (plan 129)
 - **sdk-ts**: Egress-binding secret() + retire in-guest substitution + docs (plan 129)
 - **plan-173**: Enforce exec timeout_secs (pgroup kill + ExecEvent::TimedOut)
-- **plan-152 WS-B**: Rust-native vz supervisor — boot + vsock proxy + gvproxy network (slices 1-3)
 - **resume**: Host-side PostRestore sender (plan 123 Phase C prerequisite)
 - **storage**: Linux LUKS2 arm of EncryptedStorage (plan 123 B2)
-- **plan-152**: Finalize WS-B — native objc2 VZ supervisor, delete Swift
 - **secrets**: Egress redact-to-XXX detector for undeclared secrets/PII (plan 129 Phase E)
 - **plan-123 C4**: Libkrun disk-only warm-start + doctor warm-start matrix
 - **secrets**: Plan 129 SDK-free egress — transparent terminator core
@@ -155,14 +155,13 @@ All notable changes to mvm are documented in this file.
 - **invoke**: Ephemeral secret-workload invoke via admission + endpoint (plan 129)
 - **secrets**: Emit secret.placeholder_dropped on endpoint claim-12 refusal (plan 129 E2)
 - **secrets**: Undeclared-secret/PII egress redaction mechanism (plan 129 E1 Step 2)
-- **checkpoint**: Plan 159 WS-2 PR3 — checkpoint diff + Vz pause/resume (finishes WS-2)
+- **checkpoint**: Plan 159 WS-2 PR3 — checkpoint diff + pause/resume (finishes WS-2)
 - **secrets**: Admission carriage — redaction policy plan->backend->endpoint->service (plan 129 E1)
 - **cli**: Mvmctl up --redact authors per-destination egress redaction (plan 129 E1)
 - **secrets**: Enrich always-on default secret list with 17 vendor token shapes (plan 129 E1)
 - **secrets**: Egress no-secret-to-guest leak-gate — claim 16 Preview (plan 129 Phase F)
 - **terminator**: Redaction + fail-closed + audit on the transparent terminator path via a typed error (plan 129)
 - **secrets**: Live PII spans into name co-occurrence on the redact path (plan 129 E1)
-- **backend**: Port apple_container CoW per-instance rootfs onto VzBackend (Plan 177 Phase 2, PR1)
 - **secrets**: SigV4/HMAC forward-path signing, bind-checked (plan 129)
 - **secrets**: Self-applied jailer confinement on the substitution endpoint (plan 129)
 - **plan-129**: Audit recorder in spawned endpoint + stamp Plan 129 COMPLETE
@@ -172,13 +171,11 @@ All notable changes to mvm are documented in this file.
 - **cli**: Mvmctl dev down --json (Plan 189 WS-3)
 - **checkpoint**: Instant memory fork — second live VM from a running parent in 0.91s
 - **dev**: Add `dev up --json` lifecycle envelope (plan 189 WS-3)
-- **pool**: Vz saved-standby warm pool — up claims a prebooted standby
-- **pool**: Vz warm pool self-replenishes via a detached re-warm
 - **net**: MVM_NETWORKING=native gateway flag (ADR-003 Phase 1)
 - **sdk**: Generate host↔guest protocol type stubs from protocol-v0.json (plan 124 D1.2a)
 - **backend**: WorkloadBackend type-bar — core security features non-skippable (Plan 197 Phase 1)
 - **guest**: Machine-readable host↔guest RPC request→response contract (plan 124 D1.2 step 2a)
-- MacOS egress secret substitution — vsock-5253 channel on libkrun + vz (Plan 197 Phase 2a)
+- MacOS egress secret substitution — vsock-5253 channel on libkrun (Plan 197 Phase 2a)
 - **guest**: Contract-checked host-side RPC client over the response contract (plan 124 D1.2 step 2b)
 - **core**: WASI fs/env capability projection (ADR-024 A1 / Plan 192)
 - **up**: `--console` boots straight into an interactive shell
@@ -193,17 +190,15 @@ All notable changes to mvm are documented in this file.
 - **cli**: --secret NAME:host binding on `up` (plan 125 E2)
 - **policy+cli**: Named security profiles — production default, dev never deploys (plan 125 E4)
 - **plan-125**: E5.1 in-guest broker transport (mvm-guest::broker_client)
-- **plan-125**: E5.3a reserve BROKER_PORT in host_listen_ports (libkrun + vz)
+- **plan-125**: E5.3a reserve BROKER_PORT in host_listen_ports (libkrun)
 - **plan-125**: E5.2 host.audit.v1 + E5.4 host.time.v1/host.cost.v1 typed methods (mvm-guest)
 - **plan-125**: E5.3b-0 per-VM workload audit-chain verifier + mvmctl audit verify
 - **plan-125**: E5.3b-1 mvm-audit-signer per-VM spawn helper
 - **plan-125**: E5.3b-2a mvm-broker per-VM spawn helper
 - **plan-125**: E5.3b-2b-core gated broker-services spawn + RAII reaper
 - **plan-125**: E5.3b-2b-wire (libkrun) spawn broker services on admitted up
-- **plan-125**: E5.3b-2b-wire (vz) spawn broker services on admitted up
 - **plan-125**: E5.3b-2c broker reassigns a server-authoritative correlation id
 - **plan-200**: Mvmctl machine run — beginner image-backed runner (WS-A/B kickoff)
-- **vz**: Give the persistent dev builder VM gvproxy egress (Plan 183 follow-up)
 - **plan-193**: WS-2.2a — lower egress policy into rvproxy's native [policy] config
 - **plan-125**: In-guest audit-probe + opt-in mkGuest bake (E5.3b-4 in-guest driver)
 - **plan-193**: WS-2.2a — full-fidelity policy lowering (L4 proto/port + DNS sinkhole)
@@ -229,7 +224,7 @@ All notable changes to mvm are documented in this file.
 - **plan-202**: Backend host-agent daemon seam — ensure/register/deregister (1c-wire-a)
 - **plan-200**: Admit the MCP warm-session VM too (claim-10 closeout)
 - **plan-202**: Wire start/stop onto the host-agent daemon behind a flag (1c-wire-b)
-- **plan-200**: Uniform host:port L4 egress on the libkrun/Vz bare path (WS-B follow-up)
+- **plan-200**: Uniform host:port L4 egress on the libkrun bare path (WS-B follow-up)
 - **plan-200**: Decide + pin DHCP/ARP posture under deny-all (loopback-only) (WS-B follow-up)
 - **plan-202**: Make the host-agent daemon the default (Phase 3a)
 - **cache**: Reap orphaned dead-microVM helpers by default in `cache prune`
@@ -247,7 +242,6 @@ All notable changes to mvm are documented in this file.
 - **bench**: Add density report substrate
 - **core**: Add delegated host service protocol variants
 - **bench**: Add live density benchmark hooks
-- **plan-200**: Support up --wait on the vz backend (verdict-capture)
 - **plan-205**: Workstream A — machine-checked trust-gradient invariant
 - **plan-204**: Mvm-builderd binary, rootfs embedding, and boot launch (WS-A)
 - **plan-205**: Workstream B — residency policy + observability
@@ -259,19 +253,14 @@ All notable changes to mvm are documented in this file.
 - **cli**: Tiered, liveness-guarded cache reclamation
 - **plan-205**: Builder-residency decision core (keeper action + snapshot freshness)
 - **cli**: Quiet by default; -v/-vv/-vvv verbosity + downgrade boot-race vsock warning
-- **plan-205**: Make the persistent vz builder snapshot-capable (S2.1 slice 1, unblocks #1119)
 - **plan-200**: Artifact extract — verify-before-extract + machine portable-artifact primitive
 - **plan-189**: Add linux-native dev status json detail
 - **cli**: Heartbeat during the silent Stage 0 builder-image build
-- **plan-205**: Park and restore the Vz builder
 - **plan-200**: Machine check-artifact — portable-artifact runner security core
 - **cli**: Make [mvm] ui chatter opt-in via RUST_LOG/--verbose
-- **plan-189**: Add vz dev base pinning
 - **plan-205**: Enforce persistent builder residency
 - **stage0**: Stream the in-guest nix build log to the host console live
-- **plan-205**: Auto-park the Vz dev builder on `dev down` (residency-gated)
 - **plan-189**: Expose pinned dev base fingerprint
-- **plan-205**: Enforce vz dev residency keeper
 - **plan-175**: VMGenID delivery on PostRestore (Task 1)
 - **plan-175**: FirecrackerBackend::warm_start + vm resume --warm (Task 4)
 - **plan-205**: Close resident builder live gates
@@ -310,7 +299,7 @@ All notable changes to mvm are documented in this file.
 - **machine**: --volume host shares + auto-recreate for managed `machine run`
 - **cli**: Fold `up`/`run` into `machine run` — source axis (Plan 208 Task 4, pt 1)
 - **vm-host**: ADR-007 + Plan 209 Tasks 1–2 — unified mvm-bridge sidecar contract + binary
-- **vm-host**: Plan 209 Task 4 — fold FC+vz sidecars into mvm-bridge (libkrun merged); live-verified
+- **vm-host**: Plan 209 Task 4 — fold FC sidecars into mvm-bridge (libkrun merged); live-verified
 - Add attested pack manifest verifier core
 - **backend**: Fail-closed capability model (Plan 214 slice 1)
 - **machine**: Machine/MachineBuilder library with capability-gated construction
@@ -345,9 +334,9 @@ All notable changes to mvm are documented in this file.
 - **cli**: Emit chain-signed verb_denied on a session set-timeout refusal
 - **sdk**: Status-aware machine ls (close the facade's "always Stopped" gap)
 - **cli**: Audit verb_denied across the agent-RPC verb surface (exec/run-code/attach)
-- **run**: Drop --stdin, auto-detect non-TTY stdin (Vz-deprecation Phase 1 / Plan 220)
+- **run**: Drop --stdin, auto-detect non-TTY stdin (backend-deprecation Phase 1 / Plan 220)
 - **hostd**: Admit_and_start — the shared admitted-boot entrypoint (#1388 slice 4a)
-- **build**: Auto-detect the in-house HVF builder on macOS-26 (Vz-free fallback) — #1403
+- **build**: Auto-detect the in-house HVF builder on macOS-26 (replacement fallback) — #1403
 - **sdk**: Wire MvmClient::run to boot real admitted machines
 - **ext4**: Mvm-ext4 — memory-safe pure-Rust ext4 writer (Plan 221 B2)
 - **ext4**: Pure-Rust dm-verity root hash + veritysetup CI differential (Plan 221 B)
@@ -358,7 +347,7 @@ All notable changes to mvm are documented in this file.
 - **mvm-client-local**: Boot local runs in-process via the admission seam
 - **mvm-ext4**: Multi-block-group images (rootfs past 128 MiB)
 - **run**: Materialize the run-path rootfs in-process by default
-- **console**: Interactive -it shell over the in-house VMM (Vz-deprecation Phase 2A / Plan 221)
+- **console**: Interactive -it shell over the in-house VMM (backend-deprecation Phase 2A / Plan 221)
 - **mvm-ext4**: Depth-1 extent tree for files past 4 inline extents
 - **mvm-client-local**: Resolve registry refs + unpacked dirs in LocalBackend.run
 - **run**: Embed guest-agent binaries so end-user run --image works offline
@@ -386,10 +375,10 @@ All notable changes to mvm are documented in this file.
 - **run**: Virtiofs-root selection wired into run --image on HVF (Plan 223 A4→run path)
 - **audit**: Chain-signed plan.grant_required entry (M1, #1457)
 - **virtiofs-root**: Chain-audit the resolved boot posture (A3)
-- **checkpoint**: Resolve fs_quick rootfs backend-neutrally (de-Vz step 1, #1478)
+- **checkpoint**: Resolve fs_quick rootfs backend-neutrally (backend-neutral step 1, #1478)
 - **egress**: Slice 1 Phase A — libkrun transparent-TCP vsock egress (flag-gated, NIC retained)
 - **kernel**: Strip unreachable block drivers from the workload kernel (Plan 209 Batch 6)
-- **checkpoint**: De-Vz vm_full capture on Firecracker (#1478 step 2 capture)
+- **checkpoint**: Backend-neutral vm_full capture on Firecracker (#1478 step 2 capture)
 - **mvm-client**: MachineSpec builder pattern + refresh examples & Rust SDK docs
 - **machine**: Workload healthcheck as a lifecycle signal (phase A)
 - **hvf**: Demand-zero guest RAM (working-set residency, 638→144 MB idle)
@@ -426,11 +415,11 @@ All notable changes to mvm are documented in this file.
 - **plans**: Add Plan 165 — entrypoint-presence policy + sealed-prod interactivity prohibition
 - **plans**: Plan 165 A0 verdict — wrapper is a shell script
 - **plan-123**: Reconcile Phase A — claims-gated lift landed (A1-A4 + L3-A)
-- **plan-152**: Record minimal-VZ-launcher prior art; flip Plan 134 gate
+- **plan-152**: Record minimal-launcher prior art; flip Plan 134 gate
 - **plan-166**: Promote cold-state guarantee to a witnessed non-persistence claim
 - **plan-167**: Renumber non-persistence plan 166->167 (collision with feat/plan-166-qemu-builder)
 - ADR-007 + Plan 165 — QEMU dev/builder backend (Firecracker stays prod)
-- **adr-072,plan-165**: Scope QEMU to Linux; Vz is the macOS built-in equivalent
+- **adr-072,plan-165**: Scope QEMU to Linux; the macOS built-in is the equivalent
 - **claim15**: Catalog row + ADR-001 + CLAUDE.md — no interactive access to a sealed prod microVM (Plan 165 WS-C)
 - **plan-165**: Tick WS-B/WS-C; defer A4 invoke witness + note latent B4 gate
 - **sdk**: Clarify B1 comment — B4 enforces via the entrypoint_present wire field, not this predicate (Plan 165 review fix)
@@ -442,14 +431,10 @@ All notable changes to mvm are documented in this file.
 - **plan-166**: Record QEMU run_build reachability gap found on box
 - **plan-166**: Record Task 1.5 box verification + egress-lockdown follow-up
 - **plan-166**: Task 1.5 fully green on box — networked QEMU run_build E2E
-- **plan-159**: Design note for the 152-independent VZ DX slice
-- **plan-168**: Implementation plan for the 152-independent VZ DX slice
 - **plan-168**: Record final-review follow-ups (json migration, doctor coverage)
 - **plan-166**: Phase 2 done + box-proven (workload boot + agent round-trip)
-- **spike**: Vz page-cache-priming measurement design
 - **spike**: Recast success threshold as separation + materiality gates
 - **spike**: Implementation runbook + fat-image working-set refinement
-- **spike**: Execution findings — BLOCKED on two Vz workload-path bugs
 - **spike**: A+B fixed , Bug C surfaced
 - **plan-129**: Mark #1a + #1b-core done; scope remaining bin glue
 - Refer to the external fork/snapshot sibling obliquely (Plans 148, 157)
@@ -511,29 +496,22 @@ All notable changes to mvm are documented in this file.
 - **sprint**: Refresh stale Current Status header (v0.13.0 → v0.16.1)
 - ADR-024 wasm-component runner + Plan 192 (A1 capability projection fs/env)
 - **plan-192**: Propose rvproxy network substrate (replace gvproxy/passt) + record gvproxy/build-perf findings
-- **rollup+sprint**: Record Vz warm-pool self-replenish
-- **plan-189**: WS-2 who-calls audit — vz boot surface is already fast-boot-default
 - **rollup+sprint**: Record warm-claim admission-sha reuse
-- **notes**: Vz 100%-support + close-out handoff prompt for the next session
 - **rollup**: Cite #826/#833 on the two-copy-fork + instant-memory-fork lines
 - **deps**: Record the plan 126 Phase D final dependency measure
 - **adr-082**: Align flag literal with shipped `native` (was `rvproxy`)
 - **claude**: MVM_NETWORKING now accepts the opt-in `native` value
-- **vz**: Close out Sprint 55 at parity + Plan 197 design/plan
 - **plan-197**: Phase 2 design spike — terminator → rvproxy; split into 2a (mvm vsock channel) + 2b (rvproxy-gated)
 - **plan-124**: Close out at core-complete; descope Phase E as superseded premise
 - **rollup**: Plan 185 Phase 3 complete (naming + typed selectors)
 - **plan-185**: Close Phase 5 Task 9 by verification (feature/dep boundaries)
 - **notes**: Plan 185 deferred-work handoff for the next session
-- **sprint**: Record vz up/down sub-second + `up --console` (Sprint 55)
-- **rollup**: Note vz up/down sub-second + `up --console` (PLAN 152 block)
 - **plan-193**: Design WS-2 (claim-10 enforcement port) + the R2 contract it needs
 - **notes**: Scope Plan 125 E5 (host-services SDK / guest→broker client)
 - **notes**: Rvproxy R2 session close-out + slices 2–4 handoff prompt
 - **rollup**: Plan 197 2a default-path plan-persist gap closed
-- **plan-197**: Phase 2a vz egress substitution data plane proven live (follow-on to #917)
+- **plan-197**: Phase 2a egress substitution data plane proven live (follow-on to #917)
 - Ban clippy::too_many_arguments outright; builder-pattern struct is the fix
-- **rollup**: Clarify Plan 118/159 open boxes are non-vz remainders
 - **plan-181**: Record preview-ingress DX benchmark, validate L4-first
 - Sync REFACTOR-STATUS/SPRINT/handoff to R2 build started (slice 1 merged)
 - **plan-185**: Task 6 done — all too_many_arguments allows eliminated
@@ -551,7 +529,6 @@ All notable changes to mvm are documented in this file.
 - **plan-125**: Close out Phase A (52→≤15 CLI) as satisfied — scope amendment
 - **plan-199**: WarmLease borrow-handle + batched guest exec
 - **warm-path**: Sync fork/snapshot prior-art into plans 148/157/175 + tag-traversal audit
-- **vz-objc**: SAFETY invariants on the remaining unsafe blocks (Plan 185 Task 8)
 - **plan-185**: Task 8 done → Plan 185 COMPLETE
 - **adr-084**: Host services as a per-tenant daemon, not per-VM spawn (+ Plan 202)
 - **plan-118**: Part C density+concurrency bench + prior-art decision note
@@ -577,13 +554,11 @@ All notable changes to mvm are documented in this file.
 - Close Plan 202
 - **dev**: Close out builder VM fingerprint narrowing
 - Propose builder VM resident control plane
-- **plan-200**: Draft the Vz up --wait verdict-capture slice
 - Plan 205 / ADR-020 — resident builder control plane + residency model (umbrella)
 - **plan-205**: Workstream F — what-runs-where, residency config, threat-model delta
 - **plan-205**: Make the "instant" bar a CI-gated latency budget
 - **troubleshooting**: Stage 0 BadActivate on a fresh isolated cache
 - Reconcile Plan 205 / Sprint 63 rollups to shipped state (A/B/D/F merged, E #1102, C via Plan 204)
-- Reconcile rollup/sprint to #1112 default-path Vz warm-claim fix
 - **plan-126**: Record Step-0 decision — rehome aws-lc-rs removal + reqwest-major unify
 - **plan-126**: Wire upstream PR #274 into the rehome decision + correct platform-verifier claim
 - **rollup**: Freshen REFACTOR-STATUS for the 2026-06-20 landings
@@ -592,7 +567,6 @@ All notable changes to mvm are documented in this file.
 - **plan-204**: WS-E — document the resident builder control plane
 - Close plan 189
 - Mark plan 189 complete in rollup
-- Record macOS VZ live validation
 - **plan-175**: Mark CORE COMPLETE; rehome UFFD substrate + primed wiring to Plan 206
 - **plan-205**: Mark rollup complete
 - **plan-205**: Reconcile the parked-resume latency budget with measured reality
@@ -602,7 +576,6 @@ All notable changes to mvm are documented in this file.
 - **plan-200**: Add machine use-case guards
 - **plan-200**: Correct binary-install-first backend docs
 - **plan-204**: Live-validate builder daemon boot + WS-E install note; correct WS-D status
-- **plan-200**: Record macOS Vz machine-run phase timing + --net finding
 - **plan-200**: Frame old verbs as advanced/underlying surfaces (§A 821)
 - **plan-204**: Sync REFACTOR-STATUS WS-D state (FlakeCheck routing landed; build route blocked)
 - **plan-200**: Record live Firecracker-lane machine-run phase timing (KVM)
@@ -659,8 +632,6 @@ All notable changes to mvm are documented in this file.
 - **mvm-cli**: Drop redundant closure in signing check (clippy -D warnings)
 - **plan-124 D1.0**: Unbreak gen-stubs (-p mvm-ir → mvm-sdk) + resync stale SDK IR
 - **secrets**: Allow Debug on SecretBindingMeta (no bytes; security-lane lint)
-- **vz**: Give mvmctl console a Vz-workload vsock transport (Bug B)
-- **vz**: Only request the gateway-audit bridge when admitted (Bug A)
 - **plan-166**: Harden the QEMU bridge/lifecycle (adversarial review #3)
 - **mvm-cli**: Up --wait is libkrun-only + mutually exclusive with --detach
 - **exit-capture**: Ack handshake so guest poweroff waits for durable workload.exit (race fix)
@@ -674,34 +645,28 @@ All notable changes to mvm are documented in this file.
 - **mvm-cli**: Flush per chunk in session run-code stream (progressive output)
 - **secrets**: Preserve the source chain in forward-leg errors
 - **doctor**: Signing check probes all sign targets, not just mvmctl
-- **plan-152**: Vz supervisor SAVE pauses before saving (pause → save → resume)
 - **secrets**: Substitution endpoint forwards http to the destination's real port
 - **netinit+init**: Make the guest's own loopback functional
 - Make the libkrun mkGuest warm claim fire end-to-end (Plan 118 WS-1 1b)
 - **firecracker**: Extract ELF vmlinux from a bzImage at boot
 - **dev**: Degraded builder store — fail fast + cache repair + doctor health
-- **plan-152**: Harden Vz supervisor — resource caps, self-sign lock, error fidelity + doc truth
 - **firecracker**: Make the guest agent reachable on live FC boots
-- **guest-init**: Detach sealed-workload stdin from input-less Vz console + sleeper liveness fixture
+- **guest-init**: Detach sealed-workload stdin from input-less console + sleeper liveness fixture
 - **builder-vm**: Scope egress lockdown to the install arm (Plan 183 WS-A)
 - **firecracker**: Three live-bringup fixes from the FC egress e2e session (plan 129)
 - **builder-vm**: Guest network bootstrap — static gvproxy fallback + writable resolv.conf (Plan 183 WS-B/C)
-- **vz**: Workload boot — builder-kernel fallback + bound gvproxy reply socket (Plan 183 WS-E)
 - **supply-chain**: Duplicate-major lock-gate + restore red cargo-deny/cargo-audit (Plan 126 D2)
-- **vz**: Checkpoint integration — pause-aware fs_quick gate + restore gvproxy re-spawn (Plan 183 follow-ups)
 - **fuzz**: Pin time below 0.3.48 in rcgen-pulling fuzz crates (unblock Fuzz — parsers)
-- **vz**: Reap the restore-spawned gvproxy on restore failure
 - **checkpoint**: Clippy unnecessary_literal_unwrap in resource-shape test
 - **oci**: Close the layer-unpacker TOCTTOU with openat2 (plan 161 / 143 R2+R3)
 - **oci**: Route whiteout removal through openat2 too (plan 161 follow-up)
 - **pool**: Serialize warm_to_target with a pool-dir flock (Plan 118)
 - **guest-console**: Drop post-fork malloc; SAFETY-audit the console (Plan 185 Task 8)
-- **cli**: Persist plan.json pre-start so vz/libkrun egress substitution actually spawns (Plan 197 Phase 2a)
+- **cli**: Persist plan.json pre-start so libkrun egress substitution actually spawns (Plan 197 Phase 2a)
 - **console**: Route workload consoles to their own VM, not the builder
 - **fc**: Sub-second down + kernel-less flake boot for Firecracker
 - **fc**: Skip the vestigial secrets drive when it has no content
 - **host-vm-init**: TestEnv-guard the TMPDIR-inherit test so it can't break parallel tests (Plan 185 Phase 1)
-- **plan-125**: Vz broker binds the wrong BROKER_PORT socket (round-trip broken on vz)
 - **host-vm-init**: Clear pre-existing Linux-only clippy lints (Plan 185 Phase 7 follow-up)
 - **plan-193**: Match rvproxy's dns_hostname_allowlist field name + reconcile WS-2 status
 - **plan-200**: Renumber mvm.toml schema v2 -> v1 (no pre-release schema)
@@ -715,38 +680,26 @@ All notable changes to mvm are documented in this file.
 - **ci**: Drop stale broker-services wording
 - **libkrun**: Thread x86 kernel format for live bench
 - **plan-200**: Reply to libkrun's -krun.sock so bridge egress actually reaches the guest
-- **plan-204**: Probe the Vz-shaped builderd control socket in doctor
 - **cli**: Build the prod default microVM image locally on a source checkout
-- **pool**: Pair the Vz standby kernel with its rootfs variant
 - **plan-205**: Harden host_signer gate + document OCI machine warm-pool intent
 - Keep json stdout clean for dev convergence
-- Rebuild stale vz helpers in source checkouts
-- **vz**: Clearer + quieter microVM boot (stale-aux-binary hint, drop vsock boot-noise)
-- **vz**: Make vm save/restore round-trip survive a stop
 - **builder**: Fail fast on a Stage 0/builder build that halts the guest
 - **oci**: Key the run-image guest-agent cache by the dev-shell variant
 - **oci**: Re-materialize a run-image rootfs when the baked agent is stale
-- **vz**: Surface detached launch exits
 - **security**: Close command-injection in warm_restore_instance snapshot/load
-- **vz**: Preserve stopped launch registrations
 - **run**: Boot --image OCI runs on a prebuilt workload kernel (avoid Nix + 220 MB on the OCI path)
 - **hostd**: Exit moat helpers when their supervisor dies; add reap-helpers backstop
 - **hostd**: Host-agent daemon self-terminates when idle (follow-up to #1174)
 - **plan-204**: Builderd enables nix-command/flakes; live over-the-wire FlakeCheck driver
-- **vz**: Resolve egress observers from the threaded bundle, not the policy file
 - **cache**: Make `cache prune`/`repair` report their result by default
 - **egress**: Defer DNS to the DNS layer so a curated allow-list can resolve
 - **builderd**: Don't path:-wrap scheme-qualified flake refs in flake_check_argv
 - **guest-net**: Static fallback when udhcpc/resolv.conf tooling is absent (OCI --net)
 - **firecracker**: Make the gateway-bridge sidecar actually run (plan.json decode + seccomp gaps)
-- **vz**: Clear error + retry when a disk image is missing (NSPOSIXErrorDomain:45)
-- **vz**: Cold-boot when a parked builder snapshot references a purged disk
 - **plan-204**: Make the typed BuildGuestImage daemon path actually build (writable nix HOME/XDG) (WS-D)
 - **plan-203**: Capture denied (dropped) egress in the forensic transcript
-- Persistent-builder start honors --builder vz (real Vz persistent builder)
 - Keep the host-gvproxy socket path under the AF_UNIX sun_path limit
-- Short Vz persistent session id keeps vsock sockets under AF_UNIX sun_path
-- **cli**: Pre-open interactive console data ports on Vz/libkrun (Plan 207 regression)
+- **cli**: Pre-open interactive console data ports on libkrun (Plan 207 regression)
 - **cli**: Fast teardown for interactive-transient `machine run -t` (Ctrl+D no longer reads as a hang)
 - **sdk-python**: Migrate live-mode Sandbox ops to `machine` verbs
 - **build**: Stream typed mvm-builderd build progress to stderr (no more silent "hang")
@@ -760,7 +713,7 @@ All notable changes to mvm are documented in this file.
 - **machine**: Docker-parity for `machine run -it` (job control, quiet boot, no codesign noise)
 - **machine**: Hash flake slot identities without canonicalizing
 - **sdk**: Restore hidden no-vm transport
-- **kernel**: Re-enable PCI/VIRTIO_PCI for vz — fixes #1297 (vz builder hang) + #1298 root cause
+- **kernel**: Re-enable PCI/VIRTIO_PCI for PCI-attached backends — fixes #1297 (builder hang) + #1298 root cause
 - **release**: Ship per-VM host binaries so a downloaded mvmctl can spawn them
 - **pool**: Reap stale standbys on the launch path (no-daemon TTL enforcement)
 - **machine**: Run interactive argv in PTY
@@ -774,7 +727,6 @@ All notable changes to mvm are documented in this file.
 - **run**: Wire dev_console on the interactive transient -it path
 - **build**: Decode mvm.verb_grant cmdline token in the OCI guest init
 - **oci**: Egress-CA parity for OCI workloads (guest /init decode + host TLS env)
-- **pool**: Avoid Vz auto-rewarm contention
 - **run**: Actually enable the pure in-process rootfs materialize in mvmctl
 - **machine**: Populate flake slot kernel fallback
 - **cli**: Mint default agent-verb grant only for sealed images (#1381 item 2)
@@ -797,9 +749,7 @@ All notable changes to mvm are documented in this file.
 ### Performance
 - **dev**: Narrow builder-VM source fingerprint (plan 195)
 - **pool**: Warm claim reuses the admission image sha, drops the re-hash
-- **vz**: Sub-second up/down on the local PTY path
 - **build**: Host-side flake build cache (Plan 198) — skip the builder VM on an unchanged flake
-- **vz**: Exit post-boot stability wait when the guest agent is listening
 - **ci**: Move feature-gated test steps off the Test critical path
 
 ### Refactored
@@ -820,7 +770,6 @@ All notable changes to mvm are documented in this file.
 - **cli**: Merge exec into run (Plan 178 Task 7)
 - **audit**: Hoist AuditEmitter into mvm_hostd::audit (library API for mvmd)
 - **comments**: Strip plan/PR/ADR/sprint refs from source comments + lint gate (Plan 180)
-- **cli**: One vz dev path — consolidate the duplicate, drop dead apple_container names
 - Tighten backend traits and rust hygiene
 - **backend**: Promote the catalog into a descriptor registry (Plan 184)
 - **cli**: Mvm-cli unary call sites adopt the contract-checked client (plan 124 D1.2 step 2c)
@@ -882,8 +831,7 @@ All notable changes to mvm are documented in this file.
 - **plan-200**: OCI archive reader ignores unexpected/extra tar entries
 - Close Plan 200 image source status
 - **plan-202**: Close host-agent cost semantics
-- **plan-202**: Prove host audit on vz
-- **plan-200**: Harden libkrun/Vz egress matrix with unrestricted + duplex bridge coverage
+- **plan-200**: Harden the libkrun egress matrix with unrestricted + duplex bridge coverage
 - **machine**: Gate artifact admission preview
 - **machine**: Pin interactive image shell parsing
 - **core**: Cargo-fuzz target for the snapshot-frame parser
@@ -895,10 +843,9 @@ All notable changes to mvm are documented in this file.
 - **virtio-fs**: Fuzz the FUSE-server request parser
 
 ### Merge
-- Preserve Vz warm-store prune guard
 
 ### Spec
-- **adr-002,claude**: HVF is the macOS-26 default; Vz opt-in/sunsetting
+- **adr-002,claude**: HVF is the macOS-26 default
 
 # Changelog
 
@@ -949,7 +896,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **default-image**: Prod download (5-asset contract) + release job + test
 - **nix**: Default-tenant flake build-validated (both variants) on the dev host
 - **default-image**: BuildMode-aware resolution — dev builds locally (Task 3b)
-- **volumes**: Custom volumes + fix Vz read-write-disk flock collision
+- **volumes**: Custom volumes + fix read-write-disk flock collision
 - **dev**: Mount devpts in guest /init + add config::is_dev_mode (Plan 162)
 - **crypto**: Collapse AEAD call sites into crypto::aead (plan 122 A1)
 - **crypto**: MacOS volume-at-rest via per-file AEAD (plan 122 A2)
@@ -966,7 +913,6 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **bridge**: Wire packet-observer pipeline into libkrun/gvproxy (Plan 141 Task 8)
 - **bridge**: Frame-aware Passt loop + broaden metrics scrape filter (Plan 141 Task 9)
 - **cache**: Flow-byte-log retention sweep in cache prune (Plan 141 Task 10)
-- **vz-builder**: Gvproxy networking so cold nix builds can fetch nixpkgs
 
 ### Changed
 - **sdk-ts**: Trailing commas in tsconfig (JSONC)
@@ -987,7 +933,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **plans**: Add Plan 147 — portable runnable artifacts (mvmctl artifact run)
 - **plan**: Add Plan 149 — mvmctl watch unified live operator event stream
 - **plans**: Add Plan 150 (OSV deps scan + remediation) and Plan 151 (fs-access evidence)
-- Contributor host-setup (libkrun vs Vz builder) + plan drafts 144/148
+- Contributor host-setup (libkrun builder) + plan drafts 144/148
 - **plan120**: Mark Status: COMPLETE — all acceptance boxes ticked
 - **plans**: Resolve duplicate plan numbers 144/146/147 on main
 - **plans**: Fix internal titles after 144/146/147 → 153/154/155 rename
@@ -1008,7 +954,6 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **crates**: Finalize plan 121 — ADR-022 corrections, CLAUDE.md, old→new ident map
 - **adr**: Descope B4 framing — authenticated frame stays its own protocol
 - **plan**: Record B4 Option B as a tracked deferred follow-up
-- **vz**: Stop over-claiming in-supervisor share refusal
 - **plan**: Record B4 Step 2 (config_envelope) descope + Step 3 (paths) outcome
 - **plan**: Close out B4 — descope Step 4 (subprocess) + Step 5, reconcile Acceptance
 - Close out plan 121 — stamp COMPLETE + reconcile mvm-core runtime-free claim
@@ -1016,13 +961,9 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **plan-121**: Record the production verification in the Status header
 - **plan-121**: Cross-ref #587 extending the B4 paths centralization
 - **plans**: Add Plan 162 — dev-mode interactivity (guest devpts + MVM_ENV=dev)
-- **plans**: VZ support research — Rust-objc2 supervisor (152) + vz-inspired DX (159)
 - **plan-141**: Note the Plan 152 drop-Swift conflict (reciprocal)
-- **plans**: Resolve 152↔141 — split scope, Vz payload-tap rides Plan 152
 - **plan-122**: Tick A1, mark A0 deferred
 - **plans**: Reconcile 152 WS-D nested-virt with Plan 147 Lima
-- **plans**: Add Plan 163 — Apple VZ support execution roadmap
-- **plan-159**: Add vz DX/UX parity checklist + long-tail items
 - **plan-126**: A1 dependency baseline + correct the Phase-B premises
 - **plan-126**: B4 finding — aws-lc-rs is the oci-client/reqwest-0.13 chain (= C1)
 - **plan-126**: B4 is upstream-blocked — oci-client hardcodes aws-lc
@@ -1067,7 +1008,6 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **core**: Fold mvm-security into mvm-core::crypto (pure crypto; no async in core)
 - **backend**: Relocate+rename mvm-libkrun -> crates/deps/libkrun-sys
 - **backend**: Fold mvm-providers into mvm-backend::providers
-- **build**: Fold mvm-vz into mvm-build::vz (Swift-interface; cycle-avoided)
 - **backend**: Relocate orphaned MvmContainerBridge swift pkg with providers
 - **hostd**: Consolidate supervisor/broker/signers/jailer into mvm-hostd
 - **vm-host**: Consolidate per-VM supervisors into mvm-vm-host (cfg-gated [[bin]]s)
@@ -1090,7 +1030,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 
 ### Dev
 - Default dev up to an interactive shell
-- Fall back to libkrun for auto-selected vz builder
+- Fall back to libkrun for the auto-selected builder
 
 ### Draft
 - **nix**: Default-tenant flake — dev + prod variants (Plan 158 Task 1)
@@ -1111,7 +1051,6 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **sdk**: TypeScript/Node workloads end-to-end
 
 ### Documentation
-- **notes**: File Vz + Apple Container builder papercuts from TS E2E
 
 ### Fixed
 - **security**: Scope agent symbol greps to the mvm_guest_agent crate

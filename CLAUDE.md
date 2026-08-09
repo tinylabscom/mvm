@@ -11,7 +11,7 @@ macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
 Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
 ```
 
-Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS 13-25 backend; HVF (the in-house Hypervisor.framework VMM, vsock-only) is the macOS 26+ Apple Silicon default; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. The Apple Virtualization.framework (`vz`) backend was **removed** (Plan 226 R1P1) — HVF is the sole macOS workload backend, with libkrun as the fallback; there is no `--hypervisor vz` and no `apple-container` backend.
+Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS 13-25 backend; HVF (the in-house Hypervisor.framework VMM, vsock-only) is the macOS 26+ Apple Silicon default; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. The Apple Virtualization.framework backend was **removed** (Plan 226 R1P1) — HVF is the sole macOS workload backend, with libkrun as the fallback; its `--hypervisor` value is gone, as is the `apple-container` backend. `xtask check-no-vz` fails the build if either returns.
 
 ## Host dependencies (macOS)
 
@@ -65,12 +65,12 @@ The builder VM (the Linux guest that runs `nix build` inside `mvmctl build image
 - **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. Default on Linux and macOS 13-25. Works everywhere mvm runs.
 - **qemu** — QEMU/microvm_nix builder (Linux dev/test substrate). Opt-in only.
 
-(The Vz builder was removed in Plan 226 R1P1.)
+(The Apple Virtualization.framework builder was removed in Plan 226 R1P1.)
 
 Selection priority (highest first):
 
 1. `--builder <libkrun|qemu|hvf>` global CLI flag.
-2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf` env var (case-insensitive, whitespace-trimmed; unrecognised values — including the removed `vz` — log a warning and fall through to auto-detect).
+2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf` env var (case-insensitive, whitespace-trimmed; unrecognised values — including any retired backend name — log a warning and fall through to auto-detect).
 3. Auto-detect: macOS 26+ Apple Silicon → hvf; Linux → qemu; other macOS → libkrun.
 
 `mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.

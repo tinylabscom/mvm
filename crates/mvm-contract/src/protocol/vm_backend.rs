@@ -420,7 +420,8 @@ impl VmExitStatus {
 /// them. Recovery capabilities are deliberately part of this same value so a
 /// caller cannot accidentally combine a snapshot tier from one backend with a
 /// standby answer from another.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VmCapabilities {
     /// Can pause/resume vCPUs (Firecracker: yes, WASM: no).
     pub pause_resume: bool,
@@ -572,7 +573,8 @@ impl VmCapabilities {
 /// the honest per-backend warm-start *tier*. No path silently degrades —
 /// a request beyond the reported tier returns a typed error once the
 /// snapshot RPC is wired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SnapshotCapability {
     /// Full live-memory snapshot + fast resume (Firecracker: UFFD/NBD/hugepages).
     LiveMemory,
@@ -1267,7 +1269,8 @@ pub struct VmInfo {
 /// `&dyn VmBackend` callers can call `.kind()` without an upward dependency
 /// on the higher-level backend registry that knows how to *construct* each
 /// variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackendKind {
     Firecracker,
     Libkrun,
