@@ -40,6 +40,9 @@ fn landlock_denies_paths_outside_ruleset() {
         binding_dir.into(),
         audit_dir.into(),
         keys_dir.into(),
+        // Local resolver backend: this probe is about path grants, and a
+        // resolver socket would add a write path it does not exercise.
+        None,
     );
     mvm_hostd::jailer::confine_self(&spec).expect("confine_self");
 
