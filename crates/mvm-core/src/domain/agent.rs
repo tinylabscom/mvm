@@ -513,6 +513,8 @@ impl std::fmt::Debug for EgressSecretValue {
 /// (`bindings`) plus the decrypted `values`. Delivered gateway→agent on the
 /// instance-start path. `Debug` is derived; the secret `values` redact
 /// themselves via [`EgressSecretValue`]'s hand-written `Debug`.
+// allow(secret-debug): nested EgressSecretValue implements redacting Debug;
+// the payload-level test below proves decrypted values never appear.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressSecretsPayload {
     /// Non-secret catalog: what the VM may egress and where.
