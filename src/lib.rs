@@ -14,6 +14,7 @@
 //! | [`runtime`] | mvm-runtime | Shell execution, VM lifecycle, template management |
 //! | [`build`] | mvm-build | Nix builder pipeline |
 //! | [`guest`] | mvm-agentd | Vsock protocol, integration manifest, guest agent |
+//! | [`hostd`] | mvm-hostd | Host daemon roles: substitution-endpoint config/assembly, secret keyholder (`FileBindingStore`, `SecretResolver`) |
 //!
 //! ## Usage
 //!
@@ -77,6 +78,17 @@ pub use mvm_build as build;
 ///
 /// See [`mvm_agentd`] for full documentation.
 pub use mvm_agentd as guest;
+
+/// Host daemon roles: the trusted supervisor library (substitution-endpoint
+/// `EndpointConfig`/`assemble`, egress proxy) and the secret keyholder
+/// (`SecretResolver`, `FileBindingStore`, the resolver wire protocol).
+/// mvmd's tenant-secrets vault (Phase 1 egress broker) uses this to write a
+/// VM's `SecretBindingMeta` (`auth_type`/`allowed_hosts`) into the per-VM
+/// binding store the substitution endpoint reads at spawn, and to build the
+/// `EndpointConfig` handed to it on stdin.
+///
+/// See [`mvm_hostd`] for full documentation.
+pub use mvm_hostd as hostd;
 
 // ============================================================================
 // Prelude

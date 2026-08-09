@@ -5,6 +5,11 @@ Last updated: 2026-08-08
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
+## Completed issue closeouts
+- [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
+      guest kernel now share the verified Linux 6.12.102 LTS source pin;
+      structural parity coverage prevents the consumers from drifting apart.
+
 ## In-flight plans
 - [~] Runtime hardening for production — plan 303, branch
       `feat/plan-303-runtime-hardening`
@@ -833,6 +838,9 @@ for detailed scope and acceptance criteria.
         actually excludes two threads
   - [x] `audit_signer::Chain` takes a sole-writer lock, writes each line in
         one `write_all`, and re-seeds its head after a failed append
+  - [x] An unverifiable chain reports as unverifiable, not as a missing audit
+        entry (#2258) — anchor returns `Err` naming the chains, distinct
+        `ClaimRefusal::LedgerUnverifiable`, and a `doctor` audit-chain line
   - [ ] Audit emission fails closed under `--prod` (currently advisory, so a
         missing entry leaves no gap to detect)
   - [ ] Converge the primary chain on JCS canonical bytes so no verifier has

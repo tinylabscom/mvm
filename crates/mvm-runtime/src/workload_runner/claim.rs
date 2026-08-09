@@ -26,6 +26,16 @@ pub enum ClaimRefusal {
     ParentNotClaimable,
     #[error("parent has no signed audit entry; refusing to fork an un-audited parent")]
     ParentUnaudited,
+    /// Distinct from [`Self::ParentUnaudited`] on purpose: there the parent
+    /// demonstrably has no creation entry, here the ledger cannot be read at
+    /// all, so whether the parent was audited is unknown. Same refusal, but the
+    /// operator's next move is to investigate a damaged chain rather than to
+    /// re-capture a parent.
+    #[error(
+        "the signed audit chain is unverifiable, so the parent's audit status cannot be \
+         determined; refusing to fork against a ledger that proves nothing"
+    )]
+    LedgerUnverifiable,
     #[error("parent record drifted from its sealed content; refusing a tampered parent")]
     ParentTampered,
     #[error("claim carries no admitted plan; refusing to fork without claim-8 authority")]

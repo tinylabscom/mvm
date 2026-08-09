@@ -36,6 +36,24 @@ fn rw_bridge_access() -> BitFlags<AccessFs> {
         | AccessFs::RemoveFile
 }
 
+/// Minimal `AccessFs` bit-set for a non-directory `read_write_paths` entry —
+/// today, only the M3 resolver-UDS grant (`ConfinementSpec::substitution_endpoint`'s
+/// `resolver_uds`, a socket special file, not a directory).
+///
+/// `rw_bridge_access()` above is tuned for the audit-dir's append +
+/// atomic-rename use case and includes directory-only rights (`ReadDir`,
+/// `MakeReg`, `Refer`, `RemoveFile`). Those rights are meaningless — and
+/// unenforceable — on a non-directory target; requesting them there
+/// downgrades the whole ruleset to `PartiallyEnforced`, which the fail-closed
+/// check in `apply()` refuses outright. `connect()`-ing to (and then
+/// reading/writing) an already-created UNIX domain socket file only needs the
+/// same open-for-read/open-for-write rights a regular file would: `ReadFile`
+/// and `WriteFile`. Notably absent: `MakeSock` — the resolver daemon creates
+/// the socket, this process only ever connects to it.
+fn rw_file_access() -> BitFlags<AccessFs> {
+    AccessFs::ReadFile | AccessFs::WriteFile
+}
+
 pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
     let abi = ABI::V2;
     let mut ruleset = Ruleset::default()
@@ -67,8 +85,20 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
     }
     for p in &spec.read_write_paths {
         let fd = PathFd::new(p).map_err(|e| path_open_error(p, e))?;
+        // Mirror the readable-paths branch above: directory-only rights
+        // requested on a non-directory target (e.g. the M3 resolver-UDS
+        // socket special file) downgrade the whole ruleset to
+        // `PartiallyEnforced`, which the fail-closed check below refuses.
+        // Grant the full directory rw set on directories (the audit dir's
+        // append + atomic-rename use case) and the narrower file-only set on
+        // non-directories (open-for-connect on the socket file).
+        let access = if p.is_dir() {
+            rw_access
+        } else {
+            rw_file_access()
+        };
         ruleset = ruleset
-            .add_rule(PathBeneath::new(fd, rw_access))
+            .add_rule(PathBeneath::new(fd, access))
             .map_err(|e| JailerError::LandlockApply(format!("{e:?}")))?;
     }
     let status: RestrictionStatus = ruleset
@@ -150,5 +180,22 @@ mod tests {
         assert!(access.contains(AccessFs::MakeReg));
         assert!(access.contains(AccessFs::Refer));
         assert!(access.contains(AccessFs::RemoveFile));
+    }
+
+    /// M3: the resolver-UDS grant must carry only file-open rights — no
+    /// directory-only bit, which would downgrade the whole ruleset to
+    /// `PartiallyEnforced` on the non-directory socket path (see
+    /// `rw_file_access`'s doc).
+    #[test]
+    fn rw_file_access_excludes_directory_only_bits() {
+        let access = rw_file_access();
+        assert!(access.contains(AccessFs::ReadFile));
+        assert!(access.contains(AccessFs::WriteFile));
+        assert!(!access.contains(AccessFs::ReadDir), "ReadDir granted");
+        assert!(!access.contains(AccessFs::MakeReg), "MakeReg granted");
+        assert!(!access.contains(AccessFs::Refer), "Refer granted");
+        assert!(!access.contains(AccessFs::RemoveFile), "RemoveFile granted");
+        assert!(!access.contains(AccessFs::MakeSock), "MakeSock granted");
+        assert!(!access.contains(AccessFs::Execute), "Execute granted");
     }
 }

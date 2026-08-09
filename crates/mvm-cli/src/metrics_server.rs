@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{
     Arc,
@@ -22,13 +22,23 @@ const MAX_SCRAPE_FILE_BYTES: usize = 1024 * 1024;
 pub struct MetricsServer {
     shutdown: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    local_addr: SocketAddr,
 }
 
 impl MetricsServer {
     /// Bind to `127.0.0.1:<port>` and start serving in a background thread.
+    ///
+    /// Port 0 binds an ephemeral port; read the actual one back with
+    /// [`MetricsServer::local_addr`].
     pub fn start(port: u16) -> Result<Self> {
         let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
             .with_context(|| format!("Failed to bind metrics server on port {}", port))?;
+        // Read the bound address before the listener moves into the thread. With
+        // port 0 the requested port is not the served one, so this is the only
+        // truthful thing to report or connect to.
+        let local_addr = listener
+            .local_addr()
+            .context("Failed to read metrics listener address")?;
         // Non-blocking accept so the shutdown flag is checked promptly.
         listener
             .set_nonblocking(true)
@@ -41,12 +51,19 @@ impl MetricsServer {
             serve_loop(listener, shutdown_clone);
         });
 
-        tracing::info!("Metrics available at http://127.0.0.1:{}/metrics", port);
+        tracing::info!("Metrics available at http://{}/metrics", local_addr);
 
         Ok(Self {
             shutdown,
             handle: Some(handle),
+            local_addr,
         })
+    }
+
+    /// The address actually bound, which differs from the requested port
+    /// whenever port 0 was requested.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
     }
 
     /// Signal the background thread to stop and wait for it to exit.
@@ -168,14 +185,11 @@ mod tests {
 
     #[test]
     fn test_metrics_server_binds() {
-        // Pick a port unlikely to be in use; retry once with a different port if needed.
-        let server = match MetricsServer::start(19091).or_else(|_| MetricsServer::start(19092)) {
-            Ok(server) => server,
-            Err(err) => {
-                eprintln!("skipping metrics server bind test: {err}");
-                return;
-            }
-        };
+        // Port 0: the kernel hands out a free ephemeral port, so this cannot
+        // collide with a sibling test, a previous run's leftover, or anything
+        // else on the host. A fixed port could, and the old "try 19091 then
+        // 19092, else skip" fallback turned that collision into a silent pass.
+        let server = MetricsServer::start(0).expect("binding 127.0.0.1:0 cannot fail for reuse");
         server.stop();
     }
 
@@ -184,23 +198,21 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::net::TcpStream;
 
-        let server = match MetricsServer::start(19093).or_else(|_| MetricsServer::start(19094)) {
-            Ok(server) => server,
-            Err(err) => {
-                eprintln!("skipping metrics server bind test: {err}");
-                return;
-            }
-        };
+        let server = MetricsServer::start(0).expect("binding 127.0.0.1:0 cannot fail for reuse");
 
-        // Give the background thread a moment to start.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // Determine which port actually bound by inspecting the local addr.
-        // Since we can't easily query the bound port from MetricsServer,
-        // try both candidate ports.
-        let stream = TcpStream::connect("127.0.0.1:19093")
-            .or_else(|_| TcpStream::connect("127.0.0.1:19094"))
-            .expect("should connect to metrics server");
+        // No sleep: `start` returns only after `bind` (and the implicit
+        // `listen`) have completed, so the kernel completes the handshake into
+        // the accept backlog whether or not the serve thread has reached
+        // `accept` yet. The old 50ms sleep was guessing at a race that does not
+        // exist, and under load it was the guess that failed, not the server.
+        //
+        // Connecting to the address the server actually bound also removes a
+        // wrong-target bug: the old code bound 19093-or-19094 and then
+        // connected to 19093-or-19094 independently, so a foreign process
+        // holding 19093 would be scraped instead, failing on a response this
+        // server never sent.
+        let stream = TcpStream::connect(server.local_addr())
+            .expect("should connect to the port the server reported");
 
         let mut stream_clone = stream.try_clone().unwrap();
         stream_clone

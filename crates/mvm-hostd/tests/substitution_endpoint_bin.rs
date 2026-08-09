@@ -17,7 +17,9 @@ use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::plan::{SecretBinding, SecretSource};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
-use mvm_hostd::supervisor::substitution_endpoint::{EgressMode, EndpointConfig, EndpointTransport};
+use mvm_hostd::supervisor::substitution_endpoint::{
+    EgressMode, EndpointConfig, EndpointTransport, ResolverBackend,
+};
 use secrecy::SecretBox;
 
 const BIN: &str = env!("CARGO_BIN_EXE_mvm-substitution-endpoint");
@@ -89,7 +91,8 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         terminator_listen: None,
         tls_intermediate: None,
         network_policy: None,
-        egress_mode: mvm_hostd::supervisor::substitution_endpoint::EgressMode::Wire,
+        egress_mode: EgressMode::Wire,
+        resolver: ResolverBackend::default(),
     };
 
     let mut child = Command::new(BIN)
@@ -192,6 +195,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         // Deny-all: the endpoint gates every destination — even the bound one.
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
         egress_mode: mvm_hostd::supervisor::substitution_endpoint::EgressMode::Wire,
+        resolver: ResolverBackend::default(),
     };
 
     let mut child = Command::new(BIN)
@@ -261,6 +265,7 @@ fn endpoint_bin_raw_no_secret_mode_handshakes_without_placeholders() {
             )],
         )),
         egress_mode: EgressMode::Raw,
+        resolver: ResolverBackend::default(),
     };
 
     let mut child = Command::new(BIN)

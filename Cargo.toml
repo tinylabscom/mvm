@@ -399,6 +399,12 @@ mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 mvm-agentd.workspace = true
 mvm-cli = { workspace = true, default-features = false }
+# mvmd's tenant-secrets vault (Phase 1 egress broker, plan 202-remote-resolver)
+# needs `EndpointConfig`/`assemble`/`FileBindingStore` to spawn a per-VM
+# substitution endpoint. `default = []` already on mvm-hostd, so this is a
+# no-op feature-wise; it's already in the graph transitively via mvm-cli
+# (`mvmctl secret set`), this just names it at the facade root too.
+mvm-hostd.workspace = true
 anyhow.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

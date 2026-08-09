@@ -10,6 +10,28 @@
 
 ## Current issue delivery
 
+- [x] Audit-chain verification failure no longer reports as "never audited" —
+      **issue #2258, plan 302 WS6**. `SignedChainAnchor` remembers the chains
+      that failed verification and returns `Err` naming them when a lookup
+      misses, instead of an `Ok(None)` the caller renders as "this checkpoint
+      has no signed audit entry". The record may well be audited; the ledger is
+      what cannot be read, and the two call for opposite responses. A miss with
+      every chain clean keeps the old message, which is then true. The verdict
+      is fail-closed either way — only the reason changes. `NO_SIGNED_ENTRY` and
+      `LEDGER_UNVERIFIABLE` are now shared sentinels rather than retyped
+      literals, the warm-pool seam gained `ClaimRefusal::LedgerUnverifiable`
+      (an unreadable ledger used to fall through to "parent tampered"), and
+      `mvmctl doctor` grows an `audit chain` line that fails when a chain does
+      not verify. No repair/reset verb: a chain that can be reset on demand
+      cannot detect tampering. Running the new doctor line on a real host
+      immediately caught a latent mis-scan this work would otherwise have
+      promoted into a hard failure: the unsigned `secrets.jsonl` operator log
+      matches the `<tenant>.jsonl` lifecycle shape by accident, and only
+      `mvm-client` excluded it. `SECRETS_OPERATOR_LOG` now lives in
+      `mvm-core::config` and one predicate serves all three sweeps. 14 new
+      tests, all against a synthesized and deliberately damaged chain in a temp
+      `MVM_HOME`.
+
 - [~] Open issue closeout — **plan 300**. The 22 open issues were reconciled
       on 2026-08-08 into explicit closure gates and dependency order in
       `specs/plans/300-open-issue-closeout.md`. #2192 is now closed as completed;
@@ -34,6 +56,12 @@
       the four unconfined moat roles — the Landlock machinery already exists,
       but each role needs an audited seccomp allowlist validated on live Linux,
       which should follow the `feat/seccomp-audit` tooling.
+
+- [x] Kernel pin freshness — **issue #2128**. Synchronized the libkrunfw
+      bundle and custom guest kernel on the verified Linux 6.12.102 LTS
+      tarball, replacing the stale 6.12.100 pin. Structural parity tests keep
+      both consumers on one version/hash, and the existing freshness check
+      refuses a point release that trails kernel.org.
 
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned

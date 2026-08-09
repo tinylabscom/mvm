@@ -33,6 +33,37 @@ Everything else returns EACCES at the kernel level. Sockets are
 inherited fds or opened by the endpoint itself, not opened by name from
 the ruleset, so no network paths appear in it.
 
+## `mvm-substitution-endpoint` — resolver UDS (M3)
+
+`ConfinementSpec::substitution_endpoint(..., resolver_uds)` additionally
+grants `read_write_paths` on the fleet-secrets daemon's UDS path when
+the endpoint's `ResolverBackend` is `Remote { uds_path, .. }` — `Local`
+(`resolver_uds: None`) leaves the ruleset unchanged. Unlike every other
+entry in `read_write_paths` (which are directories), the resolver UDS
+is a socket special file, so it gets the narrower `rw_file_access()`
+bit-set (`ReadFile | WriteFile` only) rather than `rw_bridge_access()`'s
+directory rights — `ReadDir` / `MakeReg` / `Refer` / `RemoveFile` are
+meaningless on a non-directory target and downgrade the whole ruleset
+to `PartiallyEnforced` if requested there (`landlock.rs::apply()`
+branches on `path.is_dir()` for exactly this reason). `MakeSock` is
+deliberately absent — the resolver daemon creates the socket; this
+process only ever `connect()`s to it.
+
+This grant is also, deliberately, **not** filtered through
+`existing_paths()` the way the readable TLS/DNS paths are. `Remote`
+mode is useless without the resolver reachable, so a missing socket
+path should surface as Landlock's own `PathNotFound` (fail-closed) —
+not silently vanish into an empty grant that lets confinement
+"succeed" while `Remote` can never resolve anything.
+
+No seccomp change accompanies this grant: `socket` / `connect` / `read`
+/ `write` / `setsockopt` are already unconditionally in the endpoint's
+`allowed_syscalls` (the TLS forward leg's TCP egress already needs
+them), and seccomp here filters by syscall number only — there is no
+per-call AF_UNIX-vs-AF_INET argument predicate to narrow. The
+confinement narrowing for `Remote` is entirely a Landlock (path)
+concern; see `SECCOMP.md` for the syscall table.
+
 ABI v2 (Linux 5.19+) required for the file-execute permission split —
 v1 collapses read + exec into a single bit, which would force us to
 choose between letting the confined role exec into other binaries or
