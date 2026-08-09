@@ -11,12 +11,7 @@ use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
-/// Filename of the persisted supervisor launch config inside a vm_full
-/// checkpoint's content dir. Present only on checkpoints captured from a
-/// backend that writes a supervisor config (today, HVF); Firecracker
-/// checkpoints omit it, which is how
-/// [`checkpoint_carries_supervisor_config`] distinguishes them.
-pub const SUPERVISOR_CONFIG_FILE_NAME: &str = "supervisor-config.json";
+pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_NAME;
 
 /// Filesystem-backed registry over `config::checkpoints_dir()` (or any root,
 /// for tests). Layout: `<root>/<id>/meta.json` + `<root>/<id>/content/`.
@@ -322,20 +317,11 @@ const FORK_ALLOW_PARENT_RUNNING: bool = false;
 
 /// Stages a forked child's snapshot into position and starts the VM, given the
 /// child's VM name and its state dir (with all checkpoint blobs already cloned
-/// there). Taken as a callback so [`fork_vm_full_fc`] is testable without a
-/// live hypervisor.
+/// there). Taken as a callback so [`fork_vm_full`] is testable without a live
+/// hypervisor, and so the VMM-specific restorers can live in `mvm-backends`
+/// without this crate naming them: `FcForkRestorer` loads Firecracker's
+/// snapshot triple, `HvfForkRestorer` maps private RAM and restores the frame.
 pub type ForkRestore<'a> = dyn Fn(&str, &Path) -> Result<()> + 'a;
-
-/// Returns `true` when the checkpoint's content manifest carries a
-/// `supervisor-config.json` blob — i.e. it was captured from a backend that
-/// rebuilds its VMM from a persisted supervisor config (today, HVF).
-/// Firecracker checkpoints omit that blob, so this dispatches fork to the
-/// right path.
-pub fn checkpoint_carries_supervisor_config(meta: &mvm_core::checkpoint::CheckpointMeta) -> bool {
-    meta.content
-        .iter()
-        .any(|b| b.name == SUPERVISOR_CONFIG_FILE_NAME)
-}
 
 /// Branch a new sandbox lineage from a checkpoint: verify the source content's
 /// integrity AND its content-address against the signed audit chain, CoW-clone
@@ -347,7 +333,7 @@ pub fn checkpoint_carries_supervisor_config(meta: &mvm_core::checkpoint::Checkpo
 /// edited after it was audited — fail-closed.
 ///
 /// fs_quick only — a vm_full checkpoint carries saved memory and must be forked
-/// through [`fork_vm_full_fc`], which restores the memory state into the new
+/// through [`fork_vm_full`], which restores the memory state into the new
 /// identity.
 pub fn fork_checkpoint(
     store: &CheckpointStore,
@@ -357,7 +343,7 @@ pub fn fork_checkpoint(
     let parent = store.read_meta(&params.checkpoint)?;
     if parent.class != CheckpointClass::FsQuick {
         anyhow::bail!(
-            "cannot fork checkpoint '{}' (class vm_full) via fork_checkpoint; use fork_vm_full_fc",
+            "cannot fork checkpoint '{}' (class vm_full) via fork_checkpoint; use fork_vm_full",
             parent.id
         );
     }
@@ -394,16 +380,15 @@ pub fn fork_checkpoint(
     Ok(child)
 }
 
-/// Branch a new FC VM identity from a Firecracker vm_full checkpoint and boot
-/// it via a fresh Firecracker VMM loaded from the checkpoint snapshot.
+/// Branch a new VM identity from a vm_full checkpoint and boot it from the
+/// saved machine state.
 ///
-/// FC checkpoints carry `{rootfs.ext4, memory.bin, vmstate.bin}` instead of a
-/// supervisor config.
-/// The child's blobs are cloned into `dest_dir`; `memory.bin` is renamed to
-/// `mem.bin` (Firecracker's canonical load name); a fresh FC VMM is started and
-/// `PUT /snapshot/load` restores the child's state; then the lineage checkpoint
-/// record is written.
-pub fn fork_vm_full_fc(
+/// Backend-neutral: the clone, the verity-binding check and the lineage record
+/// are the same for every VMM, and `restorer` owns the VMM-specific load
+/// (Firecracker's `PUT /snapshot/load`, HVF's private RAM mapping plus frame
+/// restore). The child's blobs are cloned into `dest_dir` and it boots from its
+/// OWN copies, never the parent's.
+pub fn fork_vm_full(
     store: &CheckpointStore,
     params: ForkParams,
     restore: &ForkRestore<'_>,
@@ -412,7 +397,7 @@ pub fn fork_vm_full_fc(
     let parent = store.read_meta(&params.checkpoint)?;
     if parent.class != CheckpointClass::VmFull {
         anyhow::bail!(
-            "cannot fork_vm_full_fc checkpoint '{}' (class fs_quick); use fork_checkpoint",
+            "cannot fork_vm_full checkpoint '{}' (class fs_quick); use fork_checkpoint",
             parent.id
         );
     }
@@ -477,7 +462,7 @@ pub fn fork_vm_full_fc(
     Ok(child)
 }
 
-/// Ensure a cloned FC checkpoint keeps the complete dm-verity binding and the
+/// Ensure a cloned checkpoint keeps the complete dm-verity binding and the
 /// device-path metadata needed to remap snapshot references to child files.
 fn validate_fork_verity_binding(parent: &CheckpointMeta, child_dir: &Path) -> Result<()> {
     let has_verity = parent
@@ -490,14 +475,14 @@ fn validate_fork_verity_binding(parent: &CheckpointMeta, child_dir: &Path) -> Re
         .any(|blob| blob.name == "rootfs.roothash");
     anyhow::ensure!(
         has_verity == has_roothash,
-        "FC checkpoint '{}' has an incomplete dm-verity sidecar set",
+        "checkpoint '{}' has an incomplete dm-verity sidecar set",
         parent.id
     );
 
     let anchors_path = child_dir.join("device-anchors.json");
     anyhow::ensure!(
         anchors_path.is_file(),
-        "FC checkpoint '{}' is missing device-anchors.json",
+        "checkpoint '{}' is missing device-anchors.json",
         parent.id
     );
     let anchors: DeviceAnchors = serde_json::from_slice(
@@ -511,13 +496,13 @@ fn validate_fork_verity_binding(parent: &CheckpointMeta, child_dir: &Path) -> Re
             anchors.rootfs_verity.is_some()
                 && child_dir.join("rootfs.verity").is_file()
                 && child_dir.join("rootfs.roothash").is_file(),
-            "FC checkpoint '{}' would drop its dm-verity binding during fork",
+            "checkpoint '{}' would drop its dm-verity binding during fork",
             parent.id
         );
     } else {
         anyhow::ensure!(
             anchors.rootfs_verity.is_none(),
-            "FC checkpoint '{}' has a verity device anchor without sidecars",
+            "checkpoint '{}' has a verity device anchor without sidecars",
             parent.id
         );
     }
@@ -570,8 +555,12 @@ fn validate_child_fork_plan(params: &ForkParams) -> Result<()> {
 ///
 /// Delegates to the shared marker list so a backend cannot be live here and
 /// stopped elsewhere. This gates the refuse-to-fork-a-live-parent rule, so a
-/// marker this probe does not know reads as stopped and lets a fork through.
-fn vm_is_running(vm_name: &str) -> bool {
+/// marker this probe does not know reads as stopped and lets a fork through —
+/// `vm_is_running_covers_every_catalog_pid_marker` holds the shared list to
+/// every backend the catalog registers. Delegating also picks up the
+/// `EPERM`-means-alive rule, which matters for a root-owned Firecracker: a bare
+/// `kill(pid, 0) == 0` reads that as stopped.
+pub fn vm_is_running(vm_name: &str) -> bool {
     mvm_vmm::host::process_liveness::state_dir_has_live_process(&mvm_core::config::vm_state_dir(
         vm_name,
     ))
@@ -594,6 +583,13 @@ pub struct CaptureVmFullParams {
     pub supervisor_config_src: Option<PathBuf>,
     pub tag: Option<String>,
     pub created_unix: u64,
+    /// Whether the caller wants the source VM left paused after a successful
+    /// capture. Only the warm pool does: for it the paused parent *is* the
+    /// claim resource, and the checkpoint is an integrity witness beside it. A
+    /// user checkpointing their own running VM wants it running afterwards, so
+    /// this is `false` on the CLI path. Retention still requires the backend to
+    /// support it — the two must agree.
+    pub retain_paused: bool,
 }
 
 /// Capture a running VM's consistent {rootfs, memory, machine-id} triple in one
@@ -667,11 +663,12 @@ fn capture_vm_full_inner(
         }
         Ok::<(), anyhow::Error>(())
     })();
-    let resumed = if control.retain_paused_after_capture() && captured.is_ok() {
-        Ok(())
-    } else {
-        control.resume()
-    };
+    let resumed =
+        if params.retain_paused && control.retain_paused_after_capture() && captured.is_ok() {
+            Ok(())
+        } else {
+            control.resume()
+        };
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
 
@@ -867,19 +864,54 @@ pub trait VmFullRestore {
     ) -> Result<()>;
 }
 
+/// The same-identity restore mechanism for the VMM that produced `meta`.
+///
+/// Dispatch is on the machine-state blob the content manifest names, never on a
+/// stored backend label: the bytes a restore would load are what decides which
+/// VMM can load them, and a label can drift from them.
+pub fn vm_full_restorer_for(meta: &CheckpointMeta) -> Result<Box<dyn VmFullRestore>> {
+    match mvm_core::checkpoint::vm_full_origin(meta) {
+        Some(mvm_core::checkpoint::VmFullOrigin::Hvf) => {
+            Ok(Box::new(crate::hvf_restore::HvfVmFullRestore))
+        }
+        Some(mvm_core::checkpoint::VmFullOrigin::Firecracker) => anyhow::bail!(
+            "checkpoint '{}' was captured on Firecracker, which loads a saved machine state \
+             only into a fresh child identity; use `mvmctl machine warm-restore {}`",
+            meta.id,
+            meta.id
+        ),
+        Some(mvm_core::checkpoint::VmFullOrigin::Retired) => anyhow::bail!(
+            "checkpoint '{}' was captured under a backend that has been removed; nothing on \
+             this host can load its saved machine state",
+            meta.id
+        ),
+        None => anyhow::bail!(
+            "checkpoint '{}' names no saved machine state; there is nothing to restore",
+            meta.id
+        ),
+    }
+}
+
 pub struct RestoreParams {
     pub checkpoint: CheckpointId,
     /// Name of the VM to restore into (must match the supervisor-config shape).
     pub target_vm: String,
 }
 
-/// Resume a VM from a vm_full checkpoint (same identity). Verifies the manifest,
-/// then hands the three blob paths to the restore seam. Refusing fs_quick here is
-/// deliberate: fs_quick has no memory state, so `fork_checkpoint` is the right verb.
+/// Resume a VM from a vm_full checkpoint (same identity). Verifies the manifest
+/// AND the record's content-address against the signed audit chain, then hands
+/// the blob paths to the restore seam. Refusing fs_quick here is deliberate:
+/// fs_quick has no memory state, so `fork_checkpoint` is the right verb.
+///
+/// The chain check is the same fail-closed gate `fork_checkpoint` and
+/// [`fork_vm_full`] run, for the same reason: bringing a machine back to life is
+/// at least as consequential as branching from it, so a record edited after it
+/// was audited must not be restorable either.
 pub fn restore_checkpoint(
     store: &CheckpointStore,
     params: RestoreParams,
     restore: &dyn VmFullRestore,
+    anchor: &dyn CheckpointChainAnchor,
 ) -> Result<()> {
     let meta = store.read_meta(&params.checkpoint)?;
     if meta.class != CheckpointClass::VmFull {
@@ -890,6 +922,7 @@ pub fn restore_checkpoint(
         );
     }
     verify_content(store, &meta)?;
+    verify_checkpoint_against_chain(anchor, &meta)?;
     let dir = store.content_dir(&meta.id);
 
     // The checkpoint carries the launch config (for checkpoints captured after
@@ -1548,6 +1581,77 @@ mod tests {
         }
     }
 
+    /// A control that can hold its VM paused after a capture, as the HVF one
+    /// does for the warm pool.
+    struct RetainingControl(MockControl);
+    impl VmFullControl for RetainingControl {
+        fn pause(&self) -> Result<()> {
+            self.0.pause()
+        }
+        fn resume(&self) -> Result<()> {
+            self.0.resume()
+        }
+        fn save_memory(&self, memory_path: &Path) -> Result<()> {
+            self.0.save_memory(memory_path)
+        }
+        fn rootfs_path(&self) -> Result<PathBuf> {
+            self.0.rootfs_path()
+        }
+        fn device_anchors(&self) -> Result<DeviceAnchors> {
+            self.0.device_anchors()
+        }
+        fn retain_paused_after_capture(&self) -> bool {
+            true
+        }
+    }
+
+    fn capture_with_retention(retain_paused: bool) -> Vec<&'static str> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = tmp.path().join("live-rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let ctl = RetainingControl(MockControl {
+            rootfs,
+            events: RefCell::new(vec![]),
+        });
+        capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: CheckpointId::new("retain"),
+                vm_name: "vm".into(),
+                supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: 9,
+                retain_paused,
+            },
+            &ctl,
+        )
+        .unwrap();
+        let events = ctl.0.events.borrow().clone();
+        drop(ctl);
+        events
+    }
+
+    /// Retention takes both: a backend that can hold the pause AND a caller
+    /// that wants it. Only the warm pool wants it — for the pool the paused
+    /// parent is the claim resource. A user checkpointing their own running VM
+    /// must get it back running, so the CLI asks for no retention and the
+    /// capture resumes even on a retention-capable backend.
+    #[test]
+    fn capture_resumes_unless_the_caller_asks_for_retention() {
+        assert!(
+            capture_with_retention(false).contains(&"resume"),
+            "a caller that did not ask for retention must get its VM resumed"
+        );
+        assert!(
+            !capture_with_retention(true).contains(&"resume"),
+            "the warm pool keeps its captured parent paused"
+        );
+    }
+
     #[test]
     fn capture_vm_full_orders_pause_save_clone_resume_and_builds_triple() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1571,6 +1675,7 @@ mod tests {
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 9,
+                retain_paused: false,
             },
             &ctl,
         )
@@ -1622,6 +1727,7 @@ mod tests {
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 10,
+                retain_paused: false,
             },
             &ctl,
         )
@@ -1684,6 +1790,7 @@ mod tests {
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 11,
+                retain_paused: false,
             },
             &ctl,
         )
@@ -1739,6 +1846,7 @@ mod tests {
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 1,
+                retain_paused: false,
             },
             &ctl,
         )
@@ -1761,6 +1869,7 @@ mod tests {
                 target_vm: "origin".into(),
             },
             &restore,
+            &AgreeingAnchor,
         )
         .unwrap();
         let (vm, r, m, mid) = restore.seen.borrow().clone().unwrap();
@@ -1793,6 +1902,7 @@ mod tests {
                 target_vm: "origin".into(),
             },
             &restore,
+            &AgreeingAnchor,
         )
         .unwrap_err();
         assert!(
@@ -1820,6 +1930,7 @@ mod tests {
                 target_vm: "origin".into(),
             },
             &restore,
+            &AgreeingAnchor,
         )
         .unwrap_err();
         assert!(
@@ -2027,6 +2138,7 @@ mod tests {
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 1,
+                retain_paused: false,
             },
             &ctl,
         )
@@ -2087,6 +2199,7 @@ mod tests {
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 2,
+                retain_paused: false,
             },
             &ctl,
         )
@@ -2107,37 +2220,77 @@ mod tests {
         );
     }
 
-    // ── checkpoint_carries_supervisor_config ────────────────────────────────
+    // ── vm_full_origin ──────────────────────────────────────────────────────
 
+    use mvm_core::checkpoint::{VmFullOrigin, vm_full_origin};
+
+    /// A supervisor-config checkpoint with no recognizable machine-state blob
+    /// was captured by a backend that has since been removed: nothing on this
+    /// host can load it, so every consumer must refuse rather than guess.
     #[test]
-    fn supervisor_config_detected_when_the_blob_is_present() {
+    fn vm_full_origin_reports_retired_for_a_supervisor_config_only_checkpoint() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
-        let meta = seed_vm_full_checkpoint(&store, tmp.path(), "supcfg1");
-        assert!(
-            checkpoint_carries_supervisor_config(&meta),
-            "a supervisor-config-bearing checkpoint is detected by the blob"
-        );
+        let meta = seed_vm_full_checkpoint(&store, tmp.path(), "supcfg-only");
+        assert_eq!(vm_full_origin(&meta), Some(VmFullOrigin::Retired));
     }
 
     #[test]
-    fn supervisor_config_absent_for_fc_checkpoint() {
+    fn vm_full_origin_reports_firecracker_for_a_vmstate_checkpoint() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let meta = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fc1");
-        assert!(
-            !checkpoint_carries_supervisor_config(&meta),
-            "FC checkpoint has no supervisor-config.json blob"
-        );
+        assert_eq!(vm_full_origin(&meta), Some(VmFullOrigin::Firecracker));
+    }
+
+    /// The HVF frame wins over a supervisor-config blob: an HVF checkpoint
+    /// carries both, and the machine-state blob is what decides who can load it.
+    #[test]
+    fn vm_full_origin_reports_hvf_when_the_frame_blob_is_present() {
+        let mut meta =
+            CheckpointMeta::builder(CheckpointId::new("hvf1"), CheckpointClass::VmFull, "hvf-vm")
+                .content(vec![
+                    ContentBlob {
+                        name: mvm_core::checkpoint::MEMORY_BLOB.into(),
+                        sha256: "a".into(),
+                    },
+                    ContentBlob {
+                        name: mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB.into(),
+                        sha256: "b".into(),
+                    },
+                    ContentBlob {
+                        name: mvm_core::checkpoint::HVF_FRAME_BLOB.into(),
+                        sha256: "c".into(),
+                    },
+                ])
+                .build();
+        assert_eq!(vm_full_origin(&meta), Some(VmFullOrigin::Hvf));
+        // Strip the frame and the same record reads as the retired backend's.
+        meta.content
+            .retain(|b| b.name != mvm_core::checkpoint::HVF_FRAME_BLOB);
+        assert_eq!(vm_full_origin(&meta), Some(VmFullOrigin::Retired));
+    }
+
+    /// An fs_quick manifest names no machine state at all.
+    #[test]
+    fn vm_full_origin_is_none_without_any_machine_state_blob() {
+        let meta =
+            CheckpointMeta::builder(CheckpointId::new("fsq"), CheckpointClass::FsQuick, "vm")
+                .content(vec![ContentBlob {
+                    name: mvm_core::checkpoint::ROOTFS_BLOB.into(),
+                    sha256: "a".into(),
+                }])
+                .build();
+        assert_eq!(vm_full_origin(&meta), None);
     }
 
     #[test]
-    fn fork_vm_full_fc_rejects_parent_identity_collisions() {
+    fn fork_vm_full_rejects_parent_identity_collisions() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fc-identity-parent");
 
-        let same_checkpoint = fork_vm_full_fc(
+        let same_checkpoint = fork_vm_full(
             &store,
             ForkParams {
                 checkpoint: parent.id.clone(),
@@ -2154,7 +2307,7 @@ mod tests {
         .unwrap_err();
         assert!(same_checkpoint.to_string().contains("child checkpoint id"));
 
-        let same_vm = fork_vm_full_fc(
+        let same_vm = fork_vm_full(
             &store,
             ForkParams {
                 checkpoint: parent.id.clone(),
@@ -2172,30 +2325,39 @@ mod tests {
         assert!(same_vm.to_string().contains("child VM name"));
     }
 
-    /// Every workload backend's marker counts, not just Firecracker's. This
-    /// probe gates the refuse-to-fork-a-live-parent rule, so a backend whose
-    /// marker went unrecognised would read as stopped and let a fork proceed
-    /// against a running VM.
+    /// Every registered backend's marker counts, not a hand-kept subset. The
+    /// probe reads one shared marker list, so this test drives it from the
+    /// backend catalog instead: a backend that grows a pid file but never
+    /// reaches that list goes red here rather than silently reading as stopped.
+    /// That matters because this probe gates the refuse-to-fork-a-live-parent
+    /// rule — an unrecognised marker lets a fork proceed against a running VM.
+    /// A marker no registered backend owns is, conversely, not liveness.
     #[test]
-    fn vm_is_running_detects_every_workload_backend_pid_marker() {
+    fn vm_is_running_covers_every_catalog_pid_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set("MVM_HOME", tmp.path());
         let state = mvm_core::config::vm_state_dir("pid-check");
         std::fs::create_dir_all(&state).unwrap();
 
-        for marker in ["fc.pid", "hvf.pid", "libkrun.pid", "qemu.pid"] {
+        let markers: Vec<&str> = crate::catalog::started_vm_probe_descriptors()
+            .into_iter()
+            .filter_map(|descriptor| descriptor.marker_file)
+            .collect();
+        assert!(
+            markers.contains(&"hvf.pid") && markers.contains(&"fc.pid"),
+            "the catalog must expose the HVF and Firecracker markers: {markers:?}"
+        );
+        for marker in &markers {
             std::fs::write(state.join(marker), std::process::id().to_string()).unwrap();
-            assert!(
-                vm_is_running("pid-check"),
-                "{marker} must read as a live parent"
-            );
+            assert!(vm_is_running("pid-check"), "{marker} must read as live");
             std::fs::remove_file(state.join(marker)).unwrap();
         }
 
+        std::fs::write(state.join("retired.pid"), std::process::id().to_string()).unwrap();
         assert!(
             !vm_is_running("pid-check"),
-            "no marker left means the VM is stopped"
+            "a marker no registered backend owns is not liveness"
         );
     }
 
@@ -2267,6 +2429,7 @@ mod tests {
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 1,
+                retain_paused: false,
             },
             &ctl,
         )
@@ -2303,7 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_vm_full_fc_clones_triple_and_records_lineage() {
+    fn fork_vm_full_clones_triple_and_records_lineage() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv1");
@@ -2311,7 +2474,7 @@ mod tests {
 
         let dest = tmp.path().join("childvm-state");
         let restorer = RecordedRestore::default();
-        let child = fork_vm_full_fc(
+        let child = fork_vm_full(
             &store,
             ForkParams {
                 checkpoint: parent.id.clone(),
@@ -2347,12 +2510,12 @@ mod tests {
     }
 
     #[test]
-    fn fork_vm_full_fc_refuses_missing_child_admission() {
+    fn fork_vm_full_refuses_missing_child_admission() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv-missing-plan");
         let restorer = RecordedRestore::default();
-        let err = fork_vm_full_fc(
+        let err = fork_vm_full(
             &store,
             ForkParams {
                 checkpoint: parent.id,
@@ -2415,12 +2578,12 @@ mod tests {
     }
 
     #[test]
-    fn fork_vm_full_fc_refuses_fs_quick() {
+    fn fork_vm_full_refuses_fs_quick() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let fsq = seed_fs_quick_checkpoint(&store, tmp.path(), "fcp1");
         let restorer = RecordedRestore::default();
-        let err = fork_vm_full_fc(
+        let err = fork_vm_full(
             &store,
             ForkParams {
                 checkpoint: fsq.id.clone(),
