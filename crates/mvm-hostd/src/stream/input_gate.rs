@@ -1005,6 +1005,43 @@ mod tests {
     /// Fixed so a test can verify the scratch chain's signatures.
     pub(super) const TEST_CHAIN_SEED: [u8; 32] = [9u8; 32];
 
+    /// A lease that has already lapsed when it is taken, so no test has to
+    /// sleep to watch one expire.
+    ///
+    /// The degenerate TTL, and the one to reach for first: `is_live` is
+    /// `now < expires_at`, so a zero TTL expires the instant it is claimed.
+    /// Deterministic and free. Use it whenever nothing has to be written
+    /// through the lease *before* it lapses — pair it with [`LIVE_LEASE_TTL`]
+    /// re-bound before the successor opens, since `bind` replaces the binding
+    /// and leaves the lease table alone.
+    const ALREADY_LAPSED: Duration = Duration::ZERO;
+
+    /// A lease that must be live for a write and lapse only afterwards, with
+    /// the wait that outlives it.
+    ///
+    /// [`ALREADY_LAPSED`] cannot express this: the write has to be admitted
+    /// first, so the lease has to be live first, so the test has to wait the
+    /// TTL out. That makes the TTL the *window the write has to land in*, and
+    /// it is therefore sized from measurement rather than taste. Sampling
+    /// adjacent-statement stalls on a 16-core host while the `mvm-hostd` suite
+    /// ran under 2x CPU oversubscription measured 27 stalls over 20ms in a
+    /// single pass, the worst 298ms. At the previous 20ms a writer descheduled
+    /// between `open` and its first `write` lost the lease mid-setup and the
+    /// write was refused — the flake, 3-4 times per full-suite run.
+    ///
+    /// One second gives the write roughly 3x the worst stall seen under load
+    /// harsher than CI.
+    const LAPSING_LEASE_TTL: Duration = Duration::from_secs(1);
+
+    /// A wait that outlives [`LAPSING_LEASE_TTL`] with room for the sleep
+    /// itself to be scheduled late.
+    const PAST_THE_LEASE: Duration = Duration::from_millis(1300);
+
+    /// For a lease that must stay live to the end of the test. Nothing waits
+    /// this out, so it is sized to be unreachable by scheduler jitter rather
+    /// than merely unlikely.
+    const LIVE_LEASE_TTL: Duration = Duration::from_secs(30);
+
     /// The scratch chain every test in this module shares, created once per
     /// test process.
     pub(super) fn test_chain_dir() -> &'static Path {
@@ -1393,7 +1430,7 @@ mod tests {
         // test failed exactly that way on a loaded CI runner, at a 20ms TTL
         // with a 40ms sleep.
         let vm = unique_vm("vm-lease-expiry");
-        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(Duration::ZERO));
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(ALREADY_LAPSED));
         let plan = admitted_with(vec![stream_service()]);
         let mut stale = InputGate::open(&vm, &plan).expect("first session");
 
@@ -1402,10 +1439,7 @@ mod tests {
         // Re-bind before the second open so the taker gets a live lease.
         // `bind` replaces the binding and leaves the lease table alone (only
         // `unbind` clears it), so the lapsed lease is still there to take over.
-        InputGate::bind(
-            &vm,
-            InputBinding::new().with_lease_ttl(Duration::from_secs(3600)),
-        );
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(LIVE_LEASE_TTL));
         let mut fresh = InputGate::open(&vm, &plan).expect("a lapsed lease is takeable");
         assert!(matches!(
             stale.write(InputFrame {
@@ -1429,14 +1463,16 @@ mod tests {
     #[test]
     fn a_write_refreshes_the_lease() {
         let vm = unique_vm("vm-lease-refresh");
-        InputGate::bind(
-            &vm,
-            InputBinding::new().with_lease_ttl(Duration::from_millis(60)),
-        );
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(LAPSING_LEASE_TTL));
         let plan = admitted_with(vec![stream_service()]);
         let mut session = InputGate::open(&vm, &plan).expect("first session");
+        // Four gaps of this size outlast the TTL, so reaching the end proves
+        // the writes refreshed it. Each gap still has to leave a write room to
+        // land inside the TTL, so the gap is the TTL less a wide margin for a
+        // late wakeup — see `LAPSING_LEASE_TTL` for where the margin comes from.
+        const BETWEEN_WRITES: Duration = Duration::from_millis(300);
         for seq in 0..4u64 {
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(BETWEEN_WRITES);
             session
                 .write(InputFrame {
                     seq,
@@ -1455,10 +1491,7 @@ mod tests {
         // session at compile time, but expiry is a runtime condition, so both
         // of A's byte-extraction paths have to check it too.
         let vm = unique_vm("vm-interleave");
-        InputGate::bind(
-            &vm,
-            InputBinding::new().with_lease_ttl(Duration::from_millis(20)),
-        );
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(LAPSING_LEASE_TTL));
         let plan = admitted_with(vec![stream_service()]);
         let mut stalled = InputGate::open(&vm, &plan).expect("first session");
         stalled
@@ -1468,7 +1501,10 @@ mod tests {
             })
             .expect("cleared while the lease was live");
 
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(PAST_THE_LEASE);
+        // A's lease is the one under test; B's only has to still be there at
+        // the end, so it is not left racing the clock too.
+        InputGate::bind(&vm, InputBinding::new().with_lease_ttl(LIVE_LEASE_TTL));
         let mut successor = InputGate::open(&vm, &plan).expect("a lapsed lease is takeable");
         successor
             .write(InputFrame {
@@ -1692,6 +1728,69 @@ mod tests {
         );
     }
 
+    /// A test lease must be sized by a named constant, never by a magnitude
+    /// picked in place.
+    ///
+    /// The magnitudes are how this went wrong: a lease TTL is not only how long
+    /// the lease survives, it is the window every write before the lapse has to
+    /// land in. Written as `from_millis(20)` that reads like "a short lease",
+    /// not like "this test fails if the host stalls for 20ms" — and on a loaded
+    /// host stalls over 20ms happened 27 times in one suite pass. Seven tests
+    /// across four files flaked on it.
+    ///
+    /// `Duration::ZERO` is deliberately allowed: it is not a guess about how
+    /// fast the host is, it is the exact statement "already lapsed", and it is
+    /// the technique that removes the wait entirely. `from_millis` /
+    /// `from_secs` are the ones that encode an assumption about scheduling,
+    /// and those must come from a constant whose docs carry the measurement.
+    /// This checks the test halves only: production has its own default, and
+    /// the setter's own signature names `Duration`.
+    #[test]
+    fn a_test_lease_is_sized_by_a_named_constant_not_a_literal() {
+        // Every file that binds a lease from a test, including the integration
+        // tests, which are where three of the seven flakes lived.
+        let sources: [(&str, &str); 4] = [
+            ("input_gate.rs", include_str!("input_gate.rs")),
+            ("input_route.rs", include_str!("input_route.rs")),
+            (
+                "tests/workload_input_plane.rs",
+                include_str!("../../tests/workload_input_plane.rs"),
+            ),
+            (
+                "tests/stream_edge_connector.rs",
+                include_str!("../../tests/stream_edge_connector.rs"),
+            ),
+        ];
+
+        let mut literals = Vec::new();
+        for (name, src) in sources {
+            // A `src/` module keeps its tests at the end; an integration test
+            // file is tests all the way down.
+            let tests = src
+                .split_once("#[cfg(test)]\nmod tests {")
+                .map_or(src, |(_production, tests)| tests);
+            for (offset, _) in tests.match_indices(".with_lease_ttl(") {
+                let argument = tests[offset + ".with_lease_ttl(".len()..].trim_start();
+                let constructed = argument
+                    .strip_prefix("std::time::")
+                    .unwrap_or(argument)
+                    .starts_with("Duration::from_");
+                if constructed {
+                    let line = tests[..offset].lines().count() + 1;
+                    literals.push(format!(
+                        "{name}: a lease sized in place (test-half line ~{line})"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            literals.is_empty(),
+            "size these from LAPSING_LEASE_TTL / LIVE_LEASE_TTL, whose docs carry \
+             the measured stall the value has to clear: {literals:#?}"
+        );
+    }
+
     #[test]
     fn a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret() {
         // A fingerprint match is a length-and-hash match; a collision produces
@@ -1907,7 +2006,7 @@ mod tests {
             InputBinding::new()
                 .with_fingerprint(fingerprint(LONG_SECRET))
                 .with_idle_flush_after(Duration::ZERO)
-                .with_lease_ttl(Duration::from_millis(20)),
+                .with_lease_ttl(LAPSING_LEASE_TTL),
         );
         let plan = admitted_with(vec![stream_service()]);
         let mut stalled = InputGate::open(&vm, &plan).expect("the plan grants input");
@@ -1917,7 +2016,7 @@ mod tests {
                 payload: b"hello\n".to_vec(),
             })
             .expect("cleared while the lease was live");
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(PAST_THE_LEASE);
 
         assert!(matches!(stalled.refresh(), Err(InputRefusal::LeaseExpired)));
         assert!(matches!(
