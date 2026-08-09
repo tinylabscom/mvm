@@ -31,7 +31,7 @@ use tracing::info;
 
 use mvm_hostd::keyholder::secret_placeholder_env;
 use mvm_hostd::supervisor::substitution_endpoint::{
-    EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, assemble,
+    EgressMode, EndpointConfig, EndpointHandshake, EndpointTransport, ResolverBackend, assemble,
     build_audit_recorder, build_egress_gate, fingerprint_bound_secrets, parse,
 };
 
@@ -170,6 +170,20 @@ fn raw_egress_gate(cfg: &EndpointConfig) -> mvm_runtime::vmm::egress_gate::Egres
     }
 }
 
+/// The one extra Landlock/seccomp grant `Remote` needs beyond `Local`: the
+/// fleet-secrets daemon's UDS path, or `None` when resolving locally. Kept as
+/// a standalone, non-platform-gated function (rather than inlined into
+/// `confine_endpoint`, whose real body is Linux-only) so the `Remote ⇒
+/// Some(uds)` decision is unit-testable on every contributor host, not just
+/// Linux CI — see `ConfinementSpec::substitution_endpoint`'s doc for what this
+/// grants once it reaches the confinement builder.
+fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
+    match &cfg.resolver {
+        ResolverBackend::Local => None,
+        ResolverBackend::Remote { uds_path, .. } => Some(uds_path.as_path()),
+    }
+}
+
 /// Apply mvm's self-confinement (Landlock FS + seccomp-BPF) to the endpoint.
 ///
 /// Linux-only effect; on macOS/Windows the jailer's `confine_self` stub errors,
@@ -187,12 +201,15 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
         resolve_store_dirs(cfg).context("resolve substitution-endpoint store dirs")?;
     // The audit recorder (when the host signer key is present) reads the key
     // and appends to the per-tenant audit log; grant both so the confined
-    // endpoint can chain-sign substitution events.
+    // endpoint can chain-sign substitution events. `resolver_uds_path` widens
+    // the grant with the ONE resolver socket when (and only when) `cfg.resolver`
+    // is `Remote` — `Local` leaves the confinement unchanged.
     let spec = ConfinementSpec::substitution_endpoint(
         secret_dir,
         binding_dir,
         mvm_core::config::mvm_audit_dir(),
         mvm_core::config::mvm_keys_dir(),
+        resolver_uds_path(cfg),
     );
     confine_self(&spec).context("confine substitution endpoint")?;
     info!("substitution endpoint self-confined (landlock + seccomp)");
@@ -202,9 +219,12 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
 /// macOS/Windows: no kernel LSM. The jailer stub errors rather than run
 /// unconfined, so callers on those hosts must not reach it; we no-op so the bin
 /// (and its tests) build and run. Production endpoints only ever run on Linux.
+/// Still calls `resolver_uds_path` (result discarded) so the decision function
+/// is exercised — and therefore testable — on every host, matching the parity
+/// the jailer module keeps for its own types.
 #[cfg(not(target_os = "linux"))]
 fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
-    let _ = cfg;
+    let _ = resolver_uds_path(cfg);
     Ok(())
 }
 
@@ -361,6 +381,7 @@ async fn serve_raw(
 mod tests {
     use super::*;
     use mvm_core::plan::{SecretBinding, SecretSource};
+    use std::path::PathBuf;
 
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {
@@ -383,6 +404,30 @@ mod tests {
                 )],
             )),
             egress_mode: EgressMode::Raw,
+            resolver: ResolverBackend::default(),
+        }
+    }
+
+    /// A minimal `EndpointConfig`, varying only `resolver`, for exercising
+    /// `resolver_uds_path`'s decision logic. Field values otherwise don't
+    /// matter — this test never spawns or serves.
+    fn config_with_resolver(resolver: ResolverBackend) -> EndpointConfig {
+        EndpointConfig {
+            tenant_id: "acme".into(),
+            secrets: vec![],
+            transport: EndpointTransport::Uds {
+                path: PathBuf::from("/tmp/mvm-substitution-endpoint-test.sock"),
+            },
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+            forward_timeout_secs: 30,
+            secret_store_dir: None,
+            binding_store_dir: None,
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: None,
+            egress_mode: EgressMode::Wire,
+            resolver,
         }
     }
 
@@ -402,5 +447,21 @@ mod tests {
             },
         });
         assert!(!can_skip_substitution_assembly(&cfg));
+    }
+
+    #[test]
+    fn resolver_uds_path_is_none_for_local_backend() {
+        let cfg = config_with_resolver(ResolverBackend::Local);
+        assert!(resolver_uds_path(&cfg).is_none());
+    }
+
+    #[test]
+    fn resolver_uds_path_is_some_for_remote_backend() {
+        let uds = PathBuf::from("/run/mvmd/tenant-vault/resolver.sock");
+        let cfg = config_with_resolver(ResolverBackend::Remote {
+            uds_path: uds.clone(),
+            timeout_secs: 5,
+        });
+        assert_eq!(resolver_uds_path(&cfg), Some(uds.as_path()));
     }
 }

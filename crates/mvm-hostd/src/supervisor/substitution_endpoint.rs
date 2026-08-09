@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 
@@ -25,7 +26,9 @@ use mvm_contract::stream::secret_fingerprint::{SecretCategory, SecretFingerprint
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore, default_secrets_dir};
 use mvm_core::plan::SecretBinding;
 
-use crate::keyholder::{FileBindingStore, HandedPlaceholders};
+use crate::keyholder::{
+    FileBindingStore, HandedPlaceholders, LocalResolver, RemoteResolver, SecretResolver,
+};
 use crate::supervisor::substitution_proxy::SubstitutionService;
 
 /// The endpoint's ready-handshake line. Defined next to
@@ -50,6 +53,46 @@ pub fn build_egress_gate(
     let pins = mvm_core::policy::dns_pin::resolve_network_policy_pins(policy);
     let now = chrono::Utc::now().to_rfc3339();
     mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now)
+}
+
+/// Default remote-resolver round-trip timeout (connect + one request/response
+/// over the UDS to the fleet-secrets daemon), in seconds.
+fn default_resolve_timeout_secs() -> u64 {
+    5
+}
+
+/// How `assemble` resolves a bound secret's raw value at request time: on this
+/// host's local encrypted secret store (`Local`, the default — the unchanged
+/// `mvmctl secret set` flow), or from a remote fleet-secrets daemon over a
+/// Unix domain socket (`Remote` — mvmd's tenant vault; see
+/// [`crate::keyholder::RemoteResolver`]).
+///
+/// The registry (which placeholders exist, their `allowed_hosts`/`auth_type`)
+/// is always assembled from the local binding store regardless of backend —
+/// only *value* resolution moves off-host in `Remote` mode.
+///
+/// `Local` is a unit variant — deliberately. `EndpointConfig::secret_store_dir`
+/// is already the single source of truth for the local store dir (it also
+/// drives [`resolve_store_dirs`]'s Landlock confinement grant); a second,
+/// per-backend override here would let the two silently drift the moment
+/// anyone set it, so there is exactly one place to look.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+pub enum ResolverBackend {
+    /// Resolve locally via [`FileSecretStore`] over
+    /// `EndpointConfig::secret_store_dir` (falling back to the host default,
+    /// `~/.mvm/secrets`, when unset) — today's exact resolution rule.
+    #[default]
+    Local,
+    /// Resolve remotely over a Unix domain socket to a fleet-secrets daemon.
+    Remote {
+        /// Path to the daemon's UDS.
+        uds_path: PathBuf,
+        /// Round-trip timeout, seconds.
+        #[serde(default = "default_resolve_timeout_secs")]
+        timeout_secs: u64,
+    },
 }
 
 /// How the guest reaches this endpoint. Defined in `mvm-backend` (next to the
@@ -154,6 +197,11 @@ pub struct EndpointConfig {
     /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
     #[serde(default)]
     pub egress_mode: EgressMode,
+    /// How to resolve a bound secret's raw value: this host's local encrypted
+    /// store (default), or a remote fleet-secrets daemon over a UDS. See
+    /// [`ResolverBackend`].
+    #[serde(default)]
+    pub resolver: ResolverBackend,
 }
 
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
@@ -189,14 +237,36 @@ pub fn resolve_store_dirs(cfg: &EndpointConfig) -> anyhow::Result<(PathBuf, Path
 pub fn assemble(
     cfg: &EndpointConfig,
 ) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
-    let secret_store: Arc<dyn SecretStore> = Arc::new(match &cfg.secret_store_dir {
-        Some(dir) => FileSecretStore::with_dir(dir),
-        None => FileSecretStore::with_dir(default_secrets_dir()?),
-    });
     let bindings = match &cfg.binding_store_dir {
         Some(dir) => FileBindingStore::with_dir(dir),
         None => FileBindingStore::default_location()?,
     };
+    // Build the value resolver up front so `from_plan` builds the service
+    // over it instead of its hardcoded `LocalResolver`. The registry (which
+    // placeholders exist, their allowed_hosts/auth_type) is still assembled
+    // inside `from_plan` from the same local binding store — only value
+    // resolution moves off-host under `ResolverBackend::Remote`.
+    let resolver: Arc<dyn SecretResolver> = match &cfg.resolver {
+        ResolverBackend::Local => {
+            // The single source of truth for the local store dir is
+            // `cfg.secret_store_dir` — the same field `resolve_store_dirs`
+            // uses to compute the Landlock confinement grant, so the two
+            // can never drift.
+            let secret_store: Arc<dyn SecretStore> = Arc::new(match &cfg.secret_store_dir {
+                Some(dir) => FileSecretStore::with_dir(dir),
+                None => FileSecretStore::with_dir(default_secrets_dir()?),
+            });
+            Arc::new(LocalResolver::new(&cfg.tenant_id, secret_store))
+        }
+        ResolverBackend::Remote {
+            uds_path,
+            timeout_secs,
+        } => Arc::new(RemoteResolver::new(
+            uds_path.clone(),
+            Duration::from_secs(*timeout_secs),
+        )),
+    };
+
     // Reconstruct the per-VM intermediate minter from the delivered PEMs (the
     // key never left the host) so the terminator can terminate bound-host
     // `https`. Absent ⇒ `http`-only.
@@ -215,12 +285,17 @@ pub fn assemble(
     // audit rather than refusing (the same optional posture `with_recorder` had).
     let recorder = build_audit_recorder(&cfg.tenant_id);
 
+    // Build the service over the resolver assembled above. `from_plan` builds
+    // the registry (from the local binding store), the forwarder, and threads
+    // the redaction / reversible-replacement / TLS / recorder wiring; passing
+    // `resolver` in means it no longer hardcodes a `LocalResolver`, so a
+    // `Remote` backend actually reaches its `RemoteResolver`.
     let (service, handed) =
         SubstitutionService::from_plan(crate::supervisor::substitution_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
             bindings: &bindings,
-            secret_store,
+            resolver,
             forward_timeout_secs: cfg.forward_timeout_secs,
             redaction: cfg.redaction.clone(),
             reversible_replacement: cfg.reversible_replacement.clone(),
@@ -369,6 +444,7 @@ mod tests {
             tls_intermediate: None,
             network_policy: None,
             egress_mode: EgressMode::Wire,
+            resolver: ResolverBackend::default(),
         }
     }
 
@@ -752,5 +828,157 @@ mod tests {
         assert_eq!(handed.len(), 1);
         assert_eq!(handed[0].0, "OPENAI_API_KEY");
         assert!(handed[0].1.as_str().starts_with("mvm-secret-"));
+    }
+
+    #[test]
+    fn resolver_backend_defaults_to_local_when_field_omitted() {
+        // Back-compat: a config the backend wrote before `resolver` existed
+        // (or one that simply omits it) must still parse and land on the
+        // local-store behaviour existing `mvmctl secret set` flows rely on.
+        let json = serde_json::json!({
+            "tenant_id": "local",
+            "secrets": [],
+            "transport": {"kind": "uds", "path": "/tmp/sub.sock"},
+        });
+        let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(cfg.resolver, ResolverBackend::Local);
+    }
+
+    #[test]
+    fn resolver_backend_local_round_trips_as_unit_variant() {
+        // `Local` carries no fields — `cfg.secret_store_dir` remains the sole
+        // source of truth for the local store dir. Verify the wire shape is
+        // just the tag, and that it round-trips through `ResolverBackend`
+        // directly as well as inside a full `EndpointConfig`.
+        let json = serde_json::json!({ "backend": "local" });
+        assert_eq!(
+            serde_json::from_value::<ResolverBackend>(json).unwrap(),
+            ResolverBackend::Local
+        );
+
+        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        cfg.resolver = ResolverBackend::Local;
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), cfg);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["resolver"], serde_json::json!({"backend": "local"}));
+    }
+
+    #[test]
+    fn resolver_backend_remote_round_trips_through_endpoint_config() {
+        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        cfg.resolver = ResolverBackend::Remote {
+            uds_path: "/run/mvmd/tenant-a.sock".into(),
+            timeout_secs: 9,
+        };
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), cfg);
+
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["resolver"]["backend"], serde_json::json!("remote"));
+        assert_eq!(
+            v["resolver"]["uds_path"],
+            serde_json::json!("/run/mvmd/tenant-a.sock")
+        );
+        assert_eq!(v["resolver"]["timeout_secs"], serde_json::json!(9));
+    }
+
+    #[test]
+    fn resolver_backend_remote_timeout_defaults_when_omitted() {
+        let json = serde_json::json!({
+            "backend": "remote",
+            "uds_path": "/run/mvmd/tenant-a.sock",
+        });
+        let backend: ResolverBackend = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            backend,
+            ResolverBackend::Remote {
+                uds_path: "/run/mvmd/tenant-a.sock".into(),
+                timeout_secs: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn resolver_backend_rejects_unknown_fields() {
+        let json = serde_json::json!({
+            "backend": "remote",
+            "uds_path": "/run/mvmd/tenant-a.sock",
+            "smuggled": "x",
+        });
+        let err = serde_json::from_value::<ResolverBackend>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got {err}");
+    }
+
+    /// Spawn a throwaway UDS server standing in for mvmd's tenant vault:
+    /// accepts one connection, reads one length-prefixed `ResolveWireRequest`,
+    /// replies with `response` framed the same way. Mirrors
+    /// `RemoteResolver`'s own test helper (M1) — kept local here rather than
+    /// exported since it's a one-shot single-exchange stand-in, not a general
+    /// test double.
+    fn spawn_resolve_server(response: mvm_core::substitution_wire::ResolveWireResponse) -> PathBuf {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("resolver.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            let _dir = dir;
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut len_buf = [0u8; 4];
+                if stream.read_exact(&mut len_buf).is_ok() {
+                    let len = u32::from_be_bytes(len_buf) as usize;
+                    let mut buf = vec![0u8; len];
+                    if stream.read_exact(&mut buf).is_ok() {
+                        let _req: Result<mvm_core::substitution_wire::ResolveWireRequest, _> =
+                            serde_json::from_slice(&buf);
+                        let body = serde_json::to_vec(&response).unwrap();
+                        let out_len = (body.len() as u32).to_be_bytes();
+                        let _ = stream.write_all(&out_len);
+                        let _ = stream.write_all(&body);
+                    }
+                }
+            }
+        });
+        path
+    }
+
+    #[test]
+    fn assemble_wires_remote_resolver_backend_to_the_live_uds_server() {
+        use base64::Engine;
+        use mvm_core::substitution_wire::ResolveWireResponse;
+        use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
+        use secrecy::ExposeSecret;
+
+        let value_b64 = base64::engine::general_purpose::STANDARD.encode(b"sk-live-from-vault");
+        let uds_path = spawn_resolve_server(ResolveWireResponse::Ok { value_b64 });
+
+        let dir = tempdir().unwrap();
+        let mut cfg = vsock_cfg(vec![], dir.path());
+        cfg.resolver = ResolverBackend::Remote {
+            uds_path: uds_path.clone(),
+            timeout_secs: 5,
+        };
+
+        // `assemble` must not touch the local secret store at all when the
+        // backend is `Remote` — no secret is ever written to `dir/secrets`.
+        let (service, handed) = assemble(&cfg).unwrap();
+        assert!(handed.is_empty(), "no plan secrets ⇒ nothing handed");
+
+        // Observable-behaviour probe (per the task brief): resolve a
+        // `SecretRef` directly through the assembled service's resolver and
+        // assert the value came from the live UDS server, not a local store.
+        let secret_ref = SecretRef {
+            name: "openai".into(),
+            mount: SecretMount::Env {
+                var: "OPENAI_API_KEY".into(),
+            },
+            auth_type: AuthType::Bearer,
+            allowed_hosts: vec!["api.openai.com".into()],
+            sigv4: None,
+        };
+        let resolved = service.resolver().resolve(&secret_ref).unwrap();
+        assert_eq!(resolved.expose_secret().as_slice(), b"sk-live-from-vault");
     }
 }

@@ -12,6 +12,8 @@
 //! `body_b64` is base64 so the JSON stays compact and binary-safe; callers
 //! encode/decode at the edges.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// A request the guest routed to the substitution endpoint. A header value may
@@ -45,6 +47,50 @@ pub enum WireResponse {
     Refused {
         message: String,
     },
+}
+
+/// A `SecretResolver` request over the fleet secret-resolution socket
+/// (mvmd's tenant vault, or the standalone `mvm-substitution-endpoint`'s
+/// local fallback): resolve `name` to its raw credential value, bound to
+/// `allowed_hosts` for this workload. `auth_type` is the snake_case
+/// `AuthType` label (kept as a bare string here so `mvm-core` doesn't need
+/// to depend on `mvm-sdk`'s IR).
+///
+/// `deny_unknown_fields` fails closed on an unexpected field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveWireRequest {
+    pub name: String,
+    pub allowed_hosts: Vec<String>,
+    pub auth_type: String,
+}
+
+/// The resolver's reply: the resolved value (base64) or a refusal. A
+/// refusal never carries a secret.
+///
+/// `Debug` is hand-written (not derived): the `Ok` variant's `value_b64` is
+/// the raw credential, base64-encoded but otherwise unprotected, so a
+/// derived `Debug` would print it verbatim into any log or panic message
+/// that formats this type. See [`fmt::Debug for ResolveWireResponse`].
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ResolveWireResponse {
+    Ok { value_b64: String },
+    Refused { message: String },
+}
+
+impl fmt::Debug for ResolveWireResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResolveWireResponse::Ok { .. } => f
+                .debug_struct("Ok")
+                .field("value_b64", &"<redacted>")
+                .finish(),
+            ResolveWireResponse::Refused { message } => {
+                f.debug_struct("Refused").field("message", message).finish()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +146,71 @@ mod tests {
         })
         .unwrap();
         assert!(json.contains(r#""result":"refused""#), "got: {json}");
+    }
+
+    #[test]
+    fn resolve_wire_request_roundtrips() {
+        let req = ResolveWireRequest {
+            name: "openai".into(),
+            allowed_hosts: vec!["api.openai.com".into()],
+            auth_type: "bearer".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ResolveWireRequest>(&json).unwrap(),
+            req
+        );
+    }
+
+    #[test]
+    fn resolve_wire_request_rejects_unknown_fields() {
+        let bad = r#"{"name":"openai","allowed_hosts":[],"auth_type":"bearer","evil":1}"#;
+        assert!(serde_json::from_str::<ResolveWireRequest>(bad).is_err());
+    }
+
+    #[test]
+    fn resolve_wire_response_tagged_roundtrip() {
+        for resp in [
+            ResolveWireResponse::Ok {
+                value_b64: "c2stbGl2ZS14eHg=".into(),
+            },
+            ResolveWireResponse::Refused {
+                message: "secret not bound".into(),
+            },
+        ] {
+            let json = serde_json::to_string(&resp).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ResolveWireResponse>(&json).unwrap(),
+                resp
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_wire_response_refused_uses_snake_case_tag() {
+        let json = serde_json::to_string(&ResolveWireResponse::Refused {
+            message: "x".into(),
+        })
+        .unwrap();
+        assert!(json.contains(r#""result":"refused""#), "got: {json}");
+    }
+
+    #[test]
+    fn resolve_wire_response_ok_debug_redacts_the_value() {
+        let resp = ResolveWireResponse::Ok {
+            value_b64: "c2stbGl2ZS14eHg=".into(),
+        };
+        let debug = format!("{resp:?}");
+        assert!(!debug.contains("c2stbGl2ZS14eHg="), "leaked value: {debug}");
+        assert!(debug.contains("<redacted>"), "got: {debug}");
+    }
+
+    #[test]
+    fn resolve_wire_response_refused_debug_shows_the_message() {
+        let resp = ResolveWireResponse::Refused {
+            message: "secret not bound".into(),
+        };
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("secret not bound"), "got: {debug}");
     }
 }

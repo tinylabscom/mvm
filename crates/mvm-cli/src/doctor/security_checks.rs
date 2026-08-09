@@ -22,6 +22,130 @@ pub(super) fn security_audit_log_check() -> Check {
     }
 }
 
+/// What a sweep of the host-lifecycle audit chains found. Separated from the
+/// [`Check`] so the verdict mapping is testable without a keystore or an audit
+/// directory.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AuditChainScan {
+    /// Host-lifecycle chains whose signatures verified clean.
+    pub(crate) verified: usize,
+    /// Chains that failed verification, with the reason, most-relevant first.
+    pub(crate) broken: Vec<(String, String)>,
+    /// Set when the sweep could not run at all (no host signer key yet, or the
+    /// audit directory is unreadable). Distinct from "found nothing broken".
+    pub(crate) not_assessed: Option<String>,
+}
+
+/// Verification status of the chain-signed audit log.
+///
+/// This is the check that makes a damaged chain visible on its own terms. Until
+/// it existed, an unverifiable chain surfaced only indirectly — as a checkpoint
+/// verb refusing a record — which reads as a problem with that record rather
+/// than with the ledger. A broken chain is a posture failure: every claim the
+/// log is supposed to support is unprovable while it lasts.
+pub(super) fn security_audit_chain_check() -> Check {
+    audit_chain_check_from_scan(&scan_audit_chains())
+}
+
+/// Verify every host-lifecycle chain under the audit dir against the host
+/// signer's public half.
+///
+/// Loads the signer only when its secret half is already on disk: a diagnostic
+/// verb must not mint a signing key as a side effect of being run.
+fn scan_audit_chains() -> AuditChainScan {
+    let not_assessed = |reason: String| AuditChainScan {
+        not_assessed: Some(reason),
+        ..Default::default()
+    };
+
+    let dir = match mvm_hostd::audit::emitter::default_audit_dir() {
+        Ok(d) => d,
+        Err(e) => return not_assessed(format!("audit dir unresolved: {e}")),
+    };
+    let keys_dir = match mvm_hostd::audit::host_keypair::default_keys_dir() {
+        Ok(d) => d,
+        Err(e) => return not_assessed(format!("keys dir unresolved: {e}")),
+    };
+    if !keys_dir
+        .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME)
+        .exists()
+    {
+        return not_assessed("no host signer key yet; nothing has been signed".to_string());
+    }
+    let signer = match mvm_hostd::audit::host_keypair::load_or_init() {
+        Ok(s) => s,
+        Err(e) => return not_assessed(format!("host signer unreadable: {e}")),
+    };
+    let read_dir = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AuditChainScan::default(),
+        Err(e) => return not_assessed(format!("reading {}: {e}", dir.display())),
+    };
+
+    let mut scan = AuditChainScan::default();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !mvm_core::config::is_host_lifecycle_chain(&path) {
+            continue;
+        }
+        match mvm_hostd::supervisor::verify_audit_chain(&path, &signer.verifying) {
+            Ok(_) => scan.verified += 1,
+            Err(e) => scan
+                .broken
+                .push((path.display().to_string(), format!("{e:#}"))),
+        }
+    }
+    scan.broken.sort();
+    scan
+}
+
+/// Pure mapping: scan result → [`Check`]. A broken chain is the only `ok: false`
+/// arm — an absent log and an un-assessable one are both honestly reported as
+/// "not known to be broken", which is not the same as clean and does not claim
+/// to be.
+fn audit_chain_check_from_scan(scan: &AuditChainScan) -> Check {
+    let name = "audit chain";
+    let category = "security";
+    if !scan.broken.is_empty() {
+        let detail = scan
+            .broken
+            .iter()
+            .map(|(path, why)| format!("{path} ({why})"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Check {
+            name,
+            category,
+            ok: false,
+            info: format!(
+                "{} of {} chain(s) FAIL verification: {detail}. Entries behind the break anchor \
+                 nothing, so records they audit now refuse as unprovable. Quarantine the file \
+                 under a new name to preserve the evidence; it cannot be repaired without \
+                 re-signing, and a chain that can be re-signed on demand cannot detect tampering.",
+                scan.broken.len(),
+                scan.broken.len() + scan.verified
+            ),
+        };
+    }
+    if let Some(reason) = &scan.not_assessed {
+        return Check {
+            name,
+            category,
+            ok: true,
+            info: format!("not assessed ({reason})"),
+        };
+    }
+    Check {
+        name,
+        category,
+        ok: true,
+        info: match scan.verified {
+            0 => "no host-lifecycle chains yet".to_string(),
+            n => format!("{n} chain(s) verify against the host signer"),
+        },
+    }
+}
+
 /// Host full-disk-encryption check for encryption at rest.
 ///
 /// `LocalBackend` volumes rely on host FDE for at-rest protection (we
@@ -651,6 +775,127 @@ mod tests {
                 _tmp_root: root,
             }
         }
+    }
+
+    // ── audit_chain_check_from_scan unit tests ──────────────────────
+
+    /// The point of the check: a damaged chain is a posture *failure*, not an
+    /// informational line. It used to surface only as an unrelated verb
+    /// refusing a record, which reads as a problem with that record.
+    #[test]
+    fn a_broken_chain_fails_the_check_and_names_the_file() {
+        let scan = AuditChainScan {
+            verified: 2,
+            broken: vec![(
+                "/audit-root/local.jsonl".into(),
+                "prev_hash mismatch at line 3".into(),
+            )],
+            not_assessed: None,
+        };
+        let c = audit_chain_check_from_scan(&scan);
+        assert!(!c.ok, "a broken chain is a posture failure: {}", c.info);
+        assert!(c.info.contains("local.jsonl"), "{}", c.info);
+        assert!(c.info.contains("prev_hash mismatch"), "{}", c.info);
+        assert!(
+            c.info.contains("1 of 3"),
+            "must say how much of the ledger is affected: {}",
+            c.info
+        );
+    }
+
+    /// Recovery guidance must not read as "reset it": someone who can damage
+    /// one line could then force a reset, which turns tamper-detection into
+    /// tamper-erasure.
+    #[test]
+    fn the_broken_chain_guidance_says_quarantine_and_never_re_sign() {
+        let scan = AuditChainScan {
+            verified: 0,
+            broken: vec![("local.jsonl".into(), "bad signature".into())],
+            not_assessed: None,
+        };
+        let info = audit_chain_check_from_scan(&scan).info;
+        assert!(info.contains("Quarantine"), "{info}");
+        assert!(
+            info.contains("cannot detect tampering"),
+            "must say why re-signing is not a repair: {info}"
+        );
+    }
+
+    #[test]
+    fn all_chains_verifying_reports_the_count_and_passes() {
+        let scan = AuditChainScan {
+            verified: 3,
+            ..Default::default()
+        };
+        let c = audit_chain_check_from_scan(&scan);
+        assert!(c.ok);
+        assert!(c.info.contains('3'), "{}", c.info);
+    }
+
+    /// "Nothing signed yet" and "could not look" both pass, but neither may
+    /// claim the chains verify — the check would then assert a posture it never
+    /// established.
+    #[test]
+    fn an_unassessed_scan_passes_without_claiming_the_chains_verify() {
+        let scan = AuditChainScan {
+            not_assessed: Some("no host signer key yet; nothing has been signed".into()),
+            ..Default::default()
+        };
+        let c = audit_chain_check_from_scan(&scan);
+        assert!(c.ok);
+        assert!(c.info.starts_with("not assessed"), "{}", c.info);
+        assert!(
+            !c.info.contains("verify against"),
+            "must not claim verification it did not perform: {}",
+            c.info
+        );
+    }
+
+    /// An empty audit dir is a real, clean finding — distinct from not looking.
+    #[test]
+    fn no_chains_yet_is_distinct_from_not_assessed() {
+        let c = audit_chain_check_from_scan(&AuditChainScan::default());
+        assert!(c.ok);
+        assert!(
+            c.info.contains("no host-lifecycle chains yet"),
+            "{}",
+            c.info
+        );
+    }
+
+    /// A broken chain outranks an un-assessable one: the finding that needs
+    /// action must not be masked by the reason the sweep was incomplete.
+    #[test]
+    fn a_break_outranks_a_not_assessed_reason() {
+        let scan = AuditChainScan {
+            verified: 0,
+            broken: vec![("local.jsonl".into(), "bad signature".into())],
+            not_assessed: Some("partial sweep".into()),
+        };
+        assert!(!audit_chain_check_from_scan(&scan).ok);
+    }
+
+    /// The sweep must not mint a signing key just because someone ran a
+    /// diagnostic. On a fresh `MVM_HOME` it reports "not assessed" and leaves
+    /// the keys dir alone.
+    #[test]
+    fn scanning_a_fresh_home_creates_no_host_signer_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let scan = scan_audit_chains();
+        assert!(
+            scan.not_assessed.is_some(),
+            "a fresh home has nothing signed: {scan:?}"
+        );
+        assert!(
+            !tmp.path()
+                .join("keys")
+                .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME)
+                .exists(),
+            "doctor must not create a signing key as a side effect"
+        );
     }
 
     // ── signing_check_from_probes unit tests ────────────────────────
