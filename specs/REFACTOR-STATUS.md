@@ -808,3 +808,16 @@ for detailed scope and acceptance criteria.
         missing entry leaves no gap to detect)
   - [ ] Converge the primary chain on JCS canonical bytes so no verifier has
         to reproduce serde field order
+
+- [ ] Plan 306 — declared backing, tier honesty, and the check-time law
+  (`specs/plans/306-declared-backing-and-tier-honesty.md`)
+  - [ ] Declared-backing header + admission gate on contributor prose, which
+        `check-doc-claims` deliberately excludes
+  - [ ] Derive the ADR-001 per-backend tier matrix from `capabilities()`
+        instead of maintaining it by hand
+  - [ ] Refuse where we currently degrade silently (transient egress on
+        libkrun/HVF, `up --network-allow`), plus a fail-closed pre-run probe
+  - [ ] State the check-time law in ADR-001 and classify each governed effect
+  - [ ] Pin the egress predicate algebra; enumerate escalation as deny-loud
+  - [ ] Replay vectors for the audit chain's canonical signed bytes
+  - [ ] Double-key the stale-name relief valves
