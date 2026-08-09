@@ -27,9 +27,11 @@ struct FuzzInvocation {
 
 pub fn run(workspace: &Path) -> Result<()> {
     let workflows = workflow_files(workspace)?;
+    let members = workspace_package_names(workspace)?;
     let mut problems = Vec::new();
     let mut checked_dirs = 0usize;
     let mut checked_targets = 0usize;
+    let mut checked_packages = 0usize;
 
     for path in &workflows {
         let src =
@@ -65,6 +67,18 @@ pub fn run(workspace: &Path) -> Result<()> {
                 problems.push(format!("{name}: fuzz target {rel:?} does not exist"));
             }
         }
+
+        for pkg in cargo_package_flags(&src) {
+            if pkg.contains("${{") {
+                continue;
+            }
+            checked_packages += 1;
+            if !members.contains(&pkg) {
+                problems.push(format!(
+                    "{name}: `cargo ... -p {pkg}` names no workspace member"
+                ));
+            }
+        }
     }
 
     if !problems.is_empty() {
@@ -79,12 +93,134 @@ pub fn run(workspace: &Path) -> Result<()> {
     }
 
     eprintln!(
-        "check-workflow-paths: clean ({} working-directory, {} fuzz target(s) across {} workflow file(s))",
+        "check-workflow-paths: clean ({} working-directory, {} fuzz target(s), {} cargo -p package(s) across {} workflow file(s))",
         checked_dirs,
         checked_targets,
+        checked_packages,
         workflows.len()
     );
     Ok(())
+}
+
+/// Every package name declared by a workspace member, plus the root package.
+///
+/// Read from the manifests rather than `cargo metadata` so the gate stays a
+/// cheap file-parse that can run in the PR lint lane — the same reason the
+/// path checks above stat rather than build.
+fn workspace_package_names(root: &Path) -> Result<std::collections::HashSet<String>> {
+    let root_manifest = root.join("Cargo.toml");
+    let src = std::fs::read_to_string(&root_manifest)
+        .with_context(|| format!("read {}", root_manifest.display()))?;
+
+    let mut names = std::collections::HashSet::new();
+    if let Some(n) = package_name(&src) {
+        names.insert(n);
+    }
+    for member in workspace_members(&src) {
+        let manifest = root.join(&member).join("Cargo.toml");
+        let Ok(body) = std::fs::read_to_string(&manifest) else {
+            // A members entry pointing at a deleted directory is its own bug,
+            // but it is the workspace's to report — `cargo` fails loudly on it
+            // long before this gate runs.
+            continue;
+        };
+        if let Some(n) = package_name(&body) {
+            names.insert(n);
+        }
+    }
+    Ok(names)
+}
+
+/// `members = [...]` entries from a workspace manifest, unquoted.
+fn workspace_members(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_members = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with("members") && t.contains('[') {
+            in_members = true;
+            continue;
+        }
+        if in_members {
+            if t.starts_with(']') {
+                break;
+            }
+            let v = t.trim_end_matches(',').trim().trim_matches('"');
+            if !v.is_empty() && !v.starts_with('#') {
+                out.push(v.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The `name = "..."` under a manifest's `[package]` table.
+fn package_name(src: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_package = t == "[package]";
+            continue;
+        }
+        if in_package && let Some(rest) = t.strip_prefix("name") {
+            let v = rest
+                .trim_start()
+                .strip_prefix('=')?
+                .trim()
+                .trim_matches('"');
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Package names passed to cargo via `-p` / `--package` in a workflow.
+///
+/// Scoped to lines that actually invoke cargo. Other tools spell `-p`
+/// differently — `tar -p`, `gh release -p`, `mkdir -p` — and matching those
+/// would make the gate reject names that were never package references. The
+/// scan is line-based, so a `-p` continued onto the next line via `\` is
+/// missed; that is a deliberate false-negative, since the alternative is
+/// guessing at shell continuation and producing false positives instead.
+fn cargo_package_flags(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        // Comment lines describe commands, they do not run them, and prose
+        // wraps names in backticks that are not part of the name.
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        // `cargo` must appear as its own command token before the flag.
+        // Substring matching would take `mkdir -p .cargo` — where the *path*
+        // contains "cargo" — as a package reference.
+        let mut saw_cargo = false;
+        let mut it = line.split_whitespace();
+        while let Some(tok) = it.next() {
+            let bare = tok.trim_matches(['"', '\'', '`', '\\']);
+            if bare == "cargo" || bare.ends_with("/cargo") {
+                saw_cargo = true;
+                continue;
+            }
+            if !saw_cargo {
+                continue;
+            }
+            let value = match bare {
+                "-p" | "--package" => it.next(),
+                _ => bare.strip_prefix("--package="),
+            };
+            if let Some(v) = value {
+                let v = v.trim_matches(['"', '\'', '`', '\\', ',']);
+                // `${{ matrix.crate }}` and `${CRATE}` resolve at run time;
+                // there is no literal name to check.
+                if v.is_empty() || v.starts_with('-') || v.starts_with('$') {
+                    continue;
+                }
+                out.push(v.to_string());
+            }
+        }
+    }
+    out
 }
 
 fn workflow_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
@@ -481,5 +617,86 @@ mod tests {
             unexpected.is_empty(),
             "new test-support source owners need an explicit targeted CI command: {unexpected:?}"
         );
+    }
+
+    /// The bug this check was written for: `ci-full.yml` invoked
+    /// `cargo test -p mvm-jailer-lite` after that crate was absorbed into
+    /// `mvm-hostd`, so the only lane exercising Landlock + seccomp
+    /// confinement could not resolve its own package. The lane is
+    /// `workflow_dispatch`-only, which is why it went unnoticed.
+    #[test]
+    fn a_cargo_p_naming_a_dead_crate_is_caught() {
+        let flags = cargo_package_flags("          cargo test -p mvm-jailer-lite \\");
+        assert_eq!(flags, vec!["mvm-jailer-lite".to_string()]);
+
+        let members =
+            workspace_package_names(Path::new(env!("CARGO_MANIFEST_DIR")).join("..").as_path())
+                .expect("read workspace members");
+        assert!(
+            members.contains("mvm-hostd"),
+            "sanity: mvm-hostd must be a member"
+        );
+        assert!(
+            !members.contains("mvm-jailer-lite"),
+            "mvm-jailer-lite was absorbed into mvm-hostd and must not resolve"
+        );
+    }
+
+    /// `-p` belongs to plenty of tools that are not cargo. Matching those
+    /// would make the gate reject names that were never package references.
+    #[test]
+    fn non_cargo_dash_p_is_not_treated_as_a_package() {
+        for line in [
+            "          tar -xzf -p dist",
+            "          mkdir -p target/release-assets",
+            "          gh release upload -p staging",
+            // The one that caught the naive substring match out: the *path*
+            // contains "cargo", the command is not cargo.
+            "          mkdir -p .cargo",
+            // Prose describing a command is not a command.
+            "        # plain `cargo test -p mvm-hostd` is a no-op on Linux",
+        ] {
+            assert!(
+                cargo_package_flags(line).is_empty(),
+                "non-cargo line must yield no packages: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_flags_handle_both_spellings_and_quoting() {
+        assert_eq!(
+            cargo_package_flags("        run: cargo nextest run --package mvm-fs"),
+            vec!["mvm-fs".to_string()]
+        );
+        assert_eq!(
+            cargo_package_flags("        run: cargo build --package=mvm-core"),
+            vec!["mvm-core".to_string()]
+        );
+        // Names resolved at run time carry no literal to check, in either
+        // GitHub's `${{ }}` or shell `${}` spelling.
+        assert!(cargo_package_flags("        run: cargo test -p ${{ matrix.crate }}").is_empty());
+        assert!(cargo_package_flags("          cargo publish -p ${CRATE}").is_empty());
+    }
+
+    /// Every `cargo -p` across the real workflow tree resolves today. This is
+    /// the assertion that would have gone red on the stale reference.
+    #[test]
+    fn every_workflow_cargo_package_resolves() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let members = workspace_package_names(&root).expect("members");
+        let mut stale = Vec::new();
+        for path in workflow_files(&root).expect("workflow files") {
+            let src = std::fs::read_to_string(&path).expect("read workflow");
+            for pkg in cargo_package_flags(&src) {
+                if pkg.contains("${{") {
+                    continue;
+                }
+                if !members.contains(&pkg) {
+                    stale.push(format!("{}: {pkg}", path.display()));
+                }
+            }
+        }
+        assert!(stale.is_empty(), "stale cargo -p references: {stale:?}");
     }
 }
