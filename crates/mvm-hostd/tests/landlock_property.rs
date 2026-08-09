@@ -1,6 +1,6 @@
 //! Landlock property test (`mvm-jailer-lite`).
 //!
-//! Same-process test: applies `ConfinementSpec::firecracker_bridge`
+//! Same-process test: applies `ConfinementSpec::substitution_endpoint`
 //! confinement, writes inside the spec's `audit_dir` (must succeed
 //! — the rw_bridge_access grant covers `WriteFile` + `MakeReg`)
 //! and writes to `/tmp` outside the ruleset (must fail with
@@ -26,10 +26,20 @@ fn landlock_denies_paths_outside_ruleset() {
     std::fs::create_dir_all(audit_dir).ok();
     std::fs::create_dir_all(keys_dir).ok();
 
-    let spec = ConfinementSpec::firecracker_bridge(
+    // The substitution endpoint is the live confined role — the per-VM process
+    // that holds a workload's decrypted secrets. The spec this used to build
+    // belonged to a sidecar that no longer exists, and it listed a gateway
+    // binary as a readable path, so the test could only run on a host that had
+    // that binary installed.
+    let secret_dir = "/tmp/mvm-landlock-probe-secrets";
+    let binding_dir = "/tmp/mvm-landlock-probe-bindings";
+    std::fs::create_dir_all(secret_dir).ok();
+    std::fs::create_dir_all(binding_dir).ok();
+    let spec = ConfinementSpec::substitution_endpoint(
+        secret_dir.into(),
+        binding_dir.into(),
         audit_dir.into(),
         keys_dir.into(),
-        "/usr/bin/passt".into(),
     );
     mvm_hostd::jailer::confine_self(&spec).expect("confine_self");
 

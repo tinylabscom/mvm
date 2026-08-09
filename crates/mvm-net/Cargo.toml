@@ -2,7 +2,7 @@
 name = "mvm-net"
 version.workspace = true
 edition.workspace = true
-description = "NetworkProvider trait + provisioning/policy/registry seam for mvm. The TAP/bridge/native-gateway/passt impl lives in mvm-runtime; the WireGuard/Tailscale mesh impl is mvmd's."
+description = "NetworkProvider trait + provisioning/policy/registry seam for mvm. The TAP/bridge impl lives in mvm-runtime; the WireGuard/Tailscale mesh impl is mvmd's."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

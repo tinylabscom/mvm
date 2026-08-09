@@ -3,23 +3,16 @@
 //!
 //! Unlike the Firecracker `BridgeTapNetworkProvider`, which owns a host bridge
 //! + TAP, this provider owns **no host resource**. A libkrun guest's runtime
-//! control path is the explicit vsock device, configured later when the
-//! supervisor consumes the resolved [`NetworkingPreference`]. So `provision` is
-//! a pure config selection and `teardown` is a no-op.
+//! control path is the explicit vsock device, wired later inside the
+//! supervisor. So `provision` is a pure config statement and `teardown` is a
+//! no-op.
 //!
-//! claim-10: the provider no longer chooses among guest-NIC helpers at all.
-//! The active contract is vsock-only.
-//!
-//! Scope: this provider is still a config producer only. Both the builder path
-//! ([`apply_networking_mode`](crate::libkrun_builder)) and the workload base
-//! config resolve the same [`NetworkingPreference`] helper; re-pointing them
-//! through this provider is a cleanup, not a behavior gate.
+//! claim-10: the provider does not choose among guest-NIC helpers. There is
+//! one transport and it is vsock.
 
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;
 use mvm_net::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
-
-use crate::libkrun_builder::{NetworkingPreference, resolve_networking_mode};
 
 /// libkrun direct-vsock provider (a config producer; owns no host state — see
 /// the module docs).
@@ -36,12 +29,8 @@ impl LibkrunNetworkProvider {
         }
     }
 
-    /// Stable kind string for the resolved libkrun transport.
-    fn gateway_kind(pref: NetworkingPreference) -> &'static str {
-        match pref {
-            NetworkingPreference::VsockDirect => "vsock_direct",
-        }
-    }
+    /// Stable kind string for the libkrun transport. There is exactly one.
+    const TRANSPORT_TAG: &'static str = "vsock_direct";
 }
 
 impl Default for LibkrunNetworkProvider {
@@ -56,11 +45,11 @@ impl NetworkProvider for LibkrunNetworkProvider {
     }
 
     fn provision(&self, vm: &VmId, _spec: &NetworkSpec) -> Result<NetHandle, NetworkError> {
-        // Pure selection: resolve the libkrun transport. No host syscalls run
-        // here; the explicit vsock device is wired later inside the supervisor.
+        // No host syscalls run here; the explicit vsock device is wired later
+        // inside the supervisor.
         Ok(NetHandle {
             vm: vm.clone(),
-            tag: Self::gateway_kind(resolve_networking_mode()).to_string(),
+            tag: Self::TRANSPORT_TAG.to_string(),
         })
     }
 
@@ -92,12 +81,16 @@ mod tests {
         assert!(provider.teardown(handle).is_ok());
     }
 
+    /// The tag a caller reads off the handle is the vsock transport, and
+    /// nothing selects any other. Asserted on the provisioned handle rather
+    /// than on a constant, so the assertion still covers `provision` wiring.
     #[test]
-    fn gateway_kind_maps_vsock_direct() {
-        assert_eq!(
-            LibkrunNetworkProvider::gateway_kind(NetworkingPreference::VsockDirect),
-            "vsock_direct"
-        );
+    fn provisioned_handle_tags_the_vsock_transport() {
+        let provider = LibkrunNetworkProvider::new();
+        let handle = provider
+            .provision(&VmId("vm-tag".into()), &NetworkSpec::default())
+            .expect("provision");
+        assert_eq!(handle.tag, "vsock_direct");
     }
 
     #[test]

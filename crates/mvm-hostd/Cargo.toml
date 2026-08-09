@@ -14,7 +14,7 @@ authors.workspace = true
 # servers are all legitimate substrate servers (was the per-crate metadata
 # on mvm-broker/mvm-host-signer/mvm-audit-signer + the per-file globs on
 # mvm-supervisor; consolidated here). The per-VM supervisor host processes
-# (mvm-libkrun-supervisor / mvm-hvf-supervisor / mvm-bridge) are per-VM
+# (mvm-libkrun-supervisor / mvm-hvf-supervisor) are per-VM
 # substrate too — one supervisor process per guest VM, not an orchestration
 # control-plane server. The first such listener: mvm-libkrun-supervisor binds
 # the host side of the listen=false workload-exit control vsock port
@@ -65,13 +65,6 @@ path = "src/bin/mvm-substitution-endpoint.rs"
 name = "mvm-libkrun-supervisor"
 path = "src/bin/mvm-libkrun-supervisor.rs"
 required-features = ["libkrun-sys"]
-
-# Shared per-VM bridge sidecar — the single external-VMM gateway/audit bridge
-# for Firecracker. Cross-platform (not a whole-binary cfg gate): the Passt arm
-# is Linux-only and confined; per-arm cfg gating lives inside.
-[[bin]]
-name = "mvm-bridge"
-path = "src/bin/mvm-bridge.rs"
 
 # Per-VM host process for the raw HVF macOS backend. cfg-gated to
 # macOS/aarch64 in source; a stub elsewhere.

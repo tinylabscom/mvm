@@ -1,7 +1,7 @@
 # mvm-jailer-lite seccomp profile
 
-`ConfinementSpec::firecracker_bridge()` allowlists the syscalls
-required for: read packets from passt (read, splice, recvmsg);
+`ConfinementSpec::substitution_endpoint()` allowlists the syscalls
+required for: read request bytes (read, splice, recvmsg);
 write audit-chain entries (write, fsync, openat, close); socket
 bind/accept/connect; memory + threading (mmap, munmap, futex,
 mprotect); time (clock_gettime); signal handling (rt_sigprocmask,
@@ -14,7 +14,7 @@ Default action on disallowed syscall: **Trap** → SIGSYS, visible in
 core dumps + reproducible in tests.
 
 `SeccompAction::Trap` (vs `SeccompAction::Errno(EACCES)`) is
-intentional: the `mvm-bridge` sidecar is *expected* to be
+intentional: a confined role is *expected* to be
 killed by SIGSYS on a forbidden syscall, and the supervisor's
 `BridgeRestartPolicy::HardFail` (ADR-003 §Decision 6) is the cleanup
 mechanism — the dead bridge tears down the VM. `Errno` would let a

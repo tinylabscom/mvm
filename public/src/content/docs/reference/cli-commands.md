@@ -594,7 +594,7 @@ stored machine requests outbound egress and is OCI-backed (`machine create
 host-vsock-proxy backend gate as transient `run --image`: only backends that
 honestly advertise `{ vsock, no_routable_guest_nic, host_vsock_proxy }` are
 allowed, and incapable backends are refused instead of silently falling back to
-a guest NIC helper or `passt`. `no_routable_guest_nic` is a reachability
+a guest NIC helper. `no_routable_guest_nic` is a reachability
 guarantee: it holds whether the backend attaches a drained/sinked virtio-net
 device with no upstream route or presents no NIC device at all. When the named spec came from an image-backed
 manifest, `machine create --manifest`

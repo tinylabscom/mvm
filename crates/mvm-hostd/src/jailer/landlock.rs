@@ -1,8 +1,8 @@
 //! Landlock filesystem ruleset (ABI v2, Linux 5.19+).
 //!
 //! ABI v2 is the floor because it's the first to expose the
-//! file-execute permission split, which the `mvm-bridge`
-//! sidecar relies on to read its passt binary (exec) without granting
+//! file-execute permission split, which the confined role
+//! confined role relies on to read an allowlisted binary (exec) without granting
 //! exec on the audit-log directory. Earlier ABIs collapse the two.
 
 use crate::jailer::{ConfinementSpec, JailerError};
@@ -13,7 +13,7 @@ use landlock::{
 
 /// Minimal `AccessFs` bit-set granted on `read_write_paths` for the
 /// bridge sidecar. Landlock is supposed to be the *smallest* grant
-/// that lets the bridge function, so we explicitly enumerate:
+/// that lets the confined role function, so we explicitly enumerate:
 ///
 /// - `ReadFile` / `ReadDir`: read the existing audit chain head to
 ///   verify before appending (chain-signing requires the previous
@@ -54,7 +54,7 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
         // impossible for the kernel to enforce; landlock downgrades that rule
         // and reports the whole ruleset PartiallyEnforced — which the
         // fail-closed check below refuses. Grant file rights on files
-        // (ReadFile + Execute, e.g. the bridge's passt binary) and the full
+        // (ReadFile + Execute, e.g. an allowlisted helper binary) and the full
         // read set on directories, so a correct spec fully enforces.
         let access = if p.is_dir() {
             AccessFs::from_read(abi)

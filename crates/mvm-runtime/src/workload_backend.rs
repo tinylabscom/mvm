@@ -14,7 +14,7 @@ use mvm_core::vm_backend::VmBackend;
 /// substitution endpoint; the backend only declares the mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressSubstitutionTransport {
-    /// macOS rvproxy-native path: the guest still has a proxy-aware vsock/UDS
+    /// macOS native path: the guest still has a proxy-aware vsock/UDS
     /// channel, and ordinary `:80/:443` TCP is intercepted by the native gateway
     /// and forwarded to the same host terminator.
     RvproxyTransparentTerminator,

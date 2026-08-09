@@ -4,8 +4,7 @@
 //! exercising the wrapper end-to-end); [`start_enter`] configures and
 //! then blocks in `krun_start_enter` until the guest exits. `configure`
 //! and `configure_pre_net` are the shared FFI-application internals both
-//! paths — and [`crate::run_supervisor`] / [`crate::run_supervisor_with_bridge`]
-//! — build on.
+//! paths — and [`crate::run_supervisor`] — build on.
 
 use crate::context::KrunContext;
 #[cfg(feature = "libkrun-sys")]
@@ -16,9 +15,6 @@ use std::path::Path;
 
 #[cfg(feature = "libkrun-sys")]
 use crate::sys;
-
-#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
-use crate::{native_gateway, passt};
 
 /// Start a libkrun guest from `ctx`.
 ///
@@ -56,9 +52,8 @@ pub fn start(ctx: &KrunContext) -> Result<(), Error> {
 ///
 /// Split into `configure_pre_net` (everything except networking) + a
 /// per-caller networking decision. `configure` itself is the
-/// no-gateway path used by the spike/smoke binaries; real
-/// consumers go through `run_supervisor`, which owns a passt child
-/// process for the libkrun lifetime via `configure_with_passt`.
+/// path used by the spike/smoke binaries; real consumers go through
+/// `run_supervisor`, which owns the guest process for the libkrun lifetime.
 #[cfg(feature = "libkrun-sys")]
 fn configure(ctx: &KrunContext) -> Result<sys::Context, Error> {
     let krun = configure_pre_net(ctx)?;
@@ -77,80 +72,7 @@ fn configure(ctx: &KrunContext) -> Result<sys::Context, Error> {
     Ok(krun)
 }
 
-/// Owning handle to whichever userspace network gateway the supervisor
-/// spawned for this guest. Lives for the libkrun
-/// process lifetime so the gateway is reaped when the guest exits.
-#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
-pub enum GatewayHandle {
-    /// Not using a virtio-net backend.
-    None,
-    /// passt child (Linux).
-    Passt(passt::PasstHandle),
-    /// Native gateway child (macOS / cross-platform fallback).
-    NativeGateway(native_gateway::NativeGatewayHandle),
-}
-
-/// configure() variant that owns the network-gateway child process
-/// for the lifetime of the returned
-/// context. Used by [`run_supervisor`](crate::run_supervisor) when
-/// `NetworkingMode::{Passt, NativeGateway}` is set. The handle Drop's after
-/// libkrun finishes consuming the socket and the guest exits.
-#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
-pub(super) fn configure_with_gateway(
-    ctx: &KrunContext,
-) -> Result<(sys::Context, GatewayHandle), Error> {
-    let krun = configure_pre_net(ctx)?;
-    let handle = match &ctx.networking {
-        NetworkingMode::Tsi | NetworkingMode::VsockDirect => GatewayHandle::None,
-        NetworkingMode::Passt { mac, scratch_dir } => {
-            let handle =
-                passt::spawn(std::path::Path::new(scratch_dir)).map_err(|e| Error::Io {
-                    context: format!("spawning passt for NetworkingMode::Passt: {e}"),
-                })?;
-            krun.add_net_unixstream_fd(
-                handle.socket_fd(),
-                mac,
-                sys::PASST_NET_FEATURES,
-                /* flags = */ 0,
-            )?;
-            GatewayHandle::Passt(handle)
-        }
-        NetworkingMode::NativeGateway {
-            mac,
-            scratch_dir,
-            native_config,
-        } => {
-            let handle = native_gateway::spawn(
-                std::path::Path::new(scratch_dir),
-                native_config.as_deref().map(std::path::Path::new),
-            )
-            .map_err(|e| Error::Io {
-                context: format!("spawning native gateway for NetworkingMode::NativeGateway: {e}"),
-            })?;
-            // The native gateway speaks libkrun's "vfkit mode" framing on the
-            // unixgram socket; NET_FLAG_VFKIT (see sys::NET_FLAG_VFKIT)
-            // is libkrun's required signal to emit the magic-byte
-            // handshake. NET_FLAG_DHCP_CLIENT (libkrun 1.18.0+) tells
-            // libkrun's net device to bring the interface up via its
-            // in-guest DHCP client against the gateway's DHCP server, so
-            // the guest sees a fully-configured eth0 without needing
-            // an in-guest udhcpc race. libkrun's own
-            // vfkit gateway tests use both.
-            krun.add_net_unixgram_path(
-                handle.socket_path(),
-                mac,
-                sys::PASST_NET_FEATURES,
-                sys::NET_FLAG_VFKIT | sys::NET_FLAG_DHCP_CLIENT,
-            )?;
-            GatewayHandle::NativeGateway(handle)
-        }
-    };
-    Ok((krun, handle))
-}
-
-/// Every part of `configure` that doesn't touch the networking
-/// backend. Shared between the plain `configure` path and
-/// `configure_with_gateway`.
+/// Every part of `configure` that doesn't touch the networking backend.
 #[cfg(feature = "libkrun-sys")]
 pub(super) fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
     validate_boot_config(ctx)?;
@@ -224,8 +146,8 @@ pub(super) fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error
         // Defensive: a prior VM run (clean stop or crash) leaves this
         // listener socket behind — the stop path doesn't unlink it —
         // and add_vsock_port2(listen=true) binds here, failing EEXIST
-        // (rc -17) on the stale file. Pre-unlink, mirroring the native-gateway
-        // bridge socket above. Keeps repeated builder VM starts idempotent.
+        // (rc -17) on the stale file. Pre-unlink. Keeps repeated builder VM
+        // starts idempotent.
         let _ = std::fs::remove_file(&socket);
         krun.add_vsock_port2(port, &socket, /* listen = */ true)?;
     }
@@ -375,19 +297,14 @@ pub fn start_enter(ctx: &KrunContext) -> Result<std::convert::Infallible, Error>
 #[cfg(feature = "libkrun-sys")]
 pub(super) fn install_shutdown_handler(_krun: &sys::Context) -> Result<(), Error> {
     extern "C" fn handle_sigterm(_sig: libc::c_int) {
-        // Reap our native gateway first, then exit. Without this, `mvmctl stop`
-        // / `kill -TERM` tears down the supervisor but orphans the gateway
-        // (re-parented to init), which keeps holding any inherited fd
-        // and accumulates as a leaked daemon. `kill(2)` and the atomic
-        // load are async-signal-safe (signal-safety(7)); `_exit` is too.
-        // Status 143 = 128 + SIGTERM, the shell convention for "killed
-        // by SIGTERM".
-        let gateway_pid = crate::native_gateway::RUNNING_NATIVE_GATEWAY_PID
-            .load(std::sync::atomic::Ordering::SeqCst);
+        // Status 143 = 128 + SIGTERM, the shell convention for "killed by
+        // SIGTERM". `_exit` is async-signal-safe (signal-safety(7)).
+        //
+        // This used to reap a gateway child first, because tearing the
+        // supervisor down otherwise orphaned it onto init where it kept an
+        // inherited fd open. There is no gateway child now: the guest has no
+        // NIC, so no process sits between it and the host to leak.
         unsafe {
-            if gateway_pid > 0 {
-                libc::kill(gateway_pid, libc::SIGTERM);
-            }
             libc::_exit(143);
         }
     }

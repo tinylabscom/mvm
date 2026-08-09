@@ -58,11 +58,11 @@ impl std::error::Error for NetworkError {}
 
 /// Provisioning + policy + teardown for one VM's network.
 ///
-/// Impls: the mvm-backend TAP/bridge/native-gateway/passt provider (per-OS), mvmd's
+/// Impls: the mvm-backend TAP/bridge provider (per-OS), mvmd's
 /// WireGuard/Tailscale mesh provider. The provider hides the per-OS gateway
 /// choice (`MVM_NETWORKING`) from callers.
 pub trait NetworkProvider: Send + Sync {
-    /// Stable kind string — `"bridge"` | `"native-gateway"` | `"passt"` |
+    /// Stable kind string — `"bridge"` |
     /// `"wireguard"` | … . Matched against a `NetworkMode`'s kind by the
     /// registry.
     fn kind(&self) -> &str;
@@ -79,7 +79,7 @@ pub trait NetworkProvider: Send + Sync {
     /// The host-egress enforcer this provider drives, if any. `None` (default)
     /// means egress is enforced by a mechanism the provider does not own as a
     /// separate object: the Firecracker `BridgeTapNetworkProvider` self-enforces
-    /// iptables inside `provision`, and the libkrun native-gateway/passt provider (L3)
+    /// iptables inside `provision`, and the libkrun provider (L3)
     /// relies on the supervisor's in-process gateway-bridge `FlowPolicy`
     /// chokepoint. A provider returns `Some(..)` only when it drives a distinct
     /// [`EgressEnforcer`] object (the `SupervisorEgressEnforcer`).

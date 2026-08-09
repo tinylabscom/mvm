@@ -33,7 +33,7 @@
 # Prerequisites:
 #   - `mvmctl dev up` works on this host (ur-seed installed and a
 #     local dev image staged; libkrun on macOS or KVM on Linux;
-#     gvproxy/passt installed per platform).
+#     per platform).
 #   - `jq` on PATH.
 #
 # Output: `/tmp/plan-89-baseline.md` (default).

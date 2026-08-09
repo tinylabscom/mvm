@@ -34,6 +34,28 @@ for detailed scope and acceptance criteria.
         `continue-on-error`). 511 tests, no UB, ~4m25s with `merkle::` skipped
         — those sweeps ran past 30 min under the interpreter. Widening to
         `mvm-core` crypto and the `mvm-fs` ext4 writer deferred
+- [~] Delete the dead guest-NIC gateway stack — plan 305, branch
+      `feat/305-delete-gateway-stack`
+  - [x] WS2 — the deletion: ~15,600 lines net. The gateway `NetworkingMode`
+        variants and net-attach FFI, `libkrun-sys`'s bridge + gateway spawn
+        modules, `mvm-hostd`'s `gateway_bridge/`, the four `rvproxy_*`
+        modules, the observer pipeline and registry, `firecracker_bridge/`,
+        the `mvm-bridge` sidecar, the `fuzz-vmhost` crate, the supervisor's
+        bridge route, and `NetworkingPreference` / `MVM_NETWORKING` /
+        `MVM_GATEWAY_BIN`
+  - [x] `xtask check-no-gateway-names` — tree-wide gate, wired into `ci.yml`'s
+        lint lane; clean over 2,109 files
+  - [x] Docs corrected: `CLAUDE.md` host-dependencies (told contributors to
+        install a package the runtime no longer uses), `README.md`, ADR-028,
+        ADR-036, the jailer's `LANDLOCK.md`/`SECCOMP.md`, public
+        troubleshooting + CLI reference, kernel image notes, three workflows
+  - [x] Jailer property tests re-pointed from the deleted sidecar's spec to
+        `ConfinementSpec::substitution_endpoint`; verified on live Linux
+        (kernel 6.8, Landlock enforcing) with no third-party binary installed
+  - [ ] WS1 — the broken confinement CI lane fix + `cargo -p` gate (PR #2260)
+  - [ ] Follow-up: `gateway_audit_socket` plumbing through `SupervisorConfig`
+        / `mvm-vmm` / `mvm-backends` — a neutral name that reaches the
+        warm-pool claim path; deliberately out of scope here
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader

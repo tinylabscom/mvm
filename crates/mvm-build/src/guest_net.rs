@@ -64,7 +64,6 @@ pub fn classify_builder_net_bootstrap(console_log: &str) -> BuilderNetBootstrap 
 
 fn is_static_fallback_line(line: &str) -> bool {
     line.contains("falling back to static gateway addressing")
-        || line.contains("falling back to static gvproxy addressing")
 }
 
 /// Extract the leased IP from a busybox udhcpc lease line, if this is one.
@@ -115,19 +114,6 @@ some-service: ready";
         let log = "\
 udhcpc: no lease, failing
 guest-net: udhcpc exit 1 — falling back to static gateway addressing (192.168.127.3)";
-        assert_eq!(
-            classify_builder_net_bootstrap(log),
-            BuilderNetBootstrap::StaticFallback {
-                ip: "192.168.127.3".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn classify_static_fallback_accepts_legacy_gvproxy_wording() {
-        let log = "\
-udhcpc: no lease, failing
-guest-net: udhcpc exit 1 — falling back to static gvproxy addressing (192.168.127.3)";
         assert_eq!(
             classify_builder_net_bootstrap(log),
             BuilderNetBootstrap::StaticFallback {

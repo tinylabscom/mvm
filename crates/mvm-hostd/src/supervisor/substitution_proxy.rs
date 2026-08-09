@@ -76,7 +76,7 @@ fn recover_terminator_original_destination(
         stream.read_exact(&mut header)?;
         anyhow::ensure!(
             &header[..8] == RVPROXY_ORIGINAL_DST_MAGIC,
-            "invalid rvproxy original-destination preamble"
+            "invalid original-destination preamble"
         );
         let ip = std::net::Ipv4Addr::new(header[8], header[9], header[10], header[11]);
         let port = u16::from_be_bytes([header[12], header[13]]);
@@ -852,7 +852,7 @@ impl SubstitutionService {
     /// secret placeholder in the request (claim-12 bind-checked), and splice the
     /// request to the real destination — returning its response verbatim.
     ///
-    /// Linux recovers the destination via `SO_ORIGINAL_DST`; rvproxy-native
+    /// Linux recovers the destination via `SO_ORIGINAL_DST`; the native
     /// connections carry a compact preamble before the first guest byte. The
     /// substitution core (`terminator::handler::handle_request`) and splice
     /// (`terminator::listener::forward_http_raw`) are sync + blocking, so each

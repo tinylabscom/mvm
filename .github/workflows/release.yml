@@ -119,13 +119,12 @@ jobs:
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
-      # `cargo build` above only produces `mvmctl`, so without this step a
-      # downloaded (non-source) install has no `mvm-bridge` and the backend's
-      # adjacent-to-exe resolver (which also checks `MVM_BRIDGE_PATH` and the
-      # source-tree `target/`) finds nothing. They ship next to `mvmctl` in the
-      # tarball below so the resolver locates them.
-      #   - mvm-bridge: cross-platform external-VMM gateway/audit sidecar
-      #     (Firecracker passt). Builds everywhere, no extra deps.
+      # `cargo build` above only produces `mvmctl` — so they are built here and
+      # ship next to `mvmctl` in the tarball, where the backend's
+      # adjacent-to-exe resolver finds them on a downloaded install.
+      #   - mvm-substitution-endpoint: the per-VM egress gate. Every VM spawns
+      #     one, on both the FC (Linux) and HVF (macOS) paths, so it ships on
+      #     every target.
       #   - mvm-hvf-supervisor (macOS only): the raw-HVF VMM supervisor.
       #   - mvm-libkrun-supervisor (macOS only, and INTENTIONALLY so — not a
       #     follow-up): it has `required-features = ["libkrun-sys"]`, and the
@@ -134,13 +133,10 @@ jobs:
       #     at the top-level Cargo.toml, `[target.'cfg(target_os="macos")']`:
       #     "Linux CI/runtimes use Firecracker … no libkrun-dev package exists").
       #     So on Linux the supervisor can't be built here (no libkrun to link)
-      #     and isn't needed at runtime: workloads use Firecracker (-> mvm-bridge)
-      #     and the builder VM uses libkrun-if-genuinely-available-else-QEMU
-      #     (ADR-093), with libkrun's FFI stubbed out in a no-feature build so it
-      #     never spawns this supervisor. Shipping mvm-bridge alone on Linux is
-      #     correct + complete. Supporting the libkrun backend for *downloaded*
-      #     Linux binaries would be a product decision (vendor/build libkrun +
-      #     flip the feature), not a packaging fix.
+      #     and isn't needed at runtime: workloads use Firecracker and the
+      #     builder VM uses libkrun-if-genuinely-available-else-QEMU (ADR-093),
+      #     with libkrun's FFI stubbed out in a no-feature build so it never
+      #     spawns this supervisor.
       - name: Build per-VM host binaries
         env:
           TARGET: ${{ matrix.target }}
@@ -150,16 +146,10 @@ jobs:
         run: |
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${TARGET}" -p mvm-hostd \
-              --bin mvm-bridge \
               --bin mvm-hvf-supervisor \
               --bin mvm-libkrun-supervisor --features libkrun-sys
-          else
-            cargo build --release --target "${TARGET}" -p mvm-hostd \
-              --bin mvm-bridge
           fi
-          # The per-VM substitution endpoint (mvm-hostd) is the egress gate every
-          # VM spawns — on both the FC (Linux) and HVF (macOS) paths — so it ships
-          # on every target next to mvmctl.
+          # Ships on every target — see the note above.
           cargo build --release --target "${TARGET}" -p mvm-hostd \
             --bin mvm-substitution-endpoint
 
@@ -214,10 +204,10 @@ jobs:
           cp "target/${TARGET}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
-          # downloaded install. copy-if-exists: the set differs by OS (macOS gets
-          # the hvf/libkrun supervisors; Linux gets mvm-bridge only), but the
-          # substitution endpoint ships on every target.
-          for hostbin in mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
+          # downloaded install. copy-if-exists: the set differs by OS (macOS also
+          # gets the hvf/libkrun supervisors), but the substitution endpoint
+          # ships on every target.
+          for hostbin in mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
             src="target/${TARGET}/release/${hostbin}"
             [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
           done

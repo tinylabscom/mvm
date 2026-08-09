@@ -376,40 +376,6 @@ jobs:
         # nightly cron, not on every mvm-oci PR.
         run: cargo fuzz run --fuzz-dir fuzz-oci unpack_layer -- -max_total_time="$DURATION"
 
-      - name: Fuzz mvm-bridge — BridgeConfigJson (host-side)
-        working-directory: crates/mvm-hostd
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # Plan 113 §Task 15 / ADR-064 — the `mvm-bridge`
-        # sidecar reads a `BridgeConfigJson` document on stdin BEFORE
-        # installing the jailer confinement or touching the
-        # parent-inherited socketpair fds. The producer (Task 13's
-        # `FirecrackerBackend`) is trusted, but the bytes traverse a
-        # pipe the bridge must defend; a panic here is a hard process
-        # death before the parent's watchdog has a sentinel to react
-        # to. Same contract as `fuzz_supervisor_config`: "never panic
-        # on any input." `#[serde(deny_unknown_fields)]` on
-        # `BridgeConfigJson` (Task 12 — `crates/mvm-hostd/
-        # src/parse.rs`) means unknown keys fail-closed inside
-        # deserialization.
-        run: cargo fuzz run --fuzz-dir fuzz-vmhost fuzz_bridge_config_json -- -max_total_time="$DURATION"
-
-      - name: Fuzz mvm-bridge — passt-hashes TOML
-        working-directory: crates/mvm-hostd
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # Plan 113 §Task 15 / ADR-064 — `verify_passt_hash` reads
-        # `~/.mvm/passt-hashes.toml` BEFORE confinement so a missing
-        # or malformed allowlist surfaces as a clean operator hint
-        # instead of an opaque EACCES. A panic in the TOML parser at
-        # this leaf is a hard process death before the FlowEvent
-        # pipeline is up; this fuzz target asserts the no-panic
-        # complement of the `verify_passt_hash_rejects_*` unit-test
-        # suite.
-        run: cargo fuzz run --fuzz-dir fuzz-vmhost fuzz_passt_hashes_toml -- -max_total_time="$DURATION"
-
       - name: Fuzz gateway packet parse + rebuild (host-side)
         working-directory: crates/mvm-hostd
         env:
@@ -509,8 +475,6 @@ jobs:
             crates/deps/libkrun-sys/fuzz/artifacts/
             crates/mvm-fs/fuzz-oci/corpus/
             crates/mvm-fs/fuzz-oci/artifacts/
-            crates/mvm-hostd/fuzz-vmhost/corpus/
-            crates/mvm-hostd/fuzz-vmhost/artifacts/
             crates/mvm-hostd/fuzz/corpus/
             crates/mvm-hostd/fuzz/artifacts/
             crates/mvm-sdk/fuzz/corpus/

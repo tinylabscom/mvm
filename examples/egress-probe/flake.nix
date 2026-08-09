@@ -9,7 +9,7 @@
   # resolution.
   #
   # Verdict = (allow_blocked ? 1 : 0) + (deny_blocked ? 2 : 0):
-  #   0 = both reachable (open gateway, e.g. real gvproxy → network works)
+  #   0 = both reachable (open gateway → network works)
   #   2 = allow reachable, deny blocked (correct allow+deny enforcement)
   #   3 = both blocked (deny-all, or — the bug this fixture caught — no network)
   #

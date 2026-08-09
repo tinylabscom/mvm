@@ -447,7 +447,7 @@ pub enum LocalAuditKind {
 
     // --- gateway-flow audit kinds (claim 10 leg 2) ---
     //
-    // Four new kinds emitted by the native gateway (macOS) / passt (Linux)
+    // Four new kinds emitted by the host-side egress path
     // control-socket wrapper. Variants ship ahead of their emission
     // sites without re-bumping the audit schema each time. Wire
     // format is stable (snake_case strings) per the enum's
@@ -463,7 +463,7 @@ pub enum LocalAuditKind {
     //   - durations / windows are milliseconds / seconds, named
     //     `*_ms` / `*_s` to match the rest of the audit log.
     //
-    /// A new outbound flow opened through the native-gateway/passt path. Fired once
+    /// A new outbound flow opened through the host-side egress path. Fired once
     /// at flow setup with the 5-tuple and assigned `flow_id`; the
     /// `flow_id` is the join key for subsequent `FlowBytes`,
     /// `FlowClosed`, and `FlowPolicyDecision` entries on the same
