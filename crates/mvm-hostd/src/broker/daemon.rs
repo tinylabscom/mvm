@@ -669,7 +669,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::UnixStream;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, oneshot};
 
     fn daemon(tenant: &str) -> HostAgentDaemon {
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
@@ -706,13 +706,15 @@ mod tests {
     ) -> tokio::task::JoinHandle<()> {
         let helper_listener = UnixListener::bind(&helper_sock).unwrap();
         let helper = Arc::new(Mutex::new(SignerHelper::new(tenant_id, Some(key_path))));
+        let (ready_tx, ready_rx) = oneshot::channel();
         let task = tokio::spawn({
             let helper = helper.clone();
             async move {
+                let _ = ready_tx.send(());
                 let _ = serve_helper_on_listener(helper_listener, helper, 65_536).await;
             }
         });
-        tokio::task::yield_now().await;
+        ready_rx.await.unwrap();
         task
     }
 
