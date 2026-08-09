@@ -61,6 +61,21 @@ for detailed scope and acceptance criteria.
   - [ ] Follow-up: `gateway_audit_socket` plumbing through `SupervisorConfig`
         / `mvm-vmm` / `mvm-backends` — a neutral name that reaches the
         warm-pool claim path; deliberately out of scope here
+- [x] HVF save/restore for checkpoint and fork — **plan 304**, branch
+      `feat/hvf-save-restore`
+  - [x] Audit `HvfVmFullControl` against the whole `VmFullControl` surface and
+        add the writable-disk capture refusal
+  - [x] Restore entry point: the launch-config rewrite in `mvm-backends`, and
+        the `ForkRestore` callback / `VmFullRestore` adapters in `mvm-runtime`
+  - [x] Backend-neutral dispatch: `AnyBackend::vm_full_control`, one shared
+        liveness marker list held to the backend catalog by test,
+        `vm_full_origin` replacing the supervisor-config fork predicate,
+        `fork_vm_full_fc` → `fork_vm_full`
+  - [x] Flip `snapshot_capability` to `SaveRestore` and update the pinned tests
+  - [x] Chain-anchor the restore path; keep `capture_fs_quick` and the verity
+        binding untouched; fresh child identity on every fork
+  - [x] BDD suite `s11_snapshot/hvf_save_restore.feature` + benchmark evidence
+
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader

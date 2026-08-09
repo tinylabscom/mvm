@@ -3112,6 +3112,7 @@ dependencies = [
  "mvm-hostd",
  "mvm-net",
  "mvm-runtime",
+ "mvm-vmm",
  "serde",
  "serde_json",
  "sha2 0.11.0",
