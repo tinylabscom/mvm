@@ -128,7 +128,7 @@ it. Correcting the record:
 - The fail-open is deliberate and was tested
   (`panicking_observer_is_isolated_and_forwards`, "panic must be isolated ->
   Forward"), not an oversight.
-- The pipeline is reached only from `passt.rs` and `native_gateway.rs`, which
+- The pipeline is reached only from the two gateway modules, which
   are builder-VM / Stage 0 paths. No workload guest has a NIC, so this was
   never a live claim-10 hole.
 - The only production `Observer` impl is `FlowCountMetrics`, a counter with

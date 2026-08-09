@@ -11,9 +11,9 @@ check-vsock-only-egress`
 Workload egress converged on vsock. Every workload backend boots with a
 virtio-vsock device and no net device, and egress leaves the guest only over
 the per-VM substitution endpoint. The guest-NIC gateway stack that predates
-that convergence — passt, gvproxy, the native/rvproxy gateway, the `mvm-bridge`
-sidecar, and the observer packet pipeline they feed — is still in the tree but
-no longer reachable.
+that convergence — the userspace gateways, the `mvm-bridge` sidecar, and the
+observer packet pipeline they feed — is still in the tree but no longer
+reachable.
 
 This is not an inference from the docs. It is what the code says:
 
@@ -31,8 +31,8 @@ This is not an inference from the docs. It is what the code says:
   construction of `NetworkingMode::Passt` in the tree is inside a `#[test]`.
 - `with_native_gateway_config` is called only from inside a block already
   guarded on `cfg.krun.networking` *being* `NativeGateway`, which nothing sets.
-- `run_packet_pipeline`'s only non-test callers are `gateway_bridge/passt.rs`
-  and `gateway_bridge/native_gateway.rs`.
+- `run_packet_pipeline`'s only non-test callers are the two `gateway_bridge`
+  gateway modules.
 
 So the whole subtree is unreachable, and it is not inert weight: it is a second
 egress model sitting next to the real one, with its own policy surface, its own
@@ -49,10 +49,10 @@ gateway makes that gate trivially true instead of continuously defended.
    `workflow_dispatch`-only, which is why nobody noticed. The tests themselves
    are fine — run on a live Landlock kernel (6.8, `landlock` in
    `/sys/kernel/security/lsm`) both pass.
-2. **`ConfinementSpec::firecracker_bridge` hard-requires `/usr/bin/passt` to
+2. **`ConfinementSpec::firecracker_bridge` hard-requires a gateway binary to
    exist**, because Landlock's `PathFd::new` opens every allowlisted path. On a
-   box without passt the property tests fail with `landlock path missing`. That
-   is a spec pinned to a binary the runtime no longer launches.
+   box without it the property tests fail with `landlock path missing`. That is
+   a spec pinned to a binary the runtime no longer launches.
 
 ## Workstreams
 
@@ -88,8 +88,8 @@ tests pass under an enforcing Landlock (`landlock_denies_paths_outside_ruleset`,
 `seccomp_allows_listed_denies_unlisted`).
 
 One caveat found while doing it, feeding WS2: the tests only pass there because
-`passt` was installed. `ConfinementSpec::firecracker_bridge` lists the passt
-binary as a Landlock-readable path, and `PathFd::new` opens every path in the
+the gateway binary was installed. `ConfinementSpec::firecracker_bridge` lists
+it as a Landlock-readable path, and `PathFd::new` opens every path in the
 ruleset — so the spec cannot be built on a host without a binary the runtime
 never launches.
 
