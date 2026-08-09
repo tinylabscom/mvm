@@ -14,6 +14,7 @@ use crate::client::dto::{
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
+use mvm_contract::protocol::capability_negotiation::BackendCapabilityReport;
 
 /// How to reach a gateway: its base URL and the bearer token to present.
 pub struct GatewayConfig {
@@ -610,6 +611,25 @@ fn filter_machines(machines: Vec<MachineState>, filter: &MachineFilter) -> Vec<M
 
 #[async_trait]
 impl MvmClient for GatewayBackend {
+    async fn backend_capabilities(&self) -> Result<BackendCapabilityReport> {
+        // A gateway needs a capability endpoint, not a negotiation one:
+        // negotiation is pure, so the caller runs it locally on this answer.
+        let url = self.endpoint("/api/v1/backend/capabilities")?;
+        let resp = self
+            .authed(self.http.get(url))
+            .send()
+            .await
+            .map_err(|e| MvmError::Backend {
+                reason: format!("capability request failed: {e}"),
+            })?;
+        if let Some(e) = status_error(resp.status(), "") {
+            return Err(e);
+        }
+        resp.json().await.map_err(|e| MvmError::Backend {
+            reason: format!("decode capability report: {e}"),
+        })
+    }
+
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
         let url = self.endpoint("/api/v1/sandboxes")?;
         let resp = self

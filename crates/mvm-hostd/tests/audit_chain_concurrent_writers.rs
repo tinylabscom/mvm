@@ -185,6 +185,7 @@ fn explain(err: &VerifyError, path: &Path) -> String {
         | VerifyError::SignatureInvalid { line }
         | VerifyError::EntryCanonicalMismatch { line }
         | VerifyError::Malformed { line, .. } => Some(*line),
+        VerifyError::TruncatedTail { line } => Some(*line),
         VerifyError::Io(_) => None,
     };
     let context = line_no

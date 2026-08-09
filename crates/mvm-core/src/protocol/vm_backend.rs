@@ -18,6 +18,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
+pub use mvm_contract::protocol::capability_negotiation::{CapabilityAlternative, CapabilityGap};
 pub use mvm_contract::protocol::vm_backend::{
     BackendKind, BackendSecurityProfile, BalloonState, ClaimStatus, GuestChannelInfo,
     LayerCoverage, RequiredCapabilities, ReseedStatus, RuntimeSourceLaunchKind,
@@ -354,6 +355,21 @@ pub trait VmBackend: Send + Sync {
 
     /// Capabilities supported by this backend.
     fn capabilities(&self) -> VmCapabilities;
+
+    /// Check `required` against this backend, naming a substitute for every
+    /// capability it cannot serve.
+    ///
+    /// This is the uniform entry point for a caller holding a backend it did
+    /// not choose — a library consumer, or any code behind `AnyBackend`. It
+    /// answers in one call what the backend refuses *and* what to do instead,
+    /// so a refusal is actionable without a table of per-backend lore.
+    ///
+    /// Not overridable: it is `capabilities()` and `kind()` composed, and a
+    /// backend that could answer differently here than its own capability
+    /// matrix says would be exactly the dishonest tier the backend ADR forbids.
+    fn negotiate(&self, required: &RequiredCapabilities) -> Result<(), Vec<CapabilityGap>> {
+        self.capabilities().negotiate(required, self.kind())
+    }
 
     /// Whether a warm claim transfers a resident paused VMM directly into the
     /// child, instead of restoring a saved-state bundle.

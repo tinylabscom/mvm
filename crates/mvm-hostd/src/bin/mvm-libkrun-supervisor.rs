@@ -95,6 +95,9 @@ struct PrelaunchEnvelope {
 }
 
 fn main() -> ExitCode {
+    // First statement in the process: a panic before this line would
+    // print its payload unredacted.
+    mvm_hostd::panic_hook::install("libkrun-supervisor");
     // macOS Hypervisor.framework rejects any process without
     // `com.apple.security.hypervisor`. The ad-hoc signer
     // self-signs + re-spawns the binary on first run; subsequent

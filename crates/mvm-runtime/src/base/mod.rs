@@ -27,7 +27,7 @@
 //! `mvmctl::runtime::ui`, `mvmctl::runtime::shell_mock`) and the
 //! console gate (`mvm::vm::runtime_meta`) keep resolving.
 
-pub mod config;
+pub use mvm_vmm::host::config;
 pub mod cow;
 pub use mvm_vmm::host::linux_env;
 pub use mvm_vmm::host::observability_target;
