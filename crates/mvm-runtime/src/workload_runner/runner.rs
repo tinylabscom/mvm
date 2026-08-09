@@ -97,6 +97,8 @@ impl EndpointSpawner for RealEndpointSpawner {
             tls_intermediate: None,
             network_policy: Some(req.network_policy),
             raw_egress: req.raw_egress,
+            resolver_remote: None,
+            binding_store_dir: None,
         })?;
         Ok(uds)
     }

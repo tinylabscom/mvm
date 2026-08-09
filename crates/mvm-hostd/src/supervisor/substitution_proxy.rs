@@ -22,15 +22,14 @@ use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
 use mvm_contract::ir::AuthType;
-use mvm_core::crypto::secret_store::SecretStore;
 use mvm_core::plan::SecretBinding;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
-    AssembleError, BindingStore, HandedPlaceholders, LocalResolver, SecretResolver,
-    SignDispatchError, SigningInput, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry,
-    assemble_registry, build_sigv4_input, find_placeholder,
+    AssembleError, BindingStore, HandedPlaceholders, SecretResolver, SignDispatchError,
+    SigningInput, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, assemble_registry,
+    build_sigv4_input, find_placeholder,
 };
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
@@ -535,7 +534,11 @@ pub struct FromPlanInputs<'a> {
     pub plan_secrets: &'a [SecretBinding],
     pub tenant: &'a str,
     pub bindings: &'a dyn BindingStore,
-    pub secret_store: Arc<dyn SecretStore>,
+    /// The value resolver the service resolves each bound secret through. Built
+    /// by the caller (`assemble`) from `EndpointConfig.resolver`: a
+    /// [`LocalResolver`] over the host secret store (default), or a
+    /// [`crate::keyholder::RemoteResolver`] dialing a fleet-secrets daemon UDS.
+    pub resolver: Arc<dyn SecretResolver>,
     pub forward_timeout_secs: u64,
     pub redaction: mvm_core::policy::RedactionPolicy,
     pub reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy,
@@ -725,6 +728,15 @@ impl SubstitutionService {
         &self.redaction_policy
     }
 
+    /// The attached resolver. Test-only: lets `assemble`'s resolver-backend
+    /// tests prove which `SecretResolver` (`LocalResolver` vs `RemoteResolver`)
+    /// actually reached the service, via an observable `resolve()` call rather
+    /// than reaching into a private field.
+    #[cfg(test)]
+    pub(crate) fn resolver(&self) -> &Arc<dyn SecretResolver> {
+        &self.resolver
+    }
+
     /// Run the service's redactor for a destination action. Test-only seam so the
     /// endpoint-config tests can prove the threaded policy fires end-to-end.
     #[cfg(test)]
@@ -761,11 +773,12 @@ impl SubstitutionService {
     }
 
     /// Assemble a ready-to-serve service from an admitted plan's secret
-    /// bindings: build the registry ([`assemble_registry`]), a [`LocalResolver`]
-    /// over the tenant's secret store, and a hardened-reqwest forwarder.
-    /// Returns the service plus the `(guest name, placeholder)` pairs the
-    /// supervisor injects into the guest. The caller binds the listener and
-    /// calls [`Self::serve`].
+    /// bindings: build the registry ([`assemble_registry`]) and a
+    /// hardened-reqwest forwarder, and resolve values through the caller-supplied
+    /// [`SecretResolver`] (a [`LocalResolver`] over the tenant's secret store by
+    /// default, or a remote fleet-secrets resolver). Returns the service plus the
+    /// `(guest name, placeholder)` pairs the supervisor injects into the guest.
+    /// The caller binds the listener and calls [`Self::serve`].
     pub fn from_plan(
         inputs: FromPlanInputs<'_>,
     ) -> Result<(Arc<Self>, HandedPlaceholders), FromPlanError> {
@@ -773,7 +786,7 @@ impl SubstitutionService {
             plan_secrets,
             tenant,
             bindings,
-            secret_store,
+            resolver,
             forward_timeout_secs,
             redaction,
             reversible_replacement,
@@ -781,7 +794,6 @@ impl SubstitutionService {
             recorder,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
-        let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(tenant, secret_store));
         let forwarder: Arc<dyn Forwarder> = Arc::new(ReqwestForwarder::new(forward_timeout_secs)?);
         let mut service = Self::new(Arc::new(registry), resolver, forwarder).with_tenant(tenant);
         service = service.with_redaction_policy(redaction);
@@ -2643,7 +2655,8 @@ mod server_tests {
                 &SecretBox::new(Box::new("sk".to_string())),
             )
             .unwrap();
-        let secret_store: Arc<dyn SecretStore> = Arc::new(store);
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
 
         let plan = [SecretBinding {
             name: "OPENAI_API_KEY".into(),
@@ -2655,7 +2668,7 @@ mod server_tests {
             plan_secrets: &plan,
             tenant: "local",
             bindings: &bindings,
-            secret_store,
+            resolver,
             forward_timeout_secs: 30,
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
@@ -2695,7 +2708,8 @@ mod server_tests {
                 &SecretBox::new(Box::new("sk".to_string())),
             )
             .unwrap();
-        let secret_store: Arc<dyn SecretStore> = Arc::new(store);
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
 
         let plan = [SecretBinding {
             name: "OPENAI_API_KEY".into(),
@@ -2724,7 +2738,7 @@ mod server_tests {
             plan_secrets: &plan,
             tenant: "local",
             bindings: &bindings,
-            secret_store,
+            resolver,
             forward_timeout_secs: 30,
             redaction: policy,
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
