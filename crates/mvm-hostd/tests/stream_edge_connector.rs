@@ -159,6 +159,18 @@ fn a_producers_output_reaches_a_consumers_stdin_in_order() {
     );
 }
 
+/// A lease these tests mean to step across or outwait, the gap between steps,
+/// and a wait that outlives the lease.
+///
+/// The TTL doubles as the window each step has to land in, so it is sized from
+/// measurement rather than taste: on a loaded host the gap between two adjacent
+/// statements measured up to 298ms, so the previous 60ms lease lapsed between
+/// two steps and handed the lease to the competitor the test expects to be
+/// refused. See `input_gate::tests::LAPSING_LEASE_TTL` for the measurement.
+const LAPSING_LEASE_TTL: Duration = Duration::from_secs(1);
+const BETWEEN_STEPS: Duration = Duration::from_millis(300);
+const PAST_THE_LEASE: Duration = Duration::from_millis(1300);
+
 /// An edge whose producer is quiet must not lose the single-writer lease.
 ///
 /// Observed the only way it can be: by a competing writer. A test that merely
@@ -177,7 +189,7 @@ fn stepping_across_the_ttl_keeps_the_lease_from_a_competitor() {
     InputGate::bind(
         &consumer,
         InputBinding::new()
-            .with_lease_ttl(Duration::from_millis(60))
+            .with_lease_ttl(LAPSING_LEASE_TTL)
             .with_audit(InputAudit::new(
                 AuditEmitter::with_dir(key, chain_dir.path()).expect("chain"),
             )),
@@ -189,10 +201,12 @@ fn stepping_across_the_ttl_keeps_the_lease_from_a_competitor() {
     let mut edge =
         EdgeConnector::new(&StreamEdge::new("quiet"), session, reader).expect("servable");
 
-    // Step across more than one whole TTL, with nothing to send.
+    // Step across more than one whole TTL, with nothing to send. Six gaps of
+    // this size outlast the TTL, while each one still leaves the next step room
+    // to land inside it.
     for _ in 0..6 {
         assert_eq!(edge.step().expect("idle step"), EdgeStep::Idle);
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(BETWEEN_STEPS);
     }
 
     assert!(
@@ -217,7 +231,7 @@ fn an_unstepped_edge_lets_the_lease_lapse() {
     InputGate::bind(
         &consumer,
         InputBinding::new()
-            .with_lease_ttl(Duration::from_millis(40))
+            .with_lease_ttl(LAPSING_LEASE_TTL)
             .with_audit(InputAudit::new(
                 AuditEmitter::with_dir(key, chain_dir.path()).expect("chain"),
             )),
@@ -229,7 +243,7 @@ fn an_unstepped_edge_lets_the_lease_lapse() {
     let _edge =
         EdgeConnector::new(&StreamEdge::new("abandoned"), session, reader).expect("servable");
 
-    std::thread::sleep(Duration::from_millis(140));
+    std::thread::sleep(PAST_THE_LEASE);
     assert!(
         InputGate::open(&consumer, &plan).is_ok(),
         "an abandoned lease must lapse, or the two tests above prove nothing"

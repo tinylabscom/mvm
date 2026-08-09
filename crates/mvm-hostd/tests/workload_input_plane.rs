@@ -182,6 +182,29 @@ fn unique_vm(prefix: &str) -> String {
     format!("{prefix}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
+/// A lease a test means to watch lapse, and a wait that outlives it.
+///
+/// The TTL doubles as the window every write before the lapse has to land in,
+/// so it cannot be shortened to taste. On a loaded host the gap between two
+/// adjacent statements measured up to 298ms, which is why the previous 20ms
+/// lease expired mid-setup and refused a write the test required to succeed.
+/// See `input_gate::tests::LAPSING_LEASE_TTL` for the measurement.
+const LAPSING_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+const PAST_THE_LEASE: std::time::Duration = std::time::Duration::from_millis(1300);
+/// For a lease nothing waits out, so jitter cannot reach it.
+const LIVE_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The input binding the fixtures share: a real chain, so the gate's
+/// record-the-decision path is exercised rather than stubbed.
+fn audit_binding(
+    chain_key: &ed25519_dalek::SigningKey,
+    chain_dir: &std::path::Path,
+) -> InputBinding {
+    InputBinding::new().with_audit(InputAudit::new(
+        AuditEmitter::with_dir(chain_key.clone(), chain_dir).expect("open the chain"),
+    ))
+}
+
 fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     SynthesisInput {
@@ -268,15 +291,25 @@ impl Fixture {
         Self::bound(prefix, None, Some(lease_ttl))
     }
 
+    /// Re-bind this VM's lease TTL, keeping the chain it was bound with.
+    ///
+    /// For a test where one lease is meant to lapse and the next is not: the
+    /// successor's TTL is not what the test is timing, so it should not be
+    /// racing the clock alongside the one that is.
+    fn rebind_lease(&self, lease_ttl: std::time::Duration) {
+        InputGate::bind(
+            &self.vm,
+            audit_binding(&self.chain_key, self.chain_dir.path()).with_lease_ttl(lease_ttl),
+        );
+    }
+
     fn bound(prefix: &str, secret: Option<&[u8]>, lease_ttl: Option<std::time::Duration>) -> Self {
         let (env, home) = isolated_home();
         let vm = unique_vm(prefix);
         let chain_dir = tempfile::tempdir().expect("chain dir");
         let chain_key = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
 
-        let mut binding = InputBinding::new().with_audit(InputAudit::new(
-            AuditEmitter::with_dir(chain_key.clone(), chain_dir.path()).expect("open the chain"),
-        ));
+        let mut binding = audit_binding(&chain_key, chain_dir.path());
         if let Some(ttl) = lease_ttl {
             binding = binding.with_lease_ttl(ttl);
         }
@@ -541,7 +574,7 @@ fn a_writer_that_let_its_lease_lapse_does_not_wedge_the_stream_for_its_successor
     // that started numbering afresh would be refused for its predecessor's
     // sequence and the workload's stdin would be wedged for good.
     let _guard = desk_test();
-    let fx = Fixture::with_lease_ttl("input-displaced", std::time::Duration::from_millis(20));
+    let fx = Fixture::with_lease_ttl("input-displaced", LAPSING_LEASE_TTL);
     let mut child = cat();
     fx.plane
         .open_input(&fx.vm, &fx.admit(true), Box::new(ToDesk::over(&mut child)))
@@ -551,12 +584,15 @@ fn a_writer_that_let_its_lease_lapse_does_not_wedge_the_stream_for_its_successor
         .expect("the gate cleared it");
 
     // The first writer goes quiet for longer than its lease.
-    std::thread::sleep(std::time::Duration::from_millis(60));
+    std::thread::sleep(PAST_THE_LEASE);
     assert_eq!(
         InputGate::lease_holder(&fx.vm),
         None,
         "the lease is there to be taken"
     );
+    // Only the first writer's lease is meant to lapse. The successor has to
+    // survive its write and its close, neither of which this test is timing.
+    fx.rebind_lease(LIVE_LEASE_TTL);
 
     // The successor points at the same guest — the desk is already open over
     // this workload — and starts its own numbering at zero.
@@ -585,7 +621,7 @@ fn an_idle_writer_can_keep_its_stream_alive_without_sending_anything() {
     // that is thinking. Without a way to hold it, a writer that paused past
     // the TTL would find its close refused too — and a refused close drops the
     // tail the gate withheld, which is the writer's last bytes.
-    let fx = Fixture::with_lease_ttl("input-refresh", std::time::Duration::from_millis(40));
+    let fx = Fixture::with_lease_ttl("input-refresh", LAPSING_LEASE_TTL);
     let mut child = cat();
     fx.plane
         .open_input(
@@ -598,8 +634,12 @@ fn an_idle_writer_can_keep_its_stream_alive_without_sending_anything() {
         .write_input(&fx.vm, frame(0, b"thinking"))
         .expect("the gate cleared it");
 
+    // Five pauses of this length outlast the TTL, so reaching the close proves
+    // the refreshes held the lease. Each pause still has to leave the refresh
+    // room to land inside the TTL, hence a pause well under it.
+    const THINKING_FOR: std::time::Duration = std::time::Duration::from_millis(300);
     for _ in 0..5 {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(THINKING_FOR);
         fx.plane
             .refresh_input(&fx.vm)
             .expect("an idle holder keeps its lease");

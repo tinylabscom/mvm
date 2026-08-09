@@ -72,6 +72,39 @@ jobs:
             exit 0
           fi
 
+          # `mergeable` above is computed against `main`, but the queue does not
+          # validate entries against `main` — it validates them batched on top
+          # of the entries ahead of them. A PR that conflicts with another queue
+          # *member* is clean by the check above and dirty in every batch it
+          # joins, so requeuing it burns a validation cycle and ejects again.
+          #
+          # There is no API for "did this conflict with its batch", so use the
+          # one signal that separates the two cases: a transient ejection is
+          # followed by the head moving on, while a batch conflict reproduces
+          # unchanged. If this PR's head is the same one that was ejected last
+          # time, the retry has nothing new to try.
+          head_sha=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')
+          # `--jq` runs per page under `--paginate`, so this emits one marker
+          # per page that has any; take the last line rather than trusting a
+          # `| last` inside the filter, which would be per-page.
+          last_sha=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- requeue-head:")) | .body' \
+            | sed -n 's/^<!-- requeue-head: \([0-9a-f]\{7,40\}\) -->.*/\1/p' \
+            | tail -1)
+          if [ -n "${last_sha}" ] && [ "${last_sha}" = "${head_sha}" ]; then
+            echo "::warning::PR #${PR} ejected again at the same head ${head_sha}; not requeuing."
+            printf '%s\n\n%s\n' \
+              "Ejected again at commit \`${head_sha}\`, with nothing about this PR having changed since the last automatic requeue. Not requeuing." \
+              "That pattern usually means a conflict with another PR **in the queue** rather than with \`main\`. The queue validates entries batched on top of one another, so a clash with a queue member is invisible to a \`mergeable\` check against \`main\` — which is what this workflow can see. Rebasing onto whatever has landed since, or waiting for the other entry to merge, is usually the fix." \
+              > /tmp/requeue-note.md
+            gh pr comment "${PR}" --repo "${REPO}" --body-file /tmp/requeue-note.md || true
+            exit 0
+          fi
+          # Record the head this retry is being spent on. An HTML comment so it
+          # renders as nothing; the timeline is already the attempt counter and
+          # this only adds which commit each attempt was for.
+          gh pr comment "${PR}" --repo "${REPO}" --body "<!-- requeue-head: ${head_sha} -->" || true
+
           attempts=$(gh api "repos/${REPO}/issues/${PR}/timeline" --paginate \
             --jq '[.[] | select(.event == "labeled") | select(.label.name == "auto-requeued")] | length')
           if [ "${attempts}" -ge "${MAX_ATTEMPTS}" ]; then

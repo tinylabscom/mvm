@@ -245,8 +245,11 @@ struct SourceFile {
 
 /// The unsigned plain-JSON operator log `mvmctl secret …` writes into the
 /// audit directory. It is not a chain and carries no authenticity, so it
-/// is never a source — neither events nor a refusal.
-const SECRETS_OPERATOR_LOG: &str = "secrets.jsonl";
+/// is never a source — neither events nor a refusal. Shared with the
+/// lifecycle-chain rule in `mvm_core::config`: this exclusion used to live only
+/// here, so the sweeps that did not have it verified the operator log as if it
+/// were a chain and reported the resulting parse error as a broken chain.
+use mvm_core::config::SECRETS_OPERATOR_LOG;
 
 /// Enumerate the source identities under `dir` without verifying anything
 /// (and without needing a verifying key). Same discovery rules as a read:
