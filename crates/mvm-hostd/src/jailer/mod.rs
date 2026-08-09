@@ -226,6 +226,8 @@ mod tests {
             std::fs::create_dir_all(d).expect("create spec dir");
         }
 
+        // `None` resolver backend: this test is about the key grant, and a
+        // resolver socket would add an unrelated write path.
         let spec = ConfinementSpec::substitution_endpoint(
             secrets.clone(),
             bindings.clone(),
@@ -412,7 +414,7 @@ mod tests {
         );
     }
 
-    /// On Linux the endpoint allowlist is the bridge table plus the tokio +
+    /// On Linux the endpoint allowlist is the shared table plus the tokio +
     /// TLS-forward additions. Assert the additions are present (the egress
     /// path needs them) and the dangerous names still absent.
     #[cfg(target_os = "linux")]

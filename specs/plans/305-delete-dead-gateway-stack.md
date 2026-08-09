@@ -11,9 +11,9 @@ check-vsock-only-egress`
 Workload egress converged on vsock. Every workload backend boots with a
 virtio-vsock device and no net device, and egress leaves the guest only over
 the per-VM substitution endpoint. The guest-NIC gateway stack that predates
-that convergence — the legacy guest-NIC helpers, the native gateway, the
-`mvm-bridge` sidecar, and the observer packet pipeline they feed — is still in
-the tree but no longer reachable.
+that convergence — the legacy guest-NIC helpers, the userspace gateways, the
+native gateway, the `mvm-bridge` sidecar, and the observer packet pipeline they
+feed — is still in the tree but no longer reachable.
 
 This is not an inference from the docs. It is what the code says:
 
@@ -104,7 +104,8 @@ orphaned.
       spawn modules, `child_lifecycle.rs`, `GatewayHandle`,
       `configure_with_gateway`, and the net-attach FFI
 - [x] `mvm-hostd`: `supervisor/gateway_bridge/` entire, the four
-      supervisor network substitution modules, the observer pipeline
+      supervisor network substitution modules, including `rvproxy_*`, the
+      observer pipeline
       (`pipeline.rs`, `latency.rs`, `flow_count.rs`) and the registry in
       `network/mod.rs`, `firecracker_bridge/`, the `mvm-bridge` sidecar and
       `src/bridge/`, and the `fuzz-vmhost` crate whose only two targets fuzzed
@@ -146,7 +147,8 @@ match for the removed names, wired into `ci.yml`'s lint lane beside
 `check-vsock-only-egress`.
 
 Word boundaries are load-bearing and tested: similarly named Nix attributes and
-ordinary words can contain a forbidden token as a substring, and a substring match
+ordinary words such as `passthru` and `passthrough` can contain a forbidden
+token as a substring, and a substring match
 produced ~200 false positives — enough to get the gate switched off.
 Exemptions are narrow and asserted narrow by a test; live documentation is not
 exempt. One span-precise context allowance covers an SSH key filename that
