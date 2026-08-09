@@ -23,8 +23,14 @@
       (an unreadable ledger used to fall through to "parent tampered"), and
       `mvmctl doctor` grows an `audit chain` line that fails when a chain does
       not verify. No repair/reset verb: a chain that can be reset on demand
-      cannot detect tampering. 12 new tests, all against a synthesized and
-      deliberately damaged chain in a temp `MVM_HOME`.
+      cannot detect tampering. Running the new doctor line on a real host
+      immediately caught a latent mis-scan this work would otherwise have
+      promoted into a hard failure: the unsigned `secrets.jsonl` operator log
+      matches the `<tenant>.jsonl` lifecycle shape by accident, and only
+      `mvm-client` excluded it. `SECRETS_OPERATOR_LOG` now lives in
+      `mvm-core::config` and one predicate serves all three sweeps. 14 new
+      tests, all against a synthesized and deliberately damaged chain in a temp
+      `MVM_HOME`.
 
 - [~] Open issue closeout — **plan 300**. The 22 open issues were reconciled
       on 2026-08-08 into explicit closure gates and dependency order in

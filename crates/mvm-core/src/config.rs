@@ -771,6 +771,18 @@ pub fn mvm_transcripts_dir() -> std::path::PathBuf {
 /// Filename suffix for a per-VM workload audit chain.
 pub const WORKLOAD_AUDIT_SUFFIX: &str = ".workload.jsonl";
 
+/// The unsigned plain-JSON operator log `mvmctl secret …` writes into the audit
+/// directory. It shares the directory and the `.jsonl` extension with the
+/// signed chains and is otherwise nothing like them: no envelope, no
+/// `prev_hash`, no signature, no authenticity of any kind.
+///
+/// It therefore has to be named to be excluded, because the lifecycle-chain
+/// naming rule (`<tenant>.jsonl`, not `*.workload.jsonl`) matches it by
+/// accident. A verifier that picks it up reports a chain that "fails
+/// verification" when nothing is wrong — it is reading a file that never
+/// claimed to be a chain.
+pub const SECRETS_OPERATOR_LOG: &str = "secrets.jsonl";
+
 /// Per-VM workload audit-chain file:
 /// `<mvm_home>/audit/<tenant>.<vm>.workload.jsonl`.
 ///
@@ -787,19 +799,29 @@ pub fn workload_audit_path(tenant: &str, vm_name: &str) -> std::path::PathBuf {
 }
 
 /// Whether a path in the audit dir is a per-tenant *lifecycle* chain
-/// (`<tenant>.jsonl`) rather than a per-VM workload chain
-/// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`).
+/// (`<tenant>.jsonl`) — as opposed to a per-VM workload chain
+/// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`) or the unsigned
+/// [`SECRETS_OPERATOR_LOG`], neither of which a lifecycle verifier can parse.
 ///
-/// The two carry different envelope formats, so a verifier for one cannot parse
-/// the other. Lives here, beside the suffix it keys on, because more than one
-/// sweep needs it: the lineage anchor indexes lifecycle chains, and doctor
-/// reports their verification status. Two copies of this predicate could
-/// disagree about which files are in scope, which would let doctor report a
-/// posture the anchor does not act on.
+/// Lives here, beside the names it keys on, because more than one sweep needs
+/// it: the lineage anchor indexes lifecycle chains, doctor reports their
+/// verification status, and the client-side enumerator classifies audit
+/// sources. Copies of this rule drift — the exclusion of the operator log
+/// existed in one of those three and not the others, which is the whole reason
+/// it is one function now.
+///
+/// Both exclusions are load-bearing rather than tidy: a file that is not a
+/// chain cannot pass a chain verifier, so admitting one here manufactures a
+/// permanent "this chain fails verification" from a file that never claimed to
+/// be one.
 pub fn is_host_lifecycle_chain(path: &std::path::Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|name| name.ends_with(".jsonl") && !name.ends_with(WORKLOAD_AUDIT_SUFFIX))
+        .is_some_and(|name| {
+            name.ends_with(".jsonl")
+                && !name.ends_with(WORKLOAD_AUDIT_SUFFIX)
+                && name != SECRETS_OPERATOR_LOG
+        })
 }
 
 /// If `file_name` is a workload audit chain for `tenant`
@@ -913,6 +935,25 @@ mod tests {
     fn a_quarantined_chain_is_out_of_scope() {
         assert!(!is_host_lifecycle_chain(std::path::Path::new(
             "/a/audit/local.jsonl.forked-2026-05-12"
+        )));
+    }
+
+    /// The unsigned operator log shares the directory and the `.jsonl`
+    /// extension with the signed chains and matches the `<tenant>.jsonl` shape
+    /// by accident, but it carries no envelope, no `prev_hash` and no
+    /// signature. Found on a real host: a sweep that admitted it reported
+    /// "1 of 3 chain(s) FAIL verification" — an unfixable finding about a file
+    /// that never claimed to be a chain, which in turn made every un-anchored
+    /// record read as unprovable.
+    #[test]
+    fn the_unsigned_secrets_operator_log_is_not_a_lifecycle_chain() {
+        assert!(!is_host_lifecycle_chain(std::path::Path::new(
+            "/a/audit/secrets.jsonl"
+        )));
+        // A tenant that happens to be *called* secrets still owns a real chain;
+        // the exclusion is the exact filename, not a substring.
+        assert!(is_host_lifecycle_chain(std::path::Path::new(
+            "/a/audit/my-secrets.jsonl"
         )));
     }
 

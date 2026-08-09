@@ -100,6 +100,24 @@ writer processes — a same-process test cannot stand in for two supervisors),
       diagnostic must not mint a signing key as a side effect
       (`scanning_a_fresh_home_creates_no_host_signer_key`).
 
+      **What running it on a real host found.** The first live `doctor` after
+      the forked chain was quarantined reported `1 of 3 chain(s) FAIL
+      verification` against `~/.mvm/audit/secrets.jsonl`, with the reason
+      ``unknown field `action` ``. That file is not a chain: it is the unsigned
+      plain-JSON operator log `mvmctl secret …` writes into the same directory,
+      and it matches the `<tenant>.jsonl` lifecycle shape by accident. The
+      exclusion existed in `mvm-client`'s enumerator and nowhere else, so the
+      anchor had always mis-scanned it and merely warned — and this workstream
+      would have promoted that latent mis-scan into a hard, unfixable refusal of
+      every un-anchored record on any host that has ever used secrets. Fixed by
+      moving `SECRETS_OPERATOR_LOG` next to `WORKLOAD_AUDIT_SUFFIX` in
+      `mvm-core::config`, excluding it from `is_host_lifecycle_chain`, and
+      collapsing `mvm-client`'s private copy onto the shared one. Both
+      regression tests were confirmed to fail with the exclusion removed. This
+      is the concrete instance of the drift the predicate's own doc warns about:
+      there were three copies of the rule and the most correct one was not the
+      one the anchor used.
+
       Coverage:
       `a_miss_against_an_unverifiable_chain_is_an_error_not_a_silent_none`,
       `a_miss_against_clean_chains_still_reports_never_audited`,
@@ -107,6 +125,8 @@ writer processes — a same-process test cannot stand in for two supervisors),
       `the_image_anchor_reports_an_unverifiable_ledger_the_same_way`,
       `an_empty_anchor_reports_no_entry_rather_than_an_unreadable_ledger`,
       `lineage_refusals_separate_an_unreadable_ledger_from_unaudited_and_tampered`,
+      `the_unsigned_secrets_operator_log_never_makes_a_lookup_unanswerable`,
+      `the_unsigned_secrets_operator_log_is_not_a_lifecycle_chain`,
       plus the doctor mapping tests. All run against a chain synthesized and then
       deliberately damaged inside a temp `MVM_HOME`, never the developer's own.
 

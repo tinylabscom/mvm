@@ -451,6 +451,40 @@ mod tests {
         );
     }
 
+    /// The unsigned `secrets.jsonl` operator log lives in the same directory and
+    /// matches the `<tenant>.jsonl` shape, but it is not a chain — no envelope,
+    /// no `prev_hash`, no signature. Admitting it makes it fail verification
+    /// permanently, and after this change that turns every un-anchored record on
+    /// the host into "cannot determine whether this was audited" forever.
+    ///
+    /// Found on a real host, not hypothesised: `mvmctl doctor` reported
+    /// "1 of 3 chain(s) FAIL verification" against it with the message
+    /// `unknown field `action``, which is what a plain operator-log line looks
+    /// like to a chain parser.
+    #[test]
+    fn the_unsigned_secrets_operator_log_never_makes_a_lookup_unanswerable() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        seed_signed_chain("cp-seeded");
+        // Verbatim shape of the real operator log: plain JSON, no envelope.
+        std::fs::write(
+            tmp.path().join("audit").join("secrets.jsonl"),
+            "{\"action\":\"list\",\"error\":null,\"name\":\"*\",\"outcome\":\"ok\",\
+             \"pid\":24117,\"tenant\":\"local\",\"timestamp\":\"2026-05-15T04:25:53Z\"}\n",
+        )
+        .unwrap();
+
+        let anchor = SignedChainAnchor::load().unwrap();
+        let found = CheckpointChainAnchor::recorded_creation_digest(&anchor, &meta("cp-absent"))
+            .expect("an unsigned operator log is not an unverifiable chain");
+        assert!(
+            found.is_none(),
+            "a clean ledger beside the operator log still answers honestly"
+        );
+    }
+
     /// An anchor built for a resident claim carries no chains at all, so it must
     /// keep answering `None` rather than inventing an unverifiable one.
     #[test]
