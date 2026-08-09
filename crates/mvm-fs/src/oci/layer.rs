@@ -784,6 +784,7 @@ fn is_transient(e: &OciError) -> bool {
         | OciError::MalformedDigest(_)
         | OciError::UnsupportedDigestAlgorithm(_)
         | OciError::LayerTooLarge { .. }
+        | OciError::ManifestTooLarge { .. }
         | OciError::Unpack(_) => false,
     }
 }

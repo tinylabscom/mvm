@@ -137,6 +137,9 @@ pub(crate) fn refusal_from_lifecycle(
         LifecycleVerifyError::SignatureInvalid { line } => {
             (AuditRefusalKind::SignatureInvalid, Some(*line as u64))
         }
+        LifecycleVerifyError::TruncatedTail { line } => {
+            (AuditRefusalKind::Truncated, Some(*line as u64))
+        }
     };
     refusal(source, kind, line, &err.to_string())
 }

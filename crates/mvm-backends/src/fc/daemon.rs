@@ -4,8 +4,8 @@
 use anyhow::{Context, Result};
 use tracing::instrument;
 
-use crate::base::shell::{run_in_vm_stdout, run_in_vm_visible, shell_quote};
-use crate::base::ui;
+use mvm_vmm::host::shell::{run_in_vm_stdout, run_in_vm_visible, shell_quote};
+use mvm_vmm::host::ui;
 
 use super::{firecracker_vsock_uds_path, resolve_running_vm_dir};
 
@@ -26,12 +26,12 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 
 /// Start a Firecracker daemon in a per-VM directory with its own socket.
 #[instrument(skip_all)]
-pub(crate) fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
+pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
     start_vm_firecracker_inner(abs_dir, abs_socket, true)
 }
 
 /// Start Firecracker without unlinking a mounted child vsock UDS.
-pub(crate) fn start_vm_firecracker_for_snapshot(abs_dir: &str, abs_socket: &str) -> Result<()> {
+pub fn start_vm_firecracker_for_snapshot(abs_dir: &str, abs_socket: &str) -> Result<()> {
     start_vm_firecracker_inner(abs_dir, abs_socket, false)
 }
 
@@ -80,7 +80,7 @@ fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, clean_vsock: bool
 /// shape's quoting fragility). `socket` and `path` are
 /// `shell_quote`d defensively.
 #[instrument(skip_all, fields(path))]
-pub(crate) fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
+pub fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
     fc_api_call("PUT", socket, path, Some(data))
 }
 
@@ -89,7 +89,7 @@ pub(crate) fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()>
 /// Firecracker runs as root and consequently creates this socket as root. Only
 /// the invoking user needs to dial it, so transfer ownership and keep the mode
 /// private instead of making the control plane world-writable.
-pub(crate) fn secure_vsock_socket_for_caller(vsock: &str) -> Result<()> {
+pub fn secure_vsock_socket_for_caller(vsock: &str) -> Result<()> {
     let quoted = shell_quote(vsock);
     run_in_vm_visible(&format!(
         "set -eu\nsudo chown -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn vsock_socket_access_is_private_to_the_invoking_user() {
-        use crate::base::shell_mock;
+        use mvm_vmm::host::shell::mock as shell_mock;
         use std::sync::{Arc, Mutex};
 
         let scripts = Arc::new(Mutex::new(Vec::new()));

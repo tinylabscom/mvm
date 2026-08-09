@@ -29,7 +29,7 @@ pub(in crate::commands) enum EnvCmd {
     Uninstall(uninstall::Args),
     /// Check for and install the latest version of mvmctl
     Update(update::Args),
-    /// Re-sign mvmctl + supervisors with VZ entitlements (macOS)
+    /// Re-sign mvmctl + supervisors with the VMM entitlements (macOS)
     Sign(sign::Args),
 }
 
