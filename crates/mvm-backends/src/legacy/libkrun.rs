@@ -2169,7 +2169,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("supervisor.lifecycle.log"),
-            "dispatch_route: legacy_direct_vsock\n",
+            "dispatch_route: direct_vsock\n",
         )
         .expect("write lifecycle");
         std::fs::write(
@@ -2187,7 +2187,7 @@ mod tests {
         assert!(body.contains("libkrun vm state dir:"));
         assert!(body.contains("vsock-5251.sock"));
         assert!(body.contains("vsock-5253.sock"));
-        assert!(body.contains("dispatch_route: legacy_direct_vsock"));
+        assert!(body.contains("dispatch_route: direct_vsock"));
         assert!(body.contains("kernel_path=/kernel"));
         assert!(body.contains("initramfs_path=/initrd"));
         assert!(body.contains("networking=vsock_direct"));
