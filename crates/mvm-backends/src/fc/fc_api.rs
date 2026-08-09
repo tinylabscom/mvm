@@ -44,7 +44,7 @@ const MAX_BODY_BYTES: usize = 1 << 20;
 
 /// A parsed Firecracker API response.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FcResponse {
+pub struct FcResponse {
     pub(crate) status: u16,
     pub(crate) body: String,
 }
@@ -186,7 +186,7 @@ fn round_trip(socket: &Path, method: &str, path: &str, body: Option<&str>) -> Re
 ///
 /// Returns the response body so callers that need it (`GET /vm/config`) can
 /// parse it; callers that don't can discard it.
-pub(crate) fn call(socket: &Path, method: &str, path: &str, body: Option<&str>) -> Result<String> {
+pub fn call(socket: &Path, method: &str, path: &str, body: Option<&str>) -> Result<String> {
     let resp = round_trip(socket, method, path, body)?;
     if !resp.is_success() {
         bail!("{method} {path} failed: HTTP {} {}", resp.status, resp.body);

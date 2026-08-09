@@ -246,6 +246,76 @@ const ACCEPTED_MANIFEST_MEDIA: &[&str] = &[
     "application/vnd.docker.distribution.manifest.list.v2+json",
 ];
 
+/// Hard cap on a manifest body, enforced before the bytes are buffered.
+///
+/// An OCI image manifest is a few kilobytes and a multi-arch index is still
+/// well under a megabyte; 4 MiB is generous by three orders of magnitude and
+/// still small enough that a hostile registry cannot use it to exhaust the
+/// host. The bound has to be here rather than after the read because the
+/// integrity check operates on bytes we have already committed memory to.
+const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+
+/// A body accumulator that refuses to grow past `cap`.
+///
+/// Split out from the network call so the bound itself is unit-testable
+/// without standing up a registry: the interesting behaviour is the arithmetic
+/// on the running total, not the transport.
+struct CappedBody {
+    cap: u64,
+    buf: Vec<u8>,
+}
+
+impl CappedBody {
+    fn new(cap: u64) -> Self {
+        Self {
+            cap,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Admit one chunk, or refuse if it would carry the total past the cap.
+    /// The check is on the sum rather than the chunk so a body delivered as
+    /// many small chunks is bounded the same as one delivered whole.
+    fn push(&mut self, chunk: &[u8]) -> Result<(), OciError> {
+        let total = self.buf.len() as u64 + chunk.len() as u64;
+        if total > self.cap {
+            return Err(OciError::ManifestTooLarge { cap: self.cap });
+        }
+        self.buf.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+/// Reject a body whose declared length already exceeds the cap.
+///
+/// `Content-Length` is only a hint — absent under chunked transfer encoding,
+/// and understated at will by a registry that means us harm — so this is an
+/// optimisation, not the enforcement. [`CappedBody`] is the enforcement.
+fn declared_length_within_cap(declared: Option<u64>, cap: u64) -> Result<(), OciError> {
+    match declared {
+        Some(n) if n > cap => Err(OciError::ManifestTooLarge { cap }),
+        _ => Ok(()),
+    }
+}
+
+/// Read a response body, refusing to buffer more than `cap` bytes.
+async fn read_body_capped(mut response: reqwest::Response, cap: u64) -> Result<Vec<u8>, OciError> {
+    declared_length_within_cap(response.content_length(), cap)?;
+    let mut body = CappedBody::new(cap);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| OciError::Registry(format!("read manifest response body: {e}")))?
+    {
+        body.push(&chunk)?;
+    }
+    Ok(body.into_inner())
+}
+
 #[async_trait]
 impl ManifestFetcher for OciManifestFetcher {
     async fn fetch(&self, reference: &ImageReference) -> Result<FetchedManifest, OciError> {
@@ -253,11 +323,7 @@ impl ManifestFetcher for OciManifestFetcher {
             .client
             .get_manifest(reference, ACCEPTED_MANIFEST_MEDIA)
             .await?;
-        let bytes = response
-            .response
-            .bytes()
-            .await
-            .map_err(|e| OciError::Registry(format!("read manifest response body: {e}")))?;
+        let bytes = read_body_capped(response.response, MAX_MANIFEST_BYTES).await?;
         let computed = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
         if let Some(advertised_digest) = response.docker_content_digest {
             if computed != advertised_digest {
@@ -351,6 +417,54 @@ pub fn verify_sha256_digest(bytes: &[u8], expected: &str) -> Result<(), OciError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A registry that declares an oversized body is rejected before we read
+    /// any of it.
+    #[test]
+    fn a_declared_length_over_the_cap_is_refused_before_reading() {
+        let err = declared_length_within_cap(Some(4097), 4096)
+            .expect_err("an over-cap Content-Length must be refused");
+        assert!(matches!(err, OciError::ManifestTooLarge { cap: 4096 }));
+    }
+
+    /// A missing or understated `Content-Length` must not be treated as
+    /// permission — it is a hint, and the accumulator is the real bound.
+    #[test]
+    fn a_missing_declared_length_is_not_treated_as_permission() {
+        declared_length_within_cap(None, 4096).expect("absent length is not itself a refusal");
+        // ...and the accumulator still refuses the body that header omitted.
+        let mut body = CappedBody::new(8);
+        body.push(b"12345678").expect("exactly at the cap is fine");
+        let err = body
+            .push(b"9")
+            .expect_err("one byte past the cap must be refused");
+        assert!(matches!(err, OciError::ManifestTooLarge { cap: 8 }));
+    }
+
+    /// The bound is on the running total, so a body dribbled out in small
+    /// chunks is capped the same as one delivered in a single read.
+    #[test]
+    fn many_small_chunks_are_bounded_by_the_total_not_the_chunk() {
+        let mut body = CappedBody::new(4);
+        for _ in 0..4 {
+            body.push(b"x").expect("within cap");
+        }
+        let err = body
+            .push(b"x")
+            .expect_err("the fifth byte crosses a 4-byte cap");
+        assert!(matches!(err, OciError::ManifestTooLarge { cap: 4 }));
+    }
+
+    /// An ordinary manifest passes and round-trips its bytes unchanged —
+    /// without this the tests above would hold for an accumulator that
+    /// refused everything.
+    #[test]
+    fn an_ordinary_body_passes_through_unchanged() {
+        let mut body = CappedBody::new(MAX_MANIFEST_BYTES);
+        body.push(br#"{"schemaVersion":2,"#).unwrap();
+        body.push(br#""layers":[]}"#).unwrap();
+        assert_eq!(body.into_inner(), br#"{"schemaVersion":2,"layers":[]}"#);
+    }
 
     const KNOWN_BYTES: &[u8] = b"hello mvm";
     // sha256("hello mvm") — kept as a constant so the test for

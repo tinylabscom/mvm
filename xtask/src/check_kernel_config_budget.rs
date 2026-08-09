@@ -25,9 +25,9 @@ use std::path::Path;
 /// SoC-errata and other off-the-boot-path subsystems), each cut boot-validated
 /// under libkrun.
 ///
-/// PCI was re-added after the initial shrink dropped it: vz (Apple
-/// Virtualization.framework) presents virtio over PCI, not MMIO, so a PCI-less
-/// kernel boots blind under vz (no console/net/block). Re-enabling PCI +
+/// PCI was re-added after the initial shrink dropped it: a backend that
+/// presents virtio over PCI rather than MMIO leaves a PCI-less kernel booting
+/// blind (no console/net/block). Re-enabling PCI +
 /// PCI_MSI + VIRTIO_PCI raised x86_64 by 73 (1130 → 1203, measured). aarch64 is
 /// set to a comparable delta (core PCI is arch-shared; the SoC PCIe host
 /// controllers stay off since their deps are disabled) and is confirmed by CI's
@@ -37,14 +37,20 @@ use std::path::Path;
 /// The current subtraction pass removes selector-pinned input/VT, radio,
 /// physical-network, SoC, filesystem, tracing/debug, kexec/hibernate, legacy
 /// crypto, power-management, task-accounting, NetLabel and unprovisioned
-/// swap/huge-page families. The pinned Linux 6.12 configs contain exactly
-/// 943 aarch64 and 917 x86_64 built-ins after enabling the virtio-fs DAX
+/// swap/huge-page families. Resolved Linux 6.12.100 configs contain exactly
+/// 943 aarch64 and 916 x86_64 built-ins after enabling the virtio-fs DAX
 /// dependency chain (MIGRATION, MEMORY_HOTPLUG/REMOVE, SPARSEMEM_VMEMMAP,
 /// ZONE_DEVICE, FS_DAX, FUSE_DAX) in the workload kernel. PCI, virtio-net,
 /// virtio-balloon, KVM time, and x86 ACPI core remain because supported
 /// backends exercise them.
-/// The x86_64 ceiling matches that measured config; the previous value was
-/// stale and rejected the unchanged kernel configuration.
+///
+/// Both figures then rose by exactly one when the workload kernel gained IPv6,
+/// so the guest can hold the v6 half of the pair its plan leases. The
+/// additional IPv6-only tunnel plumbing is dropped in `workload.nix`; the guest
+/// has one point-to-point link and no tunnel endpoint to encapsulate toward.
+/// The v6 IPsec families remain in the required-disable set, so XFRM is not
+/// absorbed into this budget. These values are measured from resolved configs
+/// on the native CI architectures — x86_64 measures 917, confirmed by CI.
 const BUDGET_AARCH64: usize = 944;
 const BUDGET_X86_64: usize = 917;
 
@@ -141,7 +147,10 @@ mod tests {
             budget_for_path("staging/workload-config-aarch64"),
             BUDGET_AARCH64
         );
-        assert_eq!(budget_for_path("staging/workload-config-x86_64"), 917);
+        assert_eq!(
+            budget_for_path("staging/workload-config-x86_64"),
+            BUDGET_X86_64
+        );
         // Unknown arch → the larger ceiling (never a false pass).
         assert_eq!(
             budget_for_path("/tmp/some.config"),

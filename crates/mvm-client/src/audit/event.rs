@@ -117,6 +117,11 @@ pub enum AuditRefusalKind {
     SignatureInvalid,
     /// A verified entry claimed a scope other than the source's.
     ScopeMismatch,
+    /// The chain ends mid-record: a writer died between the record and its
+    /// terminator. Deliberately not folded into [`Self::Malformed`] — an
+    /// operator needs to tell an interrupted write from an edited log, and on
+    /// disk the two are otherwise the same thing.
+    Truncated,
 }
 
 /// Typed refusal for one source that failed verification. Returned

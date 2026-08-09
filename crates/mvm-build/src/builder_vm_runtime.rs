@@ -1160,15 +1160,13 @@ pub fn finalize_install_job(artifact_out: &Path) -> Result<BuilderArtifacts, Bui
 /// the full VM lifetime.
 ///
 /// The lock lives on a **sidecar** `<image>.lock` file, NOT on the
-/// image fd itself. The macOS hypervisor (formerly Apple
-// allow(no-vz): historical design-note reference in a doc comment, not a dependency or API use
-/// `Virtualization.framework`'s `VZDiskImageStorageDeviceAttachment`, now
-/// HVF) takes its own exclusive lock on the disk image at `vm.start()`;
-/// if the host also held an `flock` on the image it would collide
-/// ("The storage device attachment is invalid"). libkrun doesn't lock
-/// the image, so it was unaffected — the sidecar split keeps the
-/// cross-process serialisation while letting the hypervisor open the
-/// image exclusively. The host holds no fd on the image.
+/// image fd itself. The macOS hypervisor takes its own exclusive lock on
+/// the disk image when the VM starts; if the host also held an `flock` on
+/// the image it would collide ("The storage device attachment is
+/// invalid"). libkrun doesn't lock the image, so it was unaffected — the
+/// sidecar split keeps the cross-process serialisation while letting the
+/// hypervisor open the image exclusively. The host holds no fd on the
+/// image.
 ///
 /// `_file: std::fs::File` is **load-bearing** — it's the sidecar lock
 /// handle; dropping the guard releases the lock. Callers must keep the

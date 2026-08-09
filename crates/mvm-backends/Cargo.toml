@@ -20,6 +20,7 @@ mvm-core = { workspace = true }
 mvm-net = { workspace = true }
 mvm-agentd = { workspace = true }
 anyhow = { workspace = true }
+tempfile = { workspace = true }
 tracing = { workspace = true }
 libkrun-sys = { workspace = true }
 serde = { workspace = true }
@@ -39,3 +40,10 @@ workspace = true
 [dev-dependencies]
 mvm-vmm = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+
+# The fork mount-namespace path (fc/fork_namespace.rs) is Linux-only: it
+# unshares CLONE_NEWNS and bind-mounts the child's device paths. macOS
+# compiles that module out, which is exactly how a missing dep here stays
+# invisible until CI builds for Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.29", features = ["mount", "sched"] }

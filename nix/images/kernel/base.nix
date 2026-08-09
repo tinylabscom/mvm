@@ -74,14 +74,15 @@ let
   baseEnables = [
     # virtio bus + BOTH transports (sans virtio-fs — that's builder-only; a
     # sealed workload mounts no host shares). Both transports are required
-    # because the backends differ: libkrun/Firecracker present virtio over
-    # MMIO, but **vz (Apple Virtualization.framework) presents virtio over
-    # PCI**. A kernel without PCI/VIRTIO_PCI boots blind under vz — no
-    # virtio-console (zero bytes on hvc0), no virtio-net, no virtio-block — so
-    # the vz builder + workload VMs hang at boot. PCI + PCI_MSI + VIRTIO_PCI
-    # therefore stay enabled; do not drop them as "MMIO-only dead weight" (that
-    # regression broke every vz boot on macOS). The generic ECAM PCI host
-    # controller AVF's bus needs comes from `make defconfig` once PCI is on.
+    # because the backends differ: libkrun/Firecracker/HVF present virtio over
+    # MMIO, but **QEMU attaches its devices over PCI** (`virtio-net-pci`,
+    # `vhost-vsock-pci` — see the QEMU driver's device arguments). A kernel
+    # without PCI/VIRTIO_PCI boots blind there — no virtio-console (zero bytes
+    # on hvc0), no virtio-net, no virtio-block — so those VMs hang at boot.
+    # PCI + PCI_MSI + VIRTIO_PCI therefore stay enabled; do not drop them as
+    # "MMIO-only dead weight" (dropping them has broken every boot on a
+    # PCI-attached backend before). The generic ECAM PCI host controller that
+    # bus needs comes from `make defconfig` once PCI is on.
     "VIRTIO"
     "VIRTIO_MENU"
     "VIRTIO_MMIO"
@@ -159,8 +160,8 @@ let
     "PARAVIRT"
     "KVM_GUEST"
 
-    # libkrun on x86 has no device tree (aarch64) and no PCI enumeration (vz):
-    # it advertises its virtio-mmio devices *only* through
+    # libkrun on x86 has no device tree (as on aarch64) and no PCI enumeration
+    # (as under QEMU): it advertises its virtio-mmio devices *only* through
     # `virtio_mmio.device=<size>@<addr>:<irq>` kernel-cmdline params. Without
     # VIRTIO_MMIO_CMDLINE_DEVICES the guest ignores them, the root virtio-blk
     # never binds, /dev/vda never appears, and boot hangs forever at "Waiting
@@ -580,10 +581,10 @@ let
     "PINCTRL" # SoC pin-mux
     "MFD_CORE" # multi-function (PMIC) device core
 
-    # NOTE: PCI is intentionally NOT disabled — vz (Apple
-    # Virtualization.framework) presents virtio over PCI, so PCI + VIRTIO_PCI
-    # are in the enable list above. libkrun/Firecracker (MMIO) simply don't
-    # probe it. Dropping PCI here is what broke every vz boot on macOS.
+    # NOTE: PCI is intentionally NOT disabled — QEMU attaches virtio over PCI,
+    # so PCI + VIRTIO_PCI are in the enable list above. libkrun/Firecracker/HVF
+    # (MMIO) simply don't probe it. Dropping PCI here has broken boot on a
+    # PCI-attached backend before.
 
     # Shrink batch 4 — more whole subsystems a sealed virtio microVM never
     # uses. Each cascades its family (drivers + helpers) via olddefconfig.
@@ -614,7 +615,7 @@ let
 
     # Shrink batch 6 — block-device *clients* defconfig builds in that no mvm
     # backend can ever drive. Every guest boots one virtio-blk disk (`vda`,
-    # kept via VIRTIO_BLK above); libkrun / vz / Firecracker present no NBD
+    # kept via VIRTIO_BLK above); libkrun / HVF / Firecracker present no NBD
     # server and no NVMe controller, so these drivers register phantom devices
     # (nbd0–15) and idle rescuer workqueue threads (16× kworker/R-nbd*, 3×
     # kworker/R-nvme) with nothing behind them. A workload *cannot* reach them —

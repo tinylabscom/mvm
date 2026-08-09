@@ -621,15 +621,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn resolve_env_override_vz_is_unrecognised() {
-        // The Vz builder was removed; `vz` is no longer a valid choice and
-        // falls through to auto-detect like any unrecognised value.
-        with_env(Some("vz"), || {
-            assert_eq!(resolve_env_override(), None);
-        });
-    }
-
     // ── Priority: flag > env > auto-detect ──
 
     #[test]
@@ -693,19 +684,6 @@ mod tests {
         assert_eq!(BuilderBackendChoice::Qemu.name(), "qemu");
     }
 
-    /// Compile-time + behaviour guard: the Vz builder choice is gone; every
-    /// remaining choice round-trips through `name()` without yielding "vz".
-    #[test]
-    fn builder_backend_choice_has_no_vz_variant() {
-        for c in [
-            BuilderBackendChoice::Libkrun,
-            BuilderBackendChoice::Qemu,
-            BuilderBackendChoice::Hvf,
-        ] {
-            assert_ne!(c.name(), "vz");
-        }
-    }
-
     #[test]
     fn closure_nar_for_host_arch_is_none_when_the_arch_cache_dir_has_no_closure() {
         let scratch = tempfile::TempDir::new().unwrap();
@@ -743,8 +721,8 @@ mod tests {
 
     #[test]
     fn resolve_builder_backend_with_override_honours_flag() {
-        with_env(Some("vz"), || {
-            // Flag forces libkrun even though env says vz.
+        with_env(Some("not-a-backend"), || {
+            // Flag forces libkrun even though env names an unknown backend.
             let _backend =
                 resolve_builder_backend_with_override(Some(BuilderBackendChoice::Libkrun));
         });
@@ -1067,7 +1045,7 @@ mod tests {
     // ── Hvf attempt order ─────────────────────────────────────
 
     #[test]
-    fn attempt_order_hvf_auto_falls_back_to_libkrun_no_vz() {
+    fn attempt_order_hvf_auto_falls_back_to_libkrun() {
         use BuilderBackendChoice::*;
         assert_eq!(
             builder_attempt_order(Hvf, false, false, false),

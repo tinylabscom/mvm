@@ -28,7 +28,7 @@ The incumbent stack:
   host with the hypervisor and private keys, runs one workload per guest,
   and keeps secret values out of the guest entirely.
 - **Storage:** append-only chain-signed JSONL audit log (verified by the
-  `mvm-verify` wasm-clean reader), content-addressed pack-cache
+  `mvm_contract::verify` wasm-clean reader), content-addressed pack-cache
   directories, and mode-0600 key files under a single `~/.mvm` root.
 
 ## Decision

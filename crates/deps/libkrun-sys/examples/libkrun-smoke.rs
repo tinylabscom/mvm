@@ -68,7 +68,7 @@ fn main() -> ExitCode {
     }
 
     // macOS Hypervisor.framework rejects any process that lacks the
-    // `com.apple.security.hypervisor` entitlement (the joint VZ +
+    // `com.apple.security.hypervisor` entitlement (the joint virtualization +
     // Hypervisor entitlement set). `ensure_signed`
     // ad-hoc codesigns the current binary on first run and re-spawns
     // with `MVM_SIGNED=1`; subsequent runs are silent. Without this

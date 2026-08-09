@@ -26,6 +26,9 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
 }
 
 fn main() -> Result<()> {
+    // First statement in the process: a panic before this line would
+    // print its payload unredacted.
+    mvm_hostd::panic_hook::install("signer-helper");
     // A signer-helper whose host-agent parent is gone holds key material no one
     // can reach — exit rather than leak as an orphan.
     mvm_hostd::parent_death::exit_when_orphaned();
