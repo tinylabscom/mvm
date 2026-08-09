@@ -11,6 +11,16 @@ for detailed scope and acceptance criteria.
       structural parity coverage prevents the consumers from drifting apart.
 
 ## In-flight plans
+
+- [~] Security lane mutation-witness repair — **issue #2135**
+  - [x] Add direct witnesses for the security-sensitive admission,
+        verification, lease, and substitution cleanup invariants
+  - [x] Run focused mutation shards for `mvm-cli`, `mvm-core`, `mvm-agentd`,
+        `mvm-hostd`, and `mvm-vmm`
+  - [x] Pass workspace check, all-target Clippy, formatting, and the mutation
+        surface gate on the dedicated fix branch
+  - [ ] Merge the fix and rerun the exact Linux Security workflow before
+        closing the issue
 - [~] Runtime hardening for production — plan 303, branch
       `feat/plan-303-runtime-hardening`
   - [x] WS1 — `overflow-checks = true` in `[profile.release]`, a

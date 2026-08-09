@@ -74,7 +74,15 @@ pub(crate) fn early_setup() {
 /// fail-closed posture as before.
 #[cfg(target_os = "linux")]
 fn provision_host_signer_anchor() {
-    match mvm_agentd::vsock::provision_host_signer_anchor_from_cmdline() {
+    let result = std::fs::read_to_string("/proc/cmdline")
+        .map_err(|e| anyhow::anyhow!("read /proc/cmdline: {e}"))
+        .and_then(|cmdline| {
+            mvm_agentd::vsock::provision_host_signer_anchor_from_cmdline(
+                &cmdline,
+                std::path::Path::new("/"),
+            )
+        });
+    match result {
         Ok(true) => eprintln!("mvm-guest-agent: host-signer anchor provisioned from cmdline"),
         Ok(false) => {
             eprintln!("mvm-guest-agent: no host-signer anchor on cmdline; control stays closed")

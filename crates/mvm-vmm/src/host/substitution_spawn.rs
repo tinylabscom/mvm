@@ -444,10 +444,10 @@ impl SpawnedEndpointGuard {
 
 impl Drop for SpawnedEndpointGuard {
     fn drop(&mut self) {
-        if self.armed && pid_alive(self.pid) {
-            kill(self.pid, libc::SIGTERM);
-        }
         if self.armed {
+            if pid_alive(self.pid) {
+                kill(self.pid, libc::SIGTERM);
+            }
             if self.pid_written {
                 let _ = std::fs::remove_file(&self.pid_file);
             }
@@ -587,6 +587,120 @@ mod tests {
         // Idempotent: a second call on the same empty dir is still clean.
         reap_substitution_endpoint(&dir, "nonexistent-vm");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn spawned_endpoint_guard_cleans_both_sidecars_on_failure() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join(SUBST_PID_FILE);
+        let env_file = dir.path().join("substitution.env.json");
+        std::fs::write(&pid_file, child.id().to_string()).unwrap();
+        std::fs::write(&env_file, b"sidecar").unwrap();
+
+        {
+            let mut guard = SpawnedEndpointGuard::new(child.id(), &pid_file, &env_file);
+            guard.mark_pid_written();
+            guard.mark_env_written();
+        }
+
+        assert!(!pid_file.exists());
+        assert!(!env_file.exists());
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn defused_spawned_endpoint_guard_does_not_signal_a_live_endpoint() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join(SUBST_PID_FILE);
+        let env_file = dir.path().join("substitution.env.json");
+        let mut guard = SpawnedEndpointGuard::new(child.id(), &pid_file, &env_file);
+        guard.defuse();
+        drop(guard);
+
+        assert!(pid_alive(child.id() as libc::pid_t));
+        child.kill().unwrap();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn empty_handshake_line_reports_eof_without_parsing() {
+        let mut child = Command::new("sh")
+            .args(["-c", "printf '\\n'"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().expect("child stdout is piped");
+        let err = read_handshake_line(stdout, child.id(), Duration::from_secs(1))
+            .expect_err("an empty handshake line must fail");
+        assert!(
+            err.to_string()
+                .contains("closed stdout without a ready handshake")
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn endpoint_guard_reaps_armed_endpoint_and_sidecars() {
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let vm = "endpoint-guard-armed";
+        let state_dir = mvm_core::config::vm_state_dir(vm);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let env_path = mvm_core::config::vm_substitution_env_path(vm);
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::write(state_dir.join(SUBST_PID_FILE), child.id().to_string()).unwrap();
+        std::fs::write(&env_path, b"sidecar").unwrap();
+
+        {
+            let _guard = EndpointGuard::new(vm);
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut exited = child.try_wait().unwrap().is_some();
+        while !exited && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            exited = child.try_wait().unwrap().is_some();
+        }
+        if !exited {
+            child.kill().unwrap();
+            let _ = child.wait();
+        }
+        assert!(exited, "an armed endpoint guard must terminate its child");
+        assert!(!state_dir.join(SUBST_PID_FILE).exists());
+        assert!(!env_path.exists());
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn defused_endpoint_guard_leaves_endpoint_and_sidecars_alone() {
+        let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", home.path());
+        let vm = "endpoint-guard-defused";
+        let state_dir = mvm_core::config::vm_state_dir(vm);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let env_path = mvm_core::config::vm_substitution_env_path(vm);
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::write(state_dir.join(SUBST_PID_FILE), child.id().to_string()).unwrap();
+        std::fs::write(&env_path, b"sidecar").unwrap();
+
+        {
+            let mut guard = EndpointGuard::new(vm);
+            guard.defuse();
+        }
+
+        assert!(pid_alive(child.id() as libc::pid_t));
+        assert!(state_dir.join(SUBST_PID_FILE).exists());
+        assert!(env_path.exists());
+        child.kill().unwrap();
+        let _ = child.wait();
     }
 
     // The libkrun/HVF transport: `spawn_substitution_endpoint` must serialize the
