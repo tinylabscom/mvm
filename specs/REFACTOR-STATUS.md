@@ -5,6 +5,11 @@ Last updated: 2026-08-08
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
+## Completed issue closeouts
+- [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
+      guest kernel now share the verified Linux 6.12.102 LTS source pin;
+      structural parity coverage prevents the consumers from drifting apart.
+
 ## In-flight plans
 - [~] Runtime hardening for production — plan 303, branch
       `feat/plan-303-runtime-hardening`
