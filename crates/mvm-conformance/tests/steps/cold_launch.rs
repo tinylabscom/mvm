@@ -55,6 +55,8 @@ fn clean_sample(profile: BuildProfile) -> LaunchSample {
             cleanup_handoff_ms: Some(19.0),
             ..LaunchSubTimings::default()
         },
+        backend_phases: Vec::new(),
+        degraded: Vec::new(),
     }
 }
 
