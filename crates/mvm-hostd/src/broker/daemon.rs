@@ -699,6 +699,30 @@ mod tests {
         }
     }
 
+    /// Rebind registrations, retrying while the previous helper still holds the
+    /// chain's sole-writer `flock`. Bounded: a lock that never frees is a real
+    /// failure and must still surface as one rather than hanging the suite.
+    async fn rebind_once_the_old_writer_releases(d: &HostAgentDaemon) -> usize {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match d.rebind_signer_helper_registrations() {
+                Ok(n) => return n,
+                Err(e) => {
+                    let err = format!("{e:#}");
+                    // Only the sole-writer contention is worth waiting out.
+                    // Anything else is a real failure and surfaces now rather
+                    // than after a ten-second retry that hides it.
+                    if !err.contains("already held by another writer")
+                        || std::time::Instant::now() >= deadline
+                    {
+                        panic!("rebind after helper restart failed: {err}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+    }
+
     async fn start_helper(
         helper_sock: PathBuf,
         tenant_id: &str,
@@ -1069,7 +1093,16 @@ mod tests {
         let _ = std::fs::remove_file(&helper_sock);
         let restarted = start_helper(helper_sock.clone(), "local", key_path).await;
 
-        assert_eq!(d.rebind_signer_helper_registrations().unwrap(), 1);
+        // `abort()` cancels the old helper's task but does not synchronously
+        // close the chain file it held, and the sole-writer guard is an
+        // `flock` released only when that descriptor drops. So the restarted
+        // helper can briefly lose the race and be refused with "chain already
+        // held by another writer". A real deployment does not have this
+        // problem — the helper is its own process and the kernel drops the
+        // lock on exit — so wait for the release rather than assert the very
+        // first attempt wins.
+        let rebound = rebind_once_the_old_writer_releases(&d).await;
+        assert_eq!(rebound, 1);
         let after = emit_audit(&sock, "after-restart").await;
         assert!(matches!(after, ServiceResponse::Ok { .. }));
 
