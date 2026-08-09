@@ -8,6 +8,7 @@ pub mod aux_bin;
 pub mod boot_config;
 pub mod broker_services_spawn;
 pub mod cmdline;
+pub mod config;
 pub mod console_capture;
 pub mod drive_file;
 pub mod egress_bridge;

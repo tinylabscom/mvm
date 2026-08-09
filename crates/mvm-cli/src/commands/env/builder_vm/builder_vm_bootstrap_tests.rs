@@ -692,23 +692,21 @@ fn sweep_is_noop_when_root_missing() {
     }
 }
 
-/// Pin that the orphan reaper covers `mvm-builder-vz-<job_id>`
-/// dirs the same way it covers
-/// `mvm-builder-vm-<job_id>`. The traversal in
-/// `reap_orphaned_vm_helpers_at` is prefix-agnostic and
-/// `VzBuilderVm` writes a `builder.pid` sidecar under the shared
-/// `~/.mvm/cache/builder-vm/vms/` tree; this test guards against
-/// a future refactor narrowing either invariant.
+/// Pin that the orphan reaper covers a builder state dir whatever its
+/// name prefix. The traversal in `reap_orphaned_vm_helpers_at` is
+/// prefix-agnostic and every builder writes a `builder.pid` sidecar under
+/// the shared `~/.mvm/cache/builder-vm/vms/` tree; this test guards
+/// against a future refactor narrowing either invariant.
 #[test]
-fn reap_picks_up_orphaned_vz_builder_state_dir() {
+fn reap_picks_up_orphaned_builder_state_dir_regardless_of_prefix() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let vms = tmp.path();
-    let vz_dir = vms.join("mvm-builder-vz-abc12345");
-    std::fs::create_dir_all(&vz_dir).unwrap();
+    let builder_dir = vms.join("mvm-builder-unrecognised-prefix-abc12345");
+    std::fs::create_dir_all(&builder_dir).unwrap();
     // `i32::MAX` is guaranteed not to be a live process on any
     // supported host — classify_pid → Dead, so the dir has no
     // live owner and is eligible for removal.
-    std::fs::write(vz_dir.join("builder.pid"), format!("{}\n", i32::MAX)).unwrap();
+    std::fs::write(builder_dir.join("builder.pid"), format!("{}\n", i32::MAX)).unwrap();
 
     let outcome = reap_orphaned_vm_helpers_at(
         vms,
@@ -721,11 +719,11 @@ fn reap_picks_up_orphaned_vz_builder_state_dir() {
 
     assert_eq!(
         outcome.removed_dirs, 1,
-        "vz builder state dir should be reaped"
+        "builder state dir should be reaped whatever its prefix"
     );
     assert!(
-        !vz_dir.exists(),
-        "vz builder state dir should be gone on disk"
+        !builder_dir.exists(),
+        "builder state dir should be gone on disk"
     );
 }
 

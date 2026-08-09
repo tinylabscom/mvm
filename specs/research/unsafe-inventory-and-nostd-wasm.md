@@ -12,7 +12,7 @@ a blanket minimization pass is not.
 
 Crate-level `#![forbid(unsafe_code)]`: **`mvm-contract`**, **`mvm-fs`**.
 Zero-unsafe crates (not yet forbidding): **`mvm-net`**, **`mvm-client`**,
-**`mvm-conformance`**, **`mvm-vz-supervisor`** (stale post-Vz-removal stub).
+**`mvm-conformance`**, **the retired supervisor crate** (stale post-removal stub).
 
 ---
 
@@ -94,8 +94,8 @@ Zero-unsafe crates (not yet forbidding): **`mvm-net`**, **`mvm-client`**,
    regression, extends the property that `mvm-contract`/`mvm-fs` already hold.
 
 **Leave as-is:** all FFI (`libkrun-sys`, `mvm-host-services-ffi`, HVF), all
-`libc` liveness/signal/ioctl/spawn wrappers, the bindgen file, `mvm-vz-supervisor`
-(dead — delete under separate Vz-cleanup, out of scope here).
+`libc` liveness/signal/ioctl/spawn wrappers, the bindgen file, the retired supervisor crate
+(dead — deleted since).
 
 ---
 

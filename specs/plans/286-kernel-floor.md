@@ -6,7 +6,7 @@
 ## Goal
 
 Compile only the Linux subsystems exercised by mvm's supported virtual hardware
-and guest contract. Preserve Firecracker/libkrun MMIO, VZ PCI, virtio block,
+and guest contract. Preserve Firecracker/libkrun MMIO, PCI for PCI-attached backends, virtio block,
 network, console, balloon, rng and vsock, dm-verity, virtio-fs, TUN-over-vsock,
 seccomp, the x86 KVM clock and ACPI/MADT, and the ARM FDT/GIC/timer path.
 
@@ -51,7 +51,7 @@ x86_64 built-ins in a 7,656,448-byte `bzImage`, and 1,314 aarch64 built-ins in a
 
 - Both resolved configs are at or below their ratcheted symbol ceilings.
 - An audited required-disable restored by Kconfig fails the derivation.
-- x86_64 Firecracker and aarch64 HVF/VZ reach userspace with the slim kernel.
+- x86_64 Firecracker and aarch64 HVF reach userspace with the slim kernel.
 - Builder-kernel virtio-fs, cgroup and netfilter requirements still resolve and
   its image boots.
 - The repository's complete required gates pass before merge.

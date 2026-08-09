@@ -44,7 +44,11 @@ pub struct Chain {
     pub_key_bytes: Vec<u8>,
     head: String,
     jsonl_file: File,
+    jsonl_path: std::path::PathBuf,
     secondary_head_path: std::path::PathBuf,
+    /// Set when an append failed partway. The next append re-seeds the head
+    /// from the on-disk tail rather than trusting memory — see [`Chain::append`].
+    resync_needed: bool,
 }
 
 impl Chain {
@@ -52,6 +56,14 @@ impl Chain {
     /// scans the file to find the latest entry-hash and uses it as the
     /// initial head. Otherwise initializes with [`CanonicalEntry::
     /// genesis_prev_hash`].
+    ///
+    /// Takes an exclusive advisory lock on the JSONL and holds it for the
+    /// chain's lifetime, so a second signer on the same file is refused rather
+    /// than admitted to fork it. This type caches the head in memory and only
+    /// re-reads it on recovery, which is sound exactly as long as it is the
+    /// only writer — the lock is what makes that an enforced property instead
+    /// of a convention. Fails fast rather than blocking: a signer waiting on a
+    /// lock is a boot hanging with no explanation.
     pub fn open(
         jsonl_path: &Path,
         secondary_head_path: &Path,
@@ -96,6 +108,13 @@ impl Chain {
                 )
             })?;
 
+        lock_sole_writer(&jsonl_file).with_context(|| {
+            format!(
+                "mvm-audit-signer chain already held by another writer: {}",
+                jsonl_path.display()
+            )
+        })?;
+
         let head = recover_head(jsonl_path, secondary_head_path)?;
 
         Ok(Self {
@@ -103,7 +122,9 @@ impl Chain {
             pub_key_bytes,
             head,
             jsonl_file,
+            jsonl_path: jsonl_path.to_path_buf(),
             secondary_head_path: secondary_head_path.to_path_buf(),
+            resync_needed: false,
         })
     }
 
@@ -118,12 +139,23 @@ impl Chain {
     }
 
     /// Append one canonical entry. Returns the new head on success.
-    pub fn append(&mut self, mut entry: CanonicalEntry) -> Result<String, AuditSignerErrorCode> {
+    pub fn append(&mut self, entry: CanonicalEntry) -> Result<String, AuditSignerErrorCode> {
         // Allow-list gate: unknown categories are rejected before any
         // signing work happens. Keeps the chain to a known set of values
         // so downstream tooling can rely on category meaning.
         if !crate::audit_signer::category::is_allowed(&entry.category) {
             return Err(AuditSignerErrorCode::InvalidRequest);
+        }
+        // An earlier append failed after it had begun writing. Whether its
+        // line reached the file is not knowable from here, so believe the file
+        // rather than memory: a head left behind the tail would hand this
+        // entry a parent the tail has already claimed, forking the chain on
+        // our own recovery path. The caller's stale prev_hash then fails the
+        // drift check below, which is the correct fail-closed answer.
+        if self.resync_needed {
+            self.head = recover_head(&self.jsonl_path, &self.secondary_head_path)
+                .map_err(|_| AuditSignerErrorCode::InternalError)?;
+            self.resync_needed = false;
         }
         // Cross-check the caller's prev_hash matches our in-memory head.
         // If a caller (the audit-signer's own RPC handler) hands us an
@@ -145,23 +177,49 @@ impl Chain {
             sig_alg: SIG_ALG_ED25519,
             entry_hash: entry_hash.clone(),
         };
-        let line =
+        let mut line =
             serde_json::to_string(&on_disk).map_err(|_| AuditSignerErrorCode::InternalError)?;
-        // Append line + newline. O_APPEND ensures the write is atomic
-        // up to the OS write-size guarantee (typically 4 KiB on Linux).
-        writeln!(self.jsonl_file, "{}", line).map_err(|_| AuditSignerErrorCode::FsyncFailed)?;
-        // Fsync. Hard-fail on error.
-        self.jsonl_file
-            .sync_all()
-            .map_err(|_| AuditSignerErrorCode::FsyncFailed)?;
-        // Update in-memory head + persist secondary location.
+        // One buffer, one `write_all`. `writeln!` emits the payload and the
+        // newline as separate writes, and O_APPEND makes each of those atomic
+        // without making the pair atomic — a second writer can land a whole
+        // line between them and splice two entries into one unparseable line.
+        // The exclusive lock this chain holds rules that out, but a single
+        // write costs nothing and keeps the guarantee local to this function.
+        line.push('\n');
+        if let Err(e) = self.write_line(line.as_bytes()) {
+            // Part of the line may be on disk. Don't trust the in-memory head
+            // again until it has been re-derived from the file.
+            self.resync_needed = true;
+            return Err(e);
+        }
         self.head = entry_hash.clone();
-        std::fs::write(&self.secondary_head_path, &self.head)
-            .map_err(|_| AuditSignerErrorCode::FsyncFailed)?;
-        // Caller might also want the canonical entry back for diagnostics.
-        entry.prev_hash = self.head.clone(); // unused but keeps the value tidy
+        if std::fs::write(&self.secondary_head_path, &self.head).is_err() {
+            self.resync_needed = true;
+            return Err(AuditSignerErrorCode::FsyncFailed);
+        }
         Ok(entry_hash)
     }
+
+    /// Write one already-newline-terminated line and flush it to stable
+    /// storage.
+    fn write_line(&mut self, bytes: &[u8]) -> Result<(), AuditSignerErrorCode> {
+        self.jsonl_file
+            .write_all(bytes)
+            .map_err(|_| AuditSignerErrorCode::FsyncFailed)?;
+        self.jsonl_file
+            .sync_all()
+            .map_err(|_| AuditSignerErrorCode::FsyncFailed)
+    }
+}
+
+/// Take the sole-writer lock on an open chain file, failing immediately if
+/// another process holds it. Advisory and released by the kernel when the fd
+/// closes, so a crashed signer cannot wedge the chain.
+fn lock_sole_writer(file: &File) -> Result<()> {
+    use rustix::fs::{FlockOperation, flock};
+    use std::os::fd::AsFd;
+    flock(file.as_fd(), FlockOperation::NonBlockingLockExclusive)
+        .map_err(|e| anyhow::anyhow!("exclusive chain lock unavailable: {e}"))
 }
 
 fn recover_head(jsonl_path: &Path, secondary_head_path: &Path) -> Result<String> {
@@ -384,6 +442,107 @@ mod tests {
         let chain = Chain::open(&jsonl, &head, None).unwrap();
         assert_eq!(chain.head(), expected_head);
         assert_eq!(std::fs::read_to_string(&head).unwrap(), expected_head);
+    }
+
+    /// A second writer on one chain file is refused, not admitted to fork it.
+    ///
+    /// The head lives in memory between appends, which is only sound while
+    /// this is the sole writer. Two open chains would each believe they held
+    /// the tail and hand out the same parent twice.
+    #[test]
+    fn a_second_chain_on_the_same_file_is_refused() {
+        let dir = tempdir().unwrap();
+        let jsonl = dir.path().join("audit.jsonl");
+        let head = dir.path().join("HEAD");
+
+        let first = Chain::open(&jsonl, &head, None).unwrap();
+        // `Chain` owns a signing key and deliberately has no `Debug`, so
+        // unwrap the result by hand rather than via `expect_err`.
+        let Err(err) = Chain::open(&jsonl, &head, None) else {
+            panic!("a second writer must not get the chain");
+        };
+        assert!(
+            err.to_string().contains("already held by another writer"),
+            "unexpected error: {err:#}"
+        );
+
+        // Releasing the first hands the chain over cleanly.
+        drop(first);
+        Chain::open(&jsonl, &head, None).expect("the lock is released on drop");
+    }
+
+    /// Each entry is one write, so nothing can be spliced into the middle of a
+    /// line — including the gap between the payload and its newline.
+    #[test]
+    fn an_entry_and_its_newline_are_written_together() {
+        use std::io::Read;
+
+        let dir = tempdir().unwrap();
+        let jsonl = dir.path().join("audit.jsonl");
+        let head = dir.path().join("HEAD");
+        let mut chain = Chain::open(&jsonl, &head, None).unwrap();
+
+        // A payload past any single-page write the append path might otherwise
+        // get away with.
+        let mut entry = sample_entry(chain.head().to_string());
+        entry.fields = serde_json::json!({ "verb": "now", "filler": "x".repeat(16 * 1024) });
+        chain.append(entry).unwrap();
+
+        let mut raw = Vec::new();
+        File::open(&jsonl).unwrap().read_to_end(&mut raw).unwrap();
+        assert!(raw.len() > 16 * 1024, "fixture must exceed one page");
+        assert_eq!(
+            raw.iter().filter(|b| **b == b'\n').count(),
+            1,
+            "exactly one line terminator"
+        );
+        assert_eq!(raw.last(), Some(&b'\n'), "the line is newline-terminated");
+        let parsed: OnDiskEntry =
+            serde_json::from_slice(&raw[..raw.len() - 1]).expect("the line parses whole");
+        assert_eq!(parsed.entry_hash, chain.head());
+    }
+
+    /// If persisting an append fails partway, the head must not stay behind
+    /// the file — the next entry would otherwise claim a parent the tail has
+    /// already claimed, forking the chain from the inside.
+    #[test]
+    fn a_failed_append_does_not_leave_the_head_behind_the_tail() {
+        let dir = tempdir().unwrap();
+        let jsonl = dir.path().join("audit.jsonl");
+        let head_path = dir.path().join("HEAD");
+        let mut chain = Chain::open(&jsonl, &head_path, None).unwrap();
+
+        // Make the secondary-head write fail: the line lands, the head file
+        // does not. Point it at a directory, which is never writable as a file.
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        chain.secondary_head_path = blocked;
+
+        let before = chain.head().to_string();
+        let err = chain.append(sample_entry(before.clone())).unwrap_err();
+        assert_eq!(err, AuditSignerErrorCode::FsyncFailed);
+
+        // The entry did reach the file, so the tail has moved on.
+        let contents = std::fs::read_to_string(&jsonl).unwrap();
+        let written: OnDiskEntry = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_ne!(written.entry_hash, before);
+
+        // Recovery: repoint at a writable head file and re-drive. The chain
+        // must refuse the stale parent, then accept the real tail.
+        chain.secondary_head_path = dir.path().join("HEAD2");
+        assert_eq!(
+            chain.append(sample_entry(before)).unwrap_err(),
+            AuditSignerErrorCode::ChainDriftDetected,
+            "the parent the failed append consumed must not be reusable"
+        );
+        assert_eq!(
+            chain.head(),
+            written.entry_hash,
+            "the head re-seeded from the on-disk tail"
+        );
+        chain
+            .append(sample_entry(written.entry_hash.clone()))
+            .expect("appending onto the true tail succeeds");
     }
 
     #[test]

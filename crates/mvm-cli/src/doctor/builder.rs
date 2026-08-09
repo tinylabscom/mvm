@@ -379,7 +379,7 @@ pub(super) fn builder_residency_check() -> Check {
     let session = builder_residency_session_summary(
         policy.kind(),
         mvm_build::persistent_builder::read_active_session().is_some(),
-        builder_vz_snapshot_present(&vms_root),
+        builder_parked_snapshot_present(&vms_root),
     );
     Check {
         name: "builder residency",
@@ -389,11 +389,12 @@ pub(super) fn builder_residency_check() -> Check {
     }
 }
 
-/// The persistent-builder snapshot/park mechanism belonged to the removed Vz
+/// The persistent-builder snapshot/park mechanism belonged to a removed
 /// builder; the libkrun builder has no memory snapshot, so no builder VM
-/// carries a resumable snapshot today.
+/// carries a resumable snapshot today. Always `false` until some builder
+/// grows one.
 #[cfg(feature = "builder-vm")]
-fn builder_vz_snapshot_present(_vms_root: &std::path::Path) -> bool {
+fn builder_parked_snapshot_present(_vms_root: &std::path::Path) -> bool {
     false
 }
 
@@ -401,15 +402,15 @@ fn builder_vz_snapshot_present(_vms_root: &std::path::Path) -> bool {
 fn builder_residency_session_summary(
     kind: mvm_core::residency::ResidencyKind,
     persistent_active: bool,
-    vz_snapshot_present: bool,
+    parked_snapshot_present: bool,
 ) -> &'static str {
     match kind {
-        mvm_core::residency::ResidencyKind::Parked if vz_snapshot_present => {
+        mvm_core::residency::ResidencyKind::Parked if parked_snapshot_present => {
             "parked (snapshot present)"
         }
         mvm_core::residency::ResidencyKind::Parked => "parked (no snapshot)",
         _ if persistent_active => "persistent builder active",
-        _ if vz_snapshot_present => "parked snapshot present",
+        _ if parked_snapshot_present => "parked snapshot present",
         _ => "no persistent builder",
     }
 }

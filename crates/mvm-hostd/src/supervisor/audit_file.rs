@@ -107,11 +107,24 @@ impl FileAuditSigner {
     /// Re-seed the in-memory cursor from disk on first emit per tenant.
     /// Hashes the last on-disk line; returns `[0; 32]` (genesis) if no
     /// file exists or the file is empty.
-    fn restore_cursor(&self, path: &Path) -> std::io::Result<[u8; 32]> {
+    ///
+    /// A file whose last byte is not `\n` ended mid-record: some previous
+    /// append died between writing the record and writing its terminator.
+    /// `str::lines` would hand back that partial record as though it were
+    /// whole, and we would chain onto the hash of a fragment. Report it as
+    /// [`AuditError::TruncatedTail`] instead — a crash has to be
+    /// distinguishable from tampering, and silently chaining onto a fragment
+    /// makes the two identical to every downstream verifier.
+    fn restore_cursor(&self, path: &Path) -> Result<[u8; 32], AuditError> {
         if !path.exists() {
             return Ok([0u8; 32]);
         }
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path).map_err(|e| AuditError::Io(e.to_string()))?;
+        if !content.is_empty() && !content.ends_with('\n') {
+            return Err(AuditError::TruncatedTail {
+                path: path.display().to_string(),
+            });
+        }
         let last = content.lines().rfind(|l| !l.is_empty());
         match last {
             None => Ok([0u8; 32]),
@@ -153,9 +166,7 @@ impl AuditSigner for FileAuditSigner {
         // Refresh the cursor under the lock — another process may
         // have appended between our last in-memory snapshot and
         // this call.
-        let prev_hash = self
-            .restore_cursor(&path)
-            .map_err(|e| AuditError::Io(e.to_string()))?;
+        let prev_hash = self.restore_cursor(&path)?;
         {
             let mut cursors = self.cursors.lock().expect("cursors poisoned");
             cursors.insert(cursor_key.clone(), prev_hash);
@@ -174,7 +185,26 @@ impl AuditSigner for FileAuditSigner {
         let line = serde_json::to_string(&envelope).map_err(|e| AuditError::Io(e.to_string()))?;
         let new_hash = hash_line(line.as_bytes());
 
-        writeln!(file, "{line}").map_err(|e| AuditError::Io(e.to_string()))?;
+        // One `write_all` of record-plus-terminator, then fsync, both inside
+        // the flock.
+        //
+        // `writeln!` goes through `write_fmt`, which issues a syscall per
+        // format fragment — the record, then the newline. A crash between the
+        // two leaves a record with no terminator, and the next append
+        // concatenates onto it: one corrupt line where there should be two
+        // valid ones, reported by the verifier as a chain break. The audit log
+        // is the evidence that a tamper would have to defeat, so a crash must
+        // not be able to produce a tamper's signature.
+        //
+        // The fsync is what makes "the emitter returned Ok" mean the record
+        // survives the machine losing power, which is the property every
+        // admission decision downstream is assuming.
+        let mut record = line.into_bytes();
+        record.push(b'\n');
+        file.write_all(&record)
+            .map_err(|e| AuditError::Io(e.to_string()))?;
+        file.sync_data()
+            .map_err(|e| AuditError::Io(e.to_string()))?;
 
         self.cursors
             .lock()
@@ -188,7 +218,12 @@ impl AuditSigner for FileAuditSigner {
 /// Take an exclusive advisory lock on `file`. Blocks until acquired.
 /// Released when the OwnedFd backing `file` is dropped. This is what
 /// gives the per-tenant audit chain cross-process integrity.
-fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+///
+/// `flock` is held per open file description rather than per process, so two
+/// threads that each opened the file are serialized against one another the
+/// same way two processes are. `fcntl` record locks are not — they are owned
+/// by the process and grant a second thread the lock it is already holding.
+pub(crate) fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
     use rustix::fs::{FlockOperation, flock};
     use std::os::fd::AsFd;
     flock(file.as_fd(), FlockOperation::LockExclusive).map_err(std::io::Error::from)
@@ -204,6 +239,14 @@ pub enum VerifyError {
     PrevHashMismatch { line: usize },
     #[error("signature invalid at line {line}")]
     SignatureInvalid { line: usize },
+    /// The file ends mid-record: a writer died between the record and its
+    /// terminating newline. Distinct from [`Self::Malformed`] on purpose — an
+    /// operator triaging a broken chain needs to know whether they are looking
+    /// at a crash or at an edit, and the two are otherwise identical on disk.
+    /// Entries before the truncation point are still verified and returned by
+    /// the count; only the incomplete tail is refused.
+    #[error("audit stream ends mid-record at line {line}: last append did not complete")]
+    TruncatedTail { line: usize },
 }
 
 /// Walk a chain-signed audit file, verifying each envelope's
@@ -222,11 +265,21 @@ pub fn verify_audit_chain_entries(
     verifying_key: &VerifyingKey,
 ) -> Result<Vec<AuditEntry>, VerifyError> {
     let content = std::fs::read_to_string(path).map_err(|e| VerifyError::Io(e.to_string()))?;
+    // A record is only complete once its terminator is on disk. `str::lines`
+    // does not distinguish "last line" from "last line so far", so check the
+    // final byte before walking: without this, a half-written record is
+    // reported as malformed JSON or a bad signature, and a crash becomes
+    // indistinguishable from someone having edited the log.
+    let truncated_tail = !content.is_empty() && !content.ends_with('\n');
     let mut prev_hash = [0u8; 32];
     let mut entries = Vec::new();
+    let last_idx = content.lines().count().saturating_sub(1);
     for (idx, line) in content.lines().enumerate() {
         if line.is_empty() {
             continue;
+        }
+        if truncated_tail && idx == last_idx {
+            return Err(VerifyError::TruncatedTail { line: idx });
         }
         let envelope: SignedEnvelope =
             serde_json::from_str(line).map_err(|e| VerifyError::Malformed {
@@ -813,5 +866,96 @@ mod tests {
             signer.verifying_key().to_bytes(),
             other.verifying_key().to_bytes()
         );
+    }
+
+    /// Every completed append leaves the stream terminated, which is what
+    /// makes "ends without a newline" a reliable truncation signal rather
+    /// than a coincidence of the last entry's content.
+    #[tokio::test]
+    async fn every_append_lands_terminated() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
+        for event in ["plan.verified", "plan.admitted", "plan.launched"] {
+            signer
+                .sign_and_emit(&make_entry("tenant-a", event))
+                .await
+                .unwrap();
+        }
+
+        let content = std::fs::read_to_string(signer.tenant_path("tenant-a")).unwrap();
+        assert!(
+            content.ends_with('\n'),
+            "a completed append must leave the record terminated on disk"
+        );
+        assert_eq!(content.lines().count(), 3);
+    }
+
+    /// A crash between the record and its terminator must not be able to
+    /// masquerade as tampering, and must not be silently extended.
+    ///
+    /// Before the single-`write_all` change this was reachable in production:
+    /// `writeln!` emitted the record and the newline as separate syscalls.
+    /// The torn state is simulated here because a real interleaving is not
+    /// deterministically reproducible.
+    #[tokio::test]
+    async fn a_torn_tail_is_refused_not_chained_onto() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let verifying = key.verifying_key();
+        let signer = FileAuditSigner::open(key, dir.path()).unwrap();
+        signer
+            .sign_and_emit(&make_entry("tenant-a", "plan.verified"))
+            .await
+            .unwrap();
+
+        // Simulate the crash: append a record that never got its terminator.
+        let path = signer.tenant_path("tenant-a");
+        let mut torn = std::fs::read_to_string(&path).unwrap();
+        torn.push_str(r#"{"entry":{"event":"plan.admi"#);
+        std::fs::write(&path, &torn).unwrap();
+
+        // The verifier names it truncation, not a bad signature and not a
+        // chain break — an operator has to be able to tell a crash from an
+        // edit.
+        let err = verify_audit_chain(&path, &verifying).expect_err("torn tail must not verify");
+        assert!(
+            matches!(err, VerifyError::TruncatedTail { .. }),
+            "expected TruncatedTail, got {err:?}"
+        );
+
+        // And the signer refuses to extend the chain from a partial record
+        // rather than hashing the fragment as though it were an entry.
+        let err = signer
+            .sign_and_emit(&make_entry("tenant-a", "plan.launched"))
+            .await
+            .expect_err("must not append onto a torn tail");
+        assert!(
+            matches!(err, AuditError::TruncatedTail { .. }),
+            "expected TruncatedTail, got {err:?}"
+        );
+    }
+
+    /// The truncation check must not fire on healthy files — otherwise it
+    /// would refuse every append and the test above would pass vacuously.
+    #[tokio::test]
+    async fn an_intact_chain_still_verifies_and_extends() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let verifying = key.verifying_key();
+        let signer = FileAuditSigner::open(key, dir.path()).unwrap();
+        for event in ["plan.verified", "plan.admitted"] {
+            signer
+                .sign_and_emit(&make_entry("tenant-a", event))
+                .await
+                .unwrap();
+        }
+        let path = signer.tenant_path("tenant-a");
+        assert_eq!(verify_audit_chain(&path, &verifying).unwrap(), 2);
+
+        signer
+            .sign_and_emit(&make_entry("tenant-a", "plan.launched"))
+            .await
+            .expect("an intact chain must still accept appends");
+        assert_eq!(verify_audit_chain(&path, &verifying).unwrap(), 3);
     }
 }

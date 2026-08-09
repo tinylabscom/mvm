@@ -16,7 +16,7 @@ pub trait VmFullControl {
     fn pause(&self) -> Result<()>;
     /// Save machine memory state to `memory_path` while paused; also writes a
     /// `<memory_path>.machine-id` sidecar when the backend has a machine
-    /// identifier (e.g. Vz). Backends that do not have a separate machine-id
+    /// identifier. Backends that do not have a separate machine-id
     /// concept (e.g. Firecracker) may skip the sidecar — the caller only
     /// promotes it to a content blob when the file exists.
     fn save_memory(&self, memory_path: &Path) -> Result<()>;
