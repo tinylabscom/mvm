@@ -177,7 +177,7 @@ fn stepping_across_the_ttl_keeps_the_lease_from_a_competitor() {
     InputGate::bind(
         &consumer,
         InputBinding::new()
-            .with_lease_ttl(Duration::from_millis(60))
+            .with_lease_ttl(Duration::from_millis(500))
             .with_audit(InputAudit::new(
                 AuditEmitter::with_dir(key, chain_dir.path()).expect("chain"),
             )),
@@ -189,10 +189,12 @@ fn stepping_across_the_ttl_keeps_the_lease_from_a_competitor() {
     let mut edge =
         EdgeConnector::new(&StreamEdge::new("quiet"), session, reader).expect("servable");
 
-    // Step across more than one whole TTL, with nothing to send.
-    for _ in 0..6 {
+    // Keep each refresh comfortably inside the lease while still stepping
+    // past the full TTL. The margin matters because this test uses the real
+    // monotonic clock and a loaded test runner can oversleep a short interval.
+    for _ in 0..12 {
         assert_eq!(edge.step().expect("idle step"), EdgeStep::Idle);
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     assert!(
