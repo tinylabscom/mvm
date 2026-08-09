@@ -1,7 +1,7 @@
-//! `FcDriver` — the `VmmDriver` for Firecracker (Linux KVM). Identity delegates
-//! to the proven `FirecrackerBackend`, but capabilities are the flipped,
-//! NIC-less profile: the converged Firecracker path carries no routable guest
-//! NIC and routes egress solely over vsock, exactly like libkrun and hvf.
+//! `FcDriver` — the `VmmDriver` for Firecracker (Linux KVM). It reports its own
+//! identity and capabilities: the NIC-less profile, where the converged
+//! Firecracker path carries no routable guest NIC and routes egress solely
+//! over vsock, exactly like libkrun and hvf.
 //!
 //! `boot` assembles a NIC-less Firecracker launch from a policy-free `VmmSpec`
 //! using the shared `microvm` primitives — the FC-loadable kernel prep, the
@@ -21,21 +21,24 @@ use mvm_agentd::vsock::{
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
-    StandbyHandle, StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
+    SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
-use crate::backend::FirecrackerBackend;
-use crate::driver::spec::KernelImage;
-use crate::driver::{
-    BlockDev, ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
-    StandbyParentSpawn, VmmDriver, VmmSpec, VsockDirection, VsockPort,
+use crate::fc::{
+    FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
+    read_firecracker_pid, start_vm_firecracker,
 };
-use crate::microvm::{
-    FirecrackerGuard, api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
-    firecracker_vsock_uds_path, logger_body, machine_config_body, read_firecracker_pid,
-    start_vm_firecracker, vsock_body,
+use mvm_vmm::driver::spec::KernelImage;
+use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
+use mvm_vmm::driver::traits::{
+    ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
+    StandbyParentSpawn, VmmDriver,
+};
+use mvm_vmm::host::boot_config::{
+    balloon_body, boot_source_body, drive_body, logger_body, machine_config_body, vsock_body,
 };
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
@@ -54,15 +57,11 @@ const GUEST_STOP_DRAIN_TIMEOUT_SECS: u64 = 10;
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge,
 /// not here.
-pub struct FcDriver {
-    backend: FirecrackerBackend,
-}
+pub struct FcDriver {}
 
 impl FcDriver {
     pub fn new() -> Self {
-        Self {
-            backend: FirecrackerBackend,
-        }
+        Self {}
     }
 }
 
@@ -115,9 +114,9 @@ fn resolve_fc_kernel_path(spec: &VmmSpec) -> Result<PathBuf> {
 /// the per-VM API socket. Kept as data so the whole NIC-less config sequence is
 /// a pure, testable value the driver replays through `api_put_socket`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FcApiPut {
-    path: String,
-    body: String,
+pub struct FcApiPut {
+    pub path: String,
+    pub body: String,
 }
 
 /// Map slot-ordered blocks to `/drives/*` PUTs in the order Firecracker assigns
@@ -155,7 +154,7 @@ fn fc_drive_puts(blocks: &[BlockDev]) -> Vec<FcApiPut> {
 /// spec opts into balloon elasticity — the virtio-balloon device. There is
 /// deliberately no `/network-interfaces` PUT: the converged Firecracker path
 /// attaches no guest NIC.
-fn fc_config_api_puts(
+pub fn fc_config_api_puts(
     spec: &VmmSpec,
     kernel_for_boot: &str,
     vsock_uds: &str,
@@ -377,7 +376,7 @@ fn fc_sudo_signal(pid: u32, signal: FcStopSignal) {
         r#"[ -f "/proc/{pid}/comm" ] && [ "$(cat /proc/{pid}/comm)" = "firecracker" ] && sudo kill{flag} {pid}"#
     );
     #[cfg(not(target_os = "linux"))]
-    match crate::base::shell::run_in_vm(&script) {
+    match mvm_vmm::host::shell::run_in_vm(&script) {
         Ok(out) if out.status.success() => {}
         Ok(_) | Err(_) => tracing::warn!(
             "Firecracker stop signal {signal:?} to pid {pid} did not report success \
@@ -482,9 +481,9 @@ fn remove_pid_marker_if_matches(pid_file: &Path, pid: u32) {
 /// for liveness or signal delivery.
 pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -> Result<()> {
     let outcome = escalate_kill(
-        mvm_backends::legacy::libkrun::STOP_TIMEOUT,
+        crate::legacy::libkrun::STOP_TIMEOUT,
         Duration::from_millis(100),
-        || crate::firecracker::is_firecracker_pid_running(pid),
+        || crate::fc::is_firecracker_pid_running(pid),
         |signal| fc_sudo_signal(pid, signal),
         Instant::now,
         std::thread::sleep,
@@ -528,15 +527,15 @@ fn firecracker_status_with(
 
 impl VmmDriver for FcDriver {
     fn name(&self) -> &str {
-        self.backend.name()
+        "firecracker"
     }
 
     fn kind(&self) -> BackendKind {
-        self.backend.kind()
+        BackendKind::Firecracker
     }
 
     fn is_available(&self) -> Result<bool> {
-        self.backend.is_available()
+        crate::fc::host::is_installed()
     }
 
     fn capabilities(&self) -> VmCapabilities {
@@ -574,7 +573,18 @@ impl VmmDriver for FcDriver {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        self.backend.security_profile()
+        // Tier 1: full security posture. All seven CI-enforced claims
+        // hold. Hardware isolation via KVM; verified boot via
+        // dm-verity.
+        BackendSecurityProfile {
+            claims: [ClaimStatus::Holds; 7],
+            layer_coverage: LayerCoverage::all_layers(),
+            tier: "Tier 1",
+            notes: &[
+                "Full ADR-002 — all seven CI-enforced claims hold.",
+                "Hardware isolation via KVM. Verified boot via dm-verity (W3).",
+            ],
+        }
     }
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
@@ -635,8 +645,11 @@ impl VmmDriver for FcDriver {
         })
     }
 
-    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
-        Some(Box::new(crate::firecracker::FcVmFullControl::new(vm_name)))
+    fn vm_full_control(
+        &self,
+        vm_name: &str,
+    ) -> Option<Box<dyn mvm_vmm::checkpoint::VmFullControl>> {
+        Some(Box::new(crate::fc::FcVmFullControl::new(vm_name)))
     }
 
     fn supports_preloaded_standby(&self) -> bool {
@@ -660,7 +673,7 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             )));
         }
-        crate::firecracker::FcForkRestorer
+        crate::fc::FcForkRestorer
             .restore_fork_paused(req.child_vm_name, req.child_dir)
             .map_err(|e| StandbyError::SpawnFailed(format!("load paused child: {e}")))?;
         let pid = read_firecracker_pid(&req.child_dir.to_string_lossy())
@@ -696,8 +709,8 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             ))
         })?;
-        let io = crate::vm::instance_snapshot::FirecrackerIO::new(req.child_dir.join("fc.socket"));
-        <crate::vm::instance_snapshot::FirecrackerIO as crate::vm::instance_snapshot::SnapshotIO>::resume(&io)
+        let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"));
+        <crate::fc::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::resume(&io)
             .map_err(|e| StandbyError::ClaimFailed(format!("resume preloaded child: {e}")))
     }
 
@@ -749,12 +762,9 @@ impl VmmDriver for FcDriver {
         // own identity. The device-model guard between load and resume refuses
         // any snapshot carrying a network interface, so a restored child cannot
         // reintroduce a path off the box that bypasses vsock.
-        crate::checkpoint::ForkVmFullRestorer::restore_fork(
-            &crate::firecracker::FcForkRestorer,
-            req.child_vm_name,
-            req.child_dir,
-        )
-        .map_err(|e| StandbyError::ClaimFailed(format!("restore forked child: {e}")))?;
+        crate::fc::FcForkRestorer
+            .restore_fork(req.child_vm_name, req.child_dir)
+            .map_err(|e| StandbyError::ClaimFailed(format!("restore forked child: {e}")))?;
         Ok(())
     }
 
@@ -776,9 +786,7 @@ impl VmmDriver for FcDriver {
         // would orphan that Firecracker as soon as this launch overwrote the
         // rest of its state directory.
         let pid_file_str = pid_file.to_string_lossy().into_owned();
-        clear_stale_pid_marker_for_start(&pid_file, || {
-            crate::firecracker::is_vm_running(&pid_file_str)
-        })?;
+        clear_stale_pid_marker_for_start(&pid_file, || crate::fc::is_vm_running(&pid_file_str))?;
 
         let runtime_dir = state_dir.join("runtime");
         std::fs::create_dir_all(&runtime_dir)
@@ -813,7 +821,7 @@ impl VmmDriver for FcDriver {
             api_put_socket(&socket, &put.path, &put.body)
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;
         }
-        crate::microvm::secure_vsock_socket_for_caller(&vsock_uds)
+        crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
             .context("restrict Firecracker vsock socket to the invoking user")?;
 
         // Wire the guest-dial egress/broker bridges and bind the workload-exit
@@ -834,7 +842,7 @@ impl VmmDriver for FcDriver {
             // rejected config) rather than waiting out the full agent deadline.
             // The console log carries the actionable detail. Probed ownership-
             // independently since a sudo-launched FC runs as root.
-            if !crate::firecracker::is_vm_running(&pid_file_str)? {
+            if !crate::fc::is_vm_running(&pid_file_str)? {
                 bail!(
                     "Firecracker process for '{}' exited before its guest agent came up; see {}/console.log",
                     spec.name,
@@ -892,8 +900,8 @@ impl VmmDriver for FcDriver {
         }))
     }
 
-    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
-        self.backend.guest_channel_info(id)
+    fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
+        anyhow::bail!("firecracker does not provide guest channel info")
     }
 }
 
@@ -968,7 +976,7 @@ impl RunningVm for FcRunningVm {
         let Some(pid) = self.pid else {
             return Ok(());
         };
-        if !crate::firecracker::is_firecracker_pid_running(pid)? {
+        if !crate::fc::is_firecracker_pid_running(pid)? {
             remove_pid_marker_if_matches(&self.pid_file, pid);
             return Ok(());
         }
@@ -981,11 +989,11 @@ impl RunningVm for FcRunningVm {
     fn pause(&self) -> Result<()> {
         // Firecracker exposes vCPU pause via the control API; reuse the existing
         // FC control helper (PATCH /vm InstanceState) keyed by the VM name.
-        crate::microvm::pause_vm(&self.id.0)
+        crate::fc::pause_vm(&self.id.0)
     }
 
     fn resume(&self) -> Result<()> {
-        crate::microvm::resume_vm(&self.id.0)
+        crate::fc::resume_vm(&self.id.0)
     }
 
     fn status(&self) -> Result<VmStatus> {
@@ -993,7 +1001,7 @@ impl RunningVm for FcRunningVm {
         // running-VM's `libc::kill(pid, 0)` probe returns EPERM from a non-root
         // mvmctl and would misreport a live VM as Stopped. Probe ownership-
         // independently via /proc/<pid>/comm, reusing FC's own liveness helper.
-        firecracker_status_with(self.pid, crate::firecracker::is_firecracker_pid_running)
+        firecracker_status_with(self.pid, crate::fc::is_firecracker_pid_running)
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -1024,8 +1032,8 @@ impl RunningVm for FcRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::{ConsoleCapture, VirtioFsShare};
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
+    use mvm_vmm::driver::spec::{ConsoleCapture, VirtioFsShare};
 
     fn host_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
@@ -1189,32 +1197,10 @@ mod tests {
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(!caps.tap_networking);
-        assert!(!FirecrackerBackend.capabilities().tap_networking);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
-        // Security tier still delegates to the raw backend (same claims).
-        assert_eq!(
-            d.security_profile().tier,
-            FirecrackerBackend.security_profile().tier
-        );
-    }
-
-    /// The selectable driver matrix distinguishes saved-state support from
-    /// arbitrary snapshot support. Firecracker advertises the pool because its
-    /// refill path now publishes a paused, no-NIC child and its claim path
-    /// resumes that child only after fresh channel wiring.
-    #[test]
-    fn firecracker_and_hvf_advertise_the_live_standby_pool() {
-        use crate::driver::{LibkrunDriver, MockDriver};
-        use crate::wasm_backend::WasmBackend;
-        use mvm_backends::driver::hvf::HvfDriver;
-        use mvm_backends::legacy::qemu::QemuBackend;
-
-        assert!(FcDriver::new().capabilities().standby_pool);
-        assert!(!LibkrunDriver::new().capabilities().standby_pool);
-        assert!(HvfDriver::new().capabilities().standby_pool);
-        assert!(!MockDriver::default().capabilities().standby_pool);
-        assert!(!QemuBackend.capabilities().standby_pool);
-        assert!(!WasmBackend::new().capabilities().standby_pool);
+        // The driver reports the claim-bearing tier itself now, rather than
+        // asking a legacy shell for it.
+        assert_eq!(d.security_profile().tier, "Tier 1");
     }
 
     #[test]
@@ -1247,17 +1233,15 @@ mod tests {
     }
 
     #[test]
-    fn guest_channel_info_delegates_to_the_firecracker_backend() {
+    fn guest_channel_info_is_unsupported_for_firecracker() {
+        // Firecracker exposes no guest channel; the driver says so directly
+        // instead of routing the question through a legacy shell.
         let d = FcDriver::new();
         let id = VmId("fc-guest-channel-info-test-vm".into());
-        assert_eq!(
-            format!("{:?}", d.guest_channel_info(&id).map_err(|e| e.to_string())),
-            format!(
-                "{:?}",
-                FirecrackerBackend
-                    .guest_channel_info(&id)
-                    .map_err(|e| e.to_string())
-            )
+        let err = d.guest_channel_info(&id).expect_err("no guest channel");
+        assert!(
+            err.to_string().contains("guest channel info"),
+            "expected the no-guest-channel refusal, got: {err}"
         );
     }
 
@@ -1465,8 +1449,8 @@ mod tests {
     fn attach_builds_a_disk_backed_handle_that_reports_stopped_for_a_missing_vm() {
         // status probes /proc/<pid>/comm through the Linux shell env; mock it so
         // the probe is deterministic on every host (a missing VM ⇒ "no").
-        let _guard = crate::base::shell_mock::install_handler(|_| {
-            crate::base::shell_mock::MockResponse::ok("no")
+        let _guard = mvm_vmm::host::shell::mock::install_handler(|_| {
+            mvm_vmm::host::shell::mock::MockResponse::ok("no")
         });
         let vm = FcDriver::new()
             .attach(&VmId("fc-nonexistent-attach-test-vm".into()))
@@ -1516,11 +1500,11 @@ mod tests {
             pid: Some(4242),
             vsock_uds: "/state/gone-vm/runtime/v.sock".into(),
         };
-        let _guard = crate::base::shell_mock::install_handler(|script| {
+        let _guard = mvm_vmm::host::shell::mock::install_handler(|script| {
             if script.starts_with("cat ") {
-                crate::base::shell_mock::MockResponse::ok("4242")
+                mvm_vmm::host::shell::mock::MockResponse::ok("4242")
             } else {
-                crate::base::shell_mock::MockResponse::ok("no")
+                mvm_vmm::host::shell::mock::MockResponse::ok("no")
             }
         });
         vm.kill().unwrap();
@@ -1701,9 +1685,9 @@ mod tests {
         // force kill adds it — and that both go through sudo (root reach).
         let scripts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = scripts.clone();
-        let _guard = crate::base::shell_mock::install_handler(move |s: &str| {
+        let _guard = mvm_vmm::host::shell::mock::install_handler(move |s: &str| {
             sink.lock().unwrap().push(s.to_string());
-            crate::base::shell_mock::MockResponse::empty()
+            mvm_vmm::host::shell::mock::MockResponse::empty()
         });
         fc_sudo_signal(4242, FcStopSignal::Terminate);
         fc_sudo_signal(4242, FcStopSignal::ForceKill);
@@ -1739,58 +1723,6 @@ mod tests {
             fc_linux_signal_args(4242, FcStopSignal::ForceKill),
             ["-n", "kill", "-KILL", "4242"]
         );
-    }
-
-    #[test]
-    fn vsock_connect_reaches_the_agent_over_the_connect_handshake_and_rejects_other_ports() {
-        use crate::test_support::bind_unix_listener;
-        use std::io::{BufRead, BufReader, Read, Write};
-
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = dir.path().join("runtime");
-        std::fs::create_dir_all(&runtime).unwrap();
-        let vsock = runtime.join("v.sock");
-        let Some(listener) = bind_unix_listener(&vsock) else {
-            return;
-        };
-        // Firecracker's mux: read `CONNECT <port>`, reply `OK <port>`, then echo.
-        let server = std::thread::spawn(move || {
-            if let Ok((stream, _)) = listener.accept() {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_ok() {
-                    let mut w = stream;
-                    let port = line.trim().trim_start_matches("CONNECT ").trim();
-                    let _ = writeln!(w, "OK {port}");
-                    let _ = w.flush();
-                    let mut b = [0u8; 1];
-                    if reader.read_exact(&mut b).is_ok() {
-                        let _ = w.write_all(&b);
-                    }
-                }
-            }
-        });
-
-        let vm = FcRunningVm {
-            id: VmId("agent-vm".into()),
-            state_dir: dir.path().to_path_buf(),
-            pid_file: dir.path().join("fc.pid"),
-            pid: None,
-            vsock_uds: vsock.to_string_lossy().into_owned(),
-        };
-
-        // The agent port connects through the CONNECT handshake + round-trips.
-        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
-        s.write_all(b"x").unwrap();
-        let mut got = [0u8; 1];
-        s.read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"x");
-        server.join().unwrap();
-
-        // Ports outside the agent + console data range are not host-dialable
-        // (rejected before any connect attempt).
-        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
-        assert!(vm.vsock_connect(9999).is_err());
     }
 
     #[test]
@@ -1832,168 +1764,6 @@ mod tests {
     #[test]
     fn fc_offers_a_vm_full_capture_control() {
         assert!(FcDriver::new().vm_full_control("any-vm").is_some());
-    }
-
-    /// The metadata the spawn path writes for a factory parent must be exactly
-    /// what `FcVmFullControl::rootfs_path()` reads back, or a live capture
-    /// fails closed for want of a resolvable rootfs. Proven by running the real
-    /// derivation (launch config → parent config → recorded metadata) and then
-    /// resolving it through the real capture control — no boot, no KVM.
-    #[test]
-    fn the_parent_metadata_the_spawn_path_writes_resolves_through_the_capture_control() {
-        use crate::checkpoint::VmFullControl as _;
-        use crate::workload_runner::factory_parent_config;
-        use mvm_core::util::test_env::TestEnv;
-        use mvm_core::vm_backend::{StandbySpec, StartMode, VmStartConfig};
-
-        let mut env = TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
-
-        let image = tmp.path().join("rootfs.ext4");
-        std::fs::write(&image, b"fake-rootfs").unwrap();
-
-        let launch = VmStartConfig {
-            name: "workload-a".into(),
-            rootfs_path: image.display().to_string(),
-            kernel_path: Some("/img/vmlinux".into()),
-            cpus: 2,
-            memory_mib: 512,
-            ..Default::default()
-        };
-        let spec = StandbySpec {
-            id: "standby-parent-1".into(),
-            template_id: None,
-            kernel_path: "/img/vmlinux".into(),
-            kernel_sha256: "a".repeat(64),
-            vcpus: 2,
-            mem_mib: 512,
-            signing_key_path: "/keys/host-signer.ed25519".into(),
-            signer_id: "host:test".into(),
-            binding_nonce: "b".repeat(64),
-            control_socket: tmp.path().join("control.sock").display().to_string(),
-            vm_state_dir: tmp.path().join("standby-parent-1").display().to_string(),
-            image_path: Some(image.display().to_string()),
-            image_sha256: Some("c".repeat(64)),
-            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(&launch),
-        };
-
-        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
-        mvm_vmm::host::runtime_meta::record_from_start_config(
-            &spec.id,
-            StartMode::Detached,
-            &parent_cfg,
-        )
-        .unwrap();
-
-        let control = crate::firecracker::FcVmFullControl::new(&spec.id);
-        assert_eq!(control.rootfs_path().unwrap(), image);
-    }
-
-    /// A parent warmed for an egress-allowing launch boots the guest's egress
-    /// client — and that is the *only* thing the enablement changes.
-    ///
-    /// The enablement reaches the parent as a policy that answers "egress
-    /// allowed", because that is what the cmdline token is derived from. This
-    /// pins that the policy buys the parent nothing else: flipping it leaves the
-    /// device set the driver configures byte-identical, so an egress-enabled
-    /// parent hands a restored child the same vsock-only machine a deny-all one
-    /// does. (That the set itself carries no guest NIC is enforced structurally
-    /// by the workspace's vsock-only-egress token gate over this file.)
-    #[test]
-    fn an_egress_enabled_parent_boots_the_token_and_nothing_else_changes() {
-        use crate::workload_runner::{factory_parent_config, factory_parent_spec};
-        use mvm_core::network_policy::{HostPort, NetworkPolicy};
-        use mvm_core::util::test_env::TestEnv;
-        use mvm_core::vm_backend::{StandbySpec, VmStartConfig};
-
-        let mut env = TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
-
-        let image = tmp.path().join("rootfs.ext4");
-        std::fs::write(&image, b"fake-rootfs").unwrap();
-
-        let deny_all_launch = VmStartConfig {
-            name: "workload-a".into(),
-            rootfs_path: image.display().to_string(),
-            kernel_path: Some("/img/vmlinux".into()),
-            cpus: 2,
-            memory_mib: 512,
-            ..Default::default()
-        };
-        let egress_launch = VmStartConfig {
-            network_policy: NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
-            ..deny_all_launch.clone()
-        };
-        let spec_for = |launch: &VmStartConfig| StandbySpec {
-            id: "standby-egress-parent".into(),
-            template_id: None,
-            kernel_path: "/img/vmlinux".into(),
-            kernel_sha256: "a".repeat(64),
-            vcpus: 2,
-            mem_mib: 512,
-            signing_key_path: "/keys/host-signer.ed25519".into(),
-            signer_id: "host:test".into(),
-            binding_nonce: "b".repeat(64),
-            control_socket: tmp.path().join("control.sock").display().to_string(),
-            vm_state_dir: tmp
-                .path()
-                .join("standby-egress-parent")
-                .display()
-                .to_string(),
-            image_path: Some(image.display().to_string()),
-            image_sha256: Some("c".repeat(64)),
-            vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
-        };
-        let parent_boot = |launch: &VmStartConfig| {
-            let spec = spec_for(launch);
-            let cfg = factory_parent_config(launch, &spec).unwrap();
-            let boot = factory_parent_spec(
-                &cfg,
-                std::path::Path::new(&spec.vm_state_dir),
-                |virtiofs_root, has_disk| {
-                    FcDriver::new().workload_base_bootargs(virtiofs_root, has_disk)
-                },
-            );
-            (spec.vsock_egress, boot)
-        };
-
-        let (deny_enabled, deny_boot) = parent_boot(&deny_all_launch);
-        let (egress_enabled, egress_boot) = parent_boot(&egress_launch);
-        assert!(!deny_enabled);
-        assert!(
-            egress_enabled,
-            "fixture must warm an egress-enabled parent, or it proves nothing"
-        );
-
-        assert!(
-            egress_boot.cmdline.contains("mvm.vsock_egress=1"),
-            "the parent must boot the guest egress client: {}",
-            egress_boot.cmdline
-        );
-        assert!(
-            !egress_boot.cmdline.contains("api.example.com"),
-            "the parent's cmdline must name no destination: {}",
-            egress_boot.cmdline
-        );
-
-        // Everything the driver would configure apart from the boot args is
-        // identical between the two enablements. `/boot-source` is excluded
-        // because it is where the cmdline lands, and that the cmdline matches the
-        // workload's is asserted where both are assembled, not here.
-        let device_set = |boot: &VmmSpec| {
-            config_puts(boot)
-                .into_iter()
-                .filter(|p| p.path != "/boot-source")
-                .map(|p| (p.path, p.body))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            device_set(&egress_boot),
-            device_set(&deny_boot),
-            "the egress enablement must add no device to a warm parent"
-        );
     }
 
     /// A pid that can't be read after a successful boot is a real failure, not
@@ -2149,5 +1919,56 @@ mod tests {
             0,
             "a parent with no channels must leave the runtime dir empty"
         );
+    }
+    #[test]
+    fn vsock_connect_reaches_the_agent_over_the_connect_handshake_and_rejects_other_ports() {
+        use mvm_vmm::test_support::bind_unix_listener;
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let vsock = runtime.join("v.sock");
+        let Some(listener) = bind_unix_listener(&vsock) else {
+            return;
+        };
+        // Firecracker's mux: read `CONNECT <port>`, reply `OK <port>`, then echo.
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() {
+                    let mut w = stream;
+                    let port = line.trim().trim_start_matches("CONNECT ").trim();
+                    let _ = writeln!(w, "OK {port}");
+                    let _ = w.flush();
+                    let mut b = [0u8; 1];
+                    if reader.read_exact(&mut b).is_ok() {
+                        let _ = w.write_all(&b);
+                    }
+                }
+            }
+        });
+
+        let vm = FcRunningVm {
+            id: VmId("agent-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: dir.path().join("fc.pid"),
+            pid: None,
+            vsock_uds: vsock.to_string_lossy().into_owned(),
+        };
+
+        // The agent port connects through the CONNECT handshake + round-trips.
+        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
+        s.write_all(b"x").unwrap();
+        let mut got = [0u8; 1];
+        s.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"x");
+        server.join().unwrap();
+
+        // Ports outside the agent + console data range are not host-dialable
+        // (rejected before any connect attempt).
+        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+        assert!(vm.vsock_connect(9999).is_err());
     }
 }

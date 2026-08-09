@@ -3,7 +3,7 @@
 //!
 //! Workload output is **not** here. It used to be: a `logs` entry point that
 //! shelled `tail`/`tail -f` at the console capture through
-//! `require_linux_env()` + [`run_in_vm_stdout`]. That indirection is a no-op
+//! [`run_in_vm_stdout`]. That indirection is a no-op
 //! on Linux and macOS 13-25 and hands back the dev-VM environment on macOS
 //! 26+, where nothing is left to dispatch to — so the same command read a
 //! host file on two tiers and failed outright on the third, for a file that
@@ -14,11 +14,11 @@
 use anyhow::{Context, Result};
 use tracing::{instrument, warn};
 
-use crate::base::config::{RunInfo, VmSlot};
-use crate::base::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
-use crate::firecracker;
+use mvm_vmm::host::config::{RunInfo, VmSlot};
+use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
 
-use super::{abs_vms_dir, firecracker_vsock_uds_path, require_linux_env};
+use super::host;
+use super::{abs_vms_dir, firecracker_vsock_uds_path};
 
 // ============================================================================
 // VM diagnostics
@@ -61,8 +61,6 @@ const CONSOLE_WARNING_PATTERNS: &[&str] = &[
 /// even when vsock is broken (e.g. guest agent crashed, OOM, kernel panic).
 #[instrument(skip_all, fields(name))]
 pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
-    require_linux_env()?;
-
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms, name);
 
@@ -275,7 +273,7 @@ pub fn list_vms() -> Result<Vec<RunInfo>> {
             if let Some(ref name) = info.name {
                 let abs_vms = abs_vms_dir();
                 let pid_file = format!("{}/{}/fc.pid", abs_vms, name);
-                if firecracker::is_vm_running(&pid_file).unwrap_or(false) {
+                if host::is_vm_running(&pid_file).unwrap_or(false) {
                     vms.push(info);
                 }
             }

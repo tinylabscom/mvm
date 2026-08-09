@@ -3,12 +3,12 @@
 use anyhow::{Context, Result};
 use tracing::{instrument, warn};
 
-use crate::base::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
-use crate::base::ui;
-use crate::firecracker;
+use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
+use mvm_vmm::host::ui;
 
+use super::host;
 use super::observe::list_vms;
-use super::{abs_vms_dir, read_firecracker_pid, require_linux_env};
+use super::{abs_vms_dir, read_firecracker_pid};
 
 /// Pause the vCPUs of a running Firecracker VM.
 ///
@@ -21,14 +21,12 @@ use super::{abs_vms_dir, read_firecracker_pid, require_linux_env};
 /// the inconsistency, not be swallowed.
 #[instrument(skip_all, fields(name))]
 pub fn pause_vm(name: &str) -> Result<()> {
-    require_linux_env()?;
-
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
 
-    if !firecracker::is_vm_running(&pid_file)? {
+    if !host::is_vm_running(&pid_file)? {
         anyhow::bail!("VM '{}' is not running", name);
     }
 
@@ -49,14 +47,12 @@ pub fn pause_vm(name: &str) -> Result<()> {
 /// `{"state":"Resumed"}` to the per-VM control socket.
 #[instrument(skip_all, fields(name))]
 pub fn resume_vm(name: &str) -> Result<()> {
-    require_linux_env()?;
-
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
 
-    if !firecracker::is_vm_running(&pid_file)? {
+    if !host::is_vm_running(&pid_file)? {
         anyhow::bail!("VM '{}' is not running", name);
     }
 
@@ -84,14 +80,12 @@ pub fn resume_vm(name: &str) -> Result<()> {
 /// `mem_initial.is_some()` — no balloon device exists to PATCH.
 /// Firecracker surfaces this as HTTP 400 with a clear message.
 pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
-    require_linux_env()?;
-
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
 
-    if !firecracker::is_vm_running(&pid_file)? {
+    if !host::is_vm_running(&pid_file)? {
         anyhow::bail!("VM '{}' is not running", name);
     }
 
@@ -119,14 +113,12 @@ pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
 /// VM's declared `memory` cap (e.g. from `list_vms()`), the host
 /// reclaim controller derives the effective commitment.
 pub fn balloon_state(name: &str) -> Result<u32> {
-    require_linux_env()?;
-
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
 
-    if !firecracker::is_vm_running(&pid_file)? {
+    if !host::is_vm_running(&pid_file)? {
         anyhow::bail!("VM '{}' is not running", name);
     }
 
@@ -187,8 +179,6 @@ fn cleanup_stopped_vm_state(
 }
 
 pub fn stop_vm(name: &str) -> Result<()> {
-    require_linux_env()?;
-
     let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms, name);
     let pid_file = format!("{}/fc.pid", abs_dir);
@@ -202,14 +192,14 @@ pub fn stop_vm(name: &str) -> Result<()> {
     // are best-effort + idempotent (no-op when the VM carried no secrets). The
     // substitution sidecars live under `vm_state_dir(name)`, not the workspace
     // `abs_dir`. Mirrors qemu.rs ordering (reap-before-not-running-return).
-    crate::substitution_spawn::reap_substitution_endpoint(
+    mvm_vmm::host::substitution_spawn::reap_substitution_endpoint(
         &mvm_core::config::vm_state_dir(name),
         name,
     );
     // Same reasoning for the L3 gateway: a crashed guest must not leave a
     // host TUN and an nft table behind.
     mvm_vmm::host::netd_spawn::reap_netd(&mvm_core::config::vm_state_dir(name));
-    if !firecracker::is_vm_running(&pid_file)? {
+    if !host::is_vm_running(&pid_file)? {
         ui::info(&format!("VM '{}' is not running.", name));
         return Ok(());
     }
@@ -239,7 +229,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     let exited_gracefully = await_graceful_exit(
         std::time::Duration::from_millis(250),
         std::time::Duration::from_millis(25),
-        || firecracker::is_firecracker_pid_running(pid),
+        || host::is_firecracker_pid_running(pid),
         std::time::Instant::now,
         std::thread::sleep,
     )?;
@@ -254,7 +244,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     let q_abs_dir = shell_quote(&abs_dir);
     cleanup_stopped_vm_state(
         name,
-        || firecracker::is_firecracker_pid_running(pid),
+        || host::is_firecracker_pid_running(pid),
         || {
             run_in_vm(&format!("rm -rf {q_abs_dir}"))
                 .map(|_| ())
@@ -269,8 +259,6 @@ pub fn stop_vm(name: &str) -> Result<()> {
 /// Stop all running VMs.
 #[instrument(skip_all)]
 pub fn stop_all_vms() -> Result<()> {
-    require_linux_env()?;
-
     let vms = list_vms()?;
     if vms.is_empty() {
         ui::info("No VMs are running.");

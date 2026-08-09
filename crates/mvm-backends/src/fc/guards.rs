@@ -2,8 +2,8 @@
 
 use tracing::warn;
 
-use crate::base::config::VmSlot;
-use crate::base::shell::run_in_vm;
+use mvm_vmm::host::config::VmSlot;
+use mvm_vmm::host::shell::run_in_vm;
 
 /// RAII guard for a Firecracker process started on the Linux host.
 ///
@@ -87,11 +87,10 @@ impl Drop for SlotReservationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_vmm::host::shell::mock as shell_mock;
 
     #[test]
     fn firecracker_guard_defuse_prevents_cleanup() {
-        use crate::base::shell_mock;
-
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = call_count.clone();
         let _handler = shell_mock::install_handler(move |_script: &str| {
@@ -117,8 +116,6 @@ mod tests {
 
     #[test]
     fn firecracker_guard_runs_cleanup_on_drop() {
-        use crate::base::shell_mock;
-
         let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let scripts_clone = scripts.clone();
         let _handler = shell_mock::install_handler(move |script: &str| {
@@ -151,8 +148,6 @@ mod tests {
 
     #[test]
     fn firecracker_guard_tolerates_cleanup_failure() {
-        use crate::base::shell_mock;
-
         let _handler = shell_mock::install_handler(|_script: &str| shell_mock::MockResponse {
             exit_code: 1,
             stdout: String::new(),

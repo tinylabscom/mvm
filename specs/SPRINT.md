@@ -189,16 +189,26 @@
       `mvm-vmm::host`, closing the last non-FC back-edge from the legacy
       backends into `mvm-runtime`.
 
-      Remaining: `FcDriver` still lives in `mvm-runtime/src/driver/fc.rs`
-      because it couples to `crate::microvm`, `crate::firecracker`, and
-      `crate::vm::instance_snapshot` — it is the only backend whose snapshot
-      and fork mechanics were never expressed through the `VmmDriver` seam.
-      `specs/plans/298-extract-firecracker-driver.md` carries that work: one
-      `VmmDriver` trait for every backend with no Firecracker-shaped sibling,
-      the generic snapshot seam lifted into `mvm-vmm`, the FC mechanics made
-      private to `mvm-backends`, and a hard budget of zero new traits and zero
-      new structs (deleting `ForkVmFullRestorer`, whose one method, one impl
-      and one call site make it a closure rather than a trait).
+      The Firecracker extraction that finishes this is complete —
+      `specs/plans/298-extract-firecracker-driver.md`. All five drivers now
+      live in `mvm-backends`; `mvm-runtime::driver` is re-exports only, and
+      `mvm-backends` depends on neither `mvm-runtime` nor `mvm-build`. The
+      backend-agnostic snapshot seam (`SnapshotIO`, the guarded load paths,
+      the vsock-only device-model guard, one merged `CannedIO` double) sits
+      in `mvm-vmm`; the Firecracker mechanics sit in `mvm-backends::fc`.
+
+      Held to zero new traits and zero new structs and came out negative:
+      `ForkVmFullRestorer` became a callback, the two `SnapshotIO` doubles
+      became one, and the guard takes a count rather than gaining a view
+      trait. Deleted along the way: the retired raw flake launcher (four
+      functions, no callers), the `require_linux_env` no-op (seven call
+      sites, asserted nothing), and a duplicate `bind_unix_listener`.
+      `base/config.rs` moved to `mvm-vmm::host` — the dependency-free leaf
+      that was pinning the FC modules — so neither `RuntimeVolume` nor
+      `VmSlot` had to move.
+
+      Workspace tests (10,582), doctests, `clippy --workspace --all-targets
+      -- -D warnings`, and eleven xtask gates are green.
 
 - [~] NANDA-style execution receipts and conformance badges — **plan 298**
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`). WS1 RFC

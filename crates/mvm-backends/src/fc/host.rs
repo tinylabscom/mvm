@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::ContentBlob;
 
-use crate::base::config::*;
-use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
-use crate::base::ui;
 use mvm_core::config::{ARCH, fc_version, fc_version_short};
+use mvm_vmm::host::config::*;
+use mvm_vmm::host::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible};
+use mvm_vmm::host::ui;
 
 /// Check if Firecracker is installed on the Linux host.
 pub fn is_installed() -> Result<bool> {
@@ -343,14 +343,14 @@ impl FcVmFullControl {
     }
 }
 
-impl crate::checkpoint::VmFullControl for FcVmFullControl {
+impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
     fn pause(&self) -> Result<()> {
-        crate::microvm::pause_vm(&self.vm_name)
+        super::pause_vm(&self.vm_name)
             .with_context(|| format!("pausing Firecracker VM '{}'", self.vm_name))
     }
 
     fn resume(&self) -> Result<()> {
-        crate::microvm::resume_vm(&self.vm_name)
+        super::resume_vm(&self.vm_name)
             .with_context(|| format!("resuming Firecracker VM '{}'", self.vm_name))
     }
 
@@ -364,19 +364,18 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("memory_path has no parent dir"))?
             .join(FC_VMSTATE_FILENAME);
-        crate::microvm::create_snapshot_files(&self.vm_name, &vmstate_path, memory_path)
-            .with_context(|| {
-                format!(
-                    "creating Firecracker snapshot for VM '{}' (vmstate={}, mem={})",
-                    self.vm_name,
-                    vmstate_path.display(),
-                    memory_path.display(),
-                )
-            })
+        super::create_snapshot_files(&self.vm_name, &vmstate_path, memory_path).with_context(|| {
+            format!(
+                "creating Firecracker snapshot for VM '{}' (vmstate={}, mem={})",
+                self.vm_name,
+                vmstate_path.display(),
+                memory_path.display(),
+            )
+        })
     }
 
     fn rootfs_path(&self) -> Result<PathBuf> {
-        let meta = crate::base::runtime_meta::read(&self.vm_name)
+        let meta = mvm_vmm::host::runtime_meta::read(&self.vm_name)
             .with_context(|| {
                 format!(
                     "reading mode.json for Firecracker VM '{}' to resolve rootfs path",
@@ -398,20 +397,20 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
         Ok(PathBuf::from(rootfs_str))
     }
 
-    fn device_anchors(&self) -> anyhow::Result<crate::checkpoint::DeviceAnchors> {
-        let vm_dir = crate::microvm::resolve_running_vm_dir(&self.vm_name)
+    fn device_anchors(&self) -> anyhow::Result<mvm_core::checkpoint::DeviceAnchors> {
+        let vm_dir = super::resolve_running_vm_dir(&self.vm_name)
             .with_context(|| format!("resolving VM dir for '{}'", self.vm_name))?;
         let rootfs = self.rootfs_path()?;
         let rootfs_dir = rootfs
             .parent()
             .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent directory"))?;
 
-        let mut anchors = crate::checkpoint::DeviceAnchors {
+        let mut anchors = mvm_core::checkpoint::DeviceAnchors {
             rootfs: rootfs.clone(),
             rootfs_verity: None,
             config: None,
             secrets: None,
-            vsock: PathBuf::from(crate::microvm::firecracker_vsock_uds_path(&vm_dir)),
+            vsock: PathBuf::from(crate::fc::firecracker_vsock_uds_path(&vm_dir)),
         };
 
         let verity = rootfs_dir.join("rootfs.verity");
@@ -447,7 +446,7 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
 }
 
 /// Boots a forked child from a Firecracker checkpoint triple cloned into
-/// `child_dir`. Implements [`crate::checkpoint::ForkVmFullRestorer`] for the
+/// `child_dir`. Supplies the fork-restore callback for the
 /// FC path.
 ///
 /// On `restore_fork`:
@@ -467,7 +466,7 @@ impl FcForkRestorer {
         &self,
         child_vm_name: &str,
         child_dir: &std::path::Path,
-    ) -> anyhow::Result<crate::vm::instance_snapshot::FirecrackerIO> {
+    ) -> anyhow::Result<super::io::FirecrackerIO> {
         use anyhow::Context as _;
         // FC saves memory as `memory.bin`; the snapshot loader expects
         // `mem.bin`, Firecracker's canonical load filename.
@@ -486,7 +485,7 @@ impl FcForkRestorer {
         // copies inside a private mount namespace, so the snapshot loads the
         // child's devices without editing Firecracker bitcode.
         let anchors_path = child_dir.join("device-anchors.json");
-        let anchors: crate::checkpoint::DeviceAnchors =
+        let anchors: mvm_core::checkpoint::DeviceAnchors =
             serde_json::from_slice(&std::fs::read(&anchors_path).with_context(|| {
                 format!(
                     "reading required FC fork device anchors {}",
@@ -499,7 +498,7 @@ impl FcForkRestorer {
                     anchors_path.display()
                 )
             })?;
-        let child_vm_dir = crate::microvm::resolve_running_vm_dir(child_vm_name)
+        let child_vm_dir = super::resolve_running_vm_dir(child_vm_name)
             .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
         let mut mappings = Vec::new();
         mappings.push((anchors.rootfs, child_dir.join("rootfs.ext4")));
@@ -523,7 +522,7 @@ impl FcForkRestorer {
             std::path::PathBuf::from(&child_vm_dir),
         ));
         std::fs::create_dir_all(child_dir.join("runtime")).ok();
-        crate::microvm::remap_paths_for_fork(&mappings)
+        super::remap_paths_for_fork(&mappings)
             .context("remapping parent device paths for FC fork")?;
 
         // The namespace is already active, so preserve the mounted child vsock
@@ -534,9 +533,7 @@ impl FcForkRestorer {
         // The load leaves vCPUs paused, so the no-NIC device-model guard runs
         // before the child executes anything. The claim resumes it only after
         // fresh host channels have been wired.
-        Ok(crate::vm::instance_snapshot::FirecrackerIO::new(
-            child_dir.join("fc.socket"),
-        ))
+        Ok(super::io::FirecrackerIO::new(child_dir.join("fc.socket")))
     }
 
     /// Load and guard a forked child without resuming it. Pool refill uses this
@@ -548,15 +545,21 @@ impl FcForkRestorer {
         child_dir: &std::path::Path,
     ) -> anyhow::Result<()> {
         let io = self.prepare_fork_load(child_vm_name, child_dir)?;
-        crate::vm::instance_snapshot::guarded_fork_load_paused(&io, child_dir)
+        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir)
             .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
     }
 }
 
-impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
-    fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> anyhow::Result<()> {
+impl FcForkRestorer {
+    /// Stage the child's snapshot and resume it. The fork-restore callback
+    /// `fork_vm_full_fc` takes.
+    pub fn restore_fork(
+        &self,
+        child_vm_name: &str,
+        child_dir: &std::path::Path,
+    ) -> anyhow::Result<()> {
         let io = self.prepare_fork_load(child_vm_name, child_dir)?;
-        crate::vm::instance_snapshot::guarded_fork_load_resume(&io, child_dir)
+        mvm_vmm::snapshot::guarded_fork_load_resume(&io, child_dir)
             .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
     }
 }
@@ -564,8 +567,8 @@ impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::VmFullControl as _;
     use mvm_core::util::test_env::TestEnv;
+    use mvm_vmm::checkpoint::VmFullControl as _;
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -635,7 +638,7 @@ mod tests {
     /// a VM, including optional verity/config/secrets sidecars when they exist.
     #[test]
     fn fc_vm_full_control_device_anchors_collects_present_sidecars() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
@@ -669,7 +672,7 @@ mod tests {
         assert_eq!(anchors.secrets, None);
         assert_eq!(
             anchors.vsock,
-            std::path::PathBuf::from(crate::microvm::firecracker_vsock_uds_path(
+            std::path::PathBuf::from(crate::fc::firecracker_vsock_uds_path(
                 &vm_dir.to_string_lossy()
             ))
         );
@@ -679,7 +682,7 @@ mod tests {
     /// mode.json (e.g. it was never started with runtime metadata tracking).
     #[test]
     fn fc_vm_full_control_device_anchors_errors_when_mode_json_missing() {
-        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
