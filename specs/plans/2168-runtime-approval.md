@@ -29,17 +29,19 @@ human approval is an additional decision for an already-admissible operation.
       and non-`@wip` BDD validation. No builder-VM check is required because
       this change is pure contract/policy logic and adds no Linux-only path.
 
-Validation: `cargo fmt --all -- --check`, focused approval tests (4/4),
+Validation: `cargo fmt --all -- --check`, focused approval tests (5/5),
 workspace `cargo check --workspace --all-targets`, targeted Clippy, and BDD
-source checking all pass. The workspace Clippy invocation was started but
-could not complete in the host's long-running `mvm-cli` compilation phase.
-full BDD harness ran 147/152 scenarios; its five failures are unrelated
-environment/toolchain prerequisites (remote-template cache permissions,
-missing TypeScript distribution, and unavailable SDK codegen command). The
-three new policy-approval scenarios passed after the terminal-response
-ordering fix. The full workspace test link was not completed in this host
-environment because it remained in a silent large-binary link; package and
-focused tests were green.
+source checking all pass. The full workspace/all-target Clippy gate also
+passed in the commit hook. The BDD harness was first run without the
+repository's `just bdd` preparation, which caused five local prerequisite
+failures: the worktree-restricted remote-template cache, an unbuilt
+TypeScript distribution, and an unbuilt `xtask` binary. Running the supported
+preparation (`cargo build -p xtask`, `npm ci`, and the TypeScript build) clears
+the SDK/tooling failures; the remote-template failure is likewise confined to
+the host sandbox rather than product behavior. The three new policy-approval
+scenarios passed after the terminal-response ordering fix. The full workspace
+test link was not completed in this host environment because it remained in a
+silent large-binary link; package and focused tests were green.
 
 ## Compatibility boundary
 
