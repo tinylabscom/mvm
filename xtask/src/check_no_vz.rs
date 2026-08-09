@@ -8,15 +8,31 @@
 //! guest-side kernel image itself, and the Containerization SwiftPM
 //! package — including its `vminitd` init — is banned outright.
 //!
-//! Flags VZ API symbols (`VZVirtualMachine*`, `VZLinuxBootLoader`,
-//! `VZDiskImage*`), Swift imports (`import Virtualization`,
-//! `import Containerization`), the SwiftPM package URL, and SwiftPM
-//! manifests (`swift-tools-version`) in `crates/*/src/**/*.rs`, plus any
+//! Two rules, because there are two ways the retired backend comes back.
+//!
+//! **Usage.** Flags VZ API symbols (`VZVirtualMachine*`,
+//! `VZLinuxBootLoader`, `VZDiskImage*`), Swift imports
+//! (`import Virtualization`, `import Containerization`), the SwiftPM
+//! package URL, and SwiftPM manifests (`swift-tools-version`), plus any
 //! `Package.swift` / `Package.resolved` / `*.swift` file anywhere under
-//! the workspace root (`target/`, `.git/`, and `node_modules/` skipped), so a Swift shim
-//! cannot sneak in outside the crates tree either. Prose references like
-//! "no Virtualization.framework" do not match — the needles target usage
-//! (symbols, imports, package coordinates), not words.
+//! the workspace root (`target/`, `.git/`, and `node_modules/` skipped),
+//! so a Swift shim cannot sneak in outside the crates tree either.
+//!
+//! **Naming.** Flags a bare `vz` / `Vz` / `VZ` word anywhere in the Rust
+//! we own (`crates/`, `tests/`, `src/`, `examples/`, `xtask/`). The usage
+//! rule alone left the name free to persist for months after the backend
+//! was deleted — in a `vz.pid` marker still probed at runtime, in a
+//! `checkpoint_is_vz` predicate that had silently come to mean "HVF", and
+//! in user-facing text blaming a backend the user never ran. A name on a
+//! live code path is not cosmetic: it misdescribes what actually executes.
+//! `virtualization` does not match, so Apple's
+//! `com.apple.security.virtualization` entitlement — still required
+//! alongside `com.apple.security.hypervisor` — is unaffected.
+//!
+//! This lint's own names (`check-no-vz`, `check_no_vz`, `allow(no-vz)`,
+//! `NO_VZ`) are elided before the naming rule runs, so the gate and its
+//! registration can spell the word without ceremony while any other
+//! mention on the same line still trips.
 //!
 //! Opt-out: `// allow(no-vz): <reason>` on the line directly above the
 //! mention (one per line). Reserved for historical design notes — never a
@@ -42,6 +58,21 @@ const NO_VZ_NEEDLES: &[&str] = &[
 ];
 const ALLOW_MARKER: &str = "// allow(no-vz):";
 
+/// Bare `vz` / `Vz` / `VZ` as a whole word. The symbol needles above only
+/// stop the framework being *used*; this stops the retired backend being
+/// *named* — in an identifier, a path fragment like `vz.pid`, a test
+/// fixture, or a user-facing string. A stale name on a live code path is
+/// worse than clutter: a marker list or dispatch predicate carrying it
+/// misdescribes which backend actually runs there.
+///
+/// Bounded by any non-alphanumeric on both sides. `_` counts as a boundary
+/// on purpose: snake_case is where this actually hides — `checkpoint_is_vz`
+/// is the case that motivated the rule, and treating `_` as a word
+/// character would let every `*_vz` / `vz_*` identifier through.
+/// Alphanumerics still bind, so `virtualization` does not match and neither
+/// does a hash that happens to contain the pair.
+const NO_VZ_IDENT: &str = r"(?i)(?:^|[^0-9A-Za-z])vz(?:[^0-9A-Za-z]|$)";
+
 /// File names (or the Swift extension) scanned outside the crates tree so
 /// a SwiftPM shim cannot be introduced under a non-crate path.
 fn is_swift_surface(path: &Path) -> bool {
@@ -58,8 +89,21 @@ pub fn run(workspace: &Path) -> Result<()> {
     }
     let mut findings: Vec<String> = Vec::new();
 
-    // Rust sources under crates/.
-    visit_rust_files(&crates_dir, &mut |path| scan(path, &mut findings))?;
+    // Rust sources we own, checked for usage needles *and* bare `vz` names.
+    // `xtask/` is included so a gate cannot quietly reintroduce the word,
+    // except in this file, which has to spell it to ban it.
+    for root in ["crates", "tests", "src", "examples", "xtask"] {
+        let dir = workspace.join(root);
+        if !dir.is_dir() {
+            continue;
+        }
+        visit_rust_files(&dir, &mut |path| {
+            if path.ends_with("xtask/src/check_no_vz.rs") {
+                return Ok(());
+            }
+            scan_idents(path, &mut findings)
+        })?;
+    }
     // SwiftPM manifests and Swift sources anywhere under the root.
     visit_swift_surface(workspace, &mut |path| scan(path, &mut findings))?;
 
@@ -71,30 +115,52 @@ pub fn run(workspace: &Path) -> Result<()> {
         return Ok(());
     }
     eprintln!(
-        "check-no-vz: {} VZ/Containerization mention(s) — the Apple Container backend is 100% \
-         Rust-native: it boots Apple's prebuilt container kernel with the universal initramfs on \
-         the in-house HVF VMM. Virtualization.framework, SwiftPM, and the Containerization \
-         package (including vminitd) are banned from the tree. If this is a genuine historical \
-         design note, annotate with `// allow(no-vz): <reason>`:",
+        "check-no-vz: {} mention(s) — the retired backend is gone and stays gone. The Apple \
+         Container backend is 100% Rust-native: it boots Apple's prebuilt container kernel with \
+         the universal initramfs on the in-house HVF VMM. Virtualization.framework, SwiftPM, and \
+         the Containerization package (including vminitd) are banned from the tree, and so is \
+         naming the retired backend in an identifier, a pid-marker string, a test fixture, or \
+         user-facing text. If this is a genuine historical design note, annotate with \
+         `// allow(no-vz): <reason>`:",
         findings.len()
     );
     for f in &findings {
         eprintln!("  {f}");
     }
-    bail!(
-        "check-no-vz: {} unannotated VZ/Containerization mention(s)",
-        findings.len()
-    );
+    bail!("check-no-vz: {} unannotated mention(s)", findings.len());
 }
 
 /// Scan one file line-by-line for the needles, honoring the per-line
 /// opt-out marker on the line directly above.
 fn scan(path: &Path, findings: &mut Vec<String>) -> Result<()> {
+    scan_with(path, findings, false)
+}
+
+/// As [`scan`], plus the bare-identifier rule. Split out because the
+/// identifier rule applies to Rust/Nix/Markdown sources we own, while the
+/// Swift-surface sweep only ever needs the usage needles.
+fn scan_idents(path: &Path, findings: &mut Vec<String>) -> Result<()> {
+    scan_with(path, findings, true)
+}
+
+/// This lint's own names, which necessarily contain the banned word. Elided
+/// before the identifier rule runs so the gate, its registration, and any
+/// doc comment pointing at it can spell it without an allow-marker — while
+/// every *other* mention on the same line still trips.
+const SELF_NAMES: &[&str] = &["check-no-vz", "check_no_vz", "allow(no-vz)", "NO_VZ"];
+
+fn scan_with(path: &Path, findings: &mut Vec<String>, idents: bool) -> Result<()> {
     let src =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let ident = regex::Regex::new(NO_VZ_IDENT).expect("NO_VZ_IDENT is a valid regex");
     let lines: Vec<&str> = src.lines().collect();
     for (i, line) in lines.iter().enumerate() {
-        if NO_VZ_NEEDLES.iter().any(|n| line.contains(n)) {
+        let without_self_names = SELF_NAMES
+            .iter()
+            .fold(line.to_string(), |acc, n| acc.replace(n, ""));
+        let hit = NO_VZ_NEEDLES.iter().any(|n| line.contains(n))
+            || (idents && ident.is_match(&without_self_names));
+        if hit {
             let allowed = i > 0 && lines[i - 1].trim_start().starts_with(ALLOW_MARKER);
             if !allowed {
                 findings.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
@@ -206,6 +272,49 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("main.swift"), "import Virtualization\n").unwrap();
         assert!(run(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn a_bare_vz_identifier_is_flagged() {
+        // The failure this rule exists for: a marker string on a live code
+        // path, naming a backend that no longer runs.
+        for line in [
+            r#"const MARKERS: &[&str] = &["vz.pid", "fc.pid"];"#,
+            "pub fn checkpoint_is_vz(m: &Meta) -> bool { false }\n",
+            r#"    ui::success("re-signed with VZ entitlements");"#,
+            "// The removed Vz backend used to do this.\n",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_rust(tmp.path(), "x.rs", line);
+            assert!(
+                run(tmp.path()).is_err(),
+                "must flag a bare vz mention: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn words_merely_containing_the_pair_are_not_flagged() {
+        // `virtualization` must survive: Apple's entitlement key is still
+        // required, so a substring rule here would be unusable.
+        let tmp = tempfile::tempdir().unwrap();
+        write_rust(
+            tmp.path(),
+            "ok.rs",
+            "const E: &str = \"com.apple.security.virtualization\";\nconst H: &str = \"abvzcd\";\n",
+        );
+        assert!(run(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn an_annotated_vz_mention_is_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_rust(
+            tmp.path(),
+            "ok.rs",
+            "// allow(no-vz): historical design note\n/// The removed Vz backend locked the image.\nfn f() {}\n",
+        );
+        assert!(run(tmp.path()).is_ok());
     }
 
     #[test]

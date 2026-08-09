@@ -310,7 +310,7 @@ mod reap_orphans_tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-persistent-builder-vz-dev");
+        let vm = vms_root.join("mvm-persistent-builder-hvf-dev");
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{pid}\n")).expect("write pid");
 
@@ -346,7 +346,7 @@ mod reap_orphans_tests {
         let vms_root = dir.path().join("vms");
         let vm = vms_root.join("mvm-workload-livetest-3b1f-running");
         std::fs::create_dir_all(&vm).expect("mkdir");
-        std::fs::write(vm.join("vz.pid"), format!("{pid}\n")).expect("write pid");
+        std::fs::write(vm.join("libkrun.pid"), format!("{pid}\n")).expect("write pid");
 
         let out = reap_orphaned_vm_helpers_at_with_snapshot(
             &vms_root,
@@ -367,8 +367,8 @@ mod reap_orphans_tests {
 
     #[test]
     fn reap_spares_live_hvf_workload_under_launchd() {
-        // Regression: WORKLOAD_SIDECARS previously carried only `vz.pid` /
-        // `libkrun.pid`, so a live HVF supervisor's `hvf.pid` was never read
+        // Regression: WORKLOAD_SIDECARS previously omitted `hvf.pid`, so a
+        // live HVF supervisor's marker was never read
         // in the supervisor phase — an argv-scanned helper match on the same
         // dir could then be misclassified as an unprotected orphan and
         // SIGTERM'd. `hvf.pid` must now be recognised the same as the other
@@ -453,7 +453,7 @@ mod reap_orphans_tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-builder-vz-abc12345");
+        let vm = vms_root.join("mvm-builder-hvf-abc12345");
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{pid}\n")).expect("write pid");
 
@@ -496,7 +496,7 @@ mod reap_orphans_tests {
             vec![(helper_pid, helper_cmd)],
         );
 
-        std::fs::write(vm.join("vz.pid"), format!("{sup_pid}\n")).expect("write sup pid");
+        std::fs::write(vm.join("libkrun.pid"), format!("{sup_pid}\n")).expect("write sup pid");
 
         let out = reap_orphaned_vm_helpers_at_with_snapshot(
             &vms_root,
@@ -539,7 +539,8 @@ mod reap_orphans_tests {
             vec![(helper_pid, helper_cmd)],
         );
 
-        std::fs::write(vm.join("vz.pid"), format!("{dead_sup}\n")).expect("write dead sup pid");
+        std::fs::write(vm.join("libkrun.pid"), format!("{dead_sup}\n"))
+            .expect("write dead sup pid");
 
         let out = reap_orphaned_vm_helpers_at_with_snapshot(
             &vms_root,
@@ -564,7 +565,7 @@ mod reap_orphans_tests {
     fn prune_spares_stopped_persistent_builder_store() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-persistent-builder-vz-dev");
+        let vm = vms_root.join("mvm-persistent-builder-hvf-dev");
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{}\n", i32::MAX)).expect("write pid");
         std::fs::write(vm.join("store"), vec![0u8; 4096]).expect("write store payload");
@@ -594,7 +595,7 @@ mod reap_orphans_tests {
     fn prune_still_reclaims_dead_ephemeral_builder() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-builder-vz-deadjob1");
+        let vm = vms_root.join("mvm-builder-hvf-deadjob1");
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{}\n", i32::MAX)).expect("write pid");
 

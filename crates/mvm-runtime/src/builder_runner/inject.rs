@@ -1,5 +1,5 @@
 //! Self-hosting rootfs bootstrap primitive: inject mvm host binaries into a
-//! builder rootfs using ONLY the hvf VMM (no vz / no legacy builder).
+//! builder rootfs using ONLY the hvf VMM (no legacy builder).
 //!
 //! Boots `kernel + an inject initramfs + a writable copy of the base rootfs`; the
 //! `mvm-rootfs-patcher` init (carried in the initramfs) mounts the rootfs
@@ -13,10 +13,10 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 use mvm_build::rootfs_inject::{InjectBinary, build_inject_initramfs};
+use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
-use crate::backends::hvf::backend::resolve_supervisor_path;
+use mvm_backends::legacy::hvf::resolve_supervisor_path;
 
 /// A rootfs-injection request.
 pub struct InjectRequest<'a> {

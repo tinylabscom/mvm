@@ -16,7 +16,34 @@ for detailed scope and acceptance criteria.
         surface gate on the dedicated fix branch
   - [ ] Merge the fix and rerun the exact Linux Security workflow before
         closing the issue
-
+- [~] Runtime hardening for production — plan 303, branch
+      `feat/plan-303-runtime-hardening`
+  - [x] WS1 — `overflow-checks = true` in `[profile.release]`, a
+        `release-witness` profile, and a CI lane running the untrusted-input
+        crates under it (wired into the `test` aggregate and pinned by
+        `check_workflow_paths`)
+  - [x] WS2 — audit-chain appends land as one `write_all` + `sync_data`; a
+        torn tail reports as truncation rather than tampering
+        (`AuditError::TruncatedTail`, `VerifyError::TruncatedTail`,
+        `AuditRefusalKind::Truncated`)
+  - [x] WS3 — manifest body capped before buffering; decompressed-byte and
+        entry-count caps on `UnpackOptions`
+  - [x] WS5 — a panicking `payload_tap` observer kills the flow; telemetry
+        observers keep today's isolation (scope corrected from the original
+        write-up — see the plan)
+  - [x] WS4 — redacting panic hook wired into seven daemon bins; observes and
+        redacts only (exiting would break three `catch_unwind` isolation
+        sites, and signing from a hook can deadlock or double-panic)
+  - [~] WS6 — **not** "add Landlock": the jailer already implements it
+        (`jailer/landlock.rs` + `LANDLOCK.md` + a live property test). Real
+        gap is that `confine_self` is called by only two bins, leaving
+        `mvm-host-signer`, `mvm-audit-signer`, `mvm-signer-helper` and
+        `mvm-broker` unconfined. Blocked on per-role seccomp allowlists,
+        which need live-Linux validation and should follow `feat/seccomp-audit`
+  - [x] WS7 — Miri lane over `mvm-contract`, advisory (nightly + dispatch,
+        `continue-on-error`). 511 tests, no UB, ~4m25s with `merkle::` skipped
+        — those sweeps ran past 30 min under the interpreter. Widening to
+        `mvm-core` crypto and the `mvm-fs` ext4 writer deferred
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader
@@ -304,16 +331,41 @@ for detailed scope and acceptance criteria.
         stay refused at admission on the userspace backend, honestly and
         for a stated reason. ADR-039 status Rejected; reopening requires a
         workload with a demonstrated need
-- [~] Extract `mvm-backends` crate (`specs/plans/298-extract-mvm-backends-crate.md`)
+- [x] Extract `mvm-backends` crate (`specs/plans/298-extract-mvm-backends-crate.md`)
   - [x] Driver seam (`VmmDriver`, `VmmSpec`, `RunningVm`, snapshot types) moved to `mvm-vmm`
   - [x] Host `virtiofsd` helper moved to `mvm-vmm`
   - [x] Shared host helpers (`host_agent_spawn`, `substitution_spawn`, `broker_services_spawn`, `netd_spawn`, `aux_bin`, `egress_shared`, `workload_wait`, `drive_file`, `process_liveness`) moved to `mvm-vmm::host`
   - [x] Microvm boot/cmdline helpers (`boot_config`, `egress_bridge`) moved to `mvm-vmm::host`
+  - [x] Substrate helpers (`open_console_capture`, `runtime_meta`/`observability_target`, `ui`) moved to `mvm-vmm::host`
   - [x] `mvm-backends` crate scaffolded; `MockDriver` lives under `test-support`
-  - [ ] Move remaining shared dependencies (`libkrun::open_console_capture`, `microvm` pause/resume helpers, `base::runtime_meta`, `base::ui`, backend-specific `firecracker` snapshot helpers) so `mvm-backends` can stay acyclic
-  - [ ] Move concrete drivers (`FcDriver`, `HvfDriver`, `LibkrunDriver`, `QemuDriver`) into `mvm-backends`
-  - [ ] Move legacy `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`) into `mvm-backends`
-  - [ ] Wire `mvm-runtime` to depend on `mvm-backends` and remove local driver/backend source files
+  - [x] Host command execution (`shell`, `linux_env`) moved to `mvm-vmm::host`
+  - [x] Move concrete drivers: all five (`FcDriver`, `HvfDriver`, `LibkrunDriver`, `QemuDriver`, `MockDriver`) now live in `mvm-backends`
+- [x] Extract the Firecracker driver (`specs/plans/298-extract-firecracker-driver.md`)
+  - [x] Snapshot seam (`SnapshotIO`, guarded load paths, device-model guard, the single `CannedIO` double) lifted into `mvm-vmm`
+  - [x] `ForkVmFullRestorer` deleted — one method, one impl, one call site; now a callback
+  - [x] FC mechanics moved to `mvm-backends::fc` (API client, VMM process, control, observe, guards, snapshot, fork namespace, `FirecrackerIO`, `FcVmFullControl`)
+  - [x] `driver/fc.rs` and the legacy `FirecrackerBackend` moved; `mvm-runtime::driver` is re-exports only
+  - [x] `base/config.rs` moved to `mvm-vmm::host` (dependency-free leaf that pinned the FC modules)
+  - [x] Dead code removed: the retired raw flake launcher, the `require_linux_env` no-op, and the duplicate `bind_unix_listener`
+  - [x] Move legacy `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`) into `mvm-backends`
+  - [x] Wire `mvm-runtime` to depend on `mvm-backends` and re-export the driver surface; removed local HVF/libkrun/QEMU/Mock driver and legacy backend source files
+- [ ] Plan 301 — Finish WS11: `WasmBackend` completion + the P4 browser slice
+      (`specs/plans/301-wasm-backend-completion-and-browser-slice.md`) — plan
+      landed, execution not started. Bound by ADR-024's three constraints;
+      adds no numbered claim.
+  - [ ] Part A (host tier): A1 end-to-end `start()`→endpoint-subprocess
+        coverage; A2 = P3c TLS-terminating substitution (http-only today);
+        A3 transparent WASI socket interception; A4 resolve the Preview 1 vs
+        "target Preview 2" divergence; A5 ADR-024 Status is stale (claims no
+        implementation has landed — false since P2) + `deny.toml` review;
+        A6 run one governance witness across all workload backends
+  - [ ] Part B (P4 browser): B1 extract the `no_std` OCI decoders — **the long
+        pole; they do not exist today** (`mvm-fs` is std-heavy), via the
+        Increment 3 verbatim-relocation method; B2 Worker + thin proxy;
+        B3 OPFS content-addressed cache with verify-on-read; B4 `wasm-opt -Oz`
+        + gzipped-size budget in the existing wasm lane; B5 delete
+        `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
+        `mvmctl audit pubkey`
 - [ ] Plan 298 — NANDA-style execution receipts and conformance badges
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`)
   - [x] WS1 RFC approved: `ExecutionReceipt` and `ConformanceBadge` envelopes,
@@ -760,3 +812,29 @@ for detailed scope and acceptance criteria.
         restore and live Apple Silicon witnesses remain open.
   - [ ] Typed-connector egress-policy enrichment
   - [ ] OCI-image template build path and CLI facade completion
+
+- [~] Plan 302 — audit-chain write-path hardening
+  (`specs/plans/302-audit-chain-write-path-hardening.md`)
+  - [x] `ReceiptStore` links and signs under one lock — the head read was
+        outside it, so two emitters could claim one parent
+  - [x] Receipt lock switched from process-scoped `fcntl` to `flock`, which
+        actually excludes two threads
+  - [x] `audit_signer::Chain` takes a sole-writer lock, writes each line in
+        one `write_all`, and re-seeds its head after a failed append
+  - [ ] Audit emission fails closed under `--prod` (currently advisory, so a
+        missing entry leaves no gap to detect)
+  - [ ] Converge the primary chain on JCS canonical bytes so no verifier has
+        to reproduce serde field order
+
+- [ ] Plan 306 — declared backing, tier honesty, and the check-time law
+  (`specs/plans/306-declared-backing-and-tier-honesty.md`)
+  - [ ] Declared-backing header + admission gate on contributor prose, which
+        `check-doc-claims` deliberately excludes
+  - [ ] Derive the ADR-001 per-backend tier matrix from `capabilities()`
+        instead of maintaining it by hand
+  - [ ] Refuse where we currently degrade silently (transient egress on
+        libkrun/HVF, `up --network-allow`), plus a fail-closed pre-run probe
+  - [ ] State the check-time law in ADR-001 and classify each governed effect
+  - [ ] Pin the egress predicate algebra; enumerate escalation as deny-loud
+  - [ ] Replay vectors for the audit chain's canonical signed bytes
+  - [ ] Double-key the stale-name relief valves

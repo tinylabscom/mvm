@@ -1,5 +1,5 @@
-//! macOS codesigning of mvm's VMM binaries with the Virtualization +
-//! Hypervisor entitlements.
+//! macOS codesigning of mvm's VMM binaries with the virtualization +
+//! hypervisor entitlements.
 //!
 //! Apple Hypervisor.framework refuses to launch a VM unless the
 //! launching binary carries both `com.apple.security.virtualization` and
@@ -15,7 +15,7 @@ pub struct SignReport {
     pub path: PathBuf,
     /// Whether codesign was (re)applied during this call.
     pub applied: bool,
-    /// Whether both VZ + Hypervisor entitlements are present after.
+    /// Whether both entitlements are present after.
     pub entitlements_present: bool,
 }
 
@@ -33,7 +33,7 @@ pub fn entitlements_present(path: &Path) -> Option<bool> {
     }
 }
 
-/// Ad-hoc re-sign each target with the VZ + Hypervisor entitlements and
+/// Ad-hoc re-sign each target with both entitlements and
 /// report the post-sign state. No-op (empty) off macOS.
 pub fn sign_binaries(targets: &[PathBuf]) -> Vec<SignReport> {
     #[cfg(target_os = "macos")]
@@ -47,7 +47,7 @@ pub fn sign_binaries(targets: &[PathBuf]) -> Vec<SignReport> {
     }
 }
 
-/// The binaries that need VZ/Hypervisor entitlements to launch a VM:
+/// The binaries that need both entitlements to launch a VM:
 /// the running CLI plus whichever supervisors resolve on this host.
 /// Unresolved supervisors are silently skipped (a host may have only
 /// one backend installed).
@@ -56,7 +56,7 @@ pub fn collect_sign_targets() -> Vec<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         out.push(exe);
     }
-    if let Ok(p) = crate::libkrun::resolve_supervisor_path() {
+    if let Ok(p) = mvm_backends::legacy::libkrun::resolve_supervisor_path() {
         out.push(p);
     }
     out.dedup();
@@ -101,8 +101,8 @@ mod macos {
         }
     }
 
-    /// Sign the binary ad-hoc with both VZ and Hypervisor.framework
-    /// entitlements (no self-restart).
+    /// Sign the binary ad-hoc with both Virtualization.framework and
+    /// Hypervisor.framework entitlements (no self-restart).
     fn sign_binary(exe_str: &str) {
         let ent_path = std::env::temp_dir().join("mvm-entitlements.plist");
         if std::fs::write(&ent_path, ENTITLEMENTS_PLIST).is_err() {

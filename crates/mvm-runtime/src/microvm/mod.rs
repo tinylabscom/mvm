@@ -6,82 +6,30 @@
 
 mod activation;
 mod boot_config;
-mod control;
-mod daemon;
-mod egress_bridge;
-mod fc_api;
 mod flake_run;
-mod fork_namespace;
-mod guards;
-mod lifecycle;
-mod observe;
 mod run_info;
 mod snapshot;
 
 pub(crate) use activation::read_verb_grant_envelope;
 pub use activation::*;
 pub use boot_config::*;
-pub use control::*;
-pub use daemon::*;
-pub(crate) use egress_bridge::*;
-pub(crate) use fc_api::*;
+pub use mvm_backends::fc::control::*;
+// The Firecracker API client and VMM process lifecycle now live in
+// mvm-backends::fc; re-exported so `crate::microvm::<name>` keeps resolving.
 pub use flake_run::*;
-pub(crate) use fork_namespace::*;
-pub use guards::*;
-pub use lifecycle::*;
-pub use observe::*;
+pub use mvm_backends::fc::daemon::*;
+pub use mvm_backends::fc::guards::*;
+pub use mvm_backends::fc::lifecycle::*;
+pub use mvm_backends::fc::observe::*;
+pub use mvm_backends::fc::snapshot::*;
 pub use run_info::*;
 pub use snapshot::*;
 
-use anyhow::Result;
-
-/// Ensure we have a Linux execution environment.
-///
-/// Today this is always a no-op: native Linux runs Firecracker directly,
-/// macOS runs libkrun, and the Lima fallback is gone.
-/// Kept as a function so callers stay well-formed; remove once every
-/// callsite is audited and the call itself can be dropped.
-fn require_linux_env() -> Result<()> {
-    Ok(())
-}
-
-/// Absolute root of the per-VM directories (`<mvm_home>/vms`) as a `String`
-/// for shell interpolation. A host path, resolved on the host — never `echo`d
-/// inside a VM (on macOS every `run_in_vm` shells into the dev VM,
-/// auto-starting a heavyweight builder; on Linux the in-VM env is the host,
-/// so host-side resolution is identical anyway).
-pub(crate) fn abs_vms_dir() -> String {
-    mvm_core::config::vms_dir().display().to_string()
-}
-
-/// Resolve the absolute directory path for a running VM by name:
-/// `<mvm_home>/vms/<name>`. A host path the VMM reads, resolved on the host.
-pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
-    Ok(mvm_core::config::running_vm_dir(name))
-}
-
-/// Return the host-side path to Firecracker's PID file for VM `name`:
-/// `<mvm_home>/vms/<name>/fc.pid`. The Firecracker workspace shares the
-/// per-VM directory with the host metadata every backend writes; the file
-/// sets are disjoint (`fc.*`, `run-info.json` vs pid/console/socket files).
-///
-/// Returns `None` when the mvm root cannot be resolved (neither `MVM_HOME`
-/// nor `$HOME` set — e.g. hermetic test environments that intentionally
-/// omit them).
-pub fn fc_pid_path(name: &str) -> Option<std::path::PathBuf> {
-    mvm_core::config::mvm_home_strict().ok()?;
-    Some(mvm_core::config::vm_state_dir(name).join("fc.pid"))
-}
-
-/// Path to the host-side UDS that proxies the guest agent's vsock port for a
-/// Firecracker VM whose per-VM directory is `dir` (as returned by
-/// [`resolve_running_vm_dir`]). `pub` so CLI-layer callers — e.g. the FC fork
-/// path delivering a post-restore grant to a forked child — can locate the
-/// same socket used by the verified snapshot restore paths, without
-/// reimplementing the layout.
-pub fn firecracker_vsock_uds_path(dir: &str) -> String {
-    format!("{dir}/runtime/v.sock")
-}
+// The per-VM path layout moved to mvm-backends::fc with the Firecracker
+// mechanics that read it. Re-exported so `crate::microvm::<name>` and the
+// external `mvm_runtime::microvm::<name>` paths keep resolving.
+pub(crate) use mvm_backends::fc::abs_vms_dir;
+pub use mvm_backends::fc::{fc_pid_path, firecracker_vsock_uds_path, resolve_running_vm_dir};
 
 #[cfg(test)]
 mod tests {

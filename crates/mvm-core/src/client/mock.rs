@@ -11,11 +11,26 @@ use crate::client::dto::{
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
+use mvm_contract::protocol::capability_negotiation::BackendCapabilityReport;
+use mvm_contract::protocol::vm_backend::{BackendKind, VmCapabilities};
 
 #[derive(Default)]
 pub struct MockBackend {
     machines: Mutex<Vec<MachineState>>,
     next: Mutex<u64>,
+    /// What this mock advertises. Default is the all-false matrix, so a test
+    /// that forgets to set it sees refusals rather than a backend that
+    /// silently claims to do everything.
+    capabilities: Mutex<VmCapabilities>,
+}
+
+impl MockBackend {
+    /// Set the capability matrix this mock reports, for driving negotiation
+    /// paths a real backend would need hardware to reach.
+    pub fn with_capabilities(self, capabilities: VmCapabilities) -> Self {
+        *self.capabilities.lock().unwrap() = capabilities;
+        self
+    }
 }
 
 impl MockBackend {
@@ -42,6 +57,13 @@ impl MockBackend {
 
 #[async_trait]
 impl MvmClient for MockBackend {
+    async fn backend_capabilities(&self) -> Result<BackendCapabilityReport> {
+        Ok(BackendCapabilityReport::new(
+            BackendKind::Mock,
+            self.capabilities.lock().unwrap().clone(),
+        ))
+    }
+
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
         let all = self.machines.lock().unwrap();
         Ok(all

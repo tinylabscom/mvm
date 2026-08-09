@@ -53,6 +53,9 @@ use mvm_hostd::supervisor::network::{
 };
 
 fn main() -> ExitCode {
+    // First statement in the process: a panic before this line would
+    // print its payload unredacted.
+    mvm_hostd::panic_hook::install("bridge");
     // Stderr-only tracing keeps stdout clean (the parent reads stdin only).
     // Default to quiet (errors only); honor RUST_LOG when set. Same posture as
     // the bins this replaces.

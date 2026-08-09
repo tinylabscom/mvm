@@ -16,8 +16,8 @@ fn main() {
     use std::path::PathBuf;
 
     use mvm_build::builder_disk_transport::create_output_disk;
-    use mvm_runtime::backends::hvf::driver::HvfDriver;
     use mvm_runtime::builder_runner::{BuilderBuild, BuilderRunner};
+    use mvm_runtime::driver::HvfDriver;
 
     let dev = format!("{}/dev/current", mvm_core::config::mvm_home());
     let kernel = PathBuf::from(
@@ -128,7 +128,7 @@ fn main() {
     if ok {
         println!(
             "PROOF: the builder ran on the HVF VMM and the output tar came \
-             back to the host. No vz, no virtio-fs."
+             back to the host. No virtio-fs."
         );
     } else {
         eprintln!("FAILED: job did not complete cleanly (see output + result above)");

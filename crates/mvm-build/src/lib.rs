@@ -40,11 +40,9 @@ pub mod cache_install;
 /// cross-platform.
 pub mod egress_proxy;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
-pub mod fc_kernel;
 pub mod firecracker;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
 /// macOS backend, raw HVF backend). Shared by `mvm_runtime::backends::hvf` (writer) + the bin.
-pub mod hvf_supervisor;
 /// Universal initramfs build + cache resolution.
 pub mod initramfs;
 /// Hash-verify a fetched kernel image against its [`mvm_core::kernel_artifact::KernelArtifactId`].

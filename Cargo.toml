@@ -59,11 +59,6 @@ members = [
     # packet loop touches untrusted bytes. Linux-only at runtime; the
     # crate compiles as inert stubs on macOS / Windows so workspace
     # builds stay green for non-Linux contributors.
-    # Plan 113 §Task 10 / ADR-003 — per-VM Vz drainer binary (legacy
-    # NDJSON ingest path; superseded by the Rust supervisor's in-process
-    # Vz gateway-compat splice, retained pending a dead-code sweep). Threads the
-    # `FlowEventWire` stream through the chain-signing audit pipeline.
-    # Parallel role to `mvm-libkrun-supervisor` for the Vz backend.
     # Plan 113 §Task 12 / ADR-003 — per-VM Firecracker bridge sidecar.
     # Linux-only at runtime; the file-level `cfg(target_os = "linux")`
     # gate in `src/main.rs` reduces non-Linux compilation to a stub
@@ -111,8 +106,8 @@ exclude = [
     # supervisor-config JSON fuzz harness. CI gate at
     # `.github/workflows/security.yml::fuzz`.
     "crates/deps/libkrun-sys/fuzz",
-    # Plan 97 / ADR-001 claim 5 — Vz supervisor JSON fuzz harness.
-    # Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
+    # Plan 97 / ADR-001 claim 5 — retired-backend supervisor JSON fuzz
+    # harness. Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
     # constraints apply.
     "crates/mvm-build/fuzz",
     # Plan 113 §Task 15 / ADR-003 — `BridgeConfigJson` JSON +
@@ -367,17 +362,13 @@ mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.0", default-features = 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
 mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.0" }
 # Plan 57 W1 — libkrun FFI bindings split out of mvm-providers so the
-# bindgen + libclang build cost is isolated from the Apple-VZ objc2
-# stack. Default feature set is empty; consumers wanting real FFI
+# bindgen + libclang build cost is isolated from the rest of the
+# workspace. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
 libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.18.0" }
 
 # Plan 113 / ADR-003 §Decision 5 — A2 confinement helper (seccompiler +
 # landlock). Consumed by the per-VM `mvm-bridge` sidecar.
-
-# Plan 113 §Task 10 / ADR-003 — per-VM Vz drainer binary crate. Leaf
-# entry consumed by `mvm-backend::vz::start()` (Task 11) via fork+exec;
-# no other workspace member links it as a library.
 
 # Plan 113 §Task 12 / ADR-003 — per-VM Firecracker bridge sidecar binary
 # crate. Leaf entry resolved by Task 13's `FirecrackerBackend` at runtime
@@ -573,6 +564,23 @@ opt-level = 3
 strip = true
 lto = true
 codegen-units = 1
+# Wrapping arithmetic is not a safe default for this workspace. The ext4
+# writer, the OCI unpacker, the vsock frame parser and the datapath ingress all
+# do length arithmetic over bytes an attacker chooses, and all four are fuzzed
+# — under a profile that traps overflow, against a shipped binary that did not.
+# A wrapped length is a bounds check that silently passes. Trapping costs a few
+# percent on the hot paths and turns that class of bug into a fail-closed abort
+# instead of a memory-safety-adjacent surprise.
+overflow-checks = true
+
+# `release` semantics (no debug assertions, trapping overflow) without paying
+# fat LTO and single-codegen-unit linking on a ~4,350-test suite. This is what
+# the release-profile witness lane builds with; it is not a shipping profile.
+[profile.release-witness]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
 
 # Speed up `cargo test --workspace` by giving the test profile more
 # parallel codegen units and dropping debug info to line tables only.

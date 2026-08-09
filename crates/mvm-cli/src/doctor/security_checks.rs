@@ -563,7 +563,7 @@ pub(super) fn security_snapshot_dirs_check() -> Check {
 }
 
 /// macOS-only: every sign target (mvmctl plus the supervisor binaries) needs
-/// the VZ and Hypervisor entitlements. Probes all paths from
+/// the virtualization and hypervisor entitlements. Probes all paths from
 /// `collect_sign_targets` so an unsigned supervisor is not left unreported.
 /// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 pub(super) fn security_signing_check() -> Check {
@@ -614,7 +614,8 @@ fn signing_check_from_probes(probes: &[(std::path::PathBuf, Option<bool>)]) -> C
             name: "signing",
             category: "security",
             ok: true,
-            info: "VZ + Hypervisor entitlements present on all sign targets".to_string(),
+            info: "virtualization + hypervisor entitlements present on all sign targets"
+                .to_string(),
         }
     } else {
         Check {

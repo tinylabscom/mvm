@@ -1,0 +1,1298 @@
+//! `HvfDriver` — the `VmmDriver` for the first-party VMM (HVF on macOS, KVM
+//! on Linux via the shared `vmm` device model). Identity and capabilities
+//! delegate to the proven `HvfBackend`. `boot` maps a policy-free `VmmSpec` to a
+//! relay supervisor config, spawns `mvm-hvf-supervisor`, and returns a live
+//! handle. The claim-10 egress gate and secret substitution live in the
+//! host-side endpoint the caller binds to the spec's `EGRESS_PORT` socket; the
+//! driver only wires that socket through as the supervisor's egress relay — it
+//! carries no policy and never sees a `NetworkPolicy`.
+
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Instant;
+
+use anyhow::{Context, Result, anyhow, bail};
+use ed25519_dalek::Signer;
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir, vms_dir};
+use mvm_core::vm_backend::{
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyError, StandbyHandle,
+    StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
+};
+use mvm_net::channel::GuestService;
+use mvm_vmm::host::hvf_supervisor::{
+    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
+};
+use mvm_vmm::hvf_handoff::HvfHandoffRequest;
+
+use crate::legacy::hvf::{
+    self as hvf_backend, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
+};
+use mvm_core::checkpoint::DeviceAnchors;
+use mvm_vmm::checkpoint::VmFullControl;
+use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
+use mvm_vmm::driver::traits::{
+    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
+};
+
+/// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
+/// It boots what a `VmmSpec` describes and relays the guest's egress port to the
+/// host-side bridge; the claim-10 gate and substitution live in that bridge, not
+/// here.
+pub struct HvfDriver {
+    backend: HvfBackend,
+}
+
+impl HvfDriver {
+    pub fn new() -> Self {
+        Self {
+            backend: HvfBackend,
+        }
+    }
+}
+
+impl Default for HvfDriver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The per-VM host paths the supervisor writes and reads, resolved from the VM's
+/// state dir. Grouped so the pure config mapping takes one struct rather than a
+/// fistful of positional paths.
+struct SupervisorPaths {
+    state_dir: PathBuf,
+    pid_file: PathBuf,
+    console_log: PathBuf,
+    workload_exit: PathBuf,
+    timeout_secs: u64,
+}
+
+struct HandoffConfig {
+    socket: PathBuf,
+    root: PathBuf,
+    verify_key: String,
+}
+
+impl SupervisorPaths {
+    /// Resolve the standard per-VM paths under the VM's state dir. `timeout_secs`
+    /// is a backstop cap (0 = none) against a guest that never reports its exit.
+    fn resolve(state_dir: PathBuf, timeout_secs: u64) -> Self {
+        let pid_file = state_dir.join(PID_FILE_NAME);
+        let console_log = state_dir.join("console.log");
+        let workload_exit = state_dir.join("workload.exit");
+        Self {
+            state_dir,
+            pid_file,
+            console_log,
+            workload_exit,
+            timeout_secs,
+        }
+    }
+}
+
+/// Map a policy-free `VmmSpec` to a relay `HvfSupervisorConfig`: the supervisor
+/// wires the guest's `EGRESS_PORT` straight to the host-side endpoint bound at
+/// `egress_relay_socket`, which owns the claim-10 gate and substitution. The
+/// spec MUST carry that egress socket — an hvf workload has no other path
+/// off the box, so a spec without it fails closed rather than booting ungated.
+#[cfg(test)]
+fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<HvfSupervisorConfig> {
+    relay_supervisor_config_with_handoff(spec, paths, None)
+}
+
+fn relay_supervisor_config_with_handoff(
+    spec: &VmmSpec,
+    paths: &SupervisorPaths,
+    handoff: Option<&HandoffConfig>,
+) -> Result<HvfSupervisorConfig> {
+    let kernel = match &spec.kernel {
+        KernelImage::Path(p) => p.clone(),
+        KernelImage::Bundled => {
+            bail!("the hvf VMM requires an explicit kernel Image; VmmSpec.kernel is Bundled")
+        }
+    };
+
+    // Every block in slot order becomes a virtio-blk device (`/dev/vda`…). Each
+    // block carries its own read-only + ephemeral policy: a read-only block is
+    // file-served with hypervisor-enforced RO; an ephemeral block is RAM-backed
+    // (writes dropped on exit); a writable non-ephemeral block persists to the
+    // host file (the builder's nix-store / output disks).
+    let mut ordered: Vec<&BlockDev> = spec.blocks.iter().collect();
+    ordered.sort_by_key(|b| b.slot);
+    let disks = ordered
+        .iter()
+        .map(|b| HvfDisk {
+            path: b.source.clone(),
+            read_only: b.read_only,
+            ephemeral: b.ephemeral,
+        })
+        .collect();
+
+    // Guests that need host egress carry an explicit EGRESS_PORT relay socket in
+    // the spec. Workloads must provide one; trusted builders now provide the same
+    // vsock relay so every backend uses one egress path. A channel-less factory
+    // parent is the one intentional exception: it has no guest-facing host
+    // channel at all, so there is no egress path to wire or authorize.
+    let egress_relay_socket = match spec.host_socket_for_service(GuestService::Substitution) {
+        Some(socket) => Some(socket),
+        None if spec.vsock.is_empty() => None,
+        // A sealed workload with no EGRESS_PORT has an explicit deny-all,
+        // secret-free posture. There is no host listener to wire because the
+        // guest has no admitted egress capability; its attempted dial fails
+        // closed in the vsock device.
+        None if !spec
+            .vsock
+            .iter()
+            .any(|port| port.service == GuestService::Substitution) =>
+        {
+            None
+        }
+        None if spec.trusted_builder => None,
+        None => {
+            return Err(anyhow!(
+                "hvf workload spec is missing the EGRESS_PORT vsock relay socket"
+            ));
+        }
+    };
+
+    // An empty spec cmdline means "use the supervisor's workload default"
+    // (`init=/init`); a non-empty one (e.g. the builder rootfs's
+    // `init=/sbin/mvm-host-vm-init`) is threaded through verbatim.
+    let cmdline = {
+        let c = spec.cmdline.trim();
+        (!c.is_empty()).then(|| c.to_string())
+    };
+
+    // Collect dev-only console data sockets: the spec carries one HostDials entry
+    // per pre-opened console data port (exact members of dev_console_data_ports()).
+    // Sealed prod specs carry none, so this vec is empty in production.
+    let console_data_sockets = spec
+        .vsock
+        .iter()
+        .filter(|p| {
+            matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port))
+        })
+        .map(|p| ConsoleDataSocket {
+            guest_port: p.port(),
+            host_socket: p.host_uds.clone(),
+        })
+        .collect();
+
+    Ok(HvfSupervisorConfig {
+        kernel,
+        cmdline,
+        memory_mib: spec.memory_mib,
+        initramfs: spec.initramfs.clone(),
+        disks,
+        virtiofs_root: spec
+            .shares
+            .iter()
+            .find(|share| share.tag == "mvmroot")
+            .map(|share| share.host_path.clone()),
+        virtiofs_shares: spec
+            .shares
+            .iter()
+            .filter(|share| share.tag != "mvmroot")
+            .map(|share| HvfVirtioFsShare {
+                path: share.host_path.clone(),
+                tag: share.tag.clone(),
+            })
+            .collect(),
+        vsock: true,
+        console_log: paths.console_log.clone(),
+        pid_file: paths.pid_file.clone(),
+        workload_exit: paths.workload_exit.clone(),
+        pause_state: Some(paths.state_dir.join("pause.state")),
+        snapshot_request: Some(paths.state_dir.join("snapshot.request")),
+        snapshot_ram: Some(paths.state_dir.join("snapshot.ram")),
+        snapshot_frame: Some(paths.state_dir.join("snapshot.frame")),
+        restore_ram: None,
+        restore_frame: None,
+        timeout_secs: paths.timeout_secs,
+        // Re-derive the agent bridge from the state dir rather than trusting the
+        // spec's backend-neutral agent hint (`agent.sock`): the detached
+        // supervisor binds this exact path, and the host resolver probes the same
+        // `hvf-agent.sock`, so binder and resolver can't drift.
+        agent_socket: Some(hvf_agent_socket(&paths.state_dir)),
+        substitution_socket: None,
+        egress_relay_socket,
+        // An admitted workload carries a BROKER_PORT relay socket; the supervisor
+        // splices the guest's BROKER_PORT dial to it so host.audit.v1 /
+        // host.secrets.v1 reach the per-VM broker (or the per-tenant host-agent
+        // daemon). Absent for a builder/dev VM, which runs no admitted workload.
+        broker_socket: spec.host_socket_for_service(GuestService::Broker),
+        console_data_sockets,
+        handoff_socket: handoff.map(|value| value.socket.clone()),
+        handoff_root: handoff.map(|value| value.root.clone()),
+        handoff_verify_key: handoff.map(|value| value.verify_key.clone()),
+    })
+}
+
+fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
+    let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+        .context("load host identity for HVF handoff")?;
+    let state_dir = vm_state_dir(parent_vm_name);
+    Ok(HandoffConfig {
+        socket: state_dir.join("hvf-handoff.sock"),
+        root: vms_dir(),
+        verify_key: hex::encode(identity.verifying.to_bytes()),
+    })
+}
+
+fn boot_with_handoff(
+    spec: &VmmSpec,
+    handoff: Option<&HandoffConfig>,
+) -> Result<Box<dyn RunningVm>> {
+    let state_dir = vm_state_dir(&spec.name);
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
+    let _ = mvm_vmm::host::console_capture::open_console_capture(&state_dir.join("console.log"));
+    let timeout_secs = std::env::var("MVM_HVF_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let paths = SupervisorPaths::resolve(state_dir, timeout_secs);
+    let _ = std::fs::remove_file(&paths.workload_exit);
+    let cfg = relay_supervisor_config_with_handoff(spec, &paths, handoff)?;
+    let config_path = paths.state_dir.join("supervisor.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&cfg).map_err(|e| anyhow!("serialize supervisor config: {e}"))?,
+    )
+    .map_err(|e| anyhow!("write supervisor config {}: {e}", config_path.display()))?;
+    let json =
+        serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
+    let supervisor = resolve_supervisor_path()?;
+    let mut child = Command::new(&supervisor)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow!("spawn {}: {e}", supervisor.display()))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
+        .write_all(json.as_bytes())
+        .map_err(|e| anyhow!("pipe HvfSupervisorConfig to supervisor stdin: {e}"))?;
+    let deadline = Instant::now() + PID_FILE_TIMEOUT;
+    loop {
+        if paths.pid_file.exists() {
+            break;
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| anyhow!("poll supervisor: {e}"))?
+        {
+            bail!(
+                "hvf supervisor exited before writing its PID file (status: {status}); see {}",
+                paths.console_log.display()
+            );
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            bail!(
+                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}",
+                paths.console_log.display()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(child);
+    let agent_socket = hvf_agent_socket(&paths.state_dir);
+    Ok(Box::new(HvfRunningVm {
+        id: VmId(spec.name.clone()),
+        state_dir: paths.state_dir,
+        pid_file: paths.pid_file,
+        agent_socket,
+    }))
+}
+
+impl VmmDriver for HvfDriver {
+    fn name(&self) -> &str {
+        self.backend.name()
+    }
+
+    fn kind(&self) -> BackendKind {
+        self.backend.kind()
+    }
+
+    fn is_available(&self) -> Result<bool> {
+        self.backend.is_available()
+    }
+
+    fn capabilities(&self) -> VmCapabilities {
+        self.backend.capabilities()
+    }
+
+    fn security_profile(&self) -> BackendSecurityProfile {
+        self.backend.security_profile()
+    }
+
+    fn supports_directory_shares(&self) -> bool {
+        true
+    }
+
+    fn supports_resident_handoff(&self) -> bool {
+        self.backend.capabilities().standby_pool
+    }
+
+    fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+        boot_with_handoff(spec, None)
+    }
+
+    fn spawn_standby_parent(
+        &self,
+        req: &StandbyParentSpawn<'_>,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let handoff = handoff_config(&req.spec.id)
+            .map_err(|e| StandbyError::SpawnFailed(format!("prepare HVF handoff: {e}")))?;
+        let vm = boot_with_handoff(req.boot, Some(&handoff))
+            .map_err(|e| StandbyError::SpawnFailed(format!("boot HVF standby: {e}")))?;
+        let state_dir = vm_state_dir(&req.spec.id);
+        let pid = hvf_backend::read_pid(&state_dir.join(PID_FILE_NAME)).ok_or_else(|| {
+            let _ = vm.kill();
+            StandbyError::SpawnFailed(format!(
+                "HVF standby '{}' did not publish a pid",
+                req.spec.id
+            ))
+        })?;
+        let pid_u32 = u32::try_from(pid).map_err(|_| {
+            StandbyError::SpawnFailed(format!("HVF standby '{}' pid is negative", req.spec.id))
+        })?;
+        wait_for_guest_agent(&state_dir).map_err(|e| {
+            let _ = vm.kill();
+            StandbyError::SpawnFailed(format!(
+                "HVF standby '{}' guest agent did not become ready: {e}",
+                req.spec.id
+            ))
+        })?;
+        drop(vm);
+        Ok(StandbyHandle {
+            id: req.spec.id.clone(),
+            template_id: req.spec.template_id.clone(),
+            control_socket: state_dir
+                .join("hvf-control.sock")
+                .to_string_lossy()
+                .into_owned(),
+            pid: pid_u32,
+            kernel_sha256: req.spec.kernel_sha256.clone(),
+            vcpus: req.spec.vcpus,
+            mem_mib: req.spec.mem_mib,
+            binding_nonce: req.spec.binding_nonce.clone(),
+            spawned_unix_secs: mvm_core::time::now_unix_secs(),
+            state: StandbyState::Idle,
+            image_sha256: req.spec.image_sha256.clone(),
+            parent_checkpoint: None,
+            preloaded_child_vm_name: None,
+            vsock_egress: req.spec.vsock_egress,
+        })
+    }
+
+    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn VmFullControl>> {
+        Some(Box::new(HvfVmFullControl::new(vm_name)))
+    }
+
+    fn fork_standby_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        let parent_name = req.parent_vm_name.ok_or_else(|| {
+            StandbyError::ClaimFailed(
+                "HVF live standby claim requires a resident paused parent".into(),
+            )
+        })?;
+        if !req.child_dir.is_dir() {
+            return Err(StandbyError::ClaimFailed(format!(
+                "HVF child '{}' state dir {} is missing",
+                req.child_vm_name,
+                req.child_dir.display()
+            )));
+        }
+        let child_dir = req.child_dir;
+        let expected_child_dir = vm_state_dir(req.child_vm_name);
+        if child_dir != expected_child_dir {
+            return Err(StandbyError::ClaimFailed(format!(
+                "HVF child state dir {} is not the canonical dir {}",
+                child_dir.display(),
+                expected_child_dir.display()
+            )));
+        }
+
+        let parent_dir = vm_state_dir(parent_name);
+        let parent_pid_path = parent_dir.join(PID_FILE_NAME);
+        let parent_pid = hvf_backend::read_pid(&parent_pid_path).ok_or_else(|| {
+            StandbyError::ClaimFailed(format!(
+                "HVF standby parent '{}' is no longer live",
+                parent_name
+            ))
+        })?;
+        let parent_pid = u32::try_from(parent_pid).map_err(|_| {
+            StandbyError::ClaimFailed("HVF standby parent pid does not fit u32".into())
+        })?;
+        let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+            .map_err(|e| StandbyError::ClaimFailed(format!("load host handoff identity: {e}")))?;
+        let channel_mask = req.channels.iter().fold(0_u8, |mask, channel| {
+            if channel.service == GuestService::MachineControl {
+                mask | 1
+            } else if channel.service == GuestService::Substitution {
+                mask | 2
+            } else if channel.service == GuestService::Broker {
+                mask | 4
+            } else if matches!(
+                channel.service,
+                GuestService::ConsoleData { port }
+                    if dev_console_data_ports().any(|candidate| candidate == port)
+            ) {
+                mask | 8
+            } else {
+                mask
+            }
+        });
+        let request = HvfHandoffRequest {
+            child_vm_name: req.child_vm_name.to_string(),
+            parent_pid,
+            channel_mask,
+            signature: hex::encode(
+                identity
+                    .signing
+                    .sign(&HvfHandoffRequest::signing_message(
+                        parent_pid,
+                        req.child_vm_name,
+                        channel_mask,
+                    ))
+                    .to_bytes(),
+            ),
+        };
+        let socket = parent_dir.join("hvf-handoff.sock");
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "connect to HVF parent handoff socket {}: {e}",
+                socket.display()
+            ))
+        })?;
+        let mut payload = serde_json::to_vec(&request).map_err(|e| {
+            StandbyError::ClaimFailed(format!("serialize HVF handoff request: {e}"))
+        })?;
+        payload.push(b'\n');
+        stream
+            .write_all(&payload)
+            .map_err(|e| StandbyError::ClaimFailed(format!("send HVF handoff request: {e}")))?;
+        let response = read_handoff_response(&mut stream)
+            .map_err(|e| StandbyError::ClaimFailed(format!("read HVF handoff response: {e}")))?;
+        if &response != b"OK\n" {
+            return Err(StandbyError::ClaimFailed(format!(
+                "HVF parent rejected live handoff: {}",
+                String::from_utf8_lossy(&response).trim()
+            )));
+        }
+
+        link_child_state(child_dir, &parent_dir)
+            .map_err(|e| StandbyError::ClaimFailed(format!("link live HVF child state: {e}")))?;
+        hvf_backend::signal_vm(&parent_pid_path, libc::SIGUSR2, "resume live HVF child")
+            .map_err(|e| StandbyError::ClaimFailed(format!("resume live HVF child: {e}")))?;
+        // The post-restore identity RPC is the readiness barrier for the child.
+        // Waiting here for the supervisor's marker adds the full pause-ack
+        // timeout on HVF even after SIGUSR2 has resumed the vCPU; the RPC will
+        // naturally wait until the resumed guest can answer.
+        Ok(())
+    }
+
+    fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
+        // The handle is entirely disk-backed (the supervisor's pid file + the
+        // persisted workload-exit code under the VM's state dir), so reattaching is
+        // just re-deriving those paths — no live boot state to recover.
+        let state_dir = vm_state_dir(&id.0);
+        Ok(Box::new(HvfRunningVm {
+            pid_file: state_dir.join(PID_FILE_NAME),
+            agent_socket: hvf_agent_socket(&state_dir),
+            state_dir,
+            id: id.clone(),
+        }))
+    }
+
+    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
+        self.backend.guest_channel_info(id)
+    }
+
+    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
+        crate::legacy::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+    }
+}
+
+fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<[u8; 3]> {
+    stream.set_nonblocking(true)?;
+    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    let mut response = [0_u8; 3];
+    let mut received = 0;
+    while received < response.len() {
+        match stream.read(&mut response[received..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "HVF handoff peer closed before its response was complete",
+                ));
+            }
+            Ok(count) => received += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "HVF handoff response timed out",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(response)
+}
+
+fn link_child_state(child_dir: &Path, parent_dir: &Path) -> std::io::Result<()> {
+    for name in [PID_FILE_NAME, "console.log", "workload.exit", "pause.state"] {
+        let child_path = child_dir.join(name);
+        let parent_path = parent_dir.join(name);
+        if let Ok(metadata) = std::fs::symlink_metadata(&child_path) {
+            if metadata.file_type().is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("child state path {} is a directory", child_path.display()),
+                ));
+            }
+            std::fs::remove_file(&child_path)?;
+        }
+        std::os::unix::fs::symlink(&parent_path, &child_path)?;
+    }
+    Ok(())
+}
+
+/// The per-VM agent-RPC socket the detached `mvm-hvf-supervisor` binds
+/// (host→guest agent bridge). The driver re-derives this from the state dir
+/// rather than trusting the spec's generic agent hint — the same way the FC and
+/// libkrun drivers ignore the spec's agent host_uds — so the value it hands the
+/// supervisor is exactly the one the host resolver (`DevConsoleTransport` /
+/// `for_vm` → `vm_hvf_agent_socket`) probes. A drift here silently makes the
+/// guest agent unreachable and every RPC time out.
+fn hvf_agent_socket(state_dir: &std::path::Path) -> PathBuf {
+    mvm_core::config::vm_hvf_agent_socket_at(state_dir)
+}
+
+/// Do not capture a factory parent until its guest agent has completed init.
+/// The child resumes from the captured CPU/device state rather than rebooting,
+/// so a parent captured before the agent listener is serving would make every
+/// later post-restore identity handshake impossible.
+fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
+    let socket = hvf_agent_socket(state_dir);
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if socket.exists() {
+            // The HVF agent socket is the bridge's direct stream endpoint. It
+            // is not a Firecracker-style CONNECT multiplexer, so sending the
+            // `CONNECT <port>` preamble would be interpreted by the guest as
+            // the first four bytes of an RPC frame. Probe the authenticated
+            // RPC stream directly; this waits for a real guest response rather
+            // than treating the host-side listener as readiness.
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket) {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                if mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    anyhow::bail!(
+        "guest agent socket {} was not responsive within 10s",
+        socket.display()
+    )
+}
+
+/// Resolve the host UDS for a console data port via the shared HVF-style socket
+/// helper. Returns `None` when the port is outside `dev_console_data_ports()`.
+fn console_socket_for_port(state_dir: &std::path::Path, guest_port: u32) -> Option<PathBuf> {
+    if dev_console_data_ports().any(|p| p == guest_port) {
+        Some(vm_hvf_vsock_port_socket_at(state_dir, guest_port))
+    } else {
+        None
+    }
+}
+
+/// A live hvf VM: the detached `mvm-hvf-supervisor` tracked by its PID file,
+/// with the workload's exit code persisted under its state dir.
+struct HvfRunningVm {
+    id: VmId,
+    state_dir: PathBuf,
+    pid_file: PathBuf,
+    /// Host→guest agent RPC socket the supervisor bound for this VM.
+    agent_socket: PathBuf,
+}
+
+/// Host control for a running HVF standby parent. The supervisor owns the
+/// actual vCPU/device objects; this control uses the acknowledged pause marker
+/// plus fixed state-directory files for the capture rendezvous.
+struct HvfVmFullControl {
+    vm_name: String,
+    state_dir: PathBuf,
+}
+
+impl HvfVmFullControl {
+    fn new(vm_name: &str) -> Self {
+        Self {
+            vm_name: vm_name.to_string(),
+            state_dir: vm_state_dir(vm_name),
+        }
+    }
+
+    fn fixed_snapshot_paths(&self) -> (PathBuf, PathBuf, PathBuf) {
+        (
+            self.state_dir.join("snapshot.request"),
+            self.state_dir.join("snapshot.ram"),
+            self.state_dir.join("snapshot.frame"),
+        )
+    }
+}
+
+impl VmFullControl for HvfVmFullControl {
+    fn pause(&self) -> Result<()> {
+        hvf_backend::signal_vm(
+            &self.state_dir.join(PID_FILE_NAME),
+            libc::SIGUSR1,
+            "pause standby parent",
+        )?;
+        hvf_backend::wait_for_pause_state(&self.state_dir.join("pause.state"), true)
+    }
+
+    fn save_memory(&self, memory_path: &Path) -> Result<()> {
+        anyhow::ensure!(
+            memory_path.is_absolute(),
+            "save_memory requires an absolute path, got {}",
+            memory_path.display()
+        );
+        let parent = memory_path
+            .parent()
+            .ok_or_else(|| anyhow!("memory path has no parent directory"))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create snapshot output {}", parent.display()))?;
+        let (request, ram, frame) = self.fixed_snapshot_paths();
+        let _ = std::fs::remove_file(&ram);
+        let _ = std::fs::remove_file(&frame);
+        std::fs::write(&request, b"capture\n")
+            .with_context(|| format!("request HVF snapshot at {}", request.display()))?;
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while (!ram.exists() || !frame.exists()) && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        anyhow::ensure!(
+            ram.exists() && frame.exists(),
+            "HVF supervisor did not publish its paused snapshot within 30s"
+        );
+        std::fs::copy(&ram, memory_path).with_context(|| {
+            format!(
+                "copying captured HVF RAM {} -> {}",
+                ram.display(),
+                memory_path.display()
+            )
+        })?;
+        let frame_dst = parent.join(format!(
+            "{}.hvf-frame",
+            memory_path
+                .file_name()
+                .ok_or_else(|| anyhow!("memory path has no file name"))?
+                .to_string_lossy()
+        ));
+        std::fs::copy(&frame, &frame_dst).with_context(|| {
+            format!(
+                "copying captured HVF frame {} -> {}",
+                frame.display(),
+                frame_dst.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    fn resume(&self) -> Result<()> {
+        hvf_backend::signal_vm(
+            &self.state_dir.join(PID_FILE_NAME),
+            libc::SIGUSR2,
+            "resume standby parent",
+        )?;
+        hvf_backend::wait_for_pause_state(&self.state_dir.join("pause.state"), false)
+    }
+
+    fn retain_paused_after_capture(&self) -> bool {
+        true
+    }
+
+    fn rootfs_path(&self) -> Result<PathBuf> {
+        let meta = mvm_vmm::host::runtime_meta::read(&self.vm_name)?
+            .ok_or_else(|| anyhow!("no runtime metadata for HVF VM '{}'", self.vm_name))?;
+        meta.rootfs_path
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("HVF VM '{}' has no rootfs path", self.vm_name))
+    }
+
+    fn device_anchors(&self) -> Result<DeviceAnchors> {
+        let rootfs = self.rootfs_path()?;
+        let rootfs_verity = rootfs
+            .parent()
+            .map(|parent| parent.join("rootfs.verity"))
+            .filter(|path| path.exists());
+        Ok(DeviceAnchors {
+            rootfs,
+            rootfs_verity,
+            config: None,
+            secrets: None,
+            vsock: hvf_agent_socket(&self.state_dir),
+        })
+    }
+
+    fn extra_content(&self, content_dir: &Path) -> Result<Vec<mvm_core::checkpoint::ContentBlob>> {
+        let frame = content_dir.join("memory.bin.hvf-frame");
+        if !frame.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![mvm_core::checkpoint::ContentBlob {
+            name: "memory.bin.hvf-frame".into(),
+            sha256: mvm_core::crypto::image_verify::sha256_file(&frame)?,
+        }])
+    }
+
+    fn supervisor_config_path(&self) -> Result<Option<PathBuf>> {
+        let path = self.state_dir.join("supervisor.json");
+        Ok(path.is_file().then_some(path))
+    }
+}
+
+impl RunningVm for HvfRunningVm {
+    fn id(&self) -> &VmId {
+        &self.id
+    }
+
+    fn wait(&self) -> Result<VmExitStatus> {
+        Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
+            &self.state_dir,
+        ))
+    }
+
+    fn kill(&self) -> Result<()> {
+        if let Some(pid) = hvf_backend::read_pid(&self.pid_file) {
+            hvf_backend::terminate_pid(pid);
+        }
+        let _ = std::fs::remove_file(&self.pid_file);
+        Ok(())
+    }
+
+    fn pause(&self) -> Result<()> {
+        hvf_backend::signal_vm(&self.pid_file, libc::SIGUSR1, "pause")?;
+        hvf_backend::wait_for_pause_state(&self.state_dir.join("pause.state"), true)
+    }
+
+    fn resume(&self) -> Result<()> {
+        hvf_backend::signal_vm(&self.pid_file, libc::SIGUSR2, "resume")?;
+        hvf_backend::wait_for_pause_state(&self.state_dir.join("pause.state"), false)
+    }
+
+    fn status(&self) -> Result<VmStatus> {
+        Ok(match hvf_backend::read_pid(&self.pid_file) {
+            Some(pid) if hvf_backend::pid_alive(pid) => VmStatus::Running,
+            _ => VmStatus::Stopped,
+        })
+    }
+
+    fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
+        let socket_path = if guest_port == GUEST_AGENT_PORT {
+            self.agent_socket.clone()
+        } else if let Some(path) = console_socket_for_port(&self.state_dir, guest_port) {
+            // Dev-only: pre-opened console data port in the CONSOLE_PORT_BASE+1..=+128
+            // range. Claim 15: sealed prod specs carry no console sockets, so this
+            // path is only reachable when the runner pre-bound these UDS at start.
+            path
+        } else {
+            bail!(
+                "hvf driver vsock_connect supports only the agent port \
+                 ({GUEST_AGENT_PORT}) and dev console data ports ({}..={}); got {guest_port}",
+                CONSOLE_PORT_BASE + 1,
+                CONSOLE_PORT_BASE + 128,
+            );
+        };
+        let stream = std::os::unix::net::UnixStream::connect(&socket_path)
+            .with_context(|| format!("connect to hvf vsock socket {}", socket_path.display()))?;
+        Ok(Box::new(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::vm_backend::SnapshotCapability;
+    use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
+
+    #[test]
+    fn handoff_response_reader_handles_a_ready_unix_stream() {
+        let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
+        let writer = std::thread::spawn(move || {
+            peer.write_all(b"OK\n").expect("write handoff response");
+        });
+
+        let response = read_handoff_response(&mut stream).expect("read handoff response");
+        writer.join().expect("join handoff writer");
+        assert_eq!(&response, b"OK\n");
+    }
+
+    fn egress_port(uds: &str) -> VsockPort {
+        VsockPort {
+            service: GuestService::Substitution,
+            host_uds: uds.into(),
+            direction: VsockDirection::GuestDials,
+        }
+    }
+
+    fn agent_port(uds: &str) -> VsockPort {
+        VsockPort {
+            service: GuestService::MachineControl,
+            host_uds: uds.into(),
+            direction: VsockDirection::HostDials,
+        }
+    }
+
+    fn broker_port(uds: &str) -> VsockPort {
+        VsockPort {
+            service: GuestService::Broker,
+            host_uds: uds.into(),
+            direction: VsockDirection::GuestDials,
+        }
+    }
+
+    fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
+        VmmSpec {
+            name: "w".into(),
+            kernel,
+            initramfs: Some("/img/initrd.cpio".into()),
+            cmdline: String::new(),
+            vcpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            blocks,
+            shares: vec![],
+            vsock,
+            console: ConsoleCapture {
+                log_path: "/tmp/console.log".into(),
+            },
+            trusted_builder: false,
+        }
+    }
+
+    fn sample_paths() -> SupervisorPaths {
+        SupervisorPaths::resolve(PathBuf::from("/state/w"), 0)
+    }
+
+    #[test]
+    fn identity_and_capabilities_delegate_to_the_hvf_backend() {
+        let d = HvfDriver::new();
+        assert_eq!(d.name(), "hvf");
+        assert_eq!(d.kind(), BackendKind::Hvf);
+        assert!(d.capabilities().vsock);
+        assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
+        assert_eq!(
+            d.security_profile().tier,
+            HvfBackend.security_profile().tier
+        );
+    }
+
+    #[test]
+    fn workload_base_bootargs_delegates_to_hvf_bootargs() {
+        let d = HvfDriver::new();
+        assert_eq!(
+            d.workload_base_bootargs(false, true),
+            crate::legacy::hvf_bootargs::workload_bootargs(false, true)
+        );
+        assert_eq!(
+            d.workload_base_bootargs(true, false),
+            crate::legacy::hvf_bootargs::workload_bootargs(true, false)
+        );
+    }
+
+    #[test]
+    fn guest_channel_info_delegates_to_the_hvf_backend() {
+        // HvfBackend declares no guest channel (the agent bridge is a fixed
+        // vsock port, not a queryable per-VM channel) — the driver must relay
+        // that same fail-closed answer rather than inventing one.
+        let d = HvfDriver::new();
+        let id = VmId("hvf-guest-channel-info-test-vm".into());
+        assert!(d.guest_channel_info(&id).is_err());
+        assert!(HvfBackend.guest_channel_info(&id).is_err());
+    }
+
+    #[test]
+    fn attach_builds_a_disk_backed_handle_that_reports_stopped_for_a_missing_vm() {
+        // Reattaching needs no boot state — it re-derives the state dir. A VM that
+        // never ran (or has exited) reports Stopped rather than erroring.
+        let vm = HvfDriver::new()
+            .attach(&VmId("hvf-nonexistent-attach-test-vm".into()))
+            .unwrap();
+        assert_eq!(vm.id().0, "hvf-nonexistent-attach-test-vm");
+        assert_eq!(vm.status().unwrap(), VmStatus::Stopped);
+    }
+
+    #[test]
+    fn relay_config_wires_egress_relay_and_agent_leaves_substitution_none() {
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+            ],
+            vec![],
+        );
+        let paths = sample_paths();
+        let cfg = relay_supervisor_config(&spec, &paths).unwrap();
+
+        assert_eq!(cfg.kernel, PathBuf::from("/img/Image"));
+        assert_eq!(cfg.initramfs, Some(PathBuf::from("/img/initrd.cpio")));
+        assert_eq!(
+            cfg.egress_relay_socket,
+            Some(PathBuf::from("/run/egress.sock"))
+        );
+        // The driver re-derives the agent bridge from the state dir (hvf-agent.sock)
+        // and ignores the spec's backend-neutral agent hint (/run/agent.sock), so
+        // the supervisor binds the exact path the host resolver probes.
+        assert_eq!(cfg.agent_socket, Some(hvf_agent_socket(&paths.state_dir)));
+        assert_ne!(cfg.agent_socket, Some(PathBuf::from("/run/agent.sock")));
+        assert_eq!(cfg.substitution_socket, None);
+        // No BROKER_PORT in this spec ⇒ no broker relay (unadmitted / builder).
+        assert_eq!(cfg.broker_socket, None);
+        assert!(cfg.vsock);
+        // No blocks → no disks.
+        assert!(cfg.disks.is_empty());
+        // Empty spec cmdline ⇒ None (supervisor uses its workload default).
+        assert_eq!(cfg.cmdline, None);
+    }
+
+    #[test]
+    fn driver_agent_bind_path_equals_the_host_resolver_probe() {
+        // The live regression this pins closed: the detached mvm-hvf-supervisor
+        // binds the `agent_socket` the driver hands it, while the host reaches the
+        // guest agent through DevConsoleTransport::for_vm / vm_hvf_agent_socket. If
+        // those two ever name different sockets the guest agent is unreachable and
+        // every RPC times out (the witness that caught the agent.sock/hvf-agent.sock
+        // drift). Assert the exact bind path == the exact probe path for the same
+        // VM so neither side can drift independently again.
+        let name = "hvf-agent-socket-drift-guard-vm";
+        let paths = SupervisorPaths::resolve(vm_state_dir(name), 0);
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+            ],
+            vec![],
+        );
+
+        // What the supervisor binds: the agent socket the driver puts on the config.
+        let cfg = relay_supervisor_config(&spec, &paths).unwrap();
+        let binder = cfg
+            .agent_socket
+            .expect("hvf relay config must carry an agent socket");
+
+        // What the host reaches the guest agent through.
+        let resolver = mvm_core::config::vm_hvf_agent_socket(name);
+        let transport = mvm_vmm::vsock_transport::DevConsoleTransport::for_vm(name)
+            .socket_path(GUEST_AGENT_PORT);
+
+        assert_eq!(
+            binder, resolver,
+            "supervisor bind path must equal the resolver"
+        );
+        assert_eq!(
+            binder, transport,
+            "supervisor bind path must equal the transport probe"
+        );
+        // The running-vm / attach handle re-derives via the same driver helper, so
+        // vsock_connect(GUEST_AGENT_PORT) reaches the identical socket.
+        assert_eq!(hvf_agent_socket(&paths.state_dir), resolver);
+    }
+
+    #[test]
+    fn relay_config_wires_the_broker_relay_when_the_spec_carries_broker_port() {
+        // An admitted workload's spec carries a BROKER_PORT channel; the
+        // supervisor config must relay it so host.audit.v1 / host.secrets.v1
+        // reach the broker. Absence ⇒ None (asserted above).
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+                broker_port("/run/broker.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.broker_socket, Some(PathBuf::from("/run/broker.sock")));
+    }
+
+    #[test]
+    fn relay_config_threads_a_non_empty_cmdline_and_drops_an_empty_one() {
+        // The builder rootfs boots a different PID 1 than the mkGuest workload
+        // default, so its cmdline must reach the supervisor verbatim.
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![egress_port("/run/egress.sock")],
+            vec![],
+        );
+        spec.cmdline = "  console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init  ".into();
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        // Trimmed, threaded verbatim.
+        assert_eq!(
+            cfg.cmdline.as_deref(),
+            Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init")
+        );
+
+        // A whitespace-only cmdline collapses to None (default applies).
+        spec.cmdline = "   ".into();
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.cmdline, None);
+    }
+
+    #[test]
+    fn relay_config_maps_blocks_to_disks_in_slot_order_carrying_ro_and_ephemeral() {
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![egress_port("/run/egress.sock")],
+            vec![
+                // Out of slot order, mixed flags — proves sorting + per-disk policy
+                // pass through verbatim (a builder's persistent nix-store is
+                // writable AND non-ephemeral).
+                BlockDev {
+                    source: "/img/nix-store.img".into(),
+                    read_only: false,
+                    ephemeral: false,
+                    slot: 1,
+                },
+                BlockDev {
+                    source: "/img/rootfs.ext4".into(),
+                    read_only: true,
+                    ephemeral: false,
+                    slot: 0,
+                },
+            ],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.disks.len(), 2);
+        // vda = slot 0: read-only rootfs, file-served.
+        assert_eq!(cfg.disks[0].path, PathBuf::from("/img/rootfs.ext4"));
+        assert!(cfg.disks[0].read_only);
+        assert!(!cfg.disks[0].ephemeral);
+        // vdb = slot 1: writable + persistent (not ephemeral) — writes hit the file.
+        assert_eq!(cfg.disks[1].path, PathBuf::from("/img/nix-store.img"));
+        assert!(!cfg.disks[1].read_only);
+        assert!(!cfg.disks[1].ephemeral);
+    }
+
+    #[test]
+    fn relay_config_trusted_builder_uses_the_same_egress_relay() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                agent_port("/run/agent.sock"),
+                egress_port("/run/egress.sock"),
+            ],
+            vec![],
+        );
+        spec.trusted_builder = true;
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(
+            cfg.egress_relay_socket,
+            Some(PathBuf::from("/run/egress.sock"))
+        );
+    }
+
+    #[test]
+    fn relay_config_without_egress_port_is_explicit_deny_all() {
+        // No EGRESS_PORT is the explicit deny-all shape: the guest has no
+        // host-side egress listener to reach, so it cannot acquire a path off
+        // the box through this configuration.
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![agent_port("/run/agent.sock")],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).expect("deny-all shape");
+        assert_eq!(cfg.egress_relay_socket, None);
+    }
+
+    #[test]
+    fn relay_config_allows_a_channel_less_factory_parent() {
+        let spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.egress_relay_socket, None);
+        assert!(cfg.agent_socket.is_some());
+    }
+
+    #[test]
+    fn relay_config_rejects_a_bundled_kernel() {
+        // HVF has no bundled kernel; the spec must name an explicit Image.
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![egress_port("/run/egress.sock")],
+            vec![],
+        );
+        assert!(relay_supervisor_config(&spec, &sample_paths()).is_err());
+    }
+
+    #[test]
+    fn vsock_connect_reaches_the_agent_socket_and_rejects_other_ports() {
+        use mvm_vmm::test_support::bind_unix_listener;
+        use std::io::{Read, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hvf-agent.sock");
+        // Stand-in for the supervisor's agent bridge: echo one byte back.
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let server = std::thread::spawn(move || {
+            if let Ok((mut c, _)) = listener.accept() {
+                let mut b = [0u8; 1];
+                if c.read_exact(&mut b).is_ok() {
+                    let _ = c.write_all(&b);
+                }
+            }
+        });
+
+        let vm = HvfRunningVm {
+            id: VmId("agent-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: dir.path().join(PID_FILE_NAME),
+            agent_socket: sock,
+        };
+
+        // The agent port connects + round-trips through the socket.
+        let mut s = vm.vsock_connect(GUEST_AGENT_PORT).unwrap();
+        s.write_all(b"x").unwrap();
+        let mut got = [0u8; 1];
+        s.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"x");
+        server.join().unwrap();
+
+        // Ports outside the agent port and the console data range are not host-dialable.
+        assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+    }
+
+    // --- console_socket_for_port ---
+
+    #[test]
+    fn console_socket_for_port_resolves_first_console_port() {
+        let state = PathBuf::from("/state/vm");
+        let got = console_socket_for_port(&state, 20001).unwrap();
+        assert_eq!(got, PathBuf::from("/state/vm/vsock/vsock-20001.sock"));
+    }
+
+    #[test]
+    fn console_socket_for_port_resolves_last_console_port() {
+        let state = PathBuf::from("/state/vm");
+        let got = console_socket_for_port(&state, 20128).unwrap();
+        assert_eq!(got, PathBuf::from("/state/vm/vsock/vsock-20128.sock"));
+    }
+
+    #[test]
+    fn console_socket_for_port_returns_none_for_out_of_range_ports() {
+        let state = PathBuf::from("/state/vm");
+        // CONSOLE_PORT_BASE itself is not a data port (data ports start at +1).
+        assert!(console_socket_for_port(&state, 20000).is_none());
+        // Beyond the 128-port cap.
+        assert!(console_socket_for_port(&state, 20129).is_none());
+        // Arbitrary unrelated port.
+        assert!(console_socket_for_port(&state, 9999).is_none());
+    }
+
+    #[test]
+    fn vsock_connect_console_port_resolves_to_vsock_subdir() {
+        use mvm_vmm::test_support::bind_unix_listener;
+        use std::io::{Read, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let vsock_dir = dir.path().join("vsock");
+        std::fs::create_dir_all(&vsock_dir).unwrap();
+        let sock = vsock_dir.join("vsock-20001.sock");
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let server = std::thread::spawn(move || {
+            if let Ok((mut c, _)) = listener.accept() {
+                let mut b = [0u8; 1];
+                if c.read_exact(&mut b).is_ok() {
+                    let _ = c.write_all(&b);
+                }
+            }
+        });
+
+        let vm = HvfRunningVm {
+            id: VmId("console-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: dir.path().join(PID_FILE_NAME),
+            agent_socket: dir.path().join("hvf-agent.sock"),
+        };
+
+        // Port 20001 (first console data port) connects via the vsock subdir.
+        let mut s = vm.vsock_connect(20001).unwrap();
+        s.write_all(b"y").unwrap();
+        let mut got = [0u8; 1];
+        s.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"y");
+        server.join().unwrap();
+
+        // A port outside both the agent and console ranges still bails.
+        assert!(vm.vsock_connect(9999).is_err());
+    }
+
+    // --- relay_supervisor_config: console_data_sockets ---
+
+    fn console_vsock_port(port: u32, uds: &str) -> VsockPort {
+        VsockPort {
+            service: GuestService::ConsoleData { port },
+            host_uds: uds.into(),
+            direction: VsockDirection::HostDials,
+        }
+    }
+
+    #[test]
+    fn relay_config_copies_console_ports_into_console_data_sockets() {
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+                console_vsock_port(20001, "/state/vsock/vsock-20001.sock"),
+                console_vsock_port(20002, "/state/vsock/vsock-20002.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.console_data_sockets.len(), 2);
+        assert_eq!(cfg.console_data_sockets[0].guest_port, 20001);
+        assert_eq!(
+            cfg.console_data_sockets[0].host_socket,
+            PathBuf::from("/state/vsock/vsock-20001.sock")
+        );
+        assert_eq!(cfg.console_data_sockets[1].guest_port, 20002);
+    }
+
+    #[test]
+    fn relay_config_produces_empty_console_data_sockets_when_none_in_spec() {
+        // Sealed prod: spec carries only the three standing ports, no console entries.
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(cfg.console_data_sockets.is_empty());
+    }
+}

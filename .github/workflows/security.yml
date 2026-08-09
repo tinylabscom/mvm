@@ -383,7 +383,7 @@ jobs:
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
         # Plan 113 §Task 15 / ADR-064 — the `mvm-bridge`
         # sidecar reads a `BridgeConfigJson` document on stdin BEFORE
-        # installing `mvm-jailer-lite` confinement or touching the
+        # installing the jailer confinement or touching the
         # parent-inherited socketpair fds. The producer (Task 13's
         # `FirecrackerBackend`) is trusted, but the bytes traverse a
         # pipe the bridge must defend; a panic here is a hard process
@@ -563,6 +563,7 @@ jobs:
       matrix:
         package:
           - mvm-agentd
+          - mvm-backends
           - mvm-build
           - mvm-cli
           - mvm-core

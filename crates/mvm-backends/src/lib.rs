@@ -4,5 +4,8 @@
 //! seam. Orchestration lives in `mvm-runtime`; this crate owns only VMM
 //! mechanics.
 
-#[cfg(any(test, feature = "test-support"))]
+pub mod driver;
+pub mod fc;
+pub mod legacy;
+
 pub mod mock;

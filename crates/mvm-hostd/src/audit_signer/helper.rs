@@ -76,6 +76,12 @@ impl SignerHelper {
 
     fn register(&mut self, req: SignerHelperRegisterVm) -> SignerHelperResponse {
         let request_id = req.request_id.clone();
+        // Drop any chain already registered under this vm_id before opening
+        // the replacement: the open takes the file's sole-writer lock, and the
+        // old handle still holds it. Re-registering is a supervisor restart,
+        // and the head is recovered from the file, so releasing early costs
+        // nothing.
+        self.chains.remove(&req.vm_id);
         match self.open_chain(&req) {
             Ok(chain) => {
                 let chain_head = chain.head().to_string();

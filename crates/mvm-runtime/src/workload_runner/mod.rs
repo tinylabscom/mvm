@@ -4,27 +4,21 @@
 //! audit. This module holds the pure, driver-independent pieces of that mapping
 //! so they are unit-testable without a hypervisor.
 
-mod child_grant;
 pub mod claim;
-pub(crate) mod cmdline;
 pub mod console_stream;
 pub mod runner;
-pub mod spec_map;
-pub mod standby_boot;
 
 pub use child_grant::ChildGrantIssuer;
 pub use console_stream::{
     active_console_streamer, console_streamer_installed, install_console_streamer,
 };
+mod child_grant;
+mod standby_boot;
+
 pub use runner::{
     BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, ClaimContext, ConsoleCapture,
     ConsoleStreamer, EndpointSpawnRequest, EndpointSpawner, NoopConsoleStreamer, PreloadContext,
     RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs, WorkloadRunner,
-};
-pub use spec_map::{
-    WorkloadSockets, WorkloadSpecInputs, ensure_dir_share_support, ensure_no_dir_share_volumes,
-    workload_blocks, workload_device_spec, workload_spec, workload_volume_devices,
-    workload_vsock_ports,
 };
 pub use standby_boot::{factory_parent_config, factory_parent_spec};
 
@@ -38,7 +32,7 @@ pub fn assemble_workload_cmdline_for_test(
     config: &mvm_core::vm_backend::VmStartConfig,
     state_dir: &std::path::Path,
 ) -> String {
-    cmdline::runner_cmdline(config, state_dir, |virtiofs_root, has_disk| {
+    mvm_vmm::host::cmdline::runner_cmdline(config, state_dir, |virtiofs_root, has_disk| {
         driver.workload_base_bootargs(virtiofs_root, has_disk)
     })
 }

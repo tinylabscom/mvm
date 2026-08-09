@@ -12,6 +12,8 @@
 
 use async_trait::async_trait;
 
+pub use mvm_contract::protocol::capability_negotiation::BackendCapabilityReport;
+
 pub mod dto;
 pub mod error;
 #[cfg(feature = "client-remote")]
@@ -86,6 +88,21 @@ pub trait MvmClient: Send + Sync {
     /// `Some(rfc3339)` arms it, `None` clears it. Errors if the machine is not
     /// registered.
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()>;
+
+    /// What the backend behind this client can do.
+    ///
+    /// Every other method on this trait is an instruction; this is the one
+    /// question. Without it a caller learns that a backend cannot pause by
+    /// calling `pause_machine` and reading the error — a poor way to find out
+    /// and impossible to plan around. With it, a consumer asks first and gets,
+    /// for anything unsupported, a substitute named by
+    /// [`BackendCapabilityReport::negotiate`].
+    ///
+    /// Deliberately returns the report rather than taking a requirement set:
+    /// negotiation is pure, so a remote client fetches this once over the wire
+    /// and answers any number of requirement sets locally. A gateway therefore
+    /// needs a capability endpoint, not a negotiation one.
+    async fn backend_capabilities(&self) -> Result<BackendCapabilityReport>;
 }
 
 #[cfg(test)]
@@ -97,5 +114,54 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         fn _accepts(_c: &dyn MvmClient) {}
+    }
+
+    /// The consumer path: hold a `dyn MvmClient`, ask what it can do, and get a
+    /// substitute for what it cannot — without knowing which backend answered.
+    #[tokio::test]
+    async fn a_dyn_client_reports_capabilities_and_names_alternatives() {
+        use mvm_contract::protocol::capability_negotiation::CapabilityAlternative;
+        use mvm_contract::protocol::vm_backend::RequiredCapabilities;
+
+        let client: Box<dyn MvmClient> = Box::new(mock::MockBackend::default());
+        let report = client
+            .backend_capabilities()
+            .await
+            .expect("a client must be able to describe its backend");
+
+        // The default mock advertises nothing, so a pause requirement is a gap
+        // rather than a silent success.
+        let gaps = report
+            .negotiate(&RequiredCapabilities {
+                vcpu_state_snapshot: true,
+                ..RequiredCapabilities::default()
+            })
+            .expect_err("the default mock holds no vcpu state");
+        assert_eq!(
+            gaps[0].alternative,
+            CapabilityAlternative::ColdStartFromSignedPlan
+        );
+    }
+
+    /// A client whose backend serves the request answers without gaps, so a
+    /// consumer can gate on `is_ok()` rather than on backend lore.
+    #[tokio::test]
+    async fn a_capable_backend_reports_no_gaps() {
+        use mvm_contract::protocol::vm_backend::{RequiredCapabilities, VmCapabilities};
+
+        let client: Box<dyn MvmClient> = Box::new(mock::MockBackend::default().with_capabilities(
+            VmCapabilities {
+                vsock: true,
+                ..VmCapabilities::default()
+            },
+        ));
+        let report = client.backend_capabilities().await.expect("describes");
+        assert_eq!(
+            report.negotiate(&RequiredCapabilities {
+                vsock: true,
+                ..RequiredCapabilities::default()
+            }),
+            Ok(())
+        );
     }
 }

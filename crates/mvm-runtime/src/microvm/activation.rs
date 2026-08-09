@@ -27,18 +27,7 @@ const RUNTIME_HASH_DEV: &str = "/dev/vdd";
 /// virtiofs-root dev boot.  Mirrors the driver's `root=<tag>` cmdline knob.
 const VIRTIOFS_ROOT_TAG: &str = "mvmroot";
 
-/// Whether this boot attached the universal initramfs (as opposed to a
-/// legacy per-rootfs verity initramfs or no initramfs at all).  The CLI
-/// resolves the artifact out of the shared initramfs cache, so the path
-/// itself is the discriminant — a cold-cache legacy boot keeps its
-/// `rootfs.initrd` sibling and is never sent `ActivateEnvironment`.
-pub fn booted_with_universal_initramfs(config: &VmStartConfig) -> bool {
-    let Some(initrd) = &config.initrd_path else {
-        return false;
-    };
-    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
-    std::path::Path::new(initrd).starts_with(&cache_root)
-}
+pub use mvm_vmm::host::boot_config::booted_with_universal_initramfs;
 
 /// How long activation waits for the guest agent to come up before failing.
 /// The HVF boot confirms the VM process (pid file) in well under a second,
@@ -257,7 +246,7 @@ fn probe_roothash_sidecar(rootfs_path: &str) -> Option<String> {
 
 /// Translate configured volumes into the exact devices the runner attached.
 fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
-    let block_devices = crate::workload_runner::workload_volume_devices(config);
+    let block_devices = mvm_vmm::host::spec_map::workload_volume_devices(config);
 
     config
         .volumes

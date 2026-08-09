@@ -1,5 +1,5 @@
 //! `mvmctl sign` — re-sign mvmctl + supervisor binaries with the
-//! VZ/Hypervisor entitlements (user-facing repair of the auto-sign
+//! virtualization/hypervisor entitlements (user-facing repair of the auto-sign
 //! path). macOS-only; a no-op on other platforms.
 
 use anyhow::Result;
@@ -45,7 +45,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ui::status_line(&format!("  {} {}:", mark, r.path.display()), verb);
     }
     if reports.iter().all(|r| r.entitlements_present) {
-        ui::success("All binaries carry the VZ + Hypervisor entitlements.");
+        ui::success("All binaries carry the virtualization + hypervisor entitlements.");
         Ok(())
     } else {
         anyhow::bail!("one or more binaries failed to acquire both entitlements");

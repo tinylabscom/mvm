@@ -892,9 +892,10 @@ let
       # agent (forked above) serves the interactive shell over vsock — it
       # openpty()s and forks its OWN `/bin/sh -i` (mvm-agentd::console),
       # independent of PID 1 — so PID 1 doesn't need to be a shell at all.
-      # Running `/bin/sh` on /dev/console here is fatal on Vz: its serial
-      # console is input-less, the read hits EOF, the shell exits, PID 1
-      # dies, and the VM powers off ~5 s after boot.
+      # Running `/bin/sh` on /dev/console here is fatal wherever the serial
+      # console is input-less — which is every backend that captures the
+      # guest console write-only, with no host input fd: the read hits EOF,
+      # the shell exits, PID 1 dies, and the VM powers off ~5 s after boot.
       # On libkrun this just swaps a blocking console read for an explicit
       # idle — same "stay alive", no change to the agent shell path. A
       # busybox-portable loop avoids depending on `sleep infinity`.

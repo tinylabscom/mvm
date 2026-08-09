@@ -135,7 +135,10 @@ impl<'a> ClaimGuards<'a> {
     pub fn admit_overlay_contract(&self, cfg: &VmStartConfig) -> Result<()> {
         let rootfs = Path::new(&cfg.rootfs_path);
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_build::builder_vm::admit_runtime_overlay_contract(rootfs_dir, cfg.runtime_source_policy)
+        mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(
+            rootfs_dir,
+            cfg.runtime_source_policy,
+        )
     }
 
     /// Spawn the per-child substitution endpoint keyed on `vm`'s own id — 0700,
