@@ -45,6 +45,8 @@ jobs:
 
       - uses: ./.github/actions/install-zigbuild
 
+      - uses: ./.github/actions/rust-cache
+
       - name: Check formatting
         run: cargo fmt -- --check
 
@@ -95,6 +97,8 @@ jobs:
           node-version: "22"
 
       - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
 
       - name: ADR coverage (informational)
         continue-on-error: true
@@ -284,6 +288,8 @@ jobs:
 
       - uses: ./.github/actions/install-zigbuild
 
+      - uses: ./.github/actions/rust-cache
+
       - name: Clippy (mvm-client tracing-bridge)
         run: cargo clippy -p mvm-client --all-targets --features tracing-bridge -- -D warnings
 
@@ -377,6 +383,8 @@ jobs:
 
       - uses: ./.github/actions/install-zigbuild
 
+      - uses: ./.github/actions/rust-cache
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -438,6 +446,8 @@ jobs:
 
       - uses: ./.github/actions/install-zigbuild
 
+      - uses: ./.github/actions/rust-cache
+
       - name: Install pinned no_std toolchain and targets
         run: |
           rustup toolchain install 1.96.0 --profile minimal \
@@ -472,6 +482,13 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
           sudo apt-get install -y libcap-ng-dev lld
+
+      # This lane compiles a different crate set from the shared workspace key
+      # and builds bpf-linker from source, so it gets its own entry rather than
+      # diluting the one every other lane restores.
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: ebpf
 
       - name: Install bpf-linker
         run: cargo +nightly install --locked bpf-linker

@@ -1,0 +1,83 @@
+name: Warm the Rust build cache
+
+# CI runs on `pull_request` and `merge_group`, never on a push to main — so
+# without this workflow nothing ever writes a cache entry that another ref can
+# read, and every job in every validation cycle compiles the dependency graph
+# from scratch.
+#
+# This is the one writer. It builds the workspace once per merge so that every
+# pull-request job and, more importantly, every merge-queue job starts from a
+# warm target directory. The queue is the throughput bottleneck and its refs are
+# ephemeral, so main is the only place a cache useful to it can come from.
+#
+# It costs one build per merge and saves several per validation cycle: the
+# workspace is compiled by lint-core, lint-features, test-workspace, test-linux
+# and test-ebpf-telemetry, each from cold today.
+
+on:
+  push:
+    branches: [main]
+    # Only the inputs that can change what gets compiled. A docs-only merge
+    # leaves the previous entry valid, and rewriting it would spend a build to
+    # produce a byte-identical cache.
+    paths:
+      - "crates/**"
+      - "src/**"
+      - "xtask/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/cache-warm.yml"
+      - ".github/actions/rust-cache/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One warm at a time. Merges can land faster than a build completes, and the
+# newest main is the one worth caching — but let an in-flight build finish
+# rather than cancelling, since a half-built target dir caches nothing useful.
+concurrency:
+  group: cache-warm
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    name: Warm
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      # Nightly is what the heavy lanes (lint-core, lint-features,
+      # test-workspace) use, so it is the toolchain worth warming. Stable lanes
+      # still benefit from the cargo registry half of the cache.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Install system build deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
+          sudo apt-get update
+          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          save: "true"
+
+      # `clippy --all-targets` compiles every crate, every test target, and
+      # every dependency — the same artifacts the lint and test lanes each
+      # rebuild from cold. Running clippy rather than build also warms the
+      # clippy-specific artifacts that lint-core and lint-features need.
+      #
+      # Failures here are not a merge gate: this runs after the merge that
+      # already passed CI, and its only job is to leave a cache behind. A
+      # genuine breakage is caught by the lanes that gate.
+      - name: Build the workspace to populate the cache
+        run: cargo clippy --workspace --all-targets -- -D warnings
