@@ -1,0 +1,85 @@
+name: Miri
+
+# Miri interprets MIR and checks for undefined behaviour the compiler cannot
+# rule out statically. It is slow — tens of times slower than a native test
+# run — so this is a nightly/manual lane rather than a PR gate.
+#
+# Scope is deliberately narrow, and the reason is a property of Miri rather
+# than of the code: it cannot execute foreign functions, so the crates where
+# this workspace's `unsafe` actually concentrates — the libkrun FFI, the HVF
+# and QEMU device models, the seccomp/Landlock jailer — are out of reach. What
+# is left is the pure-Rust code on the untrusted-input path, which is exactly
+# the code an interpreter is good at checking.
+#
+# `mvm-contract` is the primary target: `no_std` + alloc, `forbid(unsafe_code)`,
+# and it carries the audit-log verifier and the wire DTOs. A UB report there
+# would mean UB in a dependency, which is worth knowing.
+
+on:
+  schedule:
+    # 04:20 UTC daily, offset from the other nightly lanes so they do not
+    # contend for runners.
+    - cron: "20 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  miri:
+    name: Miri (pure-Rust crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Not yet merge-blocking. Miri surfaces findings in dependencies as
+    # readily as in first-party code, and a lane that goes red on an upstream
+    # crate's UB would block unrelated work. Flip this off once a clean
+    # baseline has held for a few weeks — tracked in specs/plans/303.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Miri
+        # Unpinned nightly on purpose: `rustup` resolves to the most recent
+        # nightly that actually ships the `miri` component, which a pinned
+        # date can silently stop doing. The lane is advisory, so drift in the
+        # toolchain cannot break a merge.
+        run: |
+          rustup toolchain install nightly --component miri --profile minimal
+          rustup override set nightly
+          cargo miri setup
+
+      - name: Run Miri over mvm-contract
+        # Flags, both measured rather than guessed:
+        #
+        # `-Zmiri-disable-isolation` allows the clock and filesystem reads the
+        # DTO round-trip tests do. It weakens Miri's determinism, not its UB
+        # detection.
+        #
+        # `-Zmiri-ignore-leaks` is needed because test helpers deliberately
+        # `Box::leak` an encoded frame to hand `decode` a `&'static [u8]` (see
+        # `l3::frame::tests::roundtrip`). Miri correctly reports those as
+        # leaked allocations, which would fail the lane on intentional
+        # test-only behaviour. This turns off leak *checking* only — every UB
+        # check stays on, and UB is what this lane is for.
+        #
+        # `--skip merkle::` is a real exclusion, not a tidy-up. Those tests
+        # sweep proof generation and ed25519 verification across many tree
+        # sizes; natively that is seconds, under the interpreter it ran past
+        # 30 minutes without finishing and starved the rest of the suite. With
+        # them skipped the remaining 504 tests complete in ~4m20s locally,
+        # which is what makes this viable as a nightly at all. The merkle
+        # logic is pure arithmetic over vetted crypto crates — the lowest-value
+        # Miri target in the crate — while the DTO and frame parsers it does
+        # cover are the untrusted-input surface.
+        #
+        # `--lib --tests` excludes doctests: Miri cannot run them at all (the
+        # doctest runner rejects the nightly `-Z` flags cargo-miri passes), so
+        # without this the lane fails after every test has already passed.
+        # `cargo test --workspace --doc` covers doctests natively in `ci.yml`.
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-ignore-leaks
+        run: cargo miri test -p mvm-contract --lib --tests -- --skip merkle::

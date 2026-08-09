@@ -276,7 +276,11 @@ fn truncated_tail_refuses_the_whole_source() {
     let response = read_all(&fx.reader());
     assert!(response.events.is_empty(), "no partial prefix may leak");
     assert_eq!(response.refusals.len(), 1);
-    assert_eq!(response.refusals[0].kind, AuditRefusalKind::Malformed);
+    // Refusing was always right; calling it `Malformed` was not. A half-written
+    // line and an edited one are the same bytes on disk, and the operator
+    // triaging the refusal is exactly the person who needs to tell a crashed
+    // writer from a tampered log. The reader now names which one it saw.
+    assert_eq!(response.refusals[0].kind, AuditRefusalKind::Truncated);
     assert_eq!(response.refusals[0].line, Some(1));
 }
 

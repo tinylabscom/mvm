@@ -422,7 +422,7 @@ impl ObserverAllowlist {
 /// the `Vec<Arc<dyn Observer>>` for `BridgeConfig.observers`.
 ///
 /// The leaf capability is fixed at construction-time per backend:
-/// libkrun + Firecracker leaves report `payload_tap: true`; Vz drainer
+/// libkrun + Firecracker leaves report `payload_tap: true`; the drainer
 /// reports `payload_tap: false`.
 ///
 /// `local-default` plan refs short-circuit to empty observers without

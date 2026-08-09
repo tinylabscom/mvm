@@ -15,7 +15,7 @@
 //!   TAP device. It provides transparent guest TCP/UDP for the dev tier; it
 //!   is not part of the production claim boundary.
 //!
-//! `MicrovmBackend` has no `Hvf` variant yet (the removed Vz backend's row
+//! `MicrovmBackend` has no `Hvf` variant yet (a removed backend's row
 //! was deleted rather than repurposed); the raw HVF backend
 //! (`crates/mvm-runtime/src/hvf_backend.rs`) does not go through this table.
 

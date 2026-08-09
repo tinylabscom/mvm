@@ -6,7 +6,7 @@
 
 ## Context
 
-The goal is a Rust-orchestrated, architecture- and backend-aware model for microVM boot artifacts (kernel + rootfs + backend config), so MVM can represent and validate artifacts across CPU architectures (`x86_64`, `aarch64`) and hypervisor backends (Firecracker, libkrun, Vz, …) without assuming every kernel is `vmlinux` or every backend is Firecracker.
+The goal is a Rust-orchestrated, architecture- and backend-aware model for microVM boot artifacts (kernel + rootfs + backend config), so MVM can represent and validate artifacts across CPU architectures (`x86_64`, `aarch64`) and hypervisor backends (Firecracker, libkrun, …) without assuming every kernel is `vmlinux` or every backend is Firecracker.
 
 A full investigation showed **most of the requested capability already exists, scattered**: `mvm_libkrun::KernelFormat`, six backend impls behind `VmBackend`/`VmBackendForBuilder` in `mvm-backend`, an `Arch` enum in `mvm-build`, `ArtifactManifest` + `.mvm-provenance.json` + `.mvm-artifacts.sha256`, deterministic ext4 via `mke2fs` (`oci_to_rootfs::ext4`), and Firecracker config in `mvm-backend`. Three project rules shape the approach:
 
@@ -26,7 +26,7 @@ A full investigation showed **most of the requested capability already exists, s
 
 - **`GuestArch`** → **`mvm-core`** (pure types). Variants `X86_64 | Aarch64`. `FromStr`/`from_alias` normalizes `amd64|x86_64 → X86_64` and `arm64|aarch64 → Aarch64` (canonicalize `arm64`→`aarch64` internally). A `nix_system()` method returns `"x86_64-linux"`/`"aarch64-linux"`, replacing `host_system_linux()`. **Unifies and replaces** `mvm-build::runtime_overlay::Arch` and the stringly `packed_artifact.target_arch` (hard rename; no compat shims, per the no-backcompat rule).
 - **`KernelFormat`** → **moved to `mvm-core`** (pure enum) and extended. Keep the existing compression-aware variants (`Raw, Elf, ImageGz, ImageBz2, ImageZstd, PeGz`) and add the uncompressed cases the model needs (`Image`, `Pe`). `mvm-libkrun` imports it from core instead of owning it; its loader mapping is unchanged.
-- **`MicrovmBackend` enum + `BackendCompat`** → **`mvm-backend`** (capabilities authority), built on the core types. Enum: `Firecracker, Libkrun, Vz, AppleContainer, CloudHypervisor, Docker, Qemu, Vfkit`. Reconciliation note: **`Vz` *is* Apple Virtualization.framework** here, so there is no separate `AppleVirtualization` variant; `Vfkit` is the future CLI wrapper. Backends with no runtime impl (`Qemu`, `Vfkit`) still declare compat — the model expresses requirements even where the runtime is absent.
+- **`MicrovmBackend` enum + `BackendCompat`** → **`mvm-backend`** (capabilities authority), built on the core types. Enum: `Firecracker, Libkrun, AppleContainer, CloudHypervisor, Docker, Qemu, Vfkit`. Reconciliation note: `Vfkit` is the future CLI wrapper. Backends with no runtime impl (`Qemu`, `Vfkit`) still declare compat — the model expresses requirements even where the runtime is absent.
 
 Net: `mvm-core` gains two pure enums; `mvm-backend` gains the backend enum + compat data. No new crate, no parallel types.
 

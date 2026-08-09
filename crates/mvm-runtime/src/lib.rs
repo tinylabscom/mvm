@@ -55,7 +55,9 @@ pub mod driver;
 /// Per-VM transparent egress redirect used by the legacy libkrun gateway path.
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by
 /// the libkrun + Firecracker substitution-endpoint spawn paths.
-pub mod firecracker;
+// Firecracker host mechanics moved to mvm-backends::fc; re-exported so
+// `mvm_runtime::firecracker::<name>` keeps resolving for mvm-cli.
+pub use mvm_backends::fc::host as firecracker;
 pub mod handle_registry;
 pub mod image;
 /// Content-addressed image version-lineage store + chain-anchored verification

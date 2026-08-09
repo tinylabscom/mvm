@@ -45,6 +45,9 @@ fn read_stdin_blocking() -> Result<Vec<u8>> {
 }
 
 fn main() -> Result<()> {
+    // First statement in the process: a panic before this line would
+    // print its payload unredacted.
+    mvm_hostd::panic_hook::install("substitution-endpoint");
     // This process holds the workload's secrets in the clear; a backend that
     // died must not leave it serving as an orphan. Exit the instant the parent
     // is gone (macOS / SIGKILL gap the spawn-side attach misses).

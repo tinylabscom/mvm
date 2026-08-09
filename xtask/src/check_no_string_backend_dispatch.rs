@@ -21,10 +21,10 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 use std::path::Path;
 
-/// The full known-backend-selector set, including the retired `vz` — a
-/// reintroduced `vz` arm is exactly the regression this lint exists to
-/// catch, since there is no `BackendKind::Vz` for it to belong to.
-const BACKEND_SELECTORS: &str = "firecracker|libkrun|hvf|qemu|mock|vz";
+/// The full known-backend-selector set. A retired backend's selector is not
+/// listed here: `check-no-vz` bans naming it at all, which is a stricter
+/// rule than this lint could express.
+const BACKEND_SELECTORS: &str = "firecracker|libkrun|hvf|qemu|mock";
 
 /// This file's own doc comment above describes the banned shapes in prose
 /// rather than as literal comparisons, so it never matches its own
@@ -112,17 +112,6 @@ mod tests {
             tmp.path(),
             "bad.rs",
             "fn f(b: &dyn VmBackend) -> bool { b.name() == \"libkrun\" }\n",
-        );
-        assert!(run(tmp.path()).is_err());
-    }
-
-    #[test]
-    fn dead_vz_arm_is_flagged() {
-        let tmp = tempfile::tempdir().unwrap();
-        write(
-            tmp.path(),
-            "bad.rs",
-            "fn f(b: &dyn VmBackend) -> bool { b.name() == \"vz\" }\n",
         );
         assert!(run(tmp.path()).is_err());
     }

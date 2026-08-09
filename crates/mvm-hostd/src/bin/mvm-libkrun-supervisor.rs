@@ -95,6 +95,9 @@ struct PrelaunchEnvelope {
 }
 
 fn main() -> ExitCode {
+    // First statement in the process: a panic before this line would
+    // print its payload unredacted.
+    mvm_hostd::panic_hook::install("libkrun-supervisor");
     // macOS Hypervisor.framework rejects any process without
     // `com.apple.security.hypervisor`. The ad-hoc signer
     // self-signs + re-spawns the binary on first run; subsequent
@@ -537,7 +540,7 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
     // reaching this code).
     //
     // Leaf capabilities are fixed per backend: libkrun reports
-    // `payload_tap: true`. The Vz drainer will
+    // `payload_tap: true`. The drainer will
     // set `payload_tap: false` from its own bin.
     let leaf_caps = mvm_hostd::supervisor::network::ProviderCapabilities {
         flow_events: true,

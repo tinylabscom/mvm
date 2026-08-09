@@ -669,7 +669,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::UnixStream;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, oneshot};
 
     fn daemon(tenant: &str) -> HostAgentDaemon {
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
@@ -706,14 +706,42 @@ mod tests {
     ) -> tokio::task::JoinHandle<()> {
         let helper_listener = UnixListener::bind(&helper_sock).unwrap();
         let helper = Arc::new(Mutex::new(SignerHelper::new(tenant_id, Some(key_path))));
+        let (ready_tx, ready_rx) = oneshot::channel();
         let task = tokio::spawn({
             let helper = helper.clone();
             async move {
+                let _ = ready_tx.send(());
                 let _ = serve_helper_on_listener(helper_listener, helper, 65_536).await;
             }
         });
-        tokio::task::yield_now().await;
+        ready_rx.await.unwrap();
         task
+    }
+
+    /// Rebind the daemon's signer-helper registrations, waiting out a
+    /// previous helper that still holds the chain file's exclusive writer
+    /// lock.
+    ///
+    /// Retries only that one refusal: any other error fails immediately, so a
+    /// genuine regression still surfaces as a failure rather than as a
+    /// timeout. Bounded, so a lock that is never released fails the test
+    /// instead of hanging it.
+    async fn rebind_when_chain_released(d: &HostAgentDaemon) -> usize {
+        const ATTEMPTS: usize = 100;
+        for attempt in 0..ATTEMPTS {
+            match d.rebind_signer_helper_registrations() {
+                Ok(n) => return n,
+                Err(e) if format!("{e:#}").contains("already held by another writer") => {
+                    assert!(
+                        attempt + 1 < ATTEMPTS,
+                        "the previous helper never released the chain lock: {e:#}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(e) => panic!("rebind failed for an unexpected reason: {e:#}"),
+            }
+        }
+        unreachable!("the loop either returns or asserts on its last attempt")
     }
 
     async fn emit_audit(sock: &Path, vm: &str) -> ServiceResponse {
@@ -1069,7 +1097,20 @@ mod tests {
         let _ = std::fs::remove_file(&helper_sock);
         let restarted = start_helper(helper_sock.clone(), "local", key_path).await;
 
-        assert_eq!(d.rebind_signer_helper_registrations().unwrap(), 1);
+        // Aborting the accept loop is not the same as the old helper being
+        // gone. `audit_signer::helper::serve` spawns a detached task per
+        // connection, each holding its own `SharedSignerHelper` clone, and
+        // those are not cancelled with the loop — so the previous helper, and
+        // the exclusive chain-file lock its `Chain` holds, can outlive the
+        // `await` above. Registering the restarted helper then fails with
+        // "chain already held by another writer".
+        //
+        // Production never hits this: the helper is its own process
+        // (`mvm-signer-helper`), so shutdown releases the lock at exit. This
+        // test is the only place a helper is torn down by cancelling a task,
+        // so it has to wait for the same condition process exit would give it.
+        // A fixed sleep would only make the window bigger, not closed.
+        assert_eq!(rebind_when_chain_released(&d).await, 1);
         let after = emit_audit(&sock, "after-restart").await;
         assert!(matches!(after, ServiceResponse::Ok { .. }));
 

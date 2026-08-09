@@ -46,18 +46,13 @@ mod tests {
     use mvm_core::platform::Platform;
 
     #[test]
-    fn runtime_backend_check_macos_reports_hvf_not_vz() {
+    fn runtime_backend_check_macos_reports_hvf_and_libkrun() {
         let c = runtime_backend_check(Platform::MacOS);
         assert!(c.ok);
         assert!(c.info.contains("`hvf`"), "got: {}", c.info);
         assert!(
             c.info.contains("`libkrun`"),
             "expected libkrun fallback in macOS summary; got: {}",
-            c.info
-        );
-        assert!(
-            !c.info.contains("`vz`"),
-            "stale Vz wording must not remain in runtime backend summary: {}",
             c.info
         );
     }

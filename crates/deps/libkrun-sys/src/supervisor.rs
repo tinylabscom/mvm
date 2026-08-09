@@ -89,7 +89,7 @@ pub struct SupervisorConfig {
     /// `~/.mvm/audit/gateway-events-<vm>.sock` — per-VM ingest
     /// socket an out-of-process gateway bridge connects to (one writer
     /// only). Ignored on libkrun (which spawns its bridge in-process); the
-    /// out-of-process backend that needed it (the removed Vz backend's
+    /// out-of-process backend that needed it (a removed backend's
     /// Swift bridge) is gone, so no current backend sets this.
     #[serde(default)]
     pub gateway_events_socket: Option<std::path::PathBuf>,

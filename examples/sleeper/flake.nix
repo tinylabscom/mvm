@@ -1,5 +1,5 @@
 {
-  description = "sleeper — long-lived sealed workload fixture for live Vz validation.";
+  description = "sleeper — long-lived sealed workload fixture for live validation.";
 
   # A minimal sealed (prod) workload whose PID-1 command never exits, so the
   # VM stays resident long enough to checkpoint / fork / pause / resume and be
