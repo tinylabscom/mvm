@@ -453,6 +453,74 @@ pub struct TenantRateBudgetResult {
 // Typed message protocol (QUIC API)
 // ============================================================================
 
+// ============================================================================
+// Egress-secrets delivery payload (gateway → agent, instance-start path)
+// ============================================================================
+//
+// The fleet controller (mvmd's gateway) owns the tenant-secrets vault
+// (Postgres). The agent — the node where the VM and its substitution
+// endpoint actually run — has no line to that vault. These types are the
+// one-directional gateway→agent delivery of a VM's *pre-resolved* egress
+// secret catalog plus the *decrypted* values, carried over the existing
+// mTLS-protected QUIC control channel at instance start.
+//
+// Split by sensitivity: `EgressSecretBinding` is non-secret catalog metadata
+// (safe to log); `EgressSecretValue` carries decrypted material and therefore
+// gets a hand-written redacting `Debug`. `EgressSecretsPayload` bundles both
+// and rides `InstanceAction::Start` / `StartInstanceWithBlockVolumes` as an
+// optional, back-compatible field.
+
+/// Non-secret catalog entry describing one egress secret the VM is allowed to
+/// use: its logical `name`, the destinations it may be sent to, and the auth
+/// scheme. Contains no secret material and is safe to log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressSecretBinding {
+    /// Logical name the guest references (e.g. `"stripe_api_key"`).
+    pub name: String,
+    /// Destinations this secret may be substituted into (host/URL globs).
+    pub allowed_destinations: Vec<String>,
+    /// Auth scheme this secret satisfies (e.g. `"bearer"`, `"basic"`).
+    pub auth_type: String,
+}
+
+/// Secret-bearing resolved value for one egress secret, keyed by `name` to a
+/// base64-encoded decrypted value.
+///
+/// `value_b64` holds decrypted secret material, so this type has a
+/// hand-written [`Debug`] that redacts the value — mirroring the redaction of
+/// `value_b64` in the substitution wire response. The value MUST NOT appear in
+/// logs, panics, or `{:?}` output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressSecretValue {
+    /// Logical name matching an [`EgressSecretBinding::name`].
+    pub name: String,
+    /// Base64-encoded decrypted secret value. Redacted in `Debug`.
+    pub value_b64: String,
+}
+
+// allow(secret-debug): hand-written Debug below redacts `value_b64`; only the
+// non-secret `name` is printed.
+impl std::fmt::Debug for EgressSecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EgressSecretValue")
+            .field("name", &self.name)
+            .field("value_b64", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// A VM's fully-resolved egress-secret bundle: the non-secret catalog
+/// (`bindings`) plus the decrypted `values`. Delivered gateway→agent on the
+/// instance-start path. `Debug` is derived; the secret `values` redact
+/// themselves via [`EgressSecretValue`]'s hand-written `Debug`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressSecretsPayload {
+    /// Non-secret catalog: what the VM may egress and where.
+    pub bindings: Vec<EgressSecretBinding>,
+    /// Secret-bearing decrypted values, redacted in `Debug`.
+    pub values: Vec<EgressSecretValue>,
+}
+
 /// Strongly typed request sent over QUIC streams.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRequest {
@@ -478,11 +546,22 @@ pub enum AgentRequest {
         instance_id: String,
     },
     /// Perform an imperative lifecycle action on a specific instance.
+    ///
+    /// When `action` is [`InstanceAction::Start`], the fleet controller
+    /// (mvmd's gateway) may attach `egress_secrets`: the VM's pre-resolved
+    /// egress-secret catalog plus decrypted values. See
+    /// [`EgressSecretsPayload`] for why this rides the start path. The field
+    /// is `#[serde(default)]` so pre-existing callers (and any non-`Start`
+    /// action) serialize and deserialize byte-for-byte as before.
     InstanceAction {
         tenant_id: String,
         pool_id: String,
         instance_id: String,
         action: InstanceAction,
+        /// Optional gateway→agent delivery of resolved egress secrets for a
+        /// `Start`. `None` = today's behavior (no secrets delivered inline).
+        #[serde(default)]
+        egress_secrets: Option<EgressSecretsPayload>,
     },
     /// Start an instance with fleet-resolved encrypted block volumes.
     StartInstanceWithBlockVolumes {
@@ -492,6 +571,11 @@ pub enum AgentRequest {
         #[serde(default)]
         workspace_id: Option<String>,
         volumes: Vec<crate::instance::BlockVolumeAttach>,
+        /// Optional gateway→agent delivery of resolved egress secrets,
+        /// delivered alongside the block volumes at instance start. `None` =
+        /// today's behavior. See [`EgressSecretsPayload`].
+        #[serde(default)]
+        egress_secrets: Option<EgressSecretsPayload>,
     },
     /// Refresh the same fenced leases before their UTC expiry.
     RenewBlockVolumeLeases {
@@ -1031,6 +1115,7 @@ mod tests {
             pool_id: "p1".to_string(),
             instance_id: "i1".to_string(),
             action: InstanceAction::Wake,
+            egress_secrets: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: AgentRequest = serde_json::from_str(&json).unwrap();
@@ -1040,6 +1125,7 @@ mod tests {
                 pool_id,
                 instance_id,
                 action,
+                ..
             } => {
                 assert_eq!(tenant_id, "t1");
                 assert_eq!(pool_id, "p1");
@@ -2159,6 +2245,7 @@ mod tests {
                 pool_id: "p1".to_string(),
                 instance_id: "i1".to_string(),
                 action: InstanceAction::Start,
+                egress_secrets: None,
             },
             AgentRequest::StartInstanceWithBlockVolumes {
                 tenant_id: "t1".to_string(),
@@ -2178,6 +2265,7 @@ mod tests {
                     lease_expires_at: "2026-08-02T12:00:00Z".to_string(),
                     data_key_version: 1,
                 }],
+                egress_secrets: None,
             },
             AgentRequest::RenewBlockVolumeLeases {
                 tenant_id: "t1".to_string(),
@@ -2359,6 +2447,143 @@ mod tests {
             },
             AgentRequest::SyncEvents { since: 42 },
         ]
+    }
+
+    fn sample_egress_secrets() -> EgressSecretsPayload {
+        EgressSecretsPayload {
+            bindings: vec![EgressSecretBinding {
+                name: "stripe_api_key".to_string(),
+                allowed_destinations: vec!["api.stripe.com".to_string()],
+                auth_type: "bearer".to_string(),
+            }],
+            values: vec![EgressSecretValue {
+                name: "stripe_api_key".to_string(),
+                value_b64: "c2stbGl2ZS1TVVBFUlNFQ1JFVA==".to_string(),
+            }],
+        }
+    }
+
+    /// `InstanceAction` round-trips with and without an `egress_secrets` payload.
+    #[test]
+    fn test_instance_action_egress_secrets_round_trip() {
+        for egress_secrets in [None, Some(sample_egress_secrets())] {
+            let req = AgentRequest::InstanceAction {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                action: InstanceAction::Start,
+                egress_secrets: egress_secrets.clone(),
+            };
+            let json = serde_json::to_string(&req).expect("serialize");
+            let back: AgentRequest = serde_json::from_str(&json).expect("deserialize");
+            match back {
+                AgentRequest::InstanceAction {
+                    egress_secrets: got,
+                    action,
+                    ..
+                } => {
+                    assert_eq!(action, InstanceAction::Start);
+                    assert_eq!(got, egress_secrets);
+                }
+                other => panic!("expected InstanceAction, got {other:?}"),
+            }
+        }
+    }
+
+    /// `StartInstanceWithBlockVolumes` round-trips with and without egress secrets.
+    #[test]
+    fn test_start_with_block_volumes_egress_secrets_round_trip() {
+        for egress_secrets in [None, Some(sample_egress_secrets())] {
+            let req = AgentRequest::StartInstanceWithBlockVolumes {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                workspace_id: None,
+                volumes: vec![],
+                egress_secrets: egress_secrets.clone(),
+            };
+            let json = serde_json::to_string(&req).expect("serialize");
+            let back: AgentRequest = serde_json::from_str(&json).expect("deserialize");
+            match back {
+                AgentRequest::StartInstanceWithBlockVolumes {
+                    egress_secrets: got,
+                    ..
+                } => assert_eq!(got, egress_secrets),
+                other => panic!("expected StartInstanceWithBlockVolumes, got {other:?}"),
+            }
+        }
+    }
+
+    /// An old-format payload without the `egress_secrets` key must deserialize
+    /// to `None`, preserving byte-for-byte back-compat with existing callers.
+    #[test]
+    fn test_egress_secrets_absent_defaults_to_none() {
+        // JSON produced before the field existed (no `egress_secrets` key).
+        let old_instance_action = r#"{
+            "InstanceAction": {
+                "tenant_id": "t1",
+                "pool_id": "p1",
+                "instance_id": "i1",
+                "action": "Start"
+            }
+        }"#;
+        match serde_json::from_str::<AgentRequest>(old_instance_action).expect("deserialize old") {
+            AgentRequest::InstanceAction { egress_secrets, .. } => {
+                assert!(egress_secrets.is_none())
+            }
+            other => panic!("expected InstanceAction, got {other:?}"),
+        }
+
+        let old_start = r#"{
+            "StartInstanceWithBlockVolumes": {
+                "tenant_id": "t1",
+                "pool_id": "p1",
+                "instance_id": "i1",
+                "volumes": []
+            }
+        }"#;
+        match serde_json::from_str::<AgentRequest>(old_start).expect("deserialize old") {
+            AgentRequest::StartInstanceWithBlockVolumes {
+                egress_secrets,
+                workspace_id,
+                ..
+            } => {
+                assert!(egress_secrets.is_none());
+                assert!(workspace_id.is_none());
+            }
+            other => panic!("expected StartInstanceWithBlockVolumes, got {other:?}"),
+        }
+    }
+
+    /// The decrypted secret value must never appear in `Debug` output.
+    #[test]
+    fn test_egress_secret_value_debug_redacts() {
+        let secret = "c2stbGl2ZS1TVVBFUlNFQ1JFVA==";
+        let payload = sample_egress_secrets();
+        assert_eq!(payload.values[0].value_b64, secret);
+
+        // Direct value Debug.
+        let value_dbg = format!("{:?}", payload.values[0]);
+        assert!(!value_dbg.contains(secret), "value leaked: {value_dbg}");
+        assert!(value_dbg.contains("[REDACTED]"));
+        assert!(value_dbg.contains("stripe_api_key")); // non-secret name kept
+
+        // Nested through the payload and the request that carries it.
+        let payload_dbg = format!("{payload:?}");
+        assert!(!payload_dbg.contains(secret), "value leaked: {payload_dbg}");
+
+        let req = AgentRequest::InstanceAction {
+            tenant_id: "t1".to_string(),
+            pool_id: "p1".to_string(),
+            instance_id: "i1".to_string(),
+            action: InstanceAction::Start,
+            egress_secrets: Some(payload),
+        };
+        let req_dbg = format!("{req:?}");
+        assert!(
+            !req_dbg.contains(secret),
+            "value leaked via request: {req_dbg}"
+        );
     }
 
     /// Every `AgentRequest` variant must survive a JSON round-trip.
