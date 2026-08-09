@@ -266,6 +266,7 @@ mod tests {
             "/tmp/bindings".into(),
             "/tmp/audit".into(),
             "/tmp/keys".into(),
+            None,
         );
         assert!(spec.allowed_syscalls.contains(&"splice"));
         assert!(spec.allowed_syscalls.contains(&"fsync"));
@@ -279,6 +280,7 @@ mod tests {
             "/tmp/bindings".into(),
             "/tmp/audit".into(),
             "/tmp/keys".into(),
+            None,
         );
         assert!(!spec.allowed_syscalls.contains(&"execve"));
         assert!(!spec.allowed_syscalls.contains(&"setuid"));
