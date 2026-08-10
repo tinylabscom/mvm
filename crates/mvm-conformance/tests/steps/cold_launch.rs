@@ -71,7 +71,7 @@ fn clean_launch_sample(world: &mut CliWorld, profile: String) {
 }
 
 #[given(
-    regex = r"^a release launch sample whose launch performed (image_pull|image_build|mount_materialize|warm_claim)$"
+    regex = r"^a release launch sample whose launch performed (image_pull|image_build|mount_materialize|warm_claim|artifact_hash|process_table_scan)$"
 )]
 fn contaminated_launch_sample(world: &mut CliWorld, work: String) {
     let mut sample = clean_sample(BuildProfile::Release);
@@ -86,6 +86,12 @@ fn contaminated_launch_sample(world: &mut CliWorld, work: String) {
             sample.work.warm_claim = true;
             sample.launch_mode = LaunchMode::Warm;
         }
+        // A rootfs-sized re-read of an artifact whose digest was already
+        // cached: not a pull, a build, a materialization, or a claim, and so
+        // the one kind of repeated work the lane could not previously name.
+        "artifact_hash" => sample.work.artifact_bytes_hashed = 1_205_739_520,
+        // Host maintenance charged to a launch that spawned nothing to clean.
+        "process_table_scan" => sample.work.process_table_scans = 1,
         other => panic!("unknown work kind {other:?}"),
     }
     world.cold_launch_sample = Some(sample);
@@ -121,7 +127,7 @@ fn the_lane_accepts(world: &mut CliWorld) {
 }
 
 #[then(
-    regex = r"^the prepared-cold lane refuses the sample naming (image_pull|image_build|mount_materialize|warm_claim)$"
+    regex = r"^the prepared-cold lane refuses the sample naming (image_pull|image_build|mount_materialize|warm_claim|artifact_hash|process_table_scan)$"
 )]
 fn the_lane_refuses_naming(world: &mut CliWorld, work: String) {
     let rendered = refusal(world);

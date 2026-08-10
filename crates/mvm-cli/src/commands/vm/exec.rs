@@ -931,7 +931,14 @@ fn emit_oci_run_admission(
     timeout_secs: u64,
     network_mode: mvm_contract::plan::NetworkMode,
 ) -> Result<()> {
-    let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
+    // Cached, like every sibling admission path (`up`, the warm-pool claim, the
+    // hostd runner, image lineage). The rootfs this digest binds is immutable
+    // and content-addressed, so re-reading it on each launch recomputes a value
+    // the sidecar already holds — a cost linear in image size, and hardware
+    // SHA-256 is already fast enough that no build profile hides it. The
+    // sidecar is keyed on size + mtime, so any rewrite forces a re-hash and a
+    // stale digest cannot reach admission.
+    let image_sha256 = mvm_core::crypto::image_verify::sha256_file_cached(&image.rootfs_path)
         .with_context(|| {
             format!(
                 "hashing OCI rootfs at {} for run --image admission",

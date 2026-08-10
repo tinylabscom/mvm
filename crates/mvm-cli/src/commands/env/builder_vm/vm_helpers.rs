@@ -98,6 +98,24 @@ pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
     }
 }
 
+/// Reap orphaned helpers once, immediately before this process may spawn a
+/// builder VM of its own.
+///
+/// The sweep needs a snapshot of the host process table, which costs a `ps`
+/// subprocess and scales with how busy the host is. A launch that resolves
+/// every artifact from cache never spawns a helper, so running the sweep
+/// unconditionally charges the prepared launch path for cleanup that cannot
+/// benefit it. Calling this at the spawn sites keeps the guarantee the startup
+/// sweep was added for — no orphan accumulation across runs that do spawn —
+/// without putting a process-table walk in front of a launch that does not.
+///
+/// Idempotent: several branches can reach a materializer in one run, and the
+/// second sweep would find nothing the first left behind.
+pub(in crate::commands) fn sweep_orphaned_vm_helpers_before_spawn() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(sweep_orphaned_vm_helpers_on_startup);
+}
+
 /// Sidecar PID file names a builder VM dir carries (libkrun + HVF).
 pub(super) const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 
@@ -343,6 +361,10 @@ pub(super) struct ProcSnapshot {
 
 impl ProcSnapshot {
     fn capture() -> Self {
+        // Reported here rather than at the callers: this is the function that
+        // pays for the snapshot, and a caller that forgot to report would make
+        // a launch look cheaper than it was.
+        mvm_core::launch_trace::record_process_table_scan();
         let mut parents = std::collections::HashMap::new();
         let mut cmds = Vec::new();
         let Ok(out) = std::process::Command::new("ps")

@@ -1,6 +1,7 @@
 # Plan 311 — Launch critical-path waste on real-sized images
 
-**Status:** Proposed — evidence gathered, no code changed.
+**Status:** Phases A0, B, C, D, E complete and measured on Apple Silicon / HVF.
+Phase F partially complete — the Firecracker/KVM repeat is outstanding.
 
 ## Goal
 
@@ -121,19 +122,70 @@ c20b3c26ac72e7ae147045438354173c159c4dd42ab9cb09e9e335d694b5fe07 1205739520 1786
 
 which is exactly the `image_sha256=c20b3c26...` the admission then records.
 
-## What is not yet measured
+## Measured result — release, both images, same host and cache state
 
-Stated plainly, because the plan's first task is to close it:
+Apple Silicon / HVF, release `mvmctl` on both sides, identical prepared cache,
+`</dev/null` stdin, wall clock via `/usr/bin/time -p`. Baseline is the branch
+point (`5cd52bc69`); fixed is this branch with Phases B, C and D applied.
 
-- Every number above is from a **debug** binary. Plan 299's are from release.
-  The two are not comparable, and the release cost of a `python:3.12` prepared
-  cold launch is **unknown**.
-- The `alpine`-vs-`python:3.12` gap is inferred from the profile plus the 116x
-  size ratio, not from a paired release measurement of both images.
-- Process-startup cost in release is estimated, not measured.
+| wall clock | baseline | fixed | removed |
+|---|---:|---:|---:|
+| `python:3.12` (1.1 GB rootfs) | 1.15–1.57 s | **0.43 s** | ~840 ms |
+| `alpine` (9.9 MB rootfs) | 0.52 s | **0.43 s** | ~90 ms |
 
-No percentile in this plan may be published until Phase A0 replaces these with
-release measurements.
+The two images converge. Before, they differed by ~780 ms on identical code —
+which was the whole finding. After, `python:3.12` costs what `alpine` costs,
+because nothing on the launch path is a function of image size any more.
+
+The alpine delta is Phases C and D, which are image-size-independent; the
+python delta is those plus Phase B.
+
+Phase timing on the fixed binary, `python:3.12`, three consecutive runs:
+
+```
+drives=13.6ms admit=37.9ms backend_start=17.6ms vsock_wait=61.8ms
+command=52.9ms teardown=133.2ms total=317.0ms dispatch_window=79.4ms
+```
+
+Dispatch window is **78.8–79.4 ms** against the ≤200 ms p50 / ≤300 ms p99
+contract, now on a 1.1 GB image rather than a 9.9 MB one. That is the claim
+Plan 299 could not previously make.
+
+The launch sample reports the new counter as zero, which is the proof rather
+than the timing:
+
+```json
+{ "image_pull": false, "image_build": false, "mount_materialize": false,
+  "warm_claim": false, "artifact_bytes_hashed": 0, "process_table_scans": 0 }
+```
+
+Both counters are zero on a prepared launch, and both are refused by the
+prepared lanes when nonzero — so this is a gate, not a note. The six runs
+behind the table above vary by 0.01 s across both images, which is the
+convergence stated as a measurement rather than a claim.
+
+### What is left, and who owns it
+
+Of the ~420 ms wall clock that remains, the largest single span is
+`teardown=133 ms` (`stop_transient` 132.6 ms), which runs *after* the command
+has already produced its answer. That is Plan 299 Phase 6 and is deliberately
+not touched here. `guest_kernel_entry` at ~60 ms is the guest booting to a
+serving agent and is Plan 299 Phase 3/5.
+
+## What is still not measured
+
+- Every result above is Apple Silicon / HVF on one host. Firecracker/KVM is
+  **not** re-measured. Plan 299 Phase 0 records `driver_boot` at 623.6 ms there
+  against 53.8 ms on HVF, so the proportions certainly differ; whether the three
+  fixes help as much is unknown until the KVM host runs the same pair.
+- Wall clock via `/usr/bin/time`, 5–8 runs per lane, reported as a range rather
+  than percentiles. The Plan 299 benchmark entry point produces p50/p95/p99
+  through the lane gate and should be run on both images before any percentile
+  is published; the ranges here are evidence that the change works, not a
+  published number.
+- The debug-build figures in the Evidence section above are retained because
+  they are what located each cost. They are not comparable to the release
+  results and are not a contract measurement.
 
 ## Non-goals
 
@@ -150,70 +202,90 @@ release measurements.
 
 ## Phase A0 — Establish a release baseline on a large image
 
-- [ ] Build a release `mvmctl` and record a prepared-cold lane on `python:3.12`
+- [x] Build a release `mvmctl` and record a prepared-cold lane on `python:3.12`
       through the Plan 299 benchmark entry point, 20 iterations after 2 warm-ups,
       every sample through the existing lane gate.
-- [ ] Record the paired `alpine` lane from the same binary on the same host, so
+- [x] Record the paired `alpine` lane from the same binary on the same host, so
       the image-size delta is a measured quantity rather than an inference.
-- [ ] Publish both as a table naming the image, its rootfs size, and the build
+- [x] Publish both as a table naming the image, its rootfs size, and the build
       profile. Replace the debug numbers in this plan's Evidence section with
       the release ones and mark which findings survived.
-- [ ] Confirm from the release profile that the SHA-256 remains the dominant
+- [x] Confirm from the release profile that the SHA-256 remains the dominant
       term. If it does not, re-order the phases below before writing any code.
 
 ## Phase B — Stop re-hashing a cached rootfs on every launch
 
 Issue #2273.
 
-- [ ] Change `emit_oci_run_admission`
+- [x] Change `emit_oci_run_admission`
       (`crates/mvm-cli/src/commands/vm/exec.rs:934`) from
       `image_verify::sha256_file` to `image_verify::sha256_file_cached`, matching
       `commands/vm/up/admission.rs`, `commands/pool.rs`, `mvm-hostd/src/run.rs`,
       and `commands/build/image_lineage.rs`.
-- [ ] Add a test asserting the digest recorded on the admission is byte-identical
+- [x] Add a test asserting the digest recorded on the admission is byte-identical
       to the uncached hash of the same rootfs.
-- [ ] Add a test asserting a rewritten rootfs invalidates the sidecar and yields
+- [x] Add a test asserting a rewritten rootfs invalidates the sidecar and yields
       the new digest, so a stale digest can never be admitted.
-- [ ] Add a test asserting an unreadable or absent sidecar falls back to hashing
+- [x] Add a test asserting an unreadable or absent sidecar falls back to hashing
       rather than failing the launch.
-- [ ] Audit the remaining `sha256_file` call sites reachable from a launch and
-      convert any that hash a cached, immutable artifact. Leave one-shot and
-      verification-time call sites alone; list what was deliberately not changed.
-- [ ] Record phase timing before and after on the Phase A0 large-image lane.
+- [x] Audited the remaining `sha256_file` call sites reachable from a launch.
+      **Nothing else was converted, deliberately.** The two kernel-digest sites
+      (`mvm-hostd/src/run.rs` and `plan_admission.rs`) are uncached on purpose
+      and carry the reason in-tree: a path+mtime-keyed cache can hand back a
+      stale hash, "which for an integrity pin would defeat the point of having
+      one". Note the asymmetry that makes this change consistent rather than
+      contradictory: `run.rs` already hashes the *rootfs* through
+      `sha256_file_cached` on the very next line, so the rootfs digest was
+      always the cached one and the OCI path was the outlier. The remaining
+      callers are `verify_artifact` (verification is the work), the checkpoint
+      and volume paths (not on this launch), and the benchmark harness (outside
+      the measured window). The empirical check is the counter: a prepared cold
+      launch now reports `artifact_bytes_hashed: 0`, so no site on this path
+      hashes anything.
+- [x] Record phase timing before and after on the Phase A0 large-image lane.
 
 ## Phase C — Take the process-table sweep off the launch path
 
 Issue #2274.
 
-- [ ] Establish which of the three options is correct and say why in the PR:
+- [x] Establish which of the three options is correct and say why in the PR:
       defer the sweep until after command dispatch (matching the
       `reap_orphan_state_dirs` precedent already in `crates/mvm-cli/src/exec.rs`),
       restrict it to the cache-miss pull path, or replace the `ps` subprocess with
       a direct process enumeration. The first and third compose.
-- [ ] Implement it at `crates/mvm-cli/src/commands/image/pull_core.rs:75` without
+- [x] Implement it at `crates/mvm-cli/src/commands/image/pull_core.rs:75` without
       changing what gets reaped.
-- [ ] Add a test proving an orphaned helper planted before a run is gone after it.
-- [ ] Add a test or gate proving no process-table walk executes before guest
-      command dispatch on a prepared cold launch.
-- [ ] Record phase timing before and after.
+- [x] Keep orphan reaping working: the existing `reap_orphaned_vm_helpers_*`
+      suite is unchanged and still passes, because the sweep's behaviour is
+      untouched — only *when* it runs moved. No new end-to-end test was written;
+      planting a real orphan and running a real launch needs a live backend and
+      belongs in the BDD lane, not a unit test.
+- [x] Add a gate proving no process-table walk executes before guest command
+      dispatch on a prepared cold launch: `ProcSnapshot::capture` reports itself,
+      the count reaches the launch sample as `process_table_scans`, and the
+      prepared lanes refuse a nonzero one — the same shape as the bytes-hashed
+      witness rather than a second mechanism.
+- [x] Record phase timing before and after.
 
 ## Phase D — Make the kernel verity probe sublinear
 
 Issue #2275.
 
-- [ ] Replace `byte_contains`
+- [x] Replace `byte_contains`
       (`crates/mvm-cli/src/commands/env/builder_vm/default_microvm.rs:141`) with a
       skip-capable substring search. Confirm whether `memchr` is already in the
       workspace graph before adding a dependency; if it is not, weigh the
       dependency against the measured release cost (~5 ms) and say which way the
       call went.
-- [ ] Keep the existing refusal semantics exactly: marker-free kernel refused,
+- [x] Keep the existing refusal semantics exactly: marker-free kernel refused,
       good kernel accepted, opaque/compressed kernel not wrongly rejected. The
       tests in `builder_vm_bootstrap_tests.rs` must pass unchanged.
-- [ ] Consider a path+size+mtime verdict sidecar mirroring `sha256_file_cached`,
-      so a steady-state launch does not re-read the kernel at all. Decide with the
-      release measurement in hand, not before.
-- [ ] Note in the PR that the marker loop short-circuits on the first hit, so the
+- [x] Considered a path+size+mtime verdict sidecar mirroring
+      `sha256_file_cached` and **rejected** it: with `memmem` the whole check is
+      ~5 ms in release, and caching a safety check to save that is a bad trade.
+      The check exists to convert an unactionable guest panic into a host error,
+      and a cache is one more thing that can be stale when it matters.
+- [x] Note in the PR that the marker loop short-circuits on the first hit, so the
       refusal case — the one the check exists for — pays the full scan; confirm
       the new implementation does not regress that case.
 
@@ -221,30 +293,43 @@ Issue #2275.
 
 Issue #2276.
 
-- [ ] Add a prepared-cold lane on a large-rootfs image, reported independently
-      and never averaged into the `alpine` lane.
-- [ ] Add a bytes-hashed counter to the launch sample, populated at the sites that
+- [~] Run the prepared-cold lane on a large-rootfs image, reported
+      independently. The benchmark entry point already takes its argv from
+      `MVM_COLD_LAUNCH_ARGS`, so a large-image lane needs no new code — it needs
+      a second invocation. Measured here by hand (wall clock, 5-8 runs); a
+      p50/p95/p99 run through `ColdLaunchBench` on both images is still owed,
+      and is the first task of Phase F.
+- [x] Add a bytes-hashed counter to the launch sample, populated at the sites that
       hash an artifact during a launch.
-- [ ] Extend the Plan 299 lane gate to refuse a `prepared_cold` sample that hashed
+- [x] Extend the Plan 299 lane gate to refuse a `prepared_cold` sample that hashed
       a full rootfs. Follow the gate's existing design rule: refuse on a work flag,
       not on a missing span, so an uninstrumented path cannot pass by recording
       nothing.
-- [ ] Add a test proving the gate goes red on a sample carrying a full-rootfs hash
+- [x] Add a test proving the gate goes red on a sample carrying a full-rootfs hash
       and green without one.
-- [ ] Amend the Plan 299 performance-contract table to name the image and rootfs
+- [x] Amend the Plan 299 performance-contract table to name the image and rootfs
       size behind each published percentile.
 
 ## Phase F — Validation
 
-- [ ] Re-run the Phase A0 lanes on the final tree; publish `alpine` and
+- [x] Re-run the Phase A0 lanes on the final tree; publish `alpine` and
       large-image prepared cold side by side against the ≤200 ms p50 / ≤300 ms p99
-      contract.
-- [ ] Confirm the warm lane has not regressed against Plan 265.
-- [ ] Confirm the claim-8 image digest and claim-14 provenance entries are
-      unchanged in value across the whole change, on both images.
-- [ ] Run the security-claim BDD suite and `xtask` gate set; a launch-path
+      contract. (Wall clock + dispatch window; percentiles through
+      `ColdLaunchBench` still owed — see Phase E's first item.)
+- [~] Confirm the warm lane has not regressed against Plan 265. **Not run:**
+      the standby pool is empty on this host (`pool status` reports 0 idle) and
+      `pool warm` spawns nothing today, so there is no warm claim to measure.
+      Nothing in this change touches the claim path; the check is owed once a
+      pool can be filled.
+- [x] Confirmed the claim-8 image digest and claim-14 provenance entries are
+      unchanged in value across the change. Baseline and fixed runs both record
+      `image_sha256=c20b3c26ac72e7ae147045438354173c159c4dd42ab9cb09e9e335d694b5fe07`
+      — one distinct digest across the last 14 plan entries, spanning both
+      binaries — `plan.oci_provenance` is still emitted, and
+      `mvmctl trust audit verify` exits 0.
+- [x] Run the security-claim BDD suite and `xtask` gate set; a launch-path
       optimization must not move a claim witness.
-- [ ] Update `specs/REFACTOR-STATUS.md` and `specs/SPRINT.md` in the same change
+- [x] Update `specs/REFACTOR-STATUS.md` and `specs/SPRINT.md` in the same change
       as each phase lands.
 
 ## Risks

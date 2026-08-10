@@ -203,6 +203,8 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                 "image_build",
                 "mount_materialize",
                 "warm_claim",
+                "artifact_hash",
+                "process_table_scan",
             ])?;
             require_cold(lane, sample)
         }
@@ -212,11 +214,19 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                 "image_build",
                 "mount_materialize",
                 "warm_claim",
+                "artifact_hash",
+                "process_table_scan",
             ])?;
             require_cold(lane, sample)
         }
         LaunchLane::MountMiss => {
-            forbid(vec!["image_pull", "image_build", "warm_claim"])?;
+            forbid(vec![
+                "image_pull",
+                "image_build",
+                "warm_claim",
+                "artifact_hash",
+                "process_table_scan",
+            ])?;
             if !work.mount_materialize {
                 return Err(LaneViolation::MissingWork {
                     lane,
@@ -680,6 +690,8 @@ mod tests {
             image_build: true,
             mount_materialize: true,
             warm_claim: true,
+            artifact_bytes_hashed: 1_205_739_520,
+            process_table_scans: 1,
         };
         let err = validate_lane(LaunchLane::PreparedCold, &sample).unwrap_err();
         assert_eq!(
@@ -690,10 +702,95 @@ mod tests {
                     "image_pull",
                     "image_build",
                     "mount_materialize",
-                    "warm_claim"
+                    "warm_claim",
+                    "artifact_hash",
+                    "process_table_scan"
                 ],
             }
         );
+    }
+
+    /// The regression this gate exists for: re-reading an already-cached
+    /// artifact to recompute a digest is not a pull, a build, a mount
+    /// materialization, or a warm claim, so before this flag existed such a
+    /// launch reported itself as a clean prepared-cold sample. Its cost is
+    /// linear in artifact size, which is why it stayed invisible on a small
+    /// image and dominated a large one.
+    #[test]
+    fn prepared_cold_rejects_a_launch_that_re_hashed_a_cached_artifact() {
+        let mut sample = launch_sample();
+        sample.work.artifact_bytes_hashed = 1_205_739_520;
+        let err = validate_lane(LaunchLane::PreparedCold, &sample).unwrap_err();
+        assert_eq!(
+            err,
+            LaneViolation::ForbiddenWork {
+                lane: LaunchLane::PreparedCold,
+                performed: vec!["artifact_hash"],
+            }
+        );
+        assert!(err.to_string().contains("artifact_hash"));
+    }
+
+    /// Zero is the prepared state, and it must not be confused with "the
+    /// counter was never populated": both read as no work, and only the first
+    /// is a claim. A sample that hashed nothing passes, which is what makes
+    /// the fixed launch path provable rather than merely faster.
+    #[test]
+    fn prepared_cold_accepts_a_launch_that_hashed_nothing() {
+        let mut sample = launch_sample();
+        sample.work.artifact_bytes_hashed = 0;
+        assert_eq!(validate_lane(LaunchLane::PreparedCold, &sample), Ok(()));
+    }
+
+    /// The mount-miss lane materializes a mount image and is expected to; it
+    /// still boots prepared artifacts, so a rootfs re-hash contaminates it the
+    /// same way.
+    #[test]
+    fn mount_miss_still_rejects_a_re_hashed_artifact() {
+        let mut sample = launch_sample();
+        sample.work.mount_materialize = true;
+        sample.work.artifact_bytes_hashed = 1_205_739_520;
+        let err = validate_lane(LaunchLane::MountMiss, &sample).unwrap_err();
+        assert_eq!(
+            err,
+            LaneViolation::ForbiddenWork {
+                lane: LaunchLane::MountMiss,
+                performed: vec!["artifact_hash"],
+            }
+        );
+    }
+
+    /// The other half of the same finding: a process-table snapshot is
+    /// maintenance whose cost belongs to a run that spawns a helper, not to one
+    /// that resolved everything from cache. Like the re-hash, it is not a pull,
+    /// a build, a materialization, or a claim.
+    #[test]
+    fn prepared_cold_rejects_a_launch_that_walked_the_process_table() {
+        let mut sample = launch_sample();
+        sample.work.process_table_scans = 1;
+        let err = validate_lane(LaunchLane::PreparedCold, &sample).unwrap_err();
+        assert_eq!(
+            err,
+            LaneViolation::ForbiddenWork {
+                lane: LaunchLane::PreparedCold,
+                performed: vec!["process_table_scan"],
+            }
+        );
+        assert!(err.to_string().contains("process_table_scan"));
+    }
+
+    /// The artifact-miss lane is the one that legitimately hashes: it acquires
+    /// and prepares the image, so reading it end-to-end is the work being
+    /// measured rather than work being repeated.
+    #[test]
+    fn artifact_miss_permits_hashing_because_that_lane_is_the_acquisition() {
+        let mut sample = launch_sample();
+        sample.work.image_pull = true;
+        sample.work.artifact_bytes_hashed = 1_205_739_520;
+        // The same lane spawns a builder VM when the ext4 writer cannot emit a
+        // tree, so it reaps before doing so; that sweep belongs to this lane.
+        sample.work.process_table_scans = 1;
+        assert_eq!(validate_lane(LaunchLane::ArtifactMiss, &sample), Ok(()));
     }
 
     #[test]

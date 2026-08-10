@@ -92,6 +92,15 @@ Required release-build gates on each supported backend:
 | Prepared cold with mount-cache hit | ≤200 ms | ≤250 ms | ≤300 ms |
 | Warm claim to authenticated agent | no regression against Plan 265 | no regression | no regression |
 
+**Every published percentile names the image and rootfs size it was measured
+on.** The gates above are size-independent targets, but a launch path can carry
+per-launch work that is a function of artifact size, and a number measured on a
+small image then reads as a property of the code rather than of the pair. The
+recorded baselines below use `alpine` (9.9 MB cached rootfs); Plan 311 adds a
+large-image lane on `python:3.12` (1.1 GB) after finding ~557 ms of per-launch
+rootfs re-hashing that `alpine` could not reveal and this contract's lane gate
+had no flag for.
+
 Mount misses and artifact misses are reported with p50/p95/p99 and cache hit
 rate, but are not silently included in the prepared-cold SLO.
 
@@ -166,6 +175,9 @@ native baselines are measured and recorded below from release binaries.
 Release `mvmctl`, `machine run --image alpine -- /bin/true`, prepared artifact
 cache, 20 measured iterations after 2 warm-ups per lane. Every sample cleared
 the lane gate. Raw samples in `$MVM_HOME/state/bench/cold-launch-*.json`.
+
+Image: `alpine`, 9.9 MB cached rootfs. See Plan 311 for the same launch on a
+1.1 GB rootfs and for what that difference exposed.
 
 | span (p50 / p99) | prepared cold | warm claim |
 |---|---:|---:|

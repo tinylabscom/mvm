@@ -62,18 +62,25 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     )
 }
 
+/// Reap helper processes a previous run orphaned, immediately before this run
+/// may spawn a builder VM of its own.
+///
+/// Rootfs materialization falls back to a builder VM when the in-process ext4
+/// writer cannot faithfully emit a tree, and that is the only way this path
+/// adds a helper. Called at the branches that can reach a materializer rather
+/// than on entry: a run that resolves entirely from the cache spawns nothing,
+/// and the sweep needs a host process-table snapshot whose cost the prepared
+/// launch path should not pay for cleanup it cannot cause.
+fn sweep_before_builder_vm() {
+    crate::commands::env::builder_vm::sweep_orphaned_vm_helpers_before_spawn();
+}
+
 pub(super) fn resolve_or_pull_run_image_with(
     cache_root: &Path,
     reference: &str,
     prod: bool,
     materialize: RuntimeMaterializer,
 ) -> Result<ResolvedOciRunImage> {
-    // Rootfs materialization can fall back to a builder VM when the in-process
-    // ext4 writer cannot faithfully emit a tree. `mvmctl image pull` reaps
-    // previous helper processes at startup; the run-image path is the other
-    // place a builder VM can spawn, so give it the same sweep before we might add one.
-    crate::commands::env::builder_vm::sweep_orphaned_vm_helpers_on_startup();
-
     // Local sources route to their own ingest; a registry reference falls
     // through to the cache-or-pull path below.
     match source::ImageSource::classify(reference)? {
@@ -100,9 +107,11 @@ pub(super) fn resolve_or_pull_run_image_with(
             (cached, false, None, None)
         }
         Some(cached) => {
+            sweep_before_builder_vm();
             match rematerialize_cached_image(cache_root, cached, &runtime_tag, materialize, prod)? {
                 Some(repaired) => (repaired, false, None, None),
                 None => {
+                    sweep_before_builder_vm();
                     let (cached, trust, auth_source) =
                         pull_image_ref(cache_root, image_ref.clone(), reference, prod)?;
                     (cached, true, Some(trust), Some(auth_source))
@@ -110,6 +119,7 @@ pub(super) fn resolve_or_pull_run_image_with(
             }
         }
         _ => {
+            sweep_before_builder_vm();
             let (cached, trust, auth_source) =
                 pull_image_ref(cache_root, image_ref.clone(), reference, prod)?;
             (cached, true, Some(trust), Some(auth_source))
@@ -135,6 +145,7 @@ pub(super) fn resolve_or_pull_run_image_with(
         // is this a genuine cache loss the user must re-pull.
         match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
             Some(unpacked_root) => {
+                sweep_before_builder_vm();
                 materialize(
                     cache_root,
                     &unpacked_root,

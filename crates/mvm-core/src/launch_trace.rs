@@ -19,7 +19,7 @@
 //! diagnostic.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -187,16 +187,35 @@ impl LaunchTraceRecorder {
 pub struct AcquisitionWork {
     pub image_pull: bool,
     pub image_build: bool,
+    /// Bytes read end-to-end to produce an artifact digest.
+    ///
+    /// A count rather than a flag because the number is the diagnosis: it names
+    /// which artifact was re-read without anyone having to guess from a
+    /// boolean. A prepared launch has a cached digest for every artifact it
+    /// boots, so on that lane this is zero, and any nonzero value is work the
+    /// launch repeated.
+    pub artifact_bytes_hashed: u64,
+    /// Snapshots taken of the host process table during this launch.
+    ///
+    /// Each one costs a subprocess and scales with how busy the host is, not
+    /// with anything the launch controls. A prepared launch spawns no helper
+    /// and so needs no snapshot; a nonzero count means maintenance ran on the
+    /// launch path.
+    pub process_table_scans: u64,
 }
 
 struct AcquisitionRecorder {
     image_pull: AtomicBool,
     image_build: AtomicBool,
+    artifact_bytes_hashed: AtomicU64,
+    process_table_scans: AtomicU64,
 }
 
 static ACQUISITION: AcquisitionRecorder = AcquisitionRecorder {
     image_pull: AtomicBool::new(false),
     image_build: AtomicBool::new(false),
+    artifact_bytes_hashed: AtomicU64::new(0),
+    process_table_scans: AtomicU64::new(0),
 };
 
 /// Record that this process fetched image bytes from a registry.
@@ -209,12 +228,31 @@ pub fn record_image_build() {
     ACQUISITION.image_build.store(true, Ordering::Relaxed);
 }
 
+/// Record that this process read `bytes` end-to-end to digest an artifact.
+///
+/// Accumulates rather than latching: two re-reads are worse than one, and a
+/// gate that reported them identically would hide the second.
+pub fn record_artifact_bytes_hashed(bytes: u64) {
+    ACQUISITION
+        .artifact_bytes_hashed
+        .fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Record that this process snapshotted the host process table.
+pub fn record_process_table_scan() {
+    ACQUISITION
+        .process_table_scans
+        .fetch_add(1, Ordering::Relaxed);
+}
+
 /// What acquisition work this process has performed so far.
 #[must_use]
 pub fn recorded_acquisition() -> AcquisitionWork {
     AcquisitionWork {
         image_pull: ACQUISITION.image_pull.load(Ordering::Relaxed),
         image_build: ACQUISITION.image_build.load(Ordering::Relaxed),
+        artifact_bytes_hashed: ACQUISITION.artifact_bytes_hashed.load(Ordering::Relaxed),
+        process_table_scans: ACQUISITION.process_table_scans.load(Ordering::Relaxed),
     }
 }
 
@@ -359,12 +397,22 @@ mod tests {
         assert!(!recorded_acquisition().image_build);
         record_image_pull();
         record_image_build();
-        assert_eq!(
-            recorded_acquisition(),
-            AcquisitionWork {
-                image_pull: true,
-                image_build: true
-            }
+        let acquired = recorded_acquisition();
+        assert!(acquired.image_pull);
+        assert!(acquired.image_build);
+    }
+
+    /// The byte counter accumulates rather than latching, so two re-reads
+    /// report as more work than one. Asserted as a delta because the recorder
+    /// is process-wide and other tests in this binary hash files too.
+    #[test]
+    fn artifact_bytes_hashed_accumulates_every_read() {
+        let before = recorded_acquisition().artifact_bytes_hashed;
+        record_artifact_bytes_hashed(1_000);
+        record_artifact_bytes_hashed(200_000);
+        assert!(
+            recorded_acquisition().artifact_bytes_hashed >= before + 201_000,
+            "each reported read must add to the total, not replace it"
         );
     }
 

@@ -151,6 +151,39 @@ fn assert_workload_kernel_supports_verity_rejects_a_marker_free_kernel() {
     assert!(assert_workload_kernel_supports_verity(opaque.to_str().unwrap()).is_ok());
 }
 
+/// The scan runs over a whole multi-megabyte kernel on every launch, so its
+/// implementation was swapped for a skip-capable search. These are the cases
+/// where a naive and a skipping search can disagree: a marker at the very end
+/// (the worst offset), a long run of near-misses that share a marker's prefix,
+/// and a needle longer than the haystack.
+#[test]
+fn kernel_marker_search_finds_markers_at_any_offset_and_rejects_near_misses() {
+    let mut trailing = b"Linux version 6.6.0 ".to_vec();
+    trailing.extend(std::iter::repeat_n(b'\0', 512 * 1024));
+    trailing.extend_from_slice(b"dm-verity");
+    assert_eq!(
+        kernel_carries_dm_verity(&trailing),
+        Some(true),
+        "a marker in the final bytes must still be found"
+    );
+
+    // Repeated partial matches of `dm_table_create` that never complete: the
+    // shape a naive search walks quadratically, and which must still answer
+    // false.
+    let mut near_miss = b"Linux version 6.6.0 ".to_vec();
+    for _ in 0..40_000 {
+        near_miss.extend_from_slice(b"dm_table_creat_");
+    }
+    assert_eq!(
+        kernel_carries_dm_verity(&near_miss),
+        Some(false),
+        "a prefix that never completes a marker is not a marker"
+    );
+
+    // Needle longer than haystack must not panic or match.
+    assert_eq!(kernel_carries_dm_verity(b"Linux vers"), None);
+}
+
 #[test]
 #[cfg(feature = "builder-vm")]
 fn build_heartbeat_emits_while_alive_and_stops_on_drop() {
