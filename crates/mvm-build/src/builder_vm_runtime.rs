@@ -1267,8 +1267,6 @@ pub(crate) fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), Bu
 /// HVF; harmless for libkrun). Returns the locked handle; dropping it
 /// releases the lock.
 pub(crate) fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, BuilderVmError> {
-    use fs2::FileExt;
-
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1279,7 +1277,7 @@ pub(crate) fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, Bu
             BuilderVmError::ExtractionFailed(format!("open lock {}: {e}", lock_path.display()))
         })?;
 
-    file.try_lock_exclusive().map_err(|e| {
+    file.try_lock().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "image {} is already attached by another builder VM process; \
              wait for the running `mvmctl build` / `mvmctl deps install` to finish and retry: {e}",
@@ -1990,12 +1988,11 @@ mod tests {
         );
     }
 
-    /// fs2's `try_lock_exclusive` can spuriously return `EWOULDBLOCK` on
-    /// a fresh, uncontended path under heavy parallel test load (the
-    /// `reference_fs2_flock_spurious_ewouldblock` flake). Production must
-    /// NOT retry — there a refusal is a real concurrent holder — but a
-    /// test that expects the lock to be FREE retries briefly to absorb
-    /// the spurious failure.
+    /// `try_lock` can report `WouldBlock` on a fresh, uncontended path under
+    /// heavy parallel test load. The retry predates the move off `fs2`, and
+    /// nothing here proves the platform `flock` is innocent, so it stays.
+    /// Production must NOT retry — there a refusal is a real concurrent
+    /// holder — but a test that expects the lock to be FREE absorbs it.
     fn acquire_named_or_retry(
         cache_dir: &Path,
         file_name: &str,
@@ -2063,7 +2060,6 @@ mod tests {
     /// still locked the image. The lock lives on `<image>.lock` instead.
     #[test]
     fn nix_store_lock_does_not_lock_the_image_itself() {
-        use fs2::FileExt;
         let scratch = tempfile::TempDir::new().unwrap();
         let cache_dir = scratch.path().join("builder-vm");
         let guard = acquire_named_or_retry(&cache_dir, "nix-store-aarch64.img", 64);
@@ -2078,8 +2074,8 @@ mod tests {
         assert!(sidecar.to_string_lossy().ends_with(".img.lock"));
 
         // A second handle on the IMAGE can take an exclusive flock —
-        // proving the guard didn't lock the image. Retry to absorb the
-        // fs2 spurious-EWOULDBLOCK flake on a fresh path.
+        // proving the guard didn't lock the image. Retry to absorb a
+        // spurious `WouldBlock` on a fresh path under parallel test load.
         let img = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -2087,7 +2083,7 @@ mod tests {
             .expect("open image");
         let mut locked = false;
         for _ in 0..40 {
-            if img.try_lock_exclusive().is_ok() {
+            if img.try_lock().is_ok() {
                 locked = true;
                 break;
             }
@@ -2097,8 +2093,8 @@ mod tests {
         drop(guard);
     }
 
-    /// fs2 spurious-EWOULDBLOCK retry wrapper for a RW volume image that
-    /// the test expects to be FREE (mirrors `acquire_named_or_retry`).
+    /// Spurious-`WouldBlock` retry wrapper for a RW volume image the test
+    /// expects to be FREE (mirrors `acquire_named_or_retry`).
     fn ensure_vol_rw_or_retry(path: &Path, size_bytes: u64) -> VolumeImageLock {
         let mut last = String::new();
         for _ in 0..40 {

@@ -115,7 +115,13 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// had just serialized, and carried the whole ASN.1 stack including the
 /// closure's last `nom` 7), and replacing `rayon` with an order-preserving
 /// scoped-thread `par_map` in `mvm-fs`, which is all five call sites needed.
-const CLOSURE_BUDGET: usize = 263;
+///
+/// 262 (was 263): `fs2` existed only for `FileExt`'s advisory file locking,
+/// which std stabilized in 1.89 — well under the pinned 1.96 toolchain. std
+/// also splits contention out of the error type (`TryLockError::WouldBlock`
+/// vs `::Error`), so "another process holds it" stops riding on an errno
+/// comparison.
+const CLOSURE_BUDGET: usize = 262;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

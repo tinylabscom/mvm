@@ -90,7 +90,6 @@ tracing.workspace = true
 # `fs`: `LocalBackend`'s atomic put (write-tmp + fsync + rename) over
 # `tokio::fs`.
 tokio = { workspace = true, features = ["fs"] }
-fs2.workspace = true
 # DEK held in `EncryptedStorage` is zeroized on drop.
 zeroize.workspace = true
 # Audited rust-vmm guest-memory primitive behind the in-house VMM's `GuestMem`
