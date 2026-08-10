@@ -21,11 +21,10 @@ use std::path::Path;
 use std::process::Command;
 
 /// Crates known to resolve at more than one major today. Baseline recaptured
-/// 2026-08-10 from `cargo metadata --locked` after Plan 309 Phases 0-1 cut 23
-/// crates from the shipped closure (ratcheted 44 → 11 entries). Remove an entry
-/// freely once the duplication is gone (the gate flags stale entries); adding
-/// one must be justified in the PR that does — it admits a new duplicate major
-/// into the build.
+/// 2026-08-10 from `cargo metadata --locked` (ratcheted 44 → 11 entries).
+/// Remove an entry freely once the duplication is gone (the gate flags stale
+/// entries); adding one must be justified in the PR that does — it admits a
+/// new duplicate major into the build.
 const ALLOWLIST: &[&str] = &[
     "bitflags",
     // Neither defmt major is compiled: both are optional dependencies nobody
@@ -56,9 +55,8 @@ const ALLOWLIST: &[&str] = &[
     "vmm-sys-util",
     // windows-sys 0.52 and 0.60/0.61 remain a split; windows-core follows.
     // The per-architecture support crates (windows_aarch64_*, windows_i686_*,
-    // windows_x86_64_*, windows-targets) converged after Plan 309 dropped rayon
-    // and the rcgen x509-parser feature, so they are no longer duplicated and
-    // are not listed here.
+    // windows_x86_64_*, windows-targets) converged once rayon and rcgen's
+    // x509-parser feature were dropped — they are no longer duplicated.
     "windows-core",
     "windows-sys",
 ];
