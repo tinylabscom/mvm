@@ -1506,8 +1506,9 @@ Then unify + retire the old paths:
   per-architecture built-in-symbol budget; cold-launch JSON reports carry the
   same artifact byte and kernel-config measurements beside their timings. The
   libkrun live probe now has bounded resident host-process capture after
-  authenticated readiness. Guest demand-fault, restore, and cross-backend live
-  measurements remain open.
+  authenticated readiness, and the HVF guest-RAM seam now reports resident
+  bytes with a direct untouched-versus-touched demand-fault witness. End-to-end
+  guest working-set, restore, and cross-backend live measurements remain open.
 - [x] **Filesystem-path baseline — issue #2281.**
   `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
   source identity, node composition, emitted ext4 size/digest, materializer

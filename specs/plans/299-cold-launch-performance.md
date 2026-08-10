@@ -567,6 +567,11 @@ optimization backend-local and the benchmark backend-neutral.
       the platform footprint reader, and drops every held guest on success or
       failure. This reports host process residency; guest demand-fault and
       restore-fault evidence remain separate gates.
+- [x] Add an allocation-level demand-fault witness to the HVF guest-RAM seam.
+      `GuestRam` exposes a `mincore` resident-byte query, the raw kernel boot
+      result records it after vCPU and host-I/O shutdown, and a focused test
+      proves untouched anonymous pages become resident only after writes.
+      This is not a substitute for an end-to-end guest working-set result.
 - [x] Add a baseline filesystem-path report at the existing pure-Rust
       materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
       content digest, node composition, file bytes, emitted image size/digest,

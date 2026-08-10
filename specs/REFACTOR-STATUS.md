@@ -20,8 +20,9 @@ for detailed scope and acceptance criteria.
       #2196, and #2199. Launch evidence now records the tier-selected root
       filesystem strategy and rejects missing or mixed strategies so
       filesystem comparisons cannot mix security tiers. The libkrun probe also
-      exposes bounded resident host-process capture; guest demand-fault,
-      restore, and cross-backend evidence remain open.
+      exposes bounded resident host-process capture, and the HVF guest-RAM seam
+      exposes resident bytes with a demand-fault witness; end-to-end guest
+      working-set, restore, and cross-backend evidence remain open.
 
 ## In-flight plans
 - [x] Plan 2167 — durable agent session and event contract

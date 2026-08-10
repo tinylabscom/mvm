@@ -149,6 +149,9 @@ pub struct KernelBootResult {
     /// port (the transient run-to-exit signal). `None` for a run that ended by
     /// timeout/stop without a workload-exit report.
     pub workload_exit_code: Option<i32>,
+    /// Host-resident bytes backing the guest RAM mapping at boot completion.
+    /// `None` on platforms without a resident-page query.
+    pub resident_ram_bytes: Option<usize>,
 }
 
 /// Host-supplied boot inputs the supervisor threads into a guest: the vsock
@@ -968,6 +971,7 @@ unsafe fn run(
                     Err(HvfError::GicCreate(0))
                 }
             };
+            let snapshot_guest_ram = &*guest_ram;
             run::run_with_pause_hook(
                 &vcpu,
                 set_irq,
@@ -1030,7 +1034,7 @@ unsafe fn run(
                     if !request_path.exists() {
                         return Ok(());
                     }
-                    let ram_bytes = guest_ram.snapshot_bytes();
+                    let ram_bytes = snapshot_guest_ram.snapshot_bytes();
                     let device_bytes = capture_device_states(devices)
                         .map_err(|_| HvfError::SnapshotState("snapshot device capture failed"))?;
                     let vcpu_state = vcpu.capture_state()?;
@@ -1081,6 +1085,10 @@ unsafe fn run(
         if let Some(vs) = &vsock_dev {
             r.vsock_received = vs.received();
             r.workload_exit_code = vs.workload_exit_code();
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            r.resident_ram_bytes = guest_ram.resident_bytes().ok();
         }
         Ok(r)
     }
