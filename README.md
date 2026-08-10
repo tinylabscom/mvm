@@ -749,6 +749,79 @@ KVM box lives in [`nix/ops/hetzner/`](nix/ops/hetzner/), and the
 [contributor guide](public/src/content/docs/contributing/development.md) has the
 details.
 
+### Benchmarks
+
+Live benchmarks are opt-in and launch real workloads; they skip unless their
+enable variable is set. Run them from a quiet host with prepared artifacts, and
+use a release build when comparing results across commits.
+
+#### 1,000-VM lifecycle benchmark
+
+This measures serial or bounded-concurrency start/stop calls. It defaults to
+HVF and supports `firecracker`, `hvf`, `libkrun`, `qemu`, `apple-container`, or
+`all`:
+
+```bash
+MVM_LIFECYCLE_BENCH=1 \
+MVM_LIFECYCLE_BENCH_KERNEL=/path/to/vmlinux \
+MVM_LIFECYCLE_BENCH_ROOTFS=/path/to/rootfs.ext4 \
+cargo test --release --test microvm_lifecycle_bench -- \
+  --exact --nocapture
+```
+
+Useful overrides include:
+
+```bash
+MVM_LIFECYCLE_BENCH_COUNT=1000          # measured start/stop cycles
+MVM_LIFECYCLE_BENCH_CONCURRENCY=1      # resident VMs per batch
+MVM_LIFECYCLE_BENCH_BACKENDS=hvf       # or: all,firecracker,qemu
+MVM_LIFECYCLE_BENCH_CPUS=1
+MVM_LIFECYCLE_BENCH_MEMORY_MIB=256
+```
+
+The report prints start and stop p50/p95/p99/max, wall time, throughput, and
+stop-phase detail when the backend exposes it. For HVF, that includes supervisor
+signal time, PID disappearance, forced-kill wait, and state cleanup. The test
+requires explicit kernel and rootfs paths so it cannot silently benchmark the
+wrong artifacts.
+
+#### Prepared cold-launch benchmark
+
+This invokes a built `mvmctl` directly, keeping compilation out of the launch
+sample. The default lane is `prepared_cold`; other lanes include
+`prepared_cold_mount_hit`, `mount_miss`, `artifact_miss`, and `warm_claim`.
+
+```bash
+cargo build --release
+MVM_COLD_LAUNCH_MVMCTL="$PWD/target/release/mvmctl" \
+MVM_COLD_LAUNCH_ARGS="machine run --image alpine -- /bin/true" \
+MVM_COLD_LAUNCH_RUNS=20 \
+MVM_COLD_LAUNCH_WARMUP=2 \
+cargo test -p mvm-cli --test cold_launch_bench \
+  prepared_cold_launch_baseline -- --ignored --exact --nocapture
+```
+
+Set `MVM_COLD_LAUNCH_LANE` to select another lane. Reports are written under
+`$MVM_HOME/state/bench/`.
+
+#### Other local benchmarks
+
+```bash
+# Prebuilt backend boot, with optional guest-agent readiness.
+MVM_RUNTIME_BOOT_BENCH=1 \
+MVM_RUNTIME_BOOT_KERNEL=/path/to/vmlinux \
+MVM_RUNTIME_BOOT_ROOTFS=/path/to/rootfs.ext4 \
+cargo test --test runtime_boot_bench \
+  prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+# Direct-kernel versus SOCKS5/relayed egress paths.
+MVM_EGRESS_BENCH=1 MVM_EGRESS_BENCH_RUNS=1000 \
+cargo test --test egress_path_bench -- --nocapture
+
+# Criterion benchmarks for filesystem build and unpack helpers.
+cargo bench -p mvm-fs
+```
+
 ### Repository layout
 
 14-crate Cargo workspace. The dependency spine runs low → high:
