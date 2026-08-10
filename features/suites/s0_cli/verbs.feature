@@ -32,5 +32,5 @@ Feature: mvmctl top-level CLI surface
     But the help output does not contain "Mutually exclusive with"
     And the help output does not contain "production-safe call surface"
 
-  Scenario: every CLI subcommand help fits within 80 columns
-    Then every mvmctl subcommand help fits within 80 columns
+  Scenario: every CLI command and subcommand help fits within 80 columns
+    Then every mvmctl command and subcommand help fits within 80 columns

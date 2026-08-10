@@ -54,6 +54,8 @@ use dispatch::TopLevelCommand;
 
 use shared::{CHILD_PIDS, IN_CONSOLE_MODE, with_hints};
 
+const CLI_HELP_WIDTH: usize = 80;
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "mvmctl",
@@ -250,7 +252,11 @@ pub fn run() -> Result<()> {
             print!("{}", constrain_help_output(&error.to_string()));
             return Ok(());
         }
-        Err(error) => error.exit(),
+        Err(error) => {
+            let exit_code = error.exit_code();
+            eprint!("{}", constrain_help_output(&error.to_string()));
+            std::process::exit(exit_code);
+        }
     };
     apply_startup_env(&cli);
     register_inhouse_builder();
@@ -281,14 +287,16 @@ pub fn run() -> Result<()> {
 }
 
 fn constrain_help_width(command: clap::Command) -> clap::Command {
-    let mut command = command.term_width(80).max_term_width(80);
+    let mut command = command
+        .term_width(CLI_HELP_WIDTH)
+        .max_term_width(CLI_HELP_WIDTH);
     if let Some(usage) = command
         .clone()
         .render_help()
         .to_string()
         .lines()
         .find(|line| line.starts_with("Usage:"))
-        && usage.chars().count() > 80
+        && usage.chars().count() > CLI_HELP_WIDTH
     {
         command = command.override_usage(wrap_usage(usage));
     }
@@ -324,7 +332,7 @@ fn constrain_help_output(help: &str) -> String {
     let trailing_newline = help.ends_with('\n');
     let mut constrained = help
         .lines()
-        .map(|line| wrap_help_line(line, 80))
+        .map(|line| wrap_help_line(line, CLI_HELP_WIDTH))
         .collect::<Vec<_>>()
         .join("\n");
     if trailing_newline {
@@ -352,17 +360,35 @@ fn wrap_help_line(line: &str, width: usize) -> String {
     let mut current_limit = width.saturating_sub(indentation);
     let mut wrapped = Vec::new();
 
-    for word in line.split_whitespace() {
-        let word_width = word.chars().count();
-        if current.is_empty() {
-            current.push_str(word);
-        } else if current.chars().count() + 1 + word_width <= current_limit {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            wrapped.push(current);
-            current = word.to_owned();
-            current_limit = width.saturating_sub(continuation.chars().count());
+    for source_word in line.split_whitespace() {
+        let mut word = source_word.to_owned();
+        loop {
+            if current.is_empty() {
+                let available = current_limit.max(1);
+                let word_width = word.chars().count();
+                if word_width <= available {
+                    current = word;
+                    break;
+                }
+
+                let mut characters = word.chars();
+                current = characters.by_ref().take(available).collect();
+                wrapped.push(current);
+                current = String::new();
+                word = characters.collect();
+                current_limit = width.saturating_sub(continuation.chars().count());
+            } else {
+                let available = current_limit.saturating_sub(current.chars().count() + 1);
+                if word.chars().count() <= available {
+                    current.push(' ');
+                    current.push_str(&word);
+                    break;
+                }
+
+                wrapped.push(current);
+                current = String::new();
+                current_limit = width.saturating_sub(continuation.chars().count());
+            }
         }
     }
     if !current.is_empty() {

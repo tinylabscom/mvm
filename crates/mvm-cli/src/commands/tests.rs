@@ -12,9 +12,73 @@ fn help_output_wraps_long_lines() {
         "  command  A long description that must wrap before it exceeds the fixed output width";
     let wrapped = constrain_help_output(help);
 
-    assert!(wrapped.lines().all(|line| line.chars().count() <= 80));
+    assert!(
+        wrapped
+            .lines()
+            .all(|line| line.chars().count() <= CLI_HELP_WIDTH)
+    );
     assert!(wrapped.lines().count() > 1);
     assert!(wrapped.contains("\n  "));
+}
+
+#[test]
+fn help_output_splits_unbreakable_tokens() {
+    let help = format!("  command  {}", "x".repeat(CLI_HELP_WIDTH * 2));
+    let wrapped = constrain_help_output(&help);
+
+    assert!(
+        wrapped
+            .lines()
+            .all(|line| line.chars().count() <= CLI_HELP_WIDTH)
+    );
+}
+
+#[test]
+fn every_command_help_surface_stays_within_80_columns() {
+    let mut violations = Vec::new();
+    collect_help_width_violations(cli_command(), &mut Vec::new(), &mut violations);
+
+    assert!(
+        violations.is_empty(),
+        "CLI help lines must be 80 characters or shorter:\n{}",
+        violations.join("\n")
+    );
+}
+
+fn collect_help_width_violations(
+    command: clap::Command,
+    path: &mut Vec<String>,
+    violations: &mut Vec<String>,
+) {
+    path.push(command.get_name().to_owned());
+
+    for (help_kind, help) in [
+        (
+            "help",
+            constrain_help_output(&command.clone().render_help().to_string()),
+        ),
+        (
+            "long-help",
+            constrain_help_output(&command.clone().render_long_help().to_string()),
+        ),
+    ] {
+        for (line_number, line) in help.lines().enumerate() {
+            let width = line.chars().count();
+            if width > CLI_HELP_WIDTH {
+                violations.push(format!(
+                    "{} --{help_kind} line {} is {width} columns: {line}",
+                    path.join(" "),
+                    line_number + 1
+                ));
+            }
+        }
+    }
+
+    for subcommand in command.get_subcommands().cloned().collect::<Vec<_>>() {
+        collect_help_width_violations(subcommand, path, violations);
+    }
+
+    path.pop();
 }
 
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
