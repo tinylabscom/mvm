@@ -73,7 +73,13 @@ pub struct RegisterVm {
     pub services_bindings: Vec<ServiceId>,
     /// Exact per-verb capability bindings approved for this workload. The
     /// host-signed registration is the only source of this list.
-    #[serde(default)]
+    ///
+    /// Skip-serialized when empty. `ControlRequest` is signed over its JCS
+    /// canonical bytes, so a field that serialized as `[]` on every
+    /// registration would change those bytes for workloads that bind no
+    /// capabilities — invalidating signatures produced before this field
+    /// existed. Omitting the empty case keeps them byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_bindings: Vec<CapabilityBinding>,
 }
 

@@ -5,7 +5,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
+
+AgentRequestId = str
+
+
+DescriptorDigestItem = int
+
+
+InputDigestItem = int
 
 
 @dataclass
@@ -122,6 +130,38 @@ class ServiceErrorCode15(Enum):
     internal_error = 'internal_error'
 
 
+class ServiceErrorCode16(Enum):
+    capability_denied = 'capability_denied'
+
+
+class ServiceErrorCode17(Enum):
+    capability_binding_mismatch = 'capability_binding_mismatch'
+
+
+class ServiceErrorCode18(Enum):
+    capability_protocol_mismatch = 'capability_protocol_mismatch'
+
+
+class ServiceErrorCode19(Enum):
+    capability_replay = 'capability_replay'
+
+
+class ServiceErrorCode20(Enum):
+    capability_input_too_large = 'capability_input_too_large'
+
+
+class ServiceErrorCode21(Enum):
+    capability_output_too_large = 'capability_output_too_large'
+
+
+class ServiceErrorCode22(Enum):
+    capability_canceled = 'capability_canceled'
+
+
+class ServiceErrorCode23(Enum):
+    capability_handler_failed = 'capability_handler_failed'
+
+
 ServiceErrorCode = Union[
     ServiceErrorCode1,
     ServiceErrorCode2,
@@ -138,6 +178,14 @@ ServiceErrorCode = Union[
     ServiceErrorCode13,
     ServiceErrorCode14,
     ServiceErrorCode15,
+    ServiceErrorCode16,
+    ServiceErrorCode17,
+    ServiceErrorCode18,
+    ServiceErrorCode19,
+    ServiceErrorCode20,
+    ServiceErrorCode21,
+    ServiceErrorCode22,
+    ServiceErrorCode23,
 ]
 
 
@@ -176,6 +224,12 @@ class TimeNowResponse:
 
 
 @dataclass
+class CapabilityId:
+    service: ServiceId
+    verb: str
+
+
+@dataclass
 class EmitBatchEntryStatus2:
     code: EmitErrorCode
     kind: Kind1
@@ -199,11 +253,26 @@ class EmitBatchResponse:
 
 
 @dataclass
+class CapabilityBinding:
+    capability: CapabilityId
+    descriptor_digest: List[DescriptorDigestItem]
+
+
+@dataclass
+class CapabilityInvocation:
+    binding: CapabilityBinding
+    input_digest: List[InputDigestItem]
+    invocation_id: AgentRequestId
+    protocol_version: int
+
+
+@dataclass
 class ServiceCall:
     correlation_id: str
     payload: Any
     service: ServiceId
     verb: str
+    capability: Optional[CapabilityInvocation] = None
 
 
 @dataclass

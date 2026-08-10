@@ -31,6 +31,10 @@ export type EmitErrorCode = ("record_too_large" | "invalid_entry" | "audit_signe
  */
 export type ServiceId = string
 /**
+ * Stable public request identifier.
+ */
+export type AgentRequestId = string
+/**
  * The guest-bound envelope. Tagged variant; `Ok` carries the typed response payload, `Err` carries a typed error code + message.
  */
 export type ServiceResponse = ({
@@ -46,7 +50,7 @@ message: string
 /**
  * Typed broker error codes. Audit log entries carry the code as a stable snake_case string. New variants are additive; renames are wire-breaking.
  */
-export type ServiceErrorCode = ("not_bound" | "not_implemented" | "bad_request" | "rate_limit_exceeded" | "lifetime_quota_exhausted" | "queue_full" | "response_too_large" | "timeout" | "unavailable" | "not_ready" | "composition_depth" | "composition_width" | "service_call_abuse" | "session_revoked" | "internal_error")
+export type ServiceErrorCode = ("not_bound" | "not_implemented" | "bad_request" | "rate_limit_exceeded" | "lifetime_quota_exhausted" | "queue_full" | "response_too_large" | "timeout" | "unavailable" | "not_ready" | "composition_depth" | "composition_width" | "service_call_abuse" | "session_revoked" | "internal_error" | "capability_denied" | "capability_binding_mismatch" | "capability_protocol_mismatch" | "capability_replay" | "capability_input_too_large" | "capability_output_too_large" | "capability_canceled" | "capability_handler_failed")
 
 /**
  * Schema root: every broker wire type under one document so the shared `$defs` (`ServiceErrorCode`, `CorrelationId`, `EmitBatchEntryStatus`, …) are emitted once and the generated clients reference one definition set.
@@ -122,9 +126,66 @@ chain_head: string
  * The envelope itself is strictly typed (`deny_unknown_fields`); the `payload` is `serde_json::Value` because per-handler payloads vary. The handler's `parse_payload` step is the *real* schema gate for payload contents.
  */
 export interface ServiceCall {
+/**
+ * Optional typed capability metadata. Omitted for the established service-call path so its serialized shape remains byte-compatible.
+ */
+capability?: (CapabilityInvocation | null)
 correlation_id: string
 payload: unknown
 service: ServiceId
+verb: string
+}
+/**
+ * Typed invocation metadata carried alongside the existing broker payload.
+ */
+export interface CapabilityInvocation {
+/**
+ * Exact binding the caller claims to use.
+ */
+binding: CapabilityBinding
+/**
+ * Digest of the `ServiceCall::payload` value.
+ * 
+ * @minItems 32
+ * @maxItems 32
+ */
+input_digest: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]
+/**
+ * Bounded request identity used for replay refusal and audit joins.
+ */
+invocation_id: AgentRequestId
+/**
+ * Version of this invocation contract.
+ */
+protocol_version: number
+}
+/**
+ * Exact descriptor identity admitted for one workload.
+ */
+export interface CapabilityBinding {
+/**
+ * Capability identity approved by admission.
+ */
+capability: CapabilityId
+/**
+ * Digest of the complete descriptor approved by admission.
+ * 
+ * @minItems 32
+ * @maxItems 32
+ */
+descriptor_digest: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]
+}
+/**
+ * A versioned service verb that can be admitted independently.
+ */
+export interface CapabilityId {
+/**
+ * Versioned host service identity.
+ */
+service: ServiceId
+/**
+ * Verb within the versioned service.
+ */
 verb: string
 }
 /**

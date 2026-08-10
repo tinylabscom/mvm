@@ -127,6 +127,51 @@ mod tests {
         );
     }
 
+    /// An empty `capability_bindings` must vanish from the signed bytes
+    /// entirely rather than appear as `[]`.
+    ///
+    /// `ControlRequest` is signed over its JCS canonical bytes, so a field
+    /// that serialized on every registration would change the bytes for every
+    /// workload binding no capabilities — breaking signatures produced before
+    /// the field existed. The pin above covers the whole document; this
+    /// asserts the specific property directly, so a future edit that drops
+    /// `skip_serializing_if` fails with a message naming the cause instead of
+    /// a whole-string diff the reader has to decode.
+    #[test]
+    fn empty_capability_bindings_are_omitted_from_the_signed_bytes() {
+        let json = String::from_utf8(serde_jcs::to_vec(&sample_register()).unwrap()).unwrap();
+        assert!(
+            !json.contains("capability_bindings"),
+            "an empty capability binding set must be omitted, not serialized as []: {json}"
+        );
+    }
+
+    /// The converse: a non-empty binding set is carried in the signed bytes.
+    /// Without this, `skip_serializing_if` could be widened to always skip and
+    /// the test above would still pass while the host silently signed a
+    /// registration that authorized nothing.
+    #[test]
+    fn non_empty_capability_bindings_reach_the_signed_bytes() {
+        use mvm_contract::protocol::agent_capability::{CapabilityBinding, CapabilityId};
+
+        let mut req = sample_register();
+        if let ControlRequest::Register(ref mut r) = req {
+            r.capability_bindings = vec![CapabilityBinding {
+                capability: CapabilityId::new(
+                    mvm_contract::protocol::broker::ServiceId::parse("host.time.v1").unwrap(),
+                    "now",
+                )
+                .unwrap(),
+                descriptor_digest: [9u8; 32],
+            }];
+        }
+        let json = String::from_utf8(serde_jcs::to_vec(&req).unwrap()).unwrap();
+        assert!(
+            json.contains("capability_bindings"),
+            "a non-empty capability binding set must be signed over: {json}"
+        );
+    }
+
     #[test]
     fn sign_with_key_bytes_matches_sign() {
         let kb = [7u8; 32];
