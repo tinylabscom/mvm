@@ -714,15 +714,18 @@ pub fn run(workspace: &Path) -> Result<()> {
                 return Ok(());
             }
             let body = std::fs::read_to_string(path)?;
-            for line in body.lines() {
-                let Some((before, after)) = line.split_once("->") else {
+            // Scan whole signatures, not lines. rustfmt wraps any signature
+            // past its width limit, which puts the parameters and the return
+            // type on different lines — the single most likely shape a real
+            // second projection would take, and invisible to a line-based
+            // check. Comments are stripped first so prose quoting a signature
+            // is not mistaken for one.
+            for signature in fn_signatures(&strip_line_comments(&body)) {
+                let Some((params, ret)) = signature.rsplit_once("->") else {
                     continue;
                 };
-                if before.contains("fn ")
-                    && before.contains("Grants")
-                    && after.contains("NetworkPolicy")
-                {
-                    offenders.push(format!("{rel}: {}", line.trim()));
+                if params.contains("Grants") && ret.contains("NetworkPolicy") {
+                    offenders.push(format!("{rel}: {}", signature.trim()));
                     break;
                 }
             }
@@ -738,6 +741,45 @@ pub fn run(workspace: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Drop `//`-style comments so prose quoting a signature is not read as one.
+/// Block comments are left alone: a `/* */` containing a full signature is
+/// rare enough that the false positive is cheaper than a comment parser.
+fn strip_line_comments(body: &str) -> String {
+    body.lines()
+        .map(|line| match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every function signature in `body`, each flattened to one line.
+///
+/// A signature runs from `fn ` to the `{` opening its body (or the `;` ending
+/// a trait method), so a rustfmt-wrapped signature is returned whole rather
+/// than in fragments.
+fn fn_signatures(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("fn ") {
+        rest = &rest[start..];
+        let end = rest
+            .find('{')
+            .into_iter()
+            .chain(rest.find(';'))
+            .min()
+            .unwrap_or(rest.len());
+        out.push(rest[..end].split_whitespace().collect::<Vec<_>>().join(" "));
+        rest = &rest[end.min(rest.len())..];
+        if rest.is_empty() {
+            break;
+        }
+        rest = &rest[1.min(rest.len())..];
+    }
+    out
 }
 ```
 
