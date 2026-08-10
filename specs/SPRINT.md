@@ -1521,8 +1521,10 @@ Then unify + retire the old paths:
   libkrun live probe now has bounded resident host-process capture after
   authenticated readiness, and the HVF guest-RAM seam now reports resident
   bytes with a direct untouched-versus-touched demand-fault witness plus
-  monotonic private restore-mapping duration. End-to-end guest working-set,
-  first-use restore-fault, and cross-backend live measurements remain open.
+  monotonic private restore-mapping duration. The libkrun density report now
+  also carries guest-agent RSS from the existing ResourceUsage RPC. Whole-VM
+  guest working-set, first-use restore-fault, and cross-backend live
+  measurements remain open.
 - [x] **Filesystem-path baseline — issue #2281.**
   `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
   source identity, node composition, emitted ext4 size/digest, materializer

@@ -147,7 +147,7 @@ impl Drop for HeldProbeVm {
 /// which the supervisor never writes to, so the `start_to_pid` mark never resolved and the
 /// probe timed out on every dev-host run.
 #[cfg(feature = "libkrun-live")]
-fn probe_state_dir(vm_name: &str) -> std::path::PathBuf {
+pub(super) fn probe_state_dir(vm_name: &str) -> std::path::PathBuf {
     mvm_core::config::vm_state_dir(vm_name)
 }
 

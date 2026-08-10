@@ -140,7 +140,8 @@ between warmup or measured samples.
 - [~] [#2280](https://github.com/tinylabscom/mvm/issues/2280) — measure the
   kernel and boot-substrate budget. The bounded libkrun resident host-process
   capture is landed, and HVF guest-RAM now exposes an allocation-level
-  demand-fault witness plus private restore-mapping duration; end-to-end guest
+  demand-fault witness plus private restore-mapping duration. The live libkrun
+  density report also records guest-agent RSS after readiness; whole-VM guest
   working-set, first-use restore-fault, and cross-backend live evidence remain.
 - [~] [#2281](https://github.com/tinylabscom/mvm/issues/2281) — baseline the
   current pure-Rust ext4 path and evaluate the guest-local immutable
