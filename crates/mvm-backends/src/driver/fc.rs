@@ -804,10 +804,31 @@ impl VmmDriver for FcDriver {
                 )
             })?;
 
+        // Four spans inside this boot, emitted at debug. `driver_boot` is one
+        // opaque number to the launch sample, and on this backend it covers
+        // both VMM start and guest boot — the two things a cold-start budget
+        // most needs told apart. A trace-level split is not the sidecar the
+        // launch sample uses; it is the cheapest thing that makes the residual
+        // attributable without widening the driver trait for a diagnostic.
+        let boot_started = Instant::now();
+
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = format!("{abs_dir}/fc.socket");
         let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
         start_vm_firecracker(&abs_dir, &socket)?;
+        let spawned_at = Instant::now();
+        tracing::debug!(
+            vm = %spec.name,
+            ms = boot_started.elapsed().as_secs_f64() * 1000.0,
+            "fc boot: process spawn + API socket"
+        );
+
+        // Take ownership of the API socket so the config sequence below can
+        // speak to it in-process. Firecracker was launched through `sudo` and
+        // created the socket as root; without this every call would need its
+        // own `sudo curl`.
+        crate::fc::adopt_api_socket(&socket)
+            .context("adopting the Firecracker API socket for the invoking user")?;
 
         // Drive the NIC-less API config sequence.
         let vsock_uds = firecracker_vsock_uds_path(&abs_dir);
@@ -829,14 +850,33 @@ impl VmmDriver for FcDriver {
         // boots and dials out.
         arm_host_channels(&spec.vsock, &state_dir, &runtime_dir)?;
 
+        let configured_at = Instant::now();
+        tracing::debug!(
+            vm = %spec.name,
+            ms = (configured_at - spawned_at).as_secs_f64() * 1000.0,
+            "fc boot: API config sequence"
+        );
+
         // Boot the configured instance.
         api_put_socket(&socket, "/actions", r#"{"action_type": "InstanceStart"}"#)
             .context("Firecracker API PUT /actions InstanceStart")?;
+        let started_at = Instant::now();
+        tracing::debug!(
+            vm = %spec.name,
+            ms = (started_at - configured_at).as_secs_f64() * 1000.0,
+            "fc boot: InstanceStart"
+        );
 
         // Confirm the guest is up: a successful agent CONNECT over the vsock mux
         // means userspace booted and the agent is listening. Bounded so a guest
         // that never comes up fails closed rather than hanging forever.
+        // Backoff, not a tick. This was a flat 200 ms sleep, which put a 200 ms
+        // floor under every Firecracker launch: the driver confirms boot before
+        // returning, so this wait sits inside the span the cold-launch budget
+        // is measured against, and a guest that answered in 20 ms was reported
+        // as taking a full tick to do it.
         let deadline = Instant::now() + AGENT_READY_TIMEOUT;
+        let mut attempt = 0u32;
         loop {
             // Fail fast if Firecracker itself died on boot (kernel panic,
             // rejected config) rather than waiting out the full agent deadline.
@@ -858,8 +898,15 @@ impl VmmDriver for FcDriver {
                     abs_dir
                 );
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+            attempt = attempt.saturating_add(1);
         }
+
+        tracing::debug!(
+            vm = %spec.name,
+            ms = started_at.elapsed().as_secs_f64() * 1000.0,
+            "fc boot: guest boot to serving agent"
+        );
 
         let vm = Box::new(FcRunningVm {
             id: VmId(spec.name.clone()),
