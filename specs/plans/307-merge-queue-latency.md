@@ -31,9 +31,11 @@ branches, not the queue's own position/state display, which shows
 - [x] **WS0 — unjam.** Fixed the `check-no-vz` violation on #2232 directly and
       dequeued/re-pushed it. One line. Nothing else in the queue was wrong.
 
-- [ ] **WS1 — a required check that cannot report is a 90-minute tax.**
-      Already in flight as **#2252**, independently authored — not duplicated
-      here. `kernel-build.yml` had no `merge_group` trigger and was
+- [x] **WS1 — a required check that cannot report is a 90-minute tax.**
+      Landed as **#2252**, independently authored — not duplicated here.
+      `kernel-build.yml` now carries the `merge_group` trigger, so the required
+      contexts report instead of being absent. Previously it had no such
+      trigger and was
       `paths:`-filtered, so on any PR not touching kernel paths the required
       `Build kernels (aarch64|x86_64)` contexts were simply *absent*. An absent
       required check leaves the entry waiting out

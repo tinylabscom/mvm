@@ -44,7 +44,7 @@ final-status-level = "flaky"
 # liveness short-circuit so a dead daemon fails immediately with a reason
 # instead of waiting one out. They stay in the group as belt-and-braces.
 #
-# It does NOT apply to the `mvm-runtime` members, and that is the point of
+# It does NOT apply to the `mvm-vmm` members, and that is the point of
 # keeping the group: their budget is `SUBST_HANDSHAKE_TIMEOUT`, a production
 # constant. The wait those tests race is the one the product itself enforces,
 # so raising it to suit the test suite would change shipped behaviour. For
@@ -54,10 +54,19 @@ final-status-level = "flaky"
 # and does not have one is a bug in the test, and a group here would hide
 # it — see the fixture fix in tests/audit_emissions_live.rs, which was a
 # real defect that looked like contention.
+#
+# The `package(...)` in each filter below is load-bearing and easy to strand.
+# These filters named `mvm-runtime` until the substitution/broker spawn
+# modules moved to `mvm-vmm`, after which they matched nothing at all and the
+# cap silently stopped applying — a filter that matches no test fails open and
+# says nothing. When moving a module between packages, re-point any filter
+# naming it, and confirm with:
+#
+#   cargo nextest list -p <pkg> -E '<the filter>'
 process-handshake = { max-threads = 4 }
 
 [[profile.default.overrides]]
-filter = 'package(mvm-runtime) and (test(/substitution_spawn::/) or test(/broker_services_spawn::/))'
+filter = 'package(mvm-vmm) and (test(/substitution_spawn::/) or test(/broker_services_spawn::/))'
 test-group = "process-handshake"
 
 [[profile.default.overrides]]
@@ -65,7 +74,7 @@ filter = 'package(mvm-hostd) and (binary(host_agent_restart) or binary(per_tenan
 test-group = "process-handshake"
 
 [[profile.ci.overrides]]
-filter = 'package(mvm-runtime) and (test(/substitution_spawn::/) or test(/broker_services_spawn::/))'
+filter = 'package(mvm-vmm) and (test(/substitution_spawn::/) or test(/broker_services_spawn::/))'
 test-group = "process-handshake"
 
 [[profile.ci.overrides]]
