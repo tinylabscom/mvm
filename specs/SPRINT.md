@@ -1719,6 +1719,11 @@ Then unify + retire the old paths:
   throughput, and supports bounded batches across Firecracker, HVF, libkrun,
   QEMU, and Apple Container. It remains VM-free unless explicitly enabled with
   `MVM_LIFECYCLE_BENCH=1`.
+- [x] **HVF stop-path diagnosis (Plan 299).** Added phase timing to the
+  lifecycle harness. A 1,000-cycle run attributes 67.62 ms p50 / 74.97 ms p95
+  / 77.01 ms p99 to supervisor PID disappearance after SIGTERM; attach,
+  endpoint reaping, console cleanup, state-marker removal, and force-kill
+  escalation do not account for the stop latency.
 - [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
   `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon

@@ -5,6 +5,7 @@
 //! describes and nothing more.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
@@ -286,9 +287,28 @@ pub trait RunningVm: Send {
     fn wait(&self) -> Result<VmExitStatus>;
     /// Force-terminate the VM.
     fn kill(&self) -> Result<()>;
+    /// Force-terminate the VM and report backend-specific teardown phases when
+    /// the implementation can observe them.
+    fn kill_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
+        self.kill().map(|_| None)
+    }
     fn pause(&self) -> Result<()>;
     fn resume(&self) -> Result<()>;
     fn status(&self) -> Result<VmStatus>;
     /// Open a host->guest vsock connection to `guest_port`.
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>>;
+}
+
+/// Backend-specific phases observed while terminating a running VM.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunningVmStopTiming {
+    /// Time spent issuing the supervisor termination signal.
+    pub supervisor_signal: Duration,
+    /// Time spent waiting for the supervisor process to disappear after the
+    /// graceful termination request.
+    pub pid_disappearance: Duration,
+    /// Time spent on forced termination and its follow-up wait, if needed.
+    pub force_kill_wait: Duration,
+    /// Time spent removing the backend's live-process state marker.
+    pub state_cleanup: Duration,
 }

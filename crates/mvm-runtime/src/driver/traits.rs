@@ -6,5 +6,5 @@
 
 pub use mvm_vmm::driver::traits::{
     ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
-    StandbyParentSpawn, VmmDriver,
+    RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };

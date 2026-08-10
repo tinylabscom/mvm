@@ -162,6 +162,12 @@ rate, but are not silently included in the prepared-cold SLO.
       (`tests/microvm_lifecycle_bench.rs`; the test remains disabled unless
       `MVM_LIFECYCLE_BENCH=1` is set and requires explicit prepared kernel and
       rootfs paths.)
+- [x] Add stop-phase timing to the lifecycle benchmark so backend teardown can
+      be separated from runner attach, endpoint reaping, console cleanup, and
+      backend-specific process teardown. A 1,000-cycle HVF run measured
+      `pid_disappearance` at 67.62 ms p50 / 74.97 ms p95 / 77.01 ms p99;
+      endpoint reaping and state cleanup were below 0.1 ms at p99, and no
+      force-kill escalation occurred.
 
 **Exit gate:** the report can distinguish the 430-second mount-image cost from
 the actual approximately 1.2-second backend-start cost, and the baseline is

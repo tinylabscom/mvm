@@ -18,7 +18,8 @@ mod standby_boot;
 pub use runner::{
     BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, ClaimContext, ConsoleCapture,
     ConsoleStreamer, EndpointSpawnRequest, EndpointSpawner, NoopConsoleStreamer, PreloadContext,
-    RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs, WorkloadRunner,
+    RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, StopTiming, WorkloadLaunchInputs,
+    WorkloadRunner,
 };
 pub use standby_boot::{factory_parent_config, factory_parent_spec};
 
