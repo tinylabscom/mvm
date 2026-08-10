@@ -1482,6 +1482,16 @@ achieve the same property by hand.
 - Consumes: `CpuGrant` (Task 1); `EnforcedTier` (Task 5)
 - Produces: `scope_name(machine_id: &str) -> String`; `validate_scope_id(id: &str) -> Result<()>`; `cpu_quota_percent(millicores: u32) -> Result<u32>`; `wrap_spawn(cmd: Command, machine_id: &str, millicores: u32) -> Result<Command>` (returns the `systemd-run`-wrapped command); `read_back_tier(machine_id: &str) -> Result<EnforcedTier>`
 
+**Task 8b left one wiring dead, and this task must finish it.** `apply_grants`
+was wired into `Supervisor::launch`, which turns out to have only Noop and
+test `BackendLauncher` implementations — `mvmctl up` boots via
+`AnyBackend::start` from `admit_and_start`. So no real boot records an
+achieved tier today. Add the call at `admit_and_start`, where the backend
+instance is already in hand (the same one `RunPosture::on_backend` reads its
+kind from), and record the returned `EnforcedGrants`. Without this, the CPU
+mechanism below would enforce a bound that nothing reports — the same
+declared-but-unwitnessed shape this plan exists to remove.
+
 **Design points the implementer must honour:**
 
 - **Wrap the spawn, do not move the process.** Where a backend spawns its VMM
