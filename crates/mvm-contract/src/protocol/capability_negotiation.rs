@@ -49,6 +49,10 @@ pub enum CapabilityAlternative {
     /// Prelaunch a standby rather than restoring a snapshot. Pays the setup
     /// cost in advance instead of recovering saved state.
     StandbyPool,
+    /// Bound CPU with a deterministic instruction budget instead of a share of
+    /// host CPU time. The wasm tier has no notion of a core fraction; fuel is
+    /// its unit, and it is reproducible across hosts in a way a share is not.
+    CpuBudgetAsDeterministicFuel,
     /// No substitute exists, for the stated reason. The request must be
     /// refused and a different backend chosen.
     None { why: &'static str },
@@ -76,6 +80,9 @@ impl CapabilityAlternative {
                 "write to the workload's stdin route instead of opening an interactive terminal"
             }
             Self::StandbyPool => "prelaunch a standby instead of restoring a snapshot",
+            Self::CpuBudgetAsDeterministicFuel => {
+                "bound CPU with a deterministic instruction budget (fuel) instead of a share of host CPU time"
+            }
             Self::None { why } => why,
         }
     }
@@ -349,6 +356,18 @@ mod tests {
             .expect_err("neither capability is served");
         let names: Vec<&'static str> = gaps.iter().map(|g| g.capability).collect();
         assert_eq!(names, shortfall);
+    }
+
+    #[test]
+    fn a_share_grant_on_the_wasm_tier_names_fuel_as_the_substitute() {
+        let gap = CapabilityGap {
+            capability: "cpu.share",
+            alternative: CapabilityAlternative::CpuBudgetAsDeterministicFuel,
+        };
+        assert!(
+            gap.is_actionable(),
+            "a wasm CPU bound exists; it is just a different unit"
+        );
     }
 
     #[test]
