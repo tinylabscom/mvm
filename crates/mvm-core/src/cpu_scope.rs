@@ -20,6 +20,24 @@
 //! D-Bus directly keeps the dependency budget where this project wants it; the
 //! placement, and the delegation it depends on, are identical either way.
 //!
+//! # The rejected alternative: adopting an already-running process
+//!
+//! A scope can also be created *around* a process that is already running —
+//! `StartTransientUnit` with a `PIDs` property. This was measured working, not
+//! guessed at: a pid living in a login session's own scope was moved into the
+//! delegated tree and the quota applied. It is tempting because it needs no
+//! grant threaded onto the launch config — a caller can bound a VM it has
+//! already started.
+//!
+//! It is deliberately not what this module does, and the reason is not that it
+//! fails. It trades the born-bounded property away for one saved field.
+//! Adoption leaves a window between exec and the adopting call in which the
+//! process is unbounded, and the only argument that the window is harmless is
+//! that the guest is still in kernel boot — which is a timing argument, and
+//! timing arguments rot. Wrapping the spawn gives born-bounded for free, so
+//! there is nothing to buy. Recorded here so the next reader does not
+//! rediscover adoption and assume it was overlooked.
+//!
 //! Nothing here is `cfg`-gated to Linux. Every call first asks whether the
 //! mechanism is present, and a host without `systemd-run` or without a user
 //! session bus answers [`EnforcedTier::Declared`] — the same honest answer a
@@ -30,6 +48,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Result, bail};
+use mvm_contract::grants::CpuGrant;
 use mvm_contract::protocol::resource_controls::EnforcedTier;
 
 /// systemd expresses a CPU quota as a percentage of one core, so one percent is
@@ -168,16 +187,84 @@ pub fn cpu_quota_percent(millicores: u32) -> Result<u32> {
 pub fn wrap_spawn(cmd: Command, machine_id: &str, millicores: u32) -> Result<Command> {
     validate_scope_id(machine_id)?;
     let percent = cpu_quota_percent(millicores)?;
+    Ok(wrap_checked(cmd, machine_id, percent))
+}
 
-    let mut wrapped = Command::new(SYSTEMD_RUN);
-    wrapped.arg("--user");
-    wrapped.arg("--scope");
-    wrapped.arg("--quiet");
-    wrapped.arg("--unit");
-    wrapped.arg(scope_name(machine_id));
-    wrapped.arg("-p");
-    wrapped.arg(format!("CPUQuota={percent}%"));
-    wrapped.arg("--");
+/// The `systemd-run` tokens that precede a payload's own argv, ending in the
+/// `--` separator.
+///
+/// The single place these flags are spelled. Two kinds of spawn site consume
+/// them — one building a [`Command`], one building a shell string for a spawn
+/// that daemonizes — and a second copy of this list is how the two would
+/// silently drift into bounding different things.
+fn scope_prefix(machine_id: &str, percent: u32) -> Vec<String> {
+    vec![
+        SYSTEMD_RUN.to_string(),
+        "--user".to_string(),
+        "--scope".to_string(),
+        "--quiet".to_string(),
+        "--unit".to_string(),
+        scope_name(machine_id),
+        "-p".to_string(),
+        format!("CPUQuota={percent}%"),
+        "--".to_string(),
+    ]
+}
+
+/// The scope prefix for a grant, or `None` when nothing should be wrapped.
+///
+/// For spawn sites that build a command line as text rather than a
+/// [`Command`] — the caller is responsible for quoting each token into its
+/// shell. Applies exactly the same refusal ladder as [`bind_cpu_grant`], for
+/// the same reason: an unbindable grant degrades to an honest unbounded spawn
+/// and is caught by the read-back, never by failing an admitted boot.
+#[must_use]
+pub fn scope_prefix_for_grant(machine_id: &str, grant: Option<&CpuGrant>) -> Option<Vec<String>> {
+    let percent = bindable_quota_percent(machine_id, grant)?;
+    Some(scope_prefix(machine_id, percent))
+}
+
+/// The quota percent to bind, or `None` with the reason logged.
+///
+/// One ladder, so the `Command` and shell-string paths cannot disagree about
+/// which grants get bound.
+fn bindable_quota_percent(machine_id: &str, grant: Option<&CpuGrant>) -> Option<u32> {
+    let Some(CpuGrant::Share { millicores }) = grant else {
+        // No grant, or a fuel budget — which is wasmtime's unit, not this
+        // mechanism's, so it passes through rather than being converted into a
+        // share nobody granted.
+        return None;
+    };
+    if let Some(gap) = mechanism_gap() {
+        tracing::info!(
+            "CPU share of {millicores} millicores for '{machine_id}' will not be enforced: {}",
+            gap.describe()
+        );
+        return None;
+    }
+    if let Err(e) = validate_scope_id(machine_id) {
+        tracing::warn!("CPU share for '{machine_id}' not applied: {e}");
+        return None;
+    }
+    match cpu_quota_percent(*millicores) {
+        Ok(percent) => Some(percent),
+        Err(e) => {
+            tracing::warn!("CPU share for '{machine_id}' not applied: {e}");
+            None
+        }
+    }
+}
+
+/// The rendering half of [`wrap_spawn`], after the id and the share have both
+/// been checked.
+///
+/// Split out because `Command` is not `Clone`: a fallible wrap consumes its
+/// input, so a caller that wants the original back on refusal has to do the
+/// checking before handing it over. [`bind_cpu_grant`] is that caller.
+fn wrap_checked(cmd: Command, machine_id: &str, percent: u32) -> Command {
+    let prefix = scope_prefix(machine_id, percent);
+    let mut wrapped = Command::new(&prefix[0]);
+    wrapped.args(&prefix[1..]);
     wrapped.arg(cmd.get_program());
     wrapped.args(cmd.get_args());
 
@@ -193,7 +280,29 @@ pub fn wrap_spawn(cmd: Command, machine_id: &str, millicores: u32) -> Result<Com
     if let Some(dir) = cmd.get_current_dir() {
         wrapped.current_dir(dir);
     }
-    Ok(wrapped)
+    wrapped
+}
+
+/// The one seam every per-VM spawn goes through: bound the process this command
+/// is about to become, if a share was granted and this host can serve it.
+///
+/// Infallible by design. A CPU bound that cannot be attached must not take down
+/// a boot the admission gate already allowed — `--prod` refuses an unenforceable
+/// grant before anything is spawned, so by the time control reaches here,
+/// degrading is the admitted outcome. Every refusal path returns the original
+/// command unwrapped and says why, and `apply_grants` then reads the live
+/// control back and reports [`EnforcedTier::Declared`], so a degraded boot
+/// cannot be mistaken for a bounded one.
+///
+/// [`CpuGrant::Fuel`] is not this mechanism's unit — an instruction budget is
+/// wasmtime's to enforce — so it passes through untouched rather than being
+/// converted into a share it is not.
+#[must_use]
+pub fn bind_cpu_grant(cmd: Command, machine_id: &str, grant: Option<&CpuGrant>) -> Command {
+    match bindable_quota_percent(machine_id, grant) {
+        Some(percent) => wrap_checked(cmd, machine_id, percent),
+        None => cmd,
+    }
 }
 
 /// What actually bounds this machine's CPU right now, read off the live
@@ -291,9 +400,44 @@ fn non_empty_env(key: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(key).filter(|value| !value.is_empty())
 }
 
+/// Make [`mechanism_gap`] answer "present" for the duration of a test.
+///
+/// Creates a `systemd-run` on a scratch `PATH` and a session-bus path, then
+/// points the process at both. It fakes only what the *probe* reads — a spawn
+/// through this still runs whatever is on that `PATH` — so a test can assert the
+/// argv a bound spawn produces on any host, including a Mac, instead of
+/// asserting one thing on Linux and something weaker everywhere else.
+///
+/// `scratch` must outlive the guard; a caller's `tempfile::TempDir` is the
+/// intended source. Env mutation goes through [`crate::util::test_env::TestEnv`]
+/// so it is serialized and restored on drop.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pretend_mechanism_present(
+    env: &mut crate::util::test_env::TestEnv,
+    scratch: &Path,
+) -> std::io::Result<()> {
+    let bin_dir = scratch.join("bin");
+    let run_dir = scratch.join("run");
+    std::fs::create_dir_all(&bin_dir)?;
+    std::fs::create_dir_all(&run_dir)?;
+    let fake = bin_dir.join(SYSTEMD_RUN);
+    std::fs::write(&fake, "#!/bin/sh\nexit 0\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::write(run_dir.join("bus"), b"")?;
+    env.set("PATH", &bin_dir);
+    env.set("XDG_RUNTIME_DIR", &run_dir);
+    env.remove("DBUS_SESSION_BUS_ADDRESS");
+    Ok(())
+}
+
 /// Render a command as `program arg arg …` for assertions and logs.
-#[cfg(test)]
-fn rendered_argv(cmd: &Command) -> Vec<String> {
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn rendered_argv(cmd: &Command) -> Vec<String> {
     std::iter::once(cmd.get_program())
         .chain(cmd.get_args())
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -423,6 +567,98 @@ mod tests {
     fn wrapping_refuses_an_unusable_id_or_share_before_building_an_argv() {
         assert!(wrap_spawn(Command::new("/bin/true"), "../escape", 1500).is_err());
         assert!(wrap_spawn(Command::new("/bin/true"), "mvm-abc123", 0).is_err());
+    }
+
+    #[test]
+    fn binding_no_grant_leaves_the_spawn_exactly_as_it_was() {
+        let wrapped = bind_cpu_grant(Command::new("/bin/true"), "mvm-abc123", None);
+        assert_eq!(rendered_argv(&wrapped), vec!["/bin/true"]);
+    }
+
+    #[test]
+    fn binding_a_fuel_grant_leaves_the_spawn_alone() {
+        // An instruction budget is wasmtime's unit. Converting it into a share
+        // would invent a number nobody granted.
+        let wrapped = bind_cpu_grant(
+            Command::new("/bin/true"),
+            "mvm-abc123",
+            Some(&CpuGrant::Fuel {
+                instructions: 1_000_000,
+            }),
+        );
+        assert_eq!(rendered_argv(&wrapped), vec!["/bin/true"]);
+    }
+
+    #[test]
+    fn binding_an_unusable_share_degrades_instead_of_failing_the_spawn() {
+        // The boot was already admitted; a bound that cannot be attached must
+        // not turn into a refusal here. The read-back is what keeps it honest.
+        let wrapped = bind_cpu_grant(
+            Command::new("/bin/true"),
+            "../escape",
+            Some(&CpuGrant::Share { millicores: 1500 }),
+        );
+        assert_eq!(rendered_argv(&wrapped), vec!["/bin/true"]);
+
+        let wrapped = bind_cpu_grant(
+            Command::new("/bin/true"),
+            "mvm-abc123",
+            Some(&CpuGrant::Share { millicores: 0 }),
+        );
+        assert_eq!(rendered_argv(&wrapped), vec!["/bin/true"]);
+    }
+
+    #[test]
+    fn a_share_grant_binds_the_spawn_when_the_mechanism_is_present() {
+        // The probe is faked, not the enforcement, so this asserts the real
+        // argv on every host instead of exercising the degrade branch on macOS
+        // and never checking the branch that does the work.
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = crate::util::test_env::TestEnv::new();
+        pretend_mechanism_present(&mut env, scratch.path()).expect("fake mechanism");
+        assert_eq!(mechanism_gap(), None, "the probe must see the fake");
+
+        let wrapped = bind_cpu_grant(
+            Command::new("/usr/bin/mvm-libkrun-supervisor"),
+            "mvm-abc123",
+            Some(&CpuGrant::Share { millicores: 1500 }),
+        );
+        assert_eq!(
+            rendered_argv(&wrapped),
+            vec![
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--quiet",
+                "--unit",
+                "mvm-abc123.scope",
+                "-p",
+                "CPUQuota=150%",
+                "--",
+                "/usr/bin/mvm-libkrun-supervisor",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_shell_prefix_and_the_command_wrap_spell_the_same_flags() {
+        // Two spawn shapes, one flag list. If these ever disagree, one of the
+        // two backends is bounding something other than what the other is.
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = crate::util::test_env::TestEnv::new();
+        pretend_mechanism_present(&mut env, scratch.path()).expect("fake mechanism");
+
+        let grant = CpuGrant::Share { millicores: 1500 };
+        let prefix = scope_prefix_for_grant("mvm-abc123", Some(&grant)).expect("a bindable grant");
+        let wrapped = bind_cpu_grant(Command::new("/bin/payload"), "mvm-abc123", Some(&grant));
+        let mut expected = prefix;
+        expected.push("/bin/payload".to_string());
+        assert_eq!(rendered_argv(&wrapped), expected);
+    }
+
+    #[test]
+    fn the_shell_prefix_is_absent_when_there_is_nothing_to_bind() {
+        assert_eq!(scope_prefix_for_grant("mvm-abc123", None), None);
     }
 
     #[test]

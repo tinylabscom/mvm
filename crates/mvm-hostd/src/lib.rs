@@ -26,10 +26,6 @@
 pub mod audit;
 pub mod audit_signer;
 pub mod broker;
-/// Per-VM CPU bounds through a transient systemd scope on the user's own
-/// manager — the one mechanism that both places an unprivileged process under a
-/// cgroup v2 `cpu.max` quota and reports back what is actually in effect.
-pub mod cpu_scope;
 pub mod exit_capture;
 /// Length-prefixed message framing (4-byte BE length + body,
 /// cap-before-alloc) for the same-uid UDS control channels. Relocated

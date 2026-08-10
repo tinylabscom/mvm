@@ -29,7 +29,7 @@ use mvm_net::channel::GuestService;
 
 use crate::fc::{
     FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
-    read_firecracker_pid, start_vm_firecracker,
+    read_firecracker_pid, start_vm_firecracker_bounded,
 };
 use mvm_vmm::driver::spec::KernelImage;
 use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
@@ -813,7 +813,7 @@ impl VmmDriver for FcDriver {
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = format!("{abs_dir}/fc.socket");
         let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
-        start_vm_firecracker(&abs_dir, &socket)?;
+        start_vm_firecracker_bounded(&abs_dir, &socket, &spec.name, spec.cpu_grant.as_ref())?;
 
         // Drive the NIC-less API config sequence.
         let vsock_uds = firecracker_vsock_uds_path(&abs_dir);
@@ -1075,6 +1075,7 @@ mod tests {
             initramfs: None,
             cmdline: String::new(),
             vcpus: 2,
+            cpu_grant: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,

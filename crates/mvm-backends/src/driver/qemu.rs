@@ -85,6 +85,18 @@ fn qemu_virtiofs_socket_path(vm_name: &str, tag: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/mvm-vfs-{vm_name}-{tag}.sock"))
 }
 
+/// The qemu launch, bounded by whatever CPU share this VM was admitted under.
+///
+/// qemu `-daemonize`s, so the process this command returns from is not the one
+/// that ends up running the guest. That is fine and was measured rather than
+/// assumed: the daemonized child inherits the scope's cgroup, and a transient
+/// scope stays active while any process remains in it.
+fn bounded_qemu_command(qemu_bin: &str, argv: &[String], spec: &VmmSpec) -> Command {
+    let mut launch = Command::new(qemu_bin);
+    launch.args(argv);
+    mvm_core::cpu_scope::bind_cpu_grant(launch, &spec.name, spec.cpu_grant.as_ref())
+}
+
 /// Assemble the `qemu-system` argv for a spec boot (everything after the
 /// binary name). Pure so the whole spec→argv mapping is unit-testable
 /// without a hypervisor. No `-netdev`: the converged spec carries no NIC.
@@ -377,8 +389,7 @@ impl VmmDriver for QemuDriver {
         }
 
         let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file);
-        let status = Command::new(&qemu_bin)
-            .args(&argv)
+        let status = bounded_qemu_command(&qemu_bin, &argv, spec)
             .status()
             .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e}"))?;
         if !status.success() {
@@ -574,6 +585,7 @@ mod tests {
             initramfs: Some("/img/initramfs.cpio.gz".into()),
             cmdline: String::new(),
             vcpus: 2,
+            cpu_grant: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,
@@ -1020,5 +1032,49 @@ mod tests {
         // Ports outside the agent + console data range are not host-dialable.
         assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
         assert!(vm.vsock_connect(9999).is_err());
+    }
+
+    /// qemu daemonizes, so nothing downstream of the spawn can be inspected for
+    /// the bound — the argv is the only place it is visible.
+    #[test]
+    fn a_granted_share_wraps_the_qemu_spawn_ahead_of_its_own_argv() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+
+        let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
+        spec.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 2000 });
+        let argv = vec!["-machine".to_string(), "microvm".to_string()];
+        let cmd = bounded_qemu_command("qemu-system-x86_64", &argv, &spec);
+
+        assert_eq!(
+            mvm_core::cpu_scope::rendered_argv(&cmd),
+            vec![
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--quiet",
+                "--unit",
+                "w.scope",
+                "-p",
+                "CPUQuota=200%",
+                "--",
+                "qemu-system-x86_64",
+                "-machine",
+                "microvm",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ungranted_launch_spawns_qemu_directly() {
+        let spec = spec_with(KernelImage::Bundled, vec![], vec![]);
+        let argv = vec!["-machine".to_string(), "microvm".to_string()];
+        let cmd = bounded_qemu_command("qemu-system-x86_64", &argv, &spec);
+        assert_eq!(
+            mvm_core::cpu_scope::rendered_argv(&cmd),
+            vec!["qemu-system-x86_64", "-machine", "microvm"]
+        );
     }
 }

@@ -241,6 +241,7 @@ mod tests {
             flake_ref: "test".to_string(),
             profile: None,
             cpus: 1,
+            cpu_grant: None,
             memory_mib: 256,
             mem_initial_mib: None,
             ports: Vec::new(),

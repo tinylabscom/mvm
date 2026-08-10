@@ -233,6 +233,25 @@ pub fn map_kernel_for_test(
     Ok((config.krun.kernel_path, config.krun.kernel_format))
 }
 
+/// The supervisor launch, bounded by whatever CPU share this VM was admitted
+/// under.
+///
+/// libkrun runs *inside* the supervisor process, so bounding the supervisor
+/// bounds the VM. Wrapping the spawn rather than adjusting the process
+/// afterwards is what makes it born bounded — there is no interval in which the
+/// workload runs uncapped.
+///
+/// A function rather than three inline lines so a test can read the argv back
+/// and prove the wrap is there. An unwrapped spawn is silent: the VM boots
+/// perfectly and simply is not bounded.
+fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec) -> Command {
+    mvm_core::cpu_scope::bind_cpu_grant(
+        Command::new(supervisor),
+        &spec.name,
+        spec.cpu_grant.as_ref(),
+    )
+}
+
 impl VmmDriver for LibkrunDriver {
     fn name(&self) -> &str {
         self.backend.name()
@@ -294,7 +313,7 @@ impl VmmDriver for LibkrunDriver {
         )
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::inherit());
-        let mut child = Command::new(&supervisor)
+        let mut child = bounded_supervisor_command(&supervisor, spec)
             .stdin(Stdio::piped())
             .stdout(stdout)
             .stderr(stderr)
@@ -508,6 +527,7 @@ mod tests {
             initramfs: None,
             cmdline: String::new(),
             vcpus: 2,
+            cpu_grant: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,
@@ -967,5 +987,46 @@ mod tests {
 
         // The last console data port is in range; one past it is not.
         assert!(vm.vsock_connect(CONSOLE_PORT_BASE + 129).is_err());
+    }
+
+    /// The wrap has to be on the spawn itself. An unwrapped supervisor boots
+    /// the VM perfectly well and is simply unbounded, so nothing but reading
+    /// the argv back catches a regression here.
+    #[test]
+    fn a_granted_share_wraps_the_supervisor_spawn() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+
+        let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
+        spec.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 });
+        let cmd = bounded_supervisor_command(Path::new("/usr/bin/mvm-libkrun-supervisor"), &spec);
+
+        assert_eq!(
+            mvm_core::cpu_scope::rendered_argv(&cmd),
+            vec![
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--quiet",
+                "--unit",
+                "w.scope",
+                "-p",
+                "CPUQuota=150%",
+                "--",
+                "/usr/bin/mvm-libkrun-supervisor",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ungranted_launch_spawns_the_supervisor_directly() {
+        let spec = spec_with(KernelImage::Bundled, vec![], vec![]);
+        let cmd = bounded_supervisor_command(Path::new("/usr/bin/mvm-libkrun-supervisor"), &spec);
+        assert_eq!(
+            mvm_core::cpu_scope::rendered_argv(&cmd),
+            vec!["/usr/bin/mvm-libkrun-supervisor"]
+        );
     }
 }

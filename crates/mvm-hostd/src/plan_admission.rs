@@ -525,12 +525,24 @@ pub fn thread_tenant_id(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted:
     cfg.tenant_id = Some(admitted.plan().tenant.0.clone());
 }
 
+/// Carry the admitted CPU bound onto the launch config, so the backend can be
+/// born inside it rather than adjusted into it afterwards.
+///
+/// Taken from the **signed, admitted** plan and nowhere else. A caller-supplied
+/// `cfg.cpu_grant` would be a bound chosen outside the admission that just
+/// checked it against the host's ceiling, so whatever was there is overwritten
+/// — including with `None`, which is what an uncapped plan means.
+pub fn thread_cpu_grant(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted: &AdmittedPlan) {
+    cfg.cpu_grant = admitted.plan().grants.as_ref().and_then(|g| g.cpu);
+}
+
 pub fn populate_audit_substrate(
     cfg: &mut mvm_core::vm_backend::VmStartConfig,
     admitted: &AdmittedPlan,
     policy_bundle: Option<&PolicyBundle>,
 ) -> Result<()> {
     thread_tenant_id(cfg, admitted);
+    thread_cpu_grant(cfg, admitted);
 
     let plan_json = serde_json::to_string(admitted.signed())
         .context("serializing SignedExecutionPlan for VmStartConfig.plan_json")?;
@@ -2778,6 +2790,66 @@ mod tests {
             backend.status(&started.vm_id).unwrap(),
             mvm_core::vm_backend::VmStatus::Running
         ));
+    }
+
+    /// The bound the backend spawns under comes off the signed plan, and only
+    /// off the signed plan. A caller-supplied one would be a bound chosen
+    /// outside the admission that just measured it against the host's ceiling.
+    #[test]
+    fn the_admitted_grant_reaches_the_launch_config_and_a_caller_supplied_one_does_not() {
+        use mvm_core::vm_backend::VmStartConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let mut input = fixture_input("vm-grant-threaded");
+        let grants = mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            ..Default::default()
+        };
+        input.grants = Some(grants);
+        let admitted = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect("admit");
+
+        let mut cfg = VmStartConfig {
+            // A bound nobody admitted, planted by the caller.
+            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 64_000 }),
+            ..VmStartConfig::default()
+        };
+        thread_cpu_grant(&mut cfg, &admitted);
+        assert_eq!(
+            cfg.cpu_grant,
+            Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            "the launch must carry the admitted bound, not the caller's"
+        );
+    }
+
+    /// An uncapped plan must clear a planted bound rather than leave it: a
+    /// launch config is not a place to smuggle a control past admission.
+    #[test]
+    fn an_ungranted_plan_clears_a_caller_supplied_bound() {
+        use mvm_core::vm_backend::VmStartConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let admitted = admit_for_run(
+            &fixture_input("vm-no-grant"),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect("admit");
+
+        let mut cfg = VmStartConfig {
+            cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 64_000 }),
+            ..VmStartConfig::default()
+        };
+        thread_cpu_grant(&mut cfg, &admitted);
+        assert_eq!(cfg.cpu_grant, None);
     }
 
     /// Every admitted boot leaves a record of what actually bounded it. Before

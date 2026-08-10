@@ -166,6 +166,17 @@ pub struct VmStartConfig {
     pub profile: Option<String>,
     /// Number of vCPUs.
     pub cpus: u32,
+    /// The CPU bound this launch was admitted under, if any.
+    ///
+    /// A different control from [`cpus`](Self::cpus), and not a refinement of
+    /// it: the vCPU count is how many processors the guest sees, while this is
+    /// the share of host CPU time the whole VM may consume. Four vCPUs under a
+    /// 1.5-core share is a legitimate, common shape.
+    ///
+    /// Carried on the launch config rather than applied after `start` because a
+    /// backend has to wrap its own spawn for the per-VM process to be *born*
+    /// bounded — see [`crate::cpu_scope`]. `None` is uncapped.
+    pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
     /// Memory cap in MiB. The guest may not allocate beyond this. When
     /// [`mem_initial_mib`](Self::mem_initial_mib) is `None`, this is
     /// also the host-committed amount at boot (the historical mvm

@@ -245,6 +245,22 @@ fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
     })
 }
 
+/// The supervisor launch, bounded by whatever CPU share this VM was admitted
+/// under.
+///
+/// The HVF VMM runs inside this supervisor process, so the supervisor is the
+/// process to bound. Wired uniformly with the other drivers rather than skipped
+/// for the host it happens to run on today: the bind degrades to an unwrapped
+/// spawn wherever the mechanism is absent, which is the honest answer on macOS
+/// and needs no second code path to express.
+fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec) -> Command {
+    mvm_core::cpu_scope::bind_cpu_grant(
+        Command::new(supervisor),
+        &spec.name,
+        spec.cpu_grant.as_ref(),
+    )
+}
+
 fn boot_with_handoff(
     spec: &VmmSpec,
     handoff: Option<&HandoffConfig>,
@@ -269,7 +285,7 @@ fn boot_with_handoff(
     let json =
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
     let supervisor = resolve_supervisor_path()?;
-    let mut child = Command::new(&supervisor)
+    let mut child = bounded_supervisor_command(&supervisor, spec)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -916,6 +932,7 @@ mod tests {
             initramfs: Some("/img/initrd.cpio".into()),
             cmdline: String::new(),
             vcpus: 1,
+            cpu_grant: None,
             memory_mib: 256,
             mem_initial_mib: None,
             blocks,
@@ -1336,5 +1353,23 @@ mod tests {
         );
         let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
         assert!(cfg.console_data_sockets.is_empty());
+    }
+
+    /// Same contract as every other driver: the bound rides on the spawn.
+    #[test]
+    fn a_granted_share_wraps_the_supervisor_spawn() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+
+        let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
+        spec.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 });
+        let cmd = bounded_supervisor_command(Path::new("/usr/bin/mvm-hvf-supervisor"), &spec);
+        let argv = mvm_core::cpu_scope::rendered_argv(&cmd);
+
+        assert_eq!(argv[0], "systemd-run");
+        assert!(argv.contains(&"CPUQuota=50%".to_string()), "{argv:?}");
+        assert_eq!(argv.last().expect("payload"), "/usr/bin/mvm-hvf-supervisor");
     }
 }

@@ -100,6 +100,12 @@ pub struct VmmSpec {
     pub initramfs: Option<PathBuf>,
     pub cmdline: String,
     pub vcpus: u32,
+    /// The share of host CPU time the per-VM process may consume, if this
+    /// launch was admitted under one. Distinct from `vcpus`, which is how many
+    /// processors the guest sees. Drivers hand it to
+    /// `mvm_core::cpu_scope::bind_cpu_grant` at spawn, so the process is born
+    /// bounded rather than bounded shortly afterwards.
+    pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
     pub memory_mib: u32,
     /// Initial host commitment for virtio-balloon elasticity; `None` commits
     /// the full `memory_mib` at boot.

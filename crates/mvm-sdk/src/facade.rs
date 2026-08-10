@@ -17,7 +17,7 @@ use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
     PauseOpts, PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
-use mvm_core::client::{MvmClient, MvmError, Result};
+use mvm_core::client::{BackendCapabilityReport, MvmClient, MvmError, Result};
 
 use crate::machine::{Machine, MachineCreate, MachineError, MachineLs};
 
@@ -268,6 +268,29 @@ fn parse_machine_list(bytes: &[u8]) -> Result<Vec<MachineState>> {
 
 #[async_trait]
 impl MvmClient for SubprocessBackend {
+    /// Refused, explicitly.
+    ///
+    /// This facade's entire surface is `mvmctl machine` argv, and that surface
+    /// carries no capability query to shell out to. The report is a backend
+    /// object describing itself — its `kind()` plus its own `VmCapabilities` —
+    /// and neither is derivable from a subprocess that answers only about
+    /// machines.
+    ///
+    /// Reconstructing one from a backend name would mean a second copy of the
+    /// capability matrix living in a crate that cannot see the backends, and a
+    /// stale copy of that table is worse than no answer at all: a consumer
+    /// would plan around a capability the backend no longer has. So this
+    /// refuses by type, and the two clients that hold a real backend —
+    /// `mvm_client::LocalBackend` and `GatewayBackend` — answer it.
+    async fn backend_capabilities(&self) -> Result<BackendCapabilityReport> {
+        Err(MvmError::Unavailable {
+            reason: "the mvmctl subprocess facade exposes no capability query; use \
+                     mvm_client::LocalBackend for an in-process backend, or GatewayBackend \
+                     for a remote one"
+                .to_string(),
+        })
+    }
+
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
         let stdout = self.run_cli(&list_args()?)?;
         let machines = parse_machine_list(&stdout)?;
