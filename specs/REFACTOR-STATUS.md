@@ -1034,3 +1034,21 @@ for detailed scope and acceptance criteria.
         `tracing-subscriber`, `toml`, and the deferred `serde_jcs`
   - [ ] Phase 4 — a lockfile-count ratchet, so the ~62 `wasmtime`-family
         packages an off-by-default feature adds stay visible to `cargo deny`
+
+- [ ] Plan 313 — egress token accounting, streaming, and compaction
+  (`specs/plans/313-egress-token-accounting-and-compaction.md`)
+  - [ ] Phase 0 — blocking verification: does the substitution endpoint's
+        response leg stream, or does it accumulate? Request bodies are buffered
+        today, so an SSE model call may reach the guest only on completion
+  - [ ] Phase 1 — incremental response relay with bounded per-connection
+        buffering, keeping the `service_redact` seam correct across chunk
+        boundaries via a bounded overlap window
+  - [ ] Phase 2 — token accounting from provider-reported `usage` (both SSE
+        shapes), attributed to the `EgressGate` binding; zero new dependencies,
+        `unknown` rather than a wrong heuristic
+  - [ ] Phase 3 — `plan.egress_usage` chain-signed, payload-free audit entry
+  - [ ] Phase 4 — surface totals via a read-side verb over the existing chain
+  - [ ] Phase 5 — opt-in structural compaction, gated on Phase 3, with each
+        elision recorded as a digest and never as content
+  - [ ] Phase 6 — fleet aggregation from the same chain entries, derivable on
+        customer hardware with no call home
