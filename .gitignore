@@ -70,3 +70,9 @@ mutants.out/
 
 # Python bytecode caches (SDK test runs)
 __pycache__/
+
+# cargo-fuzz build dirs. The fuzz crates are workspace-excluded, so the
+# root-anchored `/target` rule above does not reach their nested build output.
+# Corpora are NOT ignored — the seed inputs are hand-written and committed.
+**/fuzz/target/
+**/fuzz-*/target/
