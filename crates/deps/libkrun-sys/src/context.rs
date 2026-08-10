@@ -174,7 +174,7 @@ pub struct KrunContext {
     /// adds an explicit virtio-vsock device with no guest NIC and no
     /// implicit TSI transport; `Passt` attaches a virtio-net device
     /// backed by a unixstream socket the caller has handed off to a
-    /// passt child process. See `NetworkingMode` for the trade-offs.
+    /// guest. See `NetworkingMode` for the trade-offs.
     #[serde(default)]
     pub networking: NetworkingMode,
 }
@@ -198,7 +198,7 @@ fn default_kernel_format() -> KernelFormat {
 /// not enabled. This is the no-guest-NIC builder / direct-path shape.
 ///
 /// `Passt` configures a real virtio-net device wired through a
-/// unixstream socket to a host-side passt child process. The guest
+/// unixstream socket to a host-side child process. The guest
 /// sees a normal eth0 + DHCP + DNS. This is the production-ready
 /// networking mode for Stage 0 and steady-state builder VMs.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -210,46 +210,6 @@ pub enum NetworkingMode {
     /// Explicit virtio-vsock device with no implicit TSI transport and
     /// no virtio-net guest NIC.
     VsockDirect,
-    /// virtio-net via passt. The supervisor process (whichever links
-    /// `libkrun-sys`) spawns a passt child inside `run_supervisor`,
-    /// hands its socket fd to `krun_add_net_unixstream`, and reaps
-    /// passt when libkrun exits. mvmctl (and any other JSON-consuming
-    /// caller) just declares the intent here — the live fd never
-    /// survives JSON serialization, so we keep it out of this struct.
-    Passt {
-        /// MAC address for the guest's eth0. 6 bytes; the first
-        /// octet must have bit 0x02 set (locally-administered) to
-        /// avoid colliding with real hardware allocations.
-        mac: [u8; 6],
-        /// Host directory where the supervisor stages passt's pid
-        /// file and any future scratch artifacts. Typically
-        /// `<vm_state_dir>` so the per-VM artifact set stays
-        /// co-located. The supervisor creates it if absent.
-        scratch_dir: String,
-    },
-    /// virtio-net via the native vfkit gateway. The supervisor spawns the
-    /// configured gateway inside `run_supervisor`, points libkrun's
-    /// `krun_add_net_unixgram` at the listener socket it creates,
-    /// and reaps the gateway on guest exit. Same model as
-    /// `Passt` but unixgram-flavored: libkrun connects to a path
-    /// on disk rather than receiving a pre-opened socket fd. This
-    /// is the canonical macOS backend (passt is Linux-only).
-    NativeGateway {
-        /// MAC address for the guest's eth0. Same shape as the
-        /// `Passt` variant.
-        mac: [u8; 6],
-        /// Host directory where the supervisor stages the gateway's
-        /// listener socket + log file.
-        scratch_dir: String,
-        /// When set, launch the gateway natively as
-        /// `<MVM_GATEWAY_BIN> run --config <path>` instead of the
-        /// `-listen-vfkit` compatibility arg set. The config's
-        /// `[transport].path` must match the scratch socket path so
-        /// libkrun's `add_net_unixgram` connects to the same unixgram
-        /// socket either path creates. Absent → compatibility mode.
-        #[serde(default)]
-        native_config: Option<String>,
-    },
 }
 
 /// Guest PID 1 entrypoint passed to `krun_set_exec`. `path` is
@@ -391,42 +351,6 @@ impl KrunContext {
         if let Some(entry) = self.guest_entrypoint.as_mut() {
             entry.envp = envp.into_iter().map(Into::into).collect();
         }
-        self
-    }
-
-    /// Switch the guest to native-gateway-backed virtio-net. Same shape as
-    /// [`Self::with_passt`] but uses libkrun's unixgram backend; the
-    /// supervisor spawns the configured native gateway with
-    /// `--listen-vfkit <socket>` (or `run --config <path>`) and hands the
-    /// socket path to `krun_add_net_unixgram`.
-    pub fn with_native_gateway(mut self, mac: [u8; 6], scratch_dir: impl Into<String>) -> Self {
-        self.networking = NetworkingMode::NativeGateway {
-            mac,
-            scratch_dir: scratch_dir.into(),
-            native_config: None,
-        };
-        self
-    }
-
-    /// Point an already-`with_native_gateway`'d context at a pre-rendered native
-    /// gateway config, so the supervisor launches `<MVM_GATEWAY_BIN> run
-    /// --config <path>` rather than the compatibility arg set. No-op if
-    /// networking isn't [`NetworkingMode::NativeGateway`].
-    pub fn with_native_gateway_config(mut self, config_path: impl Into<String>) -> Self {
-        if let NetworkingMode::NativeGateway { native_config, .. } = &mut self.networking {
-            *native_config = Some(config_path.into());
-        }
-        self
-    }
-
-    /// Switch the guest to passt-backed virtio-net. The supervisor
-    /// process owns the passt child; we just declare the intent and
-    /// the destination for passt's log file.
-    pub fn with_passt(mut self, mac: [u8; 6], scratch_dir: impl Into<String>) -> Self {
-        self.networking = NetworkingMode::Passt {
-            mac,
-            scratch_dir: scratch_dir.into(),
-        };
         self
     }
 

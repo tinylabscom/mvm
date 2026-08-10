@@ -40,6 +40,7 @@ mod check_machine_doc_guards;
 mod check_mutation_witnesses;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
+mod check_no_gateway_names;
 mod check_no_host_nix;
 mod check_no_network_literals;
 mod check_no_overclaim;
@@ -251,6 +252,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_trust_gradient::run(&workspace)
         }
+        Some("check-no-gateway-names") => {
+            let workspace = workspace_root();
+            check_no_gateway_names::run(&workspace)
+        }
         Some("check-vsock-only-egress") => {
             let workspace = workspace_root();
             check_vsock_only_egress::run(&workspace)
@@ -315,7 +320,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-dormant-controls, check-witness-citations, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-dormant-controls, check-witness-citations, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-no-gateway-names, check-uniform-vsock-egress, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -434,6 +439,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-mvm-host-binaries-sync            Plan 115 / ADR-004: assert Rust manifest and Nix attrset agree"
+            );
+            eprintln!(
+                "  check-no-gateway-names                  assert no reference to a removed userspace network gateway"
             );
             eprintln!(
                 "  check-workflow-paths                    assert every workflow working-directory and cargo-fuzz target still exists"

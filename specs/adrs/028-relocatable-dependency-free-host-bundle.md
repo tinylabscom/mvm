@@ -9,8 +9,8 @@ can land (see "Why Option A, and how it's staged").
 
 ## Context
 
-Today, on macOS, a user must `brew install slp/krun/{libkrun,libkrunfw,
-gvproxy}` before `mvmctl` can run its libkrun-backed builder VM. That
+Today, on macOS, a user must `brew install slp/krun/{libkrun,libkrunfw}`
+before `mvmctl` can run its libkrun-backed builder VM. That
 package-manager step is the first-run cliff: a developer who never gets
 past it never sees the security substrate behind `mvmctl` at all — DX is
 the gate, the substrate is the moat behind it.

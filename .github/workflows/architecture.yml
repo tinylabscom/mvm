@@ -72,7 +72,7 @@ jobs:
   #      in `crates/mvm-cli/src/template_cmd.rs` and
   #      `crates/deps/libkrun-sys/src/native_gateway.rs` (`free_loopback_port`).
   #      Binds to find a free port; drops the listener immediately so
-  #      the caller (here, gvproxy's mandatory ssh-forward listener)
+  #      the caller (here, a mandatory ssh-forward listener)
   #      can claim it. Not a daemon.
   #   6. Test-only mock guest-agent
   #      (`crates/mvm-runtime/src/mock_guest_agent.rs`). Mirrors the

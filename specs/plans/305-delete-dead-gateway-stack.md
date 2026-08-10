@@ -1,9 +1,9 @@
 # Plan 305 — Delete the dead guest-NIC gateway stack
 
-**Status: IN PROGRESS**
+**Status: WS1 + WS2 COMPLETE** (WS4 remains)
 **Supersedes:** the confinement-first framing this plan opened with (see
 "History" below)
-**Related:** plan 303 WS6, ADR-003, ADR-014 claim 10, `xtask
+**Related:** plan 303 WS6, ADR-003, ADR-001 claim 10, `xtask
 check-vsock-only-egress`
 
 ## Why
@@ -11,9 +11,9 @@ check-vsock-only-egress`
 Workload egress converged on vsock. Every workload backend boots with a
 virtio-vsock device and no net device, and egress leaves the guest only over
 the per-VM substitution endpoint. The guest-NIC gateway stack that predates
-that convergence — passt, gvproxy, the native/rvproxy gateway, the `mvm-bridge`
-sidecar, and the observer packet pipeline they feed — is still in the tree but
-no longer reachable.
+that convergence — the legacy guest-NIC helpers, the userspace gateways, the
+native gateway, the `mvm-bridge` sidecar, and the observer packet pipeline they
+feed — is still in the tree but no longer reachable.
 
 This is not an inference from the docs. It is what the code says:
 
@@ -31,8 +31,8 @@ This is not an inference from the docs. It is what the code says:
   construction of `NetworkingMode::Passt` in the tree is inside a `#[test]`.
 - `with_native_gateway_config` is called only from inside a block already
   guarded on `cfg.krun.networking` *being* `NativeGateway`, which nothing sets.
-- `run_packet_pipeline`'s only non-test callers are `gateway_bridge/passt.rs`
-  and `gateway_bridge/native_gateway.rs`.
+- `run_packet_pipeline`'s only non-test callers are the two `gateway_bridge`
+  gateway modules.
 
 So the whole subtree is unreachable, and it is not inert weight: it is a second
 egress model sitting next to the real one, with its own policy surface, its own
@@ -49,10 +49,10 @@ gateway makes that gate trivially true instead of continuously defended.
    `workflow_dispatch`-only, which is why nobody noticed. The tests themselves
    are fine — run on a live Landlock kernel (6.8, `landlock` in
    `/sys/kernel/security/lsm`) both pass.
-2. **`ConfinementSpec::firecracker_bridge` hard-requires `/usr/bin/passt` to
+2. **`ConfinementSpec::firecracker_bridge` hard-requires a gateway binary to
    exist**, because Landlock's `PathFd::new` opens every allowlisted path. On a
-   box without passt the property tests fail with `landlock path missing`. That
-   is a spec pinned to a binary the runtime no longer launches.
+   box without it the property tests fail with `landlock path missing`. That is
+   a spec pinned to a binary the runtime no longer launches.
 
 ## Workstreams
 
@@ -88,38 +88,85 @@ tests pass under an enforcing Landlock (`landlock_denies_paths_outside_ruleset`,
 `seccomp_allows_listed_denies_unlisted`).
 
 One caveat found while doing it, feeding WS2: the tests only pass there because
-`passt` was installed. `ConfinementSpec::firecracker_bridge` lists the passt
-binary as a Landlock-readable path, and `PathFd::new` opens every path in the
+the gateway binary was installed. `ConfinementSpec::firecracker_bridge` lists
+it as a Landlock-readable path, and `PathFd::new` opens every path in the
 ruleset — so the spec cannot be built on a host without a binary the runtime
 never launches.
 
-### WS2 — Delete the gateway stack
+### WS2 — Delete the gateway stack — DONE
 
-Staged so each step compiles and the test suite stays green.
+~15,600 lines net (`+692 / −15,670`). Compiler-driven: each stage deleted an
+entry point, then let `rustc` and `clippy -D warnings` enumerate what that
+orphaned.
 
-- [ ] `NetworkingMode::{Passt, NativeGateway}` and their builder setters
-- [ ] `libkrun-sys`: `bridge.rs`, `run_supervisor_with_bridge`,
-      `native_gateway.rs`, passt spawn in `start.rs`/`supervisor.rs`
-- [ ] `mvm-hostd`: `gateway_bridge/{passt,native_gateway,native_gateway_live}.rs`,
-      `supervisor/network/rvproxy_*.rs`, and whatever of `gateway_bridge/` is
-      left with no live caller
-- [ ] `mvm-bridge` sidecar bin + `src/bridge/`, and its `ConfinementSpec` +
-      `BRIDGE_SYSCALLS` if nothing else uses them
-- [ ] `run_with_bridge` / `should_use_bridge_route` in the libkrun supervisor
-- [ ] `MVM_NETWORKING` and `MVM_GATEWAY_BIN`
-- [ ] The observer packet pipeline (`supervisor/network/pipeline.rs`) **only if**
-      the compiler confirms no live caller survives — it is shared with the
-      scan/substitution stages, so this one gets checked, not assumed
+- [x] The gateway `NetworkingMode` variants and their builder setters
+- [x] `libkrun-sys`: `bridge.rs`, `run_supervisor_with_bridge`, the two gateway
+      spawn modules, `child_lifecycle.rs`, `GatewayHandle`,
+      `configure_with_gateway`, and the net-attach FFI
+- [x] `mvm-hostd`: `supervisor/gateway_bridge/` entire, the four
+      supervisor network substitution modules, including `rvproxy_*`, the
+      observer pipeline
+      (`pipeline.rs`, `latency.rs`, `flow_count.rs`) and the registry in
+      `network/mod.rs`, `firecracker_bridge/`, the `mvm-bridge` sidecar and
+      `src/bridge/`, and the `fuzz-vmhost` crate whose only two targets fuzzed
+      deleted parsers
+- [x] `run_with_bridge` / `should_use_bridge_route`; dispatch has one route
+- [x] `NetworkingPreference` (a single-variant enum by then),
+      `resolve_networking_mode`, `apply_networking_mode`, and with them
+      `MVM_NETWORKING` / `MVM_GATEWAY_BIN`
+- [x] Release packaging: `release.yml` built the deleted sidecar as an artifact
+      and `RELEASE_HOST_BINS` listed it for `mvmctl update` to download
 
-Anything whose deletion the compiler resists gets reported, not forced.
+`supervisor/network/` keeps what the vsock path uses: the packet parser,
+`stages::Redacting*` (the live substitution seam), and `flow_byte_log` (swept
+by `mvmctl cache prune`).
 
-### WS3 — Correct the docs the deletion falsifies
+Three findings recorded rather than quietly fixed, because each was true
+*before* the deletion and would otherwise have been lost with the code:
 
-- [ ] CLAUDE.md "Host dependencies (macOS)" still instructs `brew install
-      slp/krun/gvproxy` and documents an `MVM_NETWORKING` per-OS default table
-      that `libkrun_builder.rs:193` contradicts
-- [ ] ADR-003 and any claim-5/claim-10 prose that describes the gateway parsers
-      as a live surface
+1. **The supervisor's in-process plan verification was already unreachable.**
+   `verify_signed_plan` was called only from `run_with_bridge`, which
+   `should_use_bridge_route` gated off for every workload. Claim-8 verification
+   happens at admission in the CLI, where ADR-001 puts it. Its three tests were
+   checked against ADR-001's witness table, `model/claims.toml`, and
+   `mvm-core/src/plan/content_id.rs`, which covers the same rejection ladder.
+2. **`ConfinementSpec::firecracker_bridge` pinned a binary the runtime never
+   launched**, so the jailer property tests only ran where it was installed.
+   They now build `ConfinementSpec::substitution_endpoint` — the live confined
+   role. `BRIDGE_SYSCALLS` → `CONFINED_ROLE_SYSCALLS`, which is what the shared
+   table always was.
+3. **A re-export was gated more tightly than the item it exported.** `start`
+   returns `NotYetWired` without the `libkrun-sys` feature and has a test
+   asserting that, but its re-export was feature-gated — reachable from nothing
+   in a featureless build, kept alive only by the gateway boot path.
+
+### The gate
+
+`xtask check-no-gateway-names` walks the tree and fails on a word-boundary
+match for the removed names, wired into `ci.yml`'s lint lane beside
+`check-vsock-only-egress`.
+
+Word boundaries are load-bearing and tested: similarly named Nix attributes and
+ordinary words such as `passthru` and `passthrough` can contain a forbidden
+token as a substring, and a substring match
+produced ~200 false positives — enough to get the gate switched off.
+Exemptions are narrow and asserted narrow by a test; live documentation is not
+exempt. One span-precise context allowance covers an SSH key filename that
+cannot be renamed from here, with a test proving it does not excuse a real
+reference on the same line. The walker skips symlinks — `Path::is_dir()`
+follows them, and a `nix build` `result` symlink would walk `/nix/store` while
+a cycle would not terminate.
+
+### WS3 — Correct the docs the deletion falsifies — DONE
+
+- [x] `CLAUDE.md` "Host dependencies" instructed installing a third Homebrew
+      package and documented an `MVM_NETWORKING` per-OS default table that
+      `libkrun_builder.rs` directly contradicted
+- [x] `README.md`, ADR-028, ADR-036, the jailer's `LANDLOCK.md`/`SECCOMP.md`,
+      public troubleshooting + CLI reference, kernel image notes, three
+      workflows, two baseline scripts
+- [x] An orphaned doc comment in `mvm-hostd/src/lib.rs` described the deleted
+      bridge module while sitting on `pub mod broker;`
 
 ### WS4 — Then confine the signer roles
 
@@ -143,6 +190,12 @@ This plan opened as "confine the four unconfined moat roles". That framing
 survived until the gateway stack was examined and found inert: confining
 `mvm-bridge`'s peers is worth less than deleting the model `mvm-bridge` exists
 to serve. The confinement work is preserved as WS4 rather than dropped.
+
+## Out of scope
+
+`gateway_audit_socket` survives in `SupervisorConfig`, `mvm-vmm` and
+`mvm-backends`. It is a neutral name on the audit substrate rather than a
+gateway reference, and untangling it reaches the warm-pool claim path.
 
 ## Validation
 

@@ -32,7 +32,6 @@
 #[cfg(feature = "libkrun-sys")]
 mod sys;
 
-mod bridge;
 mod context;
 mod error;
 mod start;
@@ -44,14 +43,14 @@ pub use context::{
     GuestEntrypoint, KernelFormat, KrunContext, KrunDisk, KrunVirtioFs, NetworkingMode,
 };
 
-#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
-pub use start::GatewayHandle;
+// Exported whenever the module compiles, not only under the FFI feature.
+// `start` is written to fail with `Error::NotYetWired` in a featureless
+// build — its own test asserts that — so gating the re-export on the feature
+// left it reachable from nothing. That went unnoticed only because the
+// gateway-bridge boot path referenced it internally; deleting that path made
+// the inconsistency visible.
+#[cfg(target_family = "unix")]
 pub use start::{start, start_enter};
-
-#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
-pub use bridge::BridgeFds;
-#[cfg(feature = "libkrun-sys")]
-pub use bridge::run_supervisor_with_bridge;
 
 #[cfg(feature = "libkrun-sys")]
 pub use supervisor::run_supervisor;
@@ -64,26 +63,6 @@ pub use supervisor::{
 
 #[cfg(feature = "libkrun-sys")]
 pub use sys::{BundledKernel, LogLevel, extract_bundled_kernel, init_log, set_log_level};
-
-// passt-backed virtio-net. The supervisor owns the passt child process
-// and exposes the socket fd `KrunContext::Passt` consumes. Only Linux /
-// macOS — Windows has neither libkrun nor passt. Tests are gated on a
-// host-side passt install probe.
-#[cfg(target_family = "unix")]
-pub mod passt;
-
-// Native-gateway-backed virtio-net. The macOS counterpart to passt; both
-// modules share the same shape (spawn child, hand its socket to libkrun, kill
-// on Drop) but the native gateway uses libkrun's `krun_add_net_unixgram`
-// (path-based) where passt uses `krun_add_net_unixstream` (fd-passed). Same
-// unix gate as passt — Windows has neither.
-#[cfg(target_family = "unix")]
-pub mod native_gateway;
-
-// Tie a spawned networking helper to its supervisor's lifetime so a dead
-// supervisor never orphans it (Linux `PR_SET_PDEATHSIG`; no-op elsewhere).
-#[cfg(target_family = "unix")]
-mod child_lifecycle;
 
 // Sync length-prefixed JSON framing for the supervisor control
 // channels. Colocated with the `Supervisor*Config` wire types it frames so both the

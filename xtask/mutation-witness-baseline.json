@@ -191,13 +191,6 @@
       ]
     },
     {
-      "path": "crates/mvm-hostd/src/supervisor/network/pipeline.rs",
-      "package": "mvm-hostd",
-      "claims": [
-        13
-      ]
-    },
-    {
       "path": "crates/mvm-hostd/src/supervisor/network/stages.rs",
       "package": "mvm-hostd",
       "claims": [

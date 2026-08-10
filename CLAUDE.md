@@ -15,22 +15,23 @@ Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Pl
 
 ## Host dependencies (macOS)
 
-The libkrun-backed builder VM (started automatically by `mvmctl bootstrap`, `mvmctl build`, or `mvmctl machine run`) needs three Homebrew packages installed:
+The libkrun-backed builder VM (started automatically by `mvmctl bootstrap`, `mvmctl build`, or `mvmctl machine run`) needs two Homebrew packages installed:
 
 ```sh
-brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy
+brew install slp/krun/libkrun slp/krun/libkrunfw
 ```
 
 - `libkrun` — the in-process VMM. `mvm-libkrun-supervisor` links against it.
 - `libkrunfw` — bundles the TSI-patched Linux kernel libkrun's guests boot. Plan 86 / Plan 72 W5.D bullet 10 — `libkrun-sys::extract_bundled_kernel()` pulls the kernel out of the dylib's `.rodata` at runtime.
-- `gvproxy` — userspace virtio-net gateway **for the builder VM only**. Plan 88 / ADR-003 §"Cross-platform backends" — passt is Linux-only, so macOS dispatches to gvproxy via libkrun's `krun_add_net_unixgram` path. `MVM_NETWORKING` unset → per-OS default (macOS=gvproxy, Linux=passt); `passt`, `gvproxy`, and the opt-in `native` are accepted. `native` (ADR-003 — the hvf Rust gateway) requires `MVM_GATEWAY_BIN` to name the gateway binary and falls back to the per-OS default without it; it is parity-gated and not yet validated end-to-end, so the default never selects it. Plan 102 W6.A removed the `tsi` mode (TSI bypassed virtio-net entirely, violating the claim-10 no-bypass invariant — see ADR-014).
 
-  **This applies to the builder VM and Stage 0, never to a workload microVM.** `MVM_NETWORKING`, gvproxy, and passt select how _the build engine_ reaches the network; no workload backend consults them. See "Workload microVMs have no NIC" under **Key Design Decisions**.
+There is no third package and no gateway binary. Every libkrun lane — builder
+VM, Stage 0, and workload — boots with an explicit virtio-vsock device and no
+guest NIC, so there is nothing for a userspace network gateway to sit between.
+The `MVM_NETWORKING` and `MVM_GATEWAY_BIN` knobs that used to select one are
+gone, and `xtask check-no-gateway-names` fails the build if a reference comes
+back.
 
-On Linux contributor hosts swap `gvproxy` for `passt` from the distro
-package manager (or build passt from source — see ADR-003 references).
-
-`mvmctl doctor` probes the right gateway per OS and emits install hints when missing.
+`mvmctl doctor` reports the libkrun install state and emits hints when it is missing.
 
 For source-checkout contributors only: a **pinned** zig + cargo-zigbuild are
 needed at `cargo build`-of-mvmctl time so `crates/mvm-cli/build.rs` can
@@ -92,7 +93,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-contract` -- `#![no_std]` + alloc, `forbid(unsafe_code)`; the wasm/browser-capable foundation. The audit-log verifier (and, incrementally, the `Workload` IR + wire protocol + policy DTOs). Builds on `wasm32-unknown-unknown`.
 - `mvm-core` -- std: types, IDs, config/paths (`MVM_HOME`), crypto, signing, routing. Absorbs `plan` (typed signed `ExecutionPlan`), `policy`, `crypto` (attestation/keystore/secret_store/snapshot + opt-in cosign behind `manifest-verify`). **Default build has no async deps**: `tokio` is optional, pulled only by the off-by-default `hostd-transport` or `manifest-verify` features. `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
 - `mvm-fs` -- image → mountable rootfs: OCI distribution client (registry/manifest/layer fetch + allow-listed `unpack/`) + a pure-Rust, memory-safe, deterministic ext4 writer (no `mkfs`, no subprocess) + `overlay`. Absorbs the old `mvm-ext4` + `mvm-oci`.
-- `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge/native-gateway/passt impl lives in `mvm-runtime`.
+- `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge impl lives in `mvm-runtime`.
 - `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
 - `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait + every backend impl (`libkrun`/`hvf_backend`+`hvf/`/`firecracker`/`qemu`/`mock`), VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
 - `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
@@ -103,7 +104,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`/`mvm-bridge`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
 - `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
 - `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, runtime record mode, and the in-guest host-services C-ABI cdylib (`libmvm_host_services.so`) loaded by every language SDK. Language SDK surfaces live under `crates/mvm-sdk/sdks/`.
-- `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
+- `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
 
 `xtask` -- tooling + claim-gate lints. `mvm-conformance` -- dev-only cucumber-rs BDD harness running the security-claim scenarios against `mvmctl` (not a dependency of any shipped crate).
 
@@ -255,16 +256,12 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    host-side `SupervisorConfig` parser the `mvm-libkrun-supervisor`
    binary reads on stdin. `#[serde(deny_unknown_fields)]` on every
    host↔guest type ensures unexpected fields fail-closed (W4.1). The
-   virtio-net frame parsers that Plan 87/88 brought online live
-   inside libkrun (C), passt (C), and gvproxy (Go) — their fuzz
-   coverage belongs upstream, in those projects' own repositories;
-   `specs/adrs/003-hypervisor-egress-policy.md` was rewritten around
-   the vsock-only chokepoint and no longer tracks this gap under any
-   heading. Since the vsock-egress convergence, though,
-   those three parsers are **off the workload path entirely** (no
-   workload guest has a NIC); they remain reachable only from
-   builder-VM and Stage 0 traffic, which carries no untrusted
-   tenant workload.
+   third-party virtio-net frame parsers this section used to track as
+   an upstream fuzz gap are no longer reachable from any lane: the
+   userspace network gateways were deleted along with the guest-NIC
+   path, so there is no in-tree caller and no frame for them to parse.
+   `specs/adrs/003-hypervisor-egress-policy.md` is written around the
+   vsock-only chokepoint.
 6. **Pre-built dev image is hash-verified.** No function named
    `download_dev_image` exists; the real pipeline is
    `fetch_expected_hashes` + `verify_artifact_hash`

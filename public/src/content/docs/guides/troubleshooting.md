@@ -284,7 +284,7 @@ There's no shell into the builder VM to inspect NAT/TAP state directly.
 Start from the network policy the VM was launched with:
 
 ```bash
-mvmctl doctor              # resolved network backend (gvproxy/passt/native)
+mvmctl doctor              # resolved network backend
 mvmctl machine logs <name>  # guest-side boot + networking errors
 ```
 

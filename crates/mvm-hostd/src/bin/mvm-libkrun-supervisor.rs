@@ -45,23 +45,14 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use chrono::Utc;
-use ed25519_dalek::{SigningKey, VerifyingKey};
 use libkrun_sys::{
-    BridgeFds, LogLevel, SupervisorBaseConfig, SupervisorConfig, init_log, run_supervisor,
-    run_supervisor_with_bridge, set_log_level,
+    LogLevel, SupervisorBaseConfig, SupervisorConfig, init_log, run_supervisor, set_log_level,
 };
-use mvm_core::plan::{ExecutionPlan, NonceStore, SignedExecutionPlan, verify_plan, verify_plan_id};
-use mvm_core::policy::PolicyBundle;
-use mvm_hostd::supervisor::audit::AuditSigner;
-use mvm_hostd::supervisor::audit_file::FileAuditSigner;
-use mvm_hostd::supervisor::gateway_bridge::{
-    BridgeConfig, BridgeEndpoints, spawn_bridge_thread, spawn_native_audit_feed,
-};
+use mvm_core::plan::NonceStore;
 
 /// Per-connection attach timeout. An abandoned connect must not wedge the
 /// standby; pool size bounds the blast radius.
@@ -216,30 +207,20 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
         }
     }
 
-    // Route to the bridge path when the producer
-    // populated the audit substrate, otherwise fall back to the
-    // legacy direct-libkrun path (Stage 0 builder VMs, smoke tests,
-    // etc. that haven't synthesized an ExecutionPlan).
-    let outcome = if should_use_bridge_route(&cfg) {
-        append_supervisor_breadcrumb(
-            std::path::Path::new(&cfg.vm_state_dir),
-            "dispatch_route",
-            "bridge".to_string(),
-        );
-        run_with_bridge(cfg)
+    // One route. The bridge route existed to splice a packet-inspecting
+    // sidecar between the guest's NIC and a userspace gateway; a workload
+    // guest has no NIC, so there is nothing for it to sit between.
+    let route = if cfg.tenant_id.is_some() {
+        "direct_vsock"
     } else {
-        let route = if cfg.tenant_id.is_some() {
-            "legacy_direct_vsock"
-        } else {
-            "legacy"
-        };
-        append_supervisor_breadcrumb(
-            std::path::Path::new(&cfg.vm_state_dir),
-            "dispatch_route",
-            route.to_string(),
-        );
-        run_legacy(&cfg)
+        "direct"
     };
+    append_supervisor_breadcrumb(
+        std::path::Path::new(&cfg.vm_state_dir),
+        "dispatch_route",
+        route.to_string(),
+    );
+    let outcome = run_legacy(&cfg);
 
     match outcome {
         // run_supervisor / run_supervisor_with_bridge return
@@ -250,14 +231,6 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-fn should_use_bridge_route(cfg: &SupervisorConfig) -> bool {
-    cfg.tenant_id.is_some()
-        && !matches!(
-            cfg.krun.networking,
-            libkrun_sys::NetworkingMode::Tsi | libkrun_sys::NetworkingMode::VsockDirect
-        )
 }
 
 /// Prelaunched-standby flow. `ensure_signed()` + the libkrun
@@ -385,284 +358,6 @@ fn run_legacy(cfg: &SupervisorConfig) -> Result<std::convert::Infallible> {
     })
 }
 
-/// Bridge boot path — sets up the per-VM gateway audit bridge
-/// before calling libkrun's `start_enter`. Synthesizes the bridge
-/// factory closure that converts `BridgeFds` (mvm-libkrun shape)
-/// into `BridgeEndpoints` (mvm-supervisor shape), builds
-/// `BridgeConfig` from the JSON-encoded plan + bundle and the
-/// chain-signing `FileAuditSigner`, then calls
-/// `spawn_bridge_thread`. The bridge thread runs concurrently with
-/// `krun_start_enter` and is reaped by `exit()` on guest shutdown.
-fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
-    let vm_state_dir = std::path::PathBuf::from(&cfg.vm_state_dir);
-    append_supervisor_breadcrumb(
-        &vm_state_dir,
-        "run_with_bridge_enter",
-        format!(
-            "vm={} tenant_id={}",
-            cfg.krun.name,
-            cfg.tenant_id.as_deref().unwrap_or("")
-        ),
-    );
-
-    // Pre-extract the audit-substrate paths + plan/bundle. The
-    // factory closure needs them as owned values; the legacy
-    // `&SupervisorConfig` reference path doesn't fit because
-    // run_supervisor_with_bridge takes a `&SupervisorConfig` and
-    // the factory captures these owned by move.
-    let vm_name = cfg.krun.name.clone();
-    let tenant_id = cfg
-        .tenant_id
-        .clone()
-        .ok_or_else(|| anyhow!("run_with_bridge called without cfg.tenant_id"))?;
-    let audit_dir = cfg.audit_dir.clone().ok_or_else(|| {
-        anyhow!("cfg.audit_dir missing — validate_audit_substrate should have refused")
-    })?;
-    let audit_socket = cfg
-        .gateway_audit_socket
-        .clone()
-        .ok_or_else(|| anyhow!("cfg.gateway_audit_socket missing"))?;
-    let signing_key_path = cfg
-        .signing_key_path
-        .clone()
-        .ok_or_else(|| anyhow!("cfg.signing_key_path missing"))?;
-    let plan_value = cfg
-        .plan
-        .clone()
-        .ok_or_else(|| anyhow!("cfg.plan missing on bridge path"))?;
-    let bundle_value = cfg.bundle.clone();
-
-    // Load the host signer secret bytes before trusting any field decoded from
-    // cfg.plan. The file is mode 0600 and written by mvm-cli's
-    // `host_signer::load_or_init_at` at admit time; the path was already
-    // canonicalized under `~/.mvm/keys/` by
-    // `SupervisorConfig::validate_audit_substrate`.
-    let key_bytes = std::fs::read(&signing_key_path)
-        .with_context(|| format!("read signing key {}", signing_key_path.display()))?;
-    let key_array: [u8; 32] = key_bytes.as_slice().try_into().with_context(|| {
-        format!(
-            "signing key {} is {} bytes, expected 32",
-            signing_key_path.display(),
-            key_bytes.len()
-        )
-    })?;
-    let signing_key = SigningKey::from_bytes(&key_array);
-    let verifying_key = signing_key.verifying_key();
-
-    // Deserialize the JSON-Value-carrier into the signed envelope, then verify
-    // its signature and content-address before trusting the typed plan. The
-    // round-trip cost is trivial versus the bridge's IO budget.
-    let signed: SignedExecutionPlan =
-        serde_json::from_value(plan_value).context("decode cfg.plan into SignedExecutionPlan")?;
-    let signer_id = mvm_hostd::audit::host_keypair::host_signer_id();
-    let plan = verify_signed_plan(&signed, &signer_id, &verifying_key)?;
-    let bundle: Option<PolicyBundle> = match bundle_value {
-        Some(v) => Some(serde_json::from_value(v).context("decode cfg.bundle into PolicyBundle")?),
-        None => None,
-    };
-    // Bare egress policy for the no-bundle path. The bridge derives the flow
-    // gate + DNS allow-list from it when no bundle resolves (transient/dev).
-    let network_policy: Option<mvm_core::network_policy::NetworkPolicy> =
-        match cfg.network_policy.clone() {
-            Some(v) => Some(
-                serde_json::from_value(v)
-                    .context("decode cfg.network_policy into NetworkPolicy")?,
-            ),
-            None => None,
-        };
-
-    // Historical native-gateway hook: this now stays inert because the active
-    // libkrun transport is direct-vsock only. Keep the surrounding
-    // native-flow-audit plumbing in place so an eventual gateway-backed
-    // transport reintroduction does not need a larger structural rewrite.
-    let mut native_flow_audit_path: Option<std::path::PathBuf> = None;
-    if matches!(
-        mvm_build::libkrun_builder::resolve_networking_mode(),
-        mvm_build::libkrun_builder::NetworkingPreference::VsockDirect
-    ) && let libkrun_sys::NetworkingMode::NativeGateway { scratch_dir, .. } =
-        &cfg.krun.networking
-    {
-        let scratch = std::path::PathBuf::from(scratch_dir);
-        // Matches `write_native_gateway_config`'s `[audit]` export path.
-        native_flow_audit_path = Some(scratch.join("flow-audit.jsonl"));
-        // Fail closed: a native gateway we can't configure must not silently
-        // fall back to gvproxy-compat, which carries no policy.
-        let transparent = cfg.transparent_terminator_port.map(|terminator_port| {
-            mvm_hostd::supervisor::network::rvproxy_config::RvproxyTransparentConfig {
-                terminator_host: std::net::Ipv4Addr::new(127, 0, 0, 1),
-                terminator_port,
-            }
-        });
-        let config_path =
-            mvm_hostd::supervisor::network::rvproxy_launch::write_native_gateway_config(
-                bundle.as_ref(),
-                &plan.tenant,
-                &vm_name,
-                &scratch,
-                transparent,
-                chrono::Utc::now(),
-            )
-            .context("render native rvproxy gateway config")?;
-        tracing::info!(
-            vm = %vm_name,
-            config = %config_path.display(),
-            "native rvproxy gateway: rendered run --config"
-        );
-        cfg.krun = cfg
-            .krun
-            .with_native_gateway_config(config_path.to_string_lossy().into_owned());
-    }
-
-    // FileAuditSigner is what mvm-supervisor's chain emitter wraps.
-    // The cross-process flock serializes writes from concurrent VM
-    // supervisors for the same tenant.
-    let signer = FileAuditSigner::open(signing_key, &audit_dir)
-        .with_context(|| format!("open FileAuditSigner at {}", audit_dir.display()))?;
-    let signer: Arc<dyn AuditSigner> = Arc::new(signer);
-
-    // Sanity log so operators tailing the bin's stderr can see the
-    // bridge wired up.
-    tracing::info!(
-        vm = %vm_name,
-        tenant = %tenant_id,
-        audit_socket = %audit_socket.display(),
-        audit_dir = %audit_dir.display(),
-        "starting bridge-mode libkrun supervisor"
-    );
-
-    // Observer chain from admitted plan + host
-    // allowlist. `resolve_observer_chain_from_plan` returns an empty
-    // Vec for the `local-default` plan ref WITHOUT consulting the
-    // allowlist; only non-default refs trigger the
-    // `~/.mvm/observers/allowlist.toml` load. This preserves the
-    // Stage 0 / dev-mode path (and the dispatch
-    // smoke, which uses a placeholder plan that fails decode before
-    // reaching this code).
-    //
-    // Leaf capabilities are fixed per backend: libkrun reports
-    // `payload_tap: true`. The drainer will
-    // set `payload_tap: false` from its own bin.
-    let leaf_caps = mvm_hostd::supervisor::network::ProviderCapabilities {
-        flow_events: true,
-        payload_tap: true,
-    };
-    let observer_names = mvm_hostd::supervisor::network::resolve_observer_chain_from_policy_source(
-        &plan,
-        bundle.as_ref(),
-    )
-    .context("resolve observer chain from admitted policy source")?;
-    let observers = if observer_names.is_empty() {
-        Vec::new()
-    } else {
-        let allowlist = mvm_hostd::supervisor::network::ObserverAllowlist::load_from_host_config()
-            .context("load ObserverAllowlist from ~/.mvm/observers/allowlist.toml")?;
-        let mut pipe = mvm_hostd::supervisor::network::Pipeline::new();
-        for name in observer_names {
-            let obs = allowlist
-                .resolve(&name)
-                .context("resolve observer name in allowlist")?;
-            pipe = pipe
-                .observe(obs, leaf_caps)
-                .context("observer capability gate")?;
-        }
-        pipe.build_observers()
-    };
-
-    let bridge_cfg = BridgeConfig {
-        vm_name: vm_name.clone(),
-        plan: Arc::new(plan),
-        bundle: bundle.map(Arc::new),
-        audit_socket,
-        signer,
-        // Observers resolved above from the
-        // admitted plan's `network_policy` ref through the host
-        // allowlist. Empty for `local-default` plans (preserves
-        // prior behavior); non-empty for tenant policies that
-        // reference an allowlisted observer by name.
-        observers,
-        // Bare-policy enforcement seam for the no-bundle path, decoded from
-        // SupervisorConfig.network_policy (which the libkrun backend fills from
-        // VmStartConfig.network_policy).
-        network_policy,
-        // Native rvproxy gateway: tail its flow-audit export into the chain
-        // signer. `Some` only when the native gateway was rendered above; the
-        // gvproxy/passt path leaves it `None` (splice is the sole audit source).
-        native_flow_audit_path,
-    };
-
-    // Native rvproxy: libkrun attaches DIRECTLY to rvproxy (no splice in the
-    // data path — interposing the splice in front of rvproxy breaks the vfkit
-    // return path and would only mask rvproxy's own enforcement). rvproxy is the
-    // sole egress enforcer; a standalone audit feed re-feeds its flow-audit
-    // export into the chain signer so the claim-10 audit stays mvm's source of
-    // truth. gvproxy/passt keep the in-line splice bridge.
-    if bridge_cfg.native_flow_audit_path.is_some() {
-        append_supervisor_breadcrumb(
-            &vm_state_dir,
-            "run_with_bridge_native",
-            "native_flow_audit".to_string(),
-        );
-        // JoinHandle dropped — libkrun's exit() on guest shutdown reaps it;
-        // the feed's own catch_unwind → exit(1) is the fail-closed signal.
-        let _feed = spawn_native_audit_feed(bridge_cfg);
-        return run_supervisor(&cfg).map_err(|e| {
-            append_supervisor_breadcrumb(
-                &vm_state_dir,
-                "run_with_bridge_native_error",
-                e.to_string(),
-            );
-            anyhow!("run_supervisor (native) failed: {e}")
-        });
-    }
-
-    append_supervisor_breadcrumb(
-        &vm_state_dir,
-        "run_with_bridge_spawn_bridge",
-        "inline_bridge".to_string(),
-    );
-    run_supervisor_with_bridge(&cfg, move |bridge_fds| {
-        let endpoints = match bridge_fds {
-            BridgeFds::Passt {
-                gateway_fd,
-                supervisor_fd,
-            } => BridgeEndpoints::Passt {
-                gateway_fd,
-                supervisor_fd,
-            },
-            BridgeFds::LibkrunNativeGateway {
-                gateway_socket_path,
-                supervisor_listen_path,
-            } => BridgeEndpoints::LibkrunNativeGateway {
-                gateway_socket_path,
-                supervisor_listen_path,
-            },
-        };
-        // Bridge thread JoinHandle is intentionally dropped — libkrun's
-        // exit() on guest shutdown reaps the thread without graceful
-        // join. The bridge's own `catch_unwind → exit(1)` provides the
-        // fail-closed signal for the claim-10 substrate.
-        let _join = spawn_bridge_thread(endpoints, bridge_cfg);
-    })
-    .map_err(|e| {
-        append_supervisor_breadcrumb(&vm_state_dir, "run_with_bridge_error", e.to_string());
-        anyhow!("run_supervisor_with_bridge failed: {e}")
-    })
-}
-
-/// Verify the plan envelope before exposing its payload to the bridge setup.
-/// The supervisor receives the envelope over a private host channel, but the
-/// channel is not a substitute for the plan's cryptographic invariants.
-fn verify_signed_plan(
-    signed: &SignedExecutionPlan,
-    signer_id: &str,
-    verifying_key: &VerifyingKey,
-) -> Result<ExecutionPlan> {
-    let plan = verify_plan(signed, &[(signer_id, verifying_key)])
-        .context("verifying SignedExecutionPlan envelope")?;
-    verify_plan_id(&plan).context("verifying ExecutionPlan content address")?;
-    Ok(plan)
-}
-
 fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, detail: String) {
     let path = vm_state_dir.join("supervisor.lifecycle.log");
     if let Some(parent) = path.parent() {
@@ -681,14 +376,8 @@ fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, det
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        append_supervisor_breadcrumb, apply_egress_relay_override, should_use_bridge_route,
-        verify_signed_plan,
-    };
-    use ed25519_dalek::{Signer, SigningKey};
+    use super::{append_supervisor_breadcrumb, apply_egress_relay_override};
     use libkrun_sys::{BridgeRestartPolicy, KrunContext, NetworkingMode, SupervisorConfig};
-    use mvm_core::plan::{SignedExecutionPlan, sign_plan};
-    use mvm_core::protocol::signing::SignedPayload;
 
     fn sample_cfg(networking: NetworkingMode, tenant_id: Option<&str>) -> SupervisorConfig {
         let mut krun = KrunContext::new("vm-1", "/k", "/r");
@@ -718,30 +407,6 @@ mod tests {
         let body = std::fs::read_to_string(dir.path().join("supervisor.lifecycle.log"))
             .expect("read lifecycle log");
         assert!(body.contains("dispatch_config: detail"), "body: {body}");
-    }
-
-    #[test]
-    fn bridge_route_skips_admitted_vsock_direct_workloads() {
-        let cfg = sample_cfg(NetworkingMode::VsockDirect, Some("tenant-a"));
-        assert!(
-            !should_use_bridge_route(&cfg),
-            "VsockDirect admitted workloads must stay on the legacy no-gateway route"
-        );
-    }
-
-    #[test]
-    fn bridge_route_keeps_gateway_backed_admitted_workloads() {
-        let cfg = sample_cfg(
-            NetworkingMode::Passt {
-                mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
-                scratch_dir: "/tmp/passt".into(),
-            },
-            Some("tenant-a"),
-        );
-        assert!(
-            should_use_bridge_route(&cfg),
-            "gateway-backed admitted workloads must keep the bridge route"
-        );
     }
 
     #[test]
@@ -775,55 +440,6 @@ mod tests {
             cfg.krun
                 .host_listen_socket_path(mvm_agentd::vsock::EGRESS_PORT),
             derived
-        );
-    }
-
-    fn signed_fixture() -> (SignedExecutionPlan, SigningKey) {
-        let key = SigningKey::from_bytes(&[7u8; 32]);
-        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
-        (sign_plan(&plan, &key, "host:test"), key)
-    }
-
-    #[test]
-    fn verify_signed_plan_accepts_valid_signature_and_content_address() {
-        let (signed, key) = signed_fixture();
-        let plan = verify_signed_plan(&signed, "host:test", &key.verifying_key())
-            .expect("valid signed plan verifies");
-        assert_eq!(plan.tenant.0, "local");
-        assert!(mvm_core::plan::verify_plan_id(&plan).is_ok());
-    }
-
-    #[test]
-    fn verify_signed_plan_rejects_tampered_payload() {
-        let (mut signed, key) = signed_fixture();
-        signed.0.payload[0] ^= 1;
-
-        let err = verify_signed_plan(&signed, "host:test", &key.verifying_key())
-            .expect_err("tampered payload must fail signature verification");
-        assert!(
-            err.to_string()
-                .contains("verifying SignedExecutionPlan envelope")
-        );
-    }
-
-    #[test]
-    fn verify_signed_plan_rejects_signed_plan_with_wrong_content_address() {
-        let (_, key) = signed_fixture();
-        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
-        plan.plan_id = mvm_core::plan::PlanId("sha256:wrong".to_string());
-        let payload = serde_json::to_vec(&plan).expect("fixture plan serializes");
-        let signature = key.sign(&payload);
-        let signed = SignedExecutionPlan(SignedPayload {
-            payload,
-            signature: signature.to_bytes().to_vec(),
-            signer_id: "host:test".to_string(),
-        });
-
-        let err = verify_signed_plan(&signed, "host:test", &key.verifying_key())
-            .expect_err("wrong plan_id must fail content-address verification");
-        assert!(
-            err.to_string()
-                .contains("verifying ExecutionPlan content address")
         );
     }
 }

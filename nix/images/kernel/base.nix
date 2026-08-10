@@ -24,8 +24,8 @@
 # Five distinct ways the module contract broke during validation drove
 # this decision.
 #
-# Why no TSI patches: builder-VM networking moved to passt (Linux) /
-# gvproxy (macOS) over virtio-net. The TSI syscall-hijack path is gone
+# Why no TSI patches: builder-VM networking moved to vsock. The TSI
+# syscall-hijack path is gone
 # from every VM, and the vendored 22-file patch series was dropped.
 #
 # Tradeoff — first build compiles from source: because the `.config` is

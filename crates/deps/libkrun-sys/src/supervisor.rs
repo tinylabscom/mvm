@@ -7,7 +7,6 @@ use crate::context::KrunContext;
 use crate::error::{Error, install_hint, is_available};
 
 #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
-use crate::start::configure_with_gateway;
 #[cfg(feature = "libkrun-sys")]
 use crate::start::install_shutdown_handler;
 
@@ -23,12 +22,7 @@ use crate::start::install_shutdown_handler;
 /// "unknown variant" error.
 ///
 /// Scope: this reservation is `mvm-libkrun::SupervisorConfig`-only.
-/// The shared `mvm-bridge` sidecar binary (Firecracker)
-/// doesn't need an equivalent field because its crash policy is
-/// enforced by the parent `mvm-backend` process via the watchdog
-/// thread — the bridge dies, the parent observes the exit, the
-/// parent tears down the VM. libkrun is different because the bridge
-/// runs in-process; the supervisor itself is the only thing in a
+/// libkrun runs the guest in-process; the supervisor itself is the only thing in a
 /// position to enforce a policy on bridge panics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -580,13 +574,9 @@ pub fn run_supervisor(cfg: &SupervisorConfig) -> Result<std::convert::Infallible
         });
     }
 
-    // When NetworkingMode::Passt is set, the supervisor owns the passt
-    // child process. `_passt_handle` lives until the
-    // end of this function; libkrun's `start_enter` calls `exit()`
-    // on the success path, so the handle's Drop runs as part of
-    // process teardown when the guest powers off. On error paths
-    // the handle Drops normally and SIGTERMs passt before we return.
-    let (krun, _gateway_handle) = configure_with_gateway(&cfg.krun)?;
+    // libkrun's `start_enter` calls `exit()` on the success path, so this
+    // process ends with the guest.
+    let krun = crate::start::configure_pre_net(&cfg.krun)?;
     install_shutdown_handler(&krun)?;
     krun.start_enter()
 }

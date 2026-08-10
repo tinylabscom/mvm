@@ -1,11 +1,11 @@
 //! Seccomp property test (`mvm-jailer-lite`).
 //!
 //! Parent test forks the test binary with `SECCOMP_PROBE=1`; child
-//! applies `ConfinementSpec::firecracker_bridge` confinement and
+//! applies `ConfinementSpec::substitution_endpoint` confinement and
 //! probes one allowed syscall (`clock_gettime` via `Instant::now`)
 //! and one disallowed (`mkdir` via `std::fs::create_dir`, which on
 //! Linux dispatches `SYS_mkdirat` — confirmed absent from
-//! `BRIDGE_SYSCALLS` so `SeccompAction::Trap` raises SIGSYS).
+//! `CONFINED_ROLE_SYSCALLS` so `SeccompAction::Trap` raises SIGSYS).
 //!
 //! Acceptable outcomes:
 //!   1. Signal SIGSYS — seccomp Trap fired on the disallowed
@@ -67,10 +67,18 @@ fn run_probe() {
     // `confine_self` call below as a `PathNotFound` variant.
     std::fs::create_dir_all("/tmp/mvm-seccomp-probe-audit").ok();
     std::fs::create_dir_all("/tmp/mvm-seccomp-probe-keys").ok();
-    let spec = ConfinementSpec::firecracker_bridge(
+    std::fs::create_dir_all("/tmp/mvm-seccomp-probe-secrets").ok();
+    std::fs::create_dir_all("/tmp/mvm-seccomp-probe-bindings").ok();
+    // The substitution endpoint is the live confined role. The spec this used
+    // to build belonged to a deleted sidecar and named a gateway binary as a
+    // readable path, so the probe only ran where that binary was installed.
+    let spec = ConfinementSpec::substitution_endpoint(
+        "/tmp/mvm-seccomp-probe-secrets".into(),
+        "/tmp/mvm-seccomp-probe-bindings".into(),
         "/tmp/mvm-seccomp-probe-audit".into(),
         "/tmp/mvm-seccomp-probe-keys".into(),
-        "/usr/bin/passt".into(),
+        // Local resolver backend — see the landlock probe.
+        None,
     );
     if let Err(e) = mvm_hostd::jailer::confine_self(&spec) {
         eprintln!("confine_self failed: {e}");
@@ -81,7 +89,7 @@ fn run_probe() {
     let _ = std::time::Instant::now();
 
     // Disallowed: mkdir (Linux's std::fs::create_dir dispatches
-    // SYS_mkdirat, which is not in BRIDGE_SYSCALLS — confirmed
+    // SYS_mkdirat, which is not in CONFINED_ROLE_SYSCALLS — confirmed
     // by reading crates/mvm-jailer-lite/src/seccomp.rs).
     // SeccompAction::Trap raises SIGSYS on the disallowed call,
     // so the process is killed before this returns on the

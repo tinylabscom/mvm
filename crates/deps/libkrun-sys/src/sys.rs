@@ -29,27 +29,6 @@ mod bindings {
     include!("libkrun_bindings.rs");
 }
 
-/// The `features` mask `krun_add_net_unixstream` expects for passt as
-/// the userspace network proxy. Mirrors the
-/// `COMPAT_NET_FEATURES` macro in libkrun.h:344 — a compound `|` of
-/// the NET_FEATURE_* constants that the generated bindings don't fold into a
-/// single value. Re-deriving in Rust keeps the canonical mask close
-/// to the call site that uses it.
-pub const PASST_NET_FEATURES: u32 = (1 << 0)   // NET_FEATURE_CSUM
-    | (1 << 1)   // NET_FEATURE_GUEST_CSUM
-    | (1 << 7)   // NET_FEATURE_GUEST_TSO4
-    | (1 << 10)  // NET_FEATURE_GUEST_UFO
-    | (1 << 11)  // NET_FEATURE_HOST_TSO4
-    | (1 << 14); // NET_FEATURE_HOST_UFO
-
-/// `NET_FLAG_VFKIT` from `libkrun.h`. libkrun rejects
-/// `krun_add_net_unixgram(c_path, ...)` with -EINVAL unless this flag
-/// is set, because the unixgram backend needs to know whether to
-/// emit the vfkit magic-byte handshake the native gateway expects on
-/// `-listen-vfkit`. Without the flag libkrun assumes raw frames and
-/// fails closed at config time (rc -22).
-pub const NET_FLAG_VFKIT: u32 = 1 << 0;
-
 /// `NET_FLAG_DHCP_CLIENT` from `libkrun.h` (added in libkrun 1.18.0).
 /// Enables libkrun's in-guest DHCP client so the guest doesn't need
 /// to run `udhcpc`/`dhclient` itself — libkrun sees the DHCP-OFFER
@@ -309,91 +288,6 @@ impl Context {
     pub fn set_console_output(&self, host_path: &Path) -> Result<(), Error> {
         let path = cstring(host_path)?;
         check(unsafe { bindings::krun_set_console_output(self.ctx_id, path.as_ptr()) })
-    }
-
-    /// Add a virtio-net device backed by a unixstream userspace network
-    /// proxy (passt + virtio-net replacing TSI).
-    ///
-    /// `fd` is one end of an `AF_UNIX SOCK_STREAM` socketpair; the other
-    /// end is handed to the network proxy (passt) at spawn. libkrun
-    /// owns its half of the socket from this point — it must remain
-    /// open until `start_enter` is called, after which libkrun consumes
-    /// it.
-    ///
-    /// Calling this disables libkrun's default TSI backend (per
-    /// `libkrun.h:358`: "If no network interface is added, libkrun
-    /// will automatically enable the TSI backend"). Subsequent
-    /// `krun_set_port_map` calls return -ENOTSUP — passt manages port
-    /// forwarding via its own DHCP + NAT path.
-    ///
-    /// `mac` is a 6-byte hardware address. Pass [0xAE, 0xAD, 0xBE,
-    /// 0xEF, 0x00, 0x01] (locally-administered, unicast) for the
-    /// default mvm builder VM.
-    ///
-    /// `features` is the virtio-net feature mask; for passt the
-    /// canonical value is `COMPAT_NET_FEATURES` (definition mirrored
-    /// from `libkrun.h:344`).
-    pub fn add_net_unixstream_fd(
-        &self,
-        fd: i32,
-        mac: &[u8; 6],
-        features: u32,
-        flags: u32,
-    ) -> Result<(), Error> {
-        // libkrun's `krun_add_net_unixstream` takes `c_path` and `fd`
-        // as mutually-exclusive args (one is null/-1, the other is
-        // populated). We always take the fd path — the socketpair
-        // lives entirely in the parent process, no path on disk.
-        check(unsafe {
-            bindings::krun_add_net_unixstream(
-                self.ctx_id,
-                std::ptr::null(),
-                fd,
-                mac.as_ptr() as *mut u8,
-                features,
-                flags,
-            )
-        })
-    }
-
-    /// Add a virtio-net device backed by a unixgram userspace network
-    /// proxy (native gateway on macOS replacing passt). Mirror of
-    /// [`Self::add_net_unixstream_fd`] but uses libkrun's
-    /// `krun_add_net_unixgram` which takes a *path* to a listening
-    /// unix-domain socket rather than a pre-opened fd — the gateway
-    /// creates the listener itself when invoked with
-    /// `--listen-vfkit <path>`, and libkrun's host-side code
-    /// connects to that path.
-    ///
-    /// `c_path` and `fd` are mutually exclusive in the C API; we
-    /// always take the path arm so the caller (typically
-    /// `mvm-libkrun::native_gateway::spawn`) owns the socket lifecycle.
-    /// Pass `socket_path` as the path the native gateway child listens on.
-    ///
-    /// Calling this disables libkrun's TSI backend (same as the
-    /// unixstream wrapper). `features` should be
-    /// [`super::PASST_NET_FEATURES`] — the macro is named after
-    /// passt but `COMPAT_NET_FEATURES` in `libkrun.h:344` applies
-    /// to both passt and the vfkit-compatible gateway (`krun_set_gvproxy_path`
-    /// lists it at the C ABI layer).
-    pub fn add_net_unixgram_path(
-        &self,
-        socket_path: &Path,
-        mac: &[u8; 6],
-        features: u32,
-        flags: u32,
-    ) -> Result<(), Error> {
-        let path = cstring(socket_path)?;
-        check(unsafe {
-            bindings::krun_add_net_unixgram(
-                self.ctx_id,
-                path.as_ptr(),
-                /* fd = */ -1,
-                mac.as_ptr() as *mut u8,
-                features,
-                flags,
-            )
-        })
     }
 
     /// Returns the shutdown eventfd. The caller is responsible for

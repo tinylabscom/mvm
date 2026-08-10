@@ -13,7 +13,7 @@
 //
 // `KrunContext` (the inner field) carries the `NetworkingMode` enum
 // `{Tsi, Passt {..}, Gvproxy {..}}` — so this target also covers the
-// gvproxy variant's tag parser.
+// networking-mode tag parser.
 
 #![no_main]
 

@@ -8,7 +8,7 @@
 //! accretion.
 //!
 //! The closure is platform-sensitive (macOS pulls libkrun/objc2; Linux pulls
-//! firecracker/passt), so the gate pins the primary release/CI target
+//! firecracker), so the gate pins the primary release/CI target
 //! (`x86_64-unknown-linux-gnu`) for a deterministic count regardless of the
 //! host running it — `cargo tree --target` resolves without building.
 

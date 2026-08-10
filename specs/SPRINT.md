@@ -1414,7 +1414,7 @@ Then unify + retire the old paths:
 
 - [x] Route Firecracker, HVF, and libkrun workload execution through the uniform vsock runner; fail-closed where the host cannot mediate.
 - [x] Typed connectors use the broker/substitution seam with user-defined **`${NAME}`** named placeholders; host-side L7 inspection and data-governance witnesses cover all workload backends.
-- [ ] Delete the dead rvproxy / native-gateway subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`. Enforce the mount no-shadow rule (`/mvm` in deny prefixes).
+- [x] Delete the dead userspace network-gateway subsystem; collapse `NetworkingPreference`; drop `MVM_NETWORKING`/`MVM_GATEWAY_BIN`. Landed as plan 305, with `xtask check-no-gateway-names` keeping the names out. Enforce the mount no-shadow rule (`/mvm` in deny prefixes).
 - [ ] Snapshot/restore/warm-start: fresh boot_id + nonce + handshake; stale flows closed; no live-vsock-survives-restore assumption.
 - [x] Networking decision records why vsock is mandatory, why Model A was removed, and how typed connectors remain separate from raw admitted egress.
 - Gate: protocol unit + fuzz green; process-level integration proves allow-passes / deny-drops / **stale-session-rejected**; `check_vsock_only_egress` passes on all workload backends; `machine run --image busybox --allow-host google.com` resolves DNS + connects (fixes `ping: bad address`); live smoke Mac (HVF) + Linux (libkrun + FC); no NIC bypass.
@@ -2035,7 +2035,7 @@ change.
 
 ## Appendix C — biggest confirmed removals
 
-- Userspace network gateways — passt, gvproxy, and the opt-in native/rvproxy `native_gateway` subsystem (~1,281 lines); replaced by the one vsock seam (WS-NET).
+- Userspace network gateways — the whole guest-NIC gateway subsystem; replaced by the one vsock seam (WS-NET).
 - `crates/mvm-runtime/src/vm/egress_proxy.rs` L7 stub — removed (WS8).
 - `crates/mvm-runtime/src/storage/{pool,thin}.rs` dm-thin substrate — **NOT dead**: backs the live `mvmctl storage info`/`gc` verbs (`ThinPoolImpl`/`DeviceMapperBackend`), kept (WS8).
 - QEMU backend (WS1e), retired-backend remnants, the Swift supervisor dir (WS0.4).

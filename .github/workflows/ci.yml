@@ -182,6 +182,12 @@ jobs:
       - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
         run: cargo run -p xtask -- check-vsock-only-egress
 
+      # Tree-wide companion to the check above. The userspace network gateways
+      # went with the guest-NIC path; a reference coming back is how a second
+      # egress model grows back alongside the real one.
+      - name: no reference to a removed userspace network gateway
+        run: cargo run -p xtask -- check-no-gateway-names
+
       - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
         run: cargo run -p xtask -- check-uniform-vsock-egress
 
