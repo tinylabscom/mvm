@@ -1107,10 +1107,10 @@ fn run_inner(
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("interrupted");
     }
-    if let Some(error) = warm_memory_error {
-        if result.is_ok() {
-            anyhow::bail!("warm memory measurement failed: {error}");
-        }
+    if let Some(error) = warm_memory_error
+        && result.is_ok()
+    {
+        anyhow::bail!("warm memory measurement failed: {error}");
     }
     result
 }
