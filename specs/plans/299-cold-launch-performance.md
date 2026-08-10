@@ -4,6 +4,11 @@
 baselines measured. Phase 6 is promoted ahead of Phase 3 by the measurements;
 Phase 3 is retargeted at the Firecracker boot path.
 
+This plan is one owner of the [fast machine substrate](../notes/2026-08-10-fast-machine-substrate.md),
+which composes cold launch with Plans 298, 265, 270, and 292. It owns the
+prepared cold path and its evidence; it does not define a second artifact or
+snapshot graph.
+
 ## Goal
 
 Make a genuinely cold VMM launch fast enough that warm-VM performance is not the
@@ -55,6 +60,17 @@ This plan composes with existing work:
 - The current `--mount` surface remains the supported host-directory interface;
   the obsolete internal `AddDir` naming and any compatibility-only flag path are
   removed while this launch path is changed.
+
+The prepared template identity includes the kernel, universal initramfs, rootfs
+lower artifacts, verity metadata, runtime overlay, backend/VMM version, guest
+protocol, CPU/memory shape, block-device/share topology, network-policy shape,
+warmup profile, and readiness probe. Host paths, host-directory contents,
+tenant authority, live channels, and mutable writable state are excluded.
+
+The launch measurement vocabulary is canonical: kernel entry, agent ready,
+authenticated activation, environment ready, first useful RPC, and reaped.
+`/bin/true` remains a launch probe; the first useful authenticated RPC is a
+separate end-to-end signal.
 
 No task here may weaken admission, signed-plan verification, dm-verity,
 host-directory isolation, vsock authentication, or the no-NIC workload
@@ -127,13 +143,18 @@ rate, but are not silently included in the prepared-cold SLO.
       already refuses a prepared-cold sample that reports one.)
 - [x] Record backend, host architecture, kernel digest, initramfs digest,
       overlay digest, rootfs digest, VMM version, CPU count, memory setting,
-      filesystem, cache state, and run number with every sample.
+      filesystem, selected root filesystem strategy, cache state, and run
+      number with every sample.
       (The launch writes artifact **paths**, not digests — hashing inside the
       measured window would charge the launch for the measurement. The runner
       resolves digests, filesystem, and cache state afterwards into
       `LaunchContext`/`CacheState`. `vmm_version` is resolved only for the
       in-house VMM, which ships inside `mvmctl`; a third-party VMM records
-      `None` rather than a fabricated number.)
+      `None` rather than a fabricated number. The launch sample records the
+      tier-gated `virtiofs_root` or `block_ext4` strategy so filesystem
+      comparisons never mix security or capability tiers. The runner rejects
+      a missing strategy and refuses to aggregate a report whose warmup or
+      measured samples change strategy.)
 - [x] Add a benchmark report format containing raw samples and p50/p95/p99;
       do not store only summary numbers.
       (`ColdLaunchReport` carries `raw: Vec<ColdLaunchSample>` alongside
@@ -598,6 +619,48 @@ optimization backend-local and the benchmark backend-neutral.
 - [ ] Use the smallest supported default memory commitment and demand-fault
       guest RAM. Prove that the change affects resident cost without changing
       guest-visible memory capacity or isolation.
+- [ ] Run the kernel and boot-substrate budget from
+      [issue #2280](https://github.com/tinylabscom/mvm/issues/2280): compare
+      raw/compressed kernel and initramfs size, boot probes, kernel entry,
+      authenticated readiness, resident pages, and restore fault cost. A size
+      reduction is accepted only with readiness, security, and compatibility
+      witnesses.
+- [x] Extend `cargo xtask perf footprint` to include the initramfs artifact and
+      an optional resolved kernel config. The JSON report now records the
+      initramfs bytes and built-in-symbol count, and reuses the per-architecture
+      kernel-config budget gate. This is the artifact-ledger slice of #2280;
+      live boot timing and guest resident-memory evidence remain open; the
+      libkrun probe now captures host supervisor/VMM resident footprints.
+- [x] Carry artifact byte counts and optional resolved kernel-config symbol
+      counts into each `ColdLaunchReport` sample. The runner resolves these
+      after the child launch exits, so the report joins substrate evidence to
+      launch timing without charging metadata I/O to the measured window.
+- [x] Add a bounded live resident-footprint capture for the libkrun probe.
+      `mvm_cli::bench::probes::run_density` boots admitted guests through
+      authenticated readiness, samples each host supervisor/VMM process with
+      the platform footprint reader, and drops every held guest on success or
+      failure. This reports host process residency; guest demand-fault and
+      restore-fault evidence remain separate gates.
+- [x] Add an allocation-level demand-fault witness to the HVF guest-RAM seam.
+      `GuestRam` exposes a `mincore` resident-byte query, the raw kernel boot
+      result records it after vCPU and host-I/O shutdown, and a focused test
+      proves untouched anonymous pages become resident only after writes.
+      The raw result also records monotonic private restore-mapping duration
+      when a restore file is supplied. These are allocation and mapping
+      witnesses, not substitutes for end-to-end guest working-set or first-use
+      restore-fault measurements.
+- [x] Add a baseline filesystem-path report at the existing pure-Rust
+      materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
+      content digest, node composition, file bytes, emitted image size/digest,
+      materializer format version, and separate source-hash/walk/build timing
+      phases. `cargo xtask perf filesystem --root <DIR> --json` exposes the
+      report for repeated fixture comparisons.
+- [ ] Evaluate the current rootfs and host-directory image path against the
+      guest-local immutable filesystem hypothesis in
+      [issue #2281](https://github.com/tinylabscom/mvm/issues/2281). Keep the
+      current path as the baseline, use the new report for candidate
+      comparisons, and preserve dm-verity, xattrs/whiteouts, read-only
+      enforcement, and clean writable CoW state.
 - [ ] Add backend-specific unit tests for immutable artifact reuse, fresh VM
       identity, failed setup cleanup, and no cross-launch mutable state.
 
@@ -694,6 +757,9 @@ green.
       process ownership, and cleanup races.
 - [ ] The final sprint and refactor rollup entries cite concrete evidence files,
       host/backend details, and commit references.
+- [ ] The template identity and lifecycle vocabulary match
+      `specs/notes/2026-08-10-fast-machine-substrate.md`; no parallel cache or
+      snapshot graph exists.
 
 ## Explicit follow-ups if the gate remains red
 

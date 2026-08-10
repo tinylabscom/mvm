@@ -1501,6 +1501,32 @@ Then unify + retire the old paths:
 
 **WS10 — tiny kernel + low memory + density**
 
+- [x] **Fast machine substrate contract — issue #2279.** The kernel is now
+  explicitly treated as one part of a prepared machine substrate spanning the
+  kernel, initramfs, verified rootfs artifacts, runtime overlay, VMM shape,
+  guest lifecycle, warmup, and pool identity. The ownership and measurement
+  boundaries are documented in
+  `specs/notes/2026-08-10-fast-machine-substrate.md`; issues #2280 and #2281
+  own the kernel budget and filesystem-path experiments.
+- [~] **Kernel boot-substrate ledger — issue #2280.** `cargo xtask perf
+  footprint` now includes initramfs bytes and optionally enforces the resolved
+  per-architecture built-in-symbol budget; cold-launch JSON reports carry the
+  same artifact byte and kernel-config measurements beside their timings. The
+  libkrun live probe now has bounded resident host-process capture after
+  authenticated readiness, and the HVF guest-RAM seam now reports resident
+  bytes with a direct untouched-versus-touched demand-fault witness plus
+  monotonic private restore-mapping duration. End-to-end guest working-set,
+  first-use restore-fault, and cross-backend live measurements remain open.
+- [x] **Filesystem-path baseline — issue #2281.**
+  `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
+  source identity, node composition, emitted ext4 size/digest, materializer
+  version, and hash/walk/build timings; `cargo xtask perf filesystem --root
+  <DIR> --json` exposes it to the benchmark workflow. Cold-launch evidence
+  records the tier-selected `virtiofs_root` or `block_ext4` strategy, while
+  the benchmark rejects missing or mixed strategies; candidate guest-local
+  immutable paths still need equivalent first-access, working-set, density,
+  and security evidence before an adopt/decline decision.
+
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
 - [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured
   1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The

@@ -7104,6 +7104,7 @@ dependencies = [
  "hex",
  "mvm-cli",
  "mvm-core",
+ "mvm-fs",
  "regex",
  "serde",
  "serde_json",

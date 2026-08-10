@@ -10,6 +10,21 @@ for detailed scope and acceptance criteria.
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
 
+## Fast machine substrate
+- [x] **Issue #2279 — define the fast machine substrate and canonical template
+      contract.** The cross-plan note joins Plans 298, 299, 265, 270, and 292
+      around one prepared template identity, explicit lifecycle phases, a
+      system-level kernel budget, and a measured filesystem-path decision. It
+      introduces no second cache or snapshot graph. Follow-up measurements and
+      live backend work remain open under issues #2280, #2281, #2194, #2195,
+      #2196, and #2199. Launch evidence now records the tier-selected root
+      filesystem strategy and rejects missing or mixed strategies so
+      filesystem comparisons cannot mix security tiers. The libkrun probe also
+      exposes bounded resident host-process capture, and the HVF guest-RAM seam
+      exposes resident bytes with a demand-fault witness and records private
+      restore-mapping duration; end-to-end guest working-set, first-use
+      restore-fault, and cross-backend evidence remain open.
+
 ## In-flight plans
 - [x] Plan 2167 — durable agent session and event contract
       (`specs/plans/2167-agent-session-contract.md`)
@@ -150,6 +165,13 @@ for detailed scope and acceptance criteria.
         below 0.1 ms at p99. Follow-up: give pool maintenance to the resident
         per-tenant daemon and make supervisor shutdown event-driven.
   - [ ] Phase 7 — live validation and regression gates
+  - [x] Cross-plan fast-machine-substrate contract documented in
+        `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
+  - [~] Kernel/boot-substrate budget and filesystem-path evaluation tracked by
+        issues #2280 and #2281. The artifact-ledger slice of #2280 and the
+        pure-Rust ext4 baseline report are landed; live timing, restore,
+        density, candidate filesystem comparison, and the adopt/decline
+        decision remain open.
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images
       (`specs/plans/311-launch-critical-path-waste.md`), branch
