@@ -660,9 +660,10 @@ optimization backend-local and the benchmark backend-neutral.
       implemented for Firecracker, libkrun, and HVF without backend-name
       dispatch. A warm launch sample captures that process after authenticated
       readiness and immediately after the first guest command. Linux records
-      PSS plus process minor/major fault deltas; macOS records physical
-      footprint and explicitly leaves Linux-only fault counters unavailable.
-      Launch-sample schema v3 and cold-launch schema v4 carry the evidence, and
+      RSS from `/proc/<pid>/statm` plus process minor/major fault deltas; macOS
+      records physical footprint and explicitly leaves Linux-only fault counters
+      unavailable.
+      Launch-sample schema v4 and cold-launch schema v5 carry the evidence, and
       the warm-lane gate rejects a sample that omits it. The real-host backend
       matrix and canonical budget table remain before #2280 can close.
 - [x] Add a baseline filesystem-path report at the existing pure-Rust

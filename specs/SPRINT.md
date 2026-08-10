@@ -1524,7 +1524,8 @@ Then unify + retire the old paths:
   monotonic private restore-mapping duration. The libkrun density report now
   also carries guest-agent RSS from the existing ResourceUsage RPC. The
   backend-neutral warm launch sample now records the whole VMM host process at
-  authenticated readiness and after the first command: Linux reports PSS and
+  authenticated readiness and after the first command: Linux reports RSS from
+  `/proc/<pid>/statm` and
   minor/major fault deltas, while macOS reports physical footprint with fault
   counters explicitly unavailable. Warm-lane validation refuses missing
   evidence. The real-host Firecracker/HVF matrix, canonical budget table, and

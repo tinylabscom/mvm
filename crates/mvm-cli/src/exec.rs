@@ -999,13 +999,7 @@ fn run_inner(
     let warm_memory_start = if sample_path.is_some()
         && launch_mode == crate::commands::vm::phase_timing::LaunchMode::Warm
     {
-        match begin_warm_memory_measurement(&backend, &vm_name) {
-            Ok(start) => Some(start),
-            Err(error) => {
-                eprintln!("[mvm] warm-ready process memory not measured: {error:#}");
-                None
-            }
-        }
+        Some(begin_warm_memory_measurement(&backend, &vm_name))
     } else {
         None
     };
@@ -1020,15 +1014,14 @@ fn run_inner(
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
         Err(e) => (Err(e), None),
     };
-    let warm_first_command_memory = warm_memory_start.and_then(|start| {
-        match finish_warm_memory_measurement(&backend, &vm_name, start) {
-            Ok(measurement) => Some(measurement),
-            Err(error) => {
-                eprintln!("[mvm] first-command process memory not measured: {error:#}");
-                None
-            }
-        }
+    let warm_memory_result = warm_memory_start.map(|start| {
+        start.and_then(|start| finish_warm_memory_measurement(&backend, &vm_name, start))
     });
+    let warm_memory_error = warm_memory_result
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .map(|error| format!("{error:#}"));
+    let warm_first_command_memory = warm_memory_result.and_then(Result::ok);
 
     // Reap state dirs a killed or crashed prior transient run left behind: a
     // SIGKILL or a closed terminal skips teardown, so `~/.mvm/vms/<name>` leaks.
@@ -1083,30 +1076,41 @@ fn run_inner(
             eprintln!("{}", sub_phases.render());
         }
         if let Some(path) = sample_path.as_deref() {
-            let sample = build_launch_sample(LaunchSampleInputs {
-                backend: backend.name(),
-                start_config: &start_config,
-                launch_mode,
-                root_strategy: boot.root_strategy,
-                mount_materialized: sub_marks
-                    .recorded(crate::commands::vm::phase_timing::SubPhase::MountMaterialize),
-                phases,
-                sub_phases,
-                warm_first_command_memory,
-                backend_phases: backend_phases.clone(),
-                degraded: degraded.clone(),
-            });
-            if let Err(e) = crate::commands::vm::launch_sample::write_sample(path, &sample) {
-                // A measurement that cannot be recorded must be loud: a
-                // silently missing sample reads downstream as a launch that
-                // never ran, not as a launch nobody wrote down.
-                eprintln!("[mvm] launch sample not written: {e:#}");
+            if let Some(error) = warm_memory_error.as_deref() {
+                eprintln!(
+                    "[mvm] launch sample not written: warm memory measurement failed: {error}"
+                );
+            } else {
+                let sample = build_launch_sample(LaunchSampleInputs {
+                    backend: backend.name(),
+                    start_config: &start_config,
+                    launch_mode,
+                    root_strategy: boot.root_strategy,
+                    mount_materialized: sub_marks
+                        .recorded(crate::commands::vm::phase_timing::SubPhase::MountMaterialize),
+                    phases,
+                    sub_phases,
+                    warm_first_command_memory,
+                    backend_phases: backend_phases.clone(),
+                    degraded: degraded.clone(),
+                });
+                if let Err(e) = crate::commands::vm::launch_sample::write_sample(path, &sample) {
+                    // A measurement that cannot be recorded must be loud: a
+                    // silently missing sample reads downstream as a launch that
+                    // never ran, not as a launch nobody wrote down.
+                    eprintln!("[mvm] launch sample not written: {e:#}");
+                }
             }
         }
     }
 
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("interrupted");
+    }
+    if let Some(error) = warm_memory_error {
+        if result.is_ok() {
+            anyhow::bail!("warm memory measurement failed: {error}");
+        }
     }
     result
 }

@@ -2,8 +2,6 @@
 
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::process::Command;
 use std::thread;
 
 use anyhow::{Context, Result, bail};
@@ -141,62 +139,25 @@ pub fn parse_linux_proc_stat_faults(input: &str) -> Result<(u64, u64)> {
 
 #[cfg(target_os = "linux")]
 pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
-    let body = read_linux_proc_file(pid, "smaps_rollup")?;
+    let path = PathBuf::from("/proc")
+        .join(pid.to_string())
+        .join("smaps_rollup");
+    let body =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     parse_linux_smaps_rollup_pss_bytes(&body)
 }
 
-/// Read one proc file, retrying through non-interactive sudo for root-owned
-/// VMMs such as Firecracker. The fallback passes the path as an argument to
-/// `cat`, never through a shell, and fails rather than prompting during a
-/// benchmark.
-#[cfg(target_os = "linux")]
-fn read_linux_proc_file(pid: u32, file: &str) -> Result<String> {
-    let path = PathBuf::from("/proc").join(pid.to_string()).join(file);
-    match std::fs::read_to_string(&path) {
-        Ok(body) => Ok(body),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            read_linux_proc_file_as_root(&path).with_context(|| {
-                format!(
-                    "reading {} directly was denied and the non-interactive privileged read failed",
-                    path.display()
-                )
-            })
-        }
-        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn read_linux_proc_file_as_root(path: &std::path::Path) -> Result<String> {
-    let output = Command::new("sudo")
-        .args(["-n", "cat", path.to_string_lossy().as_ref()])
-        .output()
-        .with_context(|| format!("running sudo -n cat {}", path.display()))?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let suffix = if detail.is_empty() {
-            String::new()
-        } else {
-            format!(": {detail}")
-        };
-        anyhow::bail!(
-            "sudo -n cat {} exited with {}{}",
-            path.display(),
-            output.status,
-            suffix
-        );
-    }
-    String::from_utf8(output.stdout).context("sudo returned non-UTF-8 proc data")
-}
-
-/// Read whole-process working-set and fault counters for one Linux VMM.
+/// Read whole-process resident memory and fault counters for one Linux VMM.
 #[cfg(target_os = "linux")]
 pub fn read_process_memory_snapshot(pid: u32) -> Result<ProcessMemorySnapshot> {
-    let working_set_bytes = read_process_footprint_bytes(pid)?;
-    let stat = read_linux_proc_file(pid, "stat")?;
+    let resident_bytes = mvm_agentd::worker_pool::process_rss_bytes(pid)
+        .with_context(|| format!("reading unprivileged RSS for host process {pid}"))?;
+    let path = PathBuf::from("/proc").join(pid.to_string()).join("stat");
+    let stat =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let (minor_faults, major_faults) = parse_linux_proc_stat_faults(&stat)?;
     Ok(ProcessMemorySnapshot {
-        working_set_bytes,
+        resident_bytes,
         minor_faults: Some(minor_faults),
         major_faults: Some(major_faults),
     })
@@ -225,7 +186,7 @@ pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
 #[cfg(target_os = "macos")]
 pub fn read_process_memory_snapshot(pid: u32) -> Result<ProcessMemorySnapshot> {
     Ok(ProcessMemorySnapshot {
-        working_set_bytes: read_process_footprint_bytes(pid)?,
+        resident_bytes: read_process_footprint_bytes(pid)?,
         minor_faults: None,
         major_faults: None,
     })
@@ -297,10 +258,10 @@ Pss_Dirty:           128 kB
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn proc_file_reader_reads_the_current_process() {
-        let stat = read_linux_proc_file(std::process::id(), "stat").unwrap();
-        assert!(!stat.is_empty());
-        assert!(parse_linux_proc_stat_faults(&stat).is_ok());
+    fn process_memory_reader_uses_unprivileged_rss() {
+        let sample = read_process_memory_snapshot(std::process::id()).unwrap();
+        assert!(sample.resident_bytes > 0);
+        assert!(sample.minor_faults.is_some());
     }
 
     /// Deterministic probe so the orchestration loop is testable

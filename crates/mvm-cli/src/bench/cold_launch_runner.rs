@@ -598,12 +598,12 @@ tmpfs /tmp tmpfs rw 0 0
     fn lane_sample_preserves_warm_memory_evidence() {
         let mut sample = sample_for(148.0);
         let ready = ProcessMemorySnapshot {
-            working_set_bytes: 100,
+            resident_bytes: 100,
             minor_faults: Some(3),
             major_faults: Some(1),
         };
         let after_first_command = ProcessMemorySnapshot {
-            working_set_bytes: 120,
+            resident_bytes: 120,
             minor_faults: Some(8),
             major_faults: Some(1),
         };

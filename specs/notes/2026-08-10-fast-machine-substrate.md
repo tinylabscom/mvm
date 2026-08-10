@@ -95,7 +95,8 @@ probe without a guest-readiness witness is not an optimization.
 Warm launch samples now provide the end-to-end process witness needed for this
 comparison. The workload backend resolves the VMM/supervisor PID through the
 shared running-VM trait, then samples the same process after authenticated
-readiness and immediately after the first guest command. Linux records PSS and
+readiness and immediately after the first guest command. Linux records RSS from
+`/proc/<pid>/statm` and
 minor/major page-fault deltas; macOS records physical footprint and marks those
 Linux-specific counters unavailable. Firecracker, libkrun, and HVF use the same
 schema and lane gate, which rejects missing warm evidence. Results remain

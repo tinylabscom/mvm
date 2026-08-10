@@ -28,9 +28,10 @@ use super::stats::percentile;
 /// Report schema version for [`ColdLaunchReport`]. Version 2 added artifact
 /// byte measurements and optional resolved kernel-config evidence; version 3
 /// adds the selected root filesystem strategy; version 4 adds whole-VMM warm
-/// working-set and first-command fault evidence. Older reports remain readable
-/// through serde defaults but are not comparable without the new substrate.
-pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 4;
+/// resident-memory and first-command fault evidence; version 5 changes Linux
+/// memory accounting from PSS to RSS. Older reports remain readable through
+/// serde defaults but are not comparable without the new substrate.
+pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 5;
 
 /// The measurement lanes the cold-launch contract reports independently.
 ///
@@ -631,12 +632,12 @@ mod tests {
 
     fn warm_memory() -> WarmFirstCommandMemory {
         let ready = ProcessMemorySnapshot {
-            working_set_bytes: 10,
+            resident_bytes: 10,
             minor_faults: Some(2),
             major_faults: Some(0),
         };
         let after_first_command = ProcessMemorySnapshot {
-            working_set_bytes: 14,
+            resident_bytes: 14,
             minor_faults: Some(5),
             major_faults: Some(1),
         };
