@@ -31,6 +31,22 @@
       `mvm-core::config` and one predicate serves all three sweeps. 14 new
       tests, all against a synthesized and deliberately damaged chain in a temp
       `MVM_HOME`.
+- [x] HVF save/restore for checkpoint and fork — **plan 304**. The HVF backend
+      now advertises `SnapshotCapability::SaveRestore`, and
+      `machine checkpoint create --class vm-full`, `checkpoint restore`, and
+      `checkpoint fork` work on it end to end. Capture dispatches through the
+      backend that owns the VM (`AnyBackend::vm_full_control`) instead of a
+      hardcoded Firecracker control; the fork-liveness probe reads the shared
+      marker list so `hvf.pid` counts, held to the backend catalog by
+      `vm_is_running_covers_every_catalog_pid_marker`; the checkpoint origin is
+      classified from the machine-state blob (`vm_full_origin`) rather than from
+      the supervisor-config blob, which every HVF checkpoint also carries and so
+      would have misread all of them. Restore
+      now runs the signed-chain lineage gate — previously it verified content
+      hashes only. A capture is refused when the VM has a writable disk, since
+      a snapshot carries no device backing bytes. 6 new BDD scenarios under
+      `features/suites/s11_snapshot/hvf_save_restore.feature`; workspace
+      nextest 10600 passed / 24 skipped.
 
 - [~] Open issue closeout — **plan 300**. The 22 open issues were reconciled
       on 2026-08-08 into explicit closure gates and dependency order in
@@ -98,6 +114,13 @@
       `security.yml` trigger and merge-blocking claims, removed three
       unreachable pull-request guards, and aligned the claim descriptions with
       the workflows that actually run them.
+
+- [~] Security mutation-witness repair — **issue #2135**. Restored executable
+      witnesses for the security-sensitive boot admission, kernel-digest,
+      host-signer/grant, lease-expiry, and substitution-endpoint cleanup
+      invariants. Focused mutation runs now catch every actionable mutant in
+      those paths; the exact Linux Security workflow rerun remains the final
+      merge-and-close gate.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,

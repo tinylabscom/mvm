@@ -244,9 +244,11 @@ mod tests {
         assert_eq!(r.backends.get("firecracker"), Some(&"unsupported"));
         assert_eq!(r.backends.get("libkrun"), Some(&"unsupported"));
         assert_eq!(r.backends.get("qemu"), Some(&"unsupported"));
-        assert_eq!(r.backends.get("hvf"), Some(&"unsupported"));
+        // HVF saves and reloads machine state; apple-container boots through
+        // the same supervisor and inherits the tier.
+        assert_eq!(r.backends.get("hvf"), Some(&"save-restore"));
         assert_eq!(r.backends.get("wasm"), Some(&"unsupported"));
-        assert_eq!(r.backends.get("apple-container"), Some(&"unsupported"));
+        assert_eq!(r.backends.get("apple-container"), Some(&"save-restore"));
     }
 
     #[test]
@@ -256,10 +258,10 @@ mod tests {
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
 
         let mut expected_backends = vec![
-            ("apple-container".to_string(), "unsupported"),
+            ("apple-container".to_string(), "save-restore"),
             ("docker".to_string(), "unsupported"),
             ("firecracker".to_string(), "unsupported"),
-            ("hvf".to_string(), "unsupported"),
+            ("hvf".to_string(), "save-restore"),
             ("libkrun".to_string(), "unsupported"),
             ("qemu".to_string(), "unsupported"),
             ("wasm".to_string(), "unsupported"),

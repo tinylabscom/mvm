@@ -37,6 +37,8 @@ pub mod lifecycle;
 /// RFC 6962 Merkle transparency-log inclusion proofs over the audit log.
 #[cfg(feature = "protocol")]
 pub mod merkle;
+/// OCI distribution types with no host dependency (manifest parsing).
+pub mod oci;
 #[cfg(feature = "protocol")]
 pub mod plan;
 #[cfg(feature = "protocol")]

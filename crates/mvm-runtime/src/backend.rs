@@ -802,6 +802,33 @@ impl AnyBackend {
         }
     }
 
+    /// Pause/save-memory/resume control over a running VM this backend owns —
+    /// the mechanics a `vm_full` checkpoint capture drives.
+    ///
+    /// `None` is the fail-closed answer for a backend with no memory-capture
+    /// mechanics; a caller must refuse the capture rather than substituting
+    /// another backend's control, which would pause the wrong process. The
+    /// exhaustive match means a new variant has to make that choice explicitly.
+    pub fn vm_full_control(
+        &self,
+        vm_name: &str,
+    ) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+        use mvm_vmm::driver::traits::VmmDriver as _;
+        match self {
+            AnyBackend::Firecracker(runner) => runner.vm_full_control(vm_name),
+            AnyBackend::Libkrun(runner) => runner.vm_full_control(vm_name),
+            AnyBackend::Hvf(runner) => runner.vm_full_control(vm_name),
+            // Apple Container boots through the HVF supervisor, so its live VMs
+            // are captured by the same control the HVF driver hands back.
+            AnyBackend::AppleContainer(_) => HvfDriver::new().vm_full_control(vm_name),
+            // No memory capture: the mock keeps its VMs in memory, and qemu,
+            // wasm and docker have no save/restore mechanics at all.
+            #[cfg(feature = "test-support")]
+            AnyBackend::Mock(_) => None,
+            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::Docker(_) => None,
+        }
+    }
+
     /// Whether refill can load a child VMM and keep it paused until claim.
     pub fn supports_preloaded_standby(&self) -> bool {
         match self {
@@ -1726,10 +1753,12 @@ mod tests {
     #[test]
     fn recovery_capability_matrix_is_explicit_for_every_selectable_backend() {
         let mut expected = vec![
-            ("apple-container", SnapshotCapability::Unsupported, false),
+            // Apple Container boots through the HVF supervisor, so it inherits
+            // that VMM's save/restore tier — one supervisor, one mechanism.
+            ("apple-container", SnapshotCapability::SaveRestore, false),
             ("docker", SnapshotCapability::Unsupported, false),
             ("firecracker", SnapshotCapability::Unsupported, true),
-            ("hvf", SnapshotCapability::Unsupported, true),
+            ("hvf", SnapshotCapability::SaveRestore, true),
             ("libkrun", SnapshotCapability::Unsupported, false),
             ("qemu", SnapshotCapability::Unsupported, false),
             ("wasm", SnapshotCapability::Unsupported, false),

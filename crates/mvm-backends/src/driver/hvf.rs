@@ -29,12 +29,16 @@ use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 use crate::legacy::hvf::{
     self as hvf_backend, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
 };
-use mvm_core::checkpoint::DeviceAnchors;
+use mvm_core::checkpoint::{DeviceAnchors, HVF_FRAME_BLOB};
 use mvm_vmm::checkpoint::VmFullControl;
 use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
 use mvm_vmm::driver::traits::{
     ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
 };
+
+/// How long a capture waits for the paused supervisor to publish both halves of
+/// its snapshot. Generous: the write is proportional to guest RAM.
+const SNAPSHOT_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
@@ -654,6 +658,37 @@ impl HvfVmFullControl {
             self.state_dir.join("snapshot.frame"),
         )
     }
+
+    /// Refuse to capture a VM whose guest can write to a block device.
+    ///
+    /// A snapshot carries guest RAM plus the devices' control plane, never a
+    /// device's backing bytes. That is sound for a read-only, file-served disk:
+    /// the restore rebinds the same unchanged image. It is not sound for a
+    /// writable one — a RAM-backed ephemeral rootfs loses every guest write
+    /// when the VMM exits, and a write-through image keeps changing after the
+    /// capture — so a restore would resume a guest whose page cache disagrees
+    /// with its disk. Fail closed at capture rather than mint a checkpoint that
+    /// silently reverts data.
+    fn ensure_every_disk_is_restorable(&self) -> Result<()> {
+        let Some(path) = self.supervisor_config_path()? else {
+            return Ok(());
+        };
+        let cfg: HvfSupervisorConfig = serde_json::from_slice(
+            &std::fs::read(&path)
+                .with_context(|| format!("reading HVF launch config {}", path.display()))?,
+        )
+        .with_context(|| format!("parsing HVF launch config {}", path.display()))?;
+        if let Some(writable) = cfg.disks.iter().find(|disk| !disk.read_only) {
+            bail!(
+                "cannot capture a full-VM checkpoint of HVF VM '{}': its disk {} is \
+                 writable, and a snapshot does not carry device backing bytes. \
+                 Capture an fs_quick checkpoint of the paused VM instead.",
+                self.vm_name,
+                writable.path.display()
+            );
+        }
+        Ok(())
+    }
 }
 
 impl VmFullControl for HvfVmFullControl {
@@ -672,6 +707,7 @@ impl VmFullControl for HvfVmFullControl {
             "save_memory requires an absolute path, got {}",
             memory_path.display()
         );
+        self.ensure_every_disk_is_restorable()?;
         let parent = memory_path
             .parent()
             .ok_or_else(|| anyhow!("memory path has no parent directory"))?;
@@ -682,13 +718,15 @@ impl VmFullControl for HvfVmFullControl {
         let _ = std::fs::remove_file(&frame);
         std::fs::write(&request, b"capture\n")
             .with_context(|| format!("request HVF snapshot at {}", request.display()))?;
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = Instant::now() + SNAPSHOT_PUBLISH_TIMEOUT;
+        let mut wait = std::time::Duration::from_micros(200);
         while (!ram.exists() || !frame.exists()) && Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(wait);
+            wait = (wait * 2).min(std::time::Duration::from_millis(5));
         }
         anyhow::ensure!(
             ram.exists() && frame.exists(),
-            "HVF supervisor did not publish its paused snapshot within 30s"
+            "HVF supervisor did not publish its paused snapshot within {SNAPSHOT_PUBLISH_TIMEOUT:?}"
         );
         std::fs::copy(&ram, memory_path).with_context(|| {
             format!(
@@ -751,12 +789,12 @@ impl VmFullControl for HvfVmFullControl {
     }
 
     fn extra_content(&self, content_dir: &Path) -> Result<Vec<mvm_core::checkpoint::ContentBlob>> {
-        let frame = content_dir.join("memory.bin.hvf-frame");
+        let frame = content_dir.join(HVF_FRAME_BLOB);
         if !frame.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![mvm_core::checkpoint::ContentBlob {
-            name: "memory.bin.hvf-frame".into(),
+            name: HVF_FRAME_BLOB.into(),
             sha256: mvm_core::crypto::image_verify::sha256_file(&frame)?,
         }])
     }
@@ -896,7 +934,7 @@ mod tests {
         assert_eq!(d.name(), "hvf");
         assert_eq!(d.kind(), BackendKind::Hvf);
         assert!(d.capabilities().vsock);
-        assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
+        assert_eq!(d.snapshot_capability(), SnapshotCapability::SaveRestore);
         assert_eq!(
             d.security_profile().tier,
             HvfBackend.security_profile().tier

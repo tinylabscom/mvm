@@ -27,7 +27,7 @@ use mvm_core::vm_backend::{
 use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
 
 use crate::checkpoint::{
-    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore,
+    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, VmFullControl,
     capture_vm_full_with_snapshot_store, capture_vm_full_with_trusted_snapshot_backend,
     verify_content, verify_lineage,
 };
@@ -58,7 +58,10 @@ use mvm_vmm::host::substitution_spawn::{
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
 mod backend;
+mod refusal;
 mod warm_claim;
+
+use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
 pub struct EndpointSpawnRequest<'a> {
@@ -437,6 +440,14 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     #[must_use]
     pub fn supports_preloaded_standby(&self) -> bool {
         self.driver.supports_preloaded_standby()
+    }
+
+    /// Pause/save-memory/resume control over a running VM this runner's VMM
+    /// owns — what a checkpoint capture drives. `None` when the VMM has no
+    /// memory-capture mechanics to offer.
+    #[must_use]
+    pub fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn VmFullControl>> {
+        self.driver.vm_full_control(vm_name)
     }
 
     /// Spawn the optional gating endpoint, compose the spec, and boot. A
@@ -895,6 +906,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             })?,
             tag: None,
             created_unix: mvm_core::time::now_unix_secs(),
+            retain_paused: true,
         };
         let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))
             && std::env::var("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT").as_deref() == Ok("1")
@@ -1132,60 +1144,6 @@ impl Drop for WarmClaimLease<'_> {
                 ),
             }
         }
-    }
-}
-
-/// Judge a forked child's own report of what it did with its fresh generation
-/// token. Every flag must hold: `acknowledged` says the guest answered at all,
-/// `reseeded` says it rotated its generation identity (and so reseeded the CSPRNG
-/// it inherited from the parent's memory image), and `clock_resynced` says it
-/// took the host's wall clock instead of the parent's frozen one.
-///
-/// Pure, so the fail-closed verdict is unit-tested on its own. Any false flag is
-/// a refusal rather than a warning: a restored child that cannot prove it left
-/// the parent's random state behind is indistinguishable from a sibling that
-/// will produce the same "random" values, which is precisely what a fresh
-/// identity exists to rule out.
-fn require_fresh_child_identity(
-    child_vm_name: &str,
-    outcome: &PostRestoreOutcome,
-) -> std::result::Result<(), StandbyError> {
-    let unproven = if !outcome.acknowledged {
-        "did not acknowledge the post-restore signal"
-    } else if !outcome.reseeded {
-        "acknowledged without rotating its generation identity"
-    } else if !outcome.clock_resynced {
-        "acknowledged without resynchronizing its wall clock"
-    } else {
-        return Ok(());
-    };
-    Err(StandbyError::ClaimFailed(format!(
-        "forked child '{child_vm_name}' {unproven}; refusing to admit a child that cannot prove \
-         it left its parent's random state and clock behind"
-    )))
-}
-
-/// Map a fail-closed [`ClaimRefusal`] onto the transport-agnostic
-/// [`StandbyError`] the claim seam returns. The refusal reasons stay distinct in
-/// the message so a caller can tell an un-audited parent from a plan mismatch.
-fn refuse(refusal: ClaimRefusal) -> StandbyError {
-    StandbyError::ClaimFailed(refusal.to_string())
-}
-
-/// Distinguish the three fail-closed reasons by the lineage verifier's own
-/// message, so the caller sees the specific one: a parent with no signed
-/// creation entry, a ledger too damaged to say either way, or a parent that
-/// drifted from its sealed content. The unverifiable-ledger arm must come first
-/// — it is the case that used to be reported as un-audited, which sent the
-/// operator to re-capture a parent when the real finding was a broken chain.
-fn map_lineage_refusal(err: &anyhow::Error) -> ClaimRefusal {
-    let msg = err.to_string();
-    if msg.contains(crate::lineage::LEDGER_UNVERIFIABLE) {
-        ClaimRefusal::LedgerUnverifiable
-    } else if msg.contains(crate::lineage::NO_SIGNED_ENTRY) {
-        ClaimRefusal::ParentUnaudited
-    } else {
-        ClaimRefusal::ParentTampered
     }
 }
 
@@ -4311,44 +4269,6 @@ mod tests {
         );
     }
 
-    /// The verdict itself, without a claim around it: every flag is required, and
-    /// the refusal names which one the guest failed to prove.
-    #[test]
-    fn fresh_child_identity_requires_every_flag() {
-        let proven = PostRestoreOutcome {
-            acknowledged: true,
-            detail: None,
-            reseeded: true,
-            clock_resynced: true,
-        };
-        assert!(require_fresh_child_identity("vm-a", &proven).is_ok());
-
-        for (mutate, expected) in [
-            (
-                (|o: &mut PostRestoreOutcome| o.acknowledged = false)
-                    as fn(&mut PostRestoreOutcome),
-                "did not acknowledge",
-            ),
-            (
-                |o: &mut PostRestoreOutcome| o.reseeded = false,
-                "without rotating its generation identity",
-            ),
-            (
-                |o: &mut PostRestoreOutcome| o.clock_resynced = false,
-                "without resynchronizing its wall clock",
-            ),
-        ] {
-            let mut outcome = proven.clone();
-            mutate(&mut outcome);
-            let err = require_fresh_child_identity("vm-a", &outcome)
-                .expect_err("a false flag must refuse");
-            assert!(
-                err.to_string().contains(expected),
-                "refusal must name the unproven flag ({expected}): {err}"
-            );
-        }
-    }
-
     /// A post-materialize failure (here: the overlay-contract gate refusing a
     /// child whose clone carries no overlay sidecar) must return the healthy
     /// reserved parent to claimable and remove the orphaned child dir — no leaked
@@ -4488,39 +4408,6 @@ mod tests {
             "no child dir on a quarantine refusal"
         );
         assert!(runner.driver.forked_children().is_empty());
-    }
-
-    /// The three fail-closed reasons must stay distinguishable, and the
-    /// unverifiable-ledger one must not collapse into either neighbour. It used
-    /// to be reported as un-audited, which sends the operator to re-capture a
-    /// parent when the real finding is a damaged chain; falling through to
-    /// tampered would be the opposite error, blaming a parent that may be fine.
-    #[test]
-    fn lineage_refusals_separate_an_unreadable_ledger_from_unaudited_and_tampered() {
-        let unreadable = anyhow::anyhow!(
-            "{}: 1 audit chain(s) unverifiable: /audit-root/local.jsonl",
-            crate::lineage::LEDGER_UNVERIFIABLE
-        );
-        assert!(matches!(
-            map_lineage_refusal(&unreadable),
-            ClaimRefusal::LedgerUnverifiable
-        ));
-
-        let unaudited = anyhow::anyhow!(
-            "checkpoint 'cp-1' has {} to anchor its content-address",
-            crate::lineage::NO_SIGNED_ENTRY
-        );
-        assert!(matches!(
-            map_lineage_refusal(&unaudited),
-            ClaimRefusal::ParentUnaudited
-        ));
-
-        let tampered =
-            anyhow::anyhow!("checkpoint 'cp-1' meta_digest drift: stored abc, recomputed def");
-        assert!(matches!(
-            map_lineage_refusal(&tampered),
-            ClaimRefusal::ParentTampered
-        ));
     }
 
     /// A plan whose bound image digest does not match the parent's own verified

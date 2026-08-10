@@ -228,6 +228,21 @@ pub struct CliWorld {
     pub prior_layer_paths: HashSet<PathBuf>,
     /// The most recent OCI unpack report.
     pub last_unpack_report: Option<mvm_fs::oci::UnpackReport>,
+    /// Scratch directory backing the HVF restore config-rewrite scenarios.
+    pub hvf_restore_tmp: Option<tempfile::TempDir>,
+    /// The captured parent launch config a restore scenario rewrites.
+    pub hvf_parent_config: Option<mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig>,
+    /// The rewritten child launch config under assertion.
+    pub hvf_child_config: Option<mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig>,
+    /// Scratch directory backing the HVF checkpoint-origin/lineage scenarios.
+    pub hvf_ckpt_tmp: Option<tempfile::TempDir>,
+    /// Checkpoint store seeded by an HVF checkpoint scenario.
+    pub hvf_ckpt_store: Option<CheckpointStore>,
+    /// The sealed record a scenario classifies or tries to restore.
+    pub hvf_ckpt_meta: Option<CheckpointMeta>,
+    /// The digest the scenario's signed-chain double reports, or `None` for a
+    /// checkpoint no signed audit entry covers.
+    pub hvf_anchor: Option<Option<mvm_core::checkpoint::CheckpointDigest>>,
     /// Scratch directory backing the warm-snapshot scenarios: holds the
     /// snapshot store root, the synthetic template rootfs artifact, and
     /// every materialized instance path.

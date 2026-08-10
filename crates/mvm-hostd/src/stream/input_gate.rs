@@ -1461,6 +1461,19 @@ mod tests {
     }
 
     #[test]
+    fn a_lease_is_not_live_at_its_exact_expiry() {
+        let now = Instant::now();
+        let lease = Lease {
+            holder: "holder".into(),
+            expires_at: now + Duration::from_secs(1),
+        };
+
+        assert!(lease.is_live(now));
+        assert!(lease.is_live(now + Duration::from_millis(999)));
+        assert!(!lease.is_live(lease.expires_at));
+    }
+
+    #[test]
     fn a_write_refreshes_the_lease() {
         let vm = unique_vm("vm-lease-refresh");
         InputGate::bind(&vm, InputBinding::new().with_lease_ttl(LAPSING_LEASE_TTL));
@@ -1859,6 +1872,23 @@ mod tests {
             "and there is nothing left to release twice"
         );
         assert_eq!(session.stranded_len(), 0);
+    }
+
+    #[test]
+    fn idle_release_happens_at_the_exact_threshold() {
+        let mut session = session_bound_to(LONG_SECRET, Duration::from_secs(1));
+        let line = &LONG_SECRET.as_bytes()[..1];
+        session
+            .write(InputFrame {
+                seq: 0,
+                payload: line.to_vec(),
+            })
+            .expect("the prefix is not a complete secret");
+        assert!(session.take_admitted().unwrap().is_empty());
+
+        let exact_deadline = session.last_admitted_at + session.idle_flush_after;
+        session.release_if_idle(exact_deadline);
+        assert_eq!(session.outbox, line);
     }
 
     #[test]

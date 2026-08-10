@@ -5,6 +5,7 @@ mod agent_session;
 mod apple_container;
 mod claim;
 pub(crate) mod cli;
+mod hvf_save_restore;
 mod initramfs;
 mod kernel_pin;
 mod l3_vsock;

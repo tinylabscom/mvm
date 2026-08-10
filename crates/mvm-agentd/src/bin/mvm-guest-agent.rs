@@ -611,7 +611,9 @@ fn main() {
         }
     }
     let policy = load_verb_trust_policy(std::path::Path::new(VERB_TRUST_POLICY_PATH));
-    let launch_req = launch_requires_grant();
+    let launch_req = std::fs::read_to_string("/proc/cmdline")
+        .map(|cmdline| launch_requires_grant(&cmdline))
+        .unwrap_or(false);
     match trust_decision(policy.as_ref(), pinned_verb_grant.is_some(), launch_req) {
         TrustDecision::Serve => {}
         TrustDecision::ObserveGap => {

@@ -30,6 +30,15 @@ for detailed scope and acceptance criteria.
   - [x] Bounded digest-only metadata, audit action mappings, client/SDK
         re-exports, unit tests, and three non-`@wip` BDD scenarios
 
+- [~] Security lane mutation-witness repair — **issue #2135**
+  - [x] Add direct witnesses for the security-sensitive admission,
+        verification, lease, and substitution cleanup invariants
+  - [x] Run focused mutation shards for `mvm-cli`, `mvm-core`, `mvm-agentd`,
+        `mvm-hostd`, and `mvm-vmm`
+  - [x] Pass workspace check, all-target Clippy, formatting, and the mutation
+        surface gate on the dedicated fix branch
+  - [ ] Merge the fix and rerun the exact Linux Security workflow before
+        closing the issue
 - [~] Runtime hardening for production — plan 303, branch
       `feat/plan-303-runtime-hardening`
   - [x] WS1 — `overflow-checks = true` in `[profile.release]`, a
@@ -58,6 +67,21 @@ for detailed scope and acceptance criteria.
         `continue-on-error`). 511 tests, no UB, ~4m25s with `merkle::` skipped
         — those sweeps ran past 30 min under the interpreter. Widening to
         `mvm-core` crypto and the `mvm-fs` ext4 writer deferred
+- [x] HVF save/restore for checkpoint and fork — **plan 304**, branch
+      `feat/hvf-save-restore`
+  - [x] Audit `HvfVmFullControl` against the whole `VmFullControl` surface and
+        add the writable-disk capture refusal
+  - [x] Restore entry point: the launch-config rewrite in `mvm-backends`, and
+        the `ForkRestore` callback / `VmFullRestore` adapters in `mvm-runtime`
+  - [x] Backend-neutral dispatch: `AnyBackend::vm_full_control`, one shared
+        liveness marker list held to the backend catalog by test,
+        `vm_full_origin` replacing the supervisor-config fork predicate,
+        `fork_vm_full_fc` → `fork_vm_full`
+  - [x] Flip `snapshot_capability` to `SaveRestore` and update the pinned tests
+  - [x] Chain-anchor the restore path; keep `capture_fs_quick` and the verity
+        binding untouched; fresh child identity on every fork
+  - [x] BDD suite `s11_snapshot/hvf_save_restore.feature` + benchmark evidence
+
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader
