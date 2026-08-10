@@ -92,6 +92,15 @@ The smallest artifact wins only when it improves or preserves the launch,
 resident-memory, restore, and security measurements. Removing a driver or boot
 probe without a guest-readiness witness is not an optimization.
 
+Warm launch samples now provide the end-to-end process witness needed for this
+comparison. The workload backend resolves the VMM/supervisor PID through the
+shared running-VM trait, then samples the same process after authenticated
+readiness and immediately after the first guest command. Linux records PSS and
+minor/major page-fault deltas; macOS records physical footprint and marks those
+Linux-specific counters unavailable. Firecracker, libkrun, and HVF use the same
+schema and lane gate, which rejects missing warm evidence. Results remain
+comparable only within a matching host, backend, artifact, and sizing context.
+
 ## Filesystem evaluation
 
 The current block-backed rootfs, overlay, dm-verity, and host-directory image
@@ -141,8 +150,10 @@ between warmup or measured samples.
   kernel and boot-substrate budget. The bounded libkrun resident host-process
   capture is landed, and HVF guest-RAM now exposes an allocation-level
   demand-fault witness plus private restore-mapping duration. The live libkrun
-  density report also records guest-agent RSS after readiness; whole-VM guest
-  working-set, first-use restore-fault, and cross-backend live evidence remain.
+  density report also records guest-agent RSS after readiness. Backend-neutral
+  warm samples now capture whole-VMM ready/first-command working set and Linux
+  fault deltas; the real-host Firecracker/HVF matrix, canonical budget table,
+  and enforcement gates remain.
 - [~] [#2281](https://github.com/tinylabscom/mvm/issues/2281) — baseline the
   current pure-Rust ext4 path and evaluate the guest-local immutable
   filesystem path against it.

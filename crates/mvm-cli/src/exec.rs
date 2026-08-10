@@ -996,6 +996,20 @@ fn run_inner(
         .map(|trace| trace.degraded)
         .unwrap_or_default();
 
+    let warm_memory_start = if sample_path.is_some()
+        && launch_mode == crate::commands::vm::phase_timing::LaunchMode::Warm
+    {
+        match begin_warm_memory_measurement(&backend, &vm_name) {
+            Ok(start) => Some(start),
+            Err(error) => {
+                eprintln!("[mvm] warm-ready process memory not measured: {error:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
 
@@ -1006,6 +1020,15 @@ fn run_inner(
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
         Err(e) => (Err(e), None),
     };
+    let warm_first_command_memory = warm_memory_start.and_then(|start| {
+        match finish_warm_memory_measurement(&backend, &vm_name, start) {
+            Ok(measurement) => Some(measurement),
+            Err(error) => {
+                eprintln!("[mvm] first-command process memory not measured: {error:#}");
+                None
+            }
+        }
+    });
 
     // Reap state dirs a killed or crashed prior transient run left behind: a
     // SIGKILL or a closed terminal skips teardown, so `~/.mvm/vms/<name>` leaks.
@@ -1069,6 +1092,7 @@ fn run_inner(
                     .recorded(crate::commands::vm::phase_timing::SubPhase::MountMaterialize),
                 phases,
                 sub_phases,
+                warm_first_command_memory,
                 backend_phases: backend_phases.clone(),
                 degraded: degraded.clone(),
             });
@@ -1098,6 +1122,8 @@ struct LaunchSampleInputs<'a> {
     mount_materialized: bool,
     phases: crate::commands::vm::phase_timing::RunPhaseTimings,
     sub_phases: crate::commands::vm::launch_sample::LaunchSubTimings,
+    /// Whole-VMM memory evidence surrounding the first warm command.
+    warm_first_command_memory: Option<crate::commands::vm::launch_sample::WarmFirstCommandMemory>,
     /// Phases the backend recorded inside `start`, read from its sidecar
     /// before teardown removed the state directory holding it.
     backend_phases: Vec<mvm_core::launch_trace::TracePhase>,
@@ -1141,9 +1167,62 @@ fn build_launch_sample(
         ),
         phases: inputs.phases,
         sub_phases: inputs.sub_phases,
+        warm_first_command_memory: inputs.warm_first_command_memory,
         backend_phases: inputs.backend_phases,
         degraded: inputs.degraded,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WarmMemoryMeasurementStart {
+    pid: u32,
+    ready: crate::commands::vm::launch_sample::ProcessMemorySnapshot,
+}
+
+fn begin_warm_memory_measurement(
+    backend: &AnyBackend,
+    vm_name: &str,
+) -> Result<WarmMemoryMeasurementStart> {
+    let id = VmId(vm_name.to_string());
+    let pid = backend.host_process_id(&id)?.with_context(|| {
+        format!(
+            "{} did not expose a host process for {vm_name}",
+            backend.name()
+        )
+    })?;
+    let ready = crate::bench::harness::read_process_memory_snapshot(pid)
+        .with_context(|| format!("sampling warm-ready host process {pid}"))?;
+    Ok(WarmMemoryMeasurementStart { pid, ready })
+}
+
+fn finish_warm_memory_measurement(
+    backend: &AnyBackend,
+    vm_name: &str,
+    start: WarmMemoryMeasurementStart,
+) -> Result<crate::commands::vm::launch_sample::WarmFirstCommandMemory> {
+    use crate::commands::vm::launch_sample::{ProcessMemoryDelta, WarmFirstCommandMemory};
+
+    let id = VmId(vm_name.to_string());
+    let observed_pid = backend.host_process_id(&id)?.with_context(|| {
+        format!(
+            "{} no longer exposes a host process for {vm_name}",
+            backend.name()
+        )
+    })?;
+    if observed_pid != start.pid {
+        anyhow::bail!(
+            "host process changed from {} to {observed_pid} during the first command",
+            start.pid
+        );
+    }
+    let after_first_command = crate::bench::harness::read_process_memory_snapshot(start.pid)
+        .with_context(|| format!("sampling host process {} after first command", start.pid))?;
+    Ok(WarmFirstCommandMemory {
+        pid: start.pid,
+        ready: start.ready,
+        after_first_command,
+        delta: ProcessMemoryDelta::between(start.ready, after_first_command),
+    })
 }
 
 /// Kernel/rootfs/initrd + provenance resolved from `req.image`: either a

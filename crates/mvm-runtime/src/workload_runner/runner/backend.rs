@@ -136,6 +136,10 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         }
     }
 
+    fn host_process_id(&self, id: &VmId) -> Result<Option<u32>> {
+        Ok(self.driver.attach(id)?.host_process_id())
+    }
+
     fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
         self.driver.attach(id)?.wait()
     }

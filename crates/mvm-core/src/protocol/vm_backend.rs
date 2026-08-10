@@ -464,6 +464,13 @@ pub trait VmBackend: Send + Sync {
         self.start_with_mode(config, StartMode::Detached)
     }
 
+    /// Host process that owns a running VM's address space, when the backend
+    /// can identify it. The process may exit immediately after this call, so
+    /// consumers must treat the PID as a point-in-time observation only.
+    fn host_process_id(&self, _id: &VmId) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     /// Start a VM with explicit attach/detach semantics.
     ///
     /// See [`StartMode`] for the contract. The default impl bails —

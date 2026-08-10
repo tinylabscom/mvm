@@ -283,6 +283,12 @@ pub trait VmmDriver: Send + Sync {
 /// and an external supervisor all present the same surface.
 pub trait RunningVm: Send {
     fn id(&self) -> &VmId;
+    /// Host process that owns this VM's address space, when the driver can
+    /// identify it. This is an observation surface for diagnostics and
+    /// benchmarks, not a lifecycle handle; callers must tolerate process exit.
+    fn host_process_id(&self) -> Option<u32> {
+        None
+    }
     /// Block until the VM exits; returns its status.
     fn wait(&self) -> Result<VmExitStatus>;
     /// Force-terminate the VM.
