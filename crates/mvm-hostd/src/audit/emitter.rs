@@ -881,15 +881,29 @@ impl AuditEmitter {
     }
 
     fn emit_entry_blocking(&self, entry: &AuditEntry) -> Result<()> {
+        let t0 = std::time::Instant::now();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("building tokio runtime for audit emit")?;
-        for signer in &self.signers {
+        let t_rt = std::time::Instant::now();
+        tracing::debug!(
+            ms = (t_rt - t0).as_secs_f64() * 1000.0,
+            "emit: tokio runtime build"
+        );
+        for (i, signer) in self.signers.iter().enumerate() {
+            let t_s = std::time::Instant::now();
             rt.block_on(signer.sign_and_emit(entry))
                 .with_context(|| format!("signing-and-emitting audit event {}", entry.event))?;
+            tracing::debug!(
+                signer = i,
+                ms = t_s.elapsed().as_secs_f64() * 1000.0,
+                "emit: signer"
+            );
         }
+        let t_r = std::time::Instant::now();
         self.emit_receipt_for_entry(entry);
+        tracing::debug!(ms = t_r.elapsed().as_secs_f64() * 1000.0, "emit: receipt");
         Ok(())
     }
 
