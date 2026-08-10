@@ -1670,6 +1670,12 @@ Then unify + retire the old paths:
   registration slept 700 ms and lost `host.audit.v1` silently. Gates green:
   workspace Clippy, 10,648 nextest, doctests, hermetic BDD 153/153, Lint xtask
   gates, Linux cross-compile.
+- [x] **Lifecycle-density benchmark harness (Plan 299).** Added an opt-in
+  integration test that runs 1,000 prepared microVM start/stop operations,
+  defaults to HVF, reports start and stop p50/p95/p99/max plus wall-clock
+  throughput, and supports bounded batches across Firecracker, HVF, libkrun,
+  QEMU, and Apple Container. It remains VM-free unless explicitly enabled with
+  `MVM_LIFECYCLE_BENCH=1`.
 - [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
   `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon
