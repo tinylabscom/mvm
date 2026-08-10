@@ -2738,3 +2738,59 @@ the ceiling, which no surface can reach.
 - `a_persisted_machine_spec_without_grants_still_loads` — `#[serde(default)]`;
   machines created before this exist on disk.
 - `--cpus` and `--cpu-limit` are independently settable and do not alias.
+
+**Landed.** All six witnesses exist, the dormant entry is deleted, and
+`check-dormant-controls` passes — with the entry temporarily restored the gate
+fails naming `crates/mvm-cli/src/commands/shared/grants.rs` and
+`crates/mvm-hostd/src/run.rs` as production callers, which is the ratchet
+confirming the projection is reachable rather than merely present.
+
+Where each surface plugs in:
+
+- **Resolver** — `crates/mvm-core/src/grants_resolve.rs`
+  (`GrantLayer`/`GrantSurface`/`resolve_grants`/`load_grants_file`), folded by
+  `crates/mvm-cli/src/commands/shared/grants.rs::resolve_run_grants`, which
+  settles the grants and derives the egress policy in one step so the two
+  cannot be computed in different orders at different call sites.
+- **CLI** — `--cpu-limit <MILLICORES>` and `--grants-file <PATH>` on `machine
+  run` (and on `machine create`, which also takes `--timeout`). The existing
+  `--timeout` supplies the wall-clock dimension rather than a second flag
+  meaning the same thing, and `--allow-host` becomes the CLI's egress grant
+  through the same parser the legacy path uses.
+- **JSON** — `--grants-file` deserializes `Grants` directly, which already
+  carries `deny_unknown_fields`.
+- **Manifest** — `[grants]` on `Manifest`, converted by
+  `ManifestGrants::to_grants` and surfaced as `ManifestMachineWorkflow.grants`.
+  Declaring an allowlist in both `[grants]` and `[network]` is a parse error
+  rather than a silent ranking.
+- **Library** — `grants` on the `MachineSpec` DTO plus
+  `cpu_millicores`/`cpu_fuel`/`wall_clock_secs`/`allow_egress`/`grants` on both
+  its builder and `LaunchRequestBuilder`. `LocalRunRequest.grants` carries them
+  into `admit_and_boot_local`'s `SynthesisInput`, and the egress dimension is
+  projected onto `VmStartConfig.network_policy` — the value
+  `RealEndpointSpawner` hands the substitution endpoint, i.e. the claim-10
+  gate.
+
+The end-to-end path a manifest grant takes: `mvm.toml [grants]` →
+`Manifest::validate` → `ManifestGrants::to_grants` → `machine_workflow().grants`
+→ `resolve_run_grants` (per dimension, under CLI and grants-file) →
+`MachineSpec.grants` on disk → `machine start` → `PersistentImageStartParams`
+→ `AdmitPlanForBootParams.grants` → `SynthesisInput.grants` → `admit_for_run`
+(ceiling + enforceability) → signed `ExecutionPlan.grants`. Egress splits off at
+the resolver: `enforced_network_policy` projects it, `machine start` hands the
+result to the launch, and the substitution endpoint enforces it.
+
+Two things worth recording that the task text did not anticipate:
+
+- **`AdmitPlanForBootParams.backend_kind`.** `admit_grants`' enforceability gate
+  refuses a declared CPU or wall-clock grant on a sealed run when it cannot name
+  the tier that would enforce it, and the CLI was admitting `without_backend`.
+  Without threading the typed kind, `--cpu-limit` under a sealed posture would
+  have been unusable by construction. The transient path takes it off the
+  `AnyBackend` it already selected; the persistent path goes through a new
+  `mvm_client::backend_kind_for`, because `check-cli-runtime-surface` (rightly)
+  refuses a direct `AnyBackend` reach from a drive-a-machine call site.
+- **`Grants` gained `Eq`.** The DTO and the persisted spec both derive it, and
+  every field was already `Eq`.
+
+Not done here: the SDK parity fixture (WS6) and everything in WS6b.

@@ -72,6 +72,12 @@ pub struct MachineSpec {
     /// Recorded for inspection now; consumed by active probing later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<mvm_contract::ir::HealthCheck>,
+    /// The permission set resolved when this machine was created, baked into
+    /// the signed plan on every start. `None` means nothing was granted, which
+    /// is also what every machine created before grants existed carries —
+    /// hence `#[serde(default)]`, without which those specs stop loading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<mvm_contract::grants::Grants>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -178,6 +184,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.volumes == b.volumes
         && a.init == b.init
         && a.agent_verb == b.agent_verb
+        && a.grants == b.grants
 }
 
 /// Human summary of which boot-affecting fields differ, for the loud
@@ -217,6 +224,12 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     }
     if current.agent_verb != desired.agent_verb {
         changed.push("agent-verb");
+    }
+    // A changed permission set is a changed launch: the running VM was
+    // admitted under the old one, so reusing it would leave the machine
+    // running under bounds nobody asked for any more.
+    if current.grants != desired.grants {
+        changed.push("grants");
     }
     changed.join(", ")
 }
@@ -364,7 +377,46 @@ mod tests {
             created_at: None,
             last_started_at: None,
             health_check: None,
+            grants: None,
         }
+    }
+
+    #[test]
+    fn a_persisted_machine_spec_without_grants_still_loads() {
+        // Machines created before grants existed are on disk right now. The
+        // struct is `deny_unknown_fields`, so the *absence* of the new key has
+        // to be accepted explicitly or every one of them stops starting.
+        let legacy = serde_json::json!({
+            "schema_version": MACHINE_SPEC_SCHEMA_VERSION,
+            "name": "web",
+            "image": "alpine:latest",
+            "net": false,
+            "allow_host": [],
+            "cpus": 2,
+            "memory": "512M",
+            "profile": "standard",
+        })
+        .to_string();
+        let spec: MachineSpec =
+            serde_json::from_str(&legacy).expect("a pre-grants spec still loads");
+        assert_eq!(spec.grants, None);
+        // And a spec that granted nothing must not start emitting the key, so
+        // rewriting an old spec does not gratuitously change its bytes.
+        assert!(!serde_json::to_string(&spec).unwrap().contains("grants"));
+    }
+
+    #[test]
+    fn a_changed_grant_is_a_changed_launch_config() {
+        // The running VM was admitted under the old permission set; reusing it
+        // would leave it running under bounds nobody asked for any more.
+        let current = spec_fixture("web");
+        let mut desired = current.clone();
+        desired.grants = Some(mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            ..Default::default()
+        });
+        assert!(!machine_config_matches(&current, &desired));
+        assert!(machine_config_diff(&current, &desired).contains("grants"));
     }
 
     #[test]
@@ -540,6 +592,7 @@ mod tests {
             created_at: None,
             last_started_at: None,
             health_check: None,
+            grants: None,
         }
     }
 

@@ -54,7 +54,9 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run -d` | Boot a **persistent** machine detached and return immediately |
 | `mvmctl machine run --healthcheck '<cmd>'` | Declare the workload a long-running service: presence alone promotes the run to the **persistent** lifecycle (registered, shows in `machine ls`, torn down via `machine stop <name>`). Runs in the foreground unless combined with `-d`. `<cmd>` is exec'd in the guest by the resident host-agent daemon as its liveness check (exit 0 = healthy), actively probed on `--health-interval`; an unhealthy or crashed service is restarted with bounded exponential backoff. A run whose entrypoint exits still tears down on that exit code — a healthcheck on a run-to-completion task is a no-op |
 | `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec and actively enforced by the host-agent daemon's probe loop |
-| `mvmctl machine run --cpus N --memory SIZE` | vCPU count and memory (supports 512M, 4G, etc.) |
+| `mvmctl machine run --cpus N --memory SIZE` | vCPU count the guest sees, and memory (supports 512M, 4G, etc.) |
+| `mvmctl machine run --cpu-limit MILLICORES` | Cap the workload's share of **host CPU time**, in thousandths of a core (`1500` = 1.5 cores). A different control from `--cpus`, which sets how many vCPUs the guest sees — a workload can hold four vCPUs and be bounded to half a core. Recorded on the signed execution plan and refused when it exceeds the host's `max_cpu_millicores` ceiling |
+| `mvmctl machine run --grants-file PATH` | Read the workload's grants (CPU, wall clock, egress) from a JSON document. Unknown keys are refused, so a typo is an error rather than a silently dropped cap |
 | `mvmctl machine run -e KEY=VALUE` | Inject an environment variable (repeatable; gated by `--profile`) |
 | `mvmctl machine run --volume host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`) |
 | `mvmctl machine run --profile <p>` | Security posture: `restrictive`, `standard` (default), `dev`, `permissive` |
@@ -577,7 +579,39 @@ requires an argv after `--`; use `machine shell <name>` (or `machine exec
 both. When `--image` is omitted, it searches the current directory for
 `mvm.toml` / `Mvmfile.toml`; `--manifest <path>` selects a file explicitly. The
 persisted spec carries the manifest's image, CPU/memory sizing, `mem_initial`,
-network defaults, allow-hosts, and volumes. Relative manifest volume host paths
+network defaults, allow-hosts, volumes, and its `[grants]` table.
+
+A workload's grants — what it may consume and where it may reach — can be
+declared in four places, resolved **per dimension** from highest precedence to
+lowest: CLI flags, a `--grants-file` JSON document, the manifest's `[grants]`
+table, and the `~/.mvm/config/config.toml` defaults. Per dimension means a
+`--cpu-limit` on the command line does not discard an egress allowlist the
+manifest declared; each of CPU, wall clock, and egress is settled on its own.
+
+```toml
+# mvm.toml
+image = "alpine:3.20"
+
+[grants]
+cpu_millicores = 1500      # or cpu_fuel = <instructions>; the two are units, not precisions
+wall_clock_secs = 600      # must be > 0; omit to leave the workload unbounded
+allow_hosts = ["api.example.com:443"]
+```
+
+`[grants].allow_hosts` and `[network].allow_hosts` are two spellings of one
+decision, so declaring both is a parse error. The granted form is the one the
+egress gate enforces: the run's network policy is *derived* from it, never
+supplied alongside it, so the policy in force and the policy the plan was signed
+over cannot drift apart. An absent egress grant and an empty allowlist both mean
+deny-all.
+
+Every grant is bounded by the host operator's ceiling
+(`max_cpu_millicores`, `max_memory_mib`, `max_wall_clock_secs` in
+`~/.mvm/config/config.toml`), which no surface above can reach and which is
+checked before the plan is signed. Separately, `default_cpu_millicores` and
+`default_wall_clock_secs` supply defaults for dimensions nothing else named.
+There is no host-wide egress default: one would open outbound access for every
+workload that never asked for any. Relative manifest volume host paths
 are resolved relative to the manifest file; volume validation keeps the shared
 default of read-only mounts unless `:rw` is explicit. `--name` is optional: when
 omitted, `machine create` auto-generates a name and prints it (mirroring

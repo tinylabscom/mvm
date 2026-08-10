@@ -1024,6 +1024,7 @@ mod tests {
             cpus: 1,
             memory_mib: 64,
             env: vec![("A".into(), "B".into())],
+            grants: None,
         };
         // The env guard fires before any request, so no server is needed.
         let err = be.run_machine(spec).await.unwrap_err();

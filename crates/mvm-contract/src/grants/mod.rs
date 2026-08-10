@@ -16,7 +16,7 @@ pub mod projection;
 /// A workload's permission set. Every field is optional: absent means
 /// "unspecified", which each dimension resolves differently — an absent
 /// `egress` is deny-all, an absent `cpu` is uncapped.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grants {
     #[serde(default, skip_serializing_if = "Option::is_none")]

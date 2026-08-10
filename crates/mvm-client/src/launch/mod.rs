@@ -182,6 +182,9 @@ pub(crate) struct BootParams {
     pub(crate) backend_override: Option<String>,
     pub(crate) volumes: Vec<mvm_core::vm_backend::VmVolume>,
     pub(crate) transient: bool,
+    /// The request's permission set, carried into the signed plan and — for
+    /// its egress dimension — into the policy the gate enforces.
+    pub(crate) grants: Option<mvm_contract::grants::Grants>,
 }
 
 impl LocalBackend {
@@ -259,6 +262,7 @@ impl LocalBackend {
             backend_name: backend.name().to_string(),
             volumes: params.volumes,
             destroy_on_exit: params.transient,
+            grants: params.grants,
         };
 
         // A fresh per-launch ledger: local launches are one-shot from this
@@ -394,6 +398,9 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,
         health_check: None,
+        // The permission set the launch was admitted under, so a later
+        // `start` by name re-admits under the same bounds.
+        grants: request.grants.clone(),
     }
 }
 
@@ -618,6 +625,7 @@ impl LocalBackend {
                 backend_override: request.backend.clone(),
                 volumes,
                 transient,
+                grants: request.grants.clone(),
             })
             .await?;
         preparation.commit();

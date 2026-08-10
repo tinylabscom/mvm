@@ -640,15 +640,17 @@ impl MvmClient for LocalBackend {
                     .into(),
             });
         }
-        let request = crate::launch::LaunchRequest::builder(
+        let mut builder = crate::launch::LaunchRequest::builder(
             crate::launch::LifecycleMode::Transient,
             spec.image,
         )
         .name(spec.name)
         .cpus(spec.cpus)
-        .memory_mib(spec.memory_mib)
-        .build()?;
-        let outcome = self.launch(request).await?;
+        .memory_mib(spec.memory_mib);
+        if let Some(grants) = spec.grants {
+            builder = builder.grants(grants);
+        }
+        let outcome = self.launch(builder.build()?).await?;
         Ok(outcome.machine)
     }
 

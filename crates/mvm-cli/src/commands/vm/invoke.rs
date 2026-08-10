@@ -302,6 +302,11 @@ fn admit_entrypoint_boot(
         // resolved on every boot rather than only when the grant is asked for,
         // so the path that feeds the refusal is the ordinary path.
         entrypoint: super::entrypoint_resolve::resolve_for_rootfs(params.rootfs),
+        // The entrypoint dispatch path admits a template's own launch and
+        // authors no grant of its own; the transient and persistent machine
+        // paths are where a user names one.
+        grants: None,
+        backend_kind: None,
     })?;
     let Some(ctx) = ctx else { return Ok(None) };
 

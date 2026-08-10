@@ -146,9 +146,15 @@ pub(in crate::commands) struct RunArgs {
     /// 443), repeatable. Implies networking and **wins over `--net`**.
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
-    /// vCPU cores (default: 2)
+    /// vCPU cores the guest sees (default: 2). Not a host CPU share.
     #[arg(long, default_value = "2")]
     pub cpus: u32,
+    /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
+    #[arg(long = "cpu-limit", value_name = "MILLICORES")]
+    pub cpu_limit: Option<u32>,
+    /// Read grants (CPU, wall clock, egress) from a JSON file.
+    #[arg(long = "grants-file", value_name = "PATH")]
+    pub grants_file: Option<PathBuf>,
     /// Memory (supports human-readable: 512M, 1G, ...)
     #[arg(long, default_value = "512M")]
     pub memory: String,
@@ -368,9 +374,23 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         return Ok(());
     }
-    // One policy model for every backend: resolve the egress flags here and
-    // thread the result down both the json/receipt and the streaming paths.
-    let network_policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+    // One policy model for every backend: resolve the grant surfaces here —
+    // which settles the egress policy in the same step — and thread the result
+    // down both the json/receipt and the streaming paths.
+    let host_config = mvm_core::user_config::load(None);
+    let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
+        cpu_limit_millicores: args.cpu_limit,
+        timeout_secs: args.timeout,
+        allow_host: &args.allow_host,
+        net: args.net,
+        grants_file: args.grants_file.as_deref(),
+        // A transient run names its image on the command line and reads no
+        // project manifest; `machine create` is the verb that sources a
+        // `[grants]` table.
+        manifest: None,
+        config: &host_config,
+    })?;
+    let network_policy = resolved_grants.network_policy.clone();
 
     // Every transient run is admitted as a locally-signed workload (uniform
     // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
@@ -379,17 +399,21 @@ pub(in crate::commands) fn run_secure_with_source(
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
-    let admit_backend = crate::exec::select_exec_backend(
+    let selected_backend = crate::exec::select_exec_backend(
         args.image.is_some(),
         &network_policy,
         args.hypervisor.as_deref(),
-    )?
-    .name()
-    .to_string();
+    )?;
+    // The typed kind, taken off the backend object itself: admission measures a
+    // declared grant against the mechanisms this tier really has, and a name
+    // parsed back into a tier would be measuring against whatever was typed.
+    let admit_backend_kind = selected_backend.kind();
+    let admit_backend = selected_backend.name().to_string();
     // The closure below moves `admit_backend`; keep a copy for the receipt's
     // honest per-backend enforcement tier.
     let receipt_backend = admit_backend.clone();
     let admit_network_mode = args.network_mode;
+    let admit_grants = resolved_grants.plan_grants.clone();
     let admit_cpus = args.cpus;
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
@@ -446,6 +470,8 @@ pub(in crate::commands) fn run_secure_with_source(
                 admit_is_dev,
             ),
             services: admit_host_services.clone(),
+            grants: admit_grants.clone(),
+            backend_kind: Some(admit_backend_kind),
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                 "an ad-hoc argv run replaces the image entrypoint",
             ),
@@ -1574,6 +1600,8 @@ mod tests {
             net: false,
             allow_host: Vec::new(),
             cpus: 2,
+            cpu_limit: None,
+            grants_file: None,
             memory: "512M".to_string(),
             profile,
             agent_verb: Vec::new(),

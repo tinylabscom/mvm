@@ -128,6 +128,25 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// input grant may pass `Unresolved` freely — the check is reached only
     /// through the grant.
     pub entrypoint: ResolvedEntrypoint,
+    /// What this workload is permitted to consume or reach, as resolved from
+    /// the surfaces that may author one (CLI flags, a JSON grants file, the
+    /// project manifest, the operator's host config). Baked into the signed
+    /// plan and checked against the host's ceiling inside `admit_for_run`. Its
+    /// egress dimension is already reflected in
+    /// [`network_policy`](Self::network_policy), which the caller derived from
+    /// the same resolution.
+    ///
+    /// `None` means no surface authored anything, which is the pre-grant
+    /// baseline: no CPU cap, no wall-clock bound, deny-all egress.
+    pub grants: Option<mvm_contract::grants::Grants>,
+    /// The backend this run will actually boot on, when the caller has one in
+    /// hand. Admission measures a declared grant against the mechanisms that
+    /// tier really has; without it a sealed run refuses a grant whose
+    /// enforceability nothing can confirm, and a dev run is warned. Taken from
+    /// the backend object, never parsed from
+    /// [`backend_name`](Self::backend_name) — a name is a label, and a grant
+    /// checked against a label is checked against whatever the caller typed.
+    pub backend_kind: Option<mvm_contract::protocol::vm_backend::BackendKind>,
 }
 
 /// Shell basenames [`entrypoint_is_shell_shaped`] refuses on direct match.
@@ -338,7 +357,10 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         .map(|(policy_ref, _)| policy_ref.as_str());
 
     let input = SynthesisInput {
-        grants: None,
+        // The resolved permission set rides into the plan body, so the ceiling
+        // check below measures what the user actually asked for and the
+        // signature covers it.
+        grants: p.grants.clone(),
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: p.network_mode,
@@ -415,13 +437,18 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         p.ledger,
         p.keys_dir,
         admission_ctx.as_ref(),
-        // This path admits before the caller hands us anything typed for the
-        // backend — it carries a name, and a name is not a tier. So a declared
-        // grant is unverifiable here: a sealed run refuses it, a dev run is
-        // warned. Threading the resolved backend in is what makes a grant
-        // admissible on a sealed boot, and belongs with the surface that first
-        // lets one be authored.
-        RunPosture::without_backend(variant),
+        // A caller that already resolved its backend hands the typed kind over,
+        // and the grant gate measures against the mechanisms that tier really
+        // has. A caller that has not resolved one yet passes `None` and gets
+        // the fail-closed answer: a sealed run refuses a grant whose
+        // enforceability nothing can confirm, a dev run is warned. The plan's
+        // own `runtime_profile` is never consulted for this — it is a label its
+        // author chose, and believing it would let a mislabelled plan pick the
+        // controls it is measured against.
+        match p.backend_kind {
+            Some(kind) => RunPosture::on_backend(variant, kind),
+            None => RunPosture::without_backend(variant),
+        },
     )?;
     let t_signed = std::time::Instant::now();
     tracing::debug!(
@@ -1123,6 +1150,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("must succeed");
@@ -1163,6 +1192,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
@@ -1224,6 +1255,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect_err("missing rootfs must fail");
@@ -1331,6 +1364,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .unwrap()
@@ -1361,6 +1396,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .unwrap()
@@ -1416,6 +1453,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
@@ -1493,6 +1532,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
@@ -1548,6 +1589,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
@@ -1610,6 +1653,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
         .expect("admission")
@@ -1705,6 +1750,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec!["python".to_string(), "-m".to_string(), "app".to_string()],
                 shebang: None,
@@ -1757,6 +1804,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(), // no host.stream.v1 grant
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec![
                     "/bin/sh".to_string(),
@@ -1806,6 +1855,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec![
                     "/bin/sh".to_string(),
@@ -1863,6 +1914,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: vec![stream_grant_service()],
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
         })
         .expect_err("an unresolved entrypoint carrying the grant must be refused");
@@ -1916,6 +1969,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
         })
         .expect("an unresolved entrypoint that asked for nothing must still boot")
@@ -1962,6 +2017,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: false,
             services: vec![stream_grant_service()],
+            grants: None,
+            backend_kind: None,
             entrypoint: ResolvedEntrypoint::Known {
                 argv: vec![
                     "/bin/sh".to_string(),
@@ -2064,5 +2121,305 @@ mod entrypoint_shape_tests {
     #[test]
     fn an_empty_argv_is_not_shell_shaped() {
         assert!(!entrypoint_is_shell_shaped(&[], None));
+    }
+}
+
+// ── the surfaces, end to end ─────────────────────────────
+//
+// Everything above proves a piece. These prove the whole path: a grant
+// written in a project's manifest is resolved, checked against the host's
+// ceiling, signed into the plan, and — for egress — becomes the policy the
+// gate enforces. Asserting on the admitted `ExecutionPlan` rather than on an
+// intermediate struct is the point; every previous version of this feature
+// was correct in the middle and unreachable at the ends.
+
+#[cfg(test)]
+mod grant_surface_tests {
+    use super::*;
+    use crate::commands::shared::{GrantInputs, resolve_run_grants};
+    use mvm_contract::grants::CpuGrant;
+    use mvm_core::network_policy::HostPort;
+    use mvm_core::user_config::MvmConfig;
+
+    // `localhost` rather than a public name on purpose: admission lowers a
+    // non-deny policy into a signed bundle and pins each allowed host to its
+    // resolved addresses, so a name needing a real resolver would make these
+    // tests depend on the network.
+    const MANIFEST: &str = r#"
+image = "alpine:3.20"
+cpus = 4
+
+[grants]
+cpu_millicores = 1500
+wall_clock_secs = 600
+allow_hosts = ["localhost:8443"]
+"#;
+
+    fn manifest_grants(text: &str) -> mvm_contract::grants::Grants {
+        mvm_core::manifest::Manifest::from_toml_str(text)
+            .expect("the manifest parses")
+            .machine_workflow()
+            .expect("an image-backed manifest yields a machine workflow")
+            .grants
+    }
+
+    fn write_rootfs(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("rootfs.ext4");
+        std::fs::write(&path, b"grant rootfs").expect("write rootfs");
+        path
+    }
+
+    #[test]
+    fn a_manifest_grant_reaches_the_signed_plan() {
+        let declared = manifest_grants(MANIFEST);
+        let config = MvmConfig::default();
+        let resolved = resolve_run_grants(GrantInputs {
+            cpu_limit_millicores: None,
+            timeout_secs: None,
+            allow_host: &[],
+            net: false,
+            grants_file: None,
+            manifest: Some(&declared),
+            config: &config,
+        })
+        .expect("the manifest's grants resolve");
+
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path());
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-granted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 4,
+            mem_mib: 512,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: resolved.network_policy.clone(),
+            agent_verb_override: vec![],
+            // A dev posture: the grant is recorded and, on a tier without a
+            // CPU mechanism, warned about rather than refused. The refusal
+            // half is `plan_admission`'s to test; this one is about reach.
+            restrict_agent_verbs: false,
+            services: Vec::new(),
+            grants: resolved.plan_grants.clone(),
+            backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+
+        let plan_grants = ctx
+            .admitted
+            .plan()
+            .grants
+            .as_ref()
+            .expect("the signed plan carries the manifest's grants");
+        assert_eq!(
+            plan_grants.cpu,
+            Some(CpuGrant::Share { millicores: 1500 }),
+            "the manifest's CPU share must survive into the signed plan"
+        );
+        assert_eq!(
+            plan_grants
+                .egress
+                .as_ref()
+                .map(|egress| egress.allow.as_slice()),
+            Some(&[HostPort::new("localhost", 8443)][..]),
+            "the manifest's allow-list must survive into the signed plan"
+        );
+        assert_eq!(
+            ctx.admitted.plan().resources.cpus,
+            4,
+            "the vCPU count is its own resource and is untouched by the CPU share"
+        );
+    }
+
+    #[test]
+    fn a_manifest_egress_grant_is_what_the_gate_enforces() {
+        // The gate reads the resolved `NetworkPolicy`; the only thing allowed
+        // to derive one from a grant is the projection. So the policy handed
+        // to the launch must be exactly what the projection yields for the
+        // grant the plan was signed over.
+        let declared = manifest_grants(MANIFEST);
+        let config = MvmConfig::default();
+        let resolved = resolve_run_grants(GrantInputs {
+            cpu_limit_millicores: None,
+            timeout_secs: None,
+            allow_host: &[],
+            // `--net` would select the broad dev preset; the granted allow-list
+            // is what wins.
+            net: true,
+            grants_file: None,
+            manifest: Some(&declared),
+            config: &config,
+        })
+        .expect("resolves");
+
+        let plan_grants = resolved
+            .plan_grants
+            .as_ref()
+            .expect("the manifest granted egress");
+        assert_eq!(
+            resolved.network_policy,
+            mvm_contract::grants::projection::network_policy_from_grants(plan_grants),
+            "the enforced policy must be the projection of the signed grant"
+        );
+        assert_eq!(
+            resolved
+                .network_policy
+                .resolve_rules()
+                .expect("an allow-list resolves to rules"),
+            vec![HostPort::new("localhost", 8443)]
+        );
+        assert!(!resolved.network_policy.is_unrestricted());
+    }
+
+    #[test]
+    fn a_grant_over_the_hosts_ceiling_is_refused_before_the_plan_is_signed() {
+        // Admission reads the ceiling from host config, so the test has to be
+        // a bounded host. The refusal must land before signing: a signed plan
+        // we would have refused is indistinguishable downstream from one we
+        // admitted.
+        let home = tempfile::tempdir().expect("scratch mvm home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        mvm_core::user_config::save(
+            &MvmConfig {
+                max_cpu_millicores: Some(1000),
+                ..MvmConfig::default()
+            },
+            None,
+        )
+        .expect("writing the host config");
+
+        let declared = manifest_grants(MANIFEST);
+        let config = mvm_core::user_config::load(None);
+        let resolved = resolve_run_grants(GrantInputs {
+            cpu_limit_millicores: None,
+            timeout_secs: None,
+            allow_host: &[],
+            net: false,
+            grants_file: None,
+            manifest: Some(&declared),
+            config: &config,
+        })
+        .expect("resolving a grant is not where the ceiling applies");
+
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path());
+        let ledger = InMemoryNonceLedger::new();
+        let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-over-ceiling",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 4,
+            mem_mib: 512,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: resolved.network_policy.clone(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: false,
+            services: Vec::new(),
+            grants: resolved.plan_grants.clone(),
+            backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+        })
+        .expect_err("1500 millicores on a 1000-millicore host must be refused");
+        assert!(
+            format!("{err:#}").contains("ceiling"),
+            "the refusal must name the ceiling, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_grants_nothing_still_admits_a_grant_free_plan() {
+        // The pre-grant baseline has to stay byte-identical: an untouched
+        // permission set must not become an empty-but-present one.
+        let config = MvmConfig::default();
+        let resolved = resolve_run_grants(GrantInputs {
+            cpu_limit_millicores: None,
+            timeout_secs: None,
+            allow_host: &[],
+            net: false,
+            grants_file: None,
+            manifest: None,
+            config: &config,
+        })
+        .expect("resolves");
+        assert_eq!(resolved.plan_grants, None);
+
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path());
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-ungranted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 2,
+            mem_mib: 512,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: resolved.network_policy.clone(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            grants: resolved.plan_grants.clone(),
+            backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+        assert_eq!(ctx.admitted.plan().grants, None);
+        assert_eq!(
+            resolved.network_policy.resolve_rules().as_deref(),
+            Some(&[][..]),
+            "granting nothing still means deny-all"
+        );
     }
 }
