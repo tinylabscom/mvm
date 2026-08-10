@@ -27,7 +27,16 @@
 
 use alloc::vec::Vec;
 
+use super::resource_controls::{ResourceControls, WallClockControl};
 use super::vm_backend::{BackendKind, RequiredCapabilities, VmCapabilities};
+use crate::grants::{CpuGrant, Grants, WallClockGrant};
+
+/// The capability name a `CpuGrant::Share` asks a backend for.
+pub const CAPABILITY_CPU_SHARE: &str = "cpu.share";
+/// The capability name a `CpuGrant::Fuel` asks a backend for.
+pub const CAPABILITY_CPU_FUEL: &str = "cpu.fuel";
+/// The capability name a bounded `WallClockGrant` asks a backend for.
+pub const CAPABILITY_WALL_CLOCK: &str = "wall_clock.secs";
 
 /// The substitute for a capability a backend does not provide.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +150,36 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
         // running entrypoint; it is not a terminal and cannot become one.
         "pty_exec" => CapabilityAlternative::WorkloadStdinRoute,
 
+        // Grant dimensions. Which mechanism a tier has is
+        // `ResourceControls::for_backend`, so the substitute is derived from
+        // that same answer rather than from a second per-backend table that
+        // could disagree with it.
+        CAPABILITY_CPU_SHARE => {
+            if ResourceControls::for_backend(backend).cpu.serves_fuel() {
+                CapabilityAlternative::CpuBudgetAsDeterministicFuel
+            } else {
+                CapabilityAlternative::None {
+                    why: "this tier has no CPU quota mechanism, so a share of host CPU time \
+                          cannot be bounded here — run on a tier that meters CPU, or drop the \
+                          cpu grant and accept that nothing enforces it",
+                }
+            }
+        }
+
+        // A share is not a substitute for fuel. Fuel is reproducible across
+        // hosts; a fraction of host CPU time is not, so offering one for the
+        // other would trade the guarantee the caller asked for.
+        CAPABILITY_CPU_FUEL => CapabilityAlternative::None {
+            why: "an executed-instruction budget is metered only where the runtime counts \
+                  instructions; a share of host CPU time is a different guarantee, not a \
+                  substitute for a deterministic one",
+        },
+
+        CAPABILITY_WALL_CLOCK => CapabilityAlternative::None {
+            why: "this tier runs no clock that can stop the workload, so a wall-clock bound \
+                  would be a declaration only",
+        },
+
         // A security boundary, not a feature. A backend that cannot keep a
         // routable NIC away from the workload cannot be made to by choosing a
         // different call — the host would stop being the originator of every
@@ -159,6 +198,52 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
             }
         }
     }
+}
+
+/// Check a workload's `grants` against what `backend` can actually bound,
+/// naming a substitute for every dimension it cannot serve.
+///
+/// `Ok(())` means every declared grant has a mechanism behind it on this tier.
+/// `Err` carries one [`CapabilityGap`] per dimension that does not, in a fixed
+/// order (cpu, then wall clock) so a message reads the same on every host.
+///
+/// Separate from [`VmCapabilities::negotiate`] because the two ask different
+/// questions of different data: that one reads the capability matrix a backend
+/// advertises, this one reads [`ResourceControls`], which is the mechanism
+/// table. Answering both from one function would mean a backend could advertise
+/// a control it has no mechanism for.
+///
+/// **Pure, and deliberately posture-free.** It reports what cannot be enforced;
+/// whether that is fatal is an admission decision, which differs between a
+/// sealed production run and a developer's laptop. Deciding here would put the
+/// posture rule in a `no_std` DTO crate that has no way to know it.
+pub fn negotiate_grants(grants: &Grants, backend: BackendKind) -> Result<(), Vec<CapabilityGap>> {
+    let controls = ResourceControls::for_backend(backend);
+    let mut gaps: Vec<CapabilityGap> = Vec::new();
+
+    let cpu_capability = match grants.cpu {
+        Some(CpuGrant::Share { .. }) if !controls.cpu.serves_share() => Some(CAPABILITY_CPU_SHARE),
+        Some(CpuGrant::Fuel { .. }) if !controls.cpu.serves_fuel() => Some(CAPABILITY_CPU_FUEL),
+        _ => None,
+    };
+    if let Some(capability) = cpu_capability {
+        gaps.push(CapabilityGap {
+            capability,
+            alternative: alternative_for(capability, backend),
+        });
+    }
+
+    // `Unbounded` asks for nothing, so a tier with no timer serves it fine.
+    if matches!(grants.wall_clock, Some(WallClockGrant::Secs { .. }))
+        && controls.wall_clock == WallClockControl::None
+    {
+        gaps.push(CapabilityGap {
+            capability: CAPABILITY_WALL_CLOCK,
+            alternative: alternative_for(CAPABILITY_WALL_CLOCK, backend),
+        });
+    }
+
+    if gaps.is_empty() { Ok(()) } else { Err(gaps) }
 }
 
 impl VmCapabilities {
@@ -359,15 +444,90 @@ mod tests {
     }
 
     #[test]
-    fn a_share_grant_on_the_wasm_tier_names_fuel_as_the_substitute() {
-        let gap = CapabilityGap {
-            capability: "cpu.share",
-            alternative: CapabilityAlternative::CpuBudgetAsDeterministicFuel,
+    fn share_grant_on_wasm_is_refused_at_negotiation_naming_fuel() {
+        // The wasm tier bounds CPU, just in another unit. Saying so at
+        // negotiation is what keeps the refusal in front of the boot instead of
+        // surfacing as a failed apply after the workload is already running.
+        let grants = Grants {
+            cpu: Some(CpuGrant::Share { millicores: 1500 }),
+            ..Grants::default()
         };
+        let gaps = negotiate_grants(&grants, BackendKind::Wasm)
+            .expect_err("a share is not the wasm tier's unit");
+        assert_eq!(
+            gaps,
+            vec![CapabilityGap {
+                capability: CAPABILITY_CPU_SHARE,
+                alternative: CapabilityAlternative::CpuBudgetAsDeterministicFuel,
+            }]
+        );
         assert!(
-            gap.is_actionable(),
+            gaps[0].is_actionable(),
             "a wasm CPU bound exists; it is just a different unit"
         );
+        assert!(gaps[0].alternative.describe().contains("fuel"));
+    }
+
+    #[test]
+    fn a_fuel_grant_off_the_wasm_tier_gets_no_invented_substitute() {
+        // A share would be a different guarantee, not a substitute: fuel is
+        // reproducible across hosts and a fraction of host CPU time is not.
+        let grants = Grants {
+            cpu: Some(CpuGrant::Fuel {
+                instructions: 1_000_000,
+            }),
+            ..Grants::default()
+        };
+        let gaps = negotiate_grants(&grants, BackendKind::Firecracker)
+            .expect_err("no microVM tier counts instructions");
+        assert_eq!(gaps[0].capability, CAPABILITY_CPU_FUEL);
+        assert!(!gaps[0].is_actionable());
+    }
+
+    #[test]
+    fn a_grant_the_tier_can_bound_produces_no_gap() {
+        let grants = Grants {
+            cpu: Some(CpuGrant::Fuel {
+                instructions: 1_000_000,
+            }),
+            wall_clock: Some(WallClockGrant::Secs {
+                secs: core::num::NonZeroU32::new(30).expect("nonzero"),
+            }),
+            ..Grants::default()
+        };
+        assert_eq!(negotiate_grants(&grants, BackendKind::Wasm), Ok(()));
+    }
+
+    #[test]
+    fn an_undeclared_grant_asks_the_backend_for_nothing() {
+        // Mock bounds neither dimension, so an empty grant set is the only
+        // thing it can serve — and it must serve it, or every unbounded run
+        // would negotiate a gap it never asked for.
+        assert_eq!(
+            negotiate_grants(&Grants::default(), BackendKind::Mock),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload() {
+        let bounded = Grants {
+            wall_clock: Some(WallClockGrant::Secs {
+                secs: core::num::NonZeroU32::new(600).expect("nonzero"),
+            }),
+            ..Grants::default()
+        };
+        let gaps =
+            negotiate_grants(&bounded, BackendKind::Mock).expect_err("the mock tier runs no timer");
+        assert_eq!(gaps[0].capability, CAPABILITY_WALL_CLOCK);
+        assert!(!gaps[0].is_actionable());
+
+        // `Unbounded` asks for nothing, so the absent timer serves it.
+        let unbounded = Grants {
+            wall_clock: Some(WallClockGrant::Unbounded),
+            ..Grants::default()
+        };
+        assert_eq!(negotiate_grants(&unbounded, BackendKind::Mock), Ok(()));
     }
 
     #[test]

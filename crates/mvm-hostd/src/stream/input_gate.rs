@@ -1088,6 +1088,7 @@ mod tests {
         const FIXTURE_SHA: &str =
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         SynthesisInput {
+            grants: None,
             stream_edges: Vec::new(),
             kernel_sha256: None,
             vm_name,
@@ -2223,6 +2224,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(keys.path()),
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("the fixture input admits");
         assert!(matches!(
@@ -2238,6 +2240,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(keys.path()),
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("the granting input admits");
         let session =

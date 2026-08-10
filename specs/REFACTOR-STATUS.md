@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-09
+Last updated: 2026-08-10
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -928,6 +928,12 @@ for detailed scope and acceptance criteria.
   - [ ] WS2 — single Grants→`NetworkPolicy` projection, derived and fail-closed
   - [ ] WS3 — `resource_controls` on `VmCapabilities` + `apply_grants` on
         `VmBackend`, tier read back rather than assumed
+  - [x] WS3b — the seams made load-bearing: the signed plan carries `grants`,
+        the ceiling is resolved from host config and checked before the plan
+        is signed, `Supervisor::launch` applies grants and records the tier
+        that came back, and a sealed run refuses a grant no mechanism on that
+        tier backs (dev warns). No backend implements a real control yet —
+        every tier still answers `declared`, which is WS4/WS5
   - [ ] WS4.0 — **blocking spike**: is cgroup v2 `cpu` delegated to user
         sessions unprivileged? If not, WS4 is a different design
   - [ ] WS4 — Linux CPU quota (born into the cgroup, not moved into it),

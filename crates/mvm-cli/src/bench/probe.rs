@@ -56,6 +56,7 @@ pub fn admit_probe_plan(
     let sha = mvm_core::crypto::image_verify::sha256_file(rootfs)
         .with_context(|| format!("hashing probe rootfs {}", rootfs.display()))?;
     let input = SynthesisInput {
+        grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: Default::default(),
@@ -92,7 +93,15 @@ pub fn admit_probe_plan(
         stream_retention: Default::default(),
     };
     let ledger = InMemoryNonceLedger::new();
-    admit_for_run(&input, &SystemClock, &ledger, keys_dir, None).context("admitting probe plan")
+    admit_for_run(
+        &input,
+        &SystemClock,
+        &ledger,
+        keys_dir,
+        None,
+        mvm_core::plan::Variant::Dev,
+    )
+    .context("admitting probe plan")
 }
 
 // ──────────────────────────────────────────────────────────────────

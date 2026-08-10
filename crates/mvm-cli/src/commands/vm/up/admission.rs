@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 
-use mvm_core::plan::{StreamRetention, SynthesisInput};
+use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
 use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
@@ -323,6 +323,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         .map(|(policy_ref, _)| policy_ref.as_str());
 
     let input = SynthesisInput {
+        grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: Default::default(),
@@ -379,12 +380,22 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         }),
         _ => None,
     };
+    // The posture the grant gate reads. `restrict_agent_verbs` is this
+    // codebase's sealed-production signal — the same one the input-grant
+    // refusal above is scoped to — so a sealed boot refuses a grant nothing
+    // can enforce, and a dev boot is told about it and proceeds.
+    let variant = if p.restrict_agent_verbs {
+        Variant::Prod
+    } else {
+        Variant::Dev
+    };
     let admitted = admit_for_run(
         &input,
         &SystemClock,
         p.ledger,
         p.keys_dir,
         admission_ctx.as_ref(),
+        variant,
     )?;
     tracing::info!(
         plan_id = %admitted.plan_id().0,

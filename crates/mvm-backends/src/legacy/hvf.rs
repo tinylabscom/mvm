@@ -975,6 +975,7 @@ mod tests {
         use mvm_core::policy::RedactionPolicy;
 
         let input = SynthesisInput {
+            grants: None,
             kernel_sha256: None,
             network_mode: Default::default(),
             l3_network: None,

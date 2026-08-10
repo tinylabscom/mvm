@@ -46,12 +46,16 @@
 
 use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
+use mvm_contract::grants::Grants;
+use mvm_contract::grants::ceiling::GrantCeiling;
+use mvm_contract::protocol::capability_negotiation::negotiate_grants;
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
-    ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, check_window,
-    sign_plan, verify_plan, verify_plan_bundle, verify_plan_id,
+    ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
+    check_window, sign_plan, verify_plan, verify_plan_bundle, verify_plan_id,
 };
 use mvm_core::policy::PolicyBundle;
+use mvm_core::vm_backend::BackendKind;
 use std::sync::Mutex;
 
 use crate::audit::host_keypair::host_signer_id;
@@ -188,17 +192,33 @@ pub struct BundleAdmissionContext<'a> {
 ///   - `plan replay detected for signer {id}; nonce {hex}` — G4 nonce
 ///   - `bundle re-verify failed: {detail}` — pinned bundle missing,
 ///     unknown publisher, tampered, or sha256/sig/key_id mismatch
+///   - `grant exceeds this host's ceiling: {detail}` — the request asked
+///     for more than the host's configured bound in some dimension
+///   - `refusing an unenforceable grant: {detail}` — `variant` is
+///     [`Variant::Prod`] and the resolved backend has no mechanism behind a
+///     declared grant. The same input under [`Variant::Dev`] warns and proceeds
+///
+/// `variant` is the run's posture, not a property of the plan: the caller knows
+/// whether this is a sealed production launch or a developer's boot, and that
+/// is what decides whether a grant nothing can enforce is fatal.
 pub fn admit_for_run(
     input: &SynthesisInput<'_>,
     clock: &dyn Clock,
     ledger: &InMemoryNonceLedger,
     host_signer_keys_dir: Option<&std::path::Path>,
     bundle_ctx: Option<&BundleAdmissionContext<'_>>,
+    variant: Variant,
 ) -> Result<AdmittedPlan> {
     // Build the unsigned plan first. Synthesis failures are caught
     // before we touch the keystore — keeps "signed bad plan" from
     // being an outcome.
     let plan = synthesize_plan(input).context("synthesizing plan")?;
+
+    // Grants are checked in that same pre-keystore window, and for the same
+    // reason: a plan we would refuse must never leave here with a signature on
+    // it. A signed refused plan is indistinguishable from a signed admitted one
+    // to anything downstream that only checks the signature.
+    admit_grants(&plan, &host_grant_ceiling(), variant)?;
 
     // Load or generate the host signer. load_or_init refuses
     // loose perms; that error propagates verbatim.
@@ -265,6 +285,98 @@ pub fn admit_for_run(
         plan: verified,
         signed,
     })
+}
+
+/// The bound this host puts on what any workload may be granted.
+///
+/// Read from the operator's config, never from the plan under admission. The
+/// two have different trust roots: whoever authors a plan also authors its
+/// grants, so a ceiling the plan could carry would be a bound the bounded party
+/// writes. There is no parameter for it here for the same reason — a caller
+/// cannot hand admission a wider ceiling than the host configured.
+fn host_grant_ceiling() -> GrantCeiling {
+    mvm_core::user_config::load(None).grant_ceiling()
+}
+
+/// Refuse a run whose grants this host will not admit.
+///
+/// Two independent questions, in this order:
+///
+/// 1. *May it ask for this?* — the ceiling, which bounds the request.
+/// 2. *Can anything here deliver it?* — the backend's mechanisms, which decide
+///    whether an admitted grant would be enforced or merely recorded.
+///
+/// The second is posture-dependent: a sealed production run must not boot with
+/// a bound nothing implements, while a developer's laptop legitimately runs on
+/// tiers that cannot bound CPU at all. Warning rather than refusing in dev is
+/// what keeps the refusal credible in prod instead of training everyone to
+/// route around it.
+fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, variant: Variant) -> Result<()> {
+    let undeclared = Grants::default();
+    let grants = plan.grants.as_ref().unwrap_or(&undeclared);
+
+    // Memory is checked even when nothing was granted: it is fixed at VM
+    // creation rather than requested, and an unbounded one reserves the host.
+    ceiling
+        .admits(grants, plan.resources.mem_mib)
+        .map_err(|violation| {
+            anyhow::anyhow!(
+                "grant exceeds this host's ceiling: {dimension} requested {requested}, \
+                 host allows at most {ceiling}",
+                dimension = violation.dimension,
+                requested = violation.requested,
+                ceiling = violation.ceiling,
+            )
+        })?;
+
+    enforceability_gate(grants, &plan.runtime_profile.0, variant)
+}
+
+/// Refuse (prod) or warn (dev) when the resolved backend has no mechanism
+/// behind a declared grant.
+fn enforceability_gate(grants: &Grants, backend_label: &str, variant: Variant) -> Result<()> {
+    // A run that granted nothing has nothing to enforce; asking the backend
+    // would only produce noise on every unbounded boot.
+    if grants.cpu.is_none() && grants.wall_clock.is_none() {
+        return Ok(());
+    }
+
+    // An unrecognised backend is not a pass. We cannot name a mechanism for a
+    // tier we cannot identify, and "unknown" must not be the quiet way to get a
+    // grant admitted unenforced.
+    let Some(kind) = BackendKind::from_label(backend_label) else {
+        return refuse_or_warn(
+            variant,
+            format!(
+                "backend {backend_label:?} is not a known tier, so this host cannot say \
+                 which of the declared grants it would enforce"
+            ),
+        );
+    };
+
+    let Err(gaps) = negotiate_grants(grants, kind) else {
+        return Ok(());
+    };
+    let detail = gaps
+        .iter()
+        .map(|gap| format!("{} — {}", gap.capability, gap.alternative.describe()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    refuse_or_warn(
+        variant,
+        format!("the {backend_label} tier cannot enforce every declared grant: {detail}"),
+    )
+}
+
+fn refuse_or_warn(variant: Variant, detail: String) -> Result<()> {
+    if variant.is_prod() {
+        anyhow::bail!("refusing an unenforceable grant: {detail}");
+    }
+    tracing::warn!(
+        "{detail} — admitting anyway because this is a dev run; the grant is recorded, \
+         not enforced"
+    );
+    Ok(())
 }
 
 /// Soft caps on the JSON envelope sizes flowing through
@@ -656,6 +768,10 @@ pub struct AdmitAndStartParams<'a> {
     pub ledger: &'a InMemoryNonceLedger,
     pub host_signer_keys_dir: Option<&'a std::path::Path>,
     pub bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+    /// This run's posture. Decides whether a grant the resolved backend has no
+    /// mechanism for refuses the boot ([`Variant::Prod`]) or warns and proceeds
+    /// ([`Variant::Dev`]).
+    pub variant: Variant,
     pub policy_bundle: Option<&'a PolicyBundle>,
     /// Optional chain-signed emitter: `plan.admitted` fires after admission
     /// succeeds, then `plan.launched` on a successful backend start or
@@ -766,6 +882,7 @@ pub fn admit_and_start(
         params.ledger,
         params.host_signer_keys_dir,
         params.bundle_ctx,
+        params.variant,
     )?;
     crate::audit::durability::record_admission(
         params.emitter,
@@ -1003,6 +1120,7 @@ mod tests {
 
     fn fixture_input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            grants: None,
             stream_edges: Vec::new(),
             kernel_sha256: None,
             network_mode: Default::default(),
@@ -1234,6 +1352,262 @@ mod tests {
         assert!(enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &back).is_ok());
     }
 
+    // ---- grants: the ceiling, and what the tier can actually enforce ----
+
+    /// Isolate `MVM_HOME` and write an operator config carrying `ceiling`.
+    ///
+    /// Admission reads the ceiling from host config rather than from a
+    /// parameter, so a test that wants a bounded host has to *be* one. Returns
+    /// the guard and the home dir; both must outlive the admission call.
+    fn host_with_ceiling(
+        ceiling: mvm_contract::grants::ceiling::GrantCeiling,
+    ) -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
+        let home = tempfile::tempdir().expect("scratch mvm home");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let cfg = mvm_core::user_config::MvmConfig {
+            max_cpu_millicores: ceiling.max_cpu_millicores,
+            max_memory_mib: ceiling.max_memory_mib,
+            max_wall_clock_secs: ceiling.max_wall_clock_secs,
+            ..mvm_core::user_config::MvmConfig::default()
+        };
+        mvm_core::user_config::save(&cfg, None).expect("writing the host config");
+        // Precondition, not a redundant assertion: if this fails the isolation
+        // did not hold, and every ceiling assertion below would then be
+        // measuring some other directory's config.
+        assert_eq!(
+            mvm_core::user_config::load(None).grant_ceiling(),
+            ceiling,
+            "the isolated host must read back the ceiling it was configured with"
+        );
+        (env, home)
+    }
+
+    fn cpu_share(millicores: u32) -> mvm_contract::grants::Grants {
+        mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores }),
+            ..mvm_contract::grants::Grants::default()
+        }
+    }
+
+    #[test]
+    fn admission_refuses_a_grant_over_the_ceiling() {
+        let (_env, _home) = host_with_ceiling(mvm_contract::grants::ceiling::GrantCeiling {
+            max_cpu_millicores: Some(2000),
+            ..Default::default()
+        });
+        let keys = tempfile::tempdir().unwrap();
+
+        let mut input = fixture_input("vm-over-ceiling");
+        input.grants = Some(cpu_share(64_000));
+
+        let err = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Dev,
+        )
+        .expect_err("a grant above the host's ceiling must not be admitted");
+        let msg = err.to_string();
+        assert!(msg.contains("ceiling"), "{msg}");
+        assert!(msg.contains("64000") && msg.contains("2000"), "{msg}");
+
+        // Under the same ceiling, a request within it still admits — otherwise
+        // this test would pass on a gate that refuses everything.
+        let mut within = fixture_input("vm-under-ceiling");
+        within.grants = Some(cpu_share(1500));
+        admit_for_run(
+            &within,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Dev,
+        )
+        .expect("a grant inside the ceiling admits");
+    }
+
+    #[test]
+    fn admission_refuses_before_signing() {
+        // Not "an error came back" — no *signature* may exist for a run we
+        // refuse. The host signer is generated lazily on first use, so an
+        // untouched keys dir is proof the keystore was never reached and
+        // therefore that nothing was signed.
+        let (_env, _home) = host_with_ceiling(mvm_contract::grants::ceiling::GrantCeiling {
+            max_cpu_millicores: Some(2000),
+            ..Default::default()
+        });
+        let keys = tempfile::tempdir().unwrap();
+        let key_file = keys
+            .path()
+            .join(crate::audit::host_keypair::SECRET_FILENAME);
+
+        let mut input = fixture_input("vm-refused-unsigned");
+        input.grants = Some(cpu_share(64_000));
+        let refused = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Dev,
+        );
+        assert!(refused.is_err(), "the ceiling must refuse this run");
+        assert!(
+            !key_file.exists(),
+            "the refusal path reached the keystore; a plan we would not admit \
+             must never acquire a signature"
+        );
+
+        // The control: an admitted run does reach the keystore, so the
+        // assertion above is about the refusal and not about a keys dir that
+        // is never written under any outcome.
+        admit_for_run(
+            &fixture_input("vm-admitted-signed"),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Dev,
+        )
+        .expect("an unbounded run admits");
+        assert!(
+            key_file.exists(),
+            "an admitted run signs under the host key"
+        );
+    }
+
+    #[test]
+    fn prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu() {
+        // The hvf tier has no cgroup equivalent on any host, so a CPU share is
+        // a bound nothing behind it implements.
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let keys = tempfile::tempdir().unwrap();
+
+        let mut input = fixture_input("vm-prod-unenforceable");
+        input.backend_name = "hvf";
+        input.grants = Some(cpu_share(1500));
+
+        let err = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Prod,
+        )
+        .expect_err("a sealed run must not boot with a bound nothing enforces");
+        let msg = err.to_string();
+        assert!(msg.contains("unenforceable"), "{msg}");
+        assert!(msg.contains("cpu.share"), "{msg}");
+    }
+
+    #[test]
+    fn dev_warns_and_proceeds_on_the_same_input() {
+        // Same tier, same grant, dev posture: admitted, because a laptop that
+        // cannot bound CPU is where most development happens and refusing
+        // there would only teach everyone to stop declaring grants.
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let keys = tempfile::tempdir().unwrap();
+
+        let mut input = fixture_input("vm-dev-unenforceable");
+        input.backend_name = "hvf";
+        input.grants = Some(cpu_share(1500));
+
+        let admitted = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Dev,
+        )
+        .expect("a dev run proceeds with an unenforceable grant");
+        assert_eq!(
+            admitted.plan().grants.as_ref().map(|g| g.cpu),
+            Some(Some(mvm_contract::grants::CpuGrant::Share {
+                millicores: 1500
+            })),
+            "the declared grant rides in the signed plan even when unenforced"
+        );
+
+        // Posture is the only difference between this outcome and the refusal
+        // above. Asserted against the gate directly as well, so a change that
+        // makes the rule unconditional in either direction fails here and not
+        // only in the prod witness.
+        let grants = cpu_share(1500);
+        assert!(enforceability_gate(&grants, "hvf", Variant::Prod).is_err());
+        assert!(enforceability_gate(&grants, "hvf", Variant::Dev).is_ok());
+    }
+
+    #[test]
+    fn an_unidentifiable_backend_is_not_a_way_past_the_prod_gate() {
+        // "Unknown tier" must not be the quiet spelling of "no mechanism
+        // needed" — we cannot name what would enforce a grant on a backend we
+        // cannot name at all.
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let keys = tempfile::tempdir().unwrap();
+
+        let mut input = fixture_input("vm-unknown-backend");
+        input.backend_name = "not-a-backend";
+        input.grants = Some(cpu_share(1500));
+
+        let err = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Prod,
+        )
+        .expect_err("an unknown tier cannot promise enforcement");
+        assert!(err.to_string().contains("not a known tier"));
+    }
+
+    #[test]
+    fn a_run_that_grants_nothing_is_unaffected_by_the_tier_gate() {
+        // The gate must stay silent for the overwhelmingly common case, or
+        // every unbounded boot on a laptop becomes a warning.
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let keys = tempfile::tempdir().unwrap();
+
+        let mut input = fixture_input("vm-no-grants");
+        input.backend_name = "hvf";
+        admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Prod,
+        )
+        .expect("a run declaring no grant admits on any tier");
+    }
+
+    #[test]
+    fn the_ceiling_bounds_memory_even_though_no_one_granted_it() {
+        // Memory is fixed at VM creation rather than requested, so a plan that
+        // declares no grants at all can still reserve the whole host.
+        let (_env, _home) = host_with_ceiling(mvm_contract::grants::ceiling::GrantCeiling {
+            max_memory_mib: Some(128),
+            ..Default::default()
+        });
+        let keys = tempfile::tempdir().unwrap();
+
+        let err = admit_for_run(
+            &fixture_input("vm-fat"), // fixture asks for 256 MiB
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+            Variant::Dev,
+        )
+        .expect_err("memory above the ceiling must be refused");
+        assert!(err.to_string().contains("memory_mib"), "{err}");
+    }
+
     #[test]
     fn happy_path_returns_admitted_plan_with_plan_id() {
         let dir = tempfile::tempdir().unwrap();
@@ -1245,6 +1619,7 @@ mod tests {
             &ledger,
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .expect("happy path");
         assert!(!admitted.plan_id().0.is_empty());
@@ -1267,6 +1642,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .expect("happy path");
         assert!(
@@ -1337,6 +1713,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .unwrap();
         // The signed field is what the audit signer will hash;
@@ -1356,6 +1733,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .expect_err("must refuse");
         assert!(
@@ -1375,6 +1753,7 @@ mod tests {
             &ledger,
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .unwrap();
         let a2 = admit_for_run(
@@ -1383,6 +1762,7 @@ mod tests {
             &ledger,
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .unwrap();
         assert_ne!(a1.plan_id, a2.plan_id);
@@ -1512,6 +1892,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             Some(&ctx),
+            Variant::Dev,
         )
         .expect("clean pin admits");
         assert!(admitted.plan().bundle.is_some());
@@ -1536,6 +1917,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .expect_err("must refuse without context");
         let msg = format!("{err:#}");
@@ -1564,6 +1946,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             Some(&ctx),
+            Variant::Dev,
         )
         .expect_err("must refuse unknown publisher");
         let msg = format!("{err:#}");
@@ -1602,6 +1985,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             Some(&ctx),
+            Variant::Dev,
         )
         .expect_err("must refuse pin drift");
         assert!(
@@ -1620,6 +2004,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .expect("happy admit");
 
@@ -1656,6 +2041,7 @@ mod tests {
             &ledger,
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .expect("happy admit");
 
@@ -1696,6 +2082,7 @@ mod tests {
             &ledger,
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .expect("happy admit");
 
@@ -1849,6 +2236,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(dir.path()),
             None,
+            Variant::Dev,
         )
         .expect("happy path");
         assert_eq!(
@@ -1888,6 +2276,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(keys_dir.as_path()),
             None,
+            Variant::Dev,
         )
         .expect("admit with agent_verbs");
 
@@ -1951,6 +2340,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(keys_dir.as_path()),
             None,
+            Variant::Dev,
         )
         .expect("admit without agent_verbs");
 
@@ -1989,6 +2379,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(keys_dir.as_path()),
             None,
+            Variant::Dev,
         )
         .expect("admit with agent_verbs");
         let mut cfg_with = VmStartConfig {
@@ -2011,6 +2402,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(keys_dir.as_path()),
             None,
+            Variant::Dev,
         )
         .expect("admit without agent_verbs");
         let mut cfg_without = VmStartConfig {
@@ -2049,6 +2441,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,
@@ -2108,6 +2501,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: Some(&emitter),
                 audit_durability: AuditDurability::Required,
@@ -2159,6 +2553,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: Some(&emitter),
                 audit_durability: AuditDurability::BestEffort,
@@ -2197,6 +2592,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: None,
                 audit_durability: crate::audit::durability::AuditDurability::BestEffort,

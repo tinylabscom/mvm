@@ -208,6 +208,7 @@ fn audit_binding(
 fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     SynthesisInput {
+        grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,
         vm_name,
@@ -343,6 +344,7 @@ impl Fixture {
             &InMemoryNonceLedger::new(),
             None,
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("the fixture input admits")
     }

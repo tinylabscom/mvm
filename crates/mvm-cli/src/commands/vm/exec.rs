@@ -940,6 +940,7 @@ fn emit_oci_run_admission(
         })?;
     let exec_timeout_secs = u32::try_from(timeout_secs).unwrap_or(u32::MAX);
     let input = SynthesisInput {
+        grants: None,
         kernel_sha256: None,
         network_mode,
         l3_network: None,
@@ -976,7 +977,17 @@ fn emit_oci_run_admission(
         stream_retention: Default::default(),
     };
     let ledger = InMemoryNonceLedger::new();
-    let admitted = admit_for_run(&input, &SystemClock, &ledger, None, None)?;
+    // A one-shot `run --image` is an interactive developer invocation, not a
+    // sealed launch: it carries no attenuated verb grant, so an unenforceable
+    // grant is a warning here rather than a refusal.
+    let admitted = admit_for_run(
+        &input,
+        &SystemClock,
+        &ledger,
+        None,
+        None,
+        mvm_core::plan::Variant::Dev,
+    )?;
     let signer = load_or_init().context("loading host signer for OCI provenance audit")?;
     let emitter =
         AuditEmitter::new(signer.signing).context("opening audit chain for OCI provenance")?;

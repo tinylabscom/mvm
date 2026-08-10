@@ -604,6 +604,7 @@ mod tests {
     fn fixture_plan() -> ExecutionPlan {
         let now = chrono::Utc::now();
         ExecutionPlan {
+            grants: None,
             environment: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),

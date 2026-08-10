@@ -143,6 +143,7 @@ chain_signing = true
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                grants: None,
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
@@ -182,6 +183,7 @@ chain_signing = true
             &ledger,
             Some(keys_dir.path()),
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("admit")
         .plan()
@@ -253,6 +255,7 @@ stream_destinations = ["file://{}"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                grants: None,
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
@@ -292,6 +295,7 @@ stream_destinations = ["file://{}"]
             &ledger,
             Some(keys_dir.path()),
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("admit")
         .plan()
@@ -362,6 +366,7 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                grants: None,
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
@@ -401,6 +406,7 @@ chain_signing = false
             &ledger,
             Some(keys_dir.path()),
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("admit")
         .plan()
@@ -446,6 +452,7 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                grants: None,
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
@@ -485,6 +492,7 @@ chain_signing = false
             &ledger,
             Some(keys_dir.path()),
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("admit")
         .plan()
@@ -550,6 +558,7 @@ disabled_inspectors = ["ssrf_guarrd"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                grants: None,
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
@@ -589,6 +598,7 @@ disabled_inspectors = ["ssrf_guarrd"]
             &ledger,
             Some(keys_dir.path()),
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("admit")
         .plan()
@@ -660,6 +670,7 @@ port_hi  = 443
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                grants: None,
                 stream_edges: Vec::new(),
                 kernel_sha256: None,
                 network_mode: Default::default(),
@@ -699,6 +710,7 @@ port_hi  = 443
             &ledger,
             Some(keys_dir.path()),
             None,
+            mvm_core::plan::Variant::Dev,
         )
         .expect("admit")
         .plan()
