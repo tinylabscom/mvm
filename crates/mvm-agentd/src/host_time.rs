@@ -87,6 +87,7 @@ fn build_call() -> ServiceCall {
         verb: "now".to_string(),
         correlation_id: next_correlation_id(),
         payload: serde_json::json!({}),
+        capability: None,
     }
 }
 

@@ -92,6 +92,7 @@ impl HostAgentFixture {
             ),
             audit_signer_uds_path: None,
             services_bindings: vec![],
+            capability_bindings: vec![],
         };
         register_vm(&control_socket, &key_bytes, reg).expect("register vm");
 
@@ -287,6 +288,7 @@ async fn emit_audit(sock: &Path, event: &str) -> Result<ServiceResponse> {
             "ts": "2026-06-17T00:00:00Z",
             "fields": {"event": event},
         }),
+        capability: None,
     };
     write_frame(&mut conn, &call).await?;
     read_frame(&mut conn).await
@@ -357,6 +359,7 @@ async fn daemon_crash_mid_flight_loses_at_most_one_call_and_preserves_chain() {
             "ts": "2026-06-17T00:00:01Z",
             "fields": {"event": "in-flight"},
         }),
+        capability: None,
     };
     write_frame(&mut conn, &call)
         .await

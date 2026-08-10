@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use super::agent_capability::CapabilityBinding;
 use super::broker::ServiceId;
 
 /// Register a VM with the host-agent daemon: bind its `BROKER_PORT` listen
@@ -70,6 +71,10 @@ pub struct RegisterVm {
     /// implicitly available and need not be listed.
     #[serde(default)]
     pub services_bindings: Vec<ServiceId>,
+    /// Exact per-verb capability bindings approved for this workload. The
+    /// host-signed registration is the only source of this list.
+    #[serde(default)]
+    pub capability_bindings: Vec<CapabilityBinding>,
 }
 
 /// Deregister a VM at teardown: the daemon unbinds + drops its listen socket
@@ -138,6 +143,7 @@ mod tests {
             workload_chain_head_path: Some("/run/state/vm-1/audit-signer.head".into()),
             audit_signer_uds_path: Some("/run/state/vm-1/audit-signer.sock".into()),
             services_bindings: vec![ServiceId::parse("host.time.v1").unwrap()],
+            capability_bindings: vec![],
         })
     }
 

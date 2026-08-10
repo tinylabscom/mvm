@@ -25,7 +25,11 @@
 
 use std::os::unix::net::UnixStream;
 
-use mvm_core::protocol::broker::{ServiceCall, ServiceErrorCode, ServiceResponse};
+use mvm_contract::protocol::agent_capability::{CapabilityBinding, CapabilityInvocation};
+use mvm_contract::protocol::agent_session::AgentRequestId;
+use mvm_core::protocol::broker::{
+    CorrelationId, ServiceCall, ServiceErrorCode, ServiceId, ServiceResponse,
+};
 
 use crate::vsock::{BROKER_PORT, connect_host_vsock, read_frame, write_frame};
 
@@ -73,11 +77,39 @@ pub fn broker_call(
     call(&mut stream, request)
 }
 
+/// Build and exchange one exact typed capability invocation over an existing
+/// broker stream. The payload is serialized once for the wire and its digest
+/// is bound into the invocation metadata.
+pub fn capability_call<T: serde::Serialize>(
+    stream: &mut UnixStream,
+    service: ServiceId,
+    verb: impl Into<String>,
+    binding: CapabilityBinding,
+    invocation_id: AgentRequestId,
+    payload: T,
+) -> Result<serde_json::Value, BrokerError> {
+    let payload = serde_json::to_value(payload)
+        .map_err(|error| BrokerError::Transport(anyhow::anyhow!(error)))?;
+    let invocation = CapabilityInvocation::from_payload(binding, invocation_id.clone(), &payload)
+        .map_err(|error| BrokerError::Transport(anyhow::anyhow!(error)))?;
+    let request = ServiceCall {
+        service,
+        verb: verb.into(),
+        correlation_id: CorrelationId::new(format!("agent-capability-{invocation_id}")),
+        payload,
+        capability: Some(invocation),
+    };
+    call(stream, &request)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
     use std::thread;
 
+    use mvm_contract::protocol::agent_capability::{
+        CapabilityDescriptor, CapabilityId, CapabilityLimits, SchemaRef, payload_digest,
+    };
     use mvm_core::protocol::broker::{CorrelationId, ServiceId};
 
     use super::*;
@@ -88,6 +120,7 @@ mod tests {
             verb: "now".into(),
             correlation_id: CorrelationId::new("01HGUEST0000000000000000"),
             payload: serde_json::json!({}),
+            capability: None,
         }
     }
 
@@ -113,6 +146,53 @@ mod tests {
 
         let payload = call(&mut client, &sample_call()).expect("ok call must succeed");
         assert_eq!(payload, serde_json::json!({"wall_ms": 1717000000000_u64}));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn capability_call_binds_the_payload_digest_into_the_envelope() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let descriptor = CapabilityDescriptor::builder()
+            .id(CapabilityId::new(ServiceId::parse("host.dev.echo.v1").unwrap(), "echo").unwrap())
+            .description("echo a bounded value")
+            .input_schema(SchemaRef::new("echo.input.v1", [1; 32]).unwrap())
+            .output_schema(SchemaRef::new("echo.output.v1", [2; 32]).unwrap())
+            .limits(CapabilityLimits::new(128, 128, 100).unwrap())
+            .build()
+            .unwrap();
+        let binding = descriptor.binding();
+        let request_id = AgentRequestId::parse("typed-client-request-1").unwrap();
+        let payload = serde_json::json!({"value": "bounded"});
+        let expected_digest = payload_digest(&payload);
+        let expected_binding = binding.clone();
+        let expected_request_id = request_id.clone();
+
+        let handle = thread::spawn(move || {
+            let got: ServiceCall = read_frame(&mut server).unwrap();
+            let invocation = got.capability.expect("typed invocation must be present");
+            assert_eq!(invocation.binding, expected_binding);
+            assert_eq!(invocation.invocation_id, expected_request_id);
+            assert_eq!(invocation.input_digest, expected_digest);
+            write_frame(
+                &mut server,
+                &ServiceResponse::Ok {
+                    correlation_id: got.correlation_id,
+                    payload: serde_json::json!({"ok": true}),
+                },
+            )
+            .unwrap();
+        });
+
+        let result = capability_call(
+            &mut client,
+            ServiceId::parse("host.dev.echo.v1").unwrap(),
+            "echo",
+            descriptor.binding(),
+            AgentRequestId::parse("typed-client-request-1").unwrap(),
+            payload,
+        )
+        .expect("typed call must succeed");
+        assert_eq!(result, serde_json::json!({"ok": true}));
         handle.join().unwrap();
     }
 

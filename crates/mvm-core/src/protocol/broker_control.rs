@@ -100,6 +100,7 @@ mod tests {
             services_bindings: vec![
                 mvm_contract::protocol::broker::ServiceId::parse("host.time.v1").unwrap(),
             ],
+            capability_bindings: vec![],
         })
     }
 

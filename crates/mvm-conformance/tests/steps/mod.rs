@@ -1,6 +1,7 @@
 //! Step definitions, one module per scenario surface.
 
 mod admission_audit;
+mod agent_capability;
 mod agent_session;
 mod apple_container;
 mod claim;

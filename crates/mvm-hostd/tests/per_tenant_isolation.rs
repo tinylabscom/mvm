@@ -70,6 +70,7 @@ async fn emit_audit(sock: &Path, event: &str) -> Result<ServiceResponse> {
             "ts": "2026-06-19T00:00:00Z",
             "fields": {"event": event},
         }),
+        capability: None,
     };
     write_frame(&mut conn, &call).await?;
     read_frame(&mut conn).await
@@ -164,6 +165,7 @@ async fn start_tenant(id: &str) -> TenantHandle {
         ),
         audit_signer_uds_path: None,
         services_bindings: vec![],
+        capability_bindings: vec![],
     };
     register_vm(&control_socket, &key_bytes, reg).expect("register vm");
 

@@ -118,6 +118,7 @@ fn build_call<T: serde::Serialize>(verb: &str, payload: &T) -> Result<ServiceCal
         verb: verb.to_string(),
         correlation_id: next_correlation_id(),
         payload,
+        capability: None,
     })
 }
 

@@ -155,6 +155,10 @@ pub struct ServiceCall {
     pub verb: String,
     pub correlation_id: CorrelationId,
     pub payload: serde_json::Value,
+    /// Optional typed capability metadata. Omitted for the established
+    /// service-call path so its serialized shape remains byte-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<super::agent_capability::CapabilityInvocation>,
 }
 
 // ============================================================================
@@ -232,6 +236,22 @@ pub enum ServiceErrorCode {
     /// Catch-all for unexpected handler-internal errors. Never carries
     /// payload-derived information in the message.
     InternalError,
+    /// Typed capability admission refused the request.
+    CapabilityDenied,
+    /// Typed capability binding identity or descriptor digest did not match.
+    CapabilityBindingMismatch,
+    /// Typed capability protocol version is unsupported.
+    CapabilityProtocolMismatch,
+    /// Typed capability invocation id was already consumed.
+    CapabilityReplay,
+    /// Typed capability input exceeded its admitted bound.
+    CapabilityInputTooLarge,
+    /// Typed capability output exceeded its admitted bound.
+    CapabilityOutputTooLarge,
+    /// Typed capability invocation was canceled.
+    CapabilityCanceled,
+    /// Typed capability handler failed without exposing handler details.
+    CapabilityHandlerFailed,
 }
 
 // ============================================================================
@@ -336,6 +356,7 @@ mod tests {
             verb: "now".into(),
             correlation_id: CorrelationId::new("01HBROKER0000000000000000"),
             payload: serde_json::json!({}),
+            capability: None,
         };
         let bytes = serde_json::to_vec(&call).unwrap();
         let parsed: ServiceCall = serde_json::from_slice(&bytes).unwrap();

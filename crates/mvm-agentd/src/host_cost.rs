@@ -114,6 +114,7 @@ fn build_call(verb: &str) -> ServiceCall {
         verb: verb.to_string(),
         correlation_id: next_correlation_id(),
         payload: serde_json::json!({}),
+        capability: None,
     }
 }
 

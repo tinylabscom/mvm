@@ -41,6 +41,7 @@ impl BrokerProxy {
             verb: verb.into(),
             correlation_id,
             payload,
+            capability: None,
         };
         let mut stream = connect(&self.uds_path).await?;
         write_frame(&mut stream, &self.uds_path, &call).await?;

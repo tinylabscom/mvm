@@ -122,7 +122,13 @@ fn register_handlers(registry: &mut Registry, cfg: &SubprocessConfig) {
     match &cfg.audit_signer_uds_path {
         Some(path) => {
             let client = AuditClient::new(path.clone());
-            registry.register(Arc::new(HostAuditV1Handler::new(client)));
+            let handler = Arc::new(HostAuditV1Handler::new(client));
+            registry.register(handler.clone());
+            for descriptor in HostAuditV1Handler::capability_descriptors() {
+                registry
+                    .register_capability(handler.clone(), descriptor)
+                    .expect("host.audit capability descriptors are unique and valid");
+            }
             info!(
                 audit_signer_uds_path = %path.display(),
                 "host.audit.v1 handler registered"

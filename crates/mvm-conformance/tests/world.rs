@@ -360,6 +360,17 @@ pub struct CliWorld {
         Option<mvm_contract::protocol::agent_session::AgentSessionEventEnvelope>,
     /// Sanitized serialized history captured by a security assertion.
     pub agent_session_history_json: Option<String>,
+    /// Descriptor used by the typed capability BDD contract scenarios.
+    pub capability_descriptor:
+        Option<mvm_contract::protocol::agent_capability::CapabilityDescriptor>,
+    /// Invocation metadata used by the typed capability BDD scenarios.
+    pub capability_invocation:
+        Option<mvm_contract::protocol::agent_capability::CapabilityInvocation>,
+    /// Last typed capability validation outcome.
+    pub capability_outcome:
+        Option<Result<(), mvm_contract::protocol::agent_capability::CapabilityFailureCode>>,
+    /// Serialized digest-only capability audit event.
+    pub capability_audit_json: Option<String>,
     /// Typed policy evaluation used by the runtime-approval scenarios.
     pub approval_evaluation: Option<mvm_contract::policy::approval::PolicyEvaluation>,
     /// Durable approval ledger reconstructed from the agent-session journal.

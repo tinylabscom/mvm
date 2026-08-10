@@ -93,6 +93,13 @@
       `mvm-sdk` re-export the shared policy surface; existing network, secret,
       sealed-production, guest, and command-gate enforcement remains in force.
 
+- [x] Typed capability bindings — **issue #2170**, plan
+      `specs/plans/2170-typed-capability-bindings.md`. The implementation is
+      complete through per-verb descriptors, exact signed admission bindings,
+      bounded typed invocation, digest-only audit events, refusal witnesses,
+      and a real UDS round trip. The PR carries the remaining host-specific
+      BDD execution note.
+
 - [x] Kernel pin freshness — **issue #2128**. Synchronized the libkrunfw
       bundle and custom guest kernel on the verified Linux 6.12.102 LTS
       tarball, replacing the stale 6.12.100 pin. Structural parity tests keep
