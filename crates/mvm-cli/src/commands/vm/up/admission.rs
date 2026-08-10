@@ -48,6 +48,14 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     pub boot_artifact_identity: Option<&'a BootArtifactIdentity>,
     pub cpus: u32,
     pub mem_mib: u64,
+    /// The transport this launch gives the guest, recorded on the plan.
+    ///
+    /// Was hardcoded to `Default::default()` — `NetworkMode::None`, whose own
+    /// doc reads "no guest NIC, no broker, the workload cannot reach the
+    /// network" — while every ordinary launch derives `HostVsockProxy` and the
+    /// host stands a broker up for it. The signed record said the workload had
+    /// no path to the network while it was being given one.
+    pub network_mode: mvm_contract::plan::NetworkMode,
     pub seccomp_tier: mvm_core::plan::PlanSeccompTier,
     pub secret_release: mvm_core::plan::SecretReleasePolicy,
     pub secrets: Vec<mvm_core::plan::SecretBinding>,
@@ -325,7 +333,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     let input = SynthesisInput {
         stream_edges: Vec::new(),
         kernel_sha256: None,
-        network_mode: Default::default(),
+        network_mode: p.network_mode,
         l3_network: None,
         vm_name: p.vm_name,
         tenant: Some(p.tenant),
@@ -1042,6 +1050,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(dir.path(), b"unused");
         let ledger = InMemoryNonceLedger::new();
         let result = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-skip",
             backend_name: "firecracker",
@@ -1081,6 +1090,7 @@ mod admit_plan_tests {
         let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-happy",
             backend_name: "firecracker",
@@ -1141,6 +1151,7 @@ mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-missing",
             backend_name: "firecracker",
@@ -1174,6 +1185,67 @@ mod admit_plan_tests {
         );
     }
 
+    /// The plan must record the transport the launch gives the guest.
+    ///
+    /// This was hardcoded to `NetworkMode::None` — "no guest NIC, no broker,
+    /// the workload cannot reach the network" — for every admission, including
+    /// the ordinary ones that derive `HostVsockProxy` and get a broker stood up
+    /// for them. The value is inside the signature, so the record was
+    /// confidently wrong rather than merely absent.
+    #[test]
+    fn the_admitted_plan_records_the_transport_the_launch_derived() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"transport");
+
+        for mode in [
+            mvm_contract::plan::NetworkMode::HostVsockProxy,
+            mvm_contract::plan::NetworkMode::L3Vsock,
+            mvm_contract::plan::NetworkMode::None,
+        ] {
+            let ledger = InMemoryNonceLedger::new();
+            let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+                network_mode: mode,
+                tenant: "local",
+                vm_name: "vm-transport",
+                backend_name: "firecracker",
+                rootfs_path: &rootfs,
+                precomputed_image_sha256: None,
+                boot_artifact_identity: None,
+                cpus: 1,
+                mem_mib: 128,
+                seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                secret_release: mvm_core::plan::SecretReleasePolicy::None,
+                secrets: Vec::new(),
+                no_supervisor: false,
+                ledger: &ledger,
+                keys_dir: Some(keys_dir.path()),
+                audit_dir: Some(audit_dir.path()),
+                policy_dir: None,
+                bundle_pin: None,
+                deps_volume: None,
+                shares: Vec::new(),
+                redaction: mvm_core::policy::RedactionPolicy::default(),
+                network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+                agent_verb_override: vec![],
+                restrict_agent_verbs: false,
+                services: Vec::new(),
+                entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                    "test",
+                ),
+            })
+            .expect("admit")
+            .expect("a supervisor-backed admission returns a context");
+
+            assert_eq!(
+                ctx.admitted.plan().network_mode,
+                mode,
+                "the plan must record the mode the launch was admitted with"
+            );
+        }
+    }
+
     #[test]
     fn two_admissions_in_same_run_produce_distinct_plan_ids() {
         // The shared ledger is the per-`cmd_run` replay-store. Two
@@ -1186,6 +1258,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let a1 = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-1",
             backend_name: "firecracker",
@@ -1215,6 +1288,7 @@ mod admit_plan_tests {
         .unwrap()
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-2",
             backend_name: "firecracker",
@@ -1269,6 +1343,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"boot-posture-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-boot-posture",
             backend_name: "firecracker",
@@ -1345,6 +1420,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"local-default-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-local-default",
             backend_name: "firecracker",
@@ -1399,6 +1475,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"allow-list-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-allow-list",
             backend_name: "libkrun",
@@ -1460,6 +1537,7 @@ mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"unrestricted-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-unrestricted",
             backend_name: "hvf",
@@ -1547,6 +1625,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-non-shell-granted",
@@ -1605,6 +1684,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-shell-ungranted",
@@ -1653,6 +1733,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-shell-granted",
@@ -1709,6 +1790,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-entrypoint-unknown",
@@ -1761,6 +1843,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-entrypoint-unknown-ungranted",
@@ -1806,6 +1889,7 @@ mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-dev-shell",

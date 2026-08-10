@@ -223,6 +223,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
 
     let admission_ledger = InMemoryNonceLedger::new();
     let admission = admit_plan_for_boot(AdmitPlanForBootParams {
+        network_mode: crate::commands::machine::derive_network_mode(false),
         tenant: "local",
         vm_name: name,
         backend_name,
