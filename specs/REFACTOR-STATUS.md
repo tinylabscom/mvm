@@ -143,13 +143,28 @@ for detailed scope and acceptance criteria.
       for dm-verity markers with `windows().any()`. The Plan 299 lane gate
       cannot see any of it — a re-hash is not a pull, build, mount
       materialization, or warm claim.
-  - [ ] Phase A0 — release baseline on a large image (all current numbers are
-        from a debug binary and are not comparable to Plan 299's)
-  - [ ] Phase B — `sha256_file_cached` on the OCI admission path — **#2273**
-  - [ ] Phase C — process-table sweep off the launch path — **#2274**
-  - [ ] Phase D — sublinear kernel verity probe — **#2275**
-  - [ ] Phase E — large-image lane + bytes-hashed gate — **#2276**
-  - [ ] Phase F — validation, claim-witness and warm-lane regression checks
+  - [x] Phase A0 — release baseline on both images. `python:3.12` 1.15-1.57 s
+        vs `alpine` 0.52 s wall clock on identical code and cache state, which
+        is the finding restated as a measurement.
+  - [x] Phase B — `sha256_file_cached` on the OCI admission path — **#2273**.
+        The two kernel-digest sites stay uncached on purpose (an integrity pin
+        must not read a mtime-keyed cache); `run.rs` already hashed the rootfs
+        through the cache, so the OCI path was the outlier, not the precedent.
+  - [x] Phase C — process-table sweep moved to the builder-VM spawn sites —
+        **#2274**. A cache-hit resolve spawns no helper and now walks no
+        process table.
+  - [x] Phase D — `memmem` replaces `windows().any()` in the kernel verity
+        probe — **#2275**. A verdict sidecar was considered and rejected:
+        ~5 ms in release is not worth caching a safety check.
+  - [x] Phase E — `artifact_bytes_hashed` + `process_table_scans` on the launch
+        sample, both refused by the prepared lanes — **#2276**. Plan 299's
+        contract table now names the image behind each percentile.
+  - [~] Phase F — HVF validated: both images converge at 0.43 s wall clock,
+        dispatch window 78.8-79.4 ms against the ≤200 ms p50 budget on a 1.1 GB
+        image, claim-8/claim-14 digests unchanged and the chain still verifies.
+        Outstanding: `ColdLaunchBench` percentiles on both images, the
+        Firecracker/KVM repeat, and the warm-lane comparison (no pool can be
+        filled on this host today).
 
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`

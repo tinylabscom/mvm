@@ -76,6 +76,21 @@ pub struct LaunchWork {
     pub mount_materialize: bool,
     /// The launch was satisfied by claiming a warm standby.
     pub warm_claim: bool,
+    /// Bytes read end-to-end to digest an artifact during this launch.
+    ///
+    /// A prepared launch boots artifacts whose digests are already cached, so
+    /// this is zero on that lane. It is a count and not a flag because the
+    /// number identifies the artifact: a re-read of a 1.1 GB rootfs and a
+    /// re-read of an 8 MB kernel are the same boolean and very different
+    /// launches.
+    pub artifact_bytes_hashed: u64,
+    /// Host process-table snapshots taken during this launch.
+    ///
+    /// Zero on a prepared launch: nothing it does spawns a helper, so nothing
+    /// it does needs to reap one. Counted for the same reason as the bytes
+    /// above — the cost is real, invisible in a digest or a boot, and belongs
+    /// to maintenance rather than to the launch.
+    pub process_table_scans: u64,
 }
 
 impl LaunchWork {
@@ -95,6 +110,12 @@ impl LaunchWork {
         }
         if self.warm_claim {
             names.push("warm_claim");
+        }
+        if self.artifact_bytes_hashed > 0 {
+            names.push("artifact_hash");
+        }
+        if self.process_table_scans > 0 {
+            names.push("process_table_scan");
         }
         names
     }
@@ -118,6 +139,8 @@ pub fn recorded_work(mount_materialize: bool, warm_claim: bool) -> LaunchWork {
         image_build: acquired.image_build,
         mount_materialize,
         warm_claim,
+        artifact_bytes_hashed: acquired.artifact_bytes_hashed,
+        process_table_scans: acquired.process_table_scans,
     }
 }
 
@@ -407,12 +430,29 @@ mod tests {
             image_build: false,
             mount_materialize: true,
             warm_claim: false,
+            artifact_bytes_hashed: 0,
+            process_table_scans: 0,
         };
         assert!(!contaminated.is_prepared());
         assert_eq!(
             contaminated.performed(),
             vec!["image_pull", "mount_materialize"]
         );
+
+        // A byte count is work like any other flag, and zero is not work.
+        let re_hashed = LaunchWork {
+            artifact_bytes_hashed: 1_205_739_520,
+            ..LaunchWork::default()
+        };
+        assert!(!re_hashed.is_prepared());
+        assert_eq!(re_hashed.performed(), vec!["artifact_hash"]);
+
+        let swept = LaunchWork {
+            process_table_scans: 1,
+            ..LaunchWork::default()
+        };
+        assert!(!swept.is_prepared());
+        assert_eq!(swept.performed(), vec!["process_table_scan"]);
     }
 
     #[test]

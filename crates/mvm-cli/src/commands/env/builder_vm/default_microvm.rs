@@ -138,8 +138,15 @@ pub(super) fn kernel_carries_dm_verity(bytes: &[u8]) -> Option<bool> {
     Some(MARKERS.iter().any(|m| byte_contains(bytes, m)))
 }
 
+/// Substring search across a whole kernel image.
+///
+/// `windows(n).any(..)` is the obvious spelling and is quadratic: it compares
+/// at every offset with no way to skip ahead. Over an 8 MB `vmlinux`, repeated
+/// once per marker, that is milliseconds of every launch — and the refusal
+/// case pays the most, because it is the one that finds no marker and so scans
+/// the image for all of them. `memmem` skips, and is already linked in.
 fn byte_contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|w| w == needle)
+    needle.len() <= haystack.len() && memchr::memmem::find(haystack, needle).is_some()
 }
 
 /// Fail fast when a verity-sealed launch resolved a kernel with no dm-verity

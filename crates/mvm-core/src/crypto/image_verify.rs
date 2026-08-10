@@ -396,13 +396,20 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
+    let mut read_total: u64 = 0;
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
+        read_total += n as u64;
         hasher.update(&buf[..n]);
     }
+    // Reported here rather than at the call sites because this is the function
+    // that actually reads the bytes; a caller that forgot to report would make
+    // a launch look cheaper than it was, which is the direction that hides
+    // regressions.
+    crate::launch_trace::record_artifact_bytes_hashed(read_total);
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -418,6 +425,25 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
 /// content) moves its mtime and forces a re-hash, so a stale digest can never
 /// be admitted. A read-only cache dir simply means the next boot re-hashes.
 pub fn sha256_file_cached(path: &Path) -> io::Result<String> {
+    sha256_file_cached_with_source(path).map(|(hex, _)| hex)
+}
+
+/// Where a [`sha256_file_cached`] digest came from.
+///
+/// Returned so the sidecar being *used* is directly assertable. The cost this
+/// cache exists to avoid is linear in artifact size and invisible in a digest
+/// that is correct either way, so "it hit" has to be observable on its own —
+/// otherwise a regression to hashing every call still passes every test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigestSource {
+    /// Served from the sidecar; the artifact was not read.
+    Sidecar,
+    /// Hashed from the artifact, reading this many bytes.
+    Hashed(u64),
+}
+
+/// [`sha256_file_cached`], reporting whether the sidecar served the digest.
+pub fn sha256_file_cached_with_source(path: &Path) -> io::Result<(String, DigestSource)> {
     let meta = fs::metadata(path)?;
     let size = meta.len();
     let mtime_nanos = meta
@@ -431,14 +457,14 @@ pub fn sha256_file_cached(path: &Path) -> io::Result<String> {
         && let Ok(contents) = fs::read_to_string(&sidecar)
         && let Some(hex) = parse_sha256_sidecar(&contents, size, mtime)
     {
-        return Ok(hex);
+        return Ok((hex, DigestSource::Sidecar));
     }
 
     let hex = sha256_file(path)?;
     if let Some(mtime) = mtime_nanos {
         let _ = write_sha256_sidecar(&sidecar, &hex, size, mtime);
     }
-    Ok(hex)
+    Ok((hex, DigestSource::Hashed(size)))
 }
 
 fn sha256_sidecar_path(path: &Path) -> std::path::PathBuf {
@@ -498,6 +524,49 @@ mod tests {
             sha256_file_cached(&p).expect("cached3"),
             direct2,
             "stale digest must never be served after a content change"
+        );
+
+        let _ = fs::remove_file(&sidecar);
+    }
+
+    /// A cache hit must not read the artifact. The digest is correct either
+    /// way, so without asserting the source directly a regression to hashing
+    /// on every call would pass every other test in this module while costing
+    /// a full re-read of the artifact on every launch.
+    #[test]
+    fn a_sidecar_hit_serves_the_digest_without_reading_the_artifact() {
+        let mut f = NamedTempFile::new().expect("tempfile");
+        let body = b"the quick brown fox";
+        f.write_all(body).expect("write");
+        f.flush().expect("flush");
+        let p = f.path().to_path_buf();
+        let sidecar = sha256_sidecar_path(&p);
+        let _ = fs::remove_file(&sidecar);
+
+        let (miss, miss_source) = sha256_file_cached_with_source(&p).expect("cached miss");
+        assert_eq!(
+            miss_source,
+            DigestSource::Hashed(body.len() as u64),
+            "a sidecar miss reads the whole artifact"
+        );
+
+        let (hit, hit_source) = sha256_file_cached_with_source(&p).expect("cached hit");
+        assert_eq!(hit, miss, "a hit serves the digest the miss computed");
+        assert_eq!(
+            hit_source,
+            DigestSource::Sidecar,
+            "a sidecar hit must not read the artifact"
+        );
+
+        // A rewrite moves size+mtime, so the next call must read again rather
+        // than serve the digest of content that is gone.
+        f.write_all(b" jumps").expect("append");
+        f.flush().expect("flush");
+        let (fresh, fresh_source) = sha256_file_cached_with_source(&p).expect("after rewrite");
+        assert_ne!(fresh, miss, "content changed, so the digest must change");
+        assert!(
+            matches!(fresh_source, DigestSource::Hashed(_)),
+            "a rewritten artifact must be re-read, not served from a stale sidecar"
         );
 
         let _ = fs::remove_file(&sidecar);
