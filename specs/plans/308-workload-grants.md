@@ -137,6 +137,27 @@ Two defaults that are decisions rather than accidents:
 Cross-tenant budgets stay in mvmd. This plan bounds one VM; fleet-wide quota
 is orchestration, consistent with the `--prod` gate living there.
 
+### A grant and a ceiling are different objects
+
+A grant says what a workload asks for. Nothing in the model above says what
+it is *allowed* to ask for, and a validly-signed plan carrying
+`cpu.Share(64.0)` would be admitted precisely because it is validly signed.
+For single-user mvm that is correct — the user owns the host. For fleet it is
+privilege escalation: a tenant who can sign their own plan can grant itself
+the machine.
+
+So `GrantCeiling` is a separate type with a separate trust root. The grant is
+signed by whoever launches the workload; the ceiling is resolved at admission
+from host or fleet configuration, never from the plan, and admission refuses
+a grant exceeding it. **No surface in the precedence chain can raise a
+ceiling** — the chain resolves grants only. mvm ships a host-local ceiling
+(defaulting to the host's own capacity); mvmd supplies a per-tenant one.
+
+This also settles the direction of the precedence chain: a lower-precedence
+surface may be *loosened* by a higher one — the manifest is a project default
+and the CLI belongs to the developer running it — because the ceiling, not
+the manifest, is what actually bounds the outcome.
+
 ### Per-backend mechanism
 
 | Dimension | Firecracker / libkrun / QEMU (Linux) | HVF (macOS) | wasm (wasmtime) |
@@ -173,6 +194,26 @@ cheapest and most rigorous, not the one where it is hardest.
       chain above. No enforcement change; `Grants` projects down to the
       existing `NetworkPolicy` / `Resources` / `services` types.
 
+      Two fail-open traps to close in the type itself. `#[serde(deny_unknown_fields)]`
+      on `Grants` and every nested type, applied to the `--grants-file` JSON
+      surface as well: a security control that a spelling mistake silently
+      disables (`cpu_limt: 1.5` parsing to "no cap") is worse than one that
+      does not exist, and this is already the project rule for host↔guest
+      types. And `wall_clock` must not inherit `TimeoutSpec`'s magic zero —
+      `exec_secs: 0` currently means *unbounded*, so a user writing
+      `timeout = 0` to mean "no time allowed" gets no limit. The grant carries
+      an explicit `Unbounded` variant; the projection to `exec_secs` is where
+      the legacy encoding is reconstructed, and nowhere else.
+
+- [ ] **WS1b — `GrantCeiling`.**
+      A separate type resolved at admission from host config (mvm) or fleet
+      policy (mvmd), never from the plan. Admission refuses a grant exceeding
+      it, naming the dimension and both values. Not reachable from the
+      precedence chain — a gate asserts no surface resolver writes a ceiling.
+      mvm's host-local default derives from the host's own CPU count and RAM,
+      so the out-of-the-box behaviour is "you may not grant more than the
+      machine has", which is also what makes WS4's budget meaningful.
+
 - [ ] **WS2 — Projection is single and fails closed.**
       `network_policy` is *derived* from `Grants`, never supplied alongside
       it; admission re-derives and refuses on disagreement, the same shape as
@@ -194,17 +235,47 @@ cheapest and most rigorous, not the one where it is hardest.
       substitution. New `xtask check-backend-resource-controls` asserts every
       `BackendKind` declares its controls explicitly.
 
+- [ ] **WS4.0 — Delegation spike. Blocks the rest of WS4.**
+      The `cpu` controller is historically *not* delegated to user sessions
+      by default, while `memory` and `pids` generally are. Since "no `sudo`"
+      is a hard constraint, the primary enforcement mechanism for the primary
+      gap may not exist unprivileged on a default distro. Validate on the KVM
+      box before committing to the approach: is `cpu` present in
+      `cgroup.controllers` of the user slice, and does writing `cpu.max` in a
+      delegated leaf take effect? If not, the fallback is a systemd transient
+      scope over the session bus, which is a different design and must be
+      chosen here rather than discovered during implementation.
+
 - [ ] **WS4 — Linux CPU quota, wall clock, admission budget.**
       cgroup v2 `cpu.max` via unprivileged user delegation under
       `user@$UID.service` — no `sudo`. Cgroup leaf name derives from the
       validated machine ID, never a user-supplied string; the delegated
       subtree is opened once `O_DIRECTORY` with `openat`-relative writes.
+
+      **The process is born into the cgroup, not moved into it.** A cgroup
+      written after the VMM starts leaves a window in which the workload runs
+      uncapped, and a workload built to burn CPU will use exactly that
+      window. Use `clone3` with `CLONE_INTO_CGROUP`, or write the pid from
+      the child between `fork` and `exec`; a post-hoc write of an already-
+      running pid is not acceptable and the witness must be able to tell the
+      difference.
+
       Supervisor-side `exec_secs` timer whose kill is emitted to the audit
       chain, so an enforced timeout is distinguishable from a crash.
-      Admission-time host budget summing committed CPU and memory across
-      running machines from the existing inventory, refusing a boot that
-      would oversubscribe past a headroom configured in `~/.mvm/config`
-      through the existing `user_config` key mechanism.
+
+      Admission-time host budget refusing a boot that would oversubscribe
+      past a headroom configured in `~/.mvm/config` through the existing
+      `user_config` key mechanism. **The budget is computed from live process
+      liveness, not from inventory records alone**: a crashed VM whose record
+      was never reaped would otherwise consume its share forever and refuse
+      every subsequent boot — turning the safety check into a permanent
+      lockout. Reuse the shared pid-marker liveness probe the fork path
+      already relies on rather than adding a second notion of "running".
+      Budget accounting is against each VM's configured memory *maximum*, not
+      its current commitment: the balloon controller
+      (`supervisor/balloon_runtime.rs`) moves commitment at runtime under host
+      pressure, so accounting against the live figure would drift against the
+      ceiling admission actually granted.
 
 - [ ] **WS5 — wasm enforcement.**
       `Config::consume_fuel` + `Store::set_fuel` for `CpuGrant::Fuel`;
@@ -212,6 +283,28 @@ cheapest and most rigorous, not the one where it is hardest.
       + deadline for wall clock. `VmInfo` stops reporting `cpus: 0,
       memory_mib: 0` and reports the enforced grant. Accepts fuel-accounting
       overhead as the cost of a deterministic bound.
+
+      Fuel and epoch are **jointly** required, not alternatives for separate
+      dimensions. A module blocked inside a host call consumes no fuel, so a
+      module that parks in `mvm:egress` is bounded by neither a fuel grant nor
+      anything else. Epoch interruption is what preempts it, and the
+      `mvm:egress` host call needs its own timeout so the wasm tier cannot be
+      stalled indefinitely by a slow or hostile endpoint. A fuel-only wasm
+      grant must be rejected at admission rather than accepted as partial
+      enforcement.
+
+- [ ] **WS5b — Grants across snapshot, fork, and restore.**
+      Today's child-plan validation (`crates/mvm-runtime/src/checkpoint/mod.rs`)
+      checks signature length, signer id, `verify_plan_id`, tenant match, and
+      the validity window. It does not compare the child's resources against
+      the parent's. The bypass that opens once grants are the control surface:
+      admit under tight grants, snapshot, restore the child under loose ones.
+
+      Grants join what checkpoint lineage chain-anchors, restore re-applies
+      them through the same `apply_grants` seam as a cold boot, and admission
+      refuses a child whose grants are not a subset of its parent's. Same
+      family as the restored-child authorization gap that disarmed the plan
+      255 pool, so the two should be reviewed together.
 
 - [ ] **WS6 — The four surfaces.**
       Manifest: `[grants]` table extending `ManifestMachineWorkflow`.
@@ -226,12 +319,25 @@ cheapest and most rigorous, not the one where it is hardest.
       `check-ir-parity` fixture, so a grant added to Rust but not Python
       fails the build.
 
+- [ ] **WS6b — Observability, migration, docs.**
+      `mvmctl doctor` reports resolved grants and achieved tiers alongside the
+      live posture it already prints — the place a user finds out their CPU
+      cap is `declared` rather than enforced. `machine inspect` / `ls` show
+      enforced-vs-declared per dimension. Persisted `MachineSpec`s on disk
+      predate grants: `#[serde(default)]` plus a `machine reconfigure` path,
+      so an existing machine does not fail to load. The CLI reference
+      (`public/src/content/docs/reference/cli-commands.md`) is held by
+      `check-machine-doc-guards`, so new flags fail the build undocumented —
+      budget for it rather than discovering it in CI. A `features/suites/`
+      BDD suite for the grant scenarios, where claim scenarios live.
+
 ## Security analysis
 
 Net positive. Guest→host resource exhaustion is not in ADR-001's
 out-of-scope list (which names a malicious host, multi-tenant guests, and
 hardware key attestation), so it is implicitly in scope and currently
-unaddressed. Three risks are introduced and each is closed above:
+unaddressed. Making grants the control surface nonetheless introduces risks
+that did not exist while the dimensions were ungoverned. Each is closed above:
 
 1. **A second egress gate.** The claim-10 architecture rests on `EgressGate`
    being the sole decision point — `check-uniform-vsock-egress` exists so a
@@ -250,7 +356,41 @@ unaddressed. Three risks are introduced and each is closed above:
    validated-ID leaf naming (no path traversal into a sibling subtree),
    `openat`-relative writes (TOCTOU), and unprivileged user delegation.
 
+4. **A self-granted ceiling.** A plan signer who is also the grant author can
+   grant itself the machine. Closed by WS1b: the ceiling has a separate trust
+   root, is resolved at admission from host or fleet config rather than from
+   the plan, and is unreachable from every surface in the precedence chain.
+
+5. **An uncapped startup window.** A cgroup applied after the VMM is already
+   running bounds nothing during the interval that matters most for a
+   workload built to burn CPU immediately. Closed by WS4's born-into-cgroup
+   requirement.
+
+6. **Restore as a grant-laundering path.** Snapshot under tight grants,
+   restore under loose ones — the child-plan check does not compare a child's
+   resources to its parent's. Closed by WS5b: grants are chain-anchored into
+   lineage, re-applied on restore, and a child's grants must be a subset of
+   its parent's.
+
+7. **Fail-open by typo or by magic zero.** An unknown field silently
+   discarding a cap, and `exec_secs: 0` already meaning *unbounded*, both turn
+   a security control off through an ordinary mistake. Closed in WS1 by
+   `deny_unknown_fields` across the type and the JSON surface, and by an
+   explicit `Unbounded` variant instead of a magic zero.
+
+8. **The safety check as a lockout.** An admission budget computed from
+   unreaped inventory records refuses every boot forever once a VM crashes
+   without cleanup — availability failure caused by the control itself.
+   Closed by WS4 computing the budget from live process liveness.
+
 Claims 8, 10, 11, and 12 are untouched.
+
+Deliberately **not** addressed: CPU-quota enforcement makes cross-VM covert
+timing channels marginally easier to drive, since a bounded workload can
+modulate a signal its co-resident can observe. ADR-001 places multi-tenant
+guests out of scope and one guest is one workload, so co-residency channels
+stay out of scope here too — but the reasoning is recorded rather than left
+as an unnoticed consequence of adding the control.
 
 Risk 2 is the same disease plan 306 WS3 treats for a different surface
 ("refuse where we currently degrade silently"). The two should share a
@@ -271,6 +411,22 @@ run on real hardware.
       reading the cgroup file, not from the attempted write.
 - [ ] `prod_refuses_unenforceable_grant`.
 - [ ] `admission_refuses_oversubscribed_host`.
+- [ ] `admission_refuses_grant_exceeding_ceiling`.
+- [ ] `no_surface_resolver_writes_a_ceiling` — the precedence chain resolves
+      grants only.
+- [ ] `restored_child_grants_must_be_subset_of_parent` — the restore
+      laundering path.
+- [ ] `vmm_is_born_into_its_cgroup` — asserts the cap is live at the
+      workload's first instruction, not merely applied eventually. A test
+      that reads `cpu.max` after startup passes on the racy implementation
+      too, so this one has to observe the pid's cgroup membership at exec.
+- [ ] `unknown_grant_field_is_refused_not_ignored` — over both the plan type
+      and the `--grants-file` JSON surface.
+- [ ] `wall_clock_zero_is_not_unbounded`.
+- [ ] `fuel_only_wasm_grant_is_refused` — fuel without epoch bounds nothing
+      for a module parked in a host call.
+- [ ] `budget_ignores_dead_machines` — an unreaped record does not refuse
+      every subsequent boot.
 - [ ] `exec_secs_timeout_kills_and_audits` — retires the currently
       unwitnessed "supervisor enforces" comment.
 - [ ] `wasm_fuel_grant_halts_runaway_module`.

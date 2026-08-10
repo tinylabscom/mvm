@@ -921,10 +921,21 @@ for detailed scope and acceptance criteria.
 
 - [ ] Plan 308 — workload grants: one declaration, per-backend enforcement
   (`specs/plans/308-workload-grants.md`)
-  - [ ] `Grants` in `mvm-contract` + one precedence resolver
-  - [ ] Single Grants→`NetworkPolicy` projection, derived and fail-closed
-  - [ ] `resource_controls` on `VmCapabilities` + `apply_grants` on `VmBackend`
-  - [ ] Linux CPU quota (cgroup v2, unprivileged), `exec_secs` enforcement,
-        host admission budget
-  - [ ] wasm fuel / `StoreLimits` / epoch interruption
-  - [ ] Four surfaces: manifest, JSON, CLI, library + SDK parity fixture
+  - [ ] WS1 — `Grants` in `mvm-contract` + one precedence resolver;
+        `deny_unknown_fields` and an explicit `Unbounded` (no magic zero)
+  - [ ] WS1b — `GrantCeiling`: separate trust root, unreachable from the
+        precedence chain, so a plan signer cannot grant itself the machine
+  - [ ] WS2 — single Grants→`NetworkPolicy` projection, derived and fail-closed
+  - [ ] WS3 — `resource_controls` on `VmCapabilities` + `apply_grants` on
+        `VmBackend`, tier read back rather than assumed
+  - [ ] WS4.0 — **blocking spike**: is cgroup v2 `cpu` delegated to user
+        sessions unprivileged? If not, WS4 is a different design
+  - [ ] WS4 — Linux CPU quota (born into the cgroup, not moved into it),
+        `exec_secs` enforcement, admission budget from live liveness
+  - [ ] WS5 — wasm fuel **and** epoch (fuel alone bounds nothing in a host
+        call) + `StoreLimits`
+  - [ ] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
+        the restore-laundering path
+  - [ ] WS6 — four surfaces: manifest, JSON, CLI, library + SDK parity fixture
+  - [ ] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs
+        gate, BDD suite
