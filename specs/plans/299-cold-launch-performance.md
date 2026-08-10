@@ -747,6 +747,14 @@ green.
 
 ## Phase 7 — Live validation and regression gates
 
+The current macOS/HVF validation attempt is deliberately not a baseline:
+release `mvmctl` emitted schema-3 launch samples, but the transient workload
+reported `degraded: ["host_services"]`. The per-sample gate rejected those
+samples, as intended. An isolated `mvm-host-agent` diagnostic binds its signer
+and control sockets, so the remaining investigation is the detached
+registration path; no degraded timing has been copied into the canonical
+table. Firecracker evidence still must be collected in the project builder VM.
+
 - [ ] Add a native Apple Silicon/HVF live benchmark job with cached artifacts,
       no mount, mount-cache hit, and mount miss lanes.
 - [ ] Add a Linux Firecracker live benchmark on the established KVM host and a
