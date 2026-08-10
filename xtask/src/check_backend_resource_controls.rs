@@ -13,14 +13,22 @@
 //! the first bare `}` never reaches the arms that follow it.
 //!
 //! Rather than hardcode wildcard spellings, every *alternative* of every
-//! arm's pattern (the text before its `=>`, split on top-level `|`) is
-//! required to mention `BackendKind::` — the one thing every real, explicit
-//! arm in this match does and a wildcard or bare binding, spelled any way,
-//! never does. Checking the whole pattern as one string is not enough: an
-//! or-pattern like `BackendKind::Mock | _` contains `BackendKind::`, so a
-//! whole-pattern substring check waves it through even though it is a
-//! catch-all — every *other* variant lands in that arm too. Splitting on `|`
-//! first and checking each alternative on its own is what catches that.
+//! arm's pattern (the text before its `=>`, split on top-level `|` and
+//! recursively unwrapped through any matching parens) is required to mention
+//! `BackendKind::` — the one thing every real, explicit arm in this match
+//! does and a wildcard or bare binding, spelled any way, never does.
+//! Checking the whole pattern as one string is not enough: an or-pattern
+//! like `BackendKind::Mock | _` contains `BackendKind::`, so a whole-pattern
+//! substring check waves it through even though it is a catch-all — every
+//! *other* variant lands in that arm too. Splitting on `|` first and
+//! checking each alternative on its own is what catches that. A single
+//! split isn't enough either: `(BackendKind::Mock | _)` puts the `|` at
+//! paren-depth one, so a depth-zero-only split treats the whole
+//! parenthesized group as one alternative that still contains
+//! `BackendKind::` from its first half. `pattern_alternatives` peels
+//! matching outer parens before re-splitting, recursively, so arbitrary
+//! nesting (`((BackendKind::Mock | _))`) can't hide a bare alternative
+//! either.
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -75,6 +83,13 @@ pub fn run(workspace: &Path) -> Result<()> {
 /// `BackendKind::` next to a wildcard or bare-binding arm can't be mistaken
 /// for the arm naming it itself — `_ /* BackendKind::Mock */ =>` bypasses a
 /// substring check that only strips line comments.
+///
+/// Known limit: this does not understand string literals, so a `//` or `/*`
+/// inside a `"..."` would be misread as a real comment start. No arm pattern
+/// in `for_backend`'s match contains a string literal today (every
+/// alternative is a bare `BackendKind::Variant` path, `_`, or a binding), so
+/// this is latent rather than a live gap — worth fixing only if that stops
+/// being true.
 fn strip_comments(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let mut chars = body.chars().peekable();
@@ -187,13 +202,45 @@ fn push_arm_pattern(arms: &mut Vec<String>, arm_text: &str) {
     }
 }
 
+/// Every leaf alternative of a pattern: split on `|` at `{ } ( ) [ ]`-depth
+/// zero, then, for any resulting piece that is itself wrapped in one or more
+/// matching outer paren pairs (`(BackendKind::Mock | _)`,
+/// `((BackendKind::Mock | _))`), peel the parens and re-split the interior —
+/// recursively, so nesting to any depth still bottoms out at real leaves.
+fn pattern_alternatives(pattern: &str) -> Vec<String> {
+    let mut alternatives = Vec::new();
+    collect_alternatives(pattern, &mut alternatives);
+    alternatives
+}
+
+/// Depth-first collection worker for `pattern_alternatives`. `text` is
+/// peeled of any matching outer parens first — `(BackendKind::Mock | _)`
+/// must be seen as the or-pattern `BackendKind::Mock | _`, not as one
+/// alternative that happens to contain `BackendKind::` — and only then
+/// split on its own top-level `|`. A piece with no top-level `|` left after
+/// peeling is a genuine leaf and is recorded as-is.
+fn collect_alternatives(text: &str, out: &mut Vec<String>) {
+    let mut trimmed = text.trim();
+    while let Some(inner) = strip_matching_outer_parens(trimmed) {
+        trimmed = inner.trim();
+    }
+    let parts = split_top_level_alternatives(trimmed);
+    if parts.len() <= 1 {
+        out.push(trimmed.to_string());
+        return;
+    }
+    for part in parts {
+        collect_alternatives(&part, out);
+    }
+}
+
 /// Every top-level alternative of a pattern, split on `|` at
 /// `{ } ( ) [ ]`-depth zero. Every `BackendKind` variant matched here is a
 /// unit variant, so no alternative can contain an unbalanced `|` nested
 /// inside its own delimiters today — but the split is depth-aware anyway,
 /// so a future tuple- or struct-patterned variant (whose own fields might
 /// use `|` inside nested parens) would not silently defeat this rule.
-fn pattern_alternatives(pattern: &str) -> Vec<String> {
+fn split_top_level_alternatives(pattern: &str) -> Vec<String> {
     let mut alternatives = Vec::new();
     let mut depth = 0i32;
     let mut start = 0usize;
@@ -210,6 +257,46 @@ fn pattern_alternatives(pattern: &str) -> Vec<String> {
     }
     alternatives.push(pattern[start..].to_string());
     alternatives
+}
+
+/// If `s` is wrapped in one matching pair of outer parens — its first byte
+/// is `(`, its last is `)`, and that opening paren's match is the closing
+/// paren at the very end rather than one that closes early — returns the
+/// text between them.
+///
+/// Checking that the first `(` *pairs with* the last `)` (not just that the
+/// string starts and ends with those characters) is what keeps
+/// `(A) | (B)` from being misread as one parenthesized group: its first `(`
+/// closes right after `A`, long before the string ends, so this correctly
+/// returns `None` and leaves the `|` between the two groups to be found by
+/// `split_top_level_alternatives`. Requiring the string to *start* with `(`
+/// at all (rather than stripping any paren found anywhere) is what keeps a
+/// tuple-struct pattern like `Some(a | b)` from ever being unwrapped: it
+/// starts with `S`, not `(`, so this returns `None` immediately and the `|`
+/// inside `Some(...)` is correctly left alone as part of one bound value,
+/// not treated as a `BackendKind` alternative separator.
+fn strip_matching_outer_parens(s: &str) -> Option<&str> {
+    if !s.starts_with('(') || !s.ends_with(')') || s.len() < 2 {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, b) in s.bytes().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return if i == s.len() - 1 {
+                        Some(&s[1..s.len() - 1])
+                    } else {
+                        None
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -308,6 +395,90 @@ mod tests {
             "or-pattern-bare-binding",
             "BackendKind::Mock | k => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
         );
+    }
+
+    #[test]
+    fn a_parenthesized_or_pattern_hiding_a_wildcard_is_caught() {
+        // `(BackendKind::Mock | _)` puts the `|` at paren-depth one, so a
+        // depth-zero-only split treats the whole group as one alternative
+        // that still contains "BackendKind::" from its first half.
+        assert_arm_rejected(
+            "paren-wildcard-second",
+            "(BackendKind::Mock | _) => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_parenthesized_or_pattern_with_wildcard_first_is_caught() {
+        assert_arm_rejected(
+            "paren-wildcard-first",
+            "(_ | BackendKind::Mock) => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_double_nested_parenthesized_wildcard_is_caught() {
+        assert_arm_rejected(
+            "double-nested-paren-wildcard",
+            "((BackendKind::Mock | _)) => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_bare_binding_inside_parens_beside_a_real_variant_is_caught() {
+        assert_arm_rejected(
+            "paren-bare-binding",
+            "(BackendKind::Mock | k) => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_legitimate_parenthesized_or_pattern_is_accepted() {
+        // Both alternatives name BackendKind:: — the parens alone must not
+        // make this arm suspect.
+        let controls_body = r#"
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            (BackendKind::Mock | BackendKind::Wasm) => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::None,
+            },
+            BackendKind::Firecracker => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::None,
+            },
+        }
+    }
+"#;
+        let tmp = write_controls_fixture("legitimate-paren-or-pattern", controls_body);
+        run(&tmp).expect(
+            "a parenthesized or-pattern naming BackendKind:: on every alternative must pass",
+        );
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn a_leading_pipe_is_accepted() {
+        // `| BackendKind::Mock` splits into an empty leading alternative and
+        // the real one; the empty alternative is skipped in run(), not
+        // treated as a missing BackendKind:: reference.
+        let controls_body = r#"
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            | BackendKind::Mock => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::None,
+            },
+            BackendKind::Firecracker => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::None,
+            },
+        }
+    }
+"#;
+        let tmp = write_controls_fixture("leading-pipe", controls_body);
+        run(&tmp).expect("a leading `|` must not be misread as a missing alternative");
+        cleanup(&tmp);
     }
 
     #[test]
