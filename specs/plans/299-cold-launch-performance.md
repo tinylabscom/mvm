@@ -217,6 +217,31 @@ What this establishes:
    54.1 ms. Neither dominates, and together they are only a third of the cold
    wall clock.
 
+### Post-Plan-311 re-measurement — Apple Silicon / HVF
+
+Release `mvmctl` at `c866611af`, `ColdLaunchBench`, 20 runs + 2 warm-ups per
+lane, every sample through the lane gate. Both images reported independently
+per the contract's image-naming rule.
+
+| lane | dispatch p50 | p95 | p99 | total p50 |
+|---|---:|---:|---:|---:|
+| `alpine` (9.9 MB rootfs) | 79.6 ms | 84.9 ms | 93.6 ms | 320.1 ms |
+| `python:3.12` (1.1 GB rootfs) | 77.3 ms | 79.7 ms | 90.1 ms | 316.1 ms |
+
+Plan 311 removed the per-launch work that made these two differ; they now agree
+inside run-to-run noise at every percentile. The prepared-cold contract is met
+on this backend with a 3.3x margin at p99, on a 1.1 GB image.
+
+What this changes for the remaining phases on HVF:
+
+- **Phase 3 has little left here.** `vmm_create` is 11.6 ms and the backend's
+  own `driver_boot` is 7.8 ms p50. `guest_kernel_entry` at 58.6 ms is now three
+  quarters of the dispatch window, so the remaining cold-start cost on this
+  backend is the guest booting, not the VMM being created.
+- **Phase 6 is still the largest single span in the run.** `stop_transient` is
+  128.1 ms p50 — larger than the whole dispatch window that precedes it, and it
+  runs after the command has already produced its answer.
+
 ### Measured baseline — Linux Firecracker / KVM
 
 Same lane, same 20 runs + 2 warm-ups, release build, on the established KVM
@@ -438,6 +463,49 @@ Two consequences for the rest of the plan. Phase 3's target on HVF is now
 known to be guest boot rather than VMM setup — 65 ms of the 70 ms. And the
 Firecracker `driver_boot` of 623.6 ms should be re-measured against these
 fixes before being decomposed, since it contains a poll of its own.
+
+### Phase 3 re-measurement — Linux Firecracker / KVM, post-Phase-5
+
+Phase 5 said the Firecracker `driver_boot` of 623.6 ms should be re-measured
+against the poll fixes before being decomposed, since it contains a poll of its
+own. Re-measured on `main` at `c866611af`, release, prepared cache, x86_64 KVM
+host:
+
+```
+phases:  drives=46.0  admit=294.4  backend_start=689.8  vsock_wait=2.1
+         command=57.3  teardown=423.8  total=1513.4   dispatch_window=691.9
+backend: driver_boot=630.5  console_stream_start=3.6  activate_workload=16.6
+         broker_register=38.7
+work:    artifact_bytes_hashed=0  process_table_scans=0
+```
+
+`driver_boot` **did not move**: 623.6 ms before, 630.5 ms after. The poll it was
+suspected of containing is not one of the four Phase 5 replaced. So Phase 3 is a
+real cost and can be decomposed — that was the open question and it is now
+closed.
+
+Note `guest_kernel_entry=0.0`: the Firecracker driver confirms boot before
+returning, so `driver_boot` spans VMM start *and* guest boot, which HVF reports
+as two spans. The like-for-like comparison is HVF's 11.6 + 58.6 = ~70 ms against
+630 ms, an excess of ~560 ms.
+
+Decomposed (**issue #2292**): the driver boots through a shell script that polls
+for the API socket on a fixed `sleep 0.1` — the same quantization Phase 5
+removed from four Rust sites, missed here because it lives in a shell heredoc —
+and then issues each API call as its own `curl` subprocess behind `sudo bash`.
+Measured on the same box: 7 ms per `sudo bash -c true`, 6 ms per `curl` spawn,
+about nine calls per boot. So ~100 ms of tick plus ~120 ms of spawn, roughly 35%
+of `driver_boot`, removable without touching the VMM.
+
+**A second cost this exposed (issue #2293).** `admit` is 294 ms here against
+~38 ms on HVF, and it is neither compute nor hashing. One launch appends **8**
+chain entries, each its own `write_all` + `sync_data` per Plan 303 WS2, and
+`fsync` on this host's md2 array costs 41.7 ms p50 — so ~334 ms of durability
+per launch. The entry list also shows `plan.admitted` twice, once from the OCI
+provenance path and once from the boot admission. On Linux, admission alone
+exceeds the ≤200 ms p50 contract before any VMM work happens; on macOS it is
+invisible. Phase 4's "keep admission entirely local" is necessary but not
+sufficient — local is not the same as cheap when every entry is a barrier.
 
 ## Phase 1 — Content-addressed `--mount` image cache
 

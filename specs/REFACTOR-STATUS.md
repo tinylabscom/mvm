@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-09
+Last updated: 2026-08-10
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -116,7 +116,13 @@ for detailed scope and acceptance criteria.
         Phase 6 ahead of Phase 3.
   - [ ] Phase 1 — content-addressed `--mount` image cache
   - [ ] Phase 2 — artifact preparation outside the launch path
-  - [ ] Phase 3 — reduce backend cold-start latency
+  - [~] Phase 3 — reduce backend cold-start latency. Re-measured on KVM at
+        `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
+        623.6 ms, so the cost is real rather than a poll artifact and can be
+        decomposed. It is a shell `sleep 0.1` socket poll plus ~9 curl/sudo
+        subprocesses (**#2292**). On HVF there is little left — `vmm_create`
+        11.6 ms, `driver_boot` 7.8 ms — the remaining cold cost there is guest
+        boot at 58.6 ms.
   - [ ] Phase 4 — parallelize independent host work
   - [~] Phase 5 — event-driven guest readiness. The flat 50 ms readiness poll
         was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
@@ -159,12 +165,16 @@ for detailed scope and acceptance criteria.
   - [x] Phase E — `artifact_bytes_hashed` + `process_table_scans` on the launch
         sample, both refused by the prepared lanes — **#2276**. Plan 299's
         contract table now names the image behind each percentile.
-  - [~] Phase F — HVF validated: both images converge at 0.43 s wall clock,
-        dispatch window 78.8-79.4 ms against the ≤200 ms p50 budget on a 1.1 GB
-        image, claim-8/claim-14 digests unchanged and the chain still verifies.
-        Outstanding: `ColdLaunchBench` percentiles on both images, the
-        Firecracker/KVM repeat, and the warm-lane comparison (no pool can be
-        filled on this host today).
+  - [~] Phase F — validated on both backends. HVF meets the contract at
+        p50/p95/p99 on a 1.1 GB image (dispatch 77.3 / 79.7 / 90.1 ms against
+        ≤200 / ≤250 / ≤300), and `alpine` and `python:3.12` now agree inside
+        run-to-run noise where they used to differ by ~780 ms. claim-8 /
+        claim-14 digests unchanged, chain still verifies. Firecracker/KVM
+        repeated: the fixes hold there (both counters zero) but that backend
+        misses the contract for reasons this plan does not own — `driver_boot`
+        630.5 ms (**#2292**) and 294 ms of audit fsync in `admit` (**#2293**).
+        Outstanding: the warm-lane comparison, blocked because no standby pool
+        can be filled today.
 
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
