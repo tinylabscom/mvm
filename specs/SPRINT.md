@@ -33,6 +33,11 @@
       299's release baseline; establishing that comparison is the plan's first
       phase and no percentile is published before it.
 
+- [x] README CLI/code-example contract — README shell examples and every
+      declared CLI option have executable cucumber help witnesses; all 26
+      fenced examples are covered by the test-owned manifest, and README
+      status text matches the shipped `deploy` and `watch` commands.
+
 - [x] Audit-chain verification failure no longer reports as "never audited" —
       **issue #2258, plan 302 WS6**. `SignedChainAnchor` remembers the chains
       that failed verification and returns `Err` naming them when a lookup

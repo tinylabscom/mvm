@@ -464,7 +464,7 @@ fn every_subcommand_help_fits_within(_world: &mut CliWorld, width: i64) {
     }
 }
 
-fn collect_command_paths(
+pub(crate) fn collect_command_paths(
     command: &clap::Command,
     prefix: &[String],
     command_paths: &mut Vec<Vec<String>>,
@@ -570,6 +570,10 @@ fn generate_project_from_template(world: &mut CliWorld, name: String) {
     world.generated_project_dir = Some(project_dir.clone());
     world.generated_project_dir_tmp = Some(out);
 
+    let home = tempfile::tempdir().expect("create isolated template home");
+    let home_path = home.path().to_path_buf();
+    world.isolated_home = Some(home);
+
     let output = mvmctl_command()
         .args([
             "generate",
@@ -578,6 +582,9 @@ fn generate_project_from_template(world: &mut CliWorld, name: String) {
             &project_dir.to_string_lossy(),
         ])
         .env("MVM_TEMPLATE_REGISTRY", registry_url)
+        .env("HOME", &home_path)
+        .env("MVM_HOME", &home_path)
+        .env("MVM_SKIP_RECONCILE", "1")
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);

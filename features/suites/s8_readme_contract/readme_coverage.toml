@@ -1,0 +1,103 @@
+[[block]]
+classification = "static-only"
+language = ""
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "install-static"
+language = "bash"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "nix-static"
+language = "nix"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "sdk-bdd"
+language = "python"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "sdk-bdd"
+language = "python"
+
+[[block]]
+classification = "sdk-bdd"
+language = "ts"
+
+[[block]]
+classification = "sdk-bdd"
+language = "python"
+
+[[block]]
+classification = "sdk-bdd"
+language = "ts"
+
+[[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
+classification = "rust-compile"
+language = "rust"
+
+[[block]]
+classification = "rust-compile"
+language = "rust"
+
+[[block]]
+classification = "rust-compile"
+language = "toml"
+
+[[block]]
+classification = "rust-compile"
+language = "toml"
+
+[[block]]
+classification = "rust-compile"
+language = "rust"
+
+[[block]]
+classification = "static-only"
+language = ""
+
+[[block]]
+classification = "static-only"
+language = "bash"
+
+[[block]]
+classification = "static-only"
+language = "bash"
