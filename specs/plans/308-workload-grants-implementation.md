@@ -2675,3 +2675,66 @@ unknown spawn shape.
 `EnforcedTier::{declared, enforced}`, `EnforcedGrants::all_declared`,
 `resolve_grants`/`GrantSources`, `grants_are_subset` are used consistently
 across every task that references them.
+
+---
+
+### Task 16: The surfaces — make a grant expressible, and therefore real
+
+**This task combines what the plan originally split into Tasks 13 and 14, on
+purpose.** Task 13 was a precedence resolver with nothing to resolve and no
+caller. This branch has already produced four controls that shipped correct,
+tested, and unreachable — a fifth is registered in `dormant-controls.toml`
+right now. Landing a pure resolver on its own would make six. The two halves
+ship together or not at all.
+
+**The acceptance criterion is end-to-end, not per-file.** A CPU share and an
+egress allowlist declared in `Mvmfile.toml` must reach the signed
+`ExecutionPlan`, be checked against the ceiling, and — for egress — be the
+thing `EgressGate` enforces. When that holds, `network_policy_from_grants`
+has a production caller, and **the `dormant-controls.toml` entry for it is
+deleted as part of this task.** That deletion is the done-signal; the gate
+fails if the entry lingers once a caller exists, which is the ratchet working.
+
+**Files:**
+- Create: `crates/mvm-core/src/grants_resolve.rs`
+- Modify: `crates/mvm-core/src/client/dto.rs` (`MachineSpec` + builder)
+- Modify: `crates/mvm-core/src/domain/manifest.rs` (`[grants]` table)
+- Modify: `crates/mvm-core/src/user_config.rs` (defaults)
+- Modify: `crates/mvm-cli/src/commands/machine/mod.rs` (flags)
+- Modify: `crates/mvm-cli/src/commands/vm/up/admission.rs:327` — **the connection**
+- Modify: `xtask/dormant-controls.toml` (delete the entry)
+
+**The four surfaces, highest precedence first:**
+
+1. **CLI** — `--cpu-limit <MILLICORES>`, `--timeout <SECS>`, `--grants-file <PATH>`.
+   `--cpu-limit` is host CPU share; `--cpus` remains the vCPU count the guest
+   sees. They are different controls and conflating them is the mistake every
+   container runtime made once, so the help text must distinguish them.
+2. **JSON** — `--grants-file`, parsed with `deny_unknown_fields` so a typo is a
+   refusal rather than a silently dropped cap.
+3. **Manifest** — a `[grants]` table on `ManifestMachineWorkflow`.
+4. **Library** — `grants` on the `MachineSpec` DTO and its builder, so
+   `MvmClient::run_machine` can express an egress allowlist. It cannot today:
+   the DTO has no network field at all, which is why every SDK reaches egress
+   only by shelling out to `mvmctl`.
+
+**Precedence is per dimension, not per object.** A CLI `--cpu-limit` must not
+discard the manifest's egress allowlist. Whole-object precedence would do that
+silently, which is the kind of bug that surfaces as "my allowlist stopped
+applying" months later.
+
+A higher surface may *loosen* a lower one — the manifest is a project default
+and the CLI belongs to the developer running it. What bounds the outcome is
+the ceiling, which no surface can reach.
+
+**Witnesses:**
+- `a_manifest_grant_reaches_the_signed_plan` — the end-to-end one; assert on
+  the admitted `ExecutionPlan`, not on an intermediate struct.
+- `cli_overrides_the_manifest_per_dimension_not_wholesale` — set CPU on the
+  CLI and egress in the manifest; both must survive.
+- `an_unknown_grants_file_field_is_refused`.
+- `a_manifest_egress_grant_is_what_the_gate_enforces` — the projection's first
+  real caller.
+- `a_persisted_machine_spec_without_grants_still_loads` — `#[serde(default)]`;
+  machines created before this exist on disk.
+- `--cpus` and `--cpu-limit` are independently settable and do not alias.
