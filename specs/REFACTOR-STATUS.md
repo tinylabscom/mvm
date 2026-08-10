@@ -1037,9 +1037,10 @@ for detailed scope and acceptance criteria.
 
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
   (`specs/plans/313-egress-token-accounting-and-compaction.md`)
-  - [ ] Phase 0 — blocking verification: does the substitution endpoint's
-        response leg stream, or does it accumulate? Request bodies are buffered
-        today, so an SSE model call may reach the guest only on completion
+  - [x] Phase 0 — verified: the substitution path buffers the whole response
+        (`resp.bytes()`), loses chunk framing, has no body cap, and kills any
+        stream held past the 30s whole-request timeout. Streaming and secret
+        substitution are today mutually exclusive
   - [ ] Phase 1 — incremental response relay with bounded per-connection
         buffering, keeping the `service_redact` seam correct across chunk
         boundaries via a bounded overlap window
