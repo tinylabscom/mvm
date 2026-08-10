@@ -22,8 +22,9 @@ for detailed scope and acceptance criteria.
       filesystem comparisons cannot mix security tiers. The libkrun probe also
       exposes bounded resident host-process capture, and the HVF guest-RAM seam
       exposes resident bytes with a demand-fault witness and records private
-      restore-mapping duration; end-to-end guest working-set, first-use
-      restore-fault, and cross-backend evidence remain open.
+      restore-mapping duration. The libkrun density report also carries the
+      readiness-bound guest-agent RSS witness; whole-VM guest working-set,
+      first-use restore-fault, and cross-backend evidence remain open.
 
 ## In-flight plans
 - [x] Plan 2167 — durable agent session and event contract

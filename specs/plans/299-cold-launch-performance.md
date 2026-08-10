@@ -641,6 +641,12 @@ optimization backend-local and the benchmark backend-neutral.
       the platform footprint reader, and drops every held guest on success or
       failure. This reports host process residency; guest demand-fault and
       restore-fault evidence remain separate gates.
+- [x] Add the guest-agent RSS witness to the same live libkrun density report.
+      After the readiness boundary, each held guest is queried through the
+      existing `ResourceUsage` RPC and the result is carried beside host
+      supervisor/VMM RSS, with aggregate statistics for samples that answered.
+      This measures the guest-agent process, not the whole guest working set;
+      whole-VM and first-use restore-fault evidence remain open.
 - [x] Add an allocation-level demand-fault witness to the HVF guest-RAM seam.
       `GuestRam` exposes a `mincore` resident-byte query, the raw kernel boot
       result records it after vCPU and host-I/O shutdown, and a focused test

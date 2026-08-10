@@ -48,6 +48,20 @@ pub struct InstanceFootprint {
     pub vm_name: String,
     pub pid: u32,
     pub bytes: u64,
+    /// Guest-agent process RSS queried after the guest reached readiness.
+    /// This is a guest-process witness, not the whole VM working set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_agent_rss_bytes: Option<u64>,
+}
+
+/// Aggregate guest-agent RSS across the samples that reported it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuestRssStats {
+    pub instances: u32,
+    pub total_bytes: u64,
+    pub per_instance_bytes: u64,
+    pub min_instance_bytes: u64,
+    pub max_instance_bytes: u64,
 }
 
 /// Aggregate density result for a held-live instance set.
@@ -58,6 +72,9 @@ pub struct DensityStats {
     pub per_instance_bytes: u64,
     pub min_instance_bytes: u64,
     pub max_instance_bytes: u64,
+    /// None when the live backend did not return guest-agent RSS.
+    #[serde(default)]
+    pub guest_agent_rss: Option<GuestRssStats>,
 }
 
 /// Read-only density report. Live orchestration boots `count`
@@ -125,12 +142,30 @@ pub(super) fn build_report(
     target_os = "macos"
 ))]
 pub fn summarize_density(samples: &[InstanceFootprint]) -> DensityStats {
-    let instances = samples.len() as u32;
+    let instances = u32::try_from(samples.len()).expect("density sample count fits in u32");
     let total_bytes = samples.iter().map(|sample| sample.bytes).sum::<u64>();
     let per_instance_bytes = if instances == 0 {
         0
     } else {
         total_bytes / u64::from(instances)
+    };
+    let guest_rss = samples
+        .iter()
+        .filter_map(|sample| sample.guest_agent_rss_bytes)
+        .collect::<Vec<_>>();
+    let guest_agent_rss = if guest_rss.is_empty() {
+        None
+    } else {
+        let guest_instances =
+            u32::try_from(guest_rss.len()).expect("guest RSS sample count fits in u32");
+        let guest_total = guest_rss.iter().sum::<u64>();
+        Some(GuestRssStats {
+            instances: guest_instances,
+            total_bytes: guest_total,
+            per_instance_bytes: guest_total / u64::from(guest_instances),
+            min_instance_bytes: guest_rss.iter().copied().min().unwrap_or(0),
+            max_instance_bytes: guest_rss.iter().copied().max().unwrap_or(0),
+        })
     };
     DensityStats {
         instances,
@@ -138,6 +173,7 @@ pub fn summarize_density(samples: &[InstanceFootprint]) -> DensityStats {
         per_instance_bytes,
         min_instance_bytes: samples.iter().map(|sample| sample.bytes).min().unwrap_or(0),
         max_instance_bytes: samples.iter().map(|sample| sample.bytes).max().unwrap_or(0),
+        guest_agent_rss,
     }
 }
 
@@ -271,16 +307,19 @@ mod tests {
                 vm_name: "bench-a".to_string(),
                 pid: 101,
                 bytes: 10 * 1024 * 1024,
+                guest_agent_rss_bytes: None,
             },
             InstanceFootprint {
                 vm_name: "bench-b".to_string(),
                 pid: 102,
                 bytes: 14 * 1024 * 1024,
+                guest_agent_rss_bytes: None,
             },
             InstanceFootprint {
                 vm_name: "bench-c".to_string(),
                 pid: 103,
                 bytes: 12 * 1024 * 1024,
+                guest_agent_rss_bytes: None,
             },
         ];
 
@@ -291,6 +330,42 @@ mod tests {
         assert_eq!(stats.per_instance_bytes, 12 * 1024 * 1024);
         assert_eq!(stats.min_instance_bytes, 10 * 1024 * 1024);
         assert_eq!(stats.max_instance_bytes, 14 * 1024 * 1024);
+        assert_eq!(stats.guest_agent_rss, None);
+    }
+
+    #[test]
+    fn density_summary_aggregates_available_guest_agent_rss() {
+        let samples = vec![
+            InstanceFootprint {
+                vm_name: "bench-a".to_string(),
+                pid: 101,
+                bytes: 100,
+                guest_agent_rss_bytes: Some(2_000),
+            },
+            InstanceFootprint {
+                vm_name: "bench-b".to_string(),
+                pid: 102,
+                bytes: 100,
+                guest_agent_rss_bytes: None,
+            },
+            InstanceFootprint {
+                vm_name: "bench-c".to_string(),
+                pid: 103,
+                bytes: 100,
+                guest_agent_rss_bytes: Some(4_000),
+            },
+        ];
+
+        assert_eq!(
+            summarize_density(&samples).guest_agent_rss,
+            Some(GuestRssStats {
+                instances: 2,
+                total_bytes: 6_000,
+                per_instance_bytes: 3_000,
+                min_instance_bytes: 2_000,
+                max_instance_bytes: 4_000,
+            })
+        );
     }
 
     #[test]

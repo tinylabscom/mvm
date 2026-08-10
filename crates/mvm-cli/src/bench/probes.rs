@@ -84,10 +84,15 @@ pub fn run_density(count: u32, max_count: u32) -> Result<DensityReport> {
             .with_context(|| format!("booting density sample {index}"))?;
         let bytes = read_process_footprint_bytes(vm.pid())
             .with_context(|| format!("sampling footprint for density sample {index}"))?;
+        let instance_dir = super::probe::probe_state_dir(&vm_name);
+        let guest_agent_rss_bytes =
+            mvm_agentd::vsock::query_resource_usage(&instance_dir.to_string_lossy())
+                .with_context(|| format!("sampling guest-agent RSS for density sample {index}"))?;
         samples.push(InstanceFootprint {
             vm_name,
             pid: vm.pid(),
             bytes,
+            guest_agent_rss_bytes: Some(guest_agent_rss_bytes),
         });
         held.push(vm);
     }
