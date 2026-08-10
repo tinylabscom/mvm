@@ -13,7 +13,7 @@
 //! restores its in-memory cursor from the last line on disk so that
 //! a process restart resumes the chain without gaps.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -78,6 +78,69 @@ pub struct FileAuditSigner {
     audit_dir: PathBuf,
     fixed_file: Option<PathBuf>,
     cursors: Mutex<HashMap<String, [u8; 32]>>,
+    /// Files carrying entries that have been written but not yet fsynced.
+    ///
+    /// Emptied whenever a barrier entry syncs the file it is on, since
+    /// `sync_data` is file-wide and carries every earlier write with it. What
+    /// remains at drop is flushed there.
+    pending_sync: Mutex<HashSet<PathBuf>>,
+}
+
+/// Whether an entry must be on disk before this call returns.
+///
+/// Distinct from [`crate::audit::durability::AuditDurability`], which decides
+/// whether a *failure* to record an admission blocks the boot. This decides
+/// when the fsync happens for a write that succeeded. They meet at
+/// `plan.admitted`: `AuditDurability::Required` means a sealed run may not
+/// proceed unless its admission reached the chain, which is only true if that
+/// entry is a [`SyncPolicy::Barrier`] here. It is, and the test below pins it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPolicy {
+    /// fsync before returning. The caller is about to do something that must
+    /// not happen without this record already durable.
+    Barrier,
+    /// Write now, fsync at the next barrier on the same file (or at drop).
+    Deferred,
+}
+
+/// Events that authorize nothing and may ride to disk on a later fsync.
+///
+/// The list is of *deferrable* events rather than of barriers, so the default
+/// for anything unrecognised — including every event added after this — is to
+/// sync. A new event that should have been durable and silently was not is the
+/// failure this ordering prevents.
+const DEFERRABLE_EVENTS: &[&str] = &[
+    // Resolution and posture records: descriptions of a decision already made
+    // and already covered by the admission that authorized the boot.
+    "plan.policy_resolved",
+    "plan.boot_posture",
+    "plan.shares_admitted",
+    // Provenance for an admission that has already been synced.
+    "plan.oci_provenance",
+    // States that the admitted plan did start. Nothing is authorized by it;
+    // the authorization was `plan.admitted`, which is a barrier.
+    "plan.launched",
+];
+
+/// How durably `event` must land.
+///
+/// The rule is what an entry authorizes, not how interesting it is. An entry
+/// that permits a subsequent action has to be on disk before that action can
+/// take effect, or a crash can leave the action having happened with no record
+/// that it was allowed to. Everything else is a record of something that has
+/// already happened, and a crash losing the tail of the log is a truncation —
+/// detectable, and not the same as a forged or missing authorization.
+///
+/// Command bookends split: `cmd.<verb>.invoked` announces an intention and
+/// authorizes nothing, while the terminal `completed`/`failed` is both a real
+/// outcome and the natural flush point for everything the command deferred.
+#[must_use]
+pub fn sync_policy_for(event: &str) -> SyncPolicy {
+    if DEFERRABLE_EVENTS.contains(&event) || event.ends_with(".invoked") {
+        SyncPolicy::Deferred
+    } else {
+        SyncPolicy::Barrier
+    }
 }
 
 impl FileAuditSigner {
@@ -93,6 +156,7 @@ impl FileAuditSigner {
             audit_dir,
             fixed_file: None,
             cursors: Mutex::new(HashMap::new()),
+            pending_sync: Mutex::new(HashSet::new()),
         })
     }
 
@@ -116,6 +180,7 @@ impl FileAuditSigner {
                 .unwrap_or_else(|| PathBuf::from(".")),
             fixed_file: Some(audit_file),
             cursors: Mutex::new(HashMap::new()),
+            pending_sync: Mutex::new(HashSet::new()),
         })
     }
 
@@ -157,6 +222,43 @@ impl FileAuditSigner {
             None => Ok([0u8; 32]),
             Some(line) => Ok(hash_line(line.as_bytes())),
         }
+    }
+}
+
+impl FileAuditSigner {
+    /// fsync every file still carrying deferred entries.
+    ///
+    /// A deferred entry is already written; this is what makes it survive the
+    /// machine losing power rather than only the process exiting. Called from
+    /// `Drop`, and available to a caller that wants an explicit flush point.
+    ///
+    /// Best-effort by signature: a failure here cannot be reported to whoever
+    /// emitted the entry, because they were told it succeeded when it was
+    /// written. It is logged instead of swallowed.
+    pub fn flush_deferred(&self) {
+        let pending: Vec<PathBuf> = {
+            let mut guard = self.pending_sync.lock().expect("pending_sync poisoned");
+            guard.drain().collect()
+        };
+        for path in pending {
+            let synced = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|f| f.sync_data());
+            if let Err(e) = synced {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "flushing deferred audit entries failed; the tail of this chain may not survive power loss"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for FileAuditSigner {
+    fn drop(&mut self) {
+        self.flush_deferred();
     }
 }
 
@@ -233,8 +335,28 @@ impl AuditSigner for FileAuditSigner {
         record.push(b'\n');
         file.write_all(&record)
             .map_err(|e| AuditError::Io(e.to_string()))?;
-        file.sync_data()
-            .map_err(|e| AuditError::Io(e.to_string()))?;
+
+        // Sync only where the record has to precede an action. One launch
+        // emits seven entries, and fsync is tens of milliseconds on a real
+        // disk, so syncing each one charged the launch for durability it did
+        // not need at that instant. `sync_data` is file-wide, so a barrier
+        // carries every deferred write on the same file with it.
+        match sync_policy_for(&entry.event) {
+            SyncPolicy::Barrier => {
+                file.sync_data()
+                    .map_err(|e| AuditError::Io(e.to_string()))?;
+                self.pending_sync
+                    .lock()
+                    .expect("pending_sync poisoned")
+                    .remove(&path);
+            }
+            SyncPolicy::Deferred => {
+                self.pending_sync
+                    .lock()
+                    .expect("pending_sync poisoned")
+                    .insert(path.clone());
+            }
+        }
 
         self.cursors
             .lock()
@@ -422,6 +544,156 @@ mod tests {
             image_sha256: "abc123".to_string(),
             event: event.to_string(),
             labels: BTreeMap::new(),
+        }
+    }
+
+    /// The rule is what an entry authorizes. `plan.admitted` permits a boot,
+    /// so it must be on disk before one can happen; the records around it
+    /// describe things that already did.
+    #[test]
+    fn only_entries_that_authorize_something_are_barriers() {
+        for authorizing in [
+            "plan.admitted",
+            "plan.failed",
+            "plan.verb_denied",
+            "plan.grant_required",
+            "stream.input_refused",
+            "cmd.machine.completed",
+            "cmd.machine.failed",
+        ] {
+            assert_eq!(
+                sync_policy_for(authorizing),
+                SyncPolicy::Barrier,
+                "{authorizing} must be durable before what follows it"
+            );
+        }
+
+        for record in [
+            "plan.policy_resolved",
+            "plan.boot_posture",
+            "plan.oci_provenance",
+            "plan.launched",
+            "plan.shares_admitted",
+            "cmd.machine.invoked",
+            "cmd.image.invoked",
+        ] {
+            assert_eq!(
+                sync_policy_for(record),
+                SyncPolicy::Deferred,
+                "{record} authorizes nothing and need not stall the launch"
+            );
+        }
+    }
+
+    /// The list is of deferrable events, so anything unrecognised syncs. An
+    /// event added later that should have been durable and silently was not is
+    /// the failure this ordering exists to prevent.
+    #[test]
+    fn an_unrecognised_event_defaults_to_syncing() {
+        assert_eq!(
+            sync_policy_for("plan.some_event_added_next_year"),
+            SyncPolicy::Barrier
+        );
+        assert_eq!(sync_policy_for(""), SyncPolicy::Barrier);
+    }
+
+    /// A launch's entries must all be on disk once its terminal entry returns,
+    /// even though only two of them synced. `sync_data` is file-wide, so the
+    /// barrier carries the deferred writes before it.
+    #[tokio::test]
+    async fn a_barrier_leaves_nothing_pending_on_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
+
+        signer
+            .sign_and_emit(&make_entry("t1", "cmd.machine.invoked"))
+            .await
+            .unwrap();
+        assert_eq!(
+            signer.pending_sync.lock().unwrap().len(),
+            1,
+            "a deferred entry leaves its file pending"
+        );
+
+        signer
+            .sign_and_emit(&make_entry("t1", "plan.admitted"))
+            .await
+            .unwrap();
+        assert!(
+            signer.pending_sync.lock().unwrap().is_empty(),
+            "a barrier clears the file it synced"
+        );
+
+        // The deferred records after the barrier are pending again, and the
+        // terminal entry is what flushes them.
+        for event in ["plan.policy_resolved", "plan.launched", "plan.boot_posture"] {
+            signer
+                .sign_and_emit(&make_entry("t1", event))
+                .await
+                .unwrap();
+        }
+        assert_eq!(signer.pending_sync.lock().unwrap().len(), 1);
+        signer
+            .sign_and_emit(&make_entry("t1", "cmd.machine.completed"))
+            .await
+            .unwrap();
+        assert!(signer.pending_sync.lock().unwrap().is_empty());
+    }
+
+    /// fsync is per-file, so a barrier on one tenant's chain says nothing
+    /// about another's. Both have to be tracked or the second tenant's tail
+    /// silently never syncs.
+    #[tokio::test]
+    async fn a_barrier_on_one_tenant_does_not_flush_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
+
+        signer
+            .sign_and_emit(&make_entry("t1", "plan.launched"))
+            .await
+            .unwrap();
+        signer
+            .sign_and_emit(&make_entry("t2", "plan.launched"))
+            .await
+            .unwrap();
+        assert_eq!(signer.pending_sync.lock().unwrap().len(), 2);
+
+        signer
+            .sign_and_emit(&make_entry("t1", "plan.admitted"))
+            .await
+            .unwrap();
+        let pending = signer.pending_sync.lock().unwrap();
+        assert_eq!(pending.len(), 1, "t2 must still be pending");
+        assert!(pending.iter().any(|p| p.to_string_lossy().contains("t2")));
+    }
+
+    /// Every entry is readable and chain-valid regardless of when it synced —
+    /// deferring changes durability, never content or ordering.
+    #[tokio::test]
+    async fn deferred_entries_are_still_written_and_chain_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
+        let events = [
+            "cmd.machine.invoked",
+            "plan.admitted",
+            "plan.policy_resolved",
+            "plan.launched",
+            "cmd.machine.completed",
+        ];
+        for event in events {
+            signer
+                .sign_and_emit(&make_entry("t1", event))
+                .await
+                .unwrap();
+        }
+        signer.flush_deferred();
+
+        let body = std::fs::read_to_string(dir.path().join("t1.jsonl")).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), events.len(), "every entry is on disk");
+        for (line, expected) in lines.iter().zip(events) {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["entry"]["event"], expected, "order is preserved");
         }
     }
 

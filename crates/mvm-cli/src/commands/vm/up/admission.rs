@@ -284,7 +284,13 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             Ok::<String, anyhow::Error>(identity.sha256.clone())
         })
         .transpose()?;
+    let t_admit_start = std::time::Instant::now();
     let sha = resolve_image_sha256(p.rootfs_path, p.precomputed_image_sha256.or(attested_sha))?;
+    let t_sha = std::time::Instant::now();
+    tracing::debug!(
+        ms = (t_sha - t_admit_start).as_secs_f64() * 1000.0,
+        "admit: image sha"
+    );
 
     // Claim 9 — bundle pin (when supplied).
     //
@@ -379,6 +385,11 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         }),
         _ => None,
     };
+    let t_pre_sign = std::time::Instant::now();
+    tracing::debug!(
+        ms = (t_pre_sign - t_sha).as_secs_f64() * 1000.0,
+        "admit: synthesis inputs"
+    );
     let admitted = admit_for_run(
         &input,
         &SystemClock,
@@ -386,6 +397,11 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         p.keys_dir,
         admission_ctx.as_ref(),
     )?;
+    let t_signed = std::time::Instant::now();
+    tracing::debug!(
+        ms = (t_signed - t_pre_sign).as_secs_f64() * 1000.0,
+        "admit: sign+verify"
+    );
     tracing::info!(
         plan_id = %admitted.plan_id().0,
         signer_id = %admitted.signer_id(),
@@ -407,6 +423,11 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         None => crate::commands::vm::host_signer::load_or_init(),
     }
     .context("loading host signer for audit emitter")?;
+    let t_signer = std::time::Instant::now();
+    tracing::debug!(
+        ms = (t_signer - t_signed).as_secs_f64() * 1000.0,
+        "admit: load host signer"
+    );
 
     // Resolve policy before constructing the final emitter so
     // `[audit]` can control chain-signing and stream replication for
@@ -467,6 +488,11 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     // an entry that was never written leaves no gap for it to find — so the
     // only moment this is catchable is right here. `restrict_agent_verbs` is
     // the same sealed-tier signal the shell-entrypoint refusal above keys on.
+    let t_emitter = std::time::Instant::now();
+    tracing::debug!(
+        ms = (t_emitter - t_signer).as_secs_f64() * 1000.0,
+        "admit: policy + emitter build"
+    );
     mvm_hostd::audit::durability::record_admission(
         Some(&emitter),
         admitted.plan(),
@@ -475,6 +501,10 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             p.restrict_agent_verbs,
         ),
     )?;
+    tracing::debug!(
+        ms = t_emitter.elapsed().as_secs_f64() * 1000.0,
+        "admit: record_admission (fsync)"
+    );
     if let Some(verbs) = admitted.plan().agent_verbs.as_ref()
         && let Err(e) = emitter.emit_grant_required(admitted.plan(), verbs)
     {
