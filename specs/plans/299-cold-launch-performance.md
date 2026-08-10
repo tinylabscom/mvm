@@ -4,6 +4,11 @@
 baselines measured. Phase 6 is promoted ahead of Phase 3 by the measurements;
 Phase 3 is retargeted at the Firecracker boot path.
 
+This plan is one owner of the [fast machine substrate](../notes/2026-08-10-fast-machine-substrate.md),
+which composes cold launch with Plans 298, 265, 270, and 292. It owns the
+prepared cold path and its evidence; it does not define a second artifact or
+snapshot graph.
+
 ## Goal
 
 Make a genuinely cold VMM launch fast enough that warm-VM performance is not the
@@ -55,6 +60,17 @@ This plan composes with existing work:
 - The current `--mount` surface remains the supported host-directory interface;
   the obsolete internal `AddDir` naming and any compatibility-only flag path are
   removed while this launch path is changed.
+
+The prepared template identity includes the kernel, universal initramfs, rootfs
+lower artifacts, verity metadata, runtime overlay, backend/VMM version, guest
+protocol, CPU/memory shape, block-device/share topology, network-policy shape,
+warmup profile, and readiness probe. Host paths, host-directory contents,
+tenant authority, live channels, and mutable writable state are excluded.
+
+The launch measurement vocabulary is canonical: kernel entry, agent ready,
+authenticated activation, environment ready, first useful RPC, and reaped.
+`/bin/true` remains a launch probe; the first useful authenticated RPC is a
+separate end-to-end signal.
 
 No task here may weaken admission, signed-plan verification, dm-verity,
 host-directory isolation, vsock authentication, or the no-NIC workload
@@ -524,6 +540,17 @@ optimization backend-local and the benchmark backend-neutral.
 - [ ] Use the smallest supported default memory commitment and demand-fault
       guest RAM. Prove that the change affects resident cost without changing
       guest-visible memory capacity or isolation.
+- [ ] Run the kernel and boot-substrate budget from
+      [issue #2280](https://github.com/tinylabscom/mvm/issues/2280): compare
+      raw/compressed kernel and initramfs size, boot probes, kernel entry,
+      authenticated readiness, resident pages, and restore fault cost. A size
+      reduction is accepted only with readiness, security, and compatibility
+      witnesses.
+- [ ] Evaluate the current rootfs and host-directory image path against the
+      guest-local immutable filesystem hypothesis in
+      [issue #2281](https://github.com/tinylabscom/mvm/issues/2281). Keep the
+      current path as the baseline and preserve dm-verity, xattrs/whiteouts,
+      read-only enforcement, and clean writable CoW state.
 - [ ] Add backend-specific unit tests for immutable artifact reuse, fresh VM
       identity, failed setup cleanup, and no cross-launch mutable state.
 
@@ -620,6 +647,9 @@ green.
       process ownership, and cleanup races.
 - [ ] The final sprint and refactor rollup entries cite concrete evidence files,
       host/backend details, and commit references.
+- [ ] The template identity and lifecycle vocabulary match
+      `specs/notes/2026-08-10-fast-machine-substrate.md`; no parallel cache or
+      snapshot graph exists.
 
 ## Explicit follow-ups if the gate remains red
 

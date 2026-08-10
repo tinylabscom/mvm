@@ -1494,6 +1494,14 @@ Then unify + retire the old paths:
 
 **WS10 — tiny kernel + low memory + density**
 
+- [x] **Fast machine substrate contract — issue #2279.** The kernel is now
+  explicitly treated as one part of a prepared machine substrate spanning the
+  kernel, initramfs, verified rootfs artifacts, runtime overlay, VMM shape,
+  guest lifecycle, warmup, and pool identity. The ownership and measurement
+  boundaries are documented in
+  `specs/notes/2026-08-10-fast-machine-substrate.md`; issues #2280 and #2281
+  own the kernel budget and filesystem-path experiments.
+
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
 - [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured
   1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The

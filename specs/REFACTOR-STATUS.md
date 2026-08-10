@@ -10,6 +10,15 @@ for detailed scope and acceptance criteria.
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
 
+## Fast machine substrate
+- [x] **Issue #2279 — define the fast machine substrate and canonical template
+      contract.** The cross-plan note joins Plans 298, 299, 265, 270, and 292
+      around one prepared template identity, explicit lifecycle phases, a
+      system-level kernel budget, and a measured filesystem-path decision. It
+      introduces no second cache or snapshot graph. Follow-up measurements and
+      live backend work remain open under issues #2280, #2281, #2194, #2195,
+      #2196, and #2199.
+
 ## In-flight plans
 - [x] Plan 2167 — durable agent session and event contract
       (`specs/plans/2167-agent-session-contract.md`)
@@ -132,6 +141,10 @@ for detailed scope and acceptance criteria.
         `stop_transient` 142.9 ms, which is real cleanup. Follow-up: give pool
         maintenance to the resident per-tenant daemon.
   - [ ] Phase 7 — live validation and regression gates
+  - [x] Cross-plan fast-machine-substrate contract documented in
+        `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
+  - [ ] Kernel/boot-substrate budget and filesystem-path evaluation tracked by
+        issues #2280 and #2281
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images
       (`specs/plans/311-launch-critical-path-waste.md`), branch

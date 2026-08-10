@@ -2,6 +2,12 @@
 
 **Status:** In progress.
 
+Plan 298 owns the resident warm-claim portion of the [fast machine
+substrate](../notes/2026-08-10-fast-machine-substrate.md). Its pool key and
+prepared artifacts are inputs to the shared template identity; tenant
+authority, host paths, live channels, and mutable workload state remain
+excluded from reusable parent state.
+
 ## Objective
 
 Make a warmed `machine run` claim complete in strictly less than 300ms from
@@ -340,6 +346,9 @@ reseeding, and policy validation.
   benchmark covers dependency installation and network behavior.
 - Workspace tests, all-target Clippy, formatting, security tests, and the
   supported live backend smoke tests pass before the sprint item closes.
+- Template identity, lifecycle phase names, and artifact ownership match the
+  shared fast-machine-substrate note. Pool capacity and backpressure account
+  for resident working set and concurrency, not only the number of parents.
 
 ## Issue ownership boundaries
 
