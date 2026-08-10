@@ -48,10 +48,10 @@ let
   # kernel — lets both of mvm's kernels track the latest point release exactly
   # and keeps the two pins from drifting apart. Bump `kernelVersion` + `hash`
   # together (the tarball's own sha256, e.g. via `nix store prefetch-file`).
-  kernelVersion = "6.12.102";
+  kernelVersion = "6.12.103";
   kernelSrc = pkgs.fetchurl {
     url = "mirror://kernel/linux/kernel/v6.x/linux-${kernelVersion}.tar.xz";
-    hash = "sha256-aUu19JNxMjq5wrcEC9NY7YG/++gLNy12UHBFgo9lWAM=";
+    hash = "sha256-8UOqreiHe6VhbniLRIJXbbKEgbz1V+9Tf0/MOTj8MXY=";
   };
   # The builder's overlay filesystem triggers a GNU tar directory-metadata
   # race while unpacking this archive. Materialize the source with bsdtar once

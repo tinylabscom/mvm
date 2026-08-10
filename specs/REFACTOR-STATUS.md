@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-09
+Last updated: 2026-08-10
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -9,6 +9,10 @@ for detailed scope and acceptance criteria.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
+- [~] **Issue #2289 — kernel pin freshness follow-up.** This PR synchronizes
+      the libkrunfw and custom guest kernel inputs on the verified Linux
+      6.12.103 LTS source pin and updates structural parity coverage with the
+      upstream tarball's verified SRI hash. Merge and rollout evidence remain.
 
 ## In-flight plans
 - [x] Plan 2167 — durable agent session and event contract

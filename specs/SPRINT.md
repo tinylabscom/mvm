@@ -123,11 +123,12 @@
       and a real UDS round trip. The PR carries the remaining host-specific
       BDD execution note.
 
-- [x] Kernel pin freshness — **issue #2128**. Synchronized the libkrunfw
-      bundle and custom guest kernel on the verified Linux 6.12.102 LTS
-      tarball, replacing the stale 6.12.100 pin. Structural parity tests keep
+- [~] Kernel pin freshness — **issue #2289**. This PR synchronizes the libkrunfw
+      bundle and custom guest kernel on the verified Linux 6.12.103 LTS
+      tarball, replacing the stale 6.12.102 pin. Structural parity tests keep
       both consumers on one version/hash, and the existing freshness check
-      refuses a point release that trails kernel.org.
+      refuses a point release that trails kernel.org. The prior #2128 closeout
+      remains the history for the preceding 6.12.102 bump.
 
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned
