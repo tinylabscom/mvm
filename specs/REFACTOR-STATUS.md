@@ -179,7 +179,7 @@ for detailed scope and acceptance criteria.
         issues #2280 and #2281. The artifact-ledger slice of #2280 and the
         pure-Rust ext4 baseline report are landed. Whole-VMM warm-ready and
         first-command memory/fault instrumentation is also landed; its
-        real-host matrix, canonical budget/gates, candidate filesystem
+        native-host matrix and candidate filesystem
         comparison, and the adopt/decline decision remain open.
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images

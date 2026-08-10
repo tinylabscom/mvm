@@ -1528,7 +1528,11 @@ Then unify + retire the old paths:
   minor/major fault deltas, while macOS reports physical footprint with fault
   counters explicitly unavailable. Warm-lane validation refuses missing
   evidence. The real-host Firecracker/HVF matrix, canonical budget table, and
-  resulting gates remain open.
+  resulting native-host gates remain open. The report-level gate now requires
+  20 measured samples after two warm-ups, revalidates every raw sample, applies
+  the 200/250/300 ms prepared-cold budget and the independent 30/50 ms warm
+  target, and aggregates whole-VMM working-set/fault evidence without
+  zero-filling unavailable counters.
 - [x] **Filesystem-path baseline — issue #2281.**
   `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
   source identity, node composition, emitted ext4 size/digest, materializer
