@@ -310,30 +310,30 @@ pinned to TLS 1.3, `redirect::Policy::none`, streaming `.chunk()` under exact
 byte caps, plus blocking and async faces. That is the whole cost, stated
 before starting rather than discovered halfway.
 
-## Phase 3 — candidates requiring a product decision
+## Phase 3 — measured and declined
 
-Not scheduled. Each needs a call that is not the implementer's to make.
+Not a backlog. Every candidate below was measured, and each is **declined** for
+the reason given. The rule this plan follows is: remove or reimplement a
+dependency only where it can actually be cut. A dependency that is load-bearing,
+or whose removal buys a single-digit crate count in exchange for behaviour users
+rely on, is not a saving — it is a regression with a smaller lockfile.
 
-- [ ] **`tracing-subscriber` (−4 measured, not −7).** Its features were
-      measured too: dropping `json` alone is −1, `env-filter` alone is −1, and
-      `fmt`+`std` only is −4. None is free — `EnvFilter::try_from_default_env`
-      backs `RUST_LOG` in the CLI, and `.json()` is what the signer and
-      substitution-endpoint daemons log through. Taking the −4 means owning
-      env-filter directive semantics and a JSON layer, and regressing a
-      `RUST_LOG` contract users rely on. Poor ratio.
+Re-open one only with a new argument, not a re-reading of the same numbers.
 
-- [ ] **The −1 tail.** `keyring`, `ext4-view`, `xattr`, `bs58`, `aho-corasick`,
-      `hex`, `ipnet`, `uuid`, `lzma-rs`, `etherparse`, `sysinfo`, `leakguard`
-      are one crate each; `which` is −3 across 37 call sites and `url` is −2.
-      `keyring` is only −1 even on macOS — `security-framework` and the
-      `core-foundation`/`objc2` set are shared with `rustls-platform-verifier`.
-      Nothing here is worth bespoke code.
-- [ ] **`toml` (−6).** Investigated: bumping 0.8 → 0.9 is roughly a wash
-      (`toml_edit` is replaced by `toml_parser` + `toml_writer`), *not* a free
-      win. The lockfile currently carries both 0.8 and 0.9 — consolidating on
-      one retires a duplicate major, which is worth doing on its own. Replacing
-      TOML wholesale is a user-facing config-format change. **Product decision.**
-- [ ] **`hickory-proto` (−3), `keyring` (−1).** Small; not worth bespoke code.
+| candidate | Δ | declined because |
+|---|---|---|
+| `tree-sitter` + 4 grammars | −7 | They *are* the SDK-to-Nix translation. See non-goals. |
+| `toml` | −6 | User-facing config format. 0.8 → 0.9 measured as a wash (`toml_edit` swaps for `toml_parser` + `toml_writer`), so there is no free version bump either. |
+| `tracing-subscriber` | −4 | `EnvFilter::try_from_default_env` backs `RUST_LOG`, and `.json()` backs the signer and substitution-endpoint logs. Taking it means owning env-filter directive semantics forever and regressing a `RUST_LOG` contract. |
+| `hickory-proto` | −3 | DNS protocol code. Not a place for bespoke parsing. |
+| `which` | −3 | 37 call sites for a PATH walk; the churn exceeds the gain. |
+| `serde_jcs` | −2 | Audit-chain signing path — a canonicalization difference breaks signature verification silently rather than loudly. |
+| `url` | −2 | Feeds the SSRF guard's host comparison. A second opinion about what the host is *is* the bug. |
+| the −1 tail | −1 each | `keyring`, `ext4-view`, `xattr`, `bs58`, `aho-corasick`, `hex`, `ipnet`, `uuid`, `lzma-rs`, `etherparse`, `sysinfo`, `leakguard`. `keyring` is only −1 even on macOS: `security-framework` and the `core-foundation`/`objc2` set are shared with `rustls-platform-verifier`. |
+
+One item here is worth doing for a reason other than crate count: the lockfile
+carries `toml` at both 0.8 and 0.9, and consolidating retires a duplicate major.
+That is hygiene for `check-duplicate-majors`, not a closure saving.
 
 ---
 
