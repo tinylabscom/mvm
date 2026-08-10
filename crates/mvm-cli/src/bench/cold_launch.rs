@@ -14,8 +14,8 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::commands::vm::launch_sample::{
-    ArtifactPaths, BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchSample,
-    LaunchSubTimings, LaunchWork,
+    ArtifactPaths, BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchRootStrategy,
+    LaunchSample, LaunchSubTimings, LaunchWork,
 };
 pub use crate::commands::vm::phase_timing::{
     LaunchMode, LaunchSubMarks, RunPhaseTimings, SubPhase,
@@ -24,11 +24,12 @@ pub use mvm_core::launch_trace::TracePhase;
 
 use super::stats::percentile;
 
-/// Report schema version for [`ColdLaunchReport`]. Version 2 adds artifact
-/// byte measurements and optional resolved kernel-config evidence to each raw
-/// sample; older reports remain readable through serde defaults but are not
-/// comparable without the new substrate fields.
-pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 2;
+/// Report schema version for [`ColdLaunchReport`]. Version 2 added artifact
+/// byte measurements and optional resolved kernel-config evidence; version 3
+/// adds the selected root filesystem strategy. Older reports remain readable
+/// through serde defaults but are not comparable without the new substrate
+/// fields.
+pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 3;
 
 /// The measurement lanes the cold-launch contract reports independently.
 ///
@@ -361,6 +362,9 @@ pub struct LaunchContext {
     /// The VMM's own version where it is knowable without probing a foreign
     /// binary. `None` is "not resolved", never "unversioned".
     pub vmm_version: Option<String>,
+    /// Root filesystem strategy selected by the capability/security tier gate.
+    #[serde(default)]
+    pub root_strategy: Option<crate::commands::vm::launch_sample::LaunchRootStrategy>,
     pub sizing: GuestSizing,
     pub filesystem: Option<String>,
     pub artifacts: ArtifactPaths,
@@ -587,6 +591,7 @@ mod tests {
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             launch_mode: LaunchMode::Cold,
+            root_strategy: Some(LaunchRootStrategy::BlockExt4),
             sizing: GuestSizing {
                 cpus: 2,
                 memory_mib: 512,
@@ -611,6 +616,7 @@ mod tests {
                 arch: "aarch64".to_string(),
                 mvm_version: "0.1.0".to_string(),
                 vmm_version: Some("0.1.0".to_string()),
+                root_strategy: Some(LaunchRootStrategy::BlockExt4),
                 sizing: GuestSizing {
                     cpus: 2,
                     memory_mib: 512,

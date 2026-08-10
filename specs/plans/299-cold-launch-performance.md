@@ -143,13 +143,16 @@ rate, but are not silently included in the prepared-cold SLO.
       already refuses a prepared-cold sample that reports one.)
 - [x] Record backend, host architecture, kernel digest, initramfs digest,
       overlay digest, rootfs digest, VMM version, CPU count, memory setting,
-      filesystem, cache state, and run number with every sample.
+      filesystem, selected root filesystem strategy, cache state, and run
+      number with every sample.
       (The launch writes artifact **paths**, not digests — hashing inside the
       measured window would charge the launch for the measurement. The runner
       resolves digests, filesystem, and cache state afterwards into
       `LaunchContext`/`CacheState`. `vmm_version` is resolved only for the
       in-house VMM, which ships inside `mvmctl`; a third-party VMM records
-      `None` rather than a fabricated number.)
+      `None` rather than a fabricated number. The launch sample records the
+      tier-gated `virtiofs_root` or `block_ext4` strategy so filesystem
+      comparisons never mix security or capability tiers.)
 - [x] Add a benchmark report format containing raw samples and p50/p95/p99;
       do not store only summary numbers.
       (`ColdLaunchReport` carries `raw: Vec<ColdLaunchSample>` alongside

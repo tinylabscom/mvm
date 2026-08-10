@@ -17,7 +17,8 @@ for detailed scope and acceptance criteria.
       system-level kernel budget, and a measured filesystem-path decision. It
       introduces no second cache or snapshot graph. Follow-up measurements and
       live backend work remain open under issues #2280, #2281, #2194, #2195,
-      #2196, and #2199.
+      #2196, and #2199. Launch evidence now records the tier-selected root
+      filesystem strategy so filesystem comparisons cannot mix security tiers.
 
 ## In-flight plans
 - [x] Plan 2167 — durable agent session and event contract

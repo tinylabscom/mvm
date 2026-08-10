@@ -1064,6 +1064,7 @@ fn run_inner(
                 backend: backend.name(),
                 start_config: &start_config,
                 launch_mode,
+                root_strategy: boot.root_strategy,
                 mount_materialized: sub_marks
                     .recorded(crate::commands::vm::phase_timing::SubPhase::MountMaterialize),
                 phases,
@@ -1091,6 +1092,8 @@ struct LaunchSampleInputs<'a> {
     backend: &'a str,
     start_config: &'a VmStartConfig,
     launch_mode: crate::commands::vm::phase_timing::LaunchMode,
+    /// Root filesystem strategy selected by the run-path tier gate.
+    root_strategy: mvm_build::run_image::RootStrategy,
     /// Whether a mount image was materialized on this launch.
     mount_materialized: bool,
     phases: crate::commands::vm::phase_timing::RunPhaseTimings,
@@ -1120,6 +1123,7 @@ fn build_launch_sample(
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         launch_mode: inputs.launch_mode,
+        root_strategy: Some(inputs.root_strategy.into()),
         sizing: sample::GuestSizing {
             cpus: config.cpus,
             memory_mib: config.memory_mib,

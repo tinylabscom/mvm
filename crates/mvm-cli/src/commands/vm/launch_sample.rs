@@ -26,7 +26,7 @@ pub use mvm_core::launch_trace::LAUNCH_SAMPLE_ENV;
 
 /// Sample schema version. A consumer that reads a different version refuses
 /// the sample as incomparable rather than mis-reading it.
-pub const LAUNCH_SAMPLE_SCHEMA_VERSION: u32 = 1;
+pub const LAUNCH_SAMPLE_SCHEMA_VERSION: u32 = 2;
 
 /// Cargo profile the `mvmctl` binary that produced a sample was built with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +157,25 @@ pub struct ArtifactPaths {
     pub rootfs: Option<String>,
 }
 
+/// Root filesystem strategy selected for this launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchRootStrategy {
+    /// Boot the unpacked OCI tree through a read-only virtio-fs root.
+    VirtiofsRoot,
+    /// Boot a materialized ext4 block image, optionally protected by dm-verity.
+    BlockExt4,
+}
+
+impl From<mvm_build::run_image::RootStrategy> for LaunchRootStrategy {
+    fn from(strategy: mvm_build::run_image::RootStrategy) -> Self {
+        match strategy {
+            mvm_build::run_image::RootStrategy::VirtiofsRoot => Self::VirtiofsRoot,
+            mvm_build::run_image::RootStrategy::BlockExt4 => Self::BlockExt4,
+        }
+    }
+}
+
 /// Guest sizing the launch was configured with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -264,6 +283,9 @@ pub struct LaunchSample {
     pub os: String,
     pub arch: String,
     pub launch_mode: LaunchMode,
+    /// The root filesystem path selected after the security/capability tier gate.
+    #[serde(default)]
+    pub root_strategy: Option<LaunchRootStrategy>,
     pub sizing: GuestSizing,
     pub artifacts: ArtifactPaths,
     pub work: LaunchWork,
@@ -333,6 +355,7 @@ mod tests {
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             launch_mode: LaunchMode::Cold,
+            root_strategy: Some(LaunchRootStrategy::VirtiofsRoot),
             sizing: GuestSizing {
                 cpus: 2,
                 memory_mib: 512,
@@ -388,6 +411,18 @@ mod tests {
         assert!(
             err.to_string().contains("surprise"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn root_strategy_mapping_preserves_the_security_tier() {
+        assert_eq!(
+            LaunchRootStrategy::from(mvm_build::run_image::RootStrategy::VirtiofsRoot),
+            LaunchRootStrategy::VirtiofsRoot
+        );
+        assert_eq!(
+            LaunchRootStrategy::from(mvm_build::run_image::RootStrategy::BlockExt4),
+            LaunchRootStrategy::BlockExt4
         );
     }
 

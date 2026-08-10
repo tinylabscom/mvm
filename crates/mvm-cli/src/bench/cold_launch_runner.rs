@@ -240,6 +240,7 @@ fn cold_launch_sample(
             arch: sample.arch.clone(),
             mvm_version: sample.mvm_version.clone(),
             vmm_version: vmm_version_for(&sample.backend, &sample.mvm_version),
+            root_strategy: sample.root_strategy,
             sizing: sample.sizing,
             filesystem: host_filesystem(Path::new(&mvm_core::config::mvm_home())),
             artifacts: sample.artifacts.clone(),
@@ -384,8 +385,8 @@ fn host_filesystem(_path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::commands::vm::launch_sample::{
-        BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchSubTimings, LaunchWork,
-        write_sample,
+        BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchRootStrategy,
+        LaunchSubTimings, LaunchWork, write_sample,
     };
     use crate::commands::vm::phase_timing::{LaunchMode, RunPhaseTimings};
 
@@ -398,6 +399,7 @@ mod tests {
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             launch_mode: LaunchMode::Cold,
+            root_strategy: Some(LaunchRootStrategy::BlockExt4),
             sizing: GuestSizing {
                 cpus: 2,
                 memory_mib: 512,
@@ -555,6 +557,10 @@ tmpfs /tmp tmpfs rw 0 0
             lane_sample.context.vmm_version,
             Some("9.9.9".to_string()),
             "the in-house VMM ships inside mvmctl, so its version is known"
+        );
+        assert_eq!(
+            lane_sample.context.root_strategy,
+            Some(LaunchRootStrategy::BlockExt4)
         );
         assert!(lane_sample.cache.artifacts_cached);
         assert_eq!(lane_sample.phases.total_ms, 148.0);

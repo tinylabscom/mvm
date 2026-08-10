@@ -114,7 +114,9 @@ effective node composition, source file bytes, emitted ext4 size/digest,
 materializer format version, and separate hash/walk/build timings. Candidate
 filesystem paths must use the same fixture identity and report equivalent
 preparation, first-file access, working-set, and density evidence before the
-existing ext4 path can be replaced.
+existing ext4 path can be replaced. Cold-launch samples now also carry the
+tier-selected `virtiofs_root` or `block_ext4` strategy, so those measurements
+remain comparable only within the same security and capability tier.
 
 ## Security and resource invariants
 
