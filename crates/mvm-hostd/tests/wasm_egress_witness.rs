@@ -8,7 +8,7 @@
 //! `secret.substituted` audit entry lands and the chain verifies.
 //!
 //! Deliberate deviation from a literal "spawn the OS subprocess" witness:
-//! the production forward leg (`ReqwestForwarder`) refuses loopback/private
+//! the production forward leg (`HardenedForwarder`) refuses loopback/private
 //! destinations by construction (an SSRF hardening control with no test
 //! escape hatch), so a hermetic test cannot drive a real destination through
 //! it — confirmed by the existing subprocess-level tests, which only ever
@@ -69,7 +69,7 @@ fn policy_dest() -> SocketAddr {
 }
 
 /// Test-only `Forwarder`: dials the mock destination directly over a real
-/// TCP socket. Production's `ReqwestForwarder` refuses loopback/private
+/// TCP socket. Production's `HardenedForwarder` refuses loopback/private
 /// destinations by construction (`SsrfGuard`), so it cannot reach a locally
 /// bound test double; this stands in for exactly that one wire hop while
 /// every governance decision (registry, resolver, gate, audit) stays on the

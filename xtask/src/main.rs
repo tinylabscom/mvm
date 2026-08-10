@@ -25,6 +25,7 @@ mod check_deferrals;
 mod check_doc_claims;
 mod check_dormant_controls;
 mod check_duplicate_majors;
+mod check_feature_closure_budget;
 mod check_file_size;
 mod check_forbidden_deps;
 mod check_guest_agent_in_all_images;
@@ -147,6 +148,10 @@ fn main() -> Result<()> {
         Some("check-closure-budget") => {
             let workspace = workspace_root();
             check_closure_budget::run(&workspace)
+        }
+        Some("check-feature-closure-budget") => {
+            let workspace = workspace_root();
+            check_feature_closure_budget::run(&workspace)
         }
         Some("check-duplicate-majors") => {
             let workspace = workspace_root();

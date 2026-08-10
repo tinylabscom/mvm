@@ -58,7 +58,7 @@ fn url_for(addr: SocketAddr) -> String {
 async fn fixed_length_body_round_trips() {
     let (addr, srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(&resp.bytes().await.unwrap()[..], b"hello");
 
@@ -76,7 +76,7 @@ async fn chunked_body_is_decoded_across_chunks() {
     )
     .await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(&resp.bytes().await.unwrap()[..], b"hello world");
 }
 
@@ -88,7 +88,7 @@ async fn chunked_trailers_are_consumed() {
     )
     .await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(&resp.bytes().await.unwrap()[..], b"abc");
 }
 
@@ -96,7 +96,7 @@ async fn chunked_trailers_are_consumed() {
 async fn body_without_framing_headers_reads_until_close() {
     let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\n\r\nstreamed-to-eof").await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(&resp.bytes().await.unwrap()[..], b"streamed-to-eof");
 }
 
@@ -107,7 +107,7 @@ async fn a_truncated_fixed_body_is_an_error_not_a_short_read() {
     let (addr, _srv) =
         serve_raw_then(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhello", true).await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     let err = resp.bytes().await.unwrap_err();
     assert!(
         matches!(err, Error::IncompleteBody { .. }),
@@ -122,7 +122,7 @@ async fn content_length_plus_transfer_encoding_is_refused() {
     )
     .await;
     let c = client_for(addr);
-    let err = c.get(&url_for(addr)).send().await.unwrap_err();
+    let err = c.get(url_for(addr)).send().await.unwrap_err();
     assert!(matches!(err, Error::Parse(_)), "{err:?}");
 }
 
@@ -131,7 +131,7 @@ async fn the_body_cap_is_enforced_by_the_reader() {
     let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world").await;
     let c = client_for(addr);
     let resp = c
-        .get(&url_for(addr))
+        .get(url_for(addr))
         .max_response_bytes(4)
         .send()
         .await
@@ -148,7 +148,7 @@ async fn a_body_exactly_at_the_cap_is_returned() {
     let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").await;
     let c = client_for(addr);
     let resp = c
-        .get(&url_for(addr))
+        .get(url_for(addr))
         .max_response_bytes(5)
         .send()
         .await
@@ -166,7 +166,7 @@ async fn the_cap_applies_to_a_chunked_body_too() {
     .await;
     let c = client_for(addr);
     let resp = c
-        .get(&url_for(addr))
+        .get(url_for(addr))
         .max_response_bytes(6)
         .send()
         .await
@@ -185,7 +185,7 @@ async fn a_redirect_is_returned_not_followed() {
     )
     .await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::FOUND);
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
@@ -199,7 +199,7 @@ async fn a_head_response_does_not_wait_for_a_body() {
     // Reading it would block until the server closed.
     let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n").await;
     let c = client_for(addr);
-    let resp = c.head(&url_for(addr)).send().await.unwrap();
+    let resp = c.head(url_for(addr)).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(resp.bytes().await.unwrap().is_empty());
 }
@@ -208,7 +208,7 @@ async fn a_head_response_does_not_wait_for_a_body() {
 async fn a_204_carries_no_body() {
     let (addr, _srv) = serve_raw(b"HTTP/1.1 204 No Content\r\n\r\n").await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert!(resp.bytes().await.unwrap().is_empty());
 }
@@ -218,7 +218,7 @@ async fn request_body_and_headers_reach_the_server() {
     let (addr, srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
     let c = client_for(addr);
     let resp = c
-        .post(&url_for(addr))
+        .post(url_for(addr))
         .bearer_auth("s3cret")
         .json(&serde_json::json!({"k": "v"}))
         .send()
@@ -238,7 +238,7 @@ async fn request_body_and_headers_reach_the_server() {
 async fn basic_auth_is_base64_encoded() {
     let (addr, srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let c = client_for(addr);
-    c.get(&url_for(addr))
+    c.get(url_for(addr))
         .basic_auth("user", Some("pass"))
         .send()
         .await
@@ -255,7 +255,7 @@ async fn basic_auth_is_base64_encoded() {
 async fn query_pairs_are_appended_and_encoded() {
     let (addr, srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let c = client_for(addr);
-    c.get(&url_for(addr))
+    c.get(url_for(addr))
         .query(&[("q", "a b&c"), ("n", "1")])
         .send()
         .await
@@ -275,7 +275,7 @@ async fn streaming_chunks_arrive_incrementally() {
     )
     .await;
     let c = client_for(addr);
-    let mut resp = c.get(&url_for(addr)).send().await.unwrap();
+    let mut resp = c.get(url_for(addr)).send().await.unwrap();
     let mut seen = Vec::new();
     while let Some(chunk) = resp.chunk().await.unwrap() {
         seen.push(String::from_utf8(chunk.to_vec()).unwrap());
@@ -287,7 +287,7 @@ async fn streaming_chunks_arrive_incrementally() {
 async fn a_garbage_response_head_is_refused() {
     let (addr, _srv) = serve_raw(b"NOT-HTTP AT ALL\r\n\r\n").await;
     let c = client_for(addr);
-    let err = c.get(&url_for(addr)).send().await.unwrap_err();
+    let err = c.get(url_for(addr)).send().await.unwrap_err();
     assert!(matches!(err, Error::Parse(_)), "{err:?}");
 }
 
@@ -295,7 +295,7 @@ async fn a_garbage_response_head_is_refused() {
 async fn a_connection_closed_before_the_head_is_refused() {
     let (addr, _srv) = serve_raw_then(b"HTTP/1.1 200 OK\r\nContent-Len", true).await;
     let c = client_for(addr);
-    let err = c.get(&url_for(addr)).send().await.unwrap_err();
+    let err = c.get(url_for(addr)).send().await.unwrap_err();
     assert!(matches!(err, Error::Parse(_)), "{err:?}");
 }
 
@@ -311,7 +311,7 @@ async fn a_timeout_fires_when_the_server_never_answers() {
     });
     let c = client_for(addr);
     let err = c
-        .get(&url_for(addr))
+        .get(url_for(addr))
         .timeout(std::time::Duration::from_millis(150))
         .send()
         .await
@@ -329,7 +329,7 @@ async fn text_and_json_decode_the_body() {
         name: String,
     }
     let body: Body = c
-        .get(&url_for(addr))
+        .get(url_for(addr))
         .send()
         .await
         .unwrap()
@@ -347,7 +347,7 @@ async fn text_and_json_decode_the_body() {
 async fn content_length_reports_the_declaration_and_does_not_move_as_the_body_is_read() {
     let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world").await;
     let c = client_for(addr);
-    let mut resp = c.get(&url_for(addr)).send().await.unwrap();
+    let mut resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(resp.content_length(), Some(11));
     let _ = resp.chunk().await.unwrap();
     assert_eq!(
@@ -363,7 +363,7 @@ async fn a_declared_zero_length_is_zero_not_absent() {
     // as "no declaration" rather than "declared empty".
     let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(resp.content_length(), Some(0));
 }
 
@@ -373,7 +373,7 @@ async fn a_head_response_still_reports_its_declared_length() {
     // and is what a size pre-check consumes.
     let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n").await;
     let c = client_for(addr);
-    let resp = c.head(&url_for(addr)).send().await.unwrap();
+    let resp = c.head(url_for(addr)).send().await.unwrap();
     assert_eq!(resp.content_length(), Some(4096));
     assert!(resp.bytes().await.unwrap().is_empty());
 }
@@ -384,10 +384,138 @@ async fn a_chunked_body_declares_no_length() {
         serve_raw(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")
             .await;
     let c = client_for(addr);
-    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    let resp = c.get(url_for(addr)).send().await.unwrap();
     assert_eq!(
         resp.content_length(),
         None,
         "a chunked body declares no length, so a pre-read cap check cannot rely on one"
     );
+}
+
+// ---- blocking face ----
+//
+// Driven over real sockets like the async tests. `serve_raw` needs a runtime to
+// bind its listener, so each test hands the address to a blocking call made
+// from a plain thread — which is the shape the CLI callers have.
+
+fn blocking_client_for(addr: SocketAddr) -> mvm_http::blocking::Client {
+    mvm_http::blocking::Client::builder()
+        .resolver(Arc::new(
+            PinnedResolver::new().with("test.local", vec![addr]),
+        ))
+        .root_store(rustls::RootCertStore::empty())
+        .user_agent("mvm-http-blocking-test")
+        .build()
+        .unwrap()
+}
+
+/// Bind + serve on a dedicated runtime thread, returning the address.
+fn serve_raw_blocking(reply: &'static [u8]) -> SocketAddr {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let (addr, srv) = serve_raw(reply).await;
+            tx.send(addr).unwrap();
+            let _ = srv.await;
+        });
+    });
+    rx.recv().unwrap()
+}
+
+#[test]
+fn blocking_get_returns_the_body() {
+    let addr = serve_raw_blocking(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+    let c = blocking_client_for(addr);
+    let resp = c.get(url_for(addr)).send().unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.text().unwrap(), "hello");
+}
+
+#[test]
+fn blocking_error_for_status_refuses_a_404() {
+    let addr = serve_raw_blocking(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+    let c = blocking_client_for(addr);
+    let err = c
+        .get(url_for(addr))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap_err();
+    assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+}
+
+#[test]
+fn blocking_decodes_a_chunked_body() {
+    let addr = serve_raw_blocking(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n",
+    );
+    let c = blocking_client_for(addr);
+    assert_eq!(
+        c.get(url_for(addr)).send().unwrap().text().unwrap(),
+        "foobar"
+    );
+}
+
+#[test]
+fn blocking_honours_the_body_cap() {
+    // The body streams, so the cap is enforced as it is read rather than at
+    // `send` — the same shape as the async face. `send` returning Ok is the
+    // head having arrived, not the body having been accepted.
+    let addr = serve_raw_blocking(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world");
+    let c = blocking_client_for(addr);
+    let err = c
+        .get(url_for(addr))
+        .max_response_bytes(4)
+        .send()
+        .expect("head arrives")
+        .bytes()
+        .unwrap_err();
+    assert!(matches!(err, Error::BodyTooLarge { limit: 4 }), "{err:?}");
+}
+
+#[test]
+fn blocking_response_streams_through_io_read() {
+    // `http_forward`'s Linux relay hands the guest an upstream response
+    // incrementally via `io::Read`; buffering would delay an SSE or long-poll
+    // body until completion.
+    use std::io::Read as _;
+    let addr = serve_raw_blocking(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n",
+    );
+    let c = blocking_client_for(addr);
+    let mut resp = c.get(url_for(addr)).send().unwrap();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 2];
+    loop {
+        let n = resp.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(out, b"foobar");
+}
+
+#[test]
+fn blocking_io_copy_drains_the_whole_body() {
+    // The other shape the relay uses, when it is not re-chunking.
+    let addr = serve_raw_blocking(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world");
+    let c = blocking_client_for(addr);
+    let mut resp = c.get(url_for(addr)).send().unwrap();
+    let mut out: Vec<u8> = Vec::new();
+    std::io::copy(&mut resp, &mut out).unwrap();
+    assert_eq!(out, b"hello world");
+}
+
+#[test]
+fn blocking_parses_json() {
+    let addr =
+        serve_raw_blocking(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\n{\"name\":\"mvm\"}");
+    let c = blocking_client_for(addr);
+    let v: serde_json::Value = c.get(url_for(addr)).send().unwrap().json().unwrap();
+    assert_eq!(v["name"], "mvm");
 }

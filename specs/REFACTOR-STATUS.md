@@ -1031,13 +1031,16 @@ for detailed scope and acceptance criteria.
   - [x] Phase 1 — drop rcgen's `x509-parser` feature (the ASN.1 tower and the
         closure's last `nom` 7) and replace `rayon` with an order-preserving
         scoped-thread `par_map`; closure 286 → 263, budget ratcheted
-  - [ ] Phase 2 — `mvm-http` over rustls to retire `reqwest` (−27), gated on
-        differential + fuzz coverage because it lands on the egress
-        re-origination and SSRF-hardening paths
-  - [ ] Phase 3 — the product decisions: tree-sitter grammar gating,
-        `tracing-subscriber`, `toml`, and the deferred `serde_jcs`
-  - [ ] Phase 4 — a lockfile-count ratchet, so the ~62 `wasmtime`-family
-        packages an off-by-default feature adds stay visible to `cargo deny`
+  - [x] Phase 2 — `mvm-http` over rustls retires `reqwest`; measured −20, not
+        the −27 the raw subtree suggested. Differential harness against reqwest
+        landed first and stays as a dev-dep oracle. Closure 262 → 242
+  - [ ] Phase 3 — the product decisions: `tracing-subscriber`, `toml`, and the
+        deferred `serde_jcs`. tree-sitter grammar gating is **struck** — the
+        grammars are the SDK-to-Nix translation, not a tradeable dependency
+  - [x] Phase 4 — `check-feature-closure-budget` bounds the all-features
+        closure at 468, so the ~62 `wasmtime`-family packages behind an
+        off-by-default feature stay observed. Not a lockfile count: measured,
+        that number does not move when a dependency is removed (~120 orphans)
 
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
   (`specs/plans/313-egress-token-accounting-and-compaction.md`)

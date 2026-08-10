@@ -6,7 +6,7 @@
 //! bearer token can never leave the host in the clear to a remote fleet.
 
 use async_trait::async_trait;
-use reqwest::{StatusCode, Url};
+use mvm_http::{StatusCode, Url};
 
 use crate::client::MvmClient;
 use crate::client::dto::{
@@ -55,7 +55,7 @@ fn is_loopback(url: &Url) -> bool {
 /// URL, and the bearer token. Construction is fail-closed — a cleartext remote
 /// base URL is rejected here, before any request or token exposure.
 pub struct GatewayBackend {
-    http: reqwest::Client,
+    http: mvm_http::Client,
     base: Url,
     token: String,
 }
@@ -76,7 +76,7 @@ impl GatewayBackend {
             reason: format!("invalid gateway base url: {e}"),
         })?;
         endpoint_guard(&base)?;
-        let http = reqwest::Client::builder()
+        let http = mvm_http::Client::builder()
             .build()
             .map_err(|e| MvmError::Backend {
                 reason: format!("building http client: {e}"),
@@ -117,7 +117,7 @@ impl GatewayBackend {
     }
 
     /// Attach the bearer credential. Endpoint-bound: only ever sent to `base`.
-    fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn authed(&self, req: mvm_http::RequestBuilder) -> mvm_http::RequestBuilder {
         req.bearer_auth(&self.token)
     }
 }
@@ -370,7 +370,7 @@ struct AttachRemoteVolumeBody<'a> {
 
 impl GatewayBackend {
     async fn decode_json<T: serde::de::DeserializeOwned>(
-        response: reqwest::Response,
+        response: mvm_http::Response,
         id: &str,
         operation: &str,
     ) -> Result<T> {

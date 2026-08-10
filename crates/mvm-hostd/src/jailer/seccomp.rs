@@ -91,7 +91,7 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("set_robust_list", libc::SYS_set_robust_list),
     // ── substitution-endpoint additions ────────────────────────────
     // The endpoint runs a multi-thread tokio runtime and a rustls TLS
-    // forward leg (reqwest, rustls-native-certs) that the bridge does
+    // forward leg (mvm-http, rustls-native-certs) that the bridge does
     // not. These cover thread creation, the glibc allocator + resolver,
     // socket-option negotiation, and cert-store directory reads. Erring
     // toward inclusion: a missing syscall SIGSYS-kills the endpoint

@@ -3,8 +3,8 @@
 //! to the real destination, returning the response bytes verbatim.
 //!
 //! Stage 1b is `http` only. We forward over a raw TCP stream rather than a
-//! reqwest round-trip so the destination's response (chunked encoding,
-//! trailers, exact header casing) reaches the guest BYTE-FOR-BYTE — a reqwest
+//! client round-trip so the destination's response (chunked encoding,
+//! trailers, exact header casing) reaches the guest BYTE-FOR-BYTE — a decoded
 //! decode-then-reserialize would mangle it. TLS termination (https) is Stage 2.
 //!
 //! The accept loop that drives this (`SubstitutionService::serve_terminator`)

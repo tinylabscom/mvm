@@ -129,7 +129,7 @@ pub fn stage0_cache_dir() -> PathBuf {
 
 /// Ensure every entry in `assets` is present in the cache dir
 /// with the matching SHA-256.
-/// Missing assets are fetched via `reqwest::blocking::get`;
+/// Missing assets are fetched via `mvm_http::blocking::get`;
 /// mismatched ones are re-fetched (the existing file is moved
 /// aside before the new one writes, so an interrupted download
 /// never leaves a half-trusted file in place).
@@ -552,7 +552,7 @@ fn fetch_to(target: &Path, asset: &BootstrapAsset) -> Result<()> {
     ));
 
     eprintln!("[mvm] downloading {} -> {}", asset.url, target.display());
-    let resp = reqwest::blocking::get(asset.url)
+    let resp = mvm_http::blocking::get(asset.url)
         .with_context(|| format!("GET {}", asset.url))?
         .error_for_status()
         .with_context(|| format!("GET {} returned non-success status", asset.url))?;

@@ -38,9 +38,7 @@ use crate::supervisor::secret_audit::{
     emit_rewrite_proof, emit_secret_placeholder_dropped, emit_secret_redacted,
     emit_secret_substituted,
 };
-use crate::supervisor::tools::http_hardening::{
-    hardened_client_builder_no_dns, resolve_ssrf_safe_ips,
-};
+use crate::supervisor::tools::http_hardening::hardened_client_builder;
 
 /// 16 MiB cap on a single routed request/response frame.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -555,7 +553,7 @@ pub trait Forwarder: Send + Sync {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError>;
 }
 
-/// Flatten an error and its `source()` chain into one message. reqwest wraps
+/// Flatten an error and its `source()` chain into one message. The client wraps
 /// the underlying connect/TLS/resolver cause as a source; the outer
 /// `to_string()` alone is just "error sending request for url (...)", which
 /// hides whether a forward failed on DNS, the SSRF filter, TLS, or timeout.
@@ -570,48 +568,30 @@ fn err_chain(e: &dyn std::error::Error) -> String {
     out
 }
 
-/// Production forwarder: a hardened reqwest client (TLS 1.3 min, no redirects)
-/// makes the real request. Unlike the HTTPS-only tool clients, the egress
-/// forward target can be plain `http` (the guest's request scheme), so the
-/// client is built **per request**: we resolve the host, SSRF-filter the IPs,
-/// and pin them on the URL's *real* port via `resolve_to_addrs` — the shared
-/// `SsrfFilteringResolver` hardcodes 443 and would send an `http` forward to the
-/// HTTPS port.
-pub struct ReqwestForwarder {
+/// Production forwarder: a hardened client (TLS 1.3 floor, no redirects) makes
+/// the real request through the shared SSRF-filtering resolver.
+///
+/// This used to resolve and SSRF-filter the host by hand and pin the safe
+/// addresses on the URL's real port, because the shared resolver hardcoded 443
+/// — reqwest's `Resolve` never saw the port, and an `http` forward would have
+/// gone to the HTTPS port. `mvm_http::Resolve` receives `(host, port)`, so the
+/// shared resolver handles it and the hand-rolled path is gone.
+pub struct HardenedForwarder {
     timeout_secs: u64,
 }
 
-impl ReqwestForwarder {
+impl HardenedForwarder {
     pub fn new(timeout_secs: u64) -> Result<Self, ForwardError> {
         Ok(Self { timeout_secs })
     }
 }
 
 #[async_trait]
-impl Forwarder for ReqwestForwarder {
+impl Forwarder for HardenedForwarder {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
-        let method = reqwest::Method::from_bytes(req.method.as_bytes())
+        let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
-        // Resolve + SSRF-filter the host ourselves, then pin reqwest to the safe
-        // IPs on the URL's real port (default 80 for http, 443 for https, or an
-        // explicit port). Keeps SSRF filtering without the resolver's 443 bug.
-        let url = Url::parse(&req.url)
-            .map_err(|e| ForwardError::Failed(format!("bad url {}: {e}", req.url)))?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| ForwardError::Failed(format!("url {} has no host", req.url)))?
-            .to_string();
-        let port = url
-            .port_or_known_default()
-            .ok_or_else(|| ForwardError::Failed(format!("url {} has no port", req.url)))?;
-        let addrs: Vec<std::net::SocketAddr> = resolve_ssrf_safe_ips(&host)
-            .await
-            .map_err(ForwardError::Failed)?
-            .into_iter()
-            .map(|ip| std::net::SocketAddr::new(ip, port))
-            .collect();
-        let client = hardened_client_builder_no_dns(self.timeout_secs)
-            .resolve_to_addrs(&host, &addrs)
+        let client = hardened_client_builder(self.timeout_secs)
             .build()
             .map_err(|e| ForwardError::Failed(e.to_string()))?;
         let mut rb = client.request(method, &req.url);
@@ -774,7 +754,7 @@ impl SubstitutionService {
 
     /// Assemble a ready-to-serve service from an admitted plan's secret
     /// bindings: build the registry ([`assemble_registry`]) and a
-    /// hardened-reqwest forwarder, and resolve values through the caller-supplied
+    /// hardened forwarder, and resolve values through the caller-supplied
     /// [`SecretResolver`] (a [`LocalResolver`] over the tenant's secret store by
     /// default, or a remote fleet-secrets resolver). Returns the service plus the
     /// `(guest name, placeholder)` pairs the supervisor injects into the guest.
@@ -794,7 +774,7 @@ impl SubstitutionService {
             recorder,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
-        let forwarder: Arc<dyn Forwarder> = Arc::new(ReqwestForwarder::new(forward_timeout_secs)?);
+        let forwarder: Arc<dyn Forwarder> = Arc::new(HardenedForwarder::new(forward_timeout_secs)?);
         let mut service = Self::new(Arc::new(registry), resolver, forwarder).with_tenant(tenant);
         service = service.with_redaction_policy(redaction);
         service = service.with_reversible_replacement_policy(reversible_replacement);
@@ -1026,7 +1006,7 @@ impl SubstitutionService {
 
     /// `:443`: peek the ClientHello SNI, then **terminate** TLS for a
     /// bound host (mint a leaf under the per-VM intermediate, decrypt, substitute,
-    /// re-originate over the hardened reqwest forwarder) or **splice** an unbound
+    /// re-originate over the hardened forwarder) or **splice** an unbound
     /// host straight through without decrypting. Fail-closed: a bound host whose
     /// substitution refuses closes the socket without forwarding (claim 12).
     async fn handle_https_terminator(
@@ -1087,9 +1067,9 @@ impl SubstitutionService {
                     .build(),
                 &mut carried,
                 |prepared| {
-                    // The upstream leg reuses the hardened reqwest forwarder (TLS
+                    // The upstream leg reuses the hardened forwarder (TLS
                     // + system roots + SSRF filter); block_on is safe on a
-                    // blocking thread. reqwest decoded the body, so we re-frame.
+                    // blocking thread. The client decoded the body, so we re-frame.
                     let resp = handle
                         .block_on(forwarder.forward(prepared.clone()))
                         .map_err(|e| anyhow::anyhow!("upstream forward: {e}"))?;
