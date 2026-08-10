@@ -336,11 +336,11 @@ verifies that volume before launch and refuses a tampered one, and `--prod`
 fails closed on high/critical findings or a stub SBOM. A lockfile entry with no
 integrity hash is rejected at compile time.
 
-`mvmctl deploy`, `mvmctl watch`, and the remaining attested-image steps are
-**designed but not yet built** — see
-[plan 291](specs/plans/291-develop-build-deploy-attested.md). Until they land,
-the declared route above is the supported way to get a dependency into an
-attested workload.
+`mvmctl deploy` packages the local attested deployment, while `mvmctl watch`
+rebuilds a workload when its local inputs change. Both commands are available
+in the CLI; use `mvmctl deploy --help` and `mvmctl watch --help` for their
+required inputs and limits. The declared route above remains the supported way
+to get a dependency into an attested workload.
 
 Full walkthrough: [From dev loop to attested image](public/src/content/docs/guides/develop-to-attested.md).
 
@@ -662,6 +662,13 @@ attestation.
 - Audit chain verification: `mvmctl trust audit verify` (exits nonzero on drift)
 
 ## Documentation
+
+`just bdd` resolves every `mvmctl` example against the real command tree, checks
+every CLI option including hidden internal options, exercises the SDK fixtures,
+and rejects new README code blocks without a corresponding test witness. Static
+install, Nix, and embedding examples are checked for their required contract
+tokens; live boot, egress, and guest-I/O behavior remains covered by tagged
+integration scenarios.
 
 - [Getting started](public/src/content/docs/getting-started/) ·
   [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
