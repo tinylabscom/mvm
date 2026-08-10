@@ -221,7 +221,7 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
             &ledger,
             None,
             None,
-            mvm_core::plan::Variant::Dev,
+            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         ) {
             Ok(admitted) => {
                 admitted_count += 1;

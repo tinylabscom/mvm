@@ -986,7 +986,7 @@ fn emit_oci_run_admission(
         &ledger,
         None,
         None,
-        mvm_core::plan::Variant::Dev,
+        mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
     )?;
     let signer = load_or_init().context("loading host signer for OCI provenance audit")?;
     let emitter =

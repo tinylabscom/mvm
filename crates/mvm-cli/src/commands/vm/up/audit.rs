@@ -183,7 +183,7 @@ chain_signing = true
             &ledger,
             Some(keys_dir.path()),
             None,
-            mvm_core::plan::Variant::Dev,
+            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
         .expect("admit")
         .plan()
@@ -295,7 +295,7 @@ stream_destinations = ["file://{}"]
             &ledger,
             Some(keys_dir.path()),
             None,
-            mvm_core::plan::Variant::Dev,
+            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
         .expect("admit")
         .plan()
@@ -406,7 +406,7 @@ chain_signing = false
             &ledger,
             Some(keys_dir.path()),
             None,
-            mvm_core::plan::Variant::Dev,
+            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
         .expect("admit")
         .plan()
@@ -492,7 +492,7 @@ chain_signing = false
             &ledger,
             Some(keys_dir.path()),
             None,
-            mvm_core::plan::Variant::Dev,
+            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
         .expect("admit")
         .plan()
@@ -598,7 +598,7 @@ disabled_inspectors = ["ssrf_guarrd"]
             &ledger,
             Some(keys_dir.path()),
             None,
-            mvm_core::plan::Variant::Dev,
+            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
         .expect("admit")
         .plan()
@@ -710,7 +710,7 @@ port_hi  = 443
             &ledger,
             Some(keys_dir.path()),
             None,
-            mvm_core::plan::Variant::Dev,
+            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
         .expect("admit")
         .plan()

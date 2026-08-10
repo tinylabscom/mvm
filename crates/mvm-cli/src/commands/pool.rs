@@ -261,7 +261,7 @@ fn admit_standby_parent_plan(
         &ledger,
         None,
         None,
-        mvm_core::plan::Variant::Dev,
+        mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
     )
     .context("admitting a plan for the captured standby parent")
 }

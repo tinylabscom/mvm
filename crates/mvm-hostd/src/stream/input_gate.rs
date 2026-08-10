@@ -2224,7 +2224,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(keys.path()),
             None,
-            mvm_core::plan::Variant::Dev,
+            crate::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
         .expect("the fixture input admits");
         assert!(matches!(
@@ -2240,7 +2240,7 @@ mod tests {
             &InMemoryNonceLedger::new(),
             Some(keys.path()),
             None,
-            mvm_core::plan::Variant::Dev,
+            crate::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
         )
         .expect("the granting input admits");
         let session =

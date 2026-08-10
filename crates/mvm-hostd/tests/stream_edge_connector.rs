@@ -78,7 +78,7 @@ fn admitted_with_grant(vm: &str) -> AdmittedPlan {
         &InMemoryNonceLedger::new(),
         None,
         None,
-        mvm_core::plan::Variant::Dev,
+        mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
     )
     .expect("the fixture input admits")
 }

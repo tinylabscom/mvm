@@ -99,7 +99,7 @@ pub fn admit_probe_plan(
         &ledger,
         keys_dir,
         None,
-        mvm_core::plan::Variant::Dev,
+        mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
     )
     .context("admitting probe plan")
 }
