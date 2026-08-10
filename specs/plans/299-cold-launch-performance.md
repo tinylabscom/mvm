@@ -146,6 +146,13 @@ rate, but are not silently included in the prepared-cold SLO.
       missing span would pass exactly the contamination the gate exists to
       catch. A warm claim is refused on the launch mode as well as the flag, so
       one signal going missing cannot let it through.)
+- [x] Add an opt-in lifecycle-density benchmark that performs 1,000 start/stop
+      operations, defaults to HVF, reports independent start and stop
+      distributions plus wall-clock throughput, and accepts bounded batches
+      across the real microVM backend selectors.
+      (`tests/microvm_lifecycle_bench.rs`; the test remains disabled unless
+      `MVM_LIFECYCLE_BENCH=1` is set and requires explicit prepared kernel and
+      rootfs paths.)
 
 **Exit gate:** the report can distinguish the 430-second mount-image cost from
 the actual approximately 1.2-second backend-start cost, and the baseline is
