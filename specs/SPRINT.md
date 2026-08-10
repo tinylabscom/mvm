@@ -10,6 +10,29 @@
 
 ## Current issue delivery
 
+- [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
+      plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
+      rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three
+      per-launch costs do not appear at that size. On `python:3.12` — 1.1 GB,
+      116x larger, same code path, same warm cache — a profile attributes
+      ~557 ms to re-hashing the cached rootfs for the claim-14 provenance record
+      (`emit_oci_run_admission` calls the uncached `sha256_file` while every
+      sibling admission path uses `sha256_file_cached`, and the sidecar holding
+      the identical digest is already on disk beside the file), ~67 ms to a `ps`
+      subprocess reaping orphaned VM helpers from inside the image-resolution
+      path, and ~28 ms to an `O(n*m)` `windows().any()` scan for dm-verity
+      markers across the whole 8.2 MB `vmlinux`. The microVM itself is 74 ms of
+      the run. The re-hash does not shrink in release — it is already hardware
+      SHA-256 at ~2.0 GB/s — so optimization level is not the lever. The Plan 299
+      lane gate cannot catch any of this: it refuses a sample that pulled, built,
+      materialized a mount image, or claimed a standby, and a re-hash of a cached
+      artifact is none of those, so the sample reports itself clean while scaling
+      with image size. Plan 311 fixes the three call sites and adds a large-image
+      lane plus a bytes-hashed work flag so the regression class becomes visible.
+      Current numbers are from a debug binary and are not comparable to Plan
+      299's release baseline; establishing that comparison is the plan's first
+      phase and no percentile is published before it.
+
 - [x] Audit-chain verification failure no longer reports as "never audited" —
       **issue #2258, plan 302 WS6**. `SignedChainAnchor` remembers the chains
       that failed verification and returns `Err` naming them when a lookup
