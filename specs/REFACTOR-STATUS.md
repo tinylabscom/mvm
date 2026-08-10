@@ -919,14 +919,15 @@ for detailed scope and acceptance criteria.
   - [ ] Replay vectors for the audit chain's canonical signed bytes
   - [ ] Double-key the stale-name relief valves
 
-- [ ] Plan 308 — workload grants: one declaration, per-backend enforcement
+- [~] Plan 308 — workload grants: one declaration, per-backend enforcement
   (`specs/plans/308-workload-grants.md`)
-  - [ ] WS1 — `Grants` in `mvm-contract` + one precedence resolver;
-        `deny_unknown_fields` and an explicit `Unbounded` (no magic zero)
-  - [ ] WS1b — `GrantCeiling`: separate trust root, unreachable from the
+  - [x] WS1 — `Grants` in `mvm-contract`; `deny_unknown_fields` and an explicit
+        `Unbounded` (no magic zero). The precedence resolver is NOT built — it
+        belongs with the surfaces (WS6), since nothing yet has sources to resolve
+  - [x] WS1b — `GrantCeiling`: separate trust root, unreachable from the
         precedence chain, so a plan signer cannot grant itself the machine
-  - [ ] WS2 — single Grants→`NetworkPolicy` projection, derived and fail-closed
-  - [ ] WS3 — `resource_controls` on `VmCapabilities` + `apply_grants` on
+  - [x] WS2 — single Grants→`NetworkPolicy` projection, derived and fail-closed
+  - [x] WS3 — `resource_controls` on `VmCapabilities` + `apply_grants` on
         `VmBackend`, tier read back rather than assumed
   - [x] WS3b — the seams made load-bearing: the signed plan carries `grants`,
         the ceiling is resolved from host config and checked before the plan
@@ -934,10 +935,18 @@ for detailed scope and acceptance criteria.
         that came back, and a sealed run refuses a grant no mechanism on that
         tier backs (dev warns). No backend implements a real control yet —
         every tier still answers `declared`, which is WS4/WS5
-  - [ ] WS4.0 — **blocking spike**: is cgroup v2 `cpu` delegated to user
-        sessions unprivileged? If not, WS4 is a different design
-  - [ ] WS4 — Linux CPU quota (born into the cgroup, not moved into it),
-        `exec_secs` enforcement, admission budget from live liveness
+  - [x] WS4.0 — spike COMPLETE. `cpu` *is* delegated and `cpu.max` *is*
+        writable, but cgroup v2 **migration** needs write access to the common
+        ancestor and a login session's `session-N.scope` is `Delegate=no`. So
+        WS4 became a systemd transient scope: measured 1.4937 cores against a
+        1.5 target, `nr_throttled` confirming live throttling
+  - [~] WS4 — CPU quota via `systemd-run --user --scope` (born bounded for
+        free: systemd registers the scope before exec'ing the payload). Per-boot
+        unique unit name, recorded in the VM state dir so the read-back can
+        still resolve it. Prod gate consults host mechanism availability, not
+        just backend kind. STILL OPEN: `exec_secs` enforcement and the
+        admission budget; and the live measurement predates the read-back
+        landing, so a bounded boot's *reported tier* is unwitnessed on hardware
   - [ ] WS5 — wasm fuel **and** epoch (fuel alone bounds nothing in a host
         call) + `StoreLimits`
   - [ ] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing

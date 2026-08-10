@@ -1,6 +1,6 @@
 # Plan 308 — Workload grants: one declaration, per-backend enforcement
 
-**Status: OPEN — no workstream started**
+**Status: IN FLIGHT — WS1, WS1b, WS2, WS3 complete; WS4 partial (CPU bound + prod gate landed, admission budget outstanding); WS5, WS5b, WS6, WS6b outstanding. No surface authors a grant yet, so the feature is inert by design until WS6.**
 
 ## Why
 
@@ -195,7 +195,7 @@ cheapest and most rigorous, not the one where it is hardest.
 
 ## Workstreams
 
-- [ ] **WS1 — The `Grants` type and one resolver.**
+- [x] **WS1 — The `Grants` type and one resolver.**
       `Grants` in `mvm-contract`, serde + `schemars` behind the existing
       `schema` feature. Added to `ExecutionPlan` as
       `Option<Grants>` with `#[serde(default, skip_serializing_if = "Option::is_none")]`
@@ -216,7 +216,7 @@ cheapest and most rigorous, not the one where it is hardest.
       an explicit `Unbounded` variant; the projection to `exec_secs` is where
       the legacy encoding is reconstructed, and nowhere else.
 
-- [ ] **WS1b — `GrantCeiling`.**
+- [x] **WS1b — `GrantCeiling`.**
       A separate type resolved at admission from host config (mvm) or fleet
       policy (mvmd), never from the plan. Admission refuses a grant exceeding
       it, naming the dimension and both values. Not reachable from the
@@ -225,7 +225,7 @@ cheapest and most rigorous, not the one where it is hardest.
       so the out-of-the-box behaviour is "you may not grant more than the
       machine has", which is also what makes WS4's budget meaningful.
 
-- [ ] **WS2 — Projection is single and fails closed.**
+- [x] **WS2 — Projection is single and fails closed.**
       `network_policy` is *derived* from `Grants`, never supplied alongside
       it; admission re-derives and refuses on disagreement, the same shape as
       the existing `l3_network` / `network_mode` refusal. Any projection
@@ -234,7 +234,7 @@ cheapest and most rigorous, not the one where it is hardest.
       Grants→`NetworkPolicy` projection function exists, in the spirit of
       `check-uniform-vsock-egress`.
 
-- [ ] **WS3 — The backend seam.**
+- [x] **WS3 — The backend seam.**
       `VmCapabilities` gains a `resource_controls` field declaring which
       `CpuGrant` variants and which dimensions a backend can serve.
       `VmBackend` gains `apply_grants(&self, id: &VmId, grants: &Grants) ->
@@ -257,7 +257,7 @@ cheapest and most rigorous, not the one where it is hardest.
       scope over the session bus, which is a different design and must be
       chosen here rather than discovered during implementation.
 
-- [ ] **WS4 — Linux CPU quota, wall clock, admission budget.**
+- [~] **WS4 (CPU + prod gate done; admission budget NOT built) — Linux CPU quota, wall clock, admission budget.**
       **Redesigned after the WS4.0 spike** — see
       `specs/plans/308-cgroup-delegation-findings.md`. Writing a cgroup leaf
       directly does not work unprivileged, and not for the reason this plan
