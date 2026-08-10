@@ -9,6 +9,10 @@ for detailed scope and acceptance criteria.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
+- [~] **Issue #2289 — kernel pin freshness follow-up.** This PR synchronizes
+      the libkrunfw and custom guest kernel inputs on the verified Linux
+      6.12.103 LTS source pin and updates structural parity coverage with the
+      upstream tarball's verified SRI hash. Merge and rollout evidence remain.
 
 ## Fast machine substrate
 - [x] **Issue #2279 — define the fast machine substrate and canonical template

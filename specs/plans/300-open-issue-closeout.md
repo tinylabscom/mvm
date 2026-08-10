@@ -1,11 +1,11 @@
 # Plan 300 — Open issue closeout
 
 **Status:** TRIAGE COMPLETE — execution pending
-**Snapshot date:** 2026-08-08
+**Snapshot date:** 2026-08-10
 
 ## Objective
 
-Reduce the 22 open issues in `tinylabscom/mvm` to a set backed by current
+Reduce the current open issues in `tinylabscom/mvm` to a set backed by current
 product intent and evidence. Every issue closes only after its implementation,
 tests, live witnesses where required, documentation, and GitHub state agree.
 
@@ -108,15 +108,19 @@ Close path:
 - Let `.github/workflows/security-lane-watch.yml` close the issue after a clean
   scheduled or release run.
 
-#### #2128 — kernel pin freshness
+#### #2289 — kernel pin freshness
 
-Both synchronized kernel inputs remain on 6.12.100 while the latest advisory
-has advanced beyond that version.
+The generated freshness tracker reported both synchronized kernel inputs one
+point release behind the latest Linux 6.12 LTS release. The prior #2128
+closeout covered the preceding 6.12.102 update; #2289 is the current tracker
+for the next point-release remediation.
 
 Close path:
 
 - Update the custom workload kernel and libkrunfw inputs together, including
-  source hashes and any generated or recorded metadata.
+  source hashes and any generated or recorded metadata. This change updates
+  both consumers to Linux 6.12.103 with the verified SRI hash
+  `sha256-8UOqreiHe6VhbniLRIJXbbKEgbz1V+9Tf0/MOTj8MXY=`.
 - Build and verify both kernel artifacts and run the kernel-pin freshness
   check.
 - Run the relevant workspace, kernel, verified-boot, and reproducibility tests.
@@ -342,9 +346,10 @@ Studio server contract and an end-to-end local launch are both available.
 
 ## Execution sequence
 
-1. Close #2192 and split/narrow #2101 and #2211.
-2. Repair the generated security tracker (#2135) and kernel freshness issue
-   (#2128), because they affect the evidence quality of every later closeout.
+1. With #2192 closed, split/narrow #2101 and #2211.
+2. Repair the generated security tracker (#2135) and current kernel freshness
+   issue (#2289), because they affect the evidence quality of every later
+   closeout.
 3. Fix the rootfs boot contract (#2165), L3 wiring (#2180), and live IPv6
    witness (#2181).
 4. Finish the warm-launch dependency graph from #2193 through #2199.
