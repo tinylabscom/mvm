@@ -86,6 +86,7 @@ fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpe
             host_signer_pub_cmdline_token()
         ),
         vcpus: 2,
+        cpu_grant: None,
         memory_mib: 512,
         mem_initial_mib: None,
         blocks: vec![BlockDev {
