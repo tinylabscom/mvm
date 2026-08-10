@@ -21,6 +21,9 @@
 //! by tests in this module so a drift in the documented budget vs.
 //! the code is caught at review.
 //!
+//! The filesystem subcommand measures the current pure-Rust immutable ext4
+//! path and emits a stable baseline for candidate filesystem comparisons.
+//!
 //! ## Usage
 //!
 //! ```text
@@ -100,11 +103,12 @@ pub fn run(args: &[String]) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
         Some("rootfs-size") => rootfs_size_subcommand(&args[1..]),
         Some("footprint") => footprint_subcommand(&args[1..]),
+        Some("filesystem") => filesystem_subcommand(&args[1..]),
         Some("boot") => boot_subcommand(&args[1..]),
         Some("budgets") => budgets_subcommand(&args[1..]),
         Some(other) => {
             bail!(
-                "Unknown perf subcommand {other:?}. Available: rootfs-size, footprint, boot, budgets"
+                "Unknown perf subcommand {other:?}. Available: rootfs-size, footprint, filesystem, boot, budgets"
             )
         }
         None => {
@@ -118,6 +122,9 @@ pub fn run(args: &[String]) -> Result<()> {
             eprintln!(
                 "                                 Assert the supplied guest artifacts total ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
             );
+            eprintln!(
+                "  filesystem --root <PATH> [--json]  Measure the immutable directory-to-ext4 baseline"
+            );
             eprintln!("  boot --rootfs <PATH> [--runs N] [--backend firecracker|libkrun]");
             eprintln!(
                 "                                 Statistical cold-boot benchmark (Linux/KVM, MVM_LIVE_SMOKE=1)"
@@ -128,6 +135,42 @@ pub fn run(args: &[String]) -> Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+// ============================================================================
+// filesystem subcommand — immutable materializer baseline
+// ============================================================================
+
+fn filesystem_subcommand(args: &[String]) -> Result<()> {
+    let root = required_path_arg(args, "--root")?;
+    let report = filesystem_baseline(&root)?;
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        eprintln!(
+            "ok: ext4 baseline emitted {} bytes from {} nodes (image {})",
+            report.image_size_bytes, report.nodes.total, report.image_sha256
+        );
+        eprintln!(
+            "  source {}  hash {} µs  walk {} µs  build {} µs  total {} µs",
+            report.source_content_sha256,
+            report.timings.source_hash_micros,
+            report.timings.walk_micros,
+            report.timings.build_micros,
+            report.timings.total_micros
+        );
+    }
+    Ok(())
+}
+
+fn filesystem_baseline(root: &Path) -> Result<mvm_fs::rootfs::Ext4MaterializationReport> {
+    mvm_fs::rootfs::measure_ext4_pure(root, &mvm_fs::rootfs::MaterializeOptions::default())
+        .with_context(|| {
+            format!(
+                "measure immutable filesystem baseline at {}",
+                root.display()
+            )
+        })
 }
 
 // ============================================================================
@@ -1121,6 +1164,26 @@ mod tests {
         assert_eq!(artifacts[3].name, "rootfs-verity");
         assert_eq!(artifacts[4].name, "overlay-verity");
         assert_eq!(artifacts[5].name, "kernel");
+    }
+
+    #[test]
+    fn filesystem_baseline_reports_a_directory_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("etc")).unwrap();
+        std::fs::write(tmp.path().join("etc/hosts"), b"127.0.0.1 localhost\n").unwrap();
+
+        let report = filesystem_baseline(tmp.path()).unwrap();
+
+        assert_eq!(report.nodes.files, 1);
+        assert_eq!(report.nodes.directories, 1);
+        assert!(report.image_size_bytes > 0);
+        assert_eq!(report.image_sha256.len(), 64);
+    }
+
+    #[test]
+    fn filesystem_subcommand_requires_a_root() {
+        let err = filesystem_subcommand(&[]).unwrap_err();
+        assert!(err.to_string().contains("--root"));
     }
 
     #[test]

@@ -107,12 +107,14 @@ not a performance number to copy. The result is an explicit adopt or decline
 decision in issue #2281 and Plan 299; no parallel filesystem or cache stack is
 allowed.
 
-The current baseline is now measurable without a VM: `mvm_fs::rootfs::measure_ext4_pure`
-reports the source content digest, effective node composition, source file
-bytes, emitted ext4 size/digest, materializer format version, and separate
-hash/walk/build timings. Candidate filesystem paths must use the same fixture
-identity and report equivalent preparation, first-access, working-set, and
-density evidence before the existing ext4 path can be replaced.
+The current baseline is now measurable without a VM: `cargo xtask perf
+filesystem --root <DIR> --json` drives
+`mvm_fs::rootfs::measure_ext4_pure`, which reports the source content digest,
+effective node composition, source file bytes, emitted ext4 size/digest,
+materializer format version, and separate hash/walk/build timings. Candidate
+filesystem paths must use the same fixture identity and report equivalent
+preparation, first-file access, working-set, and density evidence before the
+existing ext4 path can be replaced.
 
 ## Security and resource invariants
 

@@ -559,7 +559,8 @@ optimization backend-local and the benchmark backend-neutral.
       materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
       content digest, node composition, file bytes, emitted image size/digest,
       materializer format version, and separate source-hash/walk/build timing
-      phases. Its JSON shape is stable for repeated fixture comparisons.
+      phases. `cargo xtask perf filesystem --root <DIR> --json` exposes the
+      report for repeated fixture comparisons.
 - [ ] Evaluate the current rootfs and host-directory image path against the
       guest-local immutable filesystem hypothesis in
       [issue #2281](https://github.com/tinylabscom/mvm/issues/2281). Keep the
