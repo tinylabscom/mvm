@@ -129,8 +129,11 @@ impl VmBackend for FirecrackerBackend {
             host_vsock_proxy: true,
             balloon: true,
             fs_quick_checkpoint: false,
-            // Named explicitly: the per-VM supervisor process backing this
-            // VMM is cgroup-able, unlike the all-`None` struct-update default.
+            // Named explicitly, not left at the all-`None` struct-update
+            // default: on Linux a cgroup can bound any process, and
+            // Firecracker runs as a direct child of this backend — no
+            // mvm-*-supervisor binary in front of it — so the cgroup goes
+            // on that child process directly.
             resource_controls: ResourceControls::for_backend(BackendKind::Firecracker),
             ..VmCapabilities::default()
         }

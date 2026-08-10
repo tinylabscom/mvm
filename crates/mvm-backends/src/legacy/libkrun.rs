@@ -831,8 +831,13 @@ impl VmBackend for LibkrunBackend {
             // file, not an APFS clone-eligible volume mount; no
             // clonefile shortcut here.
             fs_quick_checkpoint: false,
-            // Named explicitly: the per-VM supervisor process backing this
-            // VMM is cgroup-able, unlike the all-`None` struct-update default.
+            // Named explicitly, not left at the all-`None` struct-update
+            // default: on Linux a cgroup can bound whatever process this
+            // backend runs — libkrun does go through the dedicated
+            // mvm-libkrun-supervisor binary, but the cgroup claim doesn't
+            // depend on that; it holds for any Linux process. libkrun's
+            // macOS 13-25 default host has no cgroup at all, so
+            // `for_backend` answers host-conditionally rather than by kind.
             resource_controls: ResourceControls::for_backend(BackendKind::Libkrun),
             ..VmCapabilities::default()
         }

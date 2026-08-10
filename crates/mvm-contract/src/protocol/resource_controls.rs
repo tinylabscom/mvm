@@ -41,6 +41,7 @@ impl CpuControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WallClockControl {
+    /// No wall-clock bound is available on this tier.
     None,
     /// A host-side timer owned by the supervisor.
     SupervisorTimer,
@@ -64,9 +65,22 @@ impl ResourceControls {
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
-            // Linux VMM tiers: the per-VM supervisor process is cgroup-able.
+            // A cgroup can bound any Linux process, so on Linux these tiers
+            // carry a real CPU quota. libkrun is *not* Linux-only — it is the
+            // macOS 13-25 workload default — and macOS has no cgroup, so the
+            // answer has to depend on the host rather than the kind alone.
+            // Declaring `CgroupShare` on a Mac would let a share grant be
+            // accepted and then fail at apply time, which is precisely the
+            // overstatement the macOS arm below exists to avoid.
+            //
+            // `cfg!` is the right test because mvm runs on the host it was
+            // built for; there is no cross-host execution to disagree with it.
             BackendKind::Firecracker | BackendKind::Libkrun | BackendKind::Qemu => Self {
-                cpu: CpuControl::CgroupShare,
+                cpu: if cfg!(target_os = "linux") {
+                    CpuControl::CgroupShare
+                } else {
+                    CpuControl::None
+                },
                 wall_clock: WallClockControl::SupervisorTimer,
             },
             // macOS has no cgroup equivalent; thread QoS is priority, not quota.
@@ -203,6 +217,29 @@ mod tests {
     #[test]
     fn a_share_grant_is_unenforceable_on_the_wasm_tier() {
         let c = ResourceControls::for_backend(BackendKind::Wasm);
+        assert!(!c.cpu.serves_share());
+    }
+
+    // libkrun is a live macOS 13-25 workload backend, not a Linux-only tier,
+    // so its CPU control must depend on the host rather than the kind alone.
+    // Written as a pair of `cfg`-gated halves rather than one assertion so
+    // the test is a witness on whichever host runs it, instead of only
+    // passing on the machine the author happened to be using.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_libkrun_tier_bounds_cpu_via_cgroup_on_linux() {
+        let c = ResourceControls::for_backend(BackendKind::Libkrun);
+        assert_eq!(c.cpu, CpuControl::CgroupShare);
+        assert!(c.cpu.serves_share());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn the_libkrun_tier_cannot_bound_cpu_off_linux() {
+        // No cgroup exists on this host, so a share grant must be refused at
+        // negotiation time rather than accepted and left to fail at apply.
+        let c = ResourceControls::for_backend(BackendKind::Libkrun);
+        assert_eq!(c.cpu, CpuControl::None);
         assert!(!c.cpu.serves_share());
     }
 
