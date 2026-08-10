@@ -241,6 +241,12 @@ pub fn admit_and_boot_local(
             bundle_ctx: None,
             policy_bundle: None,
             emitter: ctx.emitter,
+            // The local boot path launches unsealed (`sealed: false` above)
+            // and issues no attenuated verb grant, so it is not the tier whose
+            // admission has to be provable afterwards. Stated rather than
+            // defaulted: a run that silently picks its own audit durability is
+            // how this control erodes.
+            audit_durability: crate::audit::durability::AuditDurability::BestEffort,
         },
     )
 }

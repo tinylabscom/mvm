@@ -660,9 +660,17 @@ pub struct AdmitAndStartParams<'a> {
     /// Optional chain-signed emitter: `plan.admitted` fires after admission
     /// succeeds, then `plan.launched` on a successful backend start or
     /// `plan.failed` on a start failure — the same event ordering the CLI's
-    /// up path wires by hand. Emission failures warn and never block a boot
-    /// (the chain is tamper-evidence, not part of the admission decision).
+    /// up path wires by hand.
     pub emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
+    /// Whether a failure to record `plan.admitted` refuses the boot.
+    ///
+    /// Only the admission is gated. `plan.launched` and `plan.failed` describe
+    /// something that has already happened — refusing after the fact prevents
+    /// nothing, and tearing down a running workload because a log write failed
+    /// trades a missing record for a killed job. The admission is different:
+    /// it is the record that the run was allowed, and it is written before the
+    /// backend starts, so refusing on it actually stops the unaudited run.
+    pub audit_durability: crate::audit::durability::AuditDurability,
 }
 
 /// Refuse a boot whose kernel is not the one the plan pinned.
@@ -759,11 +767,12 @@ pub fn admit_and_start(
         params.host_signer_keys_dir,
         params.bundle_ctx,
     )?;
-    if let Some(emitter) = params.emitter
-        && let Err(e) = emitter.emit_admitted(admitted.plan(), admitted.signer_id())
-    {
-        tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal)");
-    }
+    crate::audit::durability::record_admission(
+        params.emitter,
+        admitted.plan(),
+        admitted.signer_id(),
+        params.audit_durability,
+    )?;
 
     // A refusal in any post-admission gate must still terminate the chain:
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
@@ -2042,6 +2051,7 @@ mod tests {
                 bundle_ctx: None,
                 policy_bundle: None,
                 emitter: None,
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
             },
         )
         .expect("admit + boot");
@@ -2055,6 +2065,107 @@ mod tests {
             backend.status(&started.vm_id).unwrap(),
             mvm_core::vm_backend::VmStatus::Running
         ));
+    }
+
+    /// The point of `AuditDurability::Required`: a run that cannot record its
+    /// admission does not reach the backend at all.
+    ///
+    /// Asserting the error is not enough — what matters is that no VM booted,
+    /// because the failure mode being closed is a workload that ran while
+    /// leaving no evidence it was ever admitted.
+    #[test]
+    fn a_required_admission_record_that_cannot_be_written_stops_the_boot() {
+        use crate::audit::durability::AuditDurability;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-unauditable".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+
+        // A chain whose tenant file cannot be written: a directory sits where
+        // the JSONL belongs.
+        let audit_dir = dir.path().join("audit");
+        std::fs::create_dir_all(&audit_dir).unwrap();
+        std::fs::create_dir(audit_dir.join("local.jsonl")).unwrap();
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&seed),
+            &audit_dir,
+        )
+        .expect("the emitter opens; writing the tenant file is what fails");
+
+        let err = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-unauditable"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: AuditDurability::Required,
+            },
+        )
+        .expect_err("an unauditable sealed run must not boot");
+        assert!(
+            format!("{err:#}").contains("cannot be proven"),
+            "the refusal must explain itself: {err:#}"
+        );
+
+        assert!(
+            backend.list().expect("mock list").is_empty(),
+            "no VM may exist for a run whose admission could not be recorded"
+        );
+    }
+
+    /// The same broken chain under the dev tier boots and warns.
+    #[test]
+    fn a_best_effort_admission_record_does_not_stop_the_boot() {
+        use crate::audit::durability::AuditDurability;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-dev-unauditable".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+
+        let audit_dir = dir.path().join("audit");
+        std::fs::create_dir_all(&audit_dir).unwrap();
+        std::fs::create_dir(audit_dir.join("local.jsonl")).unwrap();
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&seed),
+            &audit_dir,
+        )
+        .expect("emitter");
+
+        let started = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-dev-unauditable"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: AuditDurability::BestEffort,
+            },
+        )
+        .expect("a dev run is not blocked by a broken audit chain");
+        assert_eq!(started.vm_id.0, "vm-dev-unauditable");
     }
 
     #[test]
@@ -2088,6 +2199,7 @@ mod tests {
                 bundle_ctx: None,
                 policy_bundle: None,
                 emitter: None,
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
             },
         )
         .expect_err("unadmitted volume must refuse");

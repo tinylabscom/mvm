@@ -462,9 +462,19 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         }
     };
 
-    if let Err(e) = emitter.emit_admitted(admitted.plan(), admitted.signer_id()) {
-        tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal)");
-    }
+    // A sealed-production run that cannot record its admission does not boot.
+    // The chain can prove nothing was altered among the entries it holds, but
+    // an entry that was never written leaves no gap for it to find — so the
+    // only moment this is catchable is right here. `restrict_agent_verbs` is
+    // the same sealed-tier signal the shell-entrypoint refusal above keys on.
+    mvm_hostd::audit::durability::record_admission(
+        Some(&emitter),
+        admitted.plan(),
+        admitted.signer_id(),
+        mvm_hostd::audit::durability::AuditDurability::for_sealed_production(
+            p.restrict_agent_verbs,
+        ),
+    )?;
     if let Some(verbs) = admitted.plan().agent_verbs.as_ref()
         && let Err(e) = emitter.emit_grant_required(admitted.plan(), verbs)
     {

@@ -841,6 +841,9 @@ for detailed scope and acceptance criteria.
         actually excludes two threads
   - [x] `audit_signer::Chain` takes a sole-writer lock, writes each line in
         one `write_all`, and re-seeds its head after a failed append
+  - [x] Audit emission fails closed on the sealed tier — a run that cannot
+        record its admission does not reach the backend
+
   - [x] An unverifiable chain reports as unverifiable, not as a missing audit
         entry (#2258) — anchor returns `Err` naming the chains, distinct
         `ClaimRefusal::LedgerUnverifiable`, and a `doctor` audit-chain line
