@@ -1,0 +1,47 @@
+[package]
+name = "mvm-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Minimal HTTP/1.1 client over rustls for mvm's fetch, registry, and egress paths"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Header/status/method types. Deliberately not hand-rolled: `HeaderName` and
+# `HeaderValue` reject the control characters that turn a header write into
+# request smuggling or response splitting, and that validation is exactly the
+# thing a bespoke implementation gets subtly wrong.
+http = "1"
+# Response head parser. Same crate hyper uses, zero dependencies, fuzzed
+# upstream — so the most attacker-exposed parse in this crate is not ours.
+httparse = "1"
+# URL parsing, for the same reason: host/port/path extraction feeds the SSRF
+# guard, and a hand-rolled parser that disagrees with the resolver about what
+# the host is *is* the SSRF bug.
+url = "2"
+
+bytes = "1"
+base64 = { workspace = true }
+rustls = { workspace = true, features = ["tls12"] }
+rustls-pki-types = "1"
+rustls-platform-verifier = "0.7"
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rustls = { workspace = true, features = ["tls12"] }
+serde_json = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

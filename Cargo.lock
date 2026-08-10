@@ -3262,6 +3262,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-http"
+version = "0.18.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "http",
+ "httparse",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "mvm-net"
 version = "0.18.0"
 dependencies = [

@@ -25,6 +25,7 @@ members = [
     # contract from ADR-023. mvmd consumes this crate as a library per
     # ADR-014 §"Runtime Ownership" — keep its dep closure small.
     "crates/mvm-fs",
+    "crates/mvm-http",
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at
     # runtime; the crate compiles on macOS / Windows as an inert
     # binary so workspace builds stay green for non-Linux contributors.
@@ -114,6 +115,10 @@ exclude = [
     # harness (`fuzz_packet_parse`). Same libfuzzer-sys linker constraints;
     # CI gate at `.github/workflows/security.yml::fuzz`.
     "crates/mvm-hostd/fuzz",
+    # Response-head + chunked-framing parser for the in-house HTTP client —
+    # the whole untrusted surface a hostile server reaches. Same libfuzzer-sys
+    # linker constraints as the other fuzz crates.
+    "crates/mvm-http/fuzz",
     # Plan 186 — runtime-recording trace parser + lowering fuzz harness.
     # Same libfuzzer-sys linker-flag constraints as the other fuzz crates;
     # CI gate at `.github/workflows/security.yml::fuzz`.

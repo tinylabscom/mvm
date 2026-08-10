@@ -376,6 +376,20 @@ jobs:
         # nightly cron, not on every mvm-oci PR.
         run: cargo fuzz run --fuzz-dir fuzz-oci unpack_layer -- -max_total_time="$DURATION"
 
+      - name: Fuzz HTTP response head + chunked framing
+        working-directory: crates/mvm-http
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # `parse_head` and `next_chunk` are the whole untrusted surface of the
+        # in-house HTTP client: every byte a hostile server controls arrives
+        # through them, and they decide body framing, which is where HTTP/1.1
+        # request smuggling lives. Same "never panic on any input" contract as
+        # the other harnesses, plus two span invariants a parse bug would break
+        # silently — never consume past the buffer, and never report chunk data
+        # outside it (an out-of-range span becomes an OOB slice downstream).
+        run: cargo fuzz run fuzz_response_parse -- -max_total_time="$DURATION"
+
       - name: Fuzz gateway packet parse + rebuild (host-side)
         working-directory: crates/mvm-hostd
         env:
