@@ -20,7 +20,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::HvfError;
 #[cfg(test)]
@@ -152,6 +152,9 @@ pub struct KernelBootResult {
     /// Host-resident bytes backing the guest RAM mapping at boot completion.
     /// `None` on platforms without a resident-page query.
     pub resident_ram_bytes: Option<usize>,
+    /// Monotonic time spent installing a private restore-RAM mapping, in
+    /// microseconds. `None` when the boot did not restore RAM.
+    pub restore_mapping_micros: Option<u64>,
 }
 
 /// Host-supplied boot inputs the supervisor threads into a guest: the vsock
@@ -454,9 +457,13 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     // them, so idle residency tracks the working set instead of `ram_size`.
     // `guest_ram` owns the region and unmaps it on drop, after `hv_vm_destroy`.
     let mut guest_ram = GuestRam::new(ram_size)?;
-    if let Some(path) = channels.restore_ram.as_deref() {
+    let restore_mapping_micros = if let Some(path) = channels.restore_ram.as_deref() {
+        let started = Instant::now();
         guest_ram.map_private_file(path)?;
-    }
+        Some(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX))
+    } else {
+        None
+    };
     let ram = guest_ram.as_ptr();
 
     // Base cmdline, plus optional appended args. Precedence: the `MVM_HVF_BOOTARGS`
@@ -574,7 +581,10 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         r
     };
     // `guest_ram` unmaps here as it drops, after `hv_vm_destroy` above.
-    result
+    result.map(|mut boot_result| {
+        boot_result.restore_mapping_micros = restore_mapping_micros;
+        boot_result
+    })
 }
 
 /// # Safety
@@ -1132,6 +1142,13 @@ mod tests {
             without.contains("console=ttyAMA0"),
             "console wired: {without}"
         );
+    }
+
+    #[test]
+    fn kernel_boot_result_marks_restore_measurement_as_optional() {
+        let result = KernelBootResult::default();
+        assert_eq!(result.restore_mapping_micros, None);
+        assert_eq!(result.resident_ram_bytes, None);
     }
 
     #[test]

@@ -571,7 +571,10 @@ optimization backend-local and the benchmark backend-neutral.
       `GuestRam` exposes a `mincore` resident-byte query, the raw kernel boot
       result records it after vCPU and host-I/O shutdown, and a focused test
       proves untouched anonymous pages become resident only after writes.
-      This is not a substitute for an end-to-end guest working-set result.
+      The raw result also records monotonic private restore-mapping duration
+      when a restore file is supplied. These are allocation and mapping
+      witnesses, not substitutes for end-to-end guest working-set or first-use
+      restore-fault measurements.
 - [x] Add a baseline filesystem-path report at the existing pure-Rust
       materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
       content digest, node composition, file bytes, emitted image size/digest,
