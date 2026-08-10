@@ -1503,8 +1503,10 @@ Then unify + retire the old paths:
   own the kernel budget and filesystem-path experiments.
 - [~] **Kernel boot-substrate ledger — issue #2280.** `cargo xtask perf
   footprint` now includes initramfs bytes and optionally enforces the resolved
-  per-architecture built-in-symbol budget. Live kernel-entry/readiness,
-  resident-memory, and restore measurements remain open.
+  per-architecture built-in-symbol budget; cold-launch JSON reports carry the
+  same artifact byte and kernel-config measurements beside their timings. Live
+  kernel-entry/readiness, resident-memory, and restore measurements remain
+  open.
 
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
 - [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured

@@ -551,6 +551,10 @@ optimization backend-local and the benchmark backend-neutral.
       initramfs bytes and built-in-symbol count, and reuses the per-architecture
       kernel-config budget gate. This is the artifact-ledger slice of #2280;
       live timing and resident-memory evidence remain open.
+- [x] Carry artifact byte counts and optional resolved kernel-config symbol
+      counts into each `ColdLaunchReport` sample. The runner resolves these
+      after the child launch exits, so the report joins substrate evidence to
+      launch timing without charging metadata I/O to the measured window.
 - [ ] Evaluate the current rootfs and host-directory image path against the
       guest-local immutable filesystem hypothesis in
       [issue #2281](https://github.com/tinylabscom/mvm/issues/2281). Keep the

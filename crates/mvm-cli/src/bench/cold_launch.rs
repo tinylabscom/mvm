@@ -24,8 +24,11 @@ pub use mvm_core::launch_trace::TracePhase;
 
 use super::stats::percentile;
 
-/// Report schema version for [`ColdLaunchReport`].
-pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 1;
+/// Report schema version for [`ColdLaunchReport`]. Version 2 adds artifact
+/// byte measurements and optional resolved kernel-config evidence to each raw
+/// sample; older reports remain readable through serde defaults but are not
+/// comparable without the new substrate fields.
+pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 2;
 
 /// The measurement lanes the cold-launch contract reports independently.
 ///
@@ -282,6 +285,29 @@ pub struct ArtifactDigests {
     pub rootfs_sha256: Option<String>,
 }
 
+/// Artifact measurements resolved outside the launch's timed window.
+///
+/// Missing artifact paths stay `None`: the launch sample is still useful for
+/// timing, but the report makes the missing substrate evidence visible instead
+/// of turning it into a fabricated zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArtifactMeasurements {
+    pub kernel_bytes: Option<u64>,
+    pub initramfs_bytes: Option<u64>,
+    pub runtime_overlay_bytes: Option<u64>,
+    pub rootfs_bytes: Option<u64>,
+    pub kernel_config: Option<KernelConfigMeasurement>,
+}
+
+/// Resolved kernel-config evidence attached to a launch report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KernelConfigMeasurement {
+    pub path: String,
+    pub builtin_symbols: u32,
+}
+
 /// Which caches a lane was measured against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -339,6 +365,8 @@ pub struct LaunchContext {
     pub filesystem: Option<String>,
     pub artifacts: ArtifactPaths,
     pub digests: ArtifactDigests,
+    #[serde(default)]
+    pub measurements: ArtifactMeasurements,
 }
 
 /// One measured launch, with everything needed to re-read it later.
@@ -591,6 +619,7 @@ mod tests {
                 filesystem: Some("apfs".to_string()),
                 artifacts: ArtifactPaths::default(),
                 digests: ArtifactDigests::default(),
+                measurements: ArtifactMeasurements::default(),
             },
             cache: CacheState {
                 artifacts_cached: true,

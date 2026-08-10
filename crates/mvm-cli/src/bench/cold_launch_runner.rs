@@ -12,8 +12,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use super::cold_launch::{
-    ArtifactDigests, CacheState, ColdLaunchReport, ColdLaunchSample, LaunchContext, LaunchLane,
-    build_cold_launch_report, validate_lane,
+    ArtifactDigests, ArtifactMeasurements, CacheState, ColdLaunchReport, ColdLaunchSample,
+    KernelConfigMeasurement, LaunchContext, LaunchLane, build_cold_launch_report, validate_lane,
 };
 use crate::commands::vm::launch_sample::{
     ArtifactPaths, LAUNCH_SAMPLE_ENV, LaunchSample, read_sample,
@@ -36,6 +36,7 @@ pub struct ColdLaunchBench {
     env: Vec<(String, String)>,
     runs: u32,
     warmup: u32,
+    kernel_config: Option<PathBuf>,
 }
 
 /// Builder for [`ColdLaunchBench`].
@@ -47,6 +48,7 @@ pub struct ColdLaunchBenchBuilder {
     env: Vec<(String, String)>,
     runs: u32,
     warmup: u32,
+    kernel_config: Option<PathBuf>,
 }
 
 impl ColdLaunchBench {
@@ -60,6 +62,7 @@ impl ColdLaunchBench {
             env: Vec::new(),
             runs: 20,
             warmup: 2,
+            kernel_config: None,
         }
     }
 
@@ -90,7 +93,12 @@ impl ColdLaunchBench {
             validate_lane(self.lane, &sample).with_context(|| {
                 format!("measured launch {number} does not belong in this lane")
             })?;
-            raw.push(cold_launch_sample(self.lane, number, &sample));
+            raw.push(cold_launch_sample(
+                self.lane,
+                number,
+                &sample,
+                self.kernel_config.as_deref(),
+            )?);
         }
         Ok(build_cold_launch_report(self.lane, self.warmup, raw))
     }
@@ -159,6 +167,16 @@ impl ColdLaunchBenchBuilder {
         self
     }
 
+    /// Optional resolved kernel config to count in each report sample.
+    ///
+    /// The config is read after each launch and never inside the launch
+    /// process, so the measurement cannot charge config I/O to boot latency.
+    #[must_use]
+    pub fn kernel_config(mut self, path: impl Into<PathBuf>) -> Self {
+        self.kernel_config = Some(path.into());
+        self
+    }
+
     /// Validate and build.
     pub fn build(self) -> Result<ColdLaunchBench> {
         if self.runs == 0 {
@@ -178,6 +196,7 @@ impl ColdLaunchBenchBuilder {
             env: self.env,
             runs: self.runs,
             warmup: self.warmup,
+            kernel_config: self.kernel_config,
         })
     }
 }
@@ -206,8 +225,13 @@ fn reject_build_tool(program: &Path) -> Result<()> {
 /// Turn one launch's own sample into a lane sample, resolving the artifact
 /// digests here — outside the measured window — so hashing never lands in a
 /// launch's wall clock.
-fn cold_launch_sample(lane: LaunchLane, number: u32, sample: &LaunchSample) -> ColdLaunchSample {
-    ColdLaunchSample {
+fn cold_launch_sample(
+    lane: LaunchLane,
+    number: u32,
+    sample: &LaunchSample,
+    kernel_config: Option<&Path>,
+) -> Result<ColdLaunchSample> {
+    Ok(ColdLaunchSample {
         lane,
         number,
         context: LaunchContext {
@@ -220,6 +244,7 @@ fn cold_launch_sample(lane: LaunchLane, number: u32, sample: &LaunchSample) -> C
             filesystem: host_filesystem(Path::new(&mvm_core::config::mvm_home())),
             artifacts: sample.artifacts.clone(),
             digests: digests_for(&sample.artifacts),
+            measurements: measurements_for(&sample.artifacts, kernel_config)?,
         },
         cache: CacheState::from_sample(sample),
         work: sample.work,
@@ -228,7 +253,42 @@ fn cold_launch_sample(lane: LaunchLane, number: u32, sample: &LaunchSample) -> C
         sub_phases: sample.sub_phases,
         backend_phases: sample.backend_phases.clone(),
         degraded: sample.degraded.clone(),
-    }
+    })
+}
+
+fn measurements_for(
+    paths: &ArtifactPaths,
+    kernel_config: Option<&Path>,
+) -> Result<ArtifactMeasurements> {
+    let bytes = |path: &Option<String>| {
+        path.as_deref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len())
+    };
+    let kernel_config = kernel_config
+        .map(read_kernel_config_measurement)
+        .transpose()?;
+    Ok(ArtifactMeasurements {
+        kernel_bytes: bytes(&paths.kernel),
+        initramfs_bytes: bytes(&paths.initramfs),
+        runtime_overlay_bytes: bytes(&paths.runtime_overlay),
+        rootfs_bytes: bytes(&paths.rootfs),
+        kernel_config,
+    })
+}
+
+fn read_kernel_config_measurement(path: &Path) -> Result<KernelConfigMeasurement> {
+    let config = std::fs::read_to_string(path)
+        .with_context(|| format!("reading kernel config {}", path.display()))?;
+    let builtin_symbols = config
+        .lines()
+        .filter(|line| line.trim_end().ends_with("=y"))
+        .count();
+    Ok(KernelConfigMeasurement {
+        path: path.display().to_string(),
+        builtin_symbols: u32::try_from(builtin_symbols).unwrap_or(u32::MAX),
+    })
 }
 
 /// The VMM's version, where it is knowable without probing a foreign binary.
@@ -434,6 +494,40 @@ mod tests {
     }
 
     #[test]
+    fn measurements_capture_artifact_bytes_and_kernel_config_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = tmp.path().join("vmlinux");
+        let initramfs = tmp.path().join("initramfs.cpio.gz");
+        let config = tmp.path().join("workload.config");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        std::fs::write(&initramfs, b"initrd").unwrap();
+        std::fs::write(&config, "CONFIG_ONE=y\nCONFIG_TWO=m\nCONFIG_THREE=y\n").unwrap();
+
+        let measurements = measurements_for(
+            &ArtifactPaths {
+                kernel: Some(kernel.to_string_lossy().into_owned()),
+                initramfs: Some(initramfs.to_string_lossy().into_owned()),
+                runtime_overlay: None,
+                rootfs: None,
+            },
+            Some(&config),
+        )
+        .unwrap();
+
+        assert_eq!(measurements.kernel_bytes, Some(6));
+        assert_eq!(measurements.initramfs_bytes, Some(6));
+        assert_eq!(measurements.runtime_overlay_bytes, None);
+        assert_eq!(measurements.rootfs_bytes, None);
+        assert_eq!(
+            measurements.kernel_config,
+            Some(KernelConfigMeasurement {
+                path: config.display().to_string(),
+                builtin_symbols: 2,
+            })
+        );
+    }
+
+    #[test]
     fn proc_mounts_picks_the_longest_matching_mount_point() {
         let mounts = "\
 /dev/root / ext4 rw,relatime 0 0
@@ -454,7 +548,7 @@ tmpfs /tmp tmpfs rw 0 0
     #[test]
     fn a_sample_becomes_a_lane_sample_with_derived_context() {
         let sample = sample_for(148.0);
-        let lane_sample = cold_launch_sample(LaunchLane::PreparedCold, 3, &sample);
+        let lane_sample = cold_launch_sample(LaunchLane::PreparedCold, 3, &sample, None).unwrap();
         assert_eq!(lane_sample.number, 3);
         assert_eq!(lane_sample.context.backend, "hvf");
         assert_eq!(

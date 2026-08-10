@@ -145,7 +145,8 @@ for detailed scope and acceptance criteria.
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
   - [~] Kernel/boot-substrate budget and filesystem-path evaluation tracked by
         issues #2280 and #2281. The artifact-ledger slice of #2280 is landed;
-        live timing, restore, density, and filesystem evaluation remain open.
+        cold-launch reports now carry artifact/config measurements; live timing,
+        restore, density, and filesystem evaluation remain open.
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images
       (`specs/plans/311-launch-critical-path-waste.md`), branch
