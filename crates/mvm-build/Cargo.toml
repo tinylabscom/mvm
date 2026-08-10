@@ -84,7 +84,6 @@ mvm-sdk.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 hex.workspace = true
-reqwest = { workspace = true, features = ["blocking"] }
 # Optional libkrun FFI dep for the in-tree builder VM
 # launcher (`libkrun_builder::LibkrunBuilderVm`). Gated by
 # `builder-vm`; default-off until the cutover flips polarity.
