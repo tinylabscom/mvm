@@ -137,8 +137,10 @@ between warmup or measured samples.
 
 ## Issue sequence
 
-- [ ] [#2280](https://github.com/tinylabscom/mvm/issues/2280) — measure the
-  kernel and boot-substrate budget.
+- [~] [#2280](https://github.com/tinylabscom/mvm/issues/2280) — measure the
+  kernel and boot-substrate budget. The bounded libkrun resident host-process
+  capture is landed; guest demand-fault, restore-fault, and cross-backend live
+  evidence remain.
 - [~] [#2281](https://github.com/tinylabscom/mvm/issues/2281) — baseline the
   current pure-Rust ext4 path and evaluate the guest-local immutable
   filesystem path against it.

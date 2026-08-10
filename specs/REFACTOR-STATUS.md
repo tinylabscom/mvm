@@ -19,7 +19,9 @@ for detailed scope and acceptance criteria.
       live backend work remain open under issues #2280, #2281, #2194, #2195,
       #2196, and #2199. Launch evidence now records the tier-selected root
       filesystem strategy and rejects missing or mixed strategies so
-      filesystem comparisons cannot mix security tiers.
+      filesystem comparisons cannot mix security tiers. The libkrun probe also
+      exposes bounded resident host-process capture; guest demand-fault,
+      restore, and cross-backend evidence remain open.
 
 ## In-flight plans
 - [x] Plan 2167 — durable agent session and event contract

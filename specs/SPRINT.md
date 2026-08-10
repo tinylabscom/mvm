@@ -1504,9 +1504,10 @@ Then unify + retire the old paths:
 - [~] **Kernel boot-substrate ledger — issue #2280.** `cargo xtask perf
   footprint` now includes initramfs bytes and optionally enforces the resolved
   per-architecture built-in-symbol budget; cold-launch JSON reports carry the
-  same artifact byte and kernel-config measurements beside their timings. Live
-  kernel-entry/readiness, resident-memory, and restore measurements remain
-  open.
+  same artifact byte and kernel-config measurements beside their timings. The
+  libkrun live probe now has bounded resident host-process capture after
+  authenticated readiness. Guest demand-fault, restore, and cross-backend live
+  measurements remain open.
 - [x] **Filesystem-path baseline — issue #2281.**
   `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
   source identity, node composition, emitted ext4 size/digest, materializer

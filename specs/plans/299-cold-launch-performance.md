@@ -555,11 +555,18 @@ optimization backend-local and the benchmark backend-neutral.
       an optional resolved kernel config. The JSON report now records the
       initramfs bytes and built-in-symbol count, and reuses the per-architecture
       kernel-config budget gate. This is the artifact-ledger slice of #2280;
-      live timing and resident-memory evidence remain open.
+      live boot timing and guest resident-memory evidence remain open; the
+      libkrun probe now captures host supervisor/VMM resident footprints.
 - [x] Carry artifact byte counts and optional resolved kernel-config symbol
       counts into each `ColdLaunchReport` sample. The runner resolves these
       after the child launch exits, so the report joins substrate evidence to
       launch timing without charging metadata I/O to the measured window.
+- [x] Add a bounded live resident-footprint capture for the libkrun probe.
+      `mvm_cli::bench::probes::run_density` boots admitted guests through
+      authenticated readiness, samples each host supervisor/VMM process with
+      the platform footprint reader, and drops every held guest on success or
+      failure. This reports host process residency; guest demand-fault and
+      restore-fault evidence remain separate gates.
 - [x] Add a baseline filesystem-path report at the existing pure-Rust
       materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
       content digest, node composition, file bytes, emitted image size/digest,
