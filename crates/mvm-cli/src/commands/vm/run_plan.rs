@@ -554,7 +554,6 @@ mod tests {
 
     fn base_run_args() -> RunArgs {
         RunArgs {
-            network_mode: Default::default(),
             manifest: None,
             warm_pool_size: 0,
             pty: false,

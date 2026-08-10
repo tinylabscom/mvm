@@ -23,7 +23,7 @@
 //! instead of rebuilding or re-downloading it.
 
 use mvm_core::arch::GuestArch;
-use rayon::prelude::*;
+use mvm_fs::parallel::par_map;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -208,9 +208,11 @@ pub fn build_runtime_overlay_from_guest_binaries(
         (&bins.addon_dns, root.join("addon-dns")),
         (&bins.exit_report, root.join("exit-report")),
     ];
-    binaries
-        .into_par_iter()
-        .try_for_each(|(src, dst)| stage_runtime_overlay_binary(src, &dst))?;
+    par_map(binaries.to_vec(), |(src, dst)| {
+        stage_runtime_overlay_binary(src, &dst)
+    })
+    .into_iter()
+    .collect::<Result<(), _>>()?;
     std::fs::write(root.join("VERSION"), format!("{version}\n"))?;
 
     let image = mvm_fs::ext4::build_image(&collect_overlay_nodes(&root)?).map_err(|e| {
@@ -236,9 +238,11 @@ pub fn build_runtime_overlay_from_guest_binaries(
         ("overlay.roothash", roothash_body.as_bytes()),
         ("VERSION", version_body.as_bytes()),
     ];
-    artifact_writes
-        .into_par_iter()
-        .try_for_each(|(name, bytes)| std::fs::write(artifact_dir.join(name), bytes))?;
+    par_map(artifact_writes.to_vec(), |(name, bytes)| {
+        std::fs::write(artifact_dir.join(name), bytes)
+    })
+    .into_iter()
+    .collect::<Result<(), _>>()?;
 
     let built = read_overlay_artifact_from_dir(&artifact_dir, &arch.to_string())?;
     install_overlay_into_cache(&built, cache_root, &InstallOptions { overwrite: true })?;
@@ -779,9 +783,11 @@ pub fn install_overlay_into_cache(
         (&source.roothash_file, staging.join("overlay.roothash")),
         (&source_version_file, staging.join("VERSION")),
     ];
-    cache_copies
-        .into_par_iter()
-        .try_for_each(|(src, dst)| install_file_with_perms(src, &dst))?;
+    par_map(cache_copies.to_vec(), |(src, dst)| {
+        install_file_with_perms(src, &dst)
+    })
+    .into_iter()
+    .collect::<Result<(), _>>()?;
     write_checksum_manifest(&staging)?;
     std::fs::write(
         staging.join(LOCAL_BUILD_EPOCH_FILE),

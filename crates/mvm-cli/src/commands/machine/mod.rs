@@ -404,10 +404,6 @@ impl MachineRunArgs {
 
     fn into_run_args(self) -> RunArgs {
         RunArgs {
-            // Derived, never selected: see `derive_network_mode`.
-            // Derived from the workload, never selected. A manifest that
-            // declares `raw_ip_stack` is what moves it onto the tunnel.
-            network_mode: derive_network_mode(false),
             manifest: self.manifest,
             // Default off; `run_dispatch` sets it for the warm-claim-eligible
             // transient mode.

@@ -82,12 +82,14 @@ use stage0_cache::{
     sweep_orphaned_stage0_staging_dirs_at, write_builder_vm_artifact_digest_manifest,
     write_builder_vm_source_cache_provenance, write_builder_vm_source_fingerprint,
 };
-pub(in crate::commands) use vm_helpers::sweep_orphaned_vm_helpers_on_startup;
 #[cfg(test)]
 use vm_helpers::{
     BUILDER_SIDECARS, ProcSnapshot, WORKLOAD_SIDECARS, pid_is_alive,
     reap_orphaned_builder_egress_supervisors, reap_orphaned_vm_helpers_at,
     reap_orphaned_vm_helpers_at_with_snapshot,
+};
+pub(in crate::commands) use vm_helpers::{
+    sweep_orphaned_vm_helpers_before_spawn, sweep_orphaned_vm_helpers_on_startup,
 };
 
 #[cfg(feature = "builder-vm")]

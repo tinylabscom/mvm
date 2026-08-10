@@ -4,12 +4,15 @@
 //! panic, egress enforcement, vsock secret substitution) are proven by the
 //! live-KVM smokes, not here.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use assert_cmd::cargo::CommandCargoExt;
+use clap::Command as ClapCommand;
 use cucumber::{then, when};
+use serde::Deserialize;
 
 use crate::world::CliWorld;
 
@@ -57,6 +60,370 @@ fn spawn_mvmctl(args: &str, home: Option<PathBuf>) -> std::process::Output {
 #[when(expr = "I run mvmctl in a clean home with {string}")]
 fn run_mvmctl_clean_home(world: &mut CliWorld, args: String) {
     world.last_run = Some(spawn_mvmctl(&args, Some(isolated_mvm_home())));
+}
+
+/// Verify every shell example in the README against the command tree exposed
+/// by the built CLI. The examples are checked through `--help`, so this test
+/// validates command and option spelling without booting a VM or contacting a
+/// registry.
+#[then(expr = "every README CLI example resolves to a command and its options")]
+fn readme_cli_examples_resolve(_world: &mut CliWorld) {
+    let command_tree = mvm_cli::commands::cli_command();
+    let mut command_paths = Vec::new();
+    crate::steps::cli::collect_command_paths(&command_tree, &[], &mut command_paths);
+    let examples = readme_mvmctl_examples();
+    assert!(
+        !examples.is_empty(),
+        "README.md contains no mvmctl shell examples"
+    );
+
+    for example in examples {
+        let tokens = shell_tokens(&example);
+        let command_tokens = tokens
+            .iter()
+            .position(|token| token == "mvmctl")
+            .map(|index| &tokens[index + 1..])
+            .expect("README example must contain mvmctl");
+        let path = command_paths
+            .iter()
+            .filter(|path| path_matches(path, command_tokens))
+            .max_by_key(|path| path.len())
+            .unwrap_or_else(|| panic!("README command has no CLI match: {example:?}"));
+
+        let output = crate::steps::cli::mvmctl_command()
+            .args(path)
+            .arg("--help")
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run README command {example:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "README command `mvmctl {}` has no usable help:\n{}",
+            path.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let help = String::from_utf8_lossy(&output.stdout);
+        for option in readme_options(command_tokens) {
+            assert!(
+                help.contains(&option),
+                "README option {option:?} is not documented by `mvmctl {}`:\n{help}",
+                path.join(" ")
+            );
+        }
+    }
+}
+
+/// Exercise every declared CLI option through a help request. Visible options
+/// must be present in the real subprocess help. Hidden options are rendered
+/// from the same command tree with hiding disabled; they remain covered while
+/// retaining their intentionally non-user-facing status in the binary.
+#[then(expr = "every CLI command option has a BDD help witness")]
+fn every_cli_option_has_help_witness(_world: &mut CliWorld) {
+    let command_tree = mvm_cli::commands::cli_command();
+    let mut option_count = 0;
+    assert_command_options(&command_tree, &[], &mut option_count);
+    assert!(option_count > 0, "the CLI command tree declared no options");
+}
+
+fn assert_command_options(command: &ClapCommand, path: &[String], option_count: &mut usize) {
+    let mut args = path.to_vec();
+    args.push("--help".to_string());
+    let output = crate::steps::cli::mvmctl_command()
+        .args(&args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run `mvmctl {}`: {error}", args.join(" ")));
+    assert!(
+        output.status.success(),
+        "`mvmctl {}` help failed:\n{}",
+        args[..args.len() - 1].join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let visible_help = String::from_utf8_lossy(&output.stdout);
+    let all_help = command
+        .clone()
+        .mut_args(|argument| argument.hide(false))
+        .render_help()
+        .to_string();
+
+    for argument in command.get_arguments() {
+        let Some(option) = argument
+            .get_long()
+            .map(|long| format!("--{long}"))
+            .or_else(|| argument.get_short().map(|short| format!("-{short}")))
+        else {
+            continue;
+        };
+        *option_count += 1;
+        let help: &str = if argument.is_hide_set() {
+            all_help.as_str()
+        } else {
+            visible_help.as_ref()
+        };
+        assert!(
+            help.contains(&option),
+            "option {option:?} is missing from `mvmctl {}` help:\n{help}",
+            path.join(" ")
+        );
+    }
+
+    for subcommand in command.get_subcommands() {
+        let mut child_path = path.to_vec();
+        child_path.push(subcommand.get_name().to_string());
+        assert_command_options(subcommand, &child_path, option_count);
+    }
+}
+
+#[derive(Debug)]
+struct ReadmeCodeBlock {
+    language: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadmeCoverageManifest {
+    block: Vec<ReadmeCoverageWitness>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadmeCoverageWitness {
+    classification: String,
+    language: String,
+}
+
+#[then(expr = "every README code block has an explicit coverage witness")]
+fn every_readme_code_block_has_a_coverage_witness(_world: &mut CliWorld) {
+    let blocks = readme_code_blocks();
+    assert!(
+        !blocks.is_empty(),
+        "README.md contains no fenced code blocks"
+    );
+    let manifest = readme_coverage_manifest();
+    assert_eq!(
+        blocks.len(),
+        manifest.block.len(),
+        "README fenced block count changed; update the test-owned coverage manifest"
+    );
+
+    let mut classifications = BTreeSet::new();
+    for (index, (block, witness)) in blocks.iter().zip(&manifest.block).enumerate() {
+        assert_eq!(
+            block.language, witness.language,
+            "README code block {index} changed language; update its test-owned coverage witness"
+        );
+        classifications.insert(witness.classification.as_str());
+        match witness.classification.as_str() {
+            "cli-bdd" => {
+                assert!(
+                    matches!(block.language.as_str(), "bash" | "sh" | "shell"),
+                    "CLI witness must be a shell block: {block:?}"
+                );
+                assert!(
+                    block.body.contains("mvmctl "),
+                    "CLI witness must contain an mvmctl invocation: {block:?}"
+                );
+            }
+            "install-static" => {
+                assert_eq!(block.language, "bash", "install witness must be bash");
+                for command in ["curl ", "cargo build", "pip install", "npm install"] {
+                    assert!(
+                        block.body.contains(command),
+                        "install witness is missing {command:?}: {block:?}"
+                    );
+                }
+            }
+            "sdk-bdd" => {
+                assert!(
+                    matches!(block.language.as_str(), "python" | "ts" | "typescript"),
+                    "SDK witness must be Python or TypeScript: {block:?}"
+                );
+                assert!(
+                    block.body.contains("mvm") || block.body.contains("Sandbox"),
+                    "SDK witness must reference the SDK: {block:?}"
+                );
+            }
+            "nix-static" => {
+                assert_eq!(block.language, "nix", "Nix witness must be a Nix block");
+                for token in ["inputs", "outputs", "mkGuest", "entrypoint"] {
+                    assert!(
+                        block.body.contains(token),
+                        "Nix witness is missing {token:?}: {block:?}"
+                    );
+                }
+            }
+            "rust-compile" => {
+                assert!(
+                    matches!(block.language.as_str(), "rust" | "toml"),
+                    "Rust witness must be Rust or Cargo TOML: {block:?}"
+                );
+                assert!(
+                    block.body.contains("mvm") || block.body.contains("Mvm"),
+                    "Rust witness must reference an mvm integration: {block:?}"
+                );
+            }
+            "static-only" => {}
+            other => panic!("unknown README coverage classification {other:?}"),
+        }
+    }
+
+    for required in [
+        "cli-bdd",
+        "install-static",
+        "sdk-bdd",
+        "nix-static",
+        "rust-compile",
+        "static-only",
+    ] {
+        assert!(
+            classifications.contains(required),
+            "README coverage classification {required:?} has no witness"
+        );
+    }
+}
+
+fn readme_coverage_manifest() -> ReadmeCoverageManifest {
+    let path = repo_root()
+        .join("features")
+        .join("suites")
+        .join("s8_readme_contract")
+        .join("readme_coverage.toml");
+    let manifest = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!("read README coverage manifest {}: {error}", path.display())
+    });
+    toml::from_str(&manifest).unwrap_or_else(|error| {
+        panic!("parse README coverage manifest {}: {error}", path.display())
+    })
+}
+
+fn readme_code_blocks() -> Vec<ReadmeCodeBlock> {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("read README.md");
+    let mut current: Option<ReadmeCodeBlock> = None;
+    let mut blocks = Vec::new();
+
+    for line in readme.lines() {
+        let trimmed = line.trim();
+        if let Some(block) = current.as_mut() {
+            if trimmed == "```" {
+                blocks.push(current.take().expect("current README block"));
+            } else {
+                if !block.body.is_empty() {
+                    block.body.push('\n');
+                }
+                block.body.push_str(line);
+            }
+            continue;
+        }
+
+        if let Some(language) = trimmed.strip_prefix("```") {
+            current = Some(ReadmeCodeBlock {
+                language: language.to_string(),
+                body: String::new(),
+            });
+        }
+    }
+
+    assert!(current.is_none(), "README has an unterminated code block");
+    blocks
+}
+
+fn readme_mvmctl_examples() -> Vec<String> {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("read README.md");
+    let mut in_shell_block = false;
+    let mut pending: Option<String> = None;
+    let mut examples = Vec::new();
+
+    for line in readme.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_shell_block = matches!(trimmed, "```bash" | "```sh" | "```shell");
+            pending = None;
+            continue;
+        }
+        if !in_shell_block {
+            continue;
+        }
+
+        let line = line.split(" #").next().unwrap_or(line).trim_end();
+        if let Some(existing) = pending.as_mut() {
+            existing.push(' ');
+            existing.push_str(line.trim());
+        } else if line.contains("mvmctl ") {
+            pending = Some(line.trim().to_string());
+        } else {
+            continue;
+        }
+
+        let continued = pending
+            .as_deref()
+            .is_some_and(|command| command.ends_with('\\'));
+        if continued {
+            if let Some(command) = pending.as_mut() {
+                command.pop();
+            }
+        } else if let Some(command) = pending.take() {
+            examples.extend(split_mvmctl_invocations(&command));
+        }
+    }
+
+    examples
+}
+
+fn split_mvmctl_invocations(line: &str) -> Vec<String> {
+    let mut remaining = line;
+    let mut invocations = Vec::new();
+    while let Some(start) = remaining.find("mvmctl ") {
+        let is_command_token = remaining[..start].chars().last().is_none_or(|character| {
+            !character.is_ascii_alphanumeric() && character != '/' && character != '.'
+        });
+        if !is_command_token {
+            remaining = &remaining[start + "mvmctl".len()..];
+            continue;
+        }
+        let command = &remaining[start..];
+        let end = command.find(['|', ';', '&']).unwrap_or(command.len());
+        invocations.push(command[..end].trim().to_string());
+        remaining = &command[end..];
+        if remaining.is_empty() {
+            break;
+        }
+        remaining = &remaining[1..];
+    }
+    invocations
+}
+
+fn shell_tokens(example: &str) -> Vec<String> {
+    example
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|character| matches!(character, '"' | '\'' | '\\'))
+                .to_string()
+        })
+        .collect()
+}
+
+fn path_matches(path: &[String], tokens: &[String]) -> bool {
+    tokens.len() >= path.len()
+        && path
+            .iter()
+            .zip(tokens)
+            .all(|(expected, actual)| expected == actual)
+}
+
+fn readme_options(tokens: &[String]) -> Vec<String> {
+    let mut options = Vec::new();
+    for token in tokens {
+        if token == "--" {
+            break;
+        }
+        if let Some(long) = token.strip_prefix("--") {
+            options.push(format!("--{}", long.split('=').next().unwrap_or(long)));
+        } else if token.starts_with('-') && token.len() > 1 && !token.starts_with("--") {
+            options.extend(token[1..].chars().map(|short| format!("-{short}")));
+        }
+    }
+    options.sort();
+    options.dedup();
+    options
 }
 
 /// Count the README's enumerated security claims: `N. **…` items inside the

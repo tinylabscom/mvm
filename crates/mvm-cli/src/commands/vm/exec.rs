@@ -20,11 +20,8 @@ use super::super::env::builder_vm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
 };
 use super::Cli;
-use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
 use crate::ui;
-use mvm_core::plan::SynthesisInput;
-use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -94,11 +91,6 @@ pub(in crate::commands) struct Args {
     /// `RunArgs::host_service` via `into_exec_args`.
     #[arg(skip)]
     pub host_service: Vec<String>,
-    /// The transport derived for this run, carried through so the admitted
-    /// plan records the mode the workload actually got. Not a flag: the
-    /// derivation is the only thing that sets it.
-    #[arg(skip)]
-    pub network_mode: mvm_contract::plan::NetworkMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -115,12 +107,6 @@ pub(in crate::commands) enum RunProfile {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct RunArgs {
-    /// The admitted networking transport. Carried here rather than
-    /// re-derived downstream so exactly one value reaches the signed plan.
-    /// Not a flag of its own and not operator-selectable: the machine
-    /// surface derives it from what the workload declares it needs.
-    #[arg(skip)]
-    pub network_mode: mvm_contract::plan::NetworkMode,
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
     /// legacy slot name). If omitted, the bundled default microVM image is used.
     #[arg(short = 'm', long, conflicts_with = "image")]
@@ -318,7 +304,6 @@ impl RunArgs {
             healthcheck: self.healthcheck,
             hypervisor: self.hypervisor,
             host_service: self.host_service,
-            network_mode: self.network_mode,
         }
     }
 }
@@ -416,6 +401,10 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<super::up::AdmissionContext>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let ctx_sink = std::rc::Rc::clone(&admit_ctx);
+    // Written by image resolution below, read inside the closure once the real
+    // plan exists, so the provenance entry binds to the plan that booted.
+    let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
     let admit = move |rootfs: &std::path::Path,
                       vm_name: &str|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
@@ -483,6 +472,16 @@ pub(in crate::commands) fn run_secure_with_source(
             bundle_json,
             config_files: start_config.config_files,
         };
+        // Bind the OCI provenance to the plan that was just admitted, before
+        // the backend starts. Claim 14 wants the image's origin in the chain
+        // for the admission that booted it, and this is the first point where
+        // that plan exists.
+        if let Some(labels) = provenance_for_admit.borrow_mut().take() {
+            c.emitter
+                .emit_oci_provenance(c.admitted.plan(), labels)
+                .context("recording OCI image provenance on the admitted plan")?;
+        }
+
         // Hand the admission context (with its emitter) to the command layer so
         // it can emit `plan.launched` / `plan.failed` once the boot resolves.
         *ctx_sink.borrow_mut() = Some(c);
@@ -504,6 +503,7 @@ pub(in crate::commands) fn run_secure_with_source(
             selection,
             network_policy,
             source_override.clone(),
+            &oci_provenance,
         )?;
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
         let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
@@ -564,6 +564,7 @@ pub(in crate::commands) fn run_secure_with_source(
             admit: Some(&admit),
             ctx: &admit_ctx,
             backend: &receipt_backend,
+            oci_provenance: &oci_provenance,
         },
     )
 }
@@ -655,7 +656,19 @@ struct RunAudit<'a> {
     admit: Option<&'a crate::exec::SessionAdmit<'a>>,
     ctx: &'a std::cell::RefCell<Option<super::up::AdmissionContext>>,
     backend: &'a str,
+    /// Filled by image resolution, read by the admission that boots it.
+    oci_provenance: &'a OciProvenanceSink,
 }
+
+/// Carries the OCI provenance labels from image resolution to the admission
+/// that boots the image.
+///
+/// The labels are discovered in `build_exec_request`, which runs before the
+/// plan exists; the entry they belong on is emitted from the admit closure,
+/// which runs after. Same shape as the `AdmissionContext` hand-off directly
+/// above it: written on one side of the boot, read on the other.
+pub(in crate::commands) type OciProvenanceSink =
+    std::rc::Rc<std::cell::RefCell<Option<Vec<(String, String)>>>>;
 
 /// The inputs that decide which `ImageSource` a run boots from: the OCI
 /// reference (`--image`), the prod/dev posture that gates it, and whether to
@@ -683,6 +696,7 @@ fn run_run_args(
         selection,
         network_policy,
         source_override,
+        audit.oci_provenance,
     )?;
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
@@ -716,6 +730,7 @@ fn build_exec_request(
     selection: ImageSelection,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     source_override: Option<crate::exec::ImageSource>,
+    oci_provenance: &OciProvenanceSink,
 ) -> Result<crate::exec::ExecRequest> {
     let ImageSelection {
         image_ref,
@@ -824,14 +839,14 @@ fn build_exec_request(
                     "Using OCI image {} ({})",
                     cached.reference, cached.resolved_digest
                 ));
-                emit_oci_run_admission(
-                    &cached,
-                    args.cpus,
-                    u64::from(memory_mib),
-                    args.timeout.unwrap_or(60),
-                    args.network_mode,
-                )
-                .context("admitting OCI image provenance for mvmctl run --image")?;
+                // Hand the provenance to the real admission rather than
+                // minting a plan here to hang it on. This used to synthesize a
+                // throwaway `ExecutionPlan` and emit `plan.admitted` for it,
+                // so one launch wrote two `plan.admitted` entries with
+                // different plan ids — and the first authorized nothing, since
+                // no VM ever booted under it. A reader of the chain could not
+                // tell which of the two was the admission that mattered.
+                *oci_provenance.borrow_mut() = Some(cached.provenance.audit_labels());
                 if cached.pulled {
                     let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
                     mvm_core::audit_emit!(
@@ -922,78 +937,6 @@ fn build_exec_request(
         hypervisor: args.hypervisor,
         sdk_sidecar,
     })
-}
-
-fn emit_oci_run_admission(
-    image: &super::super::image::ResolvedOciRunImage,
-    cpus: u32,
-    mem_mib: u64,
-    timeout_secs: u64,
-    network_mode: mvm_contract::plan::NetworkMode,
-) -> Result<()> {
-    let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
-        .with_context(|| {
-            format!(
-                "hashing OCI rootfs at {} for run --image admission",
-                image.rootfs_path.display()
-            )
-        })?;
-    let exec_timeout_secs = u32::try_from(timeout_secs).unwrap_or(u32::MAX);
-    let input = SynthesisInput {
-        grants: None,
-        kernel_sha256: None,
-        network_mode,
-        l3_network: None,
-        vm_name: "run-oci",
-        tenant: None,
-        backend_name: "transient-run",
-        image_name: &image.provenance.canonical_reference,
-        image_sha256: &image_sha256,
-        image_cosign_bundle: None,
-        intent: Some("vm:run"),
-        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        network_policy_ref: None,
-        fs_policy_ref: None,
-        egress_policy_ref: None,
-        tool_policy_ref: None,
-        secret_release: mvm_core::plan::SecretReleasePolicy::None,
-        secrets: Vec::new(),
-        audit_event_prefix: None,
-        cpus,
-        mem_mib,
-        disk_mib: 0,
-        boot_timeout_secs: 60,
-        exec_timeout_secs,
-        destroy_on_exit: true,
-        bundle_pin: None,
-        deps_volume: None,
-        shares: Vec::new(),
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        audit_labels: Default::default(),
-        agent_verbs: None,
-        services: Vec::new(),
-        stream_edges: Vec::new(),
-        stream_retention: Default::default(),
-    };
-    let ledger = InMemoryNonceLedger::new();
-    // A one-shot `run --image` is an interactive developer invocation, not a
-    // sealed launch: it carries no attenuated verb grant, so an unenforceable
-    // grant is a warning here rather than a refusal.
-    let admitted = admit_for_run(
-        &input,
-        &SystemClock,
-        &ledger,
-        None,
-        None,
-        mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
-    )?;
-    let signer = load_or_init().context("loading host signer for OCI provenance audit")?;
-    let emitter =
-        AuditEmitter::new(signer.signing).context("opening audit chain for OCI provenance")?;
-    emitter.emit_admitted(admitted.plan(), admitted.signer_id())?;
-    emitter.emit_oci_provenance(admitted.plan(), image.provenance.audit_labels())?;
-    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1614,7 +1557,6 @@ mod tests {
 
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
-            network_mode: Default::default(),
             warm_pool_size: 0,
             pty: false,
             vm_name: None,

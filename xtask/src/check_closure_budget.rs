@@ -103,7 +103,25 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// into `mvm-backends`. Measured delta +1, and the new crate is our own
 /// workspace member, not a third-party dependency — the same code, one crate
 /// boundary further out.
-const CLOSURE_BUDGET: usize = 286;
+///
+/// 263 (was 286): the dependency-reduction pass, in five cuts and no product
+/// change. Three were defects: `mvm-build` pinned `thiserror` at 1 while the
+/// workspace was on 2 (a second copy plus its proc-macro), `rtnetlink` sat in
+/// `[workspace.dependencies]` with no consumer and a CI gate banning it, and
+/// `mvm-sdk` enabled `schemars` unconditionally — which, through workspace
+/// feature unification, switched it on inside `mvm-contract` for every consumer
+/// and defeated the `schema` gating in three crates. The other two were trades:
+/// dropping rcgen's `x509-parser` feature (it existed only to re-parse a PEM we
+/// had just serialized, and carried the whole ASN.1 stack including the
+/// closure's last `nom` 7), and replacing `rayon` with an order-preserving
+/// scoped-thread `par_map` in `mvm-fs`, which is all five call sites needed.
+///
+/// 262 (was 263): `fs2` existed only for `FileExt`'s advisory file locking,
+/// which std stabilized in 1.89 — well under the pinned 1.96 toolchain. std
+/// also splits contention out of the error type (`TryLockError::WouldBlock`
+/// vs `::Error`), so "another process holds it" stops riding on an errno
+/// comparison.
+const CLOSURE_BUDGET: usize = 262;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

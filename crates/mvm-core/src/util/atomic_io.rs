@@ -7,7 +7,6 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use fs2::FileExt;
 
 /// Write `data` to `path` atomically: write to a temp file in the same
 /// directory, flush + sync, then rename into place.
@@ -64,7 +63,7 @@ impl FileLock {
             .write(true)
             .open(&lock_path)
             .with_context(|| format!("failed to open lock file: {}", lock_path.display()))?;
-        file.lock_exclusive()
+        file.lock()
             .with_context(|| format!("failed to acquire lock: {}", lock_path.display()))?;
         Ok(Self { _file: file })
     }
@@ -83,10 +82,12 @@ impl FileLock {
             .write(true)
             .open(&lock_path)
             .with_context(|| format!("failed to open lock file: {}", lock_path.display()))?;
-        match file.try_lock_exclusive() {
+        // std distinguishes contention from a real error in the type, so
+        // "another process holds it" no longer rides on an errno comparison.
+        match file.try_lock() {
             Ok(()) => Ok(Some(Self { _file: file })),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => {
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
                 Err(e).with_context(|| format!("failed to try lock: {}", lock_path.display()))
             }
         }

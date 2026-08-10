@@ -61,6 +61,42 @@ impl GuestRam {
         self.len
     }
 
+    /// Return the number of resident bytes currently backing this mapping.
+    ///
+    /// The query is advisory and may change immediately after it returns, but
+    /// it provides the measurement witness for demand-faulted guest RAM: an
+    /// untouched anonymous region should occupy fewer resident pages than the
+    /// same region after selected pages have been written.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn resident_bytes(&self) -> Result<usize, std::io::Error> {
+        let raw_page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page_size = usize::try_from(raw_page_size)
+            .map_err(|_| std::io::Error::other("system page size is invalid"))?;
+        if page_size == 0 {
+            return Err(std::io::Error::other("system page size is zero"));
+        }
+        let page_count = self.len.div_ceil(page_size);
+        let mut residency = vec![0_u8; page_count];
+        // SAFETY: the mapping is live for `self`'s lifetime, `self.len` is its
+        // exact mapped length, and `residency` has one byte per system page.
+        let result = unsafe {
+            libc::mincore(
+                self.ptr.as_ptr().cast(),
+                self.len,
+                residency.as_mut_ptr().cast(),
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        residency
+            .iter()
+            .filter(|state| **state & 1 != 0)
+            .count()
+            .checked_mul(page_size)
+            .ok_or_else(|| std::io::Error::other("resident byte count overflowed"))
+    }
+
     /// Copy the complete RAM mapping into an owned snapshot section.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
         // SAFETY: the mapping is live for `self`'s lifetime and covers exactly
@@ -205,6 +241,22 @@ mod tests {
             let byte = unsafe { *ram.as_ptr().add(off) };
             assert_eq!(byte, 0, "offset {off} not zero-initialized");
         }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn untouched_pages_are_not_resident_until_touched() {
+        let ram = GuestRam::new(HVF_PAGE_SIZE * 8).expect("mmap");
+        let before = ram.resident_bytes().expect("mincore before touch");
+        for index in 0..4 {
+            // SAFETY: each offset is the first byte of one page in the live
+            // mapping, and volatile write makes the touch observable.
+            unsafe {
+                std::ptr::write_volatile(ram.as_ptr().add(index * HVF_PAGE_SIZE), 1);
+            }
+        }
+        let after = ram.resident_bytes().expect("mincore after touch");
+        assert!(after > before, "touching pages did not increase residency");
     }
 
     #[test]

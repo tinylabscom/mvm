@@ -1,13 +1,16 @@
 #[cfg(all(test, feature = "test-support"))]
 use std::error::Error;
-#[cfg(test)]
-#[cfg(test)]
+// Gated exactly like its only user below. Under plain `#[cfg(test)]` this is an
+// unused import whenever `test-support` is off, which is what a package-scoped
+// `cargo clippy -p mvm-runtime --all-targets` builds — green in CI, where the
+// workspace build turns the feature on, and a hard error locally.
+#[cfg(all(test, feature = "test-support"))]
 use std::path::Path;
 
 #[cfg(all(test, feature = "test-support"))]
 use crate::mock_guest_agent::MockGuestAgent;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 fn is_permission_denied_io(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::PermissionDenied
 }
@@ -29,7 +32,6 @@ pub(crate) fn error_chain_has_permission_denied(err: &(dyn Error + 'static)) -> 
     false
 }
 
-#[cfg(test)]
 #[cfg(all(test, feature = "test-support"))]
 pub(crate) fn start_mock_guest_agent(vm_dir: &Path) -> Option<MockGuestAgent> {
     match MockGuestAgent::start(vm_dir) {

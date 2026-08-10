@@ -9,8 +9,55 @@ for detailed scope and acceptance criteria.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
+- [~] **Issue #2289 — kernel pin freshness follow-up.** This PR synchronizes
+      the libkrunfw and custom guest kernel inputs on the verified Linux
+      6.12.103 LTS source pin and updates structural parity coverage with the
+      upstream tarball's verified SRI hash. Merge and rollout evidence remain.
+
+## Fast machine substrate
+- [x] **Issue #2279 — define the fast machine substrate and canonical template
+      contract.** The cross-plan note joins Plans 298, 299, 265, 270, and 292
+      around one prepared template identity, explicit lifecycle phases, a
+      system-level kernel budget, and a measured filesystem-path decision. It
+      introduces no second cache or snapshot graph. Follow-up measurements and
+      live backend work remain open under issues #2280, #2281, #2194, #2195,
+      #2196, and #2199. Launch evidence now records the tier-selected root
+      filesystem strategy and rejects missing or mixed strategies so
+      filesystem comparisons cannot mix security tiers. The libkrun probe also
+      exposes bounded resident host-process capture, and the HVF guest-RAM seam
+      exposes resident bytes with a demand-fault witness and records private
+      restore-mapping duration. The libkrun density report also carries the
+      readiness-bound guest-agent RSS witness; whole-VM guest working-set,
+      first-use restore-fault, and cross-backend evidence remain open.
 
 ## In-flight plans
+- [x] Plan 2167 — durable agent session and event contract
+      (`specs/plans/2167-agent-session-contract.md`)
+  - [x] Versioned public IDs, lifecycle commands, durable/ephemeral event
+        envelopes, typed errors, and bounded retention/cursor semantics
+  - [x] Idempotent prompt delivery, cancellation confirmation, restart replay,
+        and committed transcript/audit output references
+  - [x] Client/SDK re-exports, contract serialization/security tests, and
+        three non-`@wip` BDD scenarios
+
+- [x] Plan 2168 — unified runtime policy and human approval
+      (`specs/plans/2168-runtime-approval.md`)
+  - [x] Typed fail-closed policy evaluation requires signed admission and
+        applies deterministic specificity/priority/effect precedence
+  - [x] Approval requests, authorized first responses, expiry, cancellation,
+        replay, and terminal-state refusal share the durable agent-session
+        cursor
+  - [x] Bounded digest-only metadata, audit action mappings, client/SDK
+        re-exports, unit tests, and three non-`@wip` BDD scenarios
+
+- [x] Plan 2170 — typed capability bindings
+      (`specs/plans/2170-typed-capability-bindings.md`)
+  - [x] Versioned per-verb descriptors, schema references, limits, and exact
+        descriptor-digest bindings
+  - [x] Host-signed admission allowlist and invocation-time fail-closed gates
+  - [x] Timeout, cancellation, replay, bounded I/O, typed failures, and
+        digest-only capability audit events
+  - [x] Real broker UDS round trip, BDD scenarios, and validation gates
 
 - [~] Security lane mutation-witness repair — **issue #2135**
   - [x] Add direct witnesses for the security-sensitive admission,
@@ -98,7 +145,13 @@ for detailed scope and acceptance criteria.
         Phase 6 ahead of Phase 3.
   - [ ] Phase 1 — content-addressed `--mount` image cache
   - [ ] Phase 2 — artifact preparation outside the launch path
-  - [ ] Phase 3 — reduce backend cold-start latency
+  - [~] Phase 3 — reduce backend cold-start latency. Re-measured on KVM at
+        `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
+        623.6 ms, so the cost is real rather than a poll artifact and can be
+        decomposed. It is a shell `sleep 0.1` socket poll plus ~9 curl/sudo
+        subprocesses (**#2292**). On HVF there is little left — `vmm_create`
+        11.6 ms, `driver_boot` 7.8 ms — the remaining cold cost there is guest
+        boot at 58.6 ms.
   - [ ] Phase 4 — parallelize independent host work
   - [~] Phase 5 — event-driven guest readiness. The flat 50 ms readiness poll
         was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
@@ -111,9 +164,56 @@ for detailed scope and acceptance criteria.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
         decomposed and the warm-pool refill removed from it: a default
         `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
-        `stop_transient` 142.9 ms, which is real cleanup. Follow-up: give pool
-        maintenance to the resident per-tenant daemon.
+        `stop_transient` 142.9 ms, which is real cleanup. A dedicated 1,000-cycle
+        HVF run now attributes its 67.62 ms p50 / 74.97 ms p95 stop wait to
+        supervisor PID disappearance; endpoint reaping and state cleanup are
+        below 0.1 ms at p99. Follow-up: give pool maintenance to the resident
+        per-tenant daemon and make supervisor shutdown event-driven.
   - [ ] Phase 7 — live validation and regression gates
+  - [x] Cross-plan fast-machine-substrate contract documented in
+        `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
+  - [~] Kernel/boot-substrate budget and filesystem-path evaluation tracked by
+        issues #2280 and #2281. The artifact-ledger slice of #2280 and the
+        pure-Rust ext4 baseline report are landed; live timing, restore,
+        density, candidate filesystem comparison, and the adopt/decline
+        decision remain open.
+
+- [ ] Plan 311 — Launch critical-path waste on real-sized images
+      (`specs/plans/311-launch-critical-path-waste.md`), branch
+      `plan/311-launch-critical-path`. Sits beneath Plan 299's contract: its
+      baseline runs `alpine` (9.9 MB rootfs), and three per-launch costs are
+      invisible at that size. On `python:3.12` (1.1 GB, 116x) a debug profile
+      shows ~557 ms re-hashing the cached rootfs for OCI provenance, ~67 ms in a
+      `ps` subprocess reaping orphaned helpers, and ~28 ms scanning `vmlinux`
+      for dm-verity markers with `windows().any()`. The Plan 299 lane gate
+      cannot see any of it — a re-hash is not a pull, build, mount
+      materialization, or warm claim.
+  - [x] Phase A0 — release baseline on both images. `python:3.12` 1.15-1.57 s
+        vs `alpine` 0.52 s wall clock on identical code and cache state, which
+        is the finding restated as a measurement.
+  - [x] Phase B — `sha256_file_cached` on the OCI admission path — **#2273**.
+        The two kernel-digest sites stay uncached on purpose (an integrity pin
+        must not read a mtime-keyed cache); `run.rs` already hashed the rootfs
+        through the cache, so the OCI path was the outlier, not the precedent.
+  - [x] Phase C — process-table sweep moved to the builder-VM spawn sites —
+        **#2274**. A cache-hit resolve spawns no helper and now walks no
+        process table.
+  - [x] Phase D — `memmem` replaces `windows().any()` in the kernel verity
+        probe — **#2275**. A verdict sidecar was considered and rejected:
+        ~5 ms in release is not worth caching a safety check.
+  - [x] Phase E — `artifact_bytes_hashed` + `process_table_scans` on the launch
+        sample, both refused by the prepared lanes — **#2276**. Plan 299's
+        contract table now names the image behind each percentile.
+  - [~] Phase F — validated on both backends. HVF meets the contract at
+        p50/p95/p99 on a 1.1 GB image (dispatch 77.3 / 79.7 / 90.1 ms against
+        ≤200 / ≤250 / ≤300), and `alpine` and `python:3.12` now agree inside
+        run-to-run noise where they used to differ by ~780 ms. claim-8 /
+        claim-14 digests unchanged, chain still verifies. Firecracker/KVM
+        repeated: the fixes hold there (both counters zero) but that backend
+        misses the contract for reasons this plan does not own — `driver_boot`
+        630.5 ms (**#2292**) and 294 ms of audit fsync in `admit` (**#2293**).
+        Outstanding: the warm-lane comparison, blocked because no standby pool
+        can be filled today.
 
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
@@ -918,6 +1018,40 @@ for detailed scope and acceptance criteria.
   - [ ] Pin the egress predicate algebra; enumerate escalation as deny-loud
   - [ ] Replay vectors for the audit chain's canonical signed bytes
   - [ ] Double-key the stale-name relief valves
+
+- [ ] Plan 309 — dependency reduction
+  (`specs/plans/309-dependency-reduction.md`)
+  - [x] Phase 0 — the three defects: `mvm-build`'s hardcoded `thiserror` 1,
+        the dead `rtnetlink` workspace entry, and `mvm-sdk`'s unconditional
+        `schemars` leaking through feature unification into every consumer
+  - [x] Phase 1 — drop rcgen's `x509-parser` feature (the ASN.1 tower and the
+        closure's last `nom` 7) and replace `rayon` with an order-preserving
+        scoped-thread `par_map`; closure 286 → 263, budget ratcheted
+  - [ ] Phase 2 — `mvm-http` over rustls to retire `reqwest` (−27), gated on
+        differential + fuzz coverage because it lands on the egress
+        re-origination and SSRF-hardening paths
+  - [ ] Phase 3 — the product decisions: tree-sitter grammar gating,
+        `tracing-subscriber`, `toml`, and the deferred `serde_jcs`
+  - [ ] Phase 4 — a lockfile-count ratchet, so the ~62 `wasmtime`-family
+        packages an off-by-default feature adds stay visible to `cargo deny`
+
+- [ ] Plan 313 — egress token accounting, streaming, and compaction
+  (`specs/plans/313-egress-token-accounting-and-compaction.md`)
+  - [ ] Phase 0 — blocking verification: does the substitution endpoint's
+        response leg stream, or does it accumulate? Request bodies are buffered
+        today, so an SSE model call may reach the guest only on completion
+  - [ ] Phase 1 — incremental response relay with bounded per-connection
+        buffering, keeping the `service_redact` seam correct across chunk
+        boundaries via a bounded overlap window
+  - [ ] Phase 2 — token accounting from provider-reported `usage` (both SSE
+        shapes), attributed to the `EgressGate` binding; zero new dependencies,
+        `unknown` rather than a wrong heuristic
+  - [ ] Phase 3 — `plan.egress_usage` chain-signed, payload-free audit entry
+  - [ ] Phase 4 — surface totals via a read-side verb over the existing chain
+  - [ ] Phase 5 — opt-in structural compaction, gated on Phase 3, with each
+        elision recorded as a digest and never as content
+  - [ ] Phase 6 — fleet aggregation from the same chain entries, derivable on
+        customer hardware with no call home
 
 - [~] Plan 308 — workload grants: one declaration, per-backend enforcement
   (`specs/plans/308-workload-grants.md`)

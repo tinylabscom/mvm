@@ -32,6 +32,9 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use mvm_contract::protocol::agent_capability::{
+    CapabilityDescriptor, CapabilityId, CapabilityLimits, SchemaRef, payload_digest,
+};
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::audit_signer::{AppendEntryRequest, AppendEntryResponse};
 use mvm_core::protocol::broker::{AuditDurability, Idempotency, ServiceErrorCode, ServiceId};
@@ -84,6 +87,63 @@ impl HostAuditV1Handler {
             rate_limiter: Mutex::new(TokenBucket::new(tokens_per_sec)),
             call_timeout: Duration::from_secs(5),
         }
+    }
+
+    /// Descriptors for the two typed verbs this handler exposes. The schema
+    /// digests are derived from the canonical JSON schema documents used by
+    /// the host parser; no request or response value is included.
+    pub fn capability_descriptors() -> Vec<CapabilityDescriptor> {
+        let service = || ServiceId::parse("host.audit.v1").expect("host.audit.v1 is valid");
+        let emit_input = payload_digest(&serde_json::json!({
+            "type": "object",
+            "required": ["ts", "fields"],
+            "properties": {"ts": {"type": "string"}, "fields": {}}
+        }));
+        let emit_output = payload_digest(&serde_json::json!({
+            "type": "object",
+            "required": ["chain_head"],
+            "properties": {"chain_head": {"type": "string"}}
+        }));
+        let batch_input = payload_digest(&serde_json::json!({
+            "type": "object",
+            "required": ["entries"],
+            "properties": {"entries": {"type": "array"}}
+        }));
+        let batch_output = payload_digest(&serde_json::json!({
+            "type": "object",
+            "required": ["chain_head", "statuses"],
+            "properties": {"chain_head": {"type": "string"}, "statuses": {"type": "array"}}
+        }));
+        vec![
+            CapabilityDescriptor::builder()
+                .id(CapabilityId::new(service(), "emit").expect("emit capability id"))
+                .description("append a bounded workload audit entry")
+                .input_schema(
+                    SchemaRef::new("host.audit.emit.input.v1", emit_input)
+                        .expect("emit input schema"),
+                )
+                .output_schema(
+                    SchemaRef::new("host.audit.emit.output.v1", emit_output)
+                        .expect("emit output schema"),
+                )
+                .limits(CapabilityLimits::new(4096, 32 * 1024, 5_000).expect("emit limits"))
+                .build()
+                .expect("emit descriptor"),
+            CapabilityDescriptor::builder()
+                .id(CapabilityId::new(service(), "emit_batch").expect("batch capability id"))
+                .description("append a bounded batch of workload audit entries")
+                .input_schema(
+                    SchemaRef::new("host.audit.emit-batch.input.v1", batch_input)
+                        .expect("batch input schema"),
+                )
+                .output_schema(
+                    SchemaRef::new("host.audit.emit-batch.output.v1", batch_output)
+                        .expect("batch output schema"),
+                )
+                .limits(CapabilityLimits::new(256 * 1024, 32 * 1024, 5_000).expect("batch limits"))
+                .build()
+                .expect("batch descriptor"),
+        ]
     }
 
     async fn handle_emit(

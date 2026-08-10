@@ -26,7 +26,9 @@ pub mod toml_loader;
 // here as module aliases so every existing
 // `crate::policy::{security,reversible_replacement,policies,redaction,bundle}::X`
 // path keeps resolving unchanged.
-pub use mvm_contract::policy::{bundle, policies, redaction, reversible_replacement, security};
+pub use mvm_contract::policy::{
+    approval, bundle, policies, redaction, reversible_replacement, security,
+};
 
 pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
 pub use policies::{

@@ -14,8 +14,8 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::commands::vm::launch_sample::{
-    ArtifactPaths, BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchSample,
-    LaunchSubTimings, LaunchWork,
+    ArtifactPaths, BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchRootStrategy,
+    LaunchSample, LaunchSubTimings, LaunchWork,
 };
 pub use crate::commands::vm::phase_timing::{
     LaunchMode, LaunchSubMarks, RunPhaseTimings, SubPhase,
@@ -24,8 +24,12 @@ pub use mvm_core::launch_trace::TracePhase;
 
 use super::stats::percentile;
 
-/// Report schema version for [`ColdLaunchReport`].
-pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 1;
+/// Report schema version for [`ColdLaunchReport`]. Version 2 added artifact
+/// byte measurements and optional resolved kernel-config evidence; version 3
+/// adds the selected root filesystem strategy. Older reports remain readable
+/// through serde defaults but are not comparable without the new substrate
+/// fields.
+pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 3;
 
 /// The measurement lanes the cold-launch contract reports independently.
 ///
@@ -96,6 +100,8 @@ pub enum LaneViolation {
     NotReleaseBuild { profile: BuildProfile },
     /// The sample's schema is not the one this consumer understands.
     SchemaMismatch { found: u32, expected: u32 },
+    /// The current sample does not identify its selected root filesystem path.
+    MissingRootStrategy,
     /// The launch performed work the lane forbids.
     ForbiddenWork {
         lane: LaunchLane,
@@ -124,6 +130,10 @@ impl std::fmt::Display for LaneViolation {
             Self::SchemaMismatch { found, expected } => write!(
                 f,
                 "launch sample schema {found} is not the expected {expected}"
+            ),
+            Self::MissingRootStrategy => write!(
+                f,
+                "launch sample does not identify its selected root filesystem strategy"
             ),
             Self::ForbiddenWork { lane, performed } => write!(
                 f,
@@ -168,6 +178,9 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
             expected: LAUNCH_SAMPLE_SCHEMA_VERSION,
         });
     }
+    if sample.root_strategy.is_none() {
+        return Err(LaneViolation::MissingRootStrategy);
+    }
     if sample.build_profile != BuildProfile::Release {
         return Err(LaneViolation::NotReleaseBuild {
             profile: sample.build_profile,
@@ -203,6 +216,8 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                 "image_build",
                 "mount_materialize",
                 "warm_claim",
+                "artifact_hash",
+                "process_table_scan",
             ])?;
             require_cold(lane, sample)
         }
@@ -212,11 +227,19 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                 "image_build",
                 "mount_materialize",
                 "warm_claim",
+                "artifact_hash",
+                "process_table_scan",
             ])?;
             require_cold(lane, sample)
         }
         LaunchLane::MountMiss => {
-            forbid(vec!["image_pull", "image_build", "warm_claim"])?;
+            forbid(vec![
+                "image_pull",
+                "image_build",
+                "warm_claim",
+                "artifact_hash",
+                "process_table_scan",
+            ])?;
             if !work.mount_materialize {
                 return Err(LaneViolation::MissingWork {
                     lane,
@@ -272,6 +295,29 @@ pub struct ArtifactDigests {
     pub rootfs_sha256: Option<String>,
 }
 
+/// Artifact measurements resolved outside the launch's timed window.
+///
+/// Missing artifact paths stay `None`: the launch sample is still useful for
+/// timing, but the report makes the missing substrate evidence visible instead
+/// of turning it into a fabricated zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArtifactMeasurements {
+    pub kernel_bytes: Option<u64>,
+    pub initramfs_bytes: Option<u64>,
+    pub runtime_overlay_bytes: Option<u64>,
+    pub rootfs_bytes: Option<u64>,
+    pub kernel_config: Option<KernelConfigMeasurement>,
+}
+
+/// Resolved kernel-config evidence attached to a launch report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KernelConfigMeasurement {
+    pub path: String,
+    pub builtin_symbols: u32,
+}
+
 /// Which caches a lane was measured against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -325,10 +371,15 @@ pub struct LaunchContext {
     /// The VMM's own version where it is knowable without probing a foreign
     /// binary. `None` is "not resolved", never "unversioned".
     pub vmm_version: Option<String>,
+    /// Root filesystem strategy selected by the capability/security tier gate.
+    #[serde(default)]
+    pub root_strategy: Option<crate::commands::vm::launch_sample::LaunchRootStrategy>,
     pub sizing: GuestSizing,
     pub filesystem: Option<String>,
     pub artifacts: ArtifactPaths,
     pub digests: ArtifactDigests,
+    #[serde(default)]
+    pub measurements: ArtifactMeasurements,
 }
 
 /// One measured launch, with everything needed to re-read it later.
@@ -549,6 +600,7 @@ mod tests {
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             launch_mode: LaunchMode::Cold,
+            root_strategy: Some(LaunchRootStrategy::BlockExt4),
             sizing: GuestSizing {
                 cpus: 2,
                 memory_mib: 512,
@@ -573,6 +625,7 @@ mod tests {
                 arch: "aarch64".to_string(),
                 mvm_version: "0.1.0".to_string(),
                 vmm_version: Some("0.1.0".to_string()),
+                root_strategy: Some(LaunchRootStrategy::BlockExt4),
                 sizing: GuestSizing {
                     cpus: 2,
                     memory_mib: 512,
@@ -581,6 +634,7 @@ mod tests {
                 filesystem: Some("apfs".to_string()),
                 artifacts: ArtifactPaths::default(),
                 digests: ArtifactDigests::default(),
+                measurements: ArtifactMeasurements::default(),
             },
             cache: CacheState {
                 artifacts_cached: true,
@@ -680,6 +734,8 @@ mod tests {
             image_build: true,
             mount_materialize: true,
             warm_claim: true,
+            artifact_bytes_hashed: 1_205_739_520,
+            process_table_scans: 1,
         };
         let err = validate_lane(LaunchLane::PreparedCold, &sample).unwrap_err();
         assert_eq!(
@@ -690,10 +746,95 @@ mod tests {
                     "image_pull",
                     "image_build",
                     "mount_materialize",
-                    "warm_claim"
+                    "warm_claim",
+                    "artifact_hash",
+                    "process_table_scan"
                 ],
             }
         );
+    }
+
+    /// The regression this gate exists for: re-reading an already-cached
+    /// artifact to recompute a digest is not a pull, a build, a mount
+    /// materialization, or a warm claim, so before this flag existed such a
+    /// launch reported itself as a clean prepared-cold sample. Its cost is
+    /// linear in artifact size, which is why it stayed invisible on a small
+    /// image and dominated a large one.
+    #[test]
+    fn prepared_cold_rejects_a_launch_that_re_hashed_a_cached_artifact() {
+        let mut sample = launch_sample();
+        sample.work.artifact_bytes_hashed = 1_205_739_520;
+        let err = validate_lane(LaunchLane::PreparedCold, &sample).unwrap_err();
+        assert_eq!(
+            err,
+            LaneViolation::ForbiddenWork {
+                lane: LaunchLane::PreparedCold,
+                performed: vec!["artifact_hash"],
+            }
+        );
+        assert!(err.to_string().contains("artifact_hash"));
+    }
+
+    /// Zero is the prepared state, and it must not be confused with "the
+    /// counter was never populated": both read as no work, and only the first
+    /// is a claim. A sample that hashed nothing passes, which is what makes
+    /// the fixed launch path provable rather than merely faster.
+    #[test]
+    fn prepared_cold_accepts_a_launch_that_hashed_nothing() {
+        let mut sample = launch_sample();
+        sample.work.artifact_bytes_hashed = 0;
+        assert_eq!(validate_lane(LaunchLane::PreparedCold, &sample), Ok(()));
+    }
+
+    /// The mount-miss lane materializes a mount image and is expected to; it
+    /// still boots prepared artifacts, so a rootfs re-hash contaminates it the
+    /// same way.
+    #[test]
+    fn mount_miss_still_rejects_a_re_hashed_artifact() {
+        let mut sample = launch_sample();
+        sample.work.mount_materialize = true;
+        sample.work.artifact_bytes_hashed = 1_205_739_520;
+        let err = validate_lane(LaunchLane::MountMiss, &sample).unwrap_err();
+        assert_eq!(
+            err,
+            LaneViolation::ForbiddenWork {
+                lane: LaunchLane::MountMiss,
+                performed: vec!["artifact_hash"],
+            }
+        );
+    }
+
+    /// The other half of the same finding: a process-table snapshot is
+    /// maintenance whose cost belongs to a run that spawns a helper, not to one
+    /// that resolved everything from cache. Like the re-hash, it is not a pull,
+    /// a build, a materialization, or a claim.
+    #[test]
+    fn prepared_cold_rejects_a_launch_that_walked_the_process_table() {
+        let mut sample = launch_sample();
+        sample.work.process_table_scans = 1;
+        let err = validate_lane(LaunchLane::PreparedCold, &sample).unwrap_err();
+        assert_eq!(
+            err,
+            LaneViolation::ForbiddenWork {
+                lane: LaunchLane::PreparedCold,
+                performed: vec!["process_table_scan"],
+            }
+        );
+        assert!(err.to_string().contains("process_table_scan"));
+    }
+
+    /// The artifact-miss lane is the one that legitimately hashes: it acquires
+    /// and prepares the image, so reading it end-to-end is the work being
+    /// measured rather than work being repeated.
+    #[test]
+    fn artifact_miss_permits_hashing_because_that_lane_is_the_acquisition() {
+        let mut sample = launch_sample();
+        sample.work.image_pull = true;
+        sample.work.artifact_bytes_hashed = 1_205_739_520;
+        // The same lane spawns a builder VM when the ext4 writer cannot emit a
+        // tree, so it reaps before doing so; that sweep belongs to this lane.
+        sample.work.process_table_scans = 1;
+        assert_eq!(validate_lane(LaunchLane::ArtifactMiss, &sample), Ok(()));
     }
 
     #[test]
@@ -828,6 +969,16 @@ mod tests {
                 found: LAUNCH_SAMPLE_SCHEMA_VERSION + 1,
                 expected: LAUNCH_SAMPLE_SCHEMA_VERSION,
             })
+        );
+    }
+
+    #[test]
+    fn a_missing_root_strategy_is_rejected() {
+        let mut sample = launch_sample();
+        sample.root_strategy = None;
+        assert_eq!(
+            validate_lane(LaunchLane::PreparedCold, &sample),
+            Err(LaneViolation::MissingRootStrategy)
         );
     }
 

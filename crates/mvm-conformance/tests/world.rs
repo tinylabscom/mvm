@@ -343,6 +343,46 @@ pub struct CliWorld {
     pub warm_restore_verify_result: Option<Result<String, String>>,
     /// Checkpoint id captured by the most recent `machine vm checkpoint create`.
     pub warm_restore_checkpoint_id: Option<String>,
+    /// Reference agent-session journal used by the durable contract BDD
+    /// scenarios. The journal is pure protocol state, not a second store.
+    pub agent_session_journal: Option<mvm_contract::protocol::agent_session::AgentSessionJournal>,
+    /// Most recent agent command result.
+    pub agent_session_outcome: Option<mvm_contract::protocol::agent_session::AgentCommandOutcome>,
+    /// Most recent bounded history page.
+    pub agent_session_history:
+        Option<mvm_contract::protocol::agent_session::AgentSessionHistoryPage>,
+    /// State reconstructed from durable history after a simulated adapter
+    /// restart.
+    pub agent_session_restarted_state:
+        Option<mvm_contract::protocol::agent_session::AgentSessionState>,
+    /// Most recent live-only event.
+    pub agent_session_live:
+        Option<mvm_contract::protocol::agent_session::AgentSessionEventEnvelope>,
+    /// Sanitized serialized history captured by a security assertion.
+    pub agent_session_history_json: Option<String>,
+    /// Descriptor used by the typed capability BDD contract scenarios.
+    pub capability_descriptor:
+        Option<mvm_contract::protocol::agent_capability::CapabilityDescriptor>,
+    /// Invocation metadata used by the typed capability BDD scenarios.
+    pub capability_invocation:
+        Option<mvm_contract::protocol::agent_capability::CapabilityInvocation>,
+    /// Last typed capability validation outcome.
+    pub capability_outcome:
+        Option<Result<(), mvm_contract::protocol::agent_capability::CapabilityFailureCode>>,
+    /// Serialized digest-only capability audit event.
+    pub capability_audit_json: Option<String>,
+    /// Typed policy evaluation used by the runtime-approval scenarios.
+    pub approval_evaluation: Option<mvm_contract::policy::approval::PolicyEvaluation>,
+    /// Durable approval ledger reconstructed from the agent-session journal.
+    pub approval_ledger: Option<mvm_contract::policy::approval::ApprovalLedger>,
+    /// Approval id used by the current runtime-approval scenario.
+    pub approval_id: Option<mvm_contract::policy::approval::ApprovalRequestId>,
+    /// Most recent approval operation failure, retained as a stable message.
+    pub approval_error: Option<String>,
+    /// Most recent approval lifecycle state.
+    pub approval_state: Option<mvm_contract::policy::approval::ApprovalState>,
+    /// Approval state reconstructed after a simulated restart.
+    pub approval_restarted_state: Option<mvm_contract::policy::approval::ApprovalState>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`

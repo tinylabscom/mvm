@@ -1,6 +1,55 @@
 //! `VmBackend` and workload-role implementations for [`super::WorkloadRunner`].
 
 use super::*;
+use std::time::Instant;
+
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+    WorkloadRunner<D, S, B>
+{
+    /// Stop a VM and expose timings for each runner-owned teardown phase.
+    pub fn stop_with_timing(&self, id: &VmId) -> Result<StopTiming> {
+        let total_started = Instant::now();
+        let attach_started = Instant::now();
+        let vm = match self.driver.attach(id) {
+            Ok(vm) => vm,
+            Err(err) => {
+                self.console_streamer.stop(&id.0);
+                return Err(err);
+            }
+        };
+        let attach = attach_started.elapsed();
+
+        let endpoint_started = Instant::now();
+        let state_dir = vm_state_dir(&id.0);
+        reap_substitution_endpoint(&state_dir, &id.0);
+        mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
+        mvm_vmm::host::broker_services_spawn::reap_broker_services(&state_dir);
+        mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
+        let endpoint_reaping = endpoint_started.elapsed();
+
+        let kill_started = Instant::now();
+        let kill_result = vm.kill_with_timing();
+        let driver_detail = match &kill_result {
+            Ok(detail) => *detail,
+            Err(_) => None,
+        };
+        let driver_kill = kill_started.elapsed();
+
+        let console_started = Instant::now();
+        self.console_streamer.stop(&id.0);
+        let console_cleanup = console_started.elapsed();
+        kill_result?;
+
+        Ok(StopTiming {
+            attach,
+            endpoint_reaping,
+            driver_kill,
+            console_cleanup,
+            total: total_started.elapsed(),
+            driver_detail,
+        })
+    }
+}
 
 /// The runner is the workload backend: lifecycle operations run through the
 /// `VmmDriver` seam rather than being copied into each backend. State is
@@ -113,23 +162,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        let vm = match self.driver.attach(id) {
-            Ok(vm) => vm,
-            Err(err) => {
-                self.console_streamer.stop(&id.0);
-                return Err(err);
-            }
-        };
-        reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
-        mvm_vmm::host::netd_spawn::reap_netd(&vm_state_dir(&id.0));
-        mvm_vmm::host::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
-        mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(
-            &vm_state_dir(&id.0),
-            &id.0,
-        );
-        let killed = vm.kill();
-        self.console_streamer.stop(&id.0);
-        killed
+        self.stop_with_timing(id).map(|_| ())
     }
 
     fn stop_all(&self) -> Result<()> {

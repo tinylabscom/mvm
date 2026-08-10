@@ -4,6 +4,11 @@
 baselines measured. Phase 6 is promoted ahead of Phase 3 by the measurements;
 Phase 3 is retargeted at the Firecracker boot path.
 
+This plan is one owner of the [fast machine substrate](../notes/2026-08-10-fast-machine-substrate.md),
+which composes cold launch with Plans 298, 265, 270, and 292. It owns the
+prepared cold path and its evidence; it does not define a second artifact or
+snapshot graph.
+
 ## Goal
 
 Make a genuinely cold VMM launch fast enough that warm-VM performance is not the
@@ -56,6 +61,17 @@ This plan composes with existing work:
   the obsolete internal `AddDir` naming and any compatibility-only flag path are
   removed while this launch path is changed.
 
+The prepared template identity includes the kernel, universal initramfs, rootfs
+lower artifacts, verity metadata, runtime overlay, backend/VMM version, guest
+protocol, CPU/memory shape, block-device/share topology, network-policy shape,
+warmup profile, and readiness probe. Host paths, host-directory contents,
+tenant authority, live channels, and mutable writable state are excluded.
+
+The launch measurement vocabulary is canonical: kernel entry, agent ready,
+authenticated activation, environment ready, first useful RPC, and reaped.
+`/bin/true` remains a launch probe; the first useful authenticated RPC is a
+separate end-to-end signal.
+
 No task here may weaken admission, signed-plan verification, dm-verity,
 host-directory isolation, vsock authentication, or the no-NIC workload
 boundary.
@@ -92,6 +108,15 @@ Required release-build gates on each supported backend:
 | Prepared cold with mount-cache hit | ≤200 ms | ≤250 ms | ≤300 ms |
 | Warm claim to authenticated agent | no regression against Plan 265 | no regression | no regression |
 
+**Every published percentile names the image and rootfs size it was measured
+on.** The gates above are size-independent targets, but a launch path can carry
+per-launch work that is a function of artifact size, and a number measured on a
+small image then reads as a property of the code rather than of the pair. The
+recorded baselines below use `alpine` (9.9 MB cached rootfs); Plan 311 adds a
+large-image lane on `python:3.12` (1.1 GB) after finding ~557 ms of per-launch
+rootfs re-hashing that `alpine` could not reveal and this contract's lane gate
+had no flag for.
+
 Mount misses and artifact misses are reported with p50/p95/p99 and cache hit
 rate, but are not silently included in the prepared-cold SLO.
 
@@ -118,13 +143,18 @@ rate, but are not silently included in the prepared-cold SLO.
       already refuses a prepared-cold sample that reports one.)
 - [x] Record backend, host architecture, kernel digest, initramfs digest,
       overlay digest, rootfs digest, VMM version, CPU count, memory setting,
-      filesystem, cache state, and run number with every sample.
+      filesystem, selected root filesystem strategy, cache state, and run
+      number with every sample.
       (The launch writes artifact **paths**, not digests — hashing inside the
       measured window would charge the launch for the measurement. The runner
       resolves digests, filesystem, and cache state afterwards into
       `LaunchContext`/`CacheState`. `vmm_version` is resolved only for the
       in-house VMM, which ships inside `mvmctl`; a third-party VMM records
-      `None` rather than a fabricated number.)
+      `None` rather than a fabricated number. The launch sample records the
+      tier-gated `virtiofs_root` or `block_ext4` strategy so filesystem
+      comparisons never mix security or capability tiers. The runner rejects
+      a missing strategy and refuses to aggregate a report whose warmup or
+      measured samples change strategy.)
 - [x] Add a benchmark report format containing raw samples and p50/p95/p99;
       do not store only summary numbers.
       (`ColdLaunchReport` carries `raw: Vec<ColdLaunchSample>` alongside
@@ -146,6 +176,19 @@ rate, but are not silently included in the prepared-cold SLO.
       missing span would pass exactly the contamination the gate exists to
       catch. A warm claim is refused on the launch mode as well as the flag, so
       one signal going missing cannot let it through.)
+- [x] Add an opt-in lifecycle-density benchmark that performs 1,000 start/stop
+      operations, defaults to HVF, reports independent start and stop
+      distributions plus wall-clock throughput, and accepts bounded batches
+      across the real microVM backend selectors.
+      (`tests/microvm_lifecycle_bench.rs`; the test remains disabled unless
+      `MVM_LIFECYCLE_BENCH=1` is set and requires explicit prepared kernel and
+      rootfs paths.)
+- [x] Add stop-phase timing to the lifecycle benchmark so backend teardown can
+      be separated from runner attach, endpoint reaping, console cleanup, and
+      backend-specific process teardown. A 1,000-cycle HVF run measured
+      `pid_disappearance` at 67.62 ms p50 / 74.97 ms p95 / 77.01 ms p99;
+      endpoint reaping and state cleanup were below 0.1 ms at p99, and no
+      force-kill escalation occurred.
 
 **Exit gate:** the report can distinguish the 430-second mount-image cost from
 the actual approximately 1.2-second backend-start cost, and the baseline is
@@ -159,6 +202,9 @@ native baselines are measured and recorded below from release binaries.
 Release `mvmctl`, `machine run --image alpine -- /bin/true`, prepared artifact
 cache, 20 measured iterations after 2 warm-ups per lane. Every sample cleared
 the lane gate. Raw samples in `$MVM_HOME/state/bench/cold-launch-*.json`.
+
+Image: `alpine`, 9.9 MB cached rootfs. See Plan 311 for the same launch on a
+1.1 GB rootfs and for what that difference exposed.
 
 | span (p50 / p99) | prepared cold | warm claim |
 |---|---:|---:|
@@ -197,6 +243,31 @@ What this establishes:
    53.7 ms and the wait from `start` returning to an answering agent is
    54.1 ms. Neither dominates, and together they are only a third of the cold
    wall clock.
+
+### Post-Plan-311 re-measurement — Apple Silicon / HVF
+
+Release `mvmctl` at `c866611af`, `ColdLaunchBench`, 20 runs + 2 warm-ups per
+lane, every sample through the lane gate. Both images reported independently
+per the contract's image-naming rule.
+
+| lane | dispatch p50 | p95 | p99 | total p50 |
+|---|---:|---:|---:|---:|
+| `alpine` (9.9 MB rootfs) | 79.6 ms | 84.9 ms | 93.6 ms | 320.1 ms |
+| `python:3.12` (1.1 GB rootfs) | 77.3 ms | 79.7 ms | 90.1 ms | 316.1 ms |
+
+Plan 311 removed the per-launch work that made these two differ; they now agree
+inside run-to-run noise at every percentile. The prepared-cold contract is met
+on this backend with a 3.3x margin at p99, on a 1.1 GB image.
+
+What this changes for the remaining phases on HVF:
+
+- **Phase 3 has little left here.** `vmm_create` is 11.6 ms and the backend's
+  own `driver_boot` is 7.8 ms p50. `guest_kernel_entry` at 58.6 ms is now three
+  quarters of the dispatch window, so the remaining cold-start cost on this
+  backend is the guest booting, not the VMM being created.
+- **Phase 6 is still the largest single span in the run.** `stop_transient` is
+  128.1 ms p50 — larger than the whole dispatch window that precedes it, and it
+  runs after the command has already produced its answer.
 
 ### Measured baseline — Linux Firecracker / KVM
 
@@ -420,6 +491,49 @@ known to be guest boot rather than VMM setup — 65 ms of the 70 ms. And the
 Firecracker `driver_boot` of 623.6 ms should be re-measured against these
 fixes before being decomposed, since it contains a poll of its own.
 
+### Phase 3 re-measurement — Linux Firecracker / KVM, post-Phase-5
+
+Phase 5 said the Firecracker `driver_boot` of 623.6 ms should be re-measured
+against the poll fixes before being decomposed, since it contains a poll of its
+own. Re-measured on `main` at `c866611af`, release, prepared cache, x86_64 KVM
+host:
+
+```
+phases:  drives=46.0  admit=294.4  backend_start=689.8  vsock_wait=2.1
+         command=57.3  teardown=423.8  total=1513.4   dispatch_window=691.9
+backend: driver_boot=630.5  console_stream_start=3.6  activate_workload=16.6
+         broker_register=38.7
+work:    artifact_bytes_hashed=0  process_table_scans=0
+```
+
+`driver_boot` **did not move**: 623.6 ms before, 630.5 ms after. The poll it was
+suspected of containing is not one of the four Phase 5 replaced. So Phase 3 is a
+real cost and can be decomposed — that was the open question and it is now
+closed.
+
+Note `guest_kernel_entry=0.0`: the Firecracker driver confirms boot before
+returning, so `driver_boot` spans VMM start *and* guest boot, which HVF reports
+as two spans. The like-for-like comparison is HVF's 11.6 + 58.6 = ~70 ms against
+630 ms, an excess of ~560 ms.
+
+Decomposed (**issue #2292**): the driver boots through a shell script that polls
+for the API socket on a fixed `sleep 0.1` — the same quantization Phase 5
+removed from four Rust sites, missed here because it lives in a shell heredoc —
+and then issues each API call as its own `curl` subprocess behind `sudo bash`.
+Measured on the same box: 7 ms per `sudo bash -c true`, 6 ms per `curl` spawn,
+about nine calls per boot. So ~100 ms of tick plus ~120 ms of spawn, roughly 35%
+of `driver_boot`, removable without touching the VMM.
+
+**A second cost this exposed (issue #2293).** `admit` is 294 ms here against
+~38 ms on HVF, and it is neither compute nor hashing. One launch appends **8**
+chain entries, each its own `write_all` + `sync_data` per Plan 303 WS2, and
+`fsync` on this host's md2 array costs 41.7 ms p50 — so ~334 ms of durability
+per launch. The entry list also shows `plan.admitted` twice, once from the OCI
+provenance path and once from the boot admission. On Linux, admission alone
+exceeds the ≤200 ms p50 contract before any VMM work happens; on macOS it is
+invisible. Phase 4's "keep admission entirely local" is necessary but not
+sufficient — local is not the same as cheap when every entry is a barrier.
+
 ## Phase 1 — Content-addressed `--mount` image cache
 
 - [ ] Add a reusable `mvm-fs` directory fingerprint helper covering relative
@@ -505,6 +619,54 @@ optimization backend-local and the benchmark backend-neutral.
 - [ ] Use the smallest supported default memory commitment and demand-fault
       guest RAM. Prove that the change affects resident cost without changing
       guest-visible memory capacity or isolation.
+- [ ] Run the kernel and boot-substrate budget from
+      [issue #2280](https://github.com/tinylabscom/mvm/issues/2280): compare
+      raw/compressed kernel and initramfs size, boot probes, kernel entry,
+      authenticated readiness, resident pages, and restore fault cost. A size
+      reduction is accepted only with readiness, security, and compatibility
+      witnesses.
+- [x] Extend `cargo xtask perf footprint` to include the initramfs artifact and
+      an optional resolved kernel config. The JSON report now records the
+      initramfs bytes and built-in-symbol count, and reuses the per-architecture
+      kernel-config budget gate. This is the artifact-ledger slice of #2280;
+      live boot timing and guest resident-memory evidence remain open; the
+      libkrun probe now captures host supervisor/VMM resident footprints.
+- [x] Carry artifact byte counts and optional resolved kernel-config symbol
+      counts into each `ColdLaunchReport` sample. The runner resolves these
+      after the child launch exits, so the report joins substrate evidence to
+      launch timing without charging metadata I/O to the measured window.
+- [x] Add a bounded live resident-footprint capture for the libkrun probe.
+      `mvm_cli::bench::probes::run_density` boots admitted guests through
+      authenticated readiness, samples each host supervisor/VMM process with
+      the platform footprint reader, and drops every held guest on success or
+      failure. This reports host process residency; guest demand-fault and
+      restore-fault evidence remain separate gates.
+- [x] Add the guest-agent RSS witness to the same live libkrun density report.
+      After the readiness boundary, each held guest is queried through the
+      existing `ResourceUsage` RPC and the result is carried beside host
+      supervisor/VMM RSS, with aggregate statistics for samples that answered.
+      This measures the guest-agent process, not the whole guest working set;
+      whole-VM and first-use restore-fault evidence remain open.
+- [x] Add an allocation-level demand-fault witness to the HVF guest-RAM seam.
+      `GuestRam` exposes a `mincore` resident-byte query, the raw kernel boot
+      result records it after vCPU and host-I/O shutdown, and a focused test
+      proves untouched anonymous pages become resident only after writes.
+      The raw result also records monotonic private restore-mapping duration
+      when a restore file is supplied. These are allocation and mapping
+      witnesses, not substitutes for end-to-end guest working-set or first-use
+      restore-fault measurements.
+- [x] Add a baseline filesystem-path report at the existing pure-Rust
+      materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
+      content digest, node composition, file bytes, emitted image size/digest,
+      materializer format version, and separate source-hash/walk/build timing
+      phases. `cargo xtask perf filesystem --root <DIR> --json` exposes the
+      report for repeated fixture comparisons.
+- [ ] Evaluate the current rootfs and host-directory image path against the
+      guest-local immutable filesystem hypothesis in
+      [issue #2281](https://github.com/tinylabscom/mvm/issues/2281). Keep the
+      current path as the baseline, use the new report for candidate
+      comparisons, and preserve dm-verity, xattrs/whiteouts, read-only
+      enforcement, and clean writable CoW state.
 - [ ] Add backend-specific unit tests for immutable artifact reuse, fresh VM
       identity, failed setup cleanup, and no cross-launch mutable state.
 
@@ -601,6 +763,9 @@ green.
       process ownership, and cleanup races.
 - [ ] The final sprint and refactor rollup entries cite concrete evidence files,
       host/backend details, and commit references.
+- [ ] The template identity and lifecycle vocabulary match
+      `specs/notes/2026-08-10-fast-machine-substrate.md`; no parallel cache or
+      snapshot graph exists.
 
 ## Explicit follow-ups if the gate remains red
 

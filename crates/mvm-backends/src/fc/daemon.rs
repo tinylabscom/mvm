@@ -87,7 +87,17 @@ fn start_vm_firecracker_inner(
         abs_socket,
         clean_vsock,
         cpu_scope,
-    ))
+    ))?;
+
+    // The socket wait used to live in the launch script as
+    // `for i in $(seq 1 30); do [ -S sock ] && break; sleep 0.1; done`, which
+    // put a 100 ms floor under every launch — the socket normally appears in
+    // single-digit milliseconds and was rounded up to the tick. Waiting here
+    // lets it use the shared backoff, and keeps the shell to the one thing it
+    // is needed for: becoming root to exec Firecracker.
+    wait_for_api_socket(std::path::Path::new(abs_socket), API_SOCKET_TIMEOUT)?;
+    ui::info("Firecracker started.");
+    Ok(())
 }
 
 /// The launch script, built rather than run.
@@ -117,18 +127,6 @@ fn firecracker_launch_script(
         {cpu_scope}sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
             </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
             echo $! > {dir}/fc.pid'
-
-        echo "[mvm] Waiting for API socket..."
-        for i in $(seq 1 30); do
-            [ -S {socket} ] && break
-            sleep 0.1
-        done
-
-        if [ ! -S {socket} ]; then
-            echo "[mvm] ERROR: API socket did not appear." >&2
-            exit 1
-        fi
-        echo "[mvm] Firecracker started."
         "#,
         socket = abs_socket,
         dir = abs_dir,
@@ -137,14 +135,47 @@ fn firecracker_launch_script(
     )
 }
 
-/// Send API PUT request to a specific Firecracker socket.
+/// How long to wait for Firecracker to create its API socket. The shell loop
+/// this replaced allowed 30 x 100 ms, so keeping 3 s means a host slow enough
+/// to need the old ceiling still boots.
+const API_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Wait for Firecracker to create its API socket, backing off rather than
+/// ticking.
 ///
-/// `data` is written to a temp file and passed via `curl --data @<file>`
-/// so the body never traverses the shell — guards against the
-/// `--data '{json}'` shape where a single-quote in `data` would
-/// escape into the host shell (`specs/01-project.md` flagged the v1
-/// shape's quoting fragility). `socket` and `path` are
-/// `shell_quote`d defensively.
+/// Takes the path and the timeout so the expiry branch is testable without
+/// spawning a VMM. A wait that never fires is the failure mode worth pinning,
+/// and it is unreachable through the launch path.
+fn wait_for_api_socket(socket: &std::path::Path, timeout: std::time::Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut attempt = 0u32;
+    loop {
+        if is_unix_socket(socket) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Firecracker API socket {} did not appear within {timeout:?}",
+                socket.display()
+            );
+        }
+        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// Whether `path` is a unix socket — what `[ -S ]` tested. A regular file left
+/// at the path is not the API socket appearing.
+fn is_unix_socket(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+    std::fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
+}
+
+/// Send an API PUT to a specific Firecracker socket.
+///
+/// The body no longer traverses a shell at all: it is framed by
+/// `Content-Length` on a socket this process owns, so the quoting fragility
+/// the old `curl --data` shape had to defend against does not arise.
 #[instrument(skip_all, fields(path))]
 pub fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
     fc_api_call("PUT", socket, path, Some(data))
@@ -162,53 +193,46 @@ pub fn secure_vsock_socket_for_caller(vsock: &str) -> Result<()> {
     ))
 }
 
-/// Shared body for FC's PUT/PATCH calls. Writes `data` (if Some) to a
-/// `NamedTempFile`, then shells out to curl with `--data @<file>` so
-/// the JSON body never goes through bash. All paths flowing into the
-/// script are `shell_quote`d.
+/// Shared body for FC's PUT/PATCH calls.
+///
+/// Delegates to [`crate::fc::fc_api::call`], the native HTTP-over-UDS client
+/// this crate already carries for the warm-restore path. That client exists
+/// precisely because each call used to be a `curl` subprocess, and it already
+/// encodes the one thing that is easy to get wrong here: Firecracker answers
+/// `Connection: keep-alive` and holds the socket open regardless of what the
+/// request asked for, so the body must be framed by `Content-Length` and never
+/// by EOF. The boot path was the last caller still shelling out.
+///
+/// Reaching the socket without `sudo` is what [`adopt_api_socket`] arranges.
 fn fc_api_call(method: &str, socket: &str, path: &str, data: Option<&str>) -> Result<()> {
-    use std::io::Write;
-    let q_socket = shell_quote(socket);
-    let url = format!("http://localhost{path}");
-    let q_url = shell_quote(&url);
-    let q_path = shell_quote(path);
+    // The request target is built by this crate, never by a caller, but it is
+    // interpolated into a request line: reject anything that could terminate
+    // it. A drive id that ever became externally influenced must not be able
+    // to smuggle a second request.
+    if !path.starts_with('/') || path.contains(['\r', '\n']) {
+        anyhow::bail!("refusing malformed Firecracker API path {path:?}");
+    }
+    crate::fc::fc_api::call(std::path::Path::new(socket), method, path, data).map(|_body| ())
+}
 
-    let (data_arg, _body_holder) = match data {
-        Some(body) => {
-            let mut tmp = tempfile::NamedTempFile::new()
-                .with_context(|| "creating temp file for FC API body")?;
-            tmp.write_all(body.as_bytes())
-                .with_context(|| "writing FC API body to temp file")?;
-            tmp.flush()
-                .with_context(|| "flushing FC API body to temp file")?;
-            let path_str = tmp.path().to_string_lossy().into_owned();
-            let q_body_path = shell_quote(&path_str);
-            (
-                format!(
-                    "--data @{q_body_path} -H 'Content-Type: application/json'",
-                    q_body_path = &q_body_path[..]
-                ),
-                Some(tmp),
-            )
-        }
-        None => (String::new(), None),
-    };
-
-    let script = format!(
-        r#"
-        set -eu
-        response=$(sudo curl -s -w "\n%{{http_code}}" -X {method} --unix-socket {q_socket} \
-            {data_arg} {q_url})
-        code=$(printf '%s' "$response" | tail -n1)
-        body=$(printf '%s' "$response" | sed '$d')
-        if [ "$code" -ge 400 ]; then
-            echo "[mvm] ERROR: {method} $(printf '%s' {q_path}) returned $code: $body" >&2
-            exit 1
-        fi
-        "#,
-    );
-    run_in_vm_visible(&script)
-    // _body_holder drops at function exit, deleting the temp file.
+/// Hand the Firecracker-created API socket to the invoking user.
+///
+/// Firecracker is launched through `sudo`, so it creates its API socket as
+/// root and nothing but root can dial it — which is why every API call used to
+/// be a `sudo curl`. Transferring ownership once, at mode 0600, lets the rest
+/// of the boot speak to the socket in-process.
+///
+/// This is the same trade [`secure_vsock_socket_for_caller`] already makes for
+/// the vsock multiplexer, and the principal is unchanged: the user running
+/// mvmctl already drives this VM, via `sudo`, on every call. What changes is
+/// that they no longer need `sudo` to do it, so a process running as that user
+/// can reach the API socket directly. Mode 0600 keeps it off-limits to every
+/// other user on the host.
+pub fn adopt_api_socket(socket: &str) -> Result<()> {
+    let quoted = shell_quote(socket);
+    run_in_vm_visible(&format!(
+        "set -eu\nsudo chown -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
+    ))
 }
 
 /// Read the pid recorded by [`start_vm_firecracker`].
@@ -224,6 +248,61 @@ pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A boot that reaches the deadline with no socket must fail with a
+    /// message naming the path, not hang. The shell loop this replaced had the
+    /// same ceiling; the wait is unreachable from a unit test through the
+    /// launch path, which is why the timeout is a parameter.
+    #[test]
+    fn waiting_for_an_api_socket_that_never_appears_fails_with_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("fc.socket");
+        let err = wait_for_api_socket(&missing, std::time::Duration::from_millis(30))
+            .expect_err("a socket that never appears must not succeed");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("fc.socket"),
+            "unexpected error: {rendered}"
+        );
+    }
+
+    /// `[ -S ]`, which is what the shell tested: a regular file sitting at the
+    /// socket path is not Firecracker having come up.
+    #[test]
+    fn a_regular_file_at_the_socket_path_is_not_the_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let decoy = dir.path().join("fc.socket");
+        std::fs::write(&decoy, b"not a socket").expect("write decoy");
+        assert!(!is_unix_socket(&decoy));
+
+        let listener_path = dir.path().join("real.socket");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&listener_path).expect("bind unix socket");
+        assert!(is_unix_socket(&listener_path));
+        // And the wait returns immediately for one that is already there.
+        wait_for_api_socket(&listener_path, std::time::Duration::from_millis(5))
+            .expect("an existing socket is observed on the first probe");
+    }
+
+    /// The request target is interpolated into a request line. Nothing builds
+    /// one from user input today, but a path carrying CRLF would append a
+    /// second request to the same connection, so it is refused before connect
+    /// rather than trusted because of where it came from.
+    #[test]
+    fn an_api_path_that_could_split_the_request_is_refused() {
+        for bad in [
+            "/drives/a\r\nPUT /actions HTTP/1.1",
+            "/drives/a\nPUT /actions HTTP/1.1",
+            "drives/no-leading-slash",
+        ] {
+            let err = fc_api_call("PUT", "/nonexistent.socket", bad, Some("{}"))
+                .expect_err("malformed path must be refused");
+            assert!(
+                err.to_string().contains("malformed"),
+                "expected a refusal for {bad:?}, got: {err}"
+            );
+        }
+    }
 
     #[test]
     fn vsock_socket_access_is_private_to_the_invoking_user() {

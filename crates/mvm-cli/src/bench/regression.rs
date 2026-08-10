@@ -269,11 +269,13 @@ mod tests {
                     vm_name: "a".to_string(),
                     pid: 1,
                     bytes: 100,
+                    guest_agent_rss_bytes: None,
                 },
                 InstanceFootprint {
                     vm_name: "b".to_string(),
                     pid: 2,
                     bytes: 100,
+                    guest_agent_rss_bytes: None,
                 },
             ],
         );
@@ -286,11 +288,13 @@ mod tests {
                     vm_name: "a".to_string(),
                     pid: 1,
                     bytes: 130,
+                    guest_agent_rss_bytes: None,
                 },
                 InstanceFootprint {
                     vm_name: "b".to_string(),
                     pid: 2,
                     bytes: 130,
+                    guest_agent_rss_bytes: None,
                 },
             ],
         );

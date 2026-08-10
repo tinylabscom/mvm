@@ -21,7 +21,7 @@ pub use spec::{
 };
 pub use traits::{
     ChildForkRequest, DuplexStream, PreloadChildRequest, PreloadedChild, RunningVm,
-    StandbyParentSpawn, VmmDriver,
+    RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };
 
 #[cfg(any(test, feature = "test-support"))]

@@ -10,6 +10,34 @@
 
 ## Current issue delivery
 
+- [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
+      plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
+      rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three
+      per-launch costs do not appear at that size. On `python:3.12` — 1.1 GB,
+      116x larger, same code path, same warm cache — a profile attributes
+      ~557 ms to re-hashing the cached rootfs for the claim-14 provenance record
+      (`emit_oci_run_admission` calls the uncached `sha256_file` while every
+      sibling admission path uses `sha256_file_cached`, and the sidecar holding
+      the identical digest is already on disk beside the file), ~67 ms to a `ps`
+      subprocess reaping orphaned VM helpers from inside the image-resolution
+      path, and ~28 ms to an `O(n*m)` `windows().any()` scan for dm-verity
+      markers across the whole 8.2 MB `vmlinux`. The microVM itself is 74 ms of
+      the run. The re-hash does not shrink in release — it is already hardware
+      SHA-256 at ~2.0 GB/s — so optimization level is not the lever. The Plan 299
+      lane gate cannot catch any of this: it refuses a sample that pulled, built,
+      materialized a mount image, or claimed a standby, and a re-hash of a cached
+      artifact is none of those, so the sample reports itself clean while scaling
+      with image size. Plan 311 fixes the three call sites and adds a large-image
+      lane plus a bytes-hashed work flag so the regression class becomes visible.
+      Current numbers are from a debug binary and are not comparable to Plan
+      299's release baseline; establishing that comparison is the plan's first
+      phase and no percentile is published before it.
+
+- [x] README CLI/code-example contract — README shell examples and every
+      declared CLI option have executable cucumber help witnesses; all 26
+      fenced examples are covered by the test-owned manifest, and README
+      status text matches the shipped `deploy` and `watch` commands.
+
 - [x] Audit-chain verification failure no longer reports as "never audited" —
       **issue #2258, plan 302 WS6**. `SignedChainAnchor` remembers the chains
       that failed verification and returns `Err` naming them when a lookup
@@ -73,11 +101,39 @@
       but each role needs an audited seccomp allowlist validated on live Linux,
       which should follow the `feat/seccomp-audit` tooling.
 
-- [x] Kernel pin freshness — **issue #2128**. Synchronized the libkrunfw
-      bundle and custom guest kernel on the verified Linux 6.12.102 LTS
-      tarball, replacing the stale 6.12.100 pin. Structural parity tests keep
+- [x] Durable agent session and event contract — **issue #2167**, plan
+      `specs/plans/2167-agent-session-contract.md`. Added the versioned
+      transport-neutral contract in `mvm-contract`, with strict public IDs,
+      lifecycle commands, durable/ephemeral event envelopes, bounded cursor
+      history, retention, idempotent retries, cancellation confirmation,
+      adapter-restart replay, and committed transcript/audit references.
+      Prompt and output bytes never enter durable history. `mvm-client` and
+      `mvm-sdk` re-export the shared surface. Serialization/security tests and
+      three non-`@wip` BDD scenarios pass.
+
+- [x] Unified runtime policy and human approval — **issue #2168**, plan
+      `specs/plans/2168-runtime-approval.md`. Added typed fail-closed policy
+      evaluation bound to signed admission, deterministic rule precedence,
+      digest-only approval metadata, and durable approval lifecycle events on
+      the agent-session cursor. Authorization, first-valid-response, expiry,
+      cancellation, replay, duplicate, and stale-response paths are covered
+      by contract tests and three non-`@wip` BDD scenarios. `mvm-client` and
+      `mvm-sdk` re-export the shared policy surface; existing network, secret,
+      sealed-production, guest, and command-gate enforcement remains in force.
+
+- [x] Typed capability bindings — **issue #2170**, plan
+      `specs/plans/2170-typed-capability-bindings.md`. The implementation is
+      complete through per-verb descriptors, exact signed admission bindings,
+      bounded typed invocation, digest-only audit events, refusal witnesses,
+      and a real UDS round trip. The PR carries the remaining host-specific
+      BDD execution note.
+
+- [~] Kernel pin freshness — **issue #2289**. This PR synchronizes the libkrunfw
+      bundle and custom guest kernel on the verified Linux 6.12.103 LTS
+      tarball, replacing the stale 6.12.102 pin. Structural parity tests keep
       both consumers on one version/hash, and the existing freshness check
-      refuses a point release that trails kernel.org.
+      refuses a point release that trails kernel.org. The prior #2128 closeout
+      remains the history for the preceding 6.12.102 bump.
 
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned
@@ -1451,6 +1507,34 @@ Then unify + retire the old paths:
 
 **WS10 — tiny kernel + low memory + density**
 
+- [x] **Fast machine substrate contract — issue #2279.** The kernel is now
+  explicitly treated as one part of a prepared machine substrate spanning the
+  kernel, initramfs, verified rootfs artifacts, runtime overlay, VMM shape,
+  guest lifecycle, warmup, and pool identity. The ownership and measurement
+  boundaries are documented in
+  `specs/notes/2026-08-10-fast-machine-substrate.md`; issues #2280 and #2281
+  own the kernel budget and filesystem-path experiments.
+- [~] **Kernel boot-substrate ledger — issue #2280.** `cargo xtask perf
+  footprint` now includes initramfs bytes and optionally enforces the resolved
+  per-architecture built-in-symbol budget; cold-launch JSON reports carry the
+  same artifact byte and kernel-config measurements beside their timings. The
+  libkrun live probe now has bounded resident host-process capture after
+  authenticated readiness, and the HVF guest-RAM seam now reports resident
+  bytes with a direct untouched-versus-touched demand-fault witness plus
+  monotonic private restore-mapping duration. The libkrun density report now
+  also carries guest-agent RSS from the existing ResourceUsage RPC. Whole-VM
+  guest working-set, first-use restore-fault, and cross-backend live
+  measurements remain open.
+- [x] **Filesystem-path baseline — issue #2281.**
+  `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
+  source identity, node composition, emitted ext4 size/digest, materializer
+  version, and hash/walk/build timings; `cargo xtask perf filesystem --root
+  <DIR> --json` exposes it to the benchmark workflow. Cold-launch evidence
+  records the tier-selected `virtiofs_root` or `block_ext4` strategy, while
+  the benchmark rejects missing or mixed strategies; candidate guest-local
+  immutable paths still need equivalent first-access, working-set, density,
+  and security evidence before an adopt/decline decision.
+
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
 - [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured
   1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The
@@ -1670,6 +1754,17 @@ Then unify + retire the old paths:
   registration slept 700 ms and lost `host.audit.v1` silently. Gates green:
   workspace Clippy, 10,648 nextest, doctests, hermetic BDD 153/153, Lint xtask
   gates, Linux cross-compile.
+- [x] **Lifecycle-density benchmark harness (Plan 299).** Added an opt-in
+  integration test that runs 1,000 prepared microVM start/stop operations,
+  defaults to HVF, reports start and stop p50/p95/p99/max plus wall-clock
+  throughput, and supports bounded batches across Firecracker, HVF, libkrun,
+  QEMU, and Apple Container. It remains VM-free unless explicitly enabled with
+  `MVM_LIFECYCLE_BENCH=1`.
+- [x] **HVF stop-path diagnosis (Plan 299).** Added phase timing to the
+  lifecycle harness. A 1,000-cycle run attributes 67.62 ms p50 / 74.97 ms p95
+  / 77.01 ms p99 to supervisor PID disappearance after SIGTERM; attach,
+  endpoint reaping, console cleanup, state-marker removal, and force-kill
+  escalation do not account for the stop latency.
 - [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
   `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon

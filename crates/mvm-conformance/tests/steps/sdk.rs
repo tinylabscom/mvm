@@ -139,6 +139,8 @@ fn run_sdk_codegen_drift_check(world: &mut CliWorld) {
         .map(PathBuf::from)
         .unwrap_or_else(|| repo_root().join("target"));
     let xtask = target_dir.join("debug/xtask");
+    let tool_home = tempfile::tempdir().expect("create isolated SDK codegen home");
+    let tool_home_path = tool_home.path().to_path_buf();
     let codegen_target =
         std::env::temp_dir().join(format!("mvm-sdk-codegen-{}", std::process::id()));
     let uv_cache = std::env::temp_dir().join(format!("mvm-sdk-uv-cache-{}", std::process::id()));
@@ -148,6 +150,8 @@ fn run_sdk_codegen_drift_check(world: &mut CliWorld) {
             .current_dir(repo_root())
             .env("CARGO_MANIFEST_DIR", repo_root().join("xtask"))
             .env("CARGO_TARGET_DIR", codegen_target)
+            .env("UV_TOOL_DIR", tool_home_path.join("uv/tools"))
+            .env("UV_TOOL_BIN_DIR", tool_home_path.join("uv/bin"))
             .env("UV_CACHE_DIR", uv_cache)
             .output()
             .expect("spawn SDK codegen drift check"),

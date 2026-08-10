@@ -61,6 +61,15 @@ Feature: README CLI contract
     And the help output contains "--entrypoint"
     And the help output contains "-i, --interactive"
 
+  Scenario: every README CLI example resolves against the real CLI
+    Then every README CLI example resolves to a command and its options
+
+  Scenario: every CLI option has a BDD help witness
+    Then every CLI command option has a BDD help witness
+
+  Scenario: every README code block declares its coverage witness
+    Then every README code block has an explicit coverage witness
+
   Scenario: `build compile` exposes the documented IR flags
     When I run mvmctl with "build compile --help"
     Then the command exits with code 0

@@ -524,10 +524,43 @@ setup-libkrun:
 
 # ── Utilities ────────────────────────────────────────────────────────────
 
-# Clean build artifacts and the regenerable mvm cache
-clean:
+# Clean build artifacts, the regenerable mvm cache, and the dev state root
+clean: clean-dev-state
     cargo clean
     cargo run --quiet -- env cleanup --cache --yes
+
+# Remove this worktree's dev state root `.mvm-test` (DRY_RUN=1 to preview)
+clean-dev-state:
+    #!/usr/bin/env bash
+    # `scripts/dev-env.sh` points MVM_HOME, CARGO_TARGET_DIR *and* CARGO_HOME at
+    # `<repo>/.mvm-test`, so every `just dev-*` run accumulates VM images, a full
+    # build tree and a per-worktree cargo registry in one gitignored directory.
+    # It is the largest thing a checkout owns and nothing used to sweep it:
+    # `cargo clean` cleans `./target`, and `mvmctl env cleanup` only ever sees
+    # whatever MVM_HOME points at in the shell that invokes it — which, outside
+    # `just dev-*`, is not this directory. Measured 2026-08-09: 65 GB in one
+    # worktree and 282 GB across a machine's worktrees, none of it reported by
+    # any clean command.
+    #
+    # Safe whenever no dev VM is live out of this worktree; the contents are
+    # rebuilt or re-fetched on demand.
+    set -euo pipefail
+    root="$(git rev-parse --show-toplevel)/.mvm-test"
+    if [ ! -d "$root" ]; then
+        echo "clean-dev-state: nothing at $root"
+        exit 0
+    fi
+    size=$(du -sh "$root" 2>/dev/null | cut -f1)
+    if [ -n "${DRY_RUN:-}" ]; then
+        echo "clean-dev-state: would remove $root ($size)"
+        exit 0
+    fi
+    rm -rf "$root"
+    echo "clean-dev-state: removed $root ($size)"
+
+# Classify worktrees: finished, needs-a-human, or in use (--safe-only for paths)
+worktrees *ARGS:
+    ./scripts/worktree-status.sh {{ ARGS }}
 
 # Reap leaked host-side helper subprocesses (broker/host-agent/signer/etc.)
 # older than N minutes (default 30). Backstop for the in-binary parent-death

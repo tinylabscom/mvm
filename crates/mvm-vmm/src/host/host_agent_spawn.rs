@@ -285,6 +285,7 @@ pub fn register_host_agent_services_if_admitted(
             ),
             audit_signer_uds_path: None,
             services_bindings: vec![],
+            capability_bindings: vec![],
         },
     )?;
     warm_claim_debug("register_vm_done");
@@ -582,6 +583,7 @@ mod tests {
                 dir.join("audit-signer.sock").to_string_lossy().into_owned(),
             ),
             services_bindings: vec![],
+            capability_bindings: vec![],
         }
     }
 

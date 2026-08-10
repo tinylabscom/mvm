@@ -37,6 +37,7 @@ use thiserror::Error;
 use crate::apple_container::artifacts;
 use crate::backend::HvfRunner;
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
+use crate::workload_runner::StopTiming;
 
 /// Typed, fail-closed errors for requests this backend cannot satisfy.
 /// Every error names what was refused and why, rather than silently falling
@@ -86,6 +87,10 @@ impl AppleContainerBackend {
     fn config_with_kernel(&self, config: &VmStartConfig) -> Result<VmStartConfig> {
         let kernel = artifacts::resolve()?;
         Ok(kernel_override_config(config, &kernel))
+    }
+
+    pub(crate) fn stop_with_timing(&self, id: &VmId) -> Result<StopTiming> {
+        self.runner.stop_with_timing(id)
     }
 }
 

@@ -21,11 +21,10 @@ use std::path::Path;
 use std::process::Command;
 
 /// Crates known to resolve at more than one major today. Baseline recaptured
-/// 2026-07-19 from `cargo metadata --locked` after the workspace consolidation
-/// de-duplicated the OCI/TLS stack (ratcheted 44 → 11 entries). Remove an entry
-/// freely once the duplication is gone (the gate flags stale entries); adding
-/// one must be justified in the PR that does — it admits a new duplicate major
-/// into the build.
+/// 2026-08-10 from `cargo metadata --locked` (ratcheted 44 → 11 entries).
+/// Remove an entry freely once the duplication is gone (the gate flags stale
+/// entries); adding one must be justified in the PR that does — it admits a
+/// new duplicate major into the build.
 const ALLOWLIST: &[&str] = &[
     "bitflags",
     // Neither defmt major is compiled: both are optional dependencies nobody
@@ -42,34 +41,24 @@ const ALLOWLIST: &[&str] = &[
     "itertools",
     "getrandom",
     "hashbrown",
-    // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;
-    // the shipped mvmctl closure resolves nom exclusively at 7.x (via rcgen).
-    // The duplicate never reaches a product binary.
+    // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates.
+    // nom 7 used to enter behind rcgen's `x509-parser` feature; dropping that
+    // feature took the whole ASN.1 stack with it, so the shipped closure now
+    // carries no nom at all and this entry covers the fuzz tooling alone.
     "nom",
     "rand",
     "rand_core",
-    "thiserror",
-    "thiserror-impl",
     // The in-house VMM's rust-vmm virtio stack (virtio-queue) resolves
     // vmm-sys-util 0.15 while the Linux KVM stack (kvm-bindings/kvm-ioctls)
     // pins 0.12.1; the two rust-vmm families track different vmm-sys-util
     // majors until they converge.
     "vmm-sys-util",
-    // windows-sys 0.52 and 0.60/0.61 are already an accepted split. Those
-    // versions necessarily resolve matching windows-targets and per-architecture
-    // support crates at 0.52 and 0.53; none of these crates is independently
-    // selectable until the upstream windows-sys users converge.
+    // windows-sys 0.52 and 0.60/0.61 remain a split; windows-core follows.
+    // The per-architecture support crates (windows_aarch64_*, windows_i686_*,
+    // windows_x86_64_*, windows-targets) converged once rayon and rcgen's
+    // x509-parser feature were dropped — they are no longer duplicated.
     "windows-core",
     "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

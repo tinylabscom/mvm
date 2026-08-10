@@ -52,6 +52,32 @@ impl From<rcgen::Error> for EgressCaError {
 const CA_CERT_FILE: &str = "ca.crt";
 const CA_KEY_FILE: &str = "ca.key";
 
+/// Subject CN of the long-lived host root. Also the issuer CN every per-VM
+/// intermediate chains to, so [`ca_issuer_params`] can rebuild the signer.
+const HOST_CA_CN: &str = "mvm egress root CA";
+/// Subject CN of every per-VM intermediate.
+const VM_INTERMEDIATE_CN: &str = "mvm per-VM egress intermediate";
+
+/// Rebuild the signer identity for a certificate this module minted.
+///
+/// `Issuer` carries exactly three things out of `CertificateParams` — the
+/// distinguished name, the key-identifier method, and the key usages — so the
+/// signer is fully determined by the values the cert was minted with. Rebuilding
+/// them is what `Issuer::from_ca_cert_pem` does the long way round: it re-parses
+/// a PEM we just serialized in order to recover those same three fields, and it
+/// costs rcgen's entire `x509-parser` ASN.1 stack. Nothing here reads the
+/// serial, the validity window, or the name constraints, because a leaf inherits
+/// none of them — the constraints live in the intermediate's own certificate,
+/// which is minted once and delivered verbatim.
+fn ca_issuer_params(common_name: &str) -> Result<CertificateParams, EgressCaError> {
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    Ok(params)
+}
+
 /// The long-lived host egress CA. Self-signed `CA:TRUE`; signs each VM's
 /// name-constrained intermediate. The key lives only in this process's address
 /// space + on disk at mode 0400 — it never reaches a guest.
@@ -103,12 +129,8 @@ impl EgressCa {
         bound_hosts: &[&str],
     ) -> Result<VmIntermediate, EgressCaError> {
         let key = KeyPair::generate()?;
-        let mut params = CertificateParams::new(Vec::<String>::new())?;
+        let mut params = ca_issuer_params(VM_INTERMEDIATE_CN)?;
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
-        params
-            .distinguished_name
-            .push(DnType::CommonName, "mvm per-VM egress intermediate");
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         params.name_constraints = Some(NameConstraints {
             permitted_subtrees: bound_hosts.iter().map(|h| dns_subtree(h)).collect(),
             excluded_subtrees: Vec::new(),
@@ -125,7 +147,7 @@ impl EgressCa {
     fn issuer(&self) -> Result<Issuer<'static, KeyPair>, EgressCaError> {
         let key = KeyPair::from_pem(&self.key.serialize_pem())
             .map_err(|e| EgressCaError::Parse(e.to_string()))?;
-        Issuer::from_ca_cert_pem(&self.cert_pem, key).map_err(EgressCaError::from)
+        Ok(Issuer::new(ca_issuer_params(HOST_CA_CN)?, key))
     }
 }
 
@@ -194,7 +216,7 @@ impl VmIntermediate {
     fn issuer(&self) -> Result<Issuer<'static, KeyPair>, EgressCaError> {
         let key = KeyPair::from_pem(&self.key.serialize_pem())
             .map_err(|e| EgressCaError::Parse(e.to_string()))?;
-        Issuer::from_ca_cert_pem(&self.cert_pem, key).map_err(EgressCaError::from)
+        Ok(Issuer::new(ca_issuer_params(VM_INTERMEDIATE_CN)?, key))
     }
 }
 
@@ -219,12 +241,8 @@ fn dns_subtree(host: &str) -> GeneralSubtree {
 
 fn mint_host_ca() -> Result<(String, KeyPair), EgressCaError> {
     let key = KeyPair::generate()?;
-    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    let mut params = ca_issuer_params(HOST_CA_CN)?;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params
-        .distinguished_name
-        .push(DnType::CommonName, "mvm egress root CA");
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let cert = params.self_signed(&key)?;
     Ok((cert.pem(), key))
 }
@@ -353,6 +371,34 @@ mod tests {
             })
             .collect();
         assert_eq!(permitted, vec!["api.openai.com".to_string()]);
+    }
+
+    #[test]
+    fn intermediate_issuer_dn_matches_the_host_ca_subject_dn() {
+        // The signer is rebuilt from `ca_issuer_params` rather than re-parsed
+        // out of the CA's PEM, so the rebuilt DN and the minted subject DN have
+        // to agree or the intermediate chains to nothing. The leaf leg of the
+        // same property is covered by the webpki path check below; this is the
+        // root leg, which no path verifier here exercises.
+        let dir = tempdir().unwrap();
+        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
+        let inter = ca.mint_vm_intermediate(&["api.openai.com"]).unwrap();
+
+        let (_, ca_pem) = x509_parser::pem::parse_x509_pem(ca.cert_pem().as_bytes()).unwrap();
+        let ca_cert = ca_pem.parse_x509().unwrap();
+        let (_, inter_pem) = x509_parser::pem::parse_x509_pem(inter.cert_pem().as_bytes()).unwrap();
+        let inter_cert = inter_pem.parse_x509().unwrap();
+
+        assert_eq!(
+            inter_cert.tbs_certificate.issuer().to_string(),
+            ca_cert.tbs_certificate.subject().to_string(),
+            "intermediate must name the host CA subject as its issuer"
+        );
+        // And the host CA really is self-signed under the same rebuilt identity.
+        assert_eq!(
+            ca_cert.tbs_certificate.issuer().to_string(),
+            ca_cert.tbs_certificate.subject().to_string(),
+        );
     }
 
     #[test]

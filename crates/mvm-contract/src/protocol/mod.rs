@@ -3,6 +3,8 @@
 //! transport I/O) stays in `mvm-core::protocol`, which re-exports these
 //! modules at their existing paths.
 
+pub mod agent_capability;
+pub mod agent_session;
 pub mod audit_signer;
 pub mod broker;
 pub mod broker_control;

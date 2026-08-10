@@ -25,6 +25,7 @@ members = [
     # contract from ADR-023. mvmd consumes this crate as a library per
     # ADR-014 §"Runtime Ownership" — keep its dep closure small.
     "crates/mvm-fs",
+    "crates/mvm-http",
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at
     # runtime; the crate compiles on macOS / Windows as an inert
     # binary so workspace builds stay green for non-Linux contributors.
@@ -114,6 +115,10 @@ exclude = [
     # harness (`fuzz_packet_parse`). Same libfuzzer-sys linker constraints;
     # CI gate at `.github/workflows/security.yml::fuzz`.
     "crates/mvm-hostd/fuzz",
+    # Response-head + chunked-framing parser for the in-house HTTP client —
+    # the whole untrusted surface a hostile server reaches. Same libfuzzer-sys
+    # linker constraints as the other fuzz crates.
+    "crates/mvm-http/fuzz",
     # Plan 186 — runtime-recording trace parser + lowering fuzz harness.
     # Same libfuzzer-sys linker-flag constraints as the other fuzz crates;
     # CI gate at `.github/workflows/security.yml::fuzz`.
@@ -201,7 +206,7 @@ x25519-dalek = { version = "3", features = ["static_secrets"] }
 # `nameConstraints` API. `ring` crypto backend (no cmake/C-toolchain like the
 # aws-lc-rs default). Sync (no tokio) so it lives behind mvm-core's `egress-ca`
 # feature without breaking the runtime-free default build.
-rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # `secrecy` wraps secret-carrying types so accidental `Debug`/`Display`
 # becomes a compile error. Plan 63 W2 — `SecretBox<T>` pass on every
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
@@ -277,14 +282,6 @@ ipnet = { version = "2", features = ["serde"] }
 # deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
 # so a mature parser beats a hand-rolled one.
 etherparse = "0.20"
-# Plan 74 W2 — mvm-guest-netinit installs kernel blackhole routes
-# for `MANDATORY_DENY_RANGES` inside every microVM. rtnetlink wraps
-# the AF_NETLINK socket and the RTM_NEWROUTE message construction;
-# its dep tree (`netlink-packet-route`, `netlink-sys`,
-# `netlink-proto`) is pure-Rust and static-linkable for the
-# overlay binary. Async because the underlying socket uses
-# tokio's reactor; we already pull tokio in workspace-wide.
-rtnetlink = "0.14"
 async-trait = "0.1"
 
 # Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.
@@ -295,7 +292,6 @@ hickory-proto = "0.26"
 # Utilities
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
-fs2 = "0.4"
 # OS-native keystore (macOS Keychain / Linux Secret Service / Windows
 # Credential Manager). Plan 63 W3 — KeyringProvider impl uses this for
 # per-tenant DEK storage outside env vars or world-readable disk.
@@ -316,6 +312,11 @@ flate2 = "1"
 hex = "0.4"
 tar = "0.4"
 xattr = "1"
+# Skip-capable substring search. Already compiled into every host binary via
+# globset -> aho-corasick, so a direct edge adds an import and no build cost.
+# Used where a scan runs over a whole multi-megabyte artifact on the launch
+# path, which a naive `windows().any()` walks quadratically.
+memchr = "2"
 # Read-only ext4 walker (deps bitflags + crc only). Replaces hand-rolled
 # raw-byte ext4 poking in the Stage 0 validators with a real inode lookup
 # (`fs.exists("/sbin/mvm-host-vm-init")`). `std` enables `load_from_path`.
