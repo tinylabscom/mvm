@@ -253,10 +253,11 @@ fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
 /// for the host it happens to run on today: the bind degrades to an unwrapped
 /// spawn wherever the mechanism is absent, which is the honest answer on macOS
 /// and needs no second code path to express.
-fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec) -> Command {
+fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec, state_dir: &Path) -> Command {
     mvm_core::cpu_scope::bind_cpu_grant(
         Command::new(supervisor),
         &spec.name,
+        state_dir,
         spec.cpu_grant.as_ref(),
     )
 }
@@ -285,7 +286,7 @@ fn boot_with_handoff(
     let json =
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
     let supervisor = resolve_supervisor_path()?;
-    let mut child = bounded_supervisor_command(&supervisor, spec)
+    let mut child = bounded_supervisor_command(&supervisor, spec, &paths.state_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -1365,7 +1366,11 @@ mod tests {
 
         let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
         spec.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 });
-        let cmd = bounded_supervisor_command(Path::new("/usr/bin/mvm-hvf-supervisor"), &spec);
+        let cmd = bounded_supervisor_command(
+            Path::new("/usr/bin/mvm-hvf-supervisor"),
+            &spec,
+            scratch.path(),
+        );
         let argv = mvm_core::cpu_scope::rendered_argv(&cmd);
 
         assert_eq!(argv[0], "systemd-run");

@@ -44,12 +44,8 @@ pub fn start_vm_firecracker_bounded(
     machine_id: &str,
     grant: Option<&mvm_contract::grants::CpuGrant>,
 ) -> Result<()> {
-    start_vm_firecracker_inner(
-        abs_dir,
-        abs_socket,
-        true,
-        &cpu_scope_prefix(machine_id, grant),
-    )
+    let prefix = cpu_scope_prefix(machine_id, std::path::Path::new(abs_dir), grant);
+    start_vm_firecracker_inner(abs_dir, abs_socket, true, &prefix)
 }
 
 /// Start Firecracker without unlinking a mounted child vsock UDS.
@@ -65,8 +61,12 @@ pub fn start_vm_firecracker_for_snapshot(abs_dir: &str, abs_socket: &str) -> Res
 /// `nohup setsid` — so it needs the prefix as text. The tokens come from the
 /// same builder the `Command` path uses, so the two cannot drift into bounding
 /// different things.
-fn cpu_scope_prefix(machine_id: &str, grant: Option<&mvm_contract::grants::CpuGrant>) -> String {
-    match mvm_core::cpu_scope::scope_prefix_for_grant(machine_id, grant) {
+fn cpu_scope_prefix(
+    machine_id: &str,
+    state_dir: &std::path::Path,
+    grant: Option<&mvm_contract::grants::CpuGrant>,
+) -> String {
+    match mvm_core::cpu_scope::scope_prefix_for_grant(machine_id, state_dir, grant) {
         Some(tokens) => {
             let quoted: Vec<String> = tokens.iter().map(|t| shell_quote(t)).collect();
             format!("{} ", quoted.join(" "))
@@ -259,12 +259,16 @@ mod tests {
 
         let prefix = cpu_scope_prefix(
             "vm-bounded",
+            scratch.path(),
             Some(&mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
         );
         let script = firecracker_launch_script("/tmp/vm", "/tmp/vm/fc.socket", true, &prefix);
 
         assert!(script.contains("CPUQuota=150%"), "{script}");
-        assert!(script.contains("vm-bounded.scope"), "{script}");
+        // The unit carries a per-boot suffix, so match the stem rather than a
+        // name that can no longer be reconstructed from the machine id.
+        assert!(script.contains("vm-bounded-"), "{script}");
+        assert!(script.contains(".scope"), "{script}");
         // Ahead of the launch, not merely somewhere in the script: Firecracker
         // has to be born inside the scope.
         assert!(
@@ -290,6 +294,7 @@ mod tests {
     fn an_unbindable_grant_leaves_the_launch_line_untouched() {
         // No mechanism on this host, or a share too small to express: either
         // way the boot proceeds unbounded rather than failing.
-        assert_eq!(cpu_scope_prefix("vm-x", None), "");
+        let scratch = tempfile::tempdir().expect("scratch");
+        assert_eq!(cpu_scope_prefix("vm-x", scratch.path(), None), "");
     }
 }

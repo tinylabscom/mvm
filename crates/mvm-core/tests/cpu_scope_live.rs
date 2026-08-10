@@ -55,10 +55,16 @@ fn a_granted_cpu_share_binds_a_real_spawn_to_its_quota() {
          while [ $(date +%s) -lt $end ]; do :; done ) & done; wait"
     ));
 
+    // A real state dir, because the scope's unit name is minted per boot and
+    // recorded there — reconstructing it from the machine id is exactly what
+    // the per-boot suffix made impossible.
+    let state = tempfile::tempdir().expect("state dir");
+
     // The shipped call path, not a hand-rolled systemd-run line.
     let mut child = cpu_scope::bind_cpu_grant(
         spinners,
         &machine_id,
+        state.path(),
         Some(&CpuGrant::Share {
             millicores: MILLICORES,
         }),
@@ -69,14 +75,17 @@ fn a_granted_cpu_share_binds_a_real_spawn_to_its_quota() {
     // Let the scope register and the spinners get going before sampling.
     std::thread::sleep(std::time::Duration::from_millis(1500));
 
-    let tier = cpu_scope::read_back_tier(&machine_id).expect("reading the tier back");
+    let unit = cpu_scope::read_scope_unit(state.path())
+        .expect("the scope name is recorded, without which no read-back is possible");
+
+    let tier = cpu_scope::ScopeProbe::default().tier_for_vm(state.path());
     assert_eq!(
         tier,
         EnforcedTier::Cgroup2CpuMax,
         "a bound spawn must read back as enforced, not as declared"
     );
 
-    let measured = measure_cores(&machine_id);
+    let measured = measure_cores(&unit);
     let _ = child.wait();
 
     println!("measured {measured:.4} cores against a {TARGET_CORES}-core target");
@@ -96,17 +105,17 @@ fn a_granted_cpu_share_binds_a_real_spawn_to_its_quota() {
 /// Read from the cgroup's own `cpu.stat` rather than summed across
 /// `/proc/<pid>/stat`: the cgroup accounts for every process in the scope,
 /// including the ones that came and went during the window.
-fn measure_cores(machine_id: &str) -> f64 {
-    let before = usage_usec(machine_id);
+fn measure_cores(unit: &str) -> f64 {
+    let before = usage_usec(unit);
     let start = Instant::now();
     std::thread::sleep(std::time::Duration::from_secs_f64(SAMPLE_SECS));
-    let after = usage_usec(machine_id);
+    let after = usage_usec(unit);
     let elapsed = start.elapsed().as_secs_f64();
     ((after - before) as f64 / 1_000_000.0) / elapsed
 }
 
-fn usage_usec(machine_id: &str) -> u64 {
-    let cgroup = control_group(machine_id);
+fn usage_usec(unit: &str) -> u64 {
+    let cgroup = control_group(unit);
     let stat = std::fs::read_to_string(format!("/sys/fs/cgroup{cgroup}/cpu.stat"))
         .expect("reading the scope's cpu.stat");
     stat.lines()
@@ -115,16 +124,11 @@ fn usage_usec(machine_id: &str) -> u64 {
         .expect("cpu.stat carries usage_usec")
 }
 
-fn control_group(machine_id: &str) -> String {
+/// The unit name is passed in whole rather than rebuilt from the machine id:
+/// it carries a per-boot suffix, so `{machine_id}.scope` no longer names it.
+fn control_group(unit: &str) -> String {
     let out = Command::new("systemctl")
-        .args([
-            "--user",
-            "show",
-            &format!("{machine_id}.scope"),
-            "-p",
-            "ControlGroup",
-            "--value",
-        ])
+        .args(["--user", "show", unit, "-p", "ControlGroup", "--value"])
         .output()
         .expect("querying the scope's cgroup");
     String::from_utf8_lossy(&out.stdout).trim().to_string()

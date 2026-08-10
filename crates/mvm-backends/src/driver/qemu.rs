@@ -91,10 +91,15 @@ fn qemu_virtiofs_socket_path(vm_name: &str, tag: &str) -> PathBuf {
 /// that ends up running the guest. That is fine and was measured rather than
 /// assumed: the daemonized child inherits the scope's cgroup, and a transient
 /// scope stays active while any process remains in it.
-fn bounded_qemu_command(qemu_bin: &str, argv: &[String], spec: &VmmSpec) -> Command {
+fn bounded_qemu_command(
+    qemu_bin: &str,
+    argv: &[String],
+    spec: &VmmSpec,
+    state_dir: &Path,
+) -> Command {
     let mut launch = Command::new(qemu_bin);
     launch.args(argv);
-    mvm_core::cpu_scope::bind_cpu_grant(launch, &spec.name, spec.cpu_grant.as_ref())
+    mvm_core::cpu_scope::bind_cpu_grant(launch, &spec.name, state_dir, spec.cpu_grant.as_ref())
 }
 
 /// Assemble the `qemu-system` argv for a spec boot (everything after the
@@ -389,7 +394,7 @@ impl VmmDriver for QemuDriver {
         }
 
         let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file);
-        let status = bounded_qemu_command(&qemu_bin, &argv, spec)
+        let status = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir)
             .status()
             .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e}"))?;
         if !status.success() {
@@ -1046,17 +1051,26 @@ mod tests {
         let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
         spec.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 2000 });
         let argv = vec!["-machine".to_string(), "microvm".to_string()];
-        let cmd = bounded_qemu_command("qemu-system-x86_64", &argv, &spec);
+        let cmd = bounded_qemu_command("qemu-system-x86_64", &argv, &spec, scratch.path());
 
+        // The unit carries a per-boot suffix, so it is matched by shape; every
+        // other token is still pinned exactly.
+        let mut rendered = mvm_core::cpu_scope::rendered_argv(&cmd);
+        assert!(
+            rendered[5].starts_with("w-") && rendered[5].ends_with(".scope"),
+            "unit should be the machine name plus a per-boot suffix, got {}",
+            rendered[5]
+        );
+        rendered[5] = "<unit>".to_string();
         assert_eq!(
-            mvm_core::cpu_scope::rendered_argv(&cmd),
+            rendered,
             vec![
                 "systemd-run",
                 "--user",
                 "--scope",
                 "--quiet",
                 "--unit",
-                "w.scope",
+                "<unit>",
                 "-p",
                 "CPUQuota=200%",
                 "--",
@@ -1069,9 +1083,10 @@ mod tests {
 
     #[test]
     fn an_ungranted_launch_spawns_qemu_directly() {
+        let scratch = tempfile::tempdir().expect("scratch");
         let spec = spec_with(KernelImage::Bundled, vec![], vec![]);
         let argv = vec!["-machine".to_string(), "microvm".to_string()];
-        let cmd = bounded_qemu_command("qemu-system-x86_64", &argv, &spec);
+        let cmd = bounded_qemu_command("qemu-system-x86_64", &argv, &spec, scratch.path());
         assert_eq!(
             mvm_core::cpu_scope::rendered_argv(&cmd),
             vec!["qemu-system-x86_64", "-machine", "microvm"]

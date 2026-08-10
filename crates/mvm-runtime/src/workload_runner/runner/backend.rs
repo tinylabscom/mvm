@@ -37,6 +37,27 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         self.driver.is_available()
     }
 
+    /// Report what actually bounded this VM, by reading the live control.
+    ///
+    /// Overridden for every workload backend, because the trait default answers
+    /// `Declared` for everything — which on a genuinely bounded boot is a false
+    /// statement about the run, and exactly the overstatement this seam exists
+    /// to prevent. The tier comes from resolving the scope the VMM was born into
+    /// and reading its `cpu.max`, never from the spawn having succeeded.
+    ///
+    /// The requested grants are deliberately unused: what was *asked for* is
+    /// already on the signed plan, and deriving a tier from the request is how a
+    /// report ends up describing an intention rather than a fact.
+    fn apply_grants(
+        &self,
+        id: &VmId,
+        _grants: &mvm_contract::grants::Grants,
+    ) -> Result<mvm_contract::protocol::resource_controls::EnforcedGrants> {
+        Ok(mvm_core::cpu_scope::enforced_grants_for_vm(&vm_state_dir(
+            &id.0,
+        )))
+    }
+
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         let state_dir = vm_state_dir(&config.name);
         std::fs::create_dir_all(&state_dir)

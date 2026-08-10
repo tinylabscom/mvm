@@ -49,7 +49,7 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 use mvm_contract::grants::CpuGrant;
-use mvm_contract::protocol::resource_controls::EnforcedTier;
+use mvm_contract::protocol::resource_controls::{EnforcedGrants, EnforcedTier};
 
 /// systemd expresses a CPU quota as a percentage of one core, so one percent is
 /// ten millicores.
@@ -144,12 +144,44 @@ pub fn validate_scope_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The transient unit name for a machine.
+/// The transient unit name for a scope id.
 ///
 /// Call [`validate_scope_id`] first; this is a rendering, not a gate.
 #[must_use]
-pub fn scope_name(machine_id: &str) -> String {
-    format!("{machine_id}.scope")
+pub fn scope_name(scope_id: &str) -> String {
+    format!("{scope_id}.scope")
+}
+
+/// The file under a VM's state dir naming the scope its process was born into.
+///
+/// The unit name is unique per boot, so it cannot be recomputed from the
+/// machine id later. Recording it is what keeps the read-back possible: without
+/// it, uniqueness would have been bought by giving up the ability to say what is
+/// in effect, which is the one thing this module exists to do.
+const SCOPE_UNIT_FILE: &str = "cpu-scope";
+
+/// A scope id for one boot: the machine id plus a per-boot suffix.
+///
+/// Unique rather than fixed because `systemd-run --unit` refuses a name that is
+/// already taken, and a scope outlives the process that created it for as long
+/// as anything remains in its cgroup. With a fixed name, one leftover VMM from
+/// an unclean stop would make every subsequent boot of that machine fail —
+/// turning a CPU bound into a liveness bug, on a path that is supposed to
+/// degrade rather than refuse.
+///
+/// Resetting the stale unit instead was considered and rejected: a leftover
+/// scope is only *active* because a process is still in it, so clearing it means
+/// killing whatever that is. The drivers deliberately refuse to displace a live
+/// VM, and a CPU-quota helper is the wrong place to overrule them.
+#[must_use]
+fn boot_scope_id(machine_id: &str) -> String {
+    // Wall-clock nanoseconds and the pid: unique across boots on one host, and
+    // unique across concurrent processes on it. This is a name, not a secret —
+    // it needs to not collide, not to be unguessable.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{machine_id}-{:x}-{:x}", nanos, std::process::id())
 }
 
 /// The `CPUQuota=` percentage for a share, in thousandths of a core.
@@ -170,26 +202,6 @@ pub fn cpu_quota_percent(millicores: u32) -> Result<u32> {
     Ok(percent)
 }
 
-/// Wrap `cmd` so the process is *born* inside a CPU-bounded transient scope.
-///
-/// Returns a `systemd-run` invocation carrying the original program, arguments,
-/// environment overrides, and working directory. Moving an already-running
-/// process would leave an interval in which it is unbounded; this has none.
-///
-/// Call this before configuring stdio: `Command` exposes its program, argv,
-/// env overrides and cwd for reading, but not its stdio handles, so redirection
-/// set on the input is not carried across. Set stdio on the returned command.
-///
-/// Check [`mechanism_gap`] first. This renders the wrapper unconditionally; on
-/// a host with no `systemd-run` or no session bus the wrapped spawn fails, and
-/// a failed spawn is a failed boot — where degrading to an unwrapped spawn and
-/// an honest [`EnforcedTier::Declared`] is what a dev run wants.
-pub fn wrap_spawn(cmd: Command, machine_id: &str, millicores: u32) -> Result<Command> {
-    validate_scope_id(machine_id)?;
-    let percent = cpu_quota_percent(millicores)?;
-    Ok(wrap_checked(cmd, machine_id, percent))
-}
-
 /// The `systemd-run` tokens that precede a payload's own argv, ending in the
 /// `--` separator.
 ///
@@ -197,37 +209,63 @@ pub fn wrap_spawn(cmd: Command, machine_id: &str, millicores: u32) -> Result<Com
 /// them — one building a [`Command`], one building a shell string for a spawn
 /// that daemonizes — and a second copy of this list is how the two would
 /// silently drift into bounding different things.
-fn scope_prefix(machine_id: &str, percent: u32) -> Vec<String> {
+fn scope_prefix(scope_id: &str, percent: u32) -> Vec<String> {
     vec![
         SYSTEMD_RUN.to_string(),
         "--user".to_string(),
         "--scope".to_string(),
         "--quiet".to_string(),
         "--unit".to_string(),
-        scope_name(machine_id),
+        scope_name(scope_id),
         "-p".to_string(),
         format!("CPUQuota={percent}%"),
         "--".to_string(),
     ]
 }
 
-/// The scope prefix for a grant, or `None` when nothing should be wrapped.
+/// The scope prefix for this boot, or `None` when nothing is to be bound.
 ///
-/// For spawn sites that build a command line as text rather than a
-/// [`Command`] — the caller is responsible for quoting each token into its
-/// shell. Applies exactly the same refusal ladder as [`bind_cpu_grant`], for
-/// the same reason: an unbindable grant degrades to an honest unbounded spawn
-/// and is caught by the read-back, never by failing an admitted boot.
+/// For spawn sites that build a command line as *text* rather than a
+/// [`Command`] — the caller quotes each token into its own shell. Same ladder,
+/// same per-boot unit, same recorded name as [`bind_cpu_grant`]; only the
+/// rendering differs.
 #[must_use]
-pub fn scope_prefix_for_grant(machine_id: &str, grant: Option<&CpuGrant>) -> Option<Vec<String>> {
+pub fn scope_prefix_for_grant(
+    machine_id: &str,
+    state_dir: &Path,
+    grant: Option<&CpuGrant>,
+) -> Option<Vec<String>> {
+    let (scope_id, percent) = prepare_scope(machine_id, state_dir, grant)?;
+    Some(scope_prefix(&scope_id, percent))
+}
+
+/// Decide whether to bind, mint this boot's unit name, and record it.
+///
+/// One ladder, so the `Command` and shell-string paths cannot disagree about
+/// which grants get bound or about what the scope is called.
+fn prepare_scope(
+    machine_id: &str,
+    state_dir: &Path,
+    grant: Option<&CpuGrant>,
+) -> Option<(String, u32)> {
     let percent = bindable_quota_percent(machine_id, grant)?;
-    Some(scope_prefix(machine_id, percent))
+    let scope_id = boot_scope_id(machine_id);
+    // A recorded name is what makes the tier readable afterwards. If it cannot
+    // be written the bound still applies — the workload is bounded either way —
+    // and only the report suffers, which then *understates* what is in effect.
+    // Understating is the safe direction; dropping a working bound to keep the
+    // bookkeeping tidy is not.
+    if let Err(e) = std::fs::write(state_dir.join(SCOPE_UNIT_FILE), scope_name(&scope_id)) {
+        tracing::warn!(
+            "CPU scope for '{machine_id}' is in effect but its name could not be recorded in \
+             {}: {e} — the achieved tier will read back as declared",
+            state_dir.display()
+        );
+    }
+    Some((scope_id, percent))
 }
 
 /// The quota percent to bind, or `None` with the reason logged.
-///
-/// One ladder, so the `Command` and shell-string paths cannot disagree about
-/// which grants get bound.
 fn bindable_quota_percent(machine_id: &str, grant: Option<&CpuGrant>) -> Option<u32> {
     let Some(CpuGrant::Share { millicores }) = grant else {
         // No grant, or a fuel budget — which is wasmtime's unit, not this
@@ -255,14 +293,13 @@ fn bindable_quota_percent(machine_id: &str, grant: Option<&CpuGrant>) -> Option<
     }
 }
 
-/// The rendering half of [`wrap_spawn`], after the id and the share have both
-/// been checked.
+/// The rendering half of the wrap, after the decision has been made.
 ///
 /// Split out because `Command` is not `Clone`: a fallible wrap consumes its
 /// input, so a caller that wants the original back on refusal has to do the
 /// checking before handing it over. [`bind_cpu_grant`] is that caller.
-fn wrap_checked(cmd: Command, machine_id: &str, percent: u32) -> Command {
-    let prefix = scope_prefix(machine_id, percent);
+fn wrap_checked(cmd: Command, scope_id: &str, percent: u32) -> Command {
+    let prefix = scope_prefix(scope_id, percent);
     let mut wrapped = Command::new(&prefix[0]);
     wrapped.args(&prefix[1..]);
     wrapped.arg(cmd.get_program());
@@ -287,75 +324,153 @@ fn wrap_checked(cmd: Command, machine_id: &str, percent: u32) -> Command {
 /// is about to become, if a share was granted and this host can serve it.
 ///
 /// Infallible by design. A CPU bound that cannot be attached must not take down
-/// a boot the admission gate already allowed — `--prod` refuses an unenforceable
-/// grant before anything is spawned, so by the time control reaches here,
-/// degrading is the admitted outcome. Every refusal path returns the original
-/// command unwrapped and says why, and `apply_grants` then reads the live
-/// control back and reports [`EnforcedTier::Declared`], so a degraded boot
-/// cannot be mistaken for a bounded one.
+/// a boot the admission gate already allowed. Every refusal path returns the
+/// original command unwrapped and says why, and [`enforced_grants_for_vm`] then
+/// reads the live control back and reports [`EnforcedTier::Declared`], so a
+/// degraded boot cannot be mistaken for a bounded one.
+///
+/// The admission gate refuses an unenforceable grant under `--prod` before
+/// anything is spawned, and since it consults this host's own
+/// [`mechanism_gap`], a sealed run does not reach here with a share it cannot
+/// serve. Dev runs do, and degrade.
 ///
 /// [`CpuGrant::Fuel`] is not this mechanism's unit — an instruction budget is
 /// wasmtime's to enforce — so it passes through untouched rather than being
 /// converted into a share it is not.
 #[must_use]
-pub fn bind_cpu_grant(cmd: Command, machine_id: &str, grant: Option<&CpuGrant>) -> Command {
-    match bindable_quota_percent(machine_id, grant) {
-        Some(percent) => wrap_checked(cmd, machine_id, percent),
+pub fn bind_cpu_grant(
+    cmd: Command,
+    machine_id: &str,
+    state_dir: &Path,
+    grant: Option<&CpuGrant>,
+) -> Command {
+    match prepare_scope(machine_id, state_dir, grant) {
+        Some((scope_id, percent)) => wrap_checked(cmd, &scope_id, percent),
         None => cmd,
     }
 }
 
-/// What actually bounds this machine's CPU right now, read off the live
-/// control.
+/// What actually bounded this VM, read off the live control.
 ///
-/// Resolves the scope's cgroup through `systemctl --user show <scope> -p
-/// ControlGroup` and reads that cgroup's `cpu.max`. A tier derived from "the
-/// spawn returned 0" would assert an enforcement that a silently-dropped quota
-/// makes false, which is the overstatement this whole seam exists to prevent.
+/// The one function a backend's `apply_grants` calls. Resolves the scope this
+/// VM's process was born into, asks systemd where it put it, and reads that
+/// cgroup's `cpu.max`. A tier derived from "the spawn returned 0" would assert
+/// an enforcement that a silently-dropped quota makes false, which is the
+/// overstatement this whole seam exists to prevent.
 ///
-/// An absent mechanism, an absent scope, and a scope with no quota all answer
-/// [`EnforcedTier::Declared`]. Only a malformed id is an error: degrading is
-/// the honest report, not a reason to refuse a boot the admission gate already
-/// decided to allow.
-pub fn read_back_tier(machine_id: &str) -> Result<EnforcedTier> {
-    validate_scope_id(machine_id)?;
-    if let Some(gap) = mechanism_gap() {
-        tracing::debug!("{}", gap.describe());
-        return Ok(EnforcedTier::Declared);
+/// Wall clock is [`EnforcedTier::Declared`] because nothing here bounds it. It
+/// is reported rather than omitted so a receipt says which dimensions were
+/// measured and found unenforced, instead of leaving a reader to guess.
+#[must_use]
+pub fn enforced_grants_for_vm(state_dir: &Path) -> EnforcedGrants {
+    EnforcedGrants {
+        cpu: ScopeProbe::default().tier_for_vm(state_dir),
+        wall_clock: EnforcedTier::Declared,
     }
-    let Some(control_group) = scope_control_group(&scope_name(machine_id)) else {
-        return Ok(EnforcedTier::Declared);
-    };
-    let Ok(cpu_max) = std::fs::read_to_string(cgroup_file(&control_group, "cpu.max")) else {
-        return Ok(EnforcedTier::Declared);
-    };
-    Ok(tier_from_cpu_max(&cpu_max))
 }
 
-/// The cgroup path systemd placed a scope in, or `None` when the unit does not
-/// exist or no user manager answered.
-fn scope_control_group(unit: &str) -> Option<String> {
-    let output = Command::new(SYSTEMCTL)
-        .args(["--user", "show", unit, "-p", "ControlGroup", "--value"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // A unit that does not exist is not an error to `systemctl show`; it
-    // reports the property's default, which for `ControlGroup` is empty.
-    if value.is_empty() {
-        return None;
-    }
-    Some(value)
+/// Reads a live scope's CPU tier off the system.
+///
+/// A struct rather than free functions so the two things it touches — the
+/// unified hierarchy's mount point and the `systemctl` binary — are values a
+/// test can point somewhere else. Without that seam the read-back could only be
+/// exercised on a Linux host with a real session, which is exactly the
+/// coverage gap that let an unreported tier ship.
+pub struct ScopeProbe {
+    cgroup_root: PathBuf,
+    systemctl: PathBuf,
 }
 
-/// A control file inside a cgroup, resolved against the unified hierarchy.
-fn cgroup_file(control_group: &str, file: &str) -> PathBuf {
-    Path::new(CGROUP_ROOT)
-        .join(control_group.trim_start_matches('/'))
-        .join(file)
+impl Default for ScopeProbe {
+    fn default() -> Self {
+        Self {
+            cgroup_root: PathBuf::from(CGROUP_ROOT),
+            systemctl: PathBuf::from(SYSTEMCTL),
+        }
+    }
+}
+
+impl ScopeProbe {
+    /// A probe pointed at a scratch hierarchy and a stand-in `systemctl`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_root_and_systemctl(cgroup_root: PathBuf, systemctl: PathBuf) -> Self {
+        Self {
+            cgroup_root,
+            systemctl,
+        }
+    }
+
+    /// The tier in effect for the VM whose state lives in `state_dir`.
+    ///
+    /// A VM with no recorded scope was never bound, so it is a declaration.
+    #[must_use]
+    pub fn tier_for_vm(&self, state_dir: &Path) -> EnforcedTier {
+        match read_scope_unit(state_dir) {
+            Some(unit) => self.tier_for_unit(&unit),
+            None => EnforcedTier::Declared,
+        }
+    }
+
+    /// The tier a named scope unit is enforcing.
+    ///
+    /// An absent mechanism, an absent unit, an unreadable cgroup and a scope
+    /// carrying no quota all answer [`EnforcedTier::Declared`]. There is no
+    /// error case: the boot already happened, and the only question left is
+    /// what is true about it.
+    #[must_use]
+    pub fn tier_for_unit(&self, unit: &str) -> EnforcedTier {
+        let Some(control_group) = self.control_group(unit) else {
+            return EnforcedTier::Declared;
+        };
+        let Ok(cpu_max) = std::fs::read_to_string(self.cgroup_file(&control_group, "cpu.max"))
+        else {
+            return EnforcedTier::Declared;
+        };
+        tier_from_cpu_max(&cpu_max)
+    }
+
+    /// The cgroup path systemd placed a scope in, or `None` when the unit does
+    /// not exist or no user manager answered.
+    fn control_group(&self, unit: &str) -> Option<String> {
+        let output = Command::new(&self.systemctl)
+            .args(["--user", "show", unit, "-p", "ControlGroup", "--value"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // A unit that does not exist is not an error to `systemctl show`; it
+        // reports the property's default, which for `ControlGroup` is empty.
+        if value.is_empty() {
+            return None;
+        }
+        Some(value)
+    }
+
+    /// A control file inside a cgroup, resolved against the hierarchy root.
+    fn cgroup_file(&self, control_group: &str, file: &str) -> PathBuf {
+        self.cgroup_root
+            .join(control_group.trim_start_matches('/'))
+            .join(file)
+    }
+}
+
+/// The scope unit this VM's process was born into, as recorded at spawn.
+#[must_use]
+pub fn read_scope_unit(state_dir: &Path) -> Option<String> {
+    let recorded = std::fs::read_to_string(state_dir.join(SCOPE_UNIT_FILE)).ok()?;
+    let unit = recorded.trim();
+    if unit.is_empty() {
+        return None;
+    }
+    // Re-validated on the way out. The file sits in a directory the invoking
+    // user owns, and a unit name is about to reach a subprocess argv, so its
+    // shape is checked here rather than trusted because we wrote it.
+    let id = unit.strip_suffix(".scope")?;
+    validate_scope_id(id).ok()?;
+    Some(unit.to_string())
 }
 
 /// The tier a `cpu.max` line witnesses.
@@ -521,7 +636,11 @@ mod tests {
     fn wrapping_a_spawn_puts_the_quota_ahead_of_the_payload() {
         let mut inner = Command::new("/usr/bin/mvm-libkrun-supervisor");
         inner.arg("--config").arg("-");
-        let wrapped = wrap_spawn(inner, "mvm-abc123", 1500).expect("wraps");
+        // The scope id is supplied rather than derived: `boot_scope_id` mixes in
+        // the clock and the pid, so an exact-argv assertion can only be written
+        // against a fixed id. What is under test here is the *shape* — the quota
+        // reaching systemd ahead of the payload — not how the id is minted.
+        let wrapped = wrap_checked(inner, "mvm-abc123-1f2e3d-2a", 150);
         assert_eq!(
             rendered_argv(&wrapped),
             vec![
@@ -530,7 +649,7 @@ mod tests {
                 "--scope",
                 "--quiet",
                 "--unit",
-                "mvm-abc123.scope",
+                "mvm-abc123-1f2e3d-2a.scope",
                 "-p",
                 "CPUQuota=150%",
                 "--",
@@ -547,7 +666,7 @@ mod tests {
         inner.env("MVM_HOME", "/tmp/mvm-home");
         inner.env_remove("RUST_LOG");
         inner.current_dir("/tmp");
-        let wrapped = wrap_spawn(inner, "mvm-abc123", 1000).expect("wraps");
+        let wrapped = wrap_checked(inner, "mvm-abc123-1f2e3d-2a", 100);
 
         let envs: Vec<(String, Option<String>)> = wrapped
             .get_envs()
@@ -564,14 +683,24 @@ mod tests {
     }
 
     #[test]
-    fn wrapping_refuses_an_unusable_id_or_share_before_building_an_argv() {
-        assert!(wrap_spawn(Command::new("/bin/true"), "../escape", 1500).is_err());
-        assert!(wrap_spawn(Command::new("/bin/true"), "mvm-abc123", 0).is_err());
+    fn an_unusable_id_or_share_yields_no_quota_to_bind() {
+        // Validation moved off the wrapper and into the decision of whether to
+        // wrap at all: `bindable_quota_percent` returning `None` is what makes
+        // `bind_cpu_grant` infallible without ever emitting a bad argv.
+        assert!(
+            bindable_quota_percent("../escape", Some(&CpuGrant::Share { millicores: 1500 }))
+                .is_none()
+        );
+        assert!(
+            bindable_quota_percent("mvm-abc123", Some(&CpuGrant::Share { millicores: 0 }))
+                .is_none()
+        );
     }
 
     #[test]
     fn binding_no_grant_leaves_the_spawn_exactly_as_it_was() {
-        let wrapped = bind_cpu_grant(Command::new("/bin/true"), "mvm-abc123", None);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wrapped = bind_cpu_grant(Command::new("/bin/true"), "mvm-abc123", dir.path(), None);
         assert_eq!(rendered_argv(&wrapped), vec!["/bin/true"]);
     }
 
@@ -579,9 +708,11 @@ mod tests {
     fn binding_a_fuel_grant_leaves_the_spawn_alone() {
         // An instruction budget is wasmtime's unit. Converting it into a share
         // would invent a number nobody granted.
+        let dir = tempfile::tempdir().expect("tempdir");
         let wrapped = bind_cpu_grant(
             Command::new("/bin/true"),
             "mvm-abc123",
+            dir.path(),
             Some(&CpuGrant::Fuel {
                 instructions: 1_000_000,
             }),
@@ -593,9 +724,11 @@ mod tests {
     fn binding_an_unusable_share_degrades_instead_of_failing_the_spawn() {
         // The boot was already admitted; a bound that cannot be attached must
         // not turn into a refusal here. The read-back is what keeps it honest.
+        let dir = tempfile::tempdir().expect("tempdir");
         let wrapped = bind_cpu_grant(
             Command::new("/bin/true"),
             "../escape",
+            dir.path(),
             Some(&CpuGrant::Share { millicores: 1500 }),
         );
         assert_eq!(rendered_argv(&wrapped), vec!["/bin/true"]);
@@ -603,6 +736,7 @@ mod tests {
         let wrapped = bind_cpu_grant(
             Command::new("/bin/true"),
             "mvm-abc123",
+            dir.path(),
             Some(&CpuGrant::Share { millicores: 0 }),
         );
         assert_eq!(rendered_argv(&wrapped), vec!["/bin/true"]);
@@ -621,23 +755,41 @@ mod tests {
         let wrapped = bind_cpu_grant(
             Command::new("/usr/bin/mvm-libkrun-supervisor"),
             "mvm-abc123",
+            scratch.path(),
             Some(&CpuGrant::Share { millicores: 1500 }),
         );
+        let argv = rendered_argv(&wrapped);
+
+        // The unit name carries a per-boot suffix, so it is matched by shape
+        // rather than by value; everything around it is still pinned exactly.
+        let unit = &argv[5];
+        assert!(
+            unit.starts_with("mvm-abc123-") && unit.ends_with(".scope"),
+            "unit name should be the machine id plus a per-boot suffix, got {unit}"
+        );
+        let mut skeleton = argv.clone();
+        skeleton[5] = "<unit>".to_string();
         assert_eq!(
-            rendered_argv(&wrapped),
+            skeleton,
             vec![
                 "systemd-run",
                 "--user",
                 "--scope",
                 "--quiet",
                 "--unit",
-                "mvm-abc123.scope",
+                "<unit>",
                 "-p",
                 "CPUQuota=150%",
                 "--",
                 "/usr/bin/mvm-libkrun-supervisor",
             ]
         );
+
+        // The name is only useful if it was recorded — that file is what makes
+        // the tier readable afterwards.
+        let recorded = std::fs::read_to_string(scratch.path().join(SCOPE_UNIT_FILE))
+            .expect("the scope name is recorded for the read-back");
+        assert_eq!(&recorded, unit);
     }
 
     #[test]
@@ -649,16 +801,37 @@ mod tests {
         pretend_mechanism_present(&mut env, scratch.path()).expect("fake mechanism");
 
         let grant = CpuGrant::Share { millicores: 1500 };
-        let prefix = scope_prefix_for_grant("mvm-abc123", Some(&grant)).expect("a bindable grant");
-        let wrapped = bind_cpu_grant(Command::new("/bin/payload"), "mvm-abc123", Some(&grant));
-        let mut expected = prefix;
+        let prefix = scope_prefix_for_grant("mvm-abc123", scratch.path(), Some(&grant))
+            .expect("a bindable grant");
+        let wrapped = bind_cpu_grant(
+            Command::new("/bin/payload"),
+            "mvm-abc123",
+            scratch.path(),
+            Some(&grant),
+        );
+
+        // Each call mints its own per-boot unit, so the names differ by design.
+        // Blank that one token out; every other flag must match, because a
+        // disagreement there means one backend is bounding something the other
+        // is not.
+        let blank_unit = |mut argv: Vec<String>| {
+            if let Some(i) = argv.iter().position(|a| a == "--unit") {
+                argv[i + 1] = "<unit>".to_string();
+            }
+            argv
+        };
+        let mut expected = blank_unit(prefix);
         expected.push("/bin/payload".to_string());
-        assert_eq!(rendered_argv(&wrapped), expected);
+        assert_eq!(blank_unit(rendered_argv(&wrapped)), expected);
     }
 
     #[test]
     fn the_shell_prefix_is_absent_when_there_is_nothing_to_bind() {
-        assert_eq!(scope_prefix_for_grant("mvm-abc123", None), None);
+        let scratch = tempfile::tempdir().expect("scratch");
+        assert_eq!(
+            scope_prefix_for_grant("mvm-abc123", scratch.path(), None),
+            None
+        );
     }
 
     #[test]
@@ -678,26 +851,43 @@ mod tests {
     }
 
     #[test]
-    fn a_cgroup_file_resolves_under_the_unified_hierarchy() {
+    fn a_cgroup_file_resolves_under_the_probe_s_hierarchy() {
+        let probe = ScopeProbe::with_root_and_systemctl(
+            PathBuf::from("/sys/fs/cgroup"),
+            PathBuf::from("/bin/systemctl"),
+        );
         assert_eq!(
-            cgroup_file("/user.slice/user-30033.slice/mvm-abc.scope", "cpu.max"),
+            probe.cgroup_file("/user.slice/user-30033.slice/mvm-abc.scope", "cpu.max"),
             Path::new("/sys/fs/cgroup/user.slice/user-30033.slice/mvm-abc.scope/cpu.max")
         );
     }
 
     #[test]
-    fn a_machine_with_no_scope_reads_back_as_declared_not_as_an_error() {
-        // True on every host: with no mechanism the probe short-circuits, and
-        // with one, no scope by this name was ever created. Either way a boot
+    fn a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error() {
+        // True on every host: nothing was ever bound for this VM, and a boot
         // must not fail because a bound is absent — the admission gate already
-        // decided whether that was allowed.
-        let tier = read_back_tier("mvm-cpu-scope-absent-fixture").expect("reads back");
-        assert_eq!(tier, EnforcedTier::Declared);
+        // decided whether that was allowed. Note the return type carries no
+        // error at all, which is the design saying the same thing.
+        let state = tempfile::tempdir().expect("state dir");
+        assert_eq!(
+            ScopeProbe::default().tier_for_vm(state.path()),
+            EnforcedTier::Declared
+        );
     }
 
     #[test]
-    fn reading_back_a_malformed_id_is_the_one_error() {
-        assert!(read_back_tier("../escape").is_err());
+    fn a_scope_whose_cgroup_cannot_be_read_reads_back_as_declared() {
+        // The understating direction. A recorded unit that resolves to nothing
+        // readable must report "not enforced" rather than claim a bound it
+        // cannot see.
+        let state = tempfile::tempdir().expect("state dir");
+        std::fs::write(state.path().join(SCOPE_UNIT_FILE), "mvm-absent-unit.scope")
+            .expect("record a unit that does not exist");
+        let probe = ScopeProbe::with_root_and_systemctl(
+            state.path().join("no-such-cgroup-root"),
+            PathBuf::from("/bin/false"),
+        );
+        assert_eq!(probe.tier_for_vm(state.path()), EnforcedTier::Declared);
     }
 
     #[test]

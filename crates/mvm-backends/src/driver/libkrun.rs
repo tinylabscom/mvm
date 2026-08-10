@@ -244,10 +244,11 @@ pub fn map_kernel_for_test(
 /// A function rather than three inline lines so a test can read the argv back
 /// and prove the wrap is there. An unwrapped spawn is silent: the VM boots
 /// perfectly and simply is not bounded.
-fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec) -> Command {
+fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec, state_dir: &Path) -> Command {
     mvm_core::cpu_scope::bind_cpu_grant(
         Command::new(supervisor),
         &spec.name,
+        state_dir,
         spec.cpu_grant.as_ref(),
     )
 }
@@ -313,7 +314,7 @@ impl VmmDriver for LibkrunDriver {
         )
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::inherit());
-        let mut child = bounded_supervisor_command(&supervisor, spec)
+        let mut child = bounded_supervisor_command(&supervisor, spec, &state_dir)
             .stdin(Stdio::piped())
             .stdout(stdout)
             .stderr(stderr)
@@ -1001,17 +1002,30 @@ mod tests {
 
         let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
         spec.cpu_grant = Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 });
-        let cmd = bounded_supervisor_command(Path::new("/usr/bin/mvm-libkrun-supervisor"), &spec);
+        let cmd = bounded_supervisor_command(
+            Path::new("/usr/bin/mvm-libkrun-supervisor"),
+            &spec,
+            scratch.path(),
+        );
 
+        // The unit carries a per-boot suffix, so it is matched by shape; every
+        // other token is still pinned exactly.
+        let mut argv = mvm_core::cpu_scope::rendered_argv(&cmd);
+        assert!(
+            argv[5].starts_with("w-") && argv[5].ends_with(".scope"),
+            "unit should be the machine name plus a per-boot suffix, got {}",
+            argv[5]
+        );
+        argv[5] = "<unit>".to_string();
         assert_eq!(
-            mvm_core::cpu_scope::rendered_argv(&cmd),
+            argv,
             vec![
                 "systemd-run",
                 "--user",
                 "--scope",
                 "--quiet",
                 "--unit",
-                "w.scope",
+                "<unit>",
                 "-p",
                 "CPUQuota=150%",
                 "--",
@@ -1022,8 +1036,13 @@ mod tests {
 
     #[test]
     fn an_ungranted_launch_spawns_the_supervisor_directly() {
+        let scratch = tempfile::tempdir().expect("scratch");
         let spec = spec_with(KernelImage::Bundled, vec![], vec![]);
-        let cmd = bounded_supervisor_command(Path::new("/usr/bin/mvm-libkrun-supervisor"), &spec);
+        let cmd = bounded_supervisor_command(
+            Path::new("/usr/bin/mvm-libkrun-supervisor"),
+            &spec,
+            scratch.path(),
+        );
         assert_eq!(
             mvm_core::cpu_scope::rendered_argv(&cmd),
             vec!["/usr/bin/mvm-libkrun-supervisor"]

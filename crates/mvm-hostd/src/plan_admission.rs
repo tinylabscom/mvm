@@ -49,7 +49,7 @@ use ed25519_dalek::VerifyingKey;
 use mvm_contract::grants::Grants;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
-use mvm_contract::protocol::resource_controls::EnforcedGrants;
+use mvm_contract::protocol::resource_controls::{EnforcedGrants, ResourceControls};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
@@ -436,21 +436,64 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
         );
     }
 
-    let Err(gaps) = negotiate_grants(grants, kind) else {
-        return Ok(());
-    };
-    let detail = gaps
-        .iter()
-        .map(|gap| format!("{} — {}", gap.capability, gap.alternative.describe()))
-        .collect::<Vec<_>>()
-        .join("; ");
-    refuse_or_warn(
-        posture.variant,
-        format!(
-            "the {tier} tier cannot enforce every declared grant: {detail}",
-            tier = kind.as_str()
-        ),
-    )
+    if let Err(gaps) = negotiate_grants(grants, kind) {
+        let detail = gaps
+            .iter()
+            .map(|gap| format!("{} — {}", gap.capability, gap.alternative.describe()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return refuse_or_warn(
+            posture.variant,
+            format!(
+                "the {tier} tier cannot enforce every declared grant: {detail}",
+                tier = kind.as_str()
+            ),
+        );
+    }
+
+    // The tier says the mechanism exists; this host has to actually have it.
+    // `ResourceControls::for_backend` answers per backend kind and, for CPU,
+    // per target OS — neither of which knows whether *this* host has a systemd
+    // user session to delegate from. Without this second question a sealed run
+    // on a Linux host with no session bus is admitted, boots unbounded, and
+    // reports `declared`: refused in prose and permitted in code.
+    if let Some(detail) = host_cpu_mechanism_gap(grants, kind, mvm_core::cpu_scope::mechanism_gap())
+    {
+        return refuse_or_warn(posture.variant, detail);
+    }
+    Ok(())
+}
+
+/// Refusal detail when the backend's tier claims a CPU share it can serve but
+/// this host cannot serve it.
+///
+/// Pure, with the host probe passed in, so both answers are testable on any
+/// host — including the combination that cannot be produced locally (a tier
+/// that bounds CPU on a machine whose mechanism is missing).
+fn host_cpu_mechanism_gap(
+    grants: &Grants,
+    kind: BackendKind,
+    gap: Option<mvm_core::cpu_scope::MechanismGap>,
+) -> Option<String> {
+    // Only a share rides on this mechanism. A fuel budget is wasmtime's, and an
+    // absent CPU grant has nothing to enforce.
+    if !matches!(
+        grants.cpu,
+        Some(mvm_contract::grants::CpuGrant::Share { .. })
+    ) {
+        return None;
+    }
+    if !ResourceControls::for_backend(kind).cpu.serves_share() {
+        // The tier itself cannot serve a share; `negotiate_grants` already
+        // spoke to that, and saying it twice would name one problem as two.
+        return None;
+    }
+    let gap = gap?;
+    Some(format!(
+        "the {tier} tier bounds CPU with a cgroup quota, but this host cannot attach one: {reason}",
+        tier = kind.as_str(),
+        reason = gap.describe()
+    ))
 }
 
 fn refuse_or_warn(variant: Variant, detail: String) -> Result<()> {
