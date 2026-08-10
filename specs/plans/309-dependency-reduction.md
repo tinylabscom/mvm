@@ -209,6 +209,32 @@ stack on the egress path.
 
 ---
 
+## Phase 2 preflight: measured, before writing any client
+
+Feature narrowing is what made the rcgen cut cheap, so the same question was
+asked of `reqwest` first. **It does not apply.** Measured against the shipped
+closure:
+
+| Change | Δ | Verdict |
+|---|---|---|
+| drop `blocking` | 0 | `futures-channel`/`futures-util` are `hyper-util`'s anyway |
+| drop `json` | 0 | `serde_json` is already in the closure |
+| drop `rustls-no-provider` | −5 | drops TLS entirely — not viable |
+
+There is no public reqwest feature that yields rustls without
+`rustls-platform-verifier` (`__rustls` is private), and swapping the platform
+trust store for bundled `webpki-roots` would be a *downgrade* — it stops
+honouring enterprise CA policy and root revocation. So the 27 crates are the
+irreducible hyper/tower/http stack, and only a replacement wins them.
+
+That makes Phase 2 a genuine ~2000-line HTTP/1.1 client, on the path that
+carries OCI registry fetch, egress re-origination, and the `web_fetch` SSRF
+guard. The reqwest surface it must reproduce is not just request/response: the
+`reqwest::dns::Resolve` seam behind `SsrfFilteringResolver`, `min_tls_version`
+pinned to TLS 1.3, `redirect::Policy::none`, streaming `.chunk()` under exact
+byte caps, plus blocking and async faces. That is the whole cost, stated
+before starting rather than discovered halfway.
+
 ## Phase 3 — candidates requiring a product decision
 
 Not scheduled. Each needs a call that is not the implementer's to make.
@@ -221,9 +247,20 @@ Not scheduled. Each needs a call that is not the implementer's to make.
       body validator). Gating JS/TS behind an `sdk-node` feature would cut C
       compilation for the common Python case — but a default `mvmctl` would then
       refuse to compile Node workloads. **Product decision.**
-- [ ] **`tracing-subscriber` (−7).** Used in 12 files, mostly `init`. A minimal
-      in-house `Subscriber` is maybe 200 lines, but it means owning
-      `env-filter` semantics forever. Poor ratio; listed for completeness.
+- [ ] **`tracing-subscriber` (−4 measured, not −7).** Its features were
+      measured too: dropping `json` alone is −1, `env-filter` alone is −1, and
+      `fmt`+`std` only is −4. None is free — `EnvFilter::try_from_default_env`
+      backs `RUST_LOG` in the CLI, and `.json()` is what the signer and
+      substitution-endpoint daemons log through. Taking the −4 means owning
+      env-filter directive semantics and a JSON layer, and regressing a
+      `RUST_LOG` contract users rely on. Poor ratio.
+
+- [ ] **The −1 tail.** `keyring`, `ext4-view`, `xattr`, `bs58`, `aho-corasick`,
+      `hex`, `ipnet`, `uuid`, `lzma-rs`, `etherparse`, `sysinfo`, `leakguard`
+      are one crate each; `which` is −3 across 37 call sites and `url` is −2.
+      `keyring` is only −1 even on macOS — `security-framework` and the
+      `core-foundation`/`objc2` set are shared with `rustls-platform-verifier`.
+      Nothing here is worth bespoke code.
 - [ ] **`toml` (−6).** Investigated: bumping 0.8 → 0.9 is roughly a wash
       (`toml_edit` is replaced by `toml_parser` + `toml_writer`), *not* a free
       win. The lockfile currently carries both 0.8 and 0.9 — consolidating on
@@ -256,6 +293,7 @@ The ratchet only works if it moves. Every phase above must land its
 | Baseline | 286 | — | — |
 | Phase 0 | 280 | −6 | **landed** |
 | Phase 1 | 263 | −23 | **landed** |
+| `fs2` → std locking | 262 | −24 | **landed** |
 | Phase 2 | ~236 | ~−50 | not started |
 
 ## What landed (2026-08-09)
@@ -288,6 +326,17 @@ Verification performed:
   workload this size.
 - Linux cross-build (`cargo zigbuild x86_64-unknown-linux-gnu`) clean for
   every touched crate.
+
+### Also landed: `fs2` → std file locking (−1)
+
+`fs2` was in the closure for `FileExt` alone — advisory `flock` across four
+sites. std stabilized `File::lock`/`try_lock`/`unlock` in 1.89 and the
+toolchain is pinned at 1.96, so the dep bought nothing. std additionally
+splits contention out of the error type (`TryLockError::WouldBlock` vs
+`TryLockError::Error`), so "another process holds it" no longer rides on an
+errno comparison. The test-only spurious-`WouldBlock` retry wrappers were
+*kept*: nothing in this change proves the platform `flock` was innocent, so
+their comments were reworded rather than deleted.
 
 ### Deferred out of Phase 1
 
