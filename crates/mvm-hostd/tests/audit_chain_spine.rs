@@ -106,15 +106,17 @@ async fn both_audit_chains_verify_and_reject_tamper_under_one_host_key() {
         "valid workload chain must verify all three entries"
     );
 
-    // ---- Tamper Chain A: flip the first event; signature must break -----------
+    // ---- Tamper Chain A: flip the first event; the line must fail closed ------
     let content = std::fs::read_to_string(&lifecycle_path).unwrap();
     // Same-length swap keeps the JSON well-formed but off the signed bytes.
+    // The lifecycle chain stores those bytes beside the readable entry, so an
+    // in-place edit is caught as the two disagreeing.
     let tampered = content.replacen("plan.admitted", "plan.smuggled", 1);
     std::fs::write(&lifecycle_path, tampered).unwrap();
     let err = verify_audit_chain(&lifecycle_path, &verifying_key)
         .expect_err("tampered lifecycle chain must fail closed");
     assert!(
-        matches!(err, VerifyError::SignatureInvalid { line: 0 }),
+        matches!(err, VerifyError::EntryCanonicalMismatch { line: 0 }),
         "got {err:?}"
     );
 

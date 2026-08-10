@@ -1378,8 +1378,10 @@ mod tests {
         let plan = fixture_plan("local", "plan-Z");
         emitter.emit_admitted(&plan, "host:test").unwrap();
 
-        // Tamper: replace the event name. The signature was over the
-        // original entry, so verify must reject.
+        // Tamper: replace the event name. The edit reaches the readable entry
+        // but not the base64 copy of the signed bytes beside it, so the line is
+        // refused for the two disagreeing rather than for a bad signature —
+        // a more precise account of the same tamper.
         let path = dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&path).unwrap();
         let tampered = content.replace("plan.admitted", "plan.fakeville");
@@ -1387,8 +1389,11 @@ mod tests {
 
         let err = verify_audit_chain(&path, &vk).expect_err("tamper must break verify");
         assert!(
-            matches!(err, crate::supervisor::VerifyError::SignatureInvalid { .. }),
-            "expected SignatureInvalid, got {err:?}"
+            matches!(
+                err,
+                crate::supervisor::VerifyError::EntryCanonicalMismatch { .. }
+            ),
+            "expected EntryCanonicalMismatch, got {err:?}"
         );
     }
 

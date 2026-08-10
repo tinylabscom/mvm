@@ -871,6 +871,9 @@ for detailed scope and acceptance criteria.
         `ClaimRefusal::LedgerUnverifiable`, and a `doctor` audit-chain line
   - [ ] Audit emission fails closed under `--prod` (currently advisory, so a
         missing entry leaves no gap to detect)
+  - [x] The primary chain stores the bytes its signature covers; no verifier
+        re-derives them, so the entry schema can change without invalidating
+        history
   - [ ] Converge the primary chain on JCS canonical bytes so no verifier has
         to reproduce serde field order
 
