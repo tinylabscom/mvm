@@ -156,58 +156,109 @@ their predicted sizes). `CLOSURE_BUDGET` ratcheted to 263.
 
 ## Phase 2 — `mvm-http`, the in-house HTTP client
 
-**−27 crates. The single largest item, and the highest risk.** Own phase, own
-feature flag, own differential test suite.
+**Stage A (crate + proof) landed. Stage B (migration) not started.**
 
-`reqwest` pulls `hyper`, `h2`, `tower`, `http-body`, and their transitive set.
-The API surface actually used is narrow and mundane:
+### The number is −20, not −27
 
-- `Client` / `ClientBuilder` (18 + 7 refs), `blocking::Client` (5 files)
-- `Response`, `StatusCode`, `header::HeaderMap`, `Method::from_bytes`, `Url`
-- `redirect::Policy::none` (8 refs — every client disables redirects)
-- `tls::Version::TLS_*` pinning
-- `.chunk().await` streaming reads with size caps (7 sites)
-- `reqwest::dns` custom resolver hook (2 refs)
+The −27 in the baseline table is reqwest's raw subtree, and it was wrong as a
+saving. `mvm-http` legitimately keeps `http`, `httparse`, `tokio-rustls`, and
+`rustls-platform-verifier` (which brings `rustls-native-certs` and
+`openssl-probe`), and is itself a crate. Measured projection:
 
-No HTTP/2 requirement is visible in the call sites; no multipart, no cookies, no
-proxy chaining, no connection-pool tuning.
+| | crates |
+|---|---|
+| current | 262 |
+| minus the reqwest subtree | 235 |
+| union with `mvm-http`'s own closure | **242** |
 
-- [ ] Write `crates/mvm-http`: HTTP/1.1 over `rustls` (already a direct
-      dependency, already on `ring`, which is already in the closure), blocking
-      and async surfaces, explicit `Content-Length`/chunked decoding, a
-      hard response-size cap as a first-class constructor argument rather than
-      a caller-side `.chunk()` loop, no redirect following at all (matching how
-      every existing caller configures it), and a pluggable resolver.
-- [ ] Migrate callers in dependency order, easiest first:
-      `mvm-cli/src/http.rs` and `mvm-build/src/stage0.rs` (blocking artifact
-      downloads, hash-verified — a wrong byte fails closed) →
-      `mvm-cli/src/template_registry.rs` → `mvm-fs/src/oci/{registry,manifest,layer}.rs`
-      → `mvm-hostd/src/supervisor/{http_forward,tools/*}.rs` **last**.
-- [ ] Keep `reqwest` behind a `legacy-http` feature until every caller has
-      migrated and the differential suite is green, then delete it.
+So the migration is worth **−20**, still the largest remaining item by 3×.
 
-**Risk, stated plainly.** The last group is the egress re-origination path and
-the `web_fetch` SSRF hardening — i.e. ADR-023 substitution and the claim 13 /
-Preview-claim-16 boundary. A homegrown HTTP client on that path can reintroduce
-request smuggling, header injection, redirect-based SSRF, or an unbounded read.
-Preconditions for merging Phase 2:
+### Stage A — the crate, with no callers (landed)
 
-- [ ] Differential tests running the same request corpus through `reqwest` and
-      `mvm-http`, asserting identical status/headers/body and identical
-      *refusals*.
-- [ ] A fuzz target on the response parser (status line, header block, chunked
-      body), added to the `fuzz` job in `.github/workflows/security.yml`
-      alongside the existing harnesses.
-- [ ] The `http_hardening_loopback` and `wasm_egress_witness` tests green
-      unchanged.
+Built standalone and *not* wired into `mvmctl`, so the closure stays 262 and
+the budget gate stays green while the client is proven. What it reuses is the
+design decision that matters:
 
-If the differential or fuzz work does not converge, **stop after Phase 1** —
-`-24` banked with no security exposure is a better outcome than a rushed HTTP
-stack on the egress path.
+- `http` for header types — `HeaderName`/`HeaderValue` reject at construction
+  the control characters behind response splitting.
+- `httparse` for the response head — the parser hyper uses, zero deps, fuzzed
+  upstream.
+- `url` for URLs — a bespoke parser that disagreed with the SSRF guard about
+  what the host is would *be* the SSRF bug.
 
-**Phase 2 exit: 262 → 235.**
+What the crate does own is the framing decision, which it resolves once from
+the head and **fails closed** on every ambiguity that enables request
+smuggling: `Content-Length` together with `Transfer-Encoding` is refused rather
+than resolved by precedence; disagreeing duplicate `Content-Length` values are
+refused; non-decimal lengths and non-hex chunk sizes (`0x5`, `+5`, ` 5`) are
+refused rather than coerced; `204`/`304`/`1xx`/HEAD are treated as bodyless
+before framing headers are consulted; head size, header count and chunk-line
+length are all bounded.
+
+Two deliberate deviations from a general client, both narrowing:
+
+- **Redirects are never followed, and there is no policy knob.** Every caller
+  already set `Policy::none()`, and a redirect is the cheapest way to walk a
+  validated request to an unvalidated host.
+- **The body cap belongs to the reader, not the call site.** The reqwest code
+  had six hand-rolled `while let Some(chunk)` accumulator loops; the cap is now
+  enforced before a chunk is handed back.
+
+The resolver is a trait, and the client dials **only** addresses it returns —
+that is what makes it the SSRF chokepoint rather than an advisory check, and it
+closes the check-then-connect rebinding window.
+
+TLS floor is 1.2 by default, matching reqwest, so migration is not a silent
+policy change; the hardened tool paths keep pinning 1.3 explicitly.
+
+Coverage: 56 tests (19 parser units, 8 resolver/serialisation units, 22
+end-to-end over real loopback sockets driving malformed and ambiguous framing),
+plus a `cargo-fuzz` target on `parse_head`/`next_chunk` wired into
+`security.yml`, asserting never-panic plus two span invariants an out-of-range
+chunk would break.
+
+### Stage B — migration (not started)
+
+- [ ] Migrate in dependency order, easiest first: `mvm-cli/src/http.rs` and
+      `mvm-build/src/stage0.rs` (blocking, hash-verified downloads — a wrong
+      byte fails closed) → `mvm-cli/src/template_registry.rs` →
+      `mvm-fs/src/oci/{registry,manifest,layer}.rs` →
+      `mvm-hostd/src/supervisor/{http_forward,tools/*}.rs` **last**.
+- [ ] A blocking face, or a `block_on` shim, for the five blocking call sites.
+- [ ] Differential tests running one corpus through both clients, asserting
+      identical status/headers/body **and identical refusals**.
+- [ ] `http_hardening_loopback` and `wasm_egress_witness` green unchanged.
+- [ ] Drop `reqwest`; ratchet `CLOSURE_BUDGET` to the measured result.
+
+**Phase 2 exit: 262 → 242 projected.**
 
 ---
+
+## Phase 2 preflight: measured, before writing any client
+
+Feature narrowing is what made the rcgen cut cheap, so the same question was
+asked of `reqwest` first. **It does not apply.** Measured against the shipped
+closure:
+
+| Change | Δ | Verdict |
+|---|---|---|
+| drop `blocking` | 0 | `futures-channel`/`futures-util` are `hyper-util`'s anyway |
+| drop `json` | 0 | `serde_json` is already in the closure |
+| drop `rustls-no-provider` | −5 | drops TLS entirely — not viable |
+
+There is no public reqwest feature that yields rustls without
+`rustls-platform-verifier` (`__rustls` is private), and swapping the platform
+trust store for bundled `webpki-roots` would be a *downgrade* — it stops
+honouring enterprise CA policy and root revocation. So the 27 crates are the
+irreducible hyper/tower/http stack, and only a replacement wins them.
+
+That makes Phase 2 a genuine ~2000-line HTTP/1.1 client, on the path that
+carries OCI registry fetch, egress re-origination, and the `web_fetch` SSRF
+guard. The reqwest surface it must reproduce is not just request/response: the
+`reqwest::dns::Resolve` seam behind `SsrfFilteringResolver`, `min_tls_version`
+pinned to TLS 1.3, `redirect::Policy::none`, streaming `.chunk()` under exact
+byte caps, plus blocking and async faces. That is the whole cost, stated
+before starting rather than discovered halfway.
 
 ## Phase 3 — candidates requiring a product decision
 
@@ -221,9 +272,20 @@ Not scheduled. Each needs a call that is not the implementer's to make.
       body validator). Gating JS/TS behind an `sdk-node` feature would cut C
       compilation for the common Python case — but a default `mvmctl` would then
       refuse to compile Node workloads. **Product decision.**
-- [ ] **`tracing-subscriber` (−7).** Used in 12 files, mostly `init`. A minimal
-      in-house `Subscriber` is maybe 200 lines, but it means owning
-      `env-filter` semantics forever. Poor ratio; listed for completeness.
+- [ ] **`tracing-subscriber` (−4 measured, not −7).** Its features were
+      measured too: dropping `json` alone is −1, `env-filter` alone is −1, and
+      `fmt`+`std` only is −4. None is free — `EnvFilter::try_from_default_env`
+      backs `RUST_LOG` in the CLI, and `.json()` is what the signer and
+      substitution-endpoint daemons log through. Taking the −4 means owning
+      env-filter directive semantics and a JSON layer, and regressing a
+      `RUST_LOG` contract users rely on. Poor ratio.
+
+- [ ] **The −1 tail.** `keyring`, `ext4-view`, `xattr`, `bs58`, `aho-corasick`,
+      `hex`, `ipnet`, `uuid`, `lzma-rs`, `etherparse`, `sysinfo`, `leakguard`
+      are one crate each; `which` is −3 across 37 call sites and `url` is −2.
+      `keyring` is only −1 even on macOS — `security-framework` and the
+      `core-foundation`/`objc2` set are shared with `rustls-platform-verifier`.
+      Nothing here is worth bespoke code.
 - [ ] **`toml` (−6).** Investigated: bumping 0.8 → 0.9 is roughly a wash
       (`toml_edit` is replaced by `toml_parser` + `toml_writer`), *not* a free
       win. The lockfile currently carries both 0.8 and 0.9 — consolidating on
@@ -256,7 +318,9 @@ The ratchet only works if it moves. Every phase above must land its
 | Baseline | 286 | — | — |
 | Phase 0 | 280 | −6 | **landed** |
 | Phase 1 | 263 | −23 | **landed** |
-| Phase 2 | ~236 | ~−50 | not started |
+| `fs2` → std locking | 262 | −24 | **landed** |
+| Phase 2 stage A | 262 | −24 | **landed** (crate only, no callers) |
+| Phase 2 stage B | ~242 | ~−44 | not started |
 
 ## What landed (2026-08-09)
 
@@ -288,6 +352,17 @@ Verification performed:
   workload this size.
 - Linux cross-build (`cargo zigbuild x86_64-unknown-linux-gnu`) clean for
   every touched crate.
+
+### Also landed: `fs2` → std file locking (−1)
+
+`fs2` was in the closure for `FileExt` alone — advisory `flock` across four
+sites. std stabilized `File::lock`/`try_lock`/`unlock` in 1.89 and the
+toolchain is pinned at 1.96, so the dep bought nothing. std additionally
+splits contention out of the error type (`TryLockError::WouldBlock` vs
+`TryLockError::Error`), so "another process holds it" no longer rides on an
+errno comparison. The test-only spurious-`WouldBlock` retry wrappers were
+*kept*: nothing in this change proves the platform `flock` was innocent, so
+their comments were reworded rather than deleted.
 
 ### Deferred out of Phase 1
 

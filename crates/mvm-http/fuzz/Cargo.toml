@@ -1,0 +1,29 @@
+[package]
+name = "mvm-http-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detached from the parent workspace, like every other fuzz member here:
+# `libfuzzer-sys` only links under cargo-fuzz's wrapper, which injects the
+# sanitizer and linker flags. Listed under `workspace.exclude` at the root.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mvm-http]
+path = ".."
+
+# Response-head + chunked-framing parser. This is the crate's whole untrusted
+# surface: everything a hostile server controls arrives through these two
+# functions, and both are pure over bytes so the harness drives exactly the
+# code the network drives.
+[[bin]]
+name = "fuzz_response_parse"
+path = "fuzz_targets/fuzz_response_parse.rs"
+test = false
+doc = false

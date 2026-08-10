@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use fs2::FileExt;
 use mvm_core::domain::instance::InstanceReadiness;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -345,7 +344,7 @@ pub fn acquire_registry_lock(registry_path: &Path) -> Result<VmNameRegistryLock>
         .truncate(false)
         .open(&lock_path)
         .with_context(|| format!("opening VM name registry lock {}", lock_path.display()))?;
-    file.lock_exclusive()
+    file.lock()
         .with_context(|| format!("locking VM name registry {}", lock_path.display()))?;
     Ok(VmNameRegistryLock { _file: file })
 }
