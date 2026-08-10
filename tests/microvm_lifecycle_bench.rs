@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::workload_runner::StopTiming;
 
 const ENABLE_VAR: &str = "MVM_LIFECYCLE_BENCH";
 const BACKENDS_VAR: &str = "MVM_LIFECYCLE_BENCH_BACKENDS";
@@ -122,10 +123,17 @@ struct StartedVm {
     elapsed: Duration,
 }
 
+#[derive(Debug)]
+struct StoppedVm {
+    elapsed: Duration,
+    timing: Option<StopTiming>,
+}
+
 fn run_backend(spec: &BenchSpec, selector: &str) -> Result<()> {
     let backend = Arc::new(AnyBackend::from_hypervisor(selector));
     let mut start_samples = Vec::with_capacity(spec.count);
     let mut stop_samples = Vec::with_capacity(spec.count);
+    let mut stop_timings = Vec::with_capacity(spec.count);
     let mut start_wall = Duration::ZERO;
     let mut stop_wall = Duration::ZERO;
 
@@ -142,7 +150,8 @@ fn run_backend(spec: &BenchSpec, selector: &str) -> Result<()> {
         let stop_started_at = Instant::now();
         let stopped = stop_batch(Arc::clone(&backend), started)?;
         stop_wall += stop_started_at.elapsed();
-        stop_samples.extend(stopped);
+        stop_samples.extend(stopped.iter().map(|vm| vm.elapsed));
+        stop_timings.extend(stopped.iter().filter_map(|vm| vm.timing));
     }
 
     print_report(
@@ -150,6 +159,7 @@ fn run_backend(spec: &BenchSpec, selector: &str) -> Result<()> {
         spec,
         &start_samples,
         &stop_samples,
+        &stop_timings,
         start_wall,
         stop_wall,
     );
@@ -207,14 +217,14 @@ fn start_batch(backend: Arc<AnyBackend>, configs: Vec<VmStartConfig>) -> Result<
     Ok(started)
 }
 
-fn stop_batch(backend: Arc<AnyBackend>, started: Vec<StartedVm>) -> Result<Vec<Duration>> {
+fn stop_batch(backend: Arc<AnyBackend>, started: Vec<StartedVm>) -> Result<Vec<StoppedVm>> {
     let results = thread::scope(|scope| {
         let mut handles = Vec::with_capacity(started.len());
         for vm in started {
             let backend = Arc::clone(&backend);
             handles.push(scope.spawn(move || {
                 let started_at = Instant::now();
-                let result = backend.stop(&vm.id);
+                let result = backend.stop_with_timing(&vm.id);
                 (vm.id, started_at.elapsed(), result)
             }));
         }
@@ -233,7 +243,7 @@ fn stop_batch(backend: Arc<AnyBackend>, started: Vec<StartedVm>) -> Result<Vec<D
     let mut failures = Vec::new();
     for (id, elapsed, result) in results {
         match result {
-            Ok(()) => samples.push(elapsed),
+            Ok(timing) => samples.push(StoppedVm { elapsed, timing }),
             Err(error) => failures.push((id, error)),
         }
     }
@@ -266,6 +276,7 @@ fn print_report(
     spec: &BenchSpec,
     starts: &[Duration],
     stops: &[Duration],
+    stop_timings: &[StopTiming],
     start_wall: Duration,
     stop_wall: Duration,
 ) {
@@ -277,11 +288,55 @@ fn print_report(
     );
     print_phase("start", start, start_wall, starts.len());
     print_phase("stop", stop, stop_wall, stops.len());
+    print_stop_breakdown(stop_timings);
     eprintln!(
         "[microvm_lifecycle_bench] lifecycle wall={}ms throughput={:.2} VMs/s",
         millis(start_wall + stop_wall),
         starts.len() as f64 / (start_wall + stop_wall).as_secs_f64()
     );
+}
+
+fn print_stop_breakdown(timings: &[StopTiming]) {
+    if timings.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "[microvm_lifecycle_bench] stop-breakdown n={} attach={} endpoint_reaping={} driver_kill={} console_cleanup={} total={}",
+        timings.len(),
+        format_summary(timings.iter().map(|timing| timing.attach)),
+        format_summary(timings.iter().map(|timing| timing.endpoint_reaping)),
+        format_summary(timings.iter().map(|timing| timing.driver_kill)),
+        format_summary(timings.iter().map(|timing| timing.console_cleanup)),
+        format_summary(timings.iter().map(|timing| timing.total)),
+    );
+
+    let details = timings
+        .iter()
+        .filter_map(|timing| timing.driver_detail)
+        .collect::<Vec<_>>();
+    if details.len() == timings.len() {
+        eprintln!(
+            "[microvm_lifecycle_bench] stop-driver-detail n={} supervisor_signal={} pid_disappearance={} force_kill_wait={} state_cleanup={}",
+            details.len(),
+            format_summary(details.iter().map(|detail| detail.supervisor_signal)),
+            format_summary(details.iter().map(|detail| detail.pid_disappearance)),
+            format_summary(details.iter().map(|detail| detail.force_kill_wait)),
+            format_summary(details.iter().map(|detail| detail.state_cleanup)),
+        );
+    }
+}
+
+fn format_summary(samples: impl Iterator<Item = Duration>) -> String {
+    let samples = samples.collect::<Vec<_>>();
+    let summary = summarize(&samples);
+    format!(
+        "p50={:.2}ms/p95={:.2}ms/p99={:.2}ms/max={:.2}ms",
+        millis(summary.p50),
+        millis(summary.p95),
+        millis(summary.p99),
+        millis(summary.max),
+    )
 }
 
 fn print_phase(label: &str, summary: MeasurementSummary, wall: Duration, count: usize) {

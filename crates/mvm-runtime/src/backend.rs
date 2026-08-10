@@ -19,7 +19,9 @@ use crate::microvm::FlakeRunConfig;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::wasm_backend::WasmBackend;
-use crate::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
+use crate::workload_runner::{
+    RealBrokerRegistrar, RealEndpointSpawner, StopTiming, WorkloadRunner,
+};
 use mvm_backends::driver::hvf::HvfDriver;
 use mvm_backends::driver::{LibkrunDriver, QemuDriver};
 use mvm_vmm::host::drive_file::DriveFile;
@@ -937,6 +939,22 @@ impl AnyBackend {
 
     pub fn stop(&self, id: &VmId) -> Result<()> {
         self.inner().stop(id)
+    }
+
+    /// Stop a VM and return runner teardown timings when this backend exposes
+    /// the shared workload-runner lifecycle.
+    pub fn stop_with_timing(&self, id: &VmId) -> Result<Option<StopTiming>> {
+        match self {
+            Self::Firecracker(backend) => backend.stop_with_timing(id).map(Some),
+            Self::Libkrun(backend) => backend.stop_with_timing(id).map(Some),
+            Self::Qemu(backend) => backend.stop_with_timing(id).map(Some),
+            #[cfg(feature = "test-support")]
+            Self::Mock(backend) => backend.stop(id).map(|_| None),
+            Self::Hvf(backend) => backend.stop_with_timing(id).map(Some),
+            Self::Wasm(backend) => backend.stop(id).map(|_| None),
+            Self::AppleContainer(backend) => backend.stop_with_timing(id).map(Some),
+            Self::Docker(backend) => backend.stop(id).map(|_| None),
+        }
     }
 
     /// Fast teardown for an ephemeral transient run. See

@@ -33,7 +33,7 @@ use mvm_core::checkpoint::{DeviceAnchors, HVF_FRAME_BLOB};
 use mvm_vmm::checkpoint::VmFullControl;
 use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
 use mvm_vmm::driver::traits::{
-    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
+    ChildForkRequest, DuplexStream, RunningVm, RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };
 
 /// How long a capture waits for the paused supervisor to publish both halves of
@@ -821,11 +821,22 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn kill(&self) -> Result<()> {
-        if let Some(pid) = hvf_backend::read_pid(&self.pid_file) {
-            hvf_backend::terminate_pid(pid);
-        }
+        self.kill_with_timing().map(|_| ())
+    }
+
+    fn kill_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
+        let termination = hvf_backend::read_pid(&self.pid_file)
+            .map(hvf_backend::terminate_pid_timed)
+            .unwrap_or_default();
+        let cleanup_started = Instant::now();
         let _ = std::fs::remove_file(&self.pid_file);
-        Ok(())
+        let state_cleanup = cleanup_started.elapsed();
+        Ok(Some(RunningVmStopTiming {
+            supervisor_signal: termination.supervisor_signal,
+            pid_disappearance: termination.pid_disappearance,
+            force_kill_wait: termination.force_kill_wait,
+            state_cleanup,
+        }))
     }
 
     fn pause(&self) -> Result<()> {

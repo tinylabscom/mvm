@@ -87,24 +87,52 @@ fn wait_for_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TerminationTiming {
+    pub supervisor_signal: Duration,
+    pub pid_disappearance: Duration,
+    pub force_kill_wait: Duration,
+}
+
 /// SIGTERM a recorded pid, then SIGKILL if it lingers past a short grace. When
 /// the supervisor is still this process's child, reap it with `waitpid` so an
 /// already-exited zombie does not look alive for the full grace window.
 /// Shared by the `VmBackend` stop path and the hvf driver's `kill`.
 pub(crate) fn terminate_pid(pid: libc::pid_t) {
+    let _ = terminate_pid_timed(pid);
+}
+
+pub(crate) fn terminate_pid_timed(pid: libc::pid_t) -> TerminationTiming {
+    let signal_started = Instant::now();
     // SAFETY: signalling a pid we recorded from our own supervisor.
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
-    if wait_for_pid_exit(pid, Duration::from_secs(5)) {
-        return;
+    let supervisor_signal = signal_started.elapsed();
+
+    let wait_started = Instant::now();
+    let exited = wait_for_pid_exit(pid, Duration::from_secs(5));
+    let pid_disappearance = wait_started.elapsed();
+    if exited {
+        return TerminationTiming {
+            supervisor_signal,
+            pid_disappearance,
+            force_kill_wait: Duration::ZERO,
+        };
     }
+
+    let force_started = Instant::now();
     if pid_alive(pid) {
         // SAFETY: same pid.
         unsafe {
             libc::kill(pid, libc::SIGKILL);
         }
         let _ = wait_for_pid_exit(pid, Duration::from_millis(500));
+    }
+    TerminationTiming {
+        supervisor_signal,
+        pid_disappearance,
+        force_kill_wait: force_started.elapsed(),
     }
 }
 

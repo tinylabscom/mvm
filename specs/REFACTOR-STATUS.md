@@ -138,8 +138,11 @@ for detailed scope and acceptance criteria.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
         decomposed and the warm-pool refill removed from it: a default
         `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
-        `stop_transient` 142.9 ms, which is real cleanup. Follow-up: give pool
-        maintenance to the resident per-tenant daemon.
+        `stop_transient` 142.9 ms, which is real cleanup. A dedicated 1,000-cycle
+        HVF run now attributes its 67.62 ms p50 / 74.97 ms p95 stop wait to
+        supervisor PID disappearance; endpoint reaping and state cleanup are
+        below 0.1 ms at p99. Follow-up: give pool maintenance to the resident
+        per-tenant daemon and make supervisor shutdown event-driven.
   - [ ] Phase 7 — live validation and regression gates
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images

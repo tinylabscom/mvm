@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -31,7 +31,8 @@ use crate::checkpoint::{
     verify_content, verify_lineage,
 };
 use crate::driver::{
-    ChildForkRequest, PreloadChildRequest, RunningVm, StandbyParentSpawn, VmmDriver,
+    ChildForkRequest, PreloadChildRequest, RunningVm, RunningVmStopTiming, StandbyParentSpawn,
+    VmmDriver,
 };
 use crate::standby_pool::SupervisorStandbyPool;
 use crate::vm::name_registry::{VmNameRegistry, acquire_registry_lock, generate_vm_name};
@@ -349,6 +350,24 @@ pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> 
     spawner: S,
     broker: B,
     console_streamer: Arc<dyn ConsoleStreamer>,
+}
+
+/// Timings for the shared workload-runner stop sequence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StopTiming {
+    /// Time to reconstruct the live driver handle.
+    pub attach: Duration,
+    /// Time to reap host-side endpoint and service processes.
+    pub endpoint_reaping: Duration,
+    /// Time spent in the backend driver termination operation.
+    pub driver_kill: Duration,
+    /// Time to stop console streaming for the VM.
+    pub console_cleanup: Duration,
+    /// Total elapsed time for the complete stop sequence.
+    pub total: Duration,
+    /// Backend-specific detail, when the driver can observe its termination
+    /// phases. HVF reports supervisor and PID-file teardown here.
+    pub driver_detail: Option<RunningVmStopTiming>,
 }
 
 impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
