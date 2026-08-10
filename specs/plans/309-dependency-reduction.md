@@ -2,7 +2,11 @@
 
 ## Status
 
-**Phases 0 and 1 COMPLETE** (2026-08-09). Shipping closure **286 → 263**
+**Phases 0, 1, and 2 COMPLETE** (2026-08-10). `reqwest` is retired; the
+shipping closure is **242**, down from 286 — a **15% cut**. Phase 3 (product
+decisions) and Phase 4 (the lockfile ratchet) remain.
+
+Earlier status, kept for the record: Phases 0 and 1 complete (2026-08-09). Shipping closure **286 → 263**
 on `x86_64-unknown-linux-gnu`; macOS `aarch64-apple-darwin` 281 → 258.
 `CLOSURE_BUDGET` ratcheted 286 → 263. Phase 2 (`mvm-http`) and Phase 3
 (product decisions) are not started.
@@ -217,54 +221,55 @@ plus a `cargo-fuzz` target on `parse_head`/`next_chunk` wired into
 `security.yml`, asserting never-panic plus two span invariants an out-of-range
 chunk would break.
 
-### Stage B — migration (in progress)
+### Stage B — migration (COMPLETE)
 
-Every crate except `mvm-hostd` is off `reqwest`.
+`reqwest` is gone from the product graph. Closure **262 → 242**, the projection
+hit exactly.
 
-- [x] A blocking face (`mvm_http::blocking`). Five call sites needed one. It
-      holds **no runtime**: an earlier shape cached one per client, which made
-      the client un-droppable inside an async context — tokio panics on that,
-      far from the code responsible. A current-thread runtime costs microseconds
-      next to a round trip, so each `send` builds and discards its own, after
-      refusing outright if called from within a runtime.
-- [x] `mvm-cli` — `http.rs`, `template_cmd.rs`, `template_registry.rs`.
-- [x] `mvm-build` — `stage0.rs`.
-- [x] `mvm-sdk` — `deploy.rs`.
-- [x] `mvm-fs` — the whole OCI client (`registry`/`manifest`/`layer`).
-      `reqwest` **and** `rustls` are gone from its manifest.
-- [x] `mvm-core` — `client/gateway.rs`; the `client-remote` feature now pulls
-      `mvm-http` instead. `check-core-runtime-free` still clean.
-- [ ] `mvm-hostd` — 98 references across six files, and the only ones left.
-      `http_hardening.rs` is the keystone (`hardened_client_builder`,
-      `SsrfFilteringResolver`, `MIN_TLS_VERSION`); `http_forward`, `web_fetch`,
-      `web_search`, `substitution_proxy`, and `terminator/tls` follow it, as
-      does `mvm-cli`'s `audit_posture`, which reads `MIN_TLS_VERSION`.
-- [ ] Differential tests against `reqwest` before the hostd cut over.
-- [ ] Drop `reqwest`; ratchet `CLOSURE_BUDGET`.
+- [x] A blocking face (`mvm_http::blocking`), holding **no runtime**. An
+      earlier shape cached one per client, which made the client un-droppable
+      inside an async context — tokio panics on that, far from the cause. Each
+      `send` builds and discards a current-thread runtime after refusing
+      outright if called from within one.
+- [x] `mvm-cli`, `mvm-build`, `mvm-sdk`, `mvm-fs`, `mvm-core`.
+- [x] `mvm-hostd` — `http_hardening`, `web_fetch`, `web_search`,
+      `http_forward`, `substitution_proxy`, `terminator/tls`.
+- [x] Differential harness against `reqwest`, run before the hostd cut over.
+- [x] `reqwest` dropped from every manifest; `CLOSURE_BUDGET` ratcheted to 242.
 
-Two API shapes changed during the migration, both to avoid churn or a footgun
-rather than for taste: URL/header/auth arguments take `impl AsRef<str>` (reqwest
-does the same, and `&str`-only forced a `&` at every call site), and
-`Client::new()` is infallible — the TLS config is built on first use, because
-touching the platform trust store can fail for reasons unrelated to the
-caller's configuration and ten OCI constructors return `Self`, not `Result`.
-reqwest resolves the same tension by panicking; deferring surfaces the error at
-`send` instead.
+**What the differential measured.** Twelve well-formed cases agree exactly.
+Five ambiguous ones are refused here; only **two** are behavioural divergences,
+and both are cases where reqwest *resolves* a framing ambiguity:
 
-**A reqwest workaround that disappears.** `http_hardening.rs` documents that
-reqwest connects on the *resolver's* port rather than the URL's, so its
-`Resolve` trait cannot be port-correct — forcing every SSRF-filtered request
-through 443 and requiring a second path
-(`hardened_client_builder_no_dns` + `resolve_to_addrs`) for HTTP or
-arbitrary-port callers. `mvm_http::Resolve` receives `(host, port)`, so that
-split collapses back into one resolver.
+| case | reqwest | mvm-http |
+|---|---|---|
+| `0x`-prefixed chunk size | refuses | refuses |
+| `+`-prefixed Content-Length | refuses | refuses |
+| disagreeing duplicate Content-Length | refuses | refuses |
+| **Content-Length + Transfer-Encoding** | **accepts**, prefers TE | refuses |
+| **`Transfer-Encoding: gzip, chunked`** | **accepts** | refuses |
 
-**Cost during the migration.** `mvm-http` entered the closure while `reqwest`
-is still there for `mvm-hostd`, so the closure is **263** — one over budget —
-until hostd lands. The saving is all-or-nothing: reqwest leaves only when its
-last caller does.
+The first is the textbook smuggling primitive. Resolving an ambiguity is what
+lets two hops disagree, so failing closed is the point rather than a
+regression. The harness keeps `reqwest` as a **dev-dependency** deliberately —
+it is the standing evidence, not scaffolding.
 
-**Phase 2 exit: 262 → 242 projected.**
+**A reqwest workaround deleted, not ported.** `http_hardening` documented that
+reqwest connects on the *resolver's* port rather than the URL's and never hands
+the resolver the port — so the SSRF-filtering resolver hardcoded 443, and any
+caller forwarding elsewhere needed a second resolver-less builder plus a manual
+resolve-filter-and-pin. `mvm_http::Resolve` receives `(host, port)`, so
+`hardened_client_builder_no_dns` and `resolve_ssrf_safe_ips` are **gone**,
+`substitution_proxy`'s per-request dance collapses to one builder call, and
+`web_fetch`'s hand-rolled `PinnedDnsResolver` becomes the built-in
+`PinnedResolver`. `http_forward` also loses five
+`no_proxy`/`no_gzip`/`no_brotli`/`no_zstd`/`no_deflate` calls: mvm-http supports
+neither proxies nor compression, so explicit disabling became absence.
+
+**Witnesses.** 167 SSRF / egress / substitution / forward tests pass, including
+the loopback, RFC1918, and IMDS refusals and the unbound-destination leak gate.
+
+**Phase 2 exit: 262 → 242. Achieved.**
 
 ---
 
@@ -353,9 +358,8 @@ The ratchet only works if it moves. Every phase above must land its
 | Phase 0 | 280 | −6 | **landed** |
 | Phase 1 | 263 | −23 | **landed** |
 | `fs2` → std locking | 262 | −24 | **landed** |
-| Phase 2 stage A | 262 | −24 | **landed** (crate only, no callers) |
-| Phase 2 stage B (all but hostd) | 263 | −23 | **in progress** — +1 until reqwest goes |
-| Phase 2 stage B | ~242 | ~−44 | not started |
+| Phase 2 stage A (crate only) | 262 | −24 | **landed** |
+| Phase 2 stage B (all callers) | **242** | **−44** | **landed** |
 
 ## What landed (2026-08-09)
 
