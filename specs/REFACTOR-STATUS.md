@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-08
+Last updated: 2026-08-09
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -132,6 +132,24 @@ for detailed scope and acceptance criteria.
         `stop_transient` 142.9 ms, which is real cleanup. Follow-up: give pool
         maintenance to the resident per-tenant daemon.
   - [ ] Phase 7 — live validation and regression gates
+
+- [ ] Plan 311 — Launch critical-path waste on real-sized images
+      (`specs/plans/311-launch-critical-path-waste.md`), branch
+      `plan/311-launch-critical-path`. Sits beneath Plan 299's contract: its
+      baseline runs `alpine` (9.9 MB rootfs), and three per-launch costs are
+      invisible at that size. On `python:3.12` (1.1 GB, 116x) a debug profile
+      shows ~557 ms re-hashing the cached rootfs for OCI provenance, ~67 ms in a
+      `ps` subprocess reaping orphaned helpers, and ~28 ms scanning `vmlinux`
+      for dm-verity markers with `windows().any()`. The Plan 299 lane gate
+      cannot see any of it — a re-hash is not a pull, build, mount
+      materialization, or warm claim.
+  - [ ] Phase A0 — release baseline on a large image (all current numbers are
+        from a debug binary and are not comparable to Plan 299's)
+  - [ ] Phase B — `sha256_file_cached` on the OCI admission path — **#2273**
+  - [ ] Phase C — process-table sweep off the launch path — **#2274**
+  - [ ] Phase D — sublinear kernel verity probe — **#2275**
+  - [ ] Phase E — large-image lane + bytes-hashed gate — **#2276**
+  - [ ] Phase F — validation, claim-witness and warm-lane regression checks
 
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
