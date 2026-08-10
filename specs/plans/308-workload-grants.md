@@ -100,9 +100,11 @@ the VM tiers already have — not an extra control the VM tiers are missing.
 
 `CpuGrant` is an enum, because the backends do not share a unit:
 
-- `Share(f32)` — cores-equivalent, mapped to cgroup v2 `cpu.max` as
-  `<quota_us> <period_us>`.
-- `Fuel(u64)` — a deterministic wasmtime instruction budget.
+- `Share { millicores: u32 }` — thousandths of one host core (1500 = 1.5
+  cores), rendered as systemd's `CPUQuota=150%`. Integer, not a float: the
+  grant lands in a signed, content-addressed payload, and float
+  canonicalization is not stable across serializers.
+- `Fuel { instructions: u64 }` — a deterministic wasmtime instruction budget.
 
 These are not inter-convertible and no conversion is offered. A `Share`
 grant on the wasm backend resolves through `negotiate()` to a
@@ -244,7 +246,7 @@ cheapest and most rigorous, not the one where it is hardest.
       substitution. New `xtask check-backend-resource-controls` asserts every
       `BackendKind` declares its controls explicitly.
 
-- [ ] **WS4.0 — Delegation spike. Blocks the rest of WS4.**
+- [x] **WS4.0 — Delegation spike. COMPLETE — verdict: switch to a systemd transient scope.**
       The `cpu` controller is historically *not* delegated to user sessions
       by default, while `memory` and `pids` generally are. Since "no `sudo`"
       is a hard constraint, the primary enforcement mechanism for the primary
@@ -256,18 +258,35 @@ cheapest and most rigorous, not the one where it is hardest.
       chosen here rather than discovered during implementation.
 
 - [ ] **WS4 — Linux CPU quota, wall clock, admission budget.**
-      A systemd transient scope via `systemd-run --user` (redesigned after the
-      WS4.0 spike: raw cgroup migration fails unprivileged because a login
-      validated machine ID, never a user-supplied string; the delegated
-      subtree is opened once `O_DIRECTORY` with `openat`-relative writes.
+      **Redesigned after the WS4.0 spike** — see
+      `specs/plans/308-cgroup-delegation-findings.md`. Writing a cgroup leaf
+      directly does not work unprivileged, and not for the reason this plan
+      first assumed: the `cpu` controller *is* delegated and `cpu.max` *is*
+      writable, but cgroup v2 **migration** additionally requires write access
+      to the common ancestor of the process's current and destination cgroups,
+      and a login session's `session-N.scope` is `Delegate=no`. So a process
+      launched from any ordinary shell cannot move itself into the delegated
+      subtree.
 
-      **The process is born into the cgroup, not moved into it.** A cgroup
-      written after the VMM starts leaves a window in which the workload runs
-      uncapped, and a workload built to burn CPU will use exactly that
-      window. Use `clone3` with `CLONE_INTO_CGROUP`, or write the pid from
-      the child between `fork` and `exec`; a post-hoc write of an already-
-      running pid is not acceptable and the witness must be able to tell the
-      difference.
+      The mechanism is instead a systemd transient scope:
+      `systemd-run --user --scope -p CPUQuota=<n>%`, which works because the
+      user's own `systemd --user` manager performs the placement from inside
+      the delegated tree. Measured on the spike box at 1.495 cores against a
+      1.5-core target, with `nr_throttled` confirming live kernel throttling.
+      The scope name derives from the validated machine ID, never a
+      user-supplied string.
+
+      **The process is born into its scope, not moved into it** — and the new
+      mechanism gives this for free rather than by hand. systemd creates the
+      scope and then spawns the payload inside it, so there is no interval in
+      which the workload runs uncapped. The original design needed `clone3`
+      with `CLONE_INTO_CGROUP` to achieve the same property.
+
+      Fail honestly when the mechanism is absent: `systemd-run` may be missing,
+      and a user session bus may not exist in a headless daemon context —
+      delegation hangs off that session. Detect both and report the `Declared`
+      tier rather than failing the boot, except under `--prod`, which refuses
+      an unenforceable grant.
 
       Supervisor-side `exec_secs` timer whose kill is emitted to the audit
       chain, so an enforced timeout is distinguishable from a crash.
