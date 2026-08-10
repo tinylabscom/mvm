@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use rayon::prelude::*;
+use crate::parallel::par_map;
 
 use crate::ext4::{BuildOptions, EmitImageError, Ext4Error, Node, Xattr};
 
@@ -214,47 +214,45 @@ pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, Mat
         }
     }
 
-    let mut nodes: Vec<Node> = entries
-        .into_par_iter()
-        .map(|entry| -> Result<Node, MaterializeError> {
-            let WalkEntry {
-                path,
-                guest_path,
-                file_type,
-            } = entry;
-            if file_type.is_symlink() {
-                let target =
-                    std::fs::read_link(&path).map_err(|source| MaterializeError::Walk {
-                        path: path.clone(),
-                        source,
-                    })?;
-                Ok(Node::Symlink {
-                    path: guest_path,
-                    target: target.to_string_lossy().into_owned(),
-                })
-            } else if file_type.is_dir() {
-                let xattrs = node_xattrs(options.xattrs, &path);
-                Ok(Node::Dir {
-                    path: guest_path,
-                    mode: mode_of(&path, 0o755),
-                    xattrs,
-                })
-            } else {
-                let data =
-                    read_file_for_guest_image(&path).map_err(|source| MaterializeError::Walk {
-                        path: path.clone(),
-                        source,
-                    })?;
-                let xattrs = node_xattrs(options.xattrs, &path);
-                Ok(Node::File {
-                    path: guest_path,
-                    mode: mode_of(&path, 0o644),
-                    data,
-                    xattrs,
-                })
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut nodes: Vec<Node> = par_map(entries, |entry| -> Result<Node, MaterializeError> {
+        let WalkEntry {
+            path,
+            guest_path,
+            file_type,
+        } = entry;
+        if file_type.is_symlink() {
+            let target = std::fs::read_link(&path).map_err(|source| MaterializeError::Walk {
+                path: path.clone(),
+                source,
+            })?;
+            Ok(Node::Symlink {
+                path: guest_path,
+                target: target.to_string_lossy().into_owned(),
+            })
+        } else if file_type.is_dir() {
+            let xattrs = node_xattrs(options.xattrs, &path);
+            Ok(Node::Dir {
+                path: guest_path,
+                mode: mode_of(&path, 0o755),
+                xattrs,
+            })
+        } else {
+            let data =
+                read_file_for_guest_image(&path).map_err(|source| MaterializeError::Walk {
+                    path: path.clone(),
+                    source,
+                })?;
+            let xattrs = node_xattrs(options.xattrs, &path);
+            Ok(Node::File {
+                path: guest_path,
+                mode: mode_of(&path, 0o644),
+                data,
+                xattrs,
+            })
+        }
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
 
     nodes.sort_by(|a, b| a.path().cmp(b.path()));
     Ok(nodes)

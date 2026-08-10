@@ -10,12 +10,12 @@
 //! `crate::ir::canonicalize` must produce the registry's canonical
 //! bytes. The signature payload is over those canonical bytes.
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Top-level manifest. Stored as `addon.toml` in the addon's root
 /// directory alongside the inner workload definition.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AddonManifest {
     /// Schema version of the manifest itself. Mirrors workload IR's
@@ -29,7 +29,8 @@ pub struct AddonManifest {
     pub security: SecuritySection,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AddonSection {
     /// Addon name. Pattern `^[a-z][a-z0-9-]{1,63}$`. Reserved names
@@ -70,14 +71,16 @@ fn default_graceful_shutdown_seconds() -> u32 {
     30
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestTier {
     Separate,
     InVm,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AddonParam {
     /// Parameter name. ASCII identifier matching `^[a-z][a-z0-9_]*$`.
@@ -91,7 +94,8 @@ pub struct AddonParam {
     pub r#enum: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AddonParamType {
     String,
@@ -99,7 +103,8 @@ pub enum AddonParamType {
     Boolean,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AddonExport {
     /// Logical name within this addon. Unique per manifest.
@@ -148,7 +153,8 @@ fn default_credential_ttl_hours() -> u32 {
 // reveals only the variant name (a published schema constant), never
 // credential material. Future `Static`/`UserSupplied` variants follow
 // the same shape: they describe credential *provenance*, not bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CredentialsKind {
@@ -157,7 +163,8 @@ pub enum CredentialsKind {
     Generated,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SecuritySection {
     /// Trust tier — drives mvmd's SMT-affinity scheduler matrix.
@@ -172,7 +179,8 @@ pub struct SecuritySection {
     pub seccomp_profile: SeccompProfile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum TrustTier {
     /// Holds secrets at rest (DB passwords, encryption keys, customer
@@ -188,7 +196,8 @@ pub enum TrustTier {
     Low,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SeccompProfile {
     /// Strictest profile (default). Maps onto `mvm-core::crypto`'s

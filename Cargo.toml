@@ -201,7 +201,7 @@ x25519-dalek = { version = "3", features = ["static_secrets"] }
 # `nameConstraints` API. `ring` crypto backend (no cmake/C-toolchain like the
 # aws-lc-rs default). Sync (no tokio) so it lives behind mvm-core's `egress-ca`
 # feature without breaking the runtime-free default build.
-rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # `secrecy` wraps secret-carrying types so accidental `Debug`/`Display`
 # becomes a compile error. Plan 63 W2 — `SecretBox<T>` pass on every
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
@@ -277,14 +277,6 @@ ipnet = { version = "2", features = ["serde"] }
 # deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
 # so a mature parser beats a hand-rolled one.
 etherparse = "0.20"
-# Plan 74 W2 — mvm-guest-netinit installs kernel blackhole routes
-# for `MANDATORY_DENY_RANGES` inside every microVM. rtnetlink wraps
-# the AF_NETLINK socket and the RTM_NEWROUTE message construction;
-# its dep tree (`netlink-packet-route`, `netlink-sys`,
-# `netlink-proto`) is pure-Rust and static-linkable for the
-# overlay binary. Async because the underlying socket uses
-# tokio's reactor; we already pull tokio in workspace-wide.
-rtnetlink = "0.14"
 async-trait = "0.1"
 
 # Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.

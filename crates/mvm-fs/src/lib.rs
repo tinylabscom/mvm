@@ -35,6 +35,7 @@ pub mod oci;
 /// (`mke2fs -d` against the staging dir) runs inside the builder VM.
 pub mod oci_to_rootfs;
 pub mod overlay;
+pub mod parallel;
 pub mod rootfs;
 pub mod sdk_sidecar;
 pub mod snapshot_store;

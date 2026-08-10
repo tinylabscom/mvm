@@ -2,7 +2,10 @@
 
 ## Status
 
-Not started. Design of record.
+**Phases 0 and 1 COMPLETE** (2026-08-09). Shipping closure **286 → 263**
+on `x86_64-unknown-linux-gnu`; macOS `aarch64-apple-darwin` 281 → 258.
+`CLOSURE_BUDGET` ratcheted 286 → 263. Phase 2 (`mvm-http`) and Phase 3
+(product decisions) are not started.
 
 ## Why
 
@@ -73,18 +76,18 @@ Ruthless is not reckless. These are *not* cut, and the reasons are load-bearing:
 
 Three defects, not trade-offs. Land these first; they cost nothing.
 
-- [ ] **`thiserror = "1"` in `crates/mvm-build/Cargo.toml:107`.** A hardcoded
+- [x] **`thiserror = "1"` in `crates/mvm-build/Cargo.toml:107`.** A hardcoded
       major-1 pin while the workspace is on `thiserror` 2. Compiles a second
       copy of `thiserror` + `thiserror-impl` — a whole extra proc-macro build —
       into the shipped binary. Switch to `thiserror.workspace = true`.
       **−2 crates**, and it retires a duplicate major.
-- [ ] **`rtnetlink` is a dead `[workspace.dependencies]` entry.** No crate
+- [x] **`rtnetlink` is a dead `[workspace.dependencies]` entry.** No crate
       declares it; zero source references. It was deliberately removed from the
       guest (replaced with synchronous raw netlink) and
       `xtask check-guest-agent-runtime-free` *bans it by name*. Leaving the
       workspace entry live is a loaded gun pointed at that gate. Delete it.
       **0 crates, real risk removed.**
-- [ ] **`schemars` leaks into the default closure.**
+- [x] **`schemars` leaks into the default closure.**
       `crates/mvm-sdk/Cargo.toml:50` declares `schemars` non-optional, and
       line 29 sets `mvm-contract = { features = ["schema"] }`. Cargo unifies
       features workspace-wide, so this turns on `schemars` inside
@@ -94,13 +97,13 @@ Three defects, not trade-offs. Land these first; they cost nothing.
       level. Give `mvm-sdk` its own optional `schema` feature.
       **−4 crates** plus a `schemars_derive` proc-macro build.
 
-**Phase 0 exit: 286 → 280.** Ratchet `CLOSURE_BUDGET` to 280.
+**Phase 0 exit: 286 → 280 — measured, as predicted.**
 
 ---
 
 ## Phase 1 — feature narrowing (no hand-written replacements)
 
-- [ ] **Drop `rcgen`'s `x509-parser` feature.** This is the best
+- [x] **Drop `rcgen`'s `x509-parser` feature.** This is the best
       risk-adjusted cut in the plan: **−11 crates for a ~20-line refactor and
       zero new crypto code.**
 
@@ -124,7 +127,7 @@ Three defects, not trade-offs. Land these first; they cost nothing.
       intermediate carries the right `nameConstraints`; they must stay green
       unchanged.
 
-- [ ] **Replace `rayon` with `std::thread::scope`.** **−5 crates** (`rayon`,
+- [x] **Replace `rayon` with `std::thread::scope`.** **−5 crates** (`rayon`,
       `rayon-core`, `crossbeam-deque`, `crossbeam-epoch`, `crossbeam-utils`).
 
       Five call sites, all `par_iter().map(...)` over an owned `Vec` with no
@@ -145,7 +148,9 @@ Three defects, not trade-offs. Land these first; they cost nothing.
       scoped-thread version regresses measurably on a large image, keep rayon
       and say so in the plan.
 
-**Phase 1 exit: 280 → 262.** Ratchet `CLOSURE_BUDGET` to 262.
+**Phase 1 exit: 280 → 263 — measured** (the plan projected 262 by also
+counting `serde_jcs`, which was deferred; the two structural cuts landed at
+their predicted sizes). `CLOSURE_BUDGET` ratcheted to 263.
 
 ---
 
@@ -246,12 +251,56 @@ The ratchet only works if it moves. Every phase above must land its
 
 ## Expected outcome
 
-| Milestone | Closure | Δ from today |
-|---|---|---|
-| Baseline | 286 | — |
-| Phase 0 | 280 | −6 |
-| Phase 1 | 262 | −24 |
-| Phase 2 | 235 | −51 |
+| Milestone | Closure | Δ from baseline | State |
+|---|---|---|---|
+| Baseline | 286 | — | — |
+| Phase 0 | 280 | −6 | **landed** |
+| Phase 1 | 263 | −23 | **landed** |
+| Phase 2 | ~236 | ~−50 | not started |
 
-Phases 0 and 1 are **−24 crates with no new hand-written security-relevant
-code** and no product change. That is the part to commit to.
+## What landed (2026-08-09)
+
+23 crates left the shipped binary, and nothing entered it. The 23:
+`asn1-rs`, `asn1-rs-derive`, `asn1-rs-impl`, `crossbeam-deque`,
+`crossbeam-epoch`, `crossbeam-utils`, `der-parser`, `dyn-clone`,
+`minimal-lexical`, `nom` 7, `num-bigint`, `num-integer`, `oid-registry`,
+`rayon`, `rayon-core`, `rusticata-macros`, `schemars`, `schemars_derive`,
+`serde_derive_internals`, `thiserror` 1.0, `thiserror-impl` 1.0,
+`time-macros`, `x509-parser`. Six are proc-macro or derive crates, so the
+compile-time saving is larger than 23/286 suggests.
+
+Verification performed:
+
+- Full workspace: `cargo build --all-targets`, `cargo clippy --all-targets
+  -- -D warnings`, `cargo nextest run --workspace` (10,628 pass), doctests,
+  nightly `cargo fmt --all --check`.
+- All 41 `xtask check-*` policy gates pass, including `check-closure-budget`
+  at its new 263 and `check-stubs`, which confirms the schemars gating
+  changed no generated schema byte.
+- Both egress-CA legs got a test proven to go **red** under a deliberate
+  mint/rebuild DN divergence — the webpki path check for the leaf leg, and a
+  new `intermediate_issuer_dn_matches_the_host_ca_subject_dn` for the root
+  leg, which had no coverage before.
+- `par_map` carries its own suite, including ragged-chunk coverage over
+  every length 1..=97 and a worker-panic propagation test.
+- Benchmark: `build_ext4_pure_100_files_64k` went 3.12 ms (rayon) → 2.71 ms
+  (scoped threads). No regression; rayon's pool spin-up dominates a
+  workload this size.
+- Linux cross-build (`cargo zigbuild x86_64-unknown-linux-gnu`) clean for
+  every touched crate.
+
+### Deferred out of Phase 1
+
+- **`serde_jcs` (−2).** Phase 1 originally counted it. It sits on the
+  audit-chain signing path, where a canonicalization difference silently
+  breaks signature verification rather than failing loudly. Two crates does
+  not buy that risk without a differential corpus; moved to Phase 3.
+
+### Found, not fixed (pre-existing, out of scope)
+
+- `cargo check -p mvm-sdk --all-features` fails on `main` — `SubprocessBackend`
+  in `mvm-sdk/src/facade.rs` does not implement `MvmClient::backend_capabilities`.
+  The `client-facade` feature does not compile, which is why no lane caught it.
+- `check-duplicate-majors` reports nine stale `windows-*` allowlist entries on
+  `main`. (The two this work made stale, `thiserror` and `thiserror-impl`, were
+  removed from the allowlist here.)

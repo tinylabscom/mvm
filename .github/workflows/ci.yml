@@ -310,6 +310,13 @@ jobs:
       - name: client facade tests (mvm-core)
         run: cargo nextest run -p mvm-core --features client-remote
 
+      # `schema` is off by default so the shipped closure carries no schemars;
+      # the schema-shape tests and the three emitter bins only exist under it.
+      - name: schema feature tests (mvm-sdk)
+        run: |
+          cargo nextest run -p mvm-sdk --features schema
+          cargo check -p mvm-sdk --features schema --bins
+
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
           cargo test -p mvm-build --features builder-vm --lib \

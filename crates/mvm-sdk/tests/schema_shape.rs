@@ -1,3 +1,9 @@
+//! Schema-shape assertions for the emitted JSON Schemas.
+//!
+//! Requires the `schema` feature, which is what turns on the `JsonSchema`
+//! derives these tests generate from. CI runs it as its own lane.
+#![cfg(feature = "schema")]
+
 use mvm_sdk::ir::{Workload, canonicalize};
 use mvm_sdk::runtime::{RuntimeFsEntry, RuntimeFsStat, RuntimeProcessEvent, RuntimeProcessResult};
 use schemars::schema_for;

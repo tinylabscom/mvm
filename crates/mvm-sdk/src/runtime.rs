@@ -37,7 +37,6 @@
 use std::collections::BTreeMap;
 
 use base64::Engine;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
@@ -59,7 +58,8 @@ pub const MAX_FILES_WRITE_DECODED_BYTES: usize = 8 * 1024 * 1024;
 /// Canonical terminal result for a live process operation. The language SDKs
 /// expose the byte fields using their native byte container while preserving
 /// this shared shape at the contract boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeProcessResult {
     pub exit_code: i32,
@@ -68,7 +68,8 @@ pub struct RuntimeProcessResult {
 }
 
 /// Canonical stream event emitted while a live process is awaited.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeProcessEvent {
     pub stream: String,
@@ -76,7 +77,8 @@ pub struct RuntimeProcessEvent {
 }
 
 /// Canonical filesystem directory-entry shape exposed by the live SDK.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeFsEntry {
     pub name: String,
@@ -85,7 +87,8 @@ pub struct RuntimeFsEntry {
 }
 
 /// Canonical filesystem metadata shape exposed by the live SDK.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeFsStat {
     pub canonical_path: String,

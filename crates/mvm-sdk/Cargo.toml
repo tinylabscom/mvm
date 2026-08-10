@@ -21,11 +21,12 @@ mvm-core = { workspace = true }
 # live in the guest-agent crate; mvm-sdk only holds the C-ABI veneer.
 mvm-agentd.workspace = true
 # The Workload IR itself (`mvm_sdk::ir` re-exports `mvm_contract::ir`
-# unchanged — see `src/lib.rs`). `schema` derives `JsonSchema` on the IR
-# types for `emit_schema`/`emit_addon_schema`; mvm-sdk already pulls
-# schemars unconditionally for its own `AddonManifest` below, so this
-# adds no new default-build weight.
-mvm-contract = { workspace = true, features = ["schema"] }
+# unchanged — see `src/lib.rs`). The IR's own `JsonSchema` derives come from
+# `mvm-contract/schema`, which this crate's `schema` feature forwards to —
+# never unconditionally. Cargo unifies features across the workspace, so
+# enabling it here would switch schemars on inside `mvm-contract` for every
+# consumer and defeat the gating in `mvm-core`/`mvm-contract`/`mvm-agentd`.
+mvm-contract.workspace = true
 # The subprocess-backed MvmClient facade uses the trait + DTOs from
 # `mvm-core`'s `client` module (behind that crate's `client` feature). Kept off
 # by default so the mvmctl default closure gains no `async-trait`; the facade
@@ -47,7 +48,9 @@ blake3 = { workspace = true }
 # Addon module deps.
 flate2 = { workspace = true }
 hex = { workspace = true }
-schemars = { version = "0.8", default-features = false, features = ["derive"] }
+schemars = { version = "0.8", default-features = false, features = [
+    "derive",
+], optional = true }
 sha2 = { workspace = true }
 tar = { workspace = true }
 toml = { workspace = true }
@@ -64,19 +67,29 @@ tree-sitter-typescript = { workspace = true }
 [features]
 default = []
 client-facade = ["dep:async-trait", "mvm-core/client"]
+# Derive `schemars::JsonSchema` on the addon-manifest and runtime-record types
+# and forward to the IR's own derives, for the three schema-emitter bins below.
+# Off by default: nothing on the `mvmctl` runtime path reads a JSON Schema, and
+# the emitters are build tooling. Mirrors `mvm-core`/`mvm-agentd`'s `schema`.
+schema = ["dep:schemars", "mvm-contract/schema"]
 
+# The schema emitters are build tooling, not product surface.
+# `required-features` keeps `schemars` out of every default build.
 [[bin]]
 name = "emit_addon_schema"
 path = "src/bin/emit_addon_schema.rs"
+required-features = ["schema"]
 
 # Workload IR JSON-schema emitter.
 [[bin]]
 name = "emit_workload_schema"
 path = "src/bin/emit_schema.rs"
+required-features = ["schema"]
 
 [[bin]]
 name = "emit_runtime_schema"
 path = "src/bin/emit_runtime_schema.rs"
+required-features = ["schema"]
 
 [dev-dependencies]
 # `TestEnv` lives behind mvm-core's `test-support`, and the compile

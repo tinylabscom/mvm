@@ -42,14 +42,13 @@ const ALLOWLIST: &[&str] = &[
     "itertools",
     "getrandom",
     "hashbrown",
-    // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;
-    // the shipped mvmctl closure resolves nom exclusively at 7.x (via rcgen).
-    // The duplicate never reaches a product binary.
+    // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates.
+    // nom 7 used to enter behind rcgen's `x509-parser` feature; dropping that
+    // feature took the whole ASN.1 stack with it, so the shipped closure now
+    // carries no nom at all and this entry covers the fuzz tooling alone.
     "nom",
     "rand",
     "rand_core",
-    "thiserror",
-    "thiserror-impl",
     // The in-house VMM's rust-vmm virtio stack (virtio-queue) resolves
     // vmm-sys-util 0.15 while the Linux KVM stack (kvm-bindings/kvm-ioctls)
     // pins 0.12.1; the two rust-vmm families track different vmm-sys-util

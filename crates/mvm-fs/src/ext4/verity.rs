@@ -15,7 +15,7 @@
 //! hashed to form the level above, until one block remains — the root hash is
 //! that final block's digest.
 
-use rayon::prelude::*;
+use crate::parallel::par_map;
 use sha2::{Digest, Sha256};
 
 const DIGEST_SIZE: usize = 32;
@@ -32,18 +32,15 @@ pub fn root_hash(
 ) -> [u8; DIGEST_SIZE] {
     // Level 0 (leaves): digest of each data block.
     let n_data_blocks = data.len().div_ceil(data_block_size).max(1);
-    let mut level: Vec<[u8; DIGEST_SIZE]> = (0..n_data_blocks)
-        .into_par_iter()
-        .map(|i| {
-            let start = i * data_block_size;
-            let end = (start + data_block_size).min(data.len());
-            let mut block = vec![0u8; data_block_size];
-            if start < data.len() {
-                block[..end - start].copy_from_slice(&data[start..end]);
-            }
-            hash_block(salt, &block)
-        })
-        .collect();
+    let mut level: Vec<[u8; DIGEST_SIZE]> = par_map((0..n_data_blocks).collect(), |i| {
+        let start = i * data_block_size;
+        let end = (start + data_block_size).min(data.len());
+        let mut block = vec![0u8; data_block_size];
+        if start < data.len() {
+            block[..end - start].copy_from_slice(&data[start..end]);
+        }
+        hash_block(salt, &block)
+    });
 
     let hashes_per_block = hash_block_size / DIGEST_SIZE;
     loop {
@@ -53,10 +50,10 @@ pub fn root_hash(
             return hash_block(salt, &pack(&level, 0, hash_block_size));
         }
         // Otherwise, hash each packed block to form the level above.
-        level = (0..n_blocks)
-            .into_par_iter()
-            .map(|b| hash_block(salt, &pack(&level, b * hashes_per_block, hash_block_size)))
-            .collect();
+        let prev = level;
+        level = par_map((0..n_blocks).collect(), |b| {
+            hash_block(salt, &pack(&prev, b * hashes_per_block, hash_block_size))
+        });
     }
 }
 
@@ -83,18 +80,15 @@ pub fn format(
 
     // Level 0 (leaves): one digest per data block.
     let n_data_blocks = data.len().div_ceil(data_block_size).max(1);
-    let mut cur: Vec<[u8; DIGEST_SIZE]> = (0..n_data_blocks)
-        .into_par_iter()
-        .map(|i| {
-            let start = i * data_block_size;
-            let end = (start + data_block_size).min(data.len());
-            let mut block = vec![0u8; data_block_size];
-            if start < data.len() {
-                block[..end - start].copy_from_slice(&data[start..end]);
-            }
-            hash_block(salt, &block)
-        })
-        .collect();
+    let mut cur: Vec<[u8; DIGEST_SIZE]> = par_map((0..n_data_blocks).collect(), |i| {
+        let start = i * data_block_size;
+        let end = (start + data_block_size).min(data.len());
+        let mut block = vec![0u8; data_block_size];
+        if start < data.len() {
+            block[..end - start].copy_from_slice(&data[start..end]);
+        }
+        hash_block(salt, &block)
+    });
 
     // Build each level's *block bytes* bottom-up: level 0 first in `levels`.
     let mut levels: Vec<Vec<u8>> = Vec::new();
@@ -113,10 +107,9 @@ pub fn format(
         }
         // Next level up: hash each block of this level.
         let this = levels.last().expect("just pushed");
-        cur = (0..n_blocks)
-            .into_par_iter()
-            .map(|b| hash_block(salt, &this[b * hash_block_size..(b + 1) * hash_block_size]))
-            .collect();
+        cur = par_map((0..n_blocks).collect(), |b| {
+            hash_block(salt, &this[b * hash_block_size..(b + 1) * hash_block_size])
+        });
     }
 
     // Root hash = digest of the single top-level block.

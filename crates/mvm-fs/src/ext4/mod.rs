@@ -39,7 +39,7 @@ pub mod verity;
 
 use std::collections::BTreeMap;
 
-use rayon::prelude::*;
+use crate::parallel::par_map;
 
 pub const BLOCK_SIZE: u32 = 4096;
 const BLOCK_SIZE_USIZE: usize = BLOCK_SIZE as usize;
@@ -802,24 +802,24 @@ where
 
     // Directory and long-symlink data blocks are at disjoint physical extents,
     // so emit them in parallel and merge back into the shared image.
-    let data_images: Vec<Image> = planned
-        .par_iter()
+    let dir_and_symlink: Vec<&Planned> = planned
+        .iter()
         .filter(|p| p.kind == Kind::Dir || (p.kind == Kind::Symlink && !p.extents.is_empty()))
-        .map(|p| {
-            let mut local = Image::new(0);
-            match p.kind {
-                Kind::Dir => write_dir_blocks(&mut local, p),
-                Kind::Symlink => {
-                    let ext = p.extents.first().expect("filtered above");
-                    let off = local.block_off(ext.phys);
-                    let t = p.symlink_target.clone().unwrap_or_default();
-                    local.put_bytes(off, t.as_bytes());
-                }
-                Kind::File => unreachable!(),
-            }
-            local
-        })
         .collect();
+    let data_images: Vec<Image> = par_map(dir_and_symlink, |p| {
+        let mut local = Image::new(0);
+        match p.kind {
+            Kind::Dir => write_dir_blocks(&mut local, p),
+            Kind::Symlink => {
+                let ext = p.extents.first().expect("filtered above");
+                let off = local.block_off(ext.phys);
+                let t = p.symlink_target.clone().unwrap_or_default();
+                local.put_bytes(off, t.as_bytes());
+            }
+            Kind::File => unreachable!(),
+        }
+        local
+    });
     for local in data_images {
         img.merge_from(local);
     }
