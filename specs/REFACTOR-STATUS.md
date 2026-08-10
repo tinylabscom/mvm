@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-08
+Last updated: 2026-08-09
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -918,3 +918,13 @@ for detailed scope and acceptance criteria.
   - [ ] Pin the egress predicate algebra; enumerate escalation as deny-loud
   - [ ] Replay vectors for the audit chain's canonical signed bytes
   - [ ] Double-key the stale-name relief valves
+
+- [ ] Plan 308 — workload grants: one declaration, per-backend enforcement
+  (`specs/plans/308-workload-grants.md`)
+  - [ ] `Grants` in `mvm-contract` + one precedence resolver
+  - [ ] Single Grants→`NetworkPolicy` projection, derived and fail-closed
+  - [ ] `resource_controls` on `VmCapabilities` + `apply_grants` on `VmBackend`
+  - [ ] Linux CPU quota (cgroup v2, unprivileged), `exec_secs` enforcement,
+        host admission budget
+  - [ ] wasm fuel / `StoreLimits` / epoch interruption
+  - [ ] Four surfaces: manifest, JSON, CLI, library + SDK parity fixture
