@@ -16,7 +16,7 @@ use super::cold_launch::{
     KernelConfigMeasurement, LaunchContext, LaunchLane, build_cold_launch_report, validate_lane,
 };
 use crate::commands::vm::launch_sample::{
-    ArtifactPaths, LAUNCH_SAMPLE_ENV, LaunchSample, read_sample,
+    ArtifactPaths, LAUNCH_SAMPLE_ENV, LaunchRootStrategy, LaunchSample, read_sample,
 };
 
 /// Program names that would fold a build into a launch sample.
@@ -74,6 +74,7 @@ impl ColdLaunchBench {
     /// Run the warm-up iterations, then the measured ones, and summarise.
     pub fn run(&self) -> Result<ColdLaunchReport> {
         let staging = tempfile::tempdir().context("creating launch sample staging dir")?;
+        let mut strategy = None;
         for index in 0..self.warmup {
             let sample = self
                 .launch_once(staging.path(), "warmup", index)
@@ -82,6 +83,7 @@ impl ColdLaunchBench {
             // set up wrong; discarding its timing must not discard that.
             validate_lane(self.lane, &sample)
                 .with_context(|| format!("warm-up launch {index} does not belong in this lane"))?;
+            record_root_strategy(&mut strategy, &sample, "warm-up", index)?;
         }
 
         let mut raw = Vec::with_capacity(self.runs as usize);
@@ -93,6 +95,7 @@ impl ColdLaunchBench {
             validate_lane(self.lane, &sample).with_context(|| {
                 format!("measured launch {number} does not belong in this lane")
             })?;
+            record_root_strategy(&mut strategy, &sample, "measured", number)?;
             raw.push(cold_launch_sample(
                 self.lane,
                 number,
@@ -127,6 +130,27 @@ impl ColdLaunchBench {
         }
         read_sample(&sample_path)
     }
+}
+
+fn record_root_strategy(
+    expected: &mut Option<LaunchRootStrategy>,
+    sample: &LaunchSample,
+    phase: &str,
+    number: u32,
+) -> Result<()> {
+    let Some(found) = sample.root_strategy else {
+        bail!("{phase} launch {number} did not identify a root filesystem strategy");
+    };
+    match expected {
+        None => *expected = Some(found),
+        Some(expected) if *expected != found => {
+            bail!(
+                "{phase} launch {number} selected root filesystem strategy {found:?}, but the benchmark already observed {expected:?}; one report cannot mix strategies"
+            );
+        }
+        Some(_) => {}
+    }
+    Ok(())
 }
 
 impl ColdLaunchBenchBuilder {
@@ -656,6 +680,26 @@ tmpfs /tmp tmpfs rw 0 0
         let rendered = format!("{err:#}");
         assert!(rendered.contains("measured launch 2"), "{rendered}");
         assert!(rendered.contains("image_pull"), "{rendered}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_runner_refuses_mixed_root_filesystem_strategies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut different = sample_for(100.0);
+        different.root_strategy = Some(LaunchRootStrategy::VirtiofsRoot);
+        let mvmctl = fake_mvmctl(tmp.path(), &[sample_for(100.0), different]);
+
+        let err = ColdLaunchBench::builder(&mvmctl, LaunchLane::PreparedCold)
+            .runs(2)
+            .warmup(0)
+            .build()
+            .unwrap()
+            .run()
+            .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("root filesystem strategy"), "{rendered}");
+        assert!(rendered.contains("measured launch 2"), "{rendered}");
     }
 
     #[cfg(unix)]

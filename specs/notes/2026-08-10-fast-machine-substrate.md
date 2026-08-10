@@ -116,7 +116,9 @@ filesystem paths must use the same fixture identity and report equivalent
 preparation, first-file access, working-set, and density evidence before the
 existing ext4 path can be replaced. Cold-launch samples now also carry the
 tier-selected `virtiofs_root` or `block_ext4` strategy, so those measurements
-remain comparable only within the same security and capability tier.
+remain comparable only within the same security and capability tier. The
+benchmark gate requires the field and rejects a report that changes strategy
+between warmup or measured samples.
 
 ## Security and resource invariants
 

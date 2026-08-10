@@ -100,6 +100,8 @@ pub enum LaneViolation {
     NotReleaseBuild { profile: BuildProfile },
     /// The sample's schema is not the one this consumer understands.
     SchemaMismatch { found: u32, expected: u32 },
+    /// The current sample does not identify its selected root filesystem path.
+    MissingRootStrategy,
     /// The launch performed work the lane forbids.
     ForbiddenWork {
         lane: LaunchLane,
@@ -128,6 +130,10 @@ impl std::fmt::Display for LaneViolation {
             Self::SchemaMismatch { found, expected } => write!(
                 f,
                 "launch sample schema {found} is not the expected {expected}"
+            ),
+            Self::MissingRootStrategy => write!(
+                f,
+                "launch sample does not identify its selected root filesystem strategy"
             ),
             Self::ForbiddenWork { lane, performed } => write!(
                 f,
@@ -171,6 +177,9 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
             found: sample.schema_version,
             expected: LAUNCH_SAMPLE_SCHEMA_VERSION,
         });
+    }
+    if sample.root_strategy.is_none() {
+        return Err(LaneViolation::MissingRootStrategy);
     }
     if sample.build_profile != BuildProfile::Release {
         return Err(LaneViolation::NotReleaseBuild {
@@ -960,6 +969,16 @@ mod tests {
                 found: LAUNCH_SAMPLE_SCHEMA_VERSION + 1,
                 expected: LAUNCH_SAMPLE_SCHEMA_VERSION,
             })
+        );
+    }
+
+    #[test]
+    fn a_missing_root_strategy_is_rejected() {
+        let mut sample = launch_sample();
+        sample.root_strategy = None;
+        assert_eq!(
+            validate_lane(LaunchLane::PreparedCold, &sample),
+            Err(LaneViolation::MissingRootStrategy)
         );
     }
 

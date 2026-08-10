@@ -152,7 +152,9 @@ rate, but are not silently included in the prepared-cold SLO.
       in-house VMM, which ships inside `mvmctl`; a third-party VMM records
       `None` rather than a fabricated number. The launch sample records the
       tier-gated `virtiofs_root` or `block_ext4` strategy so filesystem
-      comparisons never mix security or capability tiers.)
+      comparisons never mix security or capability tiers. The runner rejects
+      a missing strategy and refuses to aggregate a report whose warmup or
+      measured samples change strategy.)
 - [x] Add a benchmark report format containing raw samples and p50/p95/p99;
       do not store only summary numbers.
       (`ColdLaunchReport` carries `raw: Vec<ColdLaunchSample>` alongside

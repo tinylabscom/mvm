@@ -10,7 +10,7 @@ use cucumber::{given, then, when};
 
 use mvm_cli::bench::cold_launch::{
     ArtifactPaths, BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchLane, LaunchMode,
-    LaunchSample, LaunchSubTimings, LaunchWork, RunPhaseTimings, validate_lane,
+    LaunchRootStrategy, LaunchSample, LaunchSubTimings, LaunchWork, RunPhaseTimings, validate_lane,
 };
 
 use crate::world::CliWorld;
@@ -25,6 +25,7 @@ fn clean_sample(profile: BuildProfile) -> LaunchSample {
         os: "macos".to_string(),
         arch: "aarch64".to_string(),
         launch_mode: LaunchMode::Cold,
+        root_strategy: Some(LaunchRootStrategy::BlockExt4),
         sizing: GuestSizing {
             cpus: 2,
             memory_mib: 512,
