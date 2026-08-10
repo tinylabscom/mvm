@@ -546,6 +546,11 @@ optimization backend-local and the benchmark backend-neutral.
       authenticated readiness, resident pages, and restore fault cost. A size
       reduction is accepted only with readiness, security, and compatibility
       witnesses.
+- [x] Extend `cargo xtask perf footprint` to include the initramfs artifact and
+      an optional resolved kernel config. The JSON report now records the
+      initramfs bytes and built-in-symbol count, and reuses the per-architecture
+      kernel-config budget gate. This is the artifact-ledger slice of #2280;
+      live timing and resident-memory evidence remain open.
 - [ ] Evaluate the current rootfs and host-directory image path against the
       guest-local immutable filesystem hypothesis in
       [issue #2281](https://github.com/tinylabscom/mvm/issues/2281). Keep the

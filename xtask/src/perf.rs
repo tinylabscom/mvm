@@ -12,9 +12,10 @@
 //!   required; gated by `MVM_LIVE_SMOKE=1` + a rootfs path so a
 //!   bare macOS host skips cleanly. Enforces the "cold-boot ≤ 500ms
 //!   Firecracker / ≤ 1s libkrun" line.
-//! - **`footprint`** — sum the Nix-built rootfs, runtime overlay, verity
-//!   sidecars, and optional kernel, assert the supplied guest artifacts stay
-//!   below 50 MB, and optionally enforce the rootfs Nix closure inventory.
+//! - **`footprint`** — sum the Nix-built rootfs, runtime overlay, initramfs,
+//!   verity sidecars, and optional kernel, assert the supplied guest artifacts
+//!   stay below 50 MB, and optionally enforce the rootfs Nix closure inventory
+//!   and kernel built-in-symbol budget.
 //!
 //! The thresholds are the per-backend boot budgets; they're pinned
 //! by tests in this module so a drift in the documented budget vs.
@@ -25,7 +26,7 @@
 //! ```text
 //! cargo xtask perf rootfs-size --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
-//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --kernel result/vmlinux --closure-paths result/rootfs-closure-paths
+//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --initramfs result/initramfs.cpio.gz --kernel result/vmlinux --kernel-config result/workload.config --closure-paths result/rootfs-closure-paths
 //! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --guest-rss-bytes 4194304
 //! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --sdk-sidecar sidecar/sdk.ext4
 //! ```
@@ -63,8 +64,8 @@ use anyhow::{Context, Result, bail};
 pub const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 
 /// Maximum complete default guest artifact footprint: rootfs, runtime overlay,
-/// their dm-verity sidecars, and kernel. The workload's own application payload
-/// remains outside this contract.
+/// initramfs, their dm-verity sidecars, and kernel. The workload's own
+/// application payload remains outside this contract.
 pub const GUEST_STORAGE_MAX_BYTES: u64 = 50_000_000; // 50 MB
 
 /// Maximum number of registered Nix store paths retained in the default
@@ -112,7 +113,7 @@ pub fn run(args: &[String]) -> Result<()> {
                 "  rootfs-size --rootfs <PATH>    Assert rootfs is ≤ {ROOTFS_MAX_BYTES} bytes"
             );
             eprintln!(
-                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>] [--closure-paths <PATH>] [--guest-rss-bytes <N>] [--sdk-sidecar <PATH>]"
+                "  footprint --rootfs <PATH> --overlay <PATH> [--initramfs <PATH>] [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>] [--kernel-config <PATH>] [--closure-paths <PATH>] [--guest-rss-bytes <N>] [--sdk-sidecar <PATH>]"
             );
             eprintln!(
                 "                                 Assert the supplied guest artifacts total ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
@@ -362,6 +363,13 @@ struct ClosureInventory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct KernelConfigSummary {
+    path: PathBuf,
+    builtin_symbols: usize,
+    budget: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 struct FootprintReport {
     limit_bytes: u64,
     total_bytes: u64,
@@ -375,6 +383,8 @@ struct FootprintReport {
     /// service, so it is not part of the base guest footprint.
     #[serde(skip_serializing_if = "Option::is_none")]
     sdk_sidecar: Option<FootprintEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kernel_config: Option<KernelConfigSummary>,
 }
 
 fn footprint_subcommand(args: &[String]) -> Result<()> {
@@ -391,10 +401,14 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
     let sdk_sidecar = optional_path_arg(args, "--sdk-sidecar")?
         .map(|path| sdk_sidecar_check(&path, SDK_SIDECAR_MAX_BYTES))
         .transpose()?;
+    let kernel_config = optional_path_arg(args, "--kernel-config")?
+        .map(|path| kernel_config_summary(&path))
+        .transpose()?;
     let mut report = guest_storage_footprint_check(&artifacts, GUEST_STORAGE_MAX_BYTES)?;
     report.rootfs_closure = rootfs_closure;
     report.guest_agent_rss_bytes = guest_agent_rss_bytes;
     report.sdk_sidecar = sdk_sidecar;
+    report.kernel_config = kernel_config;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -433,6 +447,15 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
                 "sdk-sidecar",
                 entry.bytes,
                 entry.path.display()
+            );
+        }
+        if let Some(config) = &report.kernel_config {
+            eprintln!(
+                "  {:<16} {} built-in symbols (budget {})  {}",
+                "kernel-config",
+                config.builtin_symbols,
+                config.budget,
+                config.path.display()
             );
         }
     }
@@ -477,6 +500,12 @@ fn parse_footprint_artifacts(args: &[String]) -> Result<Vec<FootprintArtifact>> 
             path: overlay,
         },
     ];
+    if let Some(path) = optional_path_arg(args, "--initramfs")? {
+        artifacts.push(FootprintArtifact {
+            name: "initramfs",
+            path,
+        });
+    }
     if let Some(path) = optional_path_arg(args, "--rootfs-verity")? {
         artifacts.push(FootprintArtifact {
             name: "rootfs-verity",
@@ -537,6 +566,20 @@ fn guest_storage_footprint_check(
         rootfs_closure: None,
         guest_agent_rss_bytes: None,
         sdk_sidecar: None,
+        kernel_config: None,
+    })
+}
+
+fn kernel_config_summary(path: &Path) -> Result<KernelConfigSummary> {
+    let config = std::fs::read_to_string(path)
+        .with_context(|| format!("read kernel config at {}", path.display()))?;
+    let builtin_symbols = crate::check_kernel_config_budget::count_builtins(&config);
+    let budget = crate::check_kernel_config_budget::budget_for_path(&path.to_string_lossy());
+    crate::check_kernel_config_budget::evaluate_budget(&config, budget)?;
+    Ok(KernelConfigSummary {
+        path: path.to_path_buf(),
+        builtin_symbols,
+        budget,
     })
 }
 
@@ -739,6 +782,7 @@ fn parse_backend_arg(args: &[String]) -> Result<Backend> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check_kernel_config_budget;
     use std::io::Write;
 
     // ──────────────────────────────────────────────────────────────
@@ -1062,6 +1106,8 @@ mod tests {
             "/tmp/rootfs.ext4".to_string(),
             "--overlay".to_string(),
             "/tmp/overlay.ext4".to_string(),
+            "--initramfs".to_string(),
+            "/tmp/initramfs.cpio.gz".to_string(),
             "--rootfs-verity".to_string(),
             "/tmp/rootfs.verity".to_string(),
             "--overlay-verity".to_string(),
@@ -1070,10 +1116,46 @@ mod tests {
             "/tmp/vmlinux".to_string(),
         ];
         let artifacts = parse_footprint_artifacts(&args).unwrap();
-        assert_eq!(artifacts.len(), 5);
-        assert_eq!(artifacts[2].name, "rootfs-verity");
-        assert_eq!(artifacts[3].name, "overlay-verity");
-        assert_eq!(artifacts[4].name, "kernel");
+        assert_eq!(artifacts.len(), 6);
+        assert_eq!(artifacts[2].name, "initramfs");
+        assert_eq!(artifacts[3].name, "rootfs-verity");
+        assert_eq!(artifacts[4].name, "overlay-verity");
+        assert_eq!(artifacts[5].name, "kernel");
+    }
+
+    #[test]
+    fn kernel_config_summary_counts_and_enforces_builtins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("workload-config-x86_64");
+        std::fs::write(
+            &path,
+            "CONFIG_ONE=y\nCONFIG_TWO=m\n# CONFIG_THREE is not set\n",
+        )
+        .unwrap();
+
+        let summary = kernel_config_summary(&path).unwrap();
+
+        assert_eq!(summary.path, path);
+        assert_eq!(summary.builtin_symbols, 1);
+        assert_eq!(
+            summary.budget,
+            check_kernel_config_budget::budget_for_path("x86_64")
+        );
+    }
+
+    #[test]
+    fn kernel_config_summary_rejects_a_budget_overflow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("workload-config-x86_64");
+        let config = (0..=check_kernel_config_budget::budget_for_path("x86_64"))
+            .map(|index| format!("CONFIG_TEST_{index}=y"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, config).unwrap();
+
+        let error = kernel_config_summary(&path).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds the budget"));
     }
 
     // ──────────────────────────────────────────────────────────────

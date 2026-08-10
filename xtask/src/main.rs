@@ -34,7 +34,7 @@ mod check_guest_entropy_seed;
 mod check_guest_images_no_builder_tools;
 mod check_guest_init_parity;
 mod check_honesty;
-mod check_kernel_config_budget;
+pub(crate) mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
 mod check_machine_doc_guards;
 mod check_mutation_witnesses;

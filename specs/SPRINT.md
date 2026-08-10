@@ -1501,6 +1501,10 @@ Then unify + retire the old paths:
   boundaries are documented in
   `specs/notes/2026-08-10-fast-machine-substrate.md`; issues #2280 and #2281
   own the kernel budget and filesystem-path experiments.
+- [~] **Kernel boot-substrate ledger — issue #2280.** `cargo xtask perf
+  footprint` now includes initramfs bytes and optionally enforces the resolved
+  per-architecture built-in-symbol budget. Live kernel-entry/readiness,
+  resident-memory, and restore measurements remain open.
 
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
 - [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured

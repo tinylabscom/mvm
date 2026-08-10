@@ -57,7 +57,7 @@ const BUDGET_X86_64: usize = 917;
 /// Resolve the budget for a config path by the arch in its name. Unknown →
 /// the larger budget (fail-open on the ceiling, never a false pass on a real
 /// regression: an unrecognised arch still can't exceed the most generous bound).
-fn budget_for_path(path: &str) -> usize {
+pub fn budget_for_path(path: &str) -> usize {
     if path.contains("x86_64") {
         BUDGET_X86_64
     } else if path.contains("aarch64") {
@@ -92,7 +92,7 @@ pub fn run(args: &[String]) -> Result<()> {
 
 /// Count `CONFIG_*=y` lines (built-in symbols). `=m` and `# … is not set`
 /// don't count — only what is compiled into the image.
-fn count_builtins(config: &str) -> usize {
+pub fn count_builtins(config: &str) -> usize {
     config
         .lines()
         .filter(|l| l.trim_end().ends_with("=y"))
