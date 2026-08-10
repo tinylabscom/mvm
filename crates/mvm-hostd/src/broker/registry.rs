@@ -6,26 +6,117 @@
 //! workload verb, and the `broker.v1/list_services` introspection verb
 //! wire in their handlers via [`Registry::register`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
+use mvm_contract::protocol::agent_capability::{
+    CapabilityAuditEvent, CapabilityBinding, CapabilityDescriptor, CapabilityFailureCode,
+    CapabilityId, CapabilityInvocation, payload_digest,
+};
+use mvm_contract::protocol::agent_session::AgentRequestId;
 use mvm_core::protocol::broker::{ServiceErrorCode, ServiceId};
 use mvm_core::protocol::handler::{
     ServiceCallCtx, ServiceDispatchResult, ServiceError, ServiceHandler,
 };
+
+/// Minimal cancellation primitive for one host-side capability invocation.
+#[derive(Clone, Default)]
+pub struct CancellationToken {
+    canceled: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl CancellationToken {
+    /// Create a token that has not been canceled.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancel all current and future waiters.
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Whether cancellation has already been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        self.notify.notified().await;
+    }
+}
+
+/// Host-owned sink for digest-only capability lifecycle evidence.
+pub trait CapabilityAuditSink: Send + Sync + 'static {
+    /// Record one event without receiving payload or handler error text.
+    fn record(&self, event: CapabilityAuditEvent);
+}
+
+struct NoopCapabilityAuditSink;
+
+impl CapabilityAuditSink for NoopCapabilityAuditSink {
+    fn record(&self, _event: CapabilityAuditEvent) {}
+}
+
+struct CapabilityRegistration {
+    descriptor: CapabilityDescriptor,
+    handler: Arc<dyn ServiceHandler>,
+}
 
 /// Per-subprocess handler registry. Handlers registered at startup live
 /// for the subprocess lifetime; runtime registration is not supported
 /// (the static catalog is the contract).
 pub struct Registry {
     handlers: HashMap<ServiceId, Arc<dyn ServiceHandler>>,
+    capabilities: HashMap<CapabilityId, CapabilityRegistration>,
+    admitted: HashMap<CapabilityId, [u8; 32]>,
+    consumed_invocations: std::sync::Mutex<HashSet<(CapabilityId, AgentRequestId)>>,
+    audit: Arc<dyn CapabilityAuditSink>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            capabilities: HashMap::new(),
+            admitted: HashMap::new(),
+            consumed_invocations: std::sync::Mutex::new(HashSet::new()),
+            audit: Arc::new(NoopCapabilityAuditSink),
         }
+    }
+
+    /// Install the host-signed exact bindings for this workload.
+    pub fn admit_capabilities<I>(&mut self, bindings: I) -> Result<(), RegistryError>
+    where
+        I: IntoIterator<Item = CapabilityBinding>,
+    {
+        for binding in bindings {
+            if self
+                .admitted
+                .insert(binding.capability.clone(), binding.descriptor_digest)
+                .is_some()
+            {
+                return Err(RegistryError::DuplicateAdmission(binding.capability));
+            }
+            self.audit.record(CapabilityAuditEvent::Admitted {
+                capability: binding.capability,
+                descriptor_digest: binding.descriptor_digest,
+            });
+        }
+        Ok(())
+    }
+
+    /// Replace the audit sink used by typed dispatch.
+    pub fn with_capability_audit_sink(mut self, audit: Arc<dyn CapabilityAuditSink>) -> Self {
+        self.audit = audit;
+        self
     }
 
     /// Register a handler. Replaces any previous handler for the same
@@ -33,6 +124,40 @@ impl Registry {
     /// bindings at the plan-verification layer, not here).
     pub fn register(&mut self, handler: Arc<dyn ServiceHandler>) {
         self.handlers.insert(handler.id(), handler);
+    }
+
+    /// Register one explicitly described per-verb capability.
+    pub fn register_capability(
+        &mut self,
+        handler: Arc<dyn ServiceHandler>,
+        descriptor: CapabilityDescriptor,
+    ) -> Result<(), RegistryError> {
+        if handler.id() != descriptor.id.service {
+            return Err(RegistryError::HandlerIdentityMismatch {
+                handler: handler.id(),
+                descriptor: descriptor.id.service,
+            });
+        }
+        let id = descriptor.id.clone();
+        if self
+            .capabilities
+            .insert(
+                id.clone(),
+                CapabilityRegistration {
+                    descriptor: descriptor.clone(),
+                    handler,
+                },
+            )
+            .is_some()
+        {
+            return Err(RegistryError::DuplicateRegistration(id));
+        }
+        let descriptor_digest = descriptor.digest();
+        self.audit.record(CapabilityAuditEvent::Registered {
+            capability: descriptor.id.clone(),
+            descriptor_digest,
+        });
+        Ok(())
     }
 
     /// Dispatch a call. Returns `Err(NotBound)` for any service not in
@@ -57,11 +182,204 @@ impl Registry {
         handler.dispatch(ctx, verb, payload).await
     }
 
+    /// Dispatch a typed capability call after every admission and resource
+    /// gate has passed. The cancellation token is owned by the host protocol
+    /// layer; canceling it drops the handler future before returning.
+    pub async fn dispatch_capability(
+        &self,
+        ctx: &ServiceCallCtx,
+        service: &ServiceId,
+        verb: &str,
+        invocation: &CapabilityInvocation,
+        payload: serde_json::Value,
+        cancellation: &CancellationToken,
+    ) -> ServiceDispatchResult {
+        let capability = match CapabilityId::new(service.clone(), verb.to_string()) {
+            Ok(capability) => capability,
+            Err(_) => return Err(capability_error(CapabilityFailureCode::ProtocolMismatch)),
+        };
+        let Some(registration) = self.capabilities.get(&capability) else {
+            return Err(capability_error(CapabilityFailureCode::NotRegistered));
+        };
+        let Some(admitted_digest) = self.admitted.get(&capability) else {
+            self.record_refusal(
+                &capability,
+                invocation,
+                CapabilityFailureCode::AdmissionDenied,
+            );
+            return Err(capability_error(CapabilityFailureCode::AdmissionDenied));
+        };
+        if *admitted_digest != invocation.binding.descriptor_digest
+            || !invocation.binding.matches(&registration.descriptor)
+        {
+            self.record_refusal(
+                &capability,
+                invocation,
+                CapabilityFailureCode::BindingMismatch,
+            );
+            return Err(capability_error(CapabilityFailureCode::BindingMismatch));
+        }
+        if let Err(code) = invocation.validate_payload(&registration.descriptor, &payload) {
+            self.record_refusal(&capability, invocation, code);
+            return Err(capability_error(code));
+        }
+        let input_bytes = match serde_json::to_vec(&payload) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.record_refusal(&capability, invocation, CapabilityFailureCode::InvalidInput);
+                return Err(capability_error(CapabilityFailureCode::InvalidInput));
+            }
+        };
+        if input_bytes.len() > registration.descriptor.limits.max_input_bytes as usize {
+            self.record_refusal(
+                &capability,
+                invocation,
+                CapabilityFailureCode::InputTooLarge,
+            );
+            return Err(capability_error(CapabilityFailureCode::InputTooLarge));
+        }
+        let replay_key = (capability.clone(), invocation.invocation_id.clone());
+        let inserted = self
+            .consumed_invocations
+            .lock()
+            .expect("capability replay mutex is not poisoned")
+            .insert(replay_key);
+        if !inserted {
+            self.record_refusal(&capability, invocation, CapabilityFailureCode::Replay);
+            return Err(capability_error(CapabilityFailureCode::Replay));
+        }
+        if cancellation.is_cancelled() {
+            self.record_canceled(&capability, invocation);
+            return Err(capability_error(CapabilityFailureCode::Canceled));
+        }
+
+        self.audit.record(CapabilityAuditEvent::Invoked {
+            capability: capability.clone(),
+            descriptor_digest: registration.descriptor.digest(),
+            invocation_id: invocation.invocation_id.clone(),
+            input_digest: invocation.input_digest,
+        });
+        let timeout = Duration::from_millis(u64::from(registration.descriptor.limits.timeout_ms));
+        let dispatch = registration.handler.dispatch(ctx, verb, payload);
+        tokio::pin!(dispatch);
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => {
+                self.record_canceled(&capability, invocation);
+                return Err(capability_error(CapabilityFailureCode::Canceled));
+            }
+            result = tokio::time::timeout(timeout, &mut dispatch) => result,
+        };
+        let output = match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                let code = if error.code == ServiceErrorCode::BadRequest {
+                    CapabilityFailureCode::InvalidInput
+                } else {
+                    CapabilityFailureCode::HandlerFailed
+                };
+                self.audit.record(CapabilityAuditEvent::Failed {
+                    capability,
+                    invocation_id: invocation.invocation_id.clone(),
+                    code,
+                });
+                return Err(capability_error(code));
+            }
+            Err(_) => {
+                self.audit.record(CapabilityAuditEvent::TimedOut {
+                    capability,
+                    invocation_id: invocation.invocation_id.clone(),
+                });
+                return Err(capability_error(CapabilityFailureCode::Timeout));
+            }
+        };
+        let output_bytes = match serde_json::to_vec(&output) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.audit.record(CapabilityAuditEvent::Failed {
+                    capability,
+                    invocation_id: invocation.invocation_id.clone(),
+                    code: CapabilityFailureCode::HandlerFailed,
+                });
+                return Err(capability_error(CapabilityFailureCode::HandlerFailed));
+            }
+        };
+        if output_bytes.len() > registration.descriptor.limits.max_output_bytes as usize {
+            self.audit.record(CapabilityAuditEvent::Failed {
+                capability,
+                invocation_id: invocation.invocation_id.clone(),
+                code: CapabilityFailureCode::OutputTooLarge,
+            });
+            return Err(capability_error(CapabilityFailureCode::OutputTooLarge));
+        }
+        self.audit.record(CapabilityAuditEvent::Completed {
+            capability,
+            invocation_id: invocation.invocation_id.clone(),
+            output_digest: payload_digest(&output),
+        });
+        Ok(output)
+    }
+
+    fn record_refusal(
+        &self,
+        capability: &CapabilityId,
+        invocation: &CapabilityInvocation,
+        code: CapabilityFailureCode,
+    ) {
+        self.audit.record(CapabilityAuditEvent::Refused {
+            capability: capability.clone(),
+            invocation_id: Some(invocation.invocation_id.clone()),
+            code,
+        });
+    }
+
+    fn record_canceled(&self, capability: &CapabilityId, invocation: &CapabilityInvocation) {
+        self.audit.record(CapabilityAuditEvent::Canceled {
+            capability: capability.clone(),
+            invocation_id: invocation.invocation_id.clone(),
+        });
+    }
+
     /// True if any handler is registered. Useful for the broker's
     /// startup readiness gate.
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
     }
+}
+
+/// Registration failures are host configuration errors, never guest data.
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryError {
+    #[error("capability {0} was admitted more than once")]
+    DuplicateAdmission(CapabilityId),
+    #[error("capability {0} was registered more than once")]
+    DuplicateRegistration(CapabilityId),
+    #[error("handler service {handler} does not own descriptor service {descriptor}")]
+    HandlerIdentityMismatch {
+        handler: ServiceId,
+        descriptor: ServiceId,
+    },
+}
+
+fn capability_error(code: CapabilityFailureCode) -> ServiceError {
+    let service_code = match code {
+        CapabilityFailureCode::ProtocolMismatch => ServiceErrorCode::CapabilityProtocolMismatch,
+        CapabilityFailureCode::NotRegistered => ServiceErrorCode::NotBound,
+        CapabilityFailureCode::AdmissionDenied => ServiceErrorCode::CapabilityDenied,
+        CapabilityFailureCode::BindingMismatch | CapabilityFailureCode::InputDigestMismatch => {
+            ServiceErrorCode::CapabilityBindingMismatch
+        }
+        CapabilityFailureCode::InputTooLarge => ServiceErrorCode::CapabilityInputTooLarge,
+        CapabilityFailureCode::InvalidInput => ServiceErrorCode::BadRequest,
+        CapabilityFailureCode::OutputTooLarge => ServiceErrorCode::CapabilityOutputTooLarge,
+        CapabilityFailureCode::Timeout => ServiceErrorCode::Timeout,
+        CapabilityFailureCode::Canceled => ServiceErrorCode::CapabilityCanceled,
+        CapabilityFailureCode::Replay => ServiceErrorCode::CapabilityReplay,
+        CapabilityFailureCode::HandlerFailed => ServiceErrorCode::CapabilityHandlerFailed,
+    };
+    ServiceError::new(
+        service_code,
+        format!("typed capability request refused: {code:?}"),
+    )
 }
 
 impl Default for Registry {
@@ -77,8 +395,14 @@ impl Default for Registry {
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use mvm_contract::protocol::agent_capability::{
+        CapabilityAuditEvent, CapabilityDescriptor, CapabilityId, CapabilityInvocation,
+        CapabilityLimits, SchemaRef,
+    };
+    use mvm_contract::protocol::agent_session::AgentRequestId;
     use mvm_core::policy::security::AgentProfile;
     use mvm_core::protocol::broker::{
         AuditDurability, CorrelationId, Idempotency, ServiceErrorCode, ServiceId,
@@ -115,6 +439,89 @@ mod tests {
         }
     }
 
+    struct InvalidInputHandler;
+
+    impl ServiceHandler for InvalidInputHandler {
+        fn id(&self) -> ServiceId {
+            ServiceId::parse("host.dev.echo.v1").unwrap()
+        }
+        fn profiles(&self) -> &[AgentProfile] {
+            &[AgentProfile::Dev]
+        }
+        fn audit_durability(&self) -> AuditDurability {
+            AuditDurability::default_batched()
+        }
+        fn idempotency(&self) -> Idempotency {
+            Idempotency::MintFresh
+        }
+        fn call_timeout(&self) -> Duration {
+            Duration::from_millis(5)
+        }
+        fn dispatch<'a>(
+            &'a self,
+            _ctx: &'a ServiceCallCtx,
+            _verb: &'a str,
+            _payload: serde_json::Value,
+        ) -> Pin<Box<dyn std::future::Future<Output = ServiceDispatchResult> + Send + 'a>> {
+            Box::pin(async {
+                Err(ServiceError::new(
+                    ServiceErrorCode::BadRequest,
+                    "input does not match the capability schema",
+                ))
+            })
+        }
+    }
+
+    enum Behavior {
+        Delay,
+        Expand,
+        Fail,
+    }
+
+    struct BehaviorHandler {
+        behavior: Behavior,
+    }
+
+    impl ServiceHandler for BehaviorHandler {
+        fn id(&self) -> ServiceId {
+            ServiceId::parse("host.dev.echo.v1").unwrap()
+        }
+        fn profiles(&self) -> &[AgentProfile] {
+            &[AgentProfile::Dev]
+        }
+        fn audit_durability(&self) -> AuditDurability {
+            AuditDurability::default_batched()
+        }
+        fn idempotency(&self) -> Idempotency {
+            Idempotency::MintFresh
+        }
+        fn call_timeout(&self) -> Duration {
+            Duration::from_millis(100)
+        }
+        fn dispatch<'a>(
+            &'a self,
+            _ctx: &'a ServiceCallCtx,
+            _verb: &'a str,
+            payload: serde_json::Value,
+        ) -> Pin<Box<dyn std::future::Future<Output = ServiceDispatchResult> + Send + 'a>> {
+            Box::pin(async move {
+                match self.behavior {
+                    Behavior::Delay => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        Ok(payload)
+                    }
+                    Behavior::Expand => Ok(serde_json::json!({
+                        "expanded": "x".repeat(200),
+                    })),
+                    Behavior::Fail => Err(ServiceError::new(
+                        ServiceErrorCode::Unavailable,
+                        "private handler failure detail",
+                    )),
+                }
+            })
+        }
+    }
+
     fn ctx() -> ServiceCallCtx {
         ServiceCallCtx {
             workload_id: "wl-test".into(),
@@ -124,6 +531,30 @@ mod tests {
             profile: AgentProfile::Dev,
             composition_depth: 0,
             composition_width: 0,
+        }
+    }
+
+    fn descriptor() -> CapabilityDescriptor {
+        CapabilityDescriptor::builder()
+            .id(CapabilityId::new(
+                ServiceId::parse("host.dev.echo.v1").expect("service id"),
+                "echo",
+            )
+            .expect("capability id"))
+            .description("echo a bounded test value")
+            .input_schema(SchemaRef::new("host.dev.echo.input.v1", [1; 32]).expect("schema"))
+            .output_schema(SchemaRef::new("host.dev.echo.output.v1", [2; 32]).expect("schema"))
+            .limits(CapabilityLimits::new(128, 128, 50).expect("limits"))
+            .build()
+            .expect("descriptor")
+    }
+
+    #[derive(Clone, Default)]
+    struct TestAudit(Arc<Mutex<Vec<CapabilityAuditEvent>>>);
+
+    impl CapabilityAuditSink for TestAudit {
+        fn record(&self, event: CapabilityAuditEvent) {
+            self.0.lock().expect("test audit mutex").push(event);
         }
     }
 
@@ -151,6 +582,291 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, payload);
+    }
+
+    #[tokio::test]
+    async fn typed_dispatch_requires_exact_admission_and_rejects_replay() {
+        let descriptor = descriptor();
+        let binding = descriptor.binding();
+        let audit = TestAudit::default();
+        let mut registry = Registry::new().with_capability_audit_sink(Arc::new(audit.clone()));
+        registry
+            .register_capability(Arc::new(EchoHandler), descriptor)
+            .expect("register");
+        registry
+            .admit_capabilities([binding.clone()])
+            .expect("admit");
+        let payload = serde_json::json!({"hello": "world"});
+        let invocation = CapabilityInvocation::from_payload(
+            binding.clone(),
+            AgentRequestId::parse("typed-request-1").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+        let cancel = CancellationToken::new();
+        let response = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &invocation,
+                payload.clone(),
+                &cancel,
+            )
+            .await
+            .expect("typed call succeeds");
+        assert_eq!(response, payload);
+
+        let replay = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &invocation,
+                serde_json::json!({"hello": "world"}),
+                &cancel,
+            )
+            .await
+            .expect_err("replay must fail");
+        assert_eq!(replay.code, ServiceErrorCode::CapabilityReplay);
+        assert!(
+            audit
+                .0
+                .lock()
+                .expect("test audit mutex")
+                .iter()
+                .any(|event| matches!(event, CapabilityAuditEvent::Completed { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_dispatch_rejects_downgrade_oversize_and_cancellation() {
+        let descriptor = descriptor();
+        let binding = descriptor.binding();
+        let mut registry = Registry::new();
+        registry
+            .register_capability(Arc::new(EchoHandler), descriptor)
+            .expect("register");
+        registry
+            .admit_capabilities([binding.clone()])
+            .expect("admit");
+
+        let payload = serde_json::json!({"hello": "world"});
+        let mut wrong = CapabilityInvocation::from_payload(
+            binding.clone(),
+            AgentRequestId::parse("typed-request-2").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+        wrong.binding.descriptor_digest = [7; 32];
+        let error = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &wrong,
+                payload.clone(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("downgrade must fail");
+        assert_eq!(error.code, ServiceErrorCode::CapabilityBindingMismatch);
+
+        let oversized = serde_json::json!({"hello": "x".repeat(200)});
+        let invocation = CapabilityInvocation::from_payload(
+            binding.clone(),
+            AgentRequestId::parse("typed-request-3").expect("request id"),
+            &oversized,
+        )
+        .expect("invocation");
+        let error = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &invocation,
+                oversized,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("oversize must fail");
+        assert_eq!(error.code, ServiceErrorCode::CapabilityInputTooLarge);
+
+        let invocation = CapabilityInvocation::from_payload(
+            binding,
+            AgentRequestId::parse("typed-request-4").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+        let canceled = CancellationToken::new();
+        canceled.cancel();
+        let error = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &invocation,
+                payload,
+                &canceled,
+            )
+            .await
+            .expect_err("canceled call must fail");
+        assert_eq!(error.code, ServiceErrorCode::CapabilityCanceled);
+    }
+
+    #[tokio::test]
+    async fn typed_dispatch_classifies_schema_rejection_without_leaking_handler_text() {
+        let descriptor = descriptor();
+        let binding = descriptor.binding();
+        let mut registry = Registry::new();
+        registry
+            .register_capability(Arc::new(InvalidInputHandler), descriptor)
+            .expect("register");
+        registry
+            .admit_capabilities([binding.clone()])
+            .expect("admit");
+        let payload = serde_json::json!({"hello": "world"});
+        let invocation = CapabilityInvocation::from_payload(
+            binding,
+            AgentRequestId::parse("typed-request-5").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+
+        let error = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &invocation,
+                payload,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("invalid schema must fail");
+        assert_eq!(error.code, ServiceErrorCode::BadRequest);
+        assert!(
+            !error
+                .message
+                .contains("does not match the capability schema")
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_dispatch_enforces_timeout_output_and_handler_failure() {
+        let payload = serde_json::json!({"hello": "world"});
+
+        let mut timeout_descriptor = descriptor();
+        timeout_descriptor.limits = CapabilityLimits::new(128, 128, 5).unwrap();
+        let timeout_binding = timeout_descriptor.binding();
+        let mut timeout_registry = Registry::new();
+        timeout_registry
+            .register_capability(
+                Arc::new(BehaviorHandler {
+                    behavior: Behavior::Delay,
+                }),
+                timeout_descriptor,
+            )
+            .unwrap();
+        timeout_registry
+            .admit_capabilities([timeout_binding.clone()])
+            .unwrap();
+        let timeout_invocation = CapabilityInvocation::from_payload(
+            timeout_binding,
+            AgentRequestId::parse("typed-request-6").unwrap(),
+            &payload,
+        )
+        .unwrap();
+        let timeout_error = timeout_registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").unwrap(),
+                "echo",
+                &timeout_invocation,
+                payload.clone(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(timeout_error.code, ServiceErrorCode::Timeout);
+
+        let mut output_descriptor = descriptor();
+        output_descriptor.limits = CapabilityLimits::new(128, 8, 50).unwrap();
+        let output_binding = output_descriptor.binding();
+        let mut output_registry = Registry::new();
+        output_registry
+            .register_capability(
+                Arc::new(BehaviorHandler {
+                    behavior: Behavior::Expand,
+                }),
+                output_descriptor,
+            )
+            .unwrap();
+        output_registry
+            .admit_capabilities([output_binding.clone()])
+            .unwrap();
+        let output_invocation = CapabilityInvocation::from_payload(
+            output_binding,
+            AgentRequestId::parse("typed-request-7").unwrap(),
+            &payload,
+        )
+        .unwrap();
+        let output_error = output_registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").unwrap(),
+                "echo",
+                &output_invocation,
+                payload.clone(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            output_error.code,
+            ServiceErrorCode::CapabilityOutputTooLarge
+        );
+
+        let failure_descriptor = descriptor();
+        let failure_binding = failure_descriptor.binding();
+        let mut failure_registry = Registry::new();
+        failure_registry
+            .register_capability(
+                Arc::new(BehaviorHandler {
+                    behavior: Behavior::Fail,
+                }),
+                failure_descriptor,
+            )
+            .unwrap();
+        failure_registry
+            .admit_capabilities([failure_binding.clone()])
+            .unwrap();
+        let failure_invocation = CapabilityInvocation::from_payload(
+            failure_binding,
+            AgentRequestId::parse("typed-request-8").unwrap(),
+            &payload,
+        )
+        .unwrap();
+        let failure_error = failure_registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").unwrap(),
+                "echo",
+                &failure_invocation,
+                payload,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failure_error.code,
+            ServiceErrorCode::CapabilityHandlerFailed
+        );
+        assert!(
+            !failure_error
+                .message
+                .contains("private handler failure detail")
+        );
     }
 
     /// Both directions. Asserting only that a fresh registry is empty

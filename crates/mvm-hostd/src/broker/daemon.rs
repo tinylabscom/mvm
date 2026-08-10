@@ -367,14 +367,28 @@ impl HostAgentDaemon {
         // at the resident helper with this server-derived `vm_id`; legacy
         // per-VM broker mode still points at a per-VM audit-signer UDS.
         let mut registry = Registry::new();
+        registry
+            .admit_capabilities(r.capability_bindings.clone())
+            .context("load host-signed capability bindings")?;
         if let Some(helper) = &self.signer_helper_uds_path {
-            registry.register(Arc::new(HostAuditV1Handler::new(
-                AuditClient::new_signer_helper(helper.clone(), r.vm_id.clone()),
+            let handler = Arc::new(HostAuditV1Handler::new(AuditClient::new_signer_helper(
+                helper.clone(),
+                r.vm_id.clone(),
             )));
+            registry.register(handler.clone());
+            for descriptor in HostAuditV1Handler::capability_descriptors() {
+                registry
+                    .register_capability(handler.clone(), descriptor)
+                    .context("register host.audit typed capability")?;
+            }
         } else if let Some(signer) = &r.audit_signer_uds_path {
-            registry.register(Arc::new(HostAuditV1Handler::new(AuditClient::new(
-                signer.clone(),
-            ))));
+            let handler = Arc::new(HostAuditV1Handler::new(AuditClient::new(signer.clone())));
+            registry.register(handler.clone());
+            for descriptor in HostAuditV1Handler::capability_descriptors() {
+                registry
+                    .register_capability(handler.clone(), descriptor)
+                    .context("register host.audit typed capability")?;
+            }
         }
         let registry = Arc::new(registry);
 
@@ -696,6 +710,7 @@ mod tests {
             ),
             audit_signer_uds_path: signer.map(|p| p.to_string_lossy().into_owned()),
             services_bindings: vec![],
+            capability_bindings: vec![],
         }
     }
 
@@ -754,6 +769,7 @@ mod tests {
                 "ts": "2026-06-17T00:00:00Z",
                 "fields": {"vm": vm}
             }),
+            capability: None,
         };
         write_frame(&mut client, &call).await.unwrap();
         read_frame(&mut client, 64 * 1024).await.unwrap()
@@ -1013,6 +1029,7 @@ mod tests {
             verb: "emit".into(),
             correlation_id: mvm_core::protocol::broker::CorrelationId::new("guest-picked-id"),
             payload: serde_json::json!({"ts": "2026-06-16T00:00:00Z", "fields": {"a": 1}}),
+            capability: None,
         };
         write_frame(&mut client, &call).await.unwrap();
         let resp: ServiceResponse = read_frame(&mut client, 64 * 1024).await.unwrap();
@@ -1058,6 +1075,7 @@ mod tests {
                 "ts": "2026-06-17T00:00:00Z",
                 "fields": {"vm": "a"}
             }),
+            capability: None,
         };
         write_frame(&mut client, &call).await.unwrap();
         let resp: ServiceResponse = read_frame(&mut client, 64 * 1024).await.unwrap();

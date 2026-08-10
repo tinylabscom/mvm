@@ -20,7 +20,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
-use crate::broker::registry::Registry;
+use crate::broker::registry::{CancellationToken, Registry};
 
 /// Accept loop. Each accepted UDS connection runs to completion in its
 /// own `tokio::spawn`; one connection per supervisor-proxy call.
@@ -105,10 +105,27 @@ async fn handle_connection(
         composition_width: 0,
     };
 
-    let response = match registry
-        .dispatch(&ctx, &call.service, &call.verb, call.payload)
-        .await
-    {
+    let cancellation = CancellationToken::new();
+    let result = match call.capability {
+        Some(invocation) => {
+            registry
+                .dispatch_capability(
+                    &ctx,
+                    &call.service,
+                    &call.verb,
+                    &invocation,
+                    call.payload,
+                    &cancellation,
+                )
+                .await
+        }
+        None => {
+            registry
+                .dispatch(&ctx, &call.service, &call.verb, call.payload)
+                .await
+        }
+    };
+    let response = match result {
         Ok(payload) => ServiceResponse::Ok {
             correlation_id,
             payload,
@@ -168,8 +185,16 @@ pub async fn write_frame<T: serde::Serialize>(stream: &mut UnixStream, value: &T
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::time::Duration;
 
+    use mvm_contract::protocol::agent_capability::{
+        CapabilityDescriptor, CapabilityId, CapabilityInvocation, CapabilityLimits, SchemaRef,
+    };
+    use mvm_contract::protocol::agent_session::AgentRequestId;
+    use mvm_core::policy::security::AgentProfile;
     use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceErrorCode, ServiceId};
+    use mvm_core::protocol::handler::{ServiceCallCtx, ServiceDispatchResult, ServiceHandler};
     use tempfile::tempdir;
     use tokio::net::UnixStream as ClientStream;
 
@@ -197,11 +222,63 @@ mod tests {
         dir.path().join("broker.sock")
     }
 
+    struct TypedEchoHandler;
+
+    impl ServiceHandler for TypedEchoHandler {
+        fn id(&self) -> ServiceId {
+            ServiceId::parse("host.dev.echo.v1").expect("service id")
+        }
+
+        fn profiles(&self) -> &[AgentProfile] {
+            &[AgentProfile::Dev]
+        }
+
+        fn audit_durability(&self) -> mvm_core::protocol::broker::AuditDurability {
+            mvm_core::protocol::broker::AuditDurability::default_batched()
+        }
+
+        fn idempotency(&self) -> mvm_core::protocol::broker::Idempotency {
+            mvm_core::protocol::broker::Idempotency::MintFresh
+        }
+
+        fn call_timeout(&self) -> Duration {
+            Duration::from_millis(50)
+        }
+
+        fn dispatch<'a>(
+            &'a self,
+            _ctx: &'a ServiceCallCtx,
+            _verb: &'a str,
+            payload: serde_json::Value,
+        ) -> Pin<Box<dyn std::future::Future<Output = ServiceDispatchResult> + Send + 'a>> {
+            Box::pin(async move { Ok(payload) })
+        }
+    }
+
+    fn typed_echo_descriptor() -> CapabilityDescriptor {
+        CapabilityDescriptor::builder()
+            .id(CapabilityId::new(
+                ServiceId::parse("host.dev.echo.v1").expect("service id"),
+                "echo",
+            )
+            .expect("capability id"))
+            .description("echo a bounded test value")
+            .input_schema(SchemaRef::new("host.dev.echo.input.v1", [1; 32]).expect("schema"))
+            .output_schema(SchemaRef::new("host.dev.echo.output.v1", [2; 32]).expect("schema"))
+            .limits(CapabilityLimits::new(1024, 1024, 100).expect("limits"))
+            .build()
+            .expect("descriptor")
+    }
+
     #[tokio::test]
     async fn round_trips_a_call_and_returns_not_bound_with_empty_registry() {
         let dir = tempdir().unwrap();
         let path = uds_path(&dir);
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = match UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind typed broker test listener: {error}"),
+        };
         let registry = Arc::new(Registry::new());
 
         let server_task = tokio::spawn({
@@ -229,6 +306,7 @@ mod tests {
             verb: "now".into(),
             correlation_id: CorrelationId::new("01HBROKER0000000000000000"),
             payload: serde_json::json!({}),
+            capability: None,
         };
         write_call(&mut client, &call).await.unwrap();
         let response = read_response(&mut client).await.unwrap();
@@ -253,6 +331,74 @@ mod tests {
             other => panic!("expected NotBound err, got {:?}", other),
         }
 
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn typed_call_round_trips_over_uds_and_replay_is_refused() {
+        let dir = tempdir().unwrap();
+        let path = uds_path(&dir);
+        let listener = match UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind typed broker test listener: {error}"),
+        };
+        let descriptor = typed_echo_descriptor();
+        let binding = descriptor.binding();
+        let mut registry = Registry::new();
+        registry
+            .register_capability(Arc::new(TypedEchoHandler), descriptor)
+            .expect("register typed handler");
+        registry
+            .admit_capabilities([binding.clone()])
+            .expect("admit typed binding");
+        let registry = Arc::new(registry);
+        let server_task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                let _ = serve_on_listener(
+                    listener,
+                    registry,
+                    "wl-test".into(),
+                    "t-test".into(),
+                    65_536,
+                )
+                .await;
+            }
+        });
+        tokio::task::yield_now().await;
+
+        let payload = serde_json::json!({"value": 7});
+        let invocation = CapabilityInvocation::from_payload(
+            binding,
+            AgentRequestId::parse("uds-request-1").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+        let call = ServiceCall {
+            service: ServiceId::parse("host.dev.echo.v1").expect("service id"),
+            verb: "echo".into(),
+            correlation_id: CorrelationId::new("guest-correlation"),
+            payload: payload.clone(),
+            capability: Some(invocation.clone()),
+        };
+        let mut client = ClientStream::connect(&path).await.unwrap();
+        write_call(&mut client, &call).await.unwrap();
+        assert!(matches!(
+            read_response(&mut client).await.unwrap(),
+            ServiceResponse::Ok { payload: response, .. } if response == payload
+        ));
+
+        let mut replay_client = ClientStream::connect(&path).await.unwrap();
+        write_call(&mut replay_client, &call).await.unwrap();
+        let response = read_response(&mut replay_client).await.unwrap();
+        assert!(matches!(
+            response,
+            ServiceResponse::Err {
+                code: ServiceErrorCode::CapabilityReplay,
+                ..
+            }
+        ));
         server_task.abort();
     }
 
@@ -292,6 +438,7 @@ mod tests {
             verb: "now".into(),
             correlation_id: CorrelationId::new("01HBROKER0000000000000000"),
             payload: serde_json::json!({"padding": "x".repeat(256)}),
+            capability: None,
         };
         // Manually write the length prefix + body so the test exercises
         // the server-side cap check (the server reads the prefix, sees

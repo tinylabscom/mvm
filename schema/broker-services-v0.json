@@ -40,6 +40,109 @@
     }
   },
   "definitions": {
+    "AgentRequestId": {
+      "description": "Stable public request identifier.",
+      "type": "string"
+    },
+    "CapabilityBinding": {
+      "description": "Exact descriptor identity admitted for one workload.",
+      "type": "object",
+      "required": [
+        "capability",
+        "descriptor_digest"
+      ],
+      "properties": {
+        "capability": {
+          "description": "Capability identity approved by admission.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CapabilityId"
+            }
+          ]
+        },
+        "descriptor_digest": {
+          "description": "Digest of the complete descriptor approved by admission.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "CapabilityId": {
+      "description": "A versioned service verb that can be admitted independently.",
+      "type": "object",
+      "required": [
+        "service",
+        "verb"
+      ],
+      "properties": {
+        "service": {
+          "description": "Versioned host service identity.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ServiceId"
+            }
+          ]
+        },
+        "verb": {
+          "description": "Verb within the versioned service.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CapabilityInvocation": {
+      "description": "Typed invocation metadata carried alongside the existing broker payload.",
+      "type": "object",
+      "required": [
+        "binding",
+        "input_digest",
+        "invocation_id",
+        "protocol_version"
+      ],
+      "properties": {
+        "binding": {
+          "description": "Exact binding the caller claims to use.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CapabilityBinding"
+            }
+          ]
+        },
+        "input_digest": {
+          "description": "Digest of the `ServiceCall::payload` value.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        },
+        "invocation_id": {
+          "description": "Bounded request identity used for replay refusal and audit joins.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentRequestId"
+            }
+          ]
+        },
+        "protocol_version": {
+          "description": "Version of this invocation contract.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
     "CostReport": {
       "description": "Response for both `host.cost.v1` verbs: the accumulated spend for the queried scope.",
       "type": "object",
@@ -228,6 +331,17 @@
         "verb"
       ],
       "properties": {
+        "capability": {
+          "description": "Optional typed capability metadata. Omitted for the established service-call path so its serialized shape remains byte-compatible.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityInvocation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "correlation_id": {
           "type": "string"
         },
@@ -347,6 +461,62 @@
           "type": "string",
           "enum": [
             "internal_error"
+          ]
+        },
+        {
+          "description": "Typed capability admission refused the request.",
+          "type": "string",
+          "enum": [
+            "capability_denied"
+          ]
+        },
+        {
+          "description": "Typed capability binding identity or descriptor digest did not match.",
+          "type": "string",
+          "enum": [
+            "capability_binding_mismatch"
+          ]
+        },
+        {
+          "description": "Typed capability protocol version is unsupported.",
+          "type": "string",
+          "enum": [
+            "capability_protocol_mismatch"
+          ]
+        },
+        {
+          "description": "Typed capability invocation id was already consumed.",
+          "type": "string",
+          "enum": [
+            "capability_replay"
+          ]
+        },
+        {
+          "description": "Typed capability input exceeded its admitted bound.",
+          "type": "string",
+          "enum": [
+            "capability_input_too_large"
+          ]
+        },
+        {
+          "description": "Typed capability output exceeded its admitted bound.",
+          "type": "string",
+          "enum": [
+            "capability_output_too_large"
+          ]
+        },
+        {
+          "description": "Typed capability invocation was canceled.",
+          "type": "string",
+          "enum": [
+            "capability_canceled"
+          ]
+        },
+        {
+          "description": "Typed capability handler failed without exposing handler details.",
+          "type": "string",
+          "enum": [
+            "capability_handler_failed"
           ]
         }
       ]

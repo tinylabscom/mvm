@@ -30,6 +30,15 @@ for detailed scope and acceptance criteria.
   - [x] Bounded digest-only metadata, audit action mappings, client/SDK
         re-exports, unit tests, and three non-`@wip` BDD scenarios
 
+- [x] Plan 2170 — typed capability bindings
+      (`specs/plans/2170-typed-capability-bindings.md`)
+  - [x] Versioned per-verb descriptors, schema references, limits, and exact
+        descriptor-digest bindings
+  - [x] Host-signed admission allowlist and invocation-time fail-closed gates
+  - [x] Timeout, cancellation, replay, bounded I/O, typed failures, and
+        digest-only capability audit events
+  - [x] Real broker UDS round trip, BDD scenarios, and validation gates
+
 - [~] Security lane mutation-witness repair — **issue #2135**
   - [x] Add direct witnesses for the security-sensitive admission,
         verification, lease, and substitution cleanup invariants

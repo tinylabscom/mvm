@@ -152,6 +152,7 @@ fn host_audit_v1_round_trip_signs_a_verifiable_workload_chain() {
             fields: serde_json::json!({"event": "it.round_trip", "n": 1}),
         })
         .unwrap(),
+        capability: None,
     };
     write_frame(&mut conn, &call);
     let resp: ServiceResponse = read_frame(&mut conn);
