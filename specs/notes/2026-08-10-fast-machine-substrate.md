@@ -107,6 +107,13 @@ not a performance number to copy. The result is an explicit adopt or decline
 decision in issue #2281 and Plan 299; no parallel filesystem or cache stack is
 allowed.
 
+The current baseline is now measurable without a VM: `mvm_fs::rootfs::measure_ext4_pure`
+reports the source content digest, effective node composition, source file
+bytes, emitted ext4 size/digest, materializer format version, and separate
+hash/walk/build timings. Candidate filesystem paths must use the same fixture
+identity and report equivalent preparation, first-access, working-set, and
+density evidence before the existing ext4 path can be replaced.
+
 ## Security and resource invariants
 
 - Prepared artifacts are published atomically and verified before use.
@@ -126,8 +133,9 @@ allowed.
 
 - [ ] [#2280](https://github.com/tinylabscom/mvm/issues/2280) — measure the
   kernel and boot-substrate budget.
-- [ ] [#2281](https://github.com/tinylabscom/mvm/issues/2281) — evaluate the
-  guest-local immutable filesystem path.
+- [~] [#2281](https://github.com/tinylabscom/mvm/issues/2281) — baseline the
+  current pure-Rust ext4 path and evaluate the guest-local immutable
+  filesystem path against it.
 - [ ] [#2194](https://github.com/tinylabscom/mvm/issues/2194),
   [#2195](https://github.com/tinylabscom/mvm/issues/2195), and
   [#2196](https://github.com/tinylabscom/mvm/issues/2196) — complete the

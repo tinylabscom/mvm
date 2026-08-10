@@ -1507,6 +1507,12 @@ Then unify + retire the old paths:
   same artifact byte and kernel-config measurements beside their timings. Live
   kernel-entry/readiness, resident-memory, and restore measurements remain
   open.
+- [x] **Filesystem-path baseline — issue #2281.**
+  `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
+  source identity, node composition, emitted ext4 size/digest, materializer
+  version, and hash/walk/build timings. Candidate guest-local immutable paths
+  still need equivalent first-access, working-set, density, and security
+  evidence before an adopt/decline decision.
 
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
 - [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured

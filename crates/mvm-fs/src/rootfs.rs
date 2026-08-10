@@ -15,12 +15,21 @@
 
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
+use sha2::Digest;
 use thiserror::Error;
 
 use crate::parallel::par_map;
 
 use crate::ext4::{BuildOptions, EmitImageError, Ext4Error, Node, Xattr};
+
+/// Version of the deterministic ext4 materializer's output contract.
+///
+/// Bump this when the same source tree and options can produce a different
+/// image. The version is deliberately part of measurement output so a
+/// filesystem candidate cannot be compared across incompatible artifacts.
+pub const EXT4_MATERIALIZER_FORMAT_VERSION: u32 = 1;
 
 /// How [`collect_nodes`] handles a host inode kind the ext4 [`Node`] enum has
 /// no variant for (device, FIFO, socket).
@@ -265,6 +274,142 @@ pub struct MaterializedImage {
     pub path: PathBuf,
     /// Final image size in bytes.
     pub size_bytes: u64,
+}
+
+/// Counts and byte totals for the effective node set sent to the image writer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MaterializationNodeCounts {
+    /// Number of nodes, excluding the implicit guest root (`/`).
+    pub total: u64,
+    /// Number of regular files.
+    pub files: u64,
+    /// Number of directories.
+    pub directories: u64,
+    /// Number of symbolic links.
+    pub symlinks: u64,
+    /// Number of captured extended attributes.
+    pub xattrs: u64,
+    /// Total bytes in regular-file payloads before filesystem overhead.
+    pub file_bytes: u64,
+}
+
+/// Timings for the current pure-Rust materialization path, in microseconds.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MaterializationTimings {
+    /// Time spent hashing the source directory's content manifest.
+    pub source_hash_micros: u64,
+    /// Time spent walking the source and reading nodes.
+    pub walk_micros: u64,
+    /// Time spent constructing the ext4 image in memory.
+    pub build_micros: u64,
+    /// End-to-end time covered by this report.
+    pub total_micros: u64,
+}
+
+/// Baseline report for comparing immutable guest filesystem materializers.
+///
+/// This measures the existing directory-to-ext4 path without booting a VM or
+/// writing the image. The source and image digests make reports comparable;
+/// the timings are observations and must be aggregated over repeated runs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Ext4MaterializationReport {
+    /// Version of this report schema.
+    pub report_version: u32,
+    /// Version of the emitted ext4 byte contract.
+    pub materializer_format_version: u32,
+    /// SHA-256 of the source directory content manifest.
+    pub source_content_sha256: String,
+    /// Composition of the nodes passed to the writer.
+    pub nodes: MaterializationNodeCounts,
+    /// Logical ext4 image size in bytes.
+    pub image_size_bytes: u64,
+    /// SHA-256 of the emitted ext4 image bytes.
+    pub image_sha256: String,
+    /// Timings for the measured path.
+    pub timings: MaterializationTimings,
+}
+
+const MATERIALIZATION_REPORT_VERSION: u32 = 1;
+
+/// Measure the pure-Rust directory-to-ext4 build path.
+///
+/// The source hash, walk, and image build are intentionally reported as
+/// separate phases. This makes it possible to distinguish a filesystem
+/// format improvement from a source-scanning or content-addressing cost.
+/// `extra_nodes` are included in the node counts and image digest, matching
+/// [`build_ext4_pure`].
+pub fn measure_ext4_pure(
+    root: &Path,
+    options: &MaterializeOptions,
+) -> Result<Ext4MaterializationReport, MaterializeError> {
+    let total_started = Instant::now();
+
+    let hash_started = Instant::now();
+    let source_content_sha256 =
+        crate::hash::hash_source(root).map_err(|source| MaterializeError::Walk {
+            path: root.to_path_buf(),
+            source,
+        })?;
+    let source_hash_micros = elapsed_micros(hash_started.elapsed());
+
+    let walk_started = Instant::now();
+    let nodes = merge_extra_nodes(
+        collect_nodes(root, options.walk)?,
+        options.extra_nodes.clone(),
+    );
+    let nodes_report = count_nodes(&nodes);
+    let walk_micros = elapsed_micros(walk_started.elapsed());
+
+    let build_started = Instant::now();
+    let image = crate::ext4::build_image_with_options(&nodes, &options.build)?;
+    let image_size_bytes = image.len() as u64;
+    let image_sha256 = hex::encode(sha2::Sha256::digest(&image));
+    let build_micros = elapsed_micros(build_started.elapsed());
+
+    Ok(Ext4MaterializationReport {
+        report_version: MATERIALIZATION_REPORT_VERSION,
+        materializer_format_version: EXT4_MATERIALIZER_FORMAT_VERSION,
+        source_content_sha256,
+        nodes: nodes_report,
+        image_size_bytes,
+        image_sha256,
+        timings: MaterializationTimings {
+            source_hash_micros,
+            walk_micros,
+            build_micros,
+            total_micros: elapsed_micros(total_started.elapsed()),
+        },
+    })
+}
+
+fn count_nodes(nodes: &[Node]) -> MaterializationNodeCounts {
+    let mut counts = MaterializationNodeCounts {
+        total: nodes.len() as u64,
+        files: 0,
+        directories: 0,
+        symlinks: 0,
+        xattrs: 0,
+        file_bytes: 0,
+    };
+    for node in nodes {
+        match node {
+            Node::Dir { xattrs, .. } => {
+                counts.directories += 1;
+                counts.xattrs = counts.xattrs.saturating_add(xattrs.len() as u64);
+            }
+            Node::File { data, xattrs, .. } => {
+                counts.files += 1;
+                counts.file_bytes = counts.file_bytes.saturating_add(data.len() as u64);
+                counts.xattrs = counts.xattrs.saturating_add(xattrs.len() as u64);
+            }
+            Node::Symlink { .. } => counts.symlinks += 1,
+        }
+    }
+    counts
+}
+
+fn elapsed_micros(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Walk + emission knobs for [`materialize_ext4_pure`].
@@ -729,6 +874,63 @@ mod tests {
         let out_path = out.path().join("rootfs.ext4");
         materialize_ext4_pure(src.path(), &out_path, &options).expect("materialize");
         assert_eq!(std::fs::read(&out_path).unwrap(), built);
+    }
+
+    #[test]
+    fn materialization_report_captures_composition_and_is_json_roundtrippable() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir(src.path().join("etc")).unwrap();
+        std::fs::write(src.path().join("etc/hosts"), b"127.0.0.1 localhost\n").unwrap();
+        std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("hosts", src.path().join("etc/localhost")).unwrap();
+
+        let report = measure_ext4_pure(src.path(), &MaterializeOptions::default())
+            .expect("measure pure materialization");
+
+        assert_eq!(report.report_version, MATERIALIZATION_REPORT_VERSION);
+        assert_eq!(
+            report.materializer_format_version,
+            EXT4_MATERIALIZER_FORMAT_VERSION
+        );
+        assert_eq!(report.nodes.total, 4);
+        assert_eq!(report.nodes.files, 2);
+        assert_eq!(report.nodes.directories, 1);
+        assert_eq!(report.nodes.symlinks, 1);
+        assert_eq!(report.nodes.file_bytes, 23);
+        assert!(report.image_size_bytes > 0);
+        assert_eq!(report.image_sha256.len(), 64);
+        assert_eq!(report.source_content_sha256.len(), 64);
+        assert!(report.timings.total_micros >= report.timings.build_micros);
+
+        let encoded = serde_json::to_vec(&report).expect("serialize report");
+        let decoded: Ext4MaterializationReport =
+            serde_json::from_slice(&encoded).expect("deserialize report");
+        assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn materialization_report_identity_changes_with_source_content() {
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("hello");
+        std::fs::write(&file, b"before").unwrap();
+
+        let before =
+            measure_ext4_pure(src.path(), &MaterializeOptions::default()).expect("measure before");
+        std::fs::write(&file, b"after").unwrap();
+        let after =
+            measure_ext4_pure(src.path(), &MaterializeOptions::default()).expect("measure after");
+
+        assert_ne!(
+            before.source_content_sha256, after.source_content_sha256,
+            "source digest must detect changed file bytes"
+        );
+        assert_ne!(
+            before.image_sha256, after.image_sha256,
+            "image digest must detect changed emitted bytes"
+        );
+        assert_eq!(before.nodes.total, after.nodes.total);
+        assert_eq!(before.nodes.files, after.nodes.files);
     }
 
     #[test]

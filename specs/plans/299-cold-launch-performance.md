@@ -555,11 +555,17 @@ optimization backend-local and the benchmark backend-neutral.
       counts into each `ColdLaunchReport` sample. The runner resolves these
       after the child launch exits, so the report joins substrate evidence to
       launch timing without charging metadata I/O to the measured window.
+- [x] Add a baseline filesystem-path report at the existing pure-Rust
+      materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
+      content digest, node composition, file bytes, emitted image size/digest,
+      materializer format version, and separate source-hash/walk/build timing
+      phases. Its JSON shape is stable for repeated fixture comparisons.
 - [ ] Evaluate the current rootfs and host-directory image path against the
       guest-local immutable filesystem hypothesis in
       [issue #2281](https://github.com/tinylabscom/mvm/issues/2281). Keep the
-      current path as the baseline and preserve dm-verity, xattrs/whiteouts,
-      read-only enforcement, and clean writable CoW state.
+      current path as the baseline, use the new report for candidate
+      comparisons, and preserve dm-verity, xattrs/whiteouts, read-only
+      enforcement, and clean writable CoW state.
 - [ ] Add backend-specific unit tests for immutable artifact reuse, fresh VM
       identity, failed setup cleanup, and no cross-launch mutable state.
 

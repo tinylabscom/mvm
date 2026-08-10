@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-09
+Last updated: 2026-08-10
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -144,9 +144,10 @@ for detailed scope and acceptance criteria.
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
   - [~] Kernel/boot-substrate budget and filesystem-path evaluation tracked by
-        issues #2280 and #2281. The artifact-ledger slice of #2280 is landed;
-        cold-launch reports now carry artifact/config measurements; live timing,
-        restore, density, and filesystem evaluation remain open.
+        issues #2280 and #2281. The artifact-ledger slice of #2280 and the
+        pure-Rust ext4 baseline report are landed; live timing, restore,
+        density, candidate filesystem comparison, and the adopt/decline
+        decision remain open.
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images
       (`specs/plans/311-launch-critical-path-waste.md`), branch
