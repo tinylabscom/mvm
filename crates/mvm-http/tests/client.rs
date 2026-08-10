@@ -338,3 +338,56 @@ async fn text_and_json_decode_the_body() {
         .unwrap();
     assert_eq!(body.name, "mvm");
 }
+
+// `content_length()` is what a caller checks to refuse an oversized body
+// *before* reading it (mvm-fs's manifest fetch does exactly this), so these
+// pin the declaration rather than a running total.
+
+#[tokio::test]
+async fn content_length_reports_the_declaration_and_does_not_move_as_the_body_is_read() {
+    let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world").await;
+    let c = client_for(addr);
+    let mut resp = c.get(&url_for(addr)).send().await.unwrap();
+    assert_eq!(resp.content_length(), Some(11));
+    let _ = resp.chunk().await.unwrap();
+    assert_eq!(
+        resp.content_length(),
+        Some(11),
+        "the declaration must not change as bytes are consumed"
+    );
+}
+
+#[tokio::test]
+async fn a_declared_zero_length_is_zero_not_absent() {
+    // Inferring from body state reported `None` here, which a cap check reads
+    // as "no declaration" rather than "declared empty".
+    let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let c = client_for(addr);
+    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    assert_eq!(resp.content_length(), Some(0));
+}
+
+#[tokio::test]
+async fn a_head_response_still_reports_its_declared_length() {
+    // The body is absent by design, but the length is the whole point of HEAD
+    // and is what a size pre-check consumes.
+    let (addr, _srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n").await;
+    let c = client_for(addr);
+    let resp = c.head(&url_for(addr)).send().await.unwrap();
+    assert_eq!(resp.content_length(), Some(4096));
+    assert!(resp.bytes().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_chunked_body_declares_no_length() {
+    let (addr, _srv) =
+        serve_raw(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")
+            .await;
+    let c = client_for(addr);
+    let resp = c.get(&url_for(addr)).send().await.unwrap();
+    assert_eq!(
+        resp.content_length(),
+        None,
+        "a chunked body declares no length, so a pre-read cap check cannot rely on one"
+    );
+}

@@ -36,6 +36,8 @@ pub struct Response {
     /// Hard ceiling on total decoded body bytes, if any.
     pub(crate) max_bytes: Option<u64>,
     pub(crate) read_total: u64,
+    /// The `Content-Length` the server declared, verbatim.
+    pub(crate) declared_length: Option<u64>,
 }
 
 impl Response {
@@ -59,6 +61,17 @@ impl Response {
             BodyLength::Chunked => BodyState::Chunked { finished: false },
             BodyLength::UntilClose => BodyState::UntilClose,
         };
+        // Recorded from the header rather than inferred from `state`, because
+        // a caller uses this to refuse an oversized body *before* reading it,
+        // and the two differ where it matters: a HEAD response is bodyless but
+        // its declared length is the whole point, and `Content-Length: 0` is a
+        // declaration of zero rather than an absence. `parse_head` has already
+        // rejected conflicting or non-decimal values, so this cannot disagree
+        // with the framing decision.
+        let declared_length = headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
         Self {
             status,
             headers,
@@ -67,6 +80,7 @@ impl Response {
             state,
             max_bytes,
             read_total: 0,
+            declared_length,
         }
     }
 
@@ -78,13 +92,14 @@ impl Response {
         &self.headers
     }
 
-    /// The declared `Content-Length`, when the response carried one.
+    /// The `Content-Length` the server declared, or `None` if it declared
+    /// none (a chunked or read-until-close body).
+    ///
+    /// This is the declaration, not a running total: it does not change as the
+    /// body is read, and it is still reported for a HEAD response, where the
+    /// length is the only thing the response carries.
     pub fn content_length(&self) -> Option<u64> {
-        match self.state {
-            BodyState::Fixed { remaining } => Some(remaining.saturating_add(self.read_total)),
-            BodyState::Done if self.read_total > 0 => Some(self.read_total),
-            _ => None,
-        }
+        self.declared_length
     }
 
     /// Next piece of the decoded body, or `None` at end of body.
