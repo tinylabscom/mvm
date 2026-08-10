@@ -1,7 +1,9 @@
 # Plan 311 — Launch critical-path waste on real-sized images
 
-**Status:** Phases A0, B, C, D, E complete and measured on Apple Silicon / HVF.
-Phase F partially complete — the Firecracker/KVM repeat is outstanding.
+**Status:** Phases A0-E complete and measured on Apple Silicon / HVF at
+p50/p95/p99. Phase F complete except the warm-lane comparison, which cannot run
+until a standby pool can be filled. The Firecracker/KVM repeat is done and
+surfaced two costs this plan does not own — see #2292 and #2293.
 
 ## Goal
 
@@ -164,6 +166,40 @@ prepared lanes when nonzero — so this is a gate, not a note. The six runs
 behind the table above vary by 0.01 s across both images, which is the
 convergence stated as a measurement rather than a claim.
 
+### Percentiles through the benchmark harness
+
+Wall clock above is the before/after. These are the contract numbers: release
+binary, `ColdLaunchBench` via the Plan 299 entry point, 20 measured runs after
+2 warm-ups per lane, every sample through the lane gate (the harness refuses a
+short report, so 20 samples means 20 launches cleared it).
+
+| lane | dispatch p50 | p95 | p99 | total p50 |
+|---|---:|---:|---:|---:|
+| `alpine` (9.9 MB rootfs) | 79.6 ms | 84.9 ms | 93.6 ms | 320.1 ms |
+| `python:3.12` (1.1 GB rootfs) | **77.3 ms** | **79.7 ms** | **90.1 ms** | 316.1 ms |
+| budget | ≤200 ms | ≤250 ms | ≤300 ms | — |
+
+The 116x image-size difference is now inside the run-to-run noise at every
+percentile, and `python:3.12` clears the p99 budget with a 3.3x margin. Before
+this change the same pair differed by ~780 ms.
+
+Sub-phases on the large image, p50 / p99:
+
+| span | p50 | p99 |
+|---|---:|---:|
+| `vmm_create` | 11.6 ms | 14.4 ms |
+| `guest_kernel_entry` | 58.6 ms | 67.9 ms |
+| `agent_auth` | 3.4 ms | 6.0 ms |
+| `artifact_verify`, `first_dispatch` | ≤0.1 ms | ≤0.1 ms |
+| `stop_transient` | 128.1 ms | 139.8 ms |
+| backend `driver_boot` | 7.8 ms | 8.9 ms |
+
+Two things this says. Guest boot to a serving agent is ~59 ms and is now three
+quarters of the dispatch window — VM creation is 11.6 ms and the backend's own
+`driver_boot` is 7.8 ms, so there is little left to win on the HVF VMM side.
+And `stop_transient` at 128 ms is larger than the entire dispatch window it
+follows.
+
 ### What is left, and who owns it
 
 Of the ~420 ms wall clock that remains, the largest single span is
@@ -174,15 +210,12 @@ serving agent and is Plan 299 Phase 3/5.
 
 ## What is still not measured
 
-- Every result above is Apple Silicon / HVF on one host. Firecracker/KVM is
-  **not** re-measured. Plan 299 Phase 0 records `driver_boot` at 623.6 ms there
-  against 53.8 ms on HVF, so the proportions certainly differ; whether the three
-  fixes help as much is unknown until the KVM host runs the same pair.
-- Wall clock via `/usr/bin/time`, 5–8 runs per lane, reported as a range rather
-  than percentiles. The Plan 299 benchmark entry point produces p50/p95/p99
-  through the lane gate and should be run on both images before any percentile
-  is published; the ranges here are evidence that the change works, not a
-  published number.
+- **Firecracker/KVM is now measured** (Plan 299 Phase 3 re-measurement section).
+  The Plan 311 fixes hold there — a prepared Firecracker launch reports
+  `artifact_bytes_hashed: 0` and `process_table_scans: 0` — but that backend
+  misses the contract for reasons this plan does not own: `driver_boot` 630.5 ms
+  (#2292) and 294 ms of audit-chain fsync in `admit` (#2293). The prepared-cold
+  contract is met on HVF and **not** on Firecracker.
 - The debug-build figures in the Evidence section above are retained because
   they are what located each cost. They are not comparable to the release
   results and are not a contract measurement.
@@ -293,12 +326,11 @@ Issue #2275.
 
 Issue #2276.
 
-- [~] Run the prepared-cold lane on a large-rootfs image, reported
+- [x] Ran the prepared-cold lane on a large-rootfs image, reported
       independently. The benchmark entry point already takes its argv from
-      `MVM_COLD_LAUNCH_ARGS`, so a large-image lane needs no new code — it needs
-      a second invocation. Measured here by hand (wall clock, 5-8 runs); a
-      p50/p95/p99 run through `ColdLaunchBench` on both images is still owed,
-      and is the first task of Phase F.
+      `MVM_COLD_LAUNCH_ARGS`, so the large-image lane needed a second
+      invocation rather than new code. Both lanes are recorded above at
+      p50/p95/p99 through the lane gate.
 - [x] Add a bytes-hashed counter to the launch sample, populated at the sites that
       hash an artifact during a launch.
 - [x] Extend the Plan 299 lane gate to refuse a `prepared_cold` sample that hashed
@@ -313,9 +345,10 @@ Issue #2276.
 ## Phase F — Validation
 
 - [x] Re-run the Phase A0 lanes on the final tree; publish `alpine` and
-      large-image prepared cold side by side against the ≤200 ms p50 / ≤300 ms p99
-      contract. (Wall clock + dispatch window; percentiles through
-      `ColdLaunchBench` still owed — see Phase E's first item.)
+      large-image prepared cold side by side against the ≤200 ms p50 / ≤300 ms
+      p99 contract. Done at p50/p95/p99 on both images.
+- [x] Repeat on Firecracker/KVM. The fixes hold (both counters zero); that
+      backend's remaining gap is #2292 and #2293, recorded in Plan 299 Phase 3.
 - [~] Confirm the warm lane has not regressed against Plan 265. **Not run:**
       the standby pool is empty on this host (`pool status` reports 0 idle) and
       `pool warm` spawns nothing today, so there is no warm claim to measure.
