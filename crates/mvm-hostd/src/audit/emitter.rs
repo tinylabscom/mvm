@@ -439,6 +439,36 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `plan.grants_enforced` — records what actually bounded this
+    /// workload, as read back off the live controls after the backend started
+    /// it.
+    ///
+    /// Deliberately a separate entry from `plan.admitted`, which records the
+    /// bounds that were *requested*. A reader who only ever sees the request
+    /// cannot tell a run that was bounded from one that declared a bound
+    /// nothing implemented — and those two are the whole point of the
+    /// distinction.
+    pub fn emit_grants_enforced(
+        &self,
+        plan: &ExecutionPlan,
+        enforced: &mvm_contract::protocol::resource_controls::EnforcedGrants,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "plan.grants_enforced",
+            [
+                (
+                    "grants_cpu_tier".to_string(),
+                    enforced.cpu.label().to_string(),
+                ),
+                (
+                    "grants_wall_clock_tier".to_string(),
+                    enforced.wall_clock.label().to_string(),
+                ),
+            ],
+        )
+    }
+
     /// Emit `plan.boot_posture` — records which rootfs strategy the run-path
     /// tier gate actually selected for this boot, so an audit reader can tell a
     /// dev virtiofs-root boot (the weaker dev-tier virtiofs contract — no

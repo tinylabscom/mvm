@@ -232,3 +232,62 @@ uses under the hood), not via direct `mkdir`/`cgroup.procs` writes:
 
 This was exercised end-to-end above (Step 3) and confirmed to work; it is
 not a theoretical fallback.
+
+## Task 9 verification: the read-back shape, and a second mechanism
+
+Re-run on the same box, same methodology (linger + ephemeral key + a real
+`Class: user` SSH session as `mvmtest`, everything removed afterwards), against
+the exact argv `mvm_hostd::cpu_scope::wrap_spawn` emits.
+
+**The read-back property and path shape are as assumed.** `ControlGroup` is the
+property name, its value is a hierarchy-relative path, and the file to read
+lives under `/sys/fs/cgroup` + that path:
+
+```
+$ systemd-run --user --scope --quiet --unit mvm-verify-task9.scope -p CPUQuota=150% -- <payload>
+$ systemctl --user show mvm-verify-task9.scope -p ControlGroup --value
+/user.slice/user-30033.slice/user@30033.service/app.slice/mvm-verify-task9.scope
+$ cat /sys/fs/cgroup/user.slice/.../mvm-verify-task9.scope/cpu.max
+150000 100000
+```
+
+**Measured: 1.4965 cores against a 1.5-core target** (0.23% under), with
+`nr_throttled=64` of 65 accounting periods — four spinners that would take ~4
+cores on this 8-core box, held at the quota. All five pids (the payload shell
+plus its four children) were inside the scope, which is the born-bounded
+property `--scope` gives for free.
+
+Two fallback behaviours the implementation depends on, both confirmed:
+
+- **An absent unit is not an error.** `systemctl --user show <unit> -p
+  ControlGroup --value` on a unit that was never created exits 0 and prints an
+  empty value, so "no scope" is distinguishable from "no answer" without
+  parsing an error string.
+- **No session bus, no mechanism.** With `XDG_RUNTIME_DIR` and
+  `DBUS_SESSION_BUS_ADDRESS` both unset, `systemd-run --user` and `systemctl
+--user` alike fail with `Failed to connect to bus: No medium found`. This is
+  the headless-daemon case, and it is why the availability probe checks the
+  session bus rather than only the binary.
+
+**New: a scope can also adopt an already-running process.** Step 2 above
+established that a *process* cannot migrate itself into the delegated tree.
+That is not the same question as whether the user's manager can be asked to do
+it, and the answer to the second turns out to be yes:
+
+```
+$ # target pid running under /user.slice/user-30033.slice/session-11356.scope
+$ busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+    org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \
+    mvm-probe-adopt.scope fail 2 PIDs au 1 $P CPUQuotaPerSecUSec t 1500000 0
+o "/org/freedesktop/systemd1/job/61"
+$ cat /proc/$P/cgroup
+0::/user.slice/user-30033.slice/user@30033.service/app.slice/mvm-probe-adopt.scope
+```
+
+This matters for the seam shape rather than for the verdict. `apply_grants` is
+by construction a post-start call — a control needs a VM to attach to — and the
+wrap-the-spawn mechanism cannot serve a caller that is already holding a
+started VM. Adoption can. It is strictly weaker (there is a window between exec
+and adoption in which the process is unbounded), so it is the mechanism for a
+backend that must bound a VMM it has already launched, not a replacement for
+wrapping a spawn we own.

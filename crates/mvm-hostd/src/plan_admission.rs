@@ -49,6 +49,7 @@ use ed25519_dalek::VerifyingKey;
 use mvm_contract::grants::Grants;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
+use mvm_contract::protocol::resource_controls::EnforcedGrants;
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
@@ -917,6 +918,37 @@ fn enforce_admitted_environment(config: &VmStartConfig, plan: &ExecutionPlan) ->
 pub struct StartedMachine {
     pub vm_id: VmId,
     pub admitted: AdmittedPlan,
+    /// What actually bounded this workload, read back off the live controls by
+    /// the backend that booted it.
+    ///
+    /// Not the grants that were requested — those are already on the signed
+    /// plan. A caller building a receipt gets the tier that fired, so it cannot
+    /// report a bound that was only asked for.
+    pub enforced_grants: EnforcedGrants,
+}
+
+/// Apply the admitted plan's grants to the VM that is now running, and report
+/// what the backend achieved.
+///
+/// After `start` rather than before, because a control needs something to
+/// attach to; the backends that bound CPU do it by placing the VMM process
+/// itself, which does not exist until then.
+///
+/// Not best-effort. A workload whose bounds could not be applied is running
+/// unbounded, so the launch is undone rather than completed alongside a record
+/// that says otherwise — the same posture the supervisor's own launch path
+/// takes.
+fn apply_admitted_grants(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+) -> Result<EnforcedGrants> {
+    let undeclared = Grants::default();
+    let grants = admitted.plan().grants.as_ref().unwrap_or(&undeclared);
+    backend
+        .as_vm_backend()
+        .apply_grants(vm_id, grants)
+        .context("applying the admitted plan's grants to the started VM")
 }
 
 /// The single admitted-boot entrypoint every driver shares — the CLI's
@@ -1001,12 +1033,42 @@ pub fn admit_and_start(
         .context("backend start after signed-plan admission")
     {
         Ok(vm_id) => {
-            if let Some(emitter) = params.emitter
-                && let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name)
-            {
-                tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
+            let enforced_grants = match apply_admitted_grants(backend, &vm_id, &admitted) {
+                Ok(enforced) => enforced,
+                Err(err) => {
+                    // Undo the launch: a VM whose grants could not be applied is
+                    // running without the bounds it was admitted under, and
+                    // leaving it up would mean the only record of the run says
+                    // it was bounded.
+                    if let Err(stop_err) = backend.stop(&vm_id) {
+                        tracing::warn!(
+                            error = %stop_err,
+                            "stopping a VM whose grants could not be applied failed; \
+                             it may still be running"
+                        );
+                    }
+                    if let Some(emitter) = params.emitter
+                        && let Err(e) =
+                            emitter.emit_failed(admitted.plan(), "grants", &format!("{err:#}"))
+                    {
+                        tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+                    }
+                    return Err(err);
+                }
+            };
+            if let Some(emitter) = params.emitter {
+                if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
+                    tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
+                }
+                if let Err(e) = emitter.emit_grants_enforced(admitted.plan(), &enforced_grants) {
+                    tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");
+                }
             }
-            Ok(StartedMachine { vm_id, admitted })
+            Ok(StartedMachine {
+                vm_id,
+                admitted,
+                enforced_grants,
+            })
         }
         Err(err) => {
             if let Some(emitter) = params.emitter
@@ -2716,6 +2778,93 @@ mod tests {
             backend.status(&started.vm_id).unwrap(),
             mvm_core::vm_backend::VmStatus::Running
         ));
+    }
+
+    /// Every admitted boot leaves a record of what actually bounded it. Before
+    /// this, `apply_grants` was reachable only from a launch path with no
+    /// production implementation, so a real boot recorded nothing at all — and
+    /// a bound nobody reports is indistinguishable from a bound nobody applied.
+    #[test]
+    fn an_admitted_boot_records_the_tier_that_bounded_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-tiers".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let started = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-tiers"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: None,
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+            },
+        )
+        .expect("admit + boot");
+
+        // The mock bounds nothing, and says so rather than claiming a tier it
+        // has no mechanism for.
+        assert_eq!(started.enforced_grants, EnforcedGrants::all_declared());
+        assert!(!started.enforced_grants.cpu.is_enforced());
+    }
+
+    /// The achieved tier reaches the chain-signed log, not just the return
+    /// value — an operator answering "was this run bounded?" from the audit
+    /// trail alone must not have to take the caller's word for it.
+    #[test]
+    fn an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-tier-audit".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        let audit_dir = dir.path().join("audit");
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&seed),
+            &audit_dir,
+        )
+        .expect("emitter");
+
+        admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-tier-audit"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+            },
+        )
+        .expect("admit + boot");
+
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("chain written");
+        assert!(
+            chain.contains("plan.grants_enforced"),
+            "the achieved tier must be on the chain: {chain}"
+        );
+        assert!(
+            chain.contains("grants_cpu_tier"),
+            "the CPU dimension must be named: {chain}"
+        );
     }
 
     /// The end-to-end half of the tier question: `admit_and_start` holds the

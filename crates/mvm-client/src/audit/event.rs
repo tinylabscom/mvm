@@ -345,6 +345,7 @@ pub(crate) fn classify_lifecycle_event(event: &str) -> AuditEventKind {
         | "plan.verified"
         | "plan.boot_posture"
         | "plan.shares_admitted"
+        | "plan.grants_enforced"
         | "plan.oci_provenance" => AuditEventKind::Admission,
         "plan.policy_resolved" => AuditEventKind::Policy,
         "plan.exited" => AuditEventKind::Lifecycle,
@@ -579,6 +580,7 @@ mod tests {
             ("plan.oci_provenance", Admission),
             ("plan.boot_posture", Admission),
             ("plan.shares_admitted", Admission),
+            ("plan.grants_enforced", Admission),
             ("plan.policy_resolved", Policy),
             ("plan.failed", Refusal),
             ("plan.rejected.nonce_replay", Refusal),
