@@ -1,6 +1,7 @@
 //! Step definitions, one module per scenario surface.
 
 mod admission_audit;
+mod agent_session;
 mod apple_container;
 mod claim;
 pub(crate) mod cli;
@@ -10,6 +11,7 @@ mod initramfs;
 mod kernel_pin;
 mod l3_vsock;
 mod oci_unpack;
+mod policy_approval;
 mod readme_contract;
 mod runtime_overlay;
 mod sdk;

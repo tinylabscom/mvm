@@ -11,6 +11,24 @@ for detailed scope and acceptance criteria.
       structural parity coverage prevents the consumers from drifting apart.
 
 ## In-flight plans
+- [x] Plan 2167 — durable agent session and event contract
+      (`specs/plans/2167-agent-session-contract.md`)
+  - [x] Versioned public IDs, lifecycle commands, durable/ephemeral event
+        envelopes, typed errors, and bounded retention/cursor semantics
+  - [x] Idempotent prompt delivery, cancellation confirmation, restart replay,
+        and committed transcript/audit output references
+  - [x] Client/SDK re-exports, contract serialization/security tests, and
+        three non-`@wip` BDD scenarios
+
+- [x] Plan 2168 — unified runtime policy and human approval
+      (`specs/plans/2168-runtime-approval.md`)
+  - [x] Typed fail-closed policy evaluation requires signed admission and
+        applies deterministic specificity/priority/effect precedence
+  - [x] Approval requests, authorized first responses, expiry, cancellation,
+        replay, and terminal-state refusal share the durable agent-session
+        cursor
+  - [x] Bounded digest-only metadata, audit action mappings, client/SDK
+        re-exports, unit tests, and three non-`@wip` BDD scenarios
 
 - [~] Security lane mutation-witness repair — **issue #2135**
   - [x] Add direct witnesses for the security-sensitive admission,

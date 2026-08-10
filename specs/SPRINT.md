@@ -73,6 +73,26 @@
       but each role needs an audited seccomp allowlist validated on live Linux,
       which should follow the `feat/seccomp-audit` tooling.
 
+- [x] Durable agent session and event contract — **issue #2167**, plan
+      `specs/plans/2167-agent-session-contract.md`. Added the versioned
+      transport-neutral contract in `mvm-contract`, with strict public IDs,
+      lifecycle commands, durable/ephemeral event envelopes, bounded cursor
+      history, retention, idempotent retries, cancellation confirmation,
+      adapter-restart replay, and committed transcript/audit references.
+      Prompt and output bytes never enter durable history. `mvm-client` and
+      `mvm-sdk` re-export the shared surface. Serialization/security tests and
+      three non-`@wip` BDD scenarios pass.
+
+- [x] Unified runtime policy and human approval — **issue #2168**, plan
+      `specs/plans/2168-runtime-approval.md`. Added typed fail-closed policy
+      evaluation bound to signed admission, deterministic rule precedence,
+      digest-only approval metadata, and durable approval lifecycle events on
+      the agent-session cursor. Authorization, first-valid-response, expiry,
+      cancellation, replay, duplicate, and stale-response paths are covered
+      by contract tests and three non-`@wip` BDD scenarios. `mvm-client` and
+      `mvm-sdk` re-export the shared policy surface; existing network, secret,
+      sealed-production, guest, and command-gate enforcement remains in force.
+
 - [x] Kernel pin freshness — **issue #2128**. Synchronized the libkrunfw
       bundle and custom guest kernel on the verified Linux 6.12.102 LTS
       tarball, replacing the stale 6.12.100 pin. Structural parity tests keep

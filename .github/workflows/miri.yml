@@ -82,4 +82,4 @@ jobs:
         # `cargo test --workspace --doc` covers doctests natively in `ci.yml`.
         env:
           MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-ignore-leaks
-        run: cargo miri test -p mvm-contract --lib --tests -- --skip merkle::
+        run: 'cargo miri test -p mvm-contract --lib --tests -- --skip merkle::'
