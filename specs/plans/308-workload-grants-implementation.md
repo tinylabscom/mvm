@@ -1395,6 +1395,62 @@ git commit -m "docs: record cgroup v2 cpu-delegation findings for the grants pla
 
 ---
 
+### Task 8b: Wire the seams — the task that makes the rest real
+
+Tasks 1-7 built a ceiling nothing validates against, a seam nothing calls, and
+a refusal nobody implements. Until something calls them, this branch ships
+types that *describe* security properties without enforcing any of them —
+which is the exact defect this plan's own rationale indicts `exec_secs` for.
+This task closes that, and it deliberately comes before the Linux CPU
+mechanism: `apply_grants` has an honest `Declared` default, so the call sites
+can be wired and reviewed while the Linux implementation is still absent.
+
+**Files:**
+- Modify: `crates/mvm-hostd/src/plan_admission.rs` (`admit_for_run`, line 191)
+- Modify: `crates/mvm-hostd/src/supervisor/aggregate.rs` (`Supervisor::launch`, line 320)
+- Modify: `crates/mvm-core/src/user_config.rs` (ceiling keys)
+
+**Interfaces:**
+- Consumes: `GrantCeiling::admits` (Task 2), `network_policy_from_grants` (Task 3), `VmBackend::apply_grants` + `ResourceControls` + `EnforcedGrants` (Task 5), `CapabilityAlternative::CpuBudgetAsDeterministicFuel` (Task 7)
+- Produces: `AdmittedPlan` carrying the resolved `EnforcedGrants`; `admit_for_run` refusing a grant over ceiling; `--prod` refusing an unenforceable grant
+
+**The four wirings, each with its own witness:**
+
+1. **Ceiling at admission.** `admit_for_run` resolves a `GrantCeiling` from host
+   config — never from the plan, since the whole point is a separate trust
+   root — and refuses before signing. Refusing *before* the keystore is touched
+   matters: it keeps "signed a plan we would not admit" from being a reachable
+   state, which is the same ordering `admit_for_run` already uses for synthesis
+   failures.
+
+2. **`apply_grants` at launch.** `Supervisor::launch` calls it on the resolved
+   backend after the VM exists and records the returned `EnforcedGrants`. The
+   returned tiers — not the requested grants — are what any receipt or report
+   must carry.
+
+3. **`--prod` refuses an unenforceable grant.** Compare the resolved `Grants`
+   against the backend's `ResourceControls` *before* boot. A `cpu` grant on a
+   backend whose `CpuControl` is `None` is refused under `--prod` and warned
+   about in dev. This is the rule that keeps a `Declared` tier from silently
+   becoming the normal outcome — which matters more after Task 8's spike, since
+   `systemd-run --user` needs a session bus that a non-interactive `ssh host
+   mvmctl ...`, a CI runner, or a `nohup`'d process will not have.
+
+4. **`negotiate()` consulted for the CPU grant.** A `CpuGrant::Share` on the
+   wasm tier must come back as a `CapabilityGap` naming
+   `CpuBudgetAsDeterministicFuel`, at negotiation rather than at apply time.
+   Task 7 added the variant; nothing reaches it. `is_actionable()` currently has
+   no production caller at all — its only call site is a test.
+
+**Witnesses (each must fail if its wiring is removed):**
+- `admission_refuses_a_grant_over_the_ceiling`
+- `admission_refuses_before_signing` — assert no signature is produced on the
+  refusal path, not merely that an error is returned
+- `launch_records_the_enforced_tier_not_the_requested_grant`
+- `prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu`
+- `dev_warns_and_proceeds_on_the_same_input`
+- `share_grant_on_wasm_is_refused_at_negotiation_naming_fuel`
+
 ### Task 9: The CPU bound, via a systemd transient scope
 
 **Redesigned after Task 8's spike. Read `specs/plans/308-cgroup-delegation-findings.md`
