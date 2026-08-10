@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use http as mvm_header;
 use http::{HeaderMap, Method, StatusCode};
 
 use crate::error::{Error, Result};
@@ -133,7 +134,11 @@ pub struct RequestBuilder {
 
 impl RequestBuilder {
     #[must_use]
-    pub fn header(mut self, name: impl AsRef<str>, value: impl AsRef<str>) -> Self {
+    pub fn header<K, V>(mut self, name: K, value: V) -> Self
+    where
+        K: TryInto<mvm_header::HeaderName>,
+        V: TryInto<mvm_header::HeaderValue>,
+    {
         self.inner = self.inner.header(name, value);
         self
     }

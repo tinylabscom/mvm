@@ -46,7 +46,6 @@ rand.workspace = true
 secrecy.workspace = true
 uuid.workspace = true
 clap.workspace = true
-reqwest.workspace = true
 rustls.workspace = true
 libc.workspace = true
 serde.workspace = true

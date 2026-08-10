@@ -121,7 +121,17 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// also splits contention out of the error type (`TryLockError::WouldBlock`
 /// vs `::Error`), so "another process holds it" stops riding on an errno
 /// comparison.
-const CLOSURE_BUDGET: usize = 262;
+///
+/// 242 (was 262): `reqwest` is gone. Its last caller was `mvm-hostd`'s egress
+/// and SSRF-guarded fetch paths; with those on the in-house `mvm-http`, the
+/// whole hyper/tower stack leaves — `hyper`, `hyper-util`, `hyper-rustls`,
+/// `tower`, `tower-http`, `tower-service`, `http-body`, `http-body-util`, the
+/// `futures-*` set, `sync_wrapper`, `want`, `try-lock`, `atomic-waker`, and
+/// `slab`. `http`, `httparse`, `url`, `tokio-rustls`, and
+/// `rustls-platform-verifier` stay, because `mvm-http` uses them rather than
+/// hand-rolling header validation, head parsing, URL parsing, or trust-store
+/// handling. Measured net −20.
+const CLOSURE_BUDGET: usize = 242;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

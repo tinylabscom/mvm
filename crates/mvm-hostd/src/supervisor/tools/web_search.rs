@@ -150,7 +150,7 @@ impl SearchProvider for NoopSearchProvider {
 /// we need.
 pub struct BraveSearchProvider {
     api_key: SecretBox<String>,
-    client: reqwest::Client,
+    client: mvm_http::Client,
     endpoint: String,
 }
 
@@ -158,7 +158,7 @@ impl BraveSearchProvider {
     /// Canonical Brave Search API endpoint.
     pub const DEFAULT_ENDPOINT: &'static str = "https://api.search.brave.com/res/v1/web/search";
 
-    /// Build with the default endpoint + a hardened reqwest client
+    /// Build with the default endpoint + a hardened HTTP client
     /// (no-auto-redirect + SSRF-filtering resolver).
     /// `api_key` is the operator's `X-Subscription-Token` value
     /// wrapped in `SecretBox<String>` so it zeroizes on drop.
@@ -169,7 +169,7 @@ impl BraveSearchProvider {
     pub fn new(api_key: SecretBox<String>) -> Result<Self, SearchError> {
         let client = hardened_client_builder(15)
             .build()
-            .map_err(|e| SearchError::Upstream(format!("building reqwest client: {e}")))?;
+            .map_err(|e| SearchError::Upstream(format!("building HTTP client: {e}")))?;
         Ok(Self {
             api_key,
             client,
@@ -453,7 +453,7 @@ impl HostMediatedTool for WebSearchTool {
 /// agent surface stays uniform across providers.
 pub struct TavilySearchProvider {
     api_key: SecretBox<String>,
-    client: reqwest::Client,
+    client: mvm_http::Client,
     endpoint: String,
 }
 
@@ -466,13 +466,13 @@ impl TavilySearchProvider {
     /// plenty of headroom for the slow-tail case.
     const DEFAULT_TIMEOUT_SECS: u64 = 20;
 
-    /// Build with the default endpoint + a hardened reqwest client
+    /// Build with the default endpoint + a hardened HTTP client
     /// (no auto-redirect, SSRF-filtering resolver, zeroize-on-drop
     /// credential).
     pub fn new(api_key: SecretBox<String>) -> Result<Self, SearchError> {
         let client = hardened_client_builder(Self::DEFAULT_TIMEOUT_SECS)
             .build()
-            .map_err(|e| SearchError::Upstream(format!("building reqwest client: {e}")))?;
+            .map_err(|e| SearchError::Upstream(format!("building HTTP client: {e}")))?;
         Ok(Self {
             api_key,
             client,
@@ -575,7 +575,7 @@ impl SearchProvider for TavilySearchProvider {
 /// `X-Subscription-Token` header or Tavily's request-body field
 /// — URLs show up in:
 ///
-/// - `reqwest::Error::Display` formatting on network failures
+/// - `mvm_http::Error::Display` formatting on network failures
 ///   (the error string includes the requested URL with query
 ///   params).
 /// - Server access logs at the upstream (Google's own logs are
@@ -586,7 +586,7 @@ impl SearchProvider for TavilySearchProvider {
 ///
 /// 1. The constructed URL is never passed to `tracing` or audit
 ///    fields. The provider builds the URL inside `search()` via
-///    reqwest's `query()` helper and discards it after the send.
+///    the client's `query()` helper and discards it after the send.
 /// 2. Any error string surfaced upward goes through
 ///    `redact_credentials`, which replaces every occurrence of
 ///    the API key and CSE ID with `<REDACTED>`. The redacted
@@ -601,7 +601,7 @@ impl SearchProvider for TavilySearchProvider {
 pub struct GoogleSearchProvider {
     api_key: SecretBox<String>,
     cse_id: SecretBox<String>,
-    client: reqwest::Client,
+    client: mvm_http::Client,
     endpoint: String,
 }
 
@@ -614,7 +614,7 @@ impl GoogleSearchProvider {
     /// connections to occupy a tokio task.
     const DEFAULT_TIMEOUT_SECS: u64 = 15;
 
-    /// Build with the default endpoint + a fresh reqwest client.
+    /// Build with the default endpoint + a fresh HTTP client.
     /// Both `api_key` (your operator's Google Cloud API key) and
     /// `cse_id` (Custom Search Engine ID) are pinned inside the
     /// struct and consumed only by the HTTP send.
@@ -622,12 +622,12 @@ impl GoogleSearchProvider {
         // Hardened builder applies no-auto-redirect +
         // SSRF-filtering DNS resolver; both
         // credentials are held as `SecretBox<String>` so they
-        // zeroize on drop. The reqwest client can't be poisoned
+        // zeroize on drop. The HTTP client can't be poisoned
         // via DNS or chased to a non-Google host via 3xx, and the
         // bytes don't sit in freed memory after the provider drops.
         let client = hardened_client_builder(Self::DEFAULT_TIMEOUT_SECS)
             .build()
-            .map_err(|e| SearchError::Upstream(format!("building reqwest client: {e}")))?;
+            .map_err(|e| SearchError::Upstream(format!("building HTTP client: {e}")))?;
         Ok(Self {
             api_key,
             cse_id,
@@ -734,7 +734,7 @@ impl SearchProvider for GoogleSearchProvider {
             return Err(SearchError::RateLimited);
         }
         if !status.is_success() {
-            // Status messages from reqwest include the URL on some
+            // Status messages include the URL on some
             // error paths. Scrub defensively even though the
             // canonical "non-success" string here doesn't.
             return Err(SearchError::Upstream(self.redact_credentials(format!(
@@ -1380,7 +1380,7 @@ mod tests {
 
     #[tokio::test]
     async fn google_search_network_error_does_not_leak_api_key() {
-        // W5 end-to-end: point at an unreachable port so reqwest
+        // W5 end-to-end: point at an unreachable port so the client
         // returns a network error whose Display includes the URL
         // (which contains the API key). The provider must scrub
         // it before wrapping into SearchError::Upstream.

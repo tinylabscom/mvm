@@ -1,116 +1,91 @@
 //! Shared HTTP-client hardening for the search/fetch tools.
 //!
-//! Until this module existed, only [`crate::supervisor::tools::web_fetch::ReqwestHttpFetcher`]
-//! had the full hardening posture. Each search provider
-//! (`BraveSearchProvider`, `TavilySearchProvider`,
-//! `GoogleSearchProvider`) built its own bare `reqwest::Client` with
-//! `timeout` set but neither `Policy::none()` redirects nor any
-//! SSRF guarding — meaning DNS poisoning of `api.search.brave.com`
-//! to a private IP would have routed credentials at a local
-//! attacker.
+//! Before this module existed, each search provider built its own bare client
+//! with a timeout but neither a redirect policy nor any SSRF guarding — so
+//! poisoning DNS for `api.search.brave.com` to a private IP would have routed
+//! credentials at a local attacker.
 //!
-//! This module exports a [`hardened_client_builder`] that every
-//! reqwest-using tool surface goes through. It carries:
+//! Every HTTP-using tool surface goes through [`hardened_client_builder`],
+//! which carries:
 //!
-//! - **No auto-redirect**: `reqwest::redirect::Policy::none()`.
-//!   An upstream that responds 3xx surfaces the status code +
-//!   headers to the caller; nothing follows silently.
-//! - **SSRF / DNS-rebinding defense**: a
-//!   [`SsrfFilteringResolver`] that wraps the system resolver
-//!   ([`tokio::net::lookup_host`]) and discards every returned IP
-//!   that [`SsrfGuard::classify`] rejects — RFC1918, loopback,
-//!   link-local, cloud metadata (169.254.169.254), CGNAT,
-//!   IPv6 unique-local, etc. If *every* resolved IP is blocked,
-//!   `resolve()` returns an error mentioning the SSRF guard so
-//!   the operator sees the cause; if *any* IPs survive, only the
-//!   safe set is handed to reqwest.
-//! - **TLS 1.3 minimum**: `min_tls_version` pinned to
-//!   [`reqwest::tls::Version::TLS_1_3`]. TLS 1.2 is acceptable
-//!   today but only TLS 1.3 mandates forward secrecy on every
-//!   cipher suite, drops the static-RSA key-exchange escape
-//!   hatch, and removes the legacy MAC-then-encrypt construction.
-//!   All targeted upstreams (Brave / Tavily / Google /
-//!   OpenAI / Anthropic / Cloudflare / AWS / Azure / GCP) support
-//!   TLS 1.3; pinning the floor at 1.3 closes a downgrade vector
-//!   without breaking any legitimate operator workflow.
+//! - **No auto-redirect.** `mvm-http` never follows one, so this is an absence
+//!   rather than a setting. An upstream 3xx surfaces its status and headers to
+//!   the caller; nothing follows silently.
+//! - **SSRF / DNS-rebinding defence.** [`SsrfFilteringResolver`] wraps the
+//!   system resolver and discards every address [`SsrfGuard::classify`]
+//!   rejects — RFC1918, loopback, link-local, cloud metadata
+//!   (169.254.169.254), CGNAT, IPv6 unique-local. If every resolved address is
+//!   blocked, resolution fails with the guard named so an operator sees the
+//!   cause; if any survive, only the safe set is dialled. The client connects
+//!   solely to what the resolver returned, which is what closes the gap between
+//!   checking a host and connecting to it.
+//! - **TLS 1.3 floor.** Only 1.3 mandates forward secrecy on every cipher
+//!   suite, drops the static-RSA key exchange, and removes MAC-then-encrypt.
+//!   Every targeted upstream supports it, so pinning the floor closes a
+//!   downgrade vector without breaking an operator workflow.
 //!
-//! ## Difference from [`crate::supervisor::tools::web_fetch::ReqwestHttpFetcher`]'s pre-resolve
-//!
-//! The fetcher does a *separate* `tokio::net::lookup_host` in the
-//! tool layer before constructing the per-call client, and uses
-//! a `PinnedDnsResolver` that only knows the pre-validated IPs.
-//! That gives the clearest possible error message ("DNS for
-//! api.allowed.example resolves to blocked address(es)...") but
-//! requires a fresh client per fetch.
-//!
-//! Providers reuse one long-lived `reqwest::Client` per provider
-//! instance, so the lazy [`SsrfFilteringResolver`] is the right
-//! fit — DNS lookups happen during reqwest's connect phase and
-//! the filtering runs there too. The error message is slightly
-//! less specific (reqwest wraps the resolver error) but the
-//! security posture is the same.
+//! One resolver serves every caller. That was not previously possible: reqwest
+//! connects on the resolver's port rather than the URL's, and its `Resolve`
+//! trait is never handed the port, so the filtering resolver had to hardcode
+//! 443 and any caller forwarding to another port needed a second builder with
+//! no resolver plus a manual resolve-and-pin. `mvm_http::Resolve` receives
+//! `(host, port)`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::Once;
 use std::time::Duration;
 
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use mvm_http::resolve::Resolve;
 
 use crate::supervisor::ssrf_guard::SsrfGuard;
 
-/// Minimum TLS version every reqwest client here accepts.
+/// Minimum TLS version every client here accepts.
 /// Pinned at TLS 1.3 to mandate forward secrecy +
 /// AEAD-only ciphers + remove the static-RSA + MAC-then-encrypt
 /// legacy paths. All operator-likely upstreams support 1.3.
-pub const MIN_TLS_VERSION: reqwest::tls::Version = reqwest::tls::Version::TLS_1_3;
+pub const MIN_TLS_VERSION: mvm_http::TlsVersion = mvm_http::TlsVersion::Tls13;
 
-fn install_rustls_provider() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-}
-
-/// Build a `reqwest::ClientBuilder` pre-configured with the
-/// no-redirect, SSRF-filtering, and TLS-1.3-floor hardening. Callers
-/// add their own per-tool config (headers, user-agent, etc.) before
-/// `.build()`.
-pub fn hardened_client_builder(timeout_secs: u64) -> reqwest::ClientBuilder {
-    install_rustls_provider();
-    reqwest::Client::builder()
+/// Build a client pre-configured with the SSRF-filtering resolver and the
+/// TLS-1.3 floor. Callers add their own per-tool config (headers, user-agent)
+/// before `.build()`. Redirects are not a setting: `mvm-http` never follows
+/// them.
+///
+/// There is one builder now. There used to be two, because reqwest connects on
+/// the *resolver's* port rather than the URL's and its `Resolve` trait is never
+/// handed the port — so an SSRF-filtering resolver had to hardcode 443, and
+/// anything forwarding to another port needed a second, resolver-less builder
+/// plus a manual resolve-and-pin dance. `mvm_http::Resolve` receives
+/// `(host, port)`, so the filtering resolver is port-correct and the split is
+/// gone.
+pub fn hardened_client_builder(timeout_secs: u64) -> mvm_http::ClientBuilder {
+    mvm_http::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
-        .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(Arc::new(SsrfFilteringResolver))
+        .resolver(Arc::new(SsrfFilteringResolver))
         .min_tls_version(MIN_TLS_VERSION)
 }
 
-/// reqwest `Resolve` impl that delegates to the system resolver
-/// and filters every returned IP through
-/// [`SsrfGuard::classify`]. Stateless — one instance per program
-/// is fine.
+/// Resolver that delegates to the system resolver and filters every returned
+/// IP through [`SsrfGuard::classify`]. Stateless — one instance per program is
+/// fine.
+///
+/// The client dials **only** what this returns, which is what makes it the
+/// chokepoint rather than an advisory check, and closes the window between
+/// checking a host and connecting to it.
 #[derive(Debug, Default)]
 pub struct SsrfFilteringResolver;
 
 impl Resolve for SsrfFilteringResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let host = name.as_str().to_string();
+    fn resolve(
+        &self,
+        host: String,
+        port: u16,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>>
+    {
         Box::pin(async move {
-            // ⚠️ reqwest connects on the **resolver's** SocketAddr port, NOT
-            // the URL's — so this 443 forces every request through HTTPS:443.
-            // Fine for the HTTPS-only callers (web_fetch, host tools), but it
-            // breaks plain `http` (the request hits :443 → "plain HTTP request
-            // was sent to HTTPS port"). HTTP/arbitrary-port callers must use
-            // `resolve_ssrf_safe_ips` + `hardened_client_builder_no_dns` +
-            // `resolve_to_addrs` instead (the `Resolve` trait never sees the
-            // port, so a custom resolver cannot be port-correct).
-            let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 443u16))
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+            let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+                .await?
                 .collect();
-            let filtered = filter_ssrf_addrs(resolved)
-                .map_err(|msg| -> Box<dyn std::error::Error + Send + Sync> { msg.into() })?;
-            Ok(Box::new(filtered.into_iter()) as Addrs)
+            filter_ssrf_addrs(resolved).map_err(std::io::Error::other)
         })
     }
 }
@@ -123,9 +98,9 @@ impl Resolve for SsrfFilteringResolver {
 /// expose the supervisor to "send-gigabytes-of-JSON" DoS.
 pub const DEFAULT_RESPONSE_BODY_CAP: usize = 1 << 20;
 
-/// Read a `reqwest::Response`'s body, refusing to accumulate more
+/// Read a response body, refusing to accumulate more
 /// than `max_bytes`. Implementation mirrors
-/// [`crate::supervisor::tools::web_fetch::ReqwestHttpFetcher`]'s chunk loop —
+/// the fetcher's chunk loop —
 /// the cap is enforced *before* a chunk that would overflow lands
 /// in the accumulator, so the returned `Vec<u8>` is exactly
 /// `≤ max_bytes` on success.
@@ -134,7 +109,7 @@ pub const DEFAULT_RESPONSE_BODY_CAP: usize = 1 << 20;
 /// upstream wanted to send more. Callers wrap the string into their
 /// own provider-specific error type.
 pub async fn read_capped(
-    mut response: reqwest::Response,
+    mut response: mvm_http::Response,
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
     let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
@@ -185,43 +160,6 @@ pub fn filter_ssrf_addrs(
     Ok(safe)
 }
 
-/// Resolve `host` to its SSRF-safe IP addresses (the IPs only — no port). The
-/// caller pins these to the request's **actual** port (see
-/// [`hardened_client_builder_no_dns`] + `resolve_to_addrs`).
-///
-/// This exists because the [`SsrfFilteringResolver`] above hardcodes port 443
-/// (the `Resolve` trait only hands the resolver the host, never the port), and
-/// reqwest connects on the *resolver's* port — so a plain-`http` forward would
-/// hit the destination's HTTPS port (`400 "plain HTTP request was sent to HTTPS
-/// port"`). Callers that forward to arbitrary URL ports resolve here, then pin
-/// the safe IPs on the URL's real port, keeping SSRF filtering without the port
-/// bug. Errors when the host doesn't resolve or every address is SSRF-blocked.
-pub async fn resolve_ssrf_safe_ips(host: &str) -> Result<Vec<std::net::IpAddr>, String> {
-    // The port handed to `lookup_host` is irrelevant — we keep only the IPs.
-    let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, 0u16))
-        .await
-        .map_err(|e| format!("resolving {host}: {e}"))?
-        .collect();
-    Ok(filter_ssrf_addrs(resolved)?
-        .into_iter()
-        .map(|sa| sa.ip())
-        .collect())
-}
-
-/// A hardened reqwest builder (no-redirect + TLS-1.3 floor + timeout)
-/// **without** the port-hardcoding [`SsrfFilteringResolver`]. Pair it with
-/// `.resolve_to_addrs(host, &[ip:url_port, …])` built from
-/// [`resolve_ssrf_safe_ips`] so SSRF filtering survives while the connection
-/// uses the URL's real port. Use this (not [`hardened_client_builder`]) when the
-/// forward target may be plain `http`.
-pub fn hardened_client_builder_no_dns(timeout_secs: u64) -> reqwest::ClientBuilder {
-    install_rustls_provider();
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .redirect(reqwest::redirect::Policy::none())
-        .min_tls_version(MIN_TLS_VERSION)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,7 +201,7 @@ mod tests {
         // public one survives; the private is silently dropped.
         // (Defense in depth — we don't fail the whole call just
         // because one of several IPs is bad. The audit signal lives
-        // at the per-call layer in ReqwestHttpFetcher, not here.)
+        // at the per-call layer in HardenedHttpFetcher, not here.)
         let out = filter_ssrf_addrs([sa([8, 8, 8, 8], 443), sa([10, 0, 0, 1], 443)]).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].ip(), IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
@@ -272,7 +210,7 @@ mod tests {
     #[test]
     fn filter_passes_empty_input() {
         // An empty resolution result isn't a security failure; let
-        // reqwest surface "no addresses" through its own error path.
+        // the client surfaces "no addresses" through its own error path.
         let out = filter_ssrf_addrs(std::iter::empty()).unwrap();
         assert!(out.is_empty());
     }
@@ -292,7 +230,7 @@ mod tests {
         // future refactor that loosens it (e.g. for a one-off legacy
         // upstream) needs to flip this assertion explicitly. The pin
         // keeps the hardening posture visible from a one-line grep.
-        assert_eq!(MIN_TLS_VERSION, reqwest::tls::Version::TLS_1_3);
+        assert_eq!(MIN_TLS_VERSION, mvm_http::TlsVersion::Tls13);
     }
 
     // ──────────────────────────────────────────────────────────────

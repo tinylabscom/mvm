@@ -2,7 +2,7 @@
 //! against the local trust store.
 //!
 //! `SOURCE` is either a path on disk or an `https://` URL. HTTPS
-//! downloads use the workspace's existing reqwest-blocking helper
+//! downloads use the workspace's existing blocking HTTP helper
 //! ([`crate::http::download_file`]) with the system trust store
 //! via rustls + webpki-roots. Plain `http://` URLs are refused by
 //! default — the trust model (Ed25519 signature) catches a tampered

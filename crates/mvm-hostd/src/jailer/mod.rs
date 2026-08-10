@@ -59,7 +59,7 @@ impl ConfinementSpec {
     ///
     /// `readable_paths` covers the secret + binding stores (resolved by the
     /// caller exactly as `assemble` does — config override or `~/.mvm`
-    /// default) plus the TLS root + DNS resolver files the reqwest
+    /// default) plus the TLS root + DNS resolver files the HTTP
     /// (`rustls-native-certs`) forward leg reads PER REQUEST during `serve`,
     /// so they must stay readable AFTER confinement. The audit recorder reads
     /// the signer key (`keys_dir`) and appends the chain-signed substitution log
@@ -113,7 +113,7 @@ impl ConfinementSpec {
         #[cfg(not(target_os = "linux"))]
         let allowed_syscalls: Vec<&'static str> = Vec::new();
 
-        // The forward leg uses reqwest's rustls-tls backend, which loads the
+        // The forward leg uses mvm-http's rustls backend, which loads the
         // host's native root store (rustls-native-certs reads /etc/ssl/certs +
         // /etc/pki/tls). DNS goes through getaddrinfo (resolv.conf / hosts /
         // nsswitch). These are read per request during serve, so they must be

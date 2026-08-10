@@ -7,7 +7,7 @@
 //! chunk-loop accumulator: it must enforce the `max_bytes` cap
 //! *before* a chunk that would overflow lands in the accumulator.
 //!
-//! The fixtures use a plain `reqwest::Client` (no hardening). The
+//! The fixtures use a plain `mvm_http::Client` (no hardening). The
 //! resolver and TLS pin are not part of `read_capped`'s contract —
 //! that responsibility lives in `hardened_client_builder`, exercised
 //! by the inline unit tests in `http_hardening.rs`.
@@ -43,7 +43,7 @@ async fn fetch_from_test_server(
 ) -> Result<Vec<u8>, String> {
     let port = spawn_one_shot_server(response_body).await;
     install_rustls_provider();
-    let client = reqwest::Client::builder()
+    let client = mvm_http::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();

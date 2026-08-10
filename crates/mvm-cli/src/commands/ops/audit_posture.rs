@@ -412,7 +412,7 @@ fn check_tls_minimum() -> PostureCheck {
     // visible report mentioning it adds confidence.
     let v = mvm_hostd::supervisor::tools::http_hardening::MIN_TLS_VERSION;
     let detail = format!("pinned to {v:?} (plan 65 W7)");
-    if v == reqwest::tls::Version::TLS_1_3 {
+    if v == mvm_http::TlsVersion::Tls13 {
         PostureCheck {
             name: "tls_minimum",
             status: PostureStatus::Ok,
@@ -422,7 +422,7 @@ fn check_tls_minimum() -> PostureCheck {
         PostureCheck {
             name: "tls_minimum",
             status: PostureStatus::Fail,
-            detail: format!("{detail} — expected TLS_1_3, hardening regressed"),
+            detail: format!("{detail} — expected Tls13, hardening regressed"),
         }
     }
 }
@@ -593,10 +593,8 @@ mod tests {
     fn tls_minimum_check_passes_when_pinned_at_1_3() {
         let check = check_tls_minimum();
         assert_eq!(check.status, PostureStatus::Ok);
-        // reqwest's Debug formatting renders TLS 1.3 as
-        // `Version(Tls1_3)` — pin against that substring rather
-        // than the constant name.
-        assert!(check.detail.contains("Tls1_3"), "{}", check.detail);
+        // `mvm_http::TlsVersion`'s Debug renders as `Tls13`.
+        assert!(check.detail.contains("Tls13"), "{}", check.detail);
         assert!(check.detail.contains("W7"), "{}", check.detail);
     }
 

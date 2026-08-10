@@ -278,24 +278,30 @@ pub struct RequestBuilder {
 
 impl RequestBuilder {
     #[must_use]
-    pub fn header(mut self, name: impl AsRef<str>, value: impl AsRef<str>) -> Self {
-        let (name, value) = (name.as_ref(), value.as_ref());
-        match (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(value),
-        ) {
+    /// Set a header.
+    ///
+    /// Generic over both parts so a caller holding already-typed
+    /// `HeaderName`/`HeaderValue` (a forwarding proxy, say) passes them
+    /// straight through, while string callers still work. Conversion failure —
+    /// which is what rejects the control characters behind response splitting —
+    /// is recorded and surfaces at `send`.
+    pub fn header<K, V>(mut self, name: K, value: V) -> Self
+    where
+        K: TryInto<HeaderName>,
+        V: TryInto<HeaderValue>,
+    {
+        match (name.try_into(), value.try_into()) {
             (Ok(n), Ok(v)) => {
                 self.headers.insert(n, v);
             }
             _ => {
                 self.error
-                    .get_or_insert_with(|| Error::Header(format!("{name}: {value}")));
+                    .get_or_insert_with(|| Error::Header("invalid header name or value".into()));
             }
         }
         self
     }
 
-    #[must_use]
     pub fn headers(mut self, h: HeaderMap) -> Self {
         self.headers.extend(h);
         self

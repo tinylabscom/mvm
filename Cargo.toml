@@ -233,13 +233,11 @@ clap = { version = "4", default-features = false, features = [
 ] }
 clap_mangen = "0.2"
 
-# HTTP client (for CLI upgrade)
-reqwest = { version = "0.13", features = ["blocking", "json", "rustls-no-provider"], default-features = false }
 
 # Plan 129 Stage 2 — the egress terminator's server-side TLS (terminate the
 # guest's https to bound hosts under the per-VM name-constrained intermediate).
-# `ring` backend (matches reqwest's rustls-tls + rcgen), no aws-lc-rs/cmake.
-# Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
+# `ring` backend (matches rcgen), no aws-lc-rs/cmake. Direct dep of mvm-hostd
+# only; the upstream re-origination leg goes through mvm-http.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # Signal handling

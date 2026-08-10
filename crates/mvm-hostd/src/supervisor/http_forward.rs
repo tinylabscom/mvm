@@ -9,8 +9,8 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use mvm_http::header::{HeaderName, HeaderValue};
 use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
-use reqwest::header::{HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[cfg(target_os = "linux")]
@@ -353,24 +353,23 @@ async fn send_host_request(
     admitted_ips: &[IpAddr],
     admitted_port: u16,
     timeout: Duration,
-) -> std::io::Result<reqwest::Response> {
-    let mut builder = reqwest::Client::builder()
-        .no_proxy()
-        .no_gzip()
-        .no_brotli()
-        .no_zstd()
-        .no_deflate()
-        .connect_timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none());
+) -> std::io::Result<mvm_http::Response> {
+    // No proxy and no compression: mvm-http supports neither, so what used to
+    // be five explicit "turn this off" calls is now their absence.
+    let mut builder = mvm_http::Client::builder().connect_timeout(timeout);
     if request.host.parse::<IpAddr>().is_err() {
         let socket_addrs: Vec<SocketAddr> = admitted_ips
             .iter()
             .map(|ip| SocketAddr::new(*ip, admitted_port))
             .collect();
-        builder = builder.resolve_to_addrs(&request.host, &socket_addrs);
+        // Only the admitted addresses are dialled; the client never resolves
+        // the host itself, so admission cannot be bypassed by a second lookup.
+        builder = builder.resolver(std::sync::Arc::new(
+            mvm_http::PinnedResolver::new().with(&request.host, socket_addrs),
+        ));
     }
     let client = builder.build().map_err(other)?;
-    let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(invalid_input)?;
+    let method = mvm_http::Method::from_bytes(request.method.as_bytes()).map_err(invalid_input)?;
     let mut req = client.request(method, request.url.clone());
     for (name, value) in &request.headers {
         req = req.header(name.clone(), value.clone());
@@ -388,24 +387,23 @@ fn send_host_request_blocking(
     admitted_ips: &[IpAddr],
     admitted_port: u16,
     timeout: Duration,
-) -> std::io::Result<reqwest::blocking::Response> {
-    let mut builder = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .no_gzip()
-        .no_brotli()
-        .no_zstd()
-        .no_deflate()
-        .connect_timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none());
+) -> std::io::Result<mvm_http::blocking::Response> {
+    // No proxy and no compression: mvm-http supports neither, so what used to
+    // be five explicit "turn this off" calls is now their absence.
+    let mut builder = mvm_http::blocking::Client::builder().connect_timeout(timeout);
     if request.host.parse::<IpAddr>().is_err() {
         let socket_addrs: Vec<SocketAddr> = admitted_ips
             .iter()
             .map(|ip| SocketAddr::new(*ip, admitted_port))
             .collect();
-        builder = builder.resolve_to_addrs(&request.host, &socket_addrs);
+        // Only the admitted addresses are dialled; the client never resolves
+        // the host itself, so admission cannot be bypassed by a second lookup.
+        builder = builder.resolver(std::sync::Arc::new(
+            mvm_http::PinnedResolver::new().with(&request.host, socket_addrs),
+        ));
     }
     let client = builder.build().map_err(other)?;
-    let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(invalid_input)?;
+    let method = mvm_http::Method::from_bytes(request.method.as_bytes()).map_err(invalid_input)?;
     let mut req = client.request(method, request.url.clone());
     for (name, value) in &request.headers {
         req = req.header(name.clone(), value.clone());
@@ -418,7 +416,7 @@ fn send_host_request_blocking(
 
 async fn write_upstream_response_async<W>(
     guest: &mut W,
-    mut response: reqwest::Response,
+    mut response: mvm_http::Response,
     request_method: &str,
 ) -> std::io::Result<()>
 where
@@ -444,7 +442,7 @@ where
 #[cfg(target_os = "linux")]
 fn write_upstream_response_blocking<W>(
     guest: &mut W,
-    mut response: reqwest::blocking::Response,
+    mut response: mvm_http::blocking::Response,
     request_method: &str,
 ) -> std::io::Result<()>
 where
@@ -472,8 +470,8 @@ where
 
 async fn write_response_head_async<W>(
     guest: &mut W,
-    status: reqwest::StatusCode,
-    headers: &reqwest::header::HeaderMap,
+    status: mvm_http::StatusCode,
+    headers: &mvm_http::header::HeaderMap,
     chunk_response: bool,
 ) -> std::io::Result<()>
 where
@@ -502,8 +500,8 @@ where
 #[cfg(target_os = "linux")]
 fn write_response_head_blocking<W>(
     guest: &mut W,
-    status: reqwest::StatusCode,
-    headers: &reqwest::header::HeaderMap,
+    status: mvm_http::StatusCode,
+    headers: &mvm_http::header::HeaderMap,
     chunk_response: bool,
 ) -> std::io::Result<()>
 where
@@ -591,9 +589,9 @@ where
     guest.flush()
 }
 
-fn connection_tokens(headers: &reqwest::header::HeaderMap) -> Vec<String> {
+fn connection_tokens(headers: &mvm_http::header::HeaderMap) -> Vec<String> {
     headers
-        .get_all(reqwest::header::CONNECTION)
+        .get_all(mvm_http::header::CONNECTION)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
@@ -612,18 +610,18 @@ fn should_strip_response_header(name: &str, connection_tokens: &[String]) -> boo
 
 fn should_chunk_response_body(
     request_method: &str,
-    status: reqwest::StatusCode,
-    headers: &reqwest::header::HeaderMap,
+    status: mvm_http::StatusCode,
+    headers: &mvm_http::header::HeaderMap,
 ) -> bool {
     !request_method.eq_ignore_ascii_case("HEAD")
         && response_status_allows_body(status)
-        && !headers.contains_key(reqwest::header::CONTENT_LENGTH)
+        && !headers.contains_key(mvm_http::header::CONTENT_LENGTH)
 }
 
-fn response_status_allows_body(status: reqwest::StatusCode) -> bool {
+fn response_status_allows_body(status: mvm_http::StatusCode) -> bool {
     !status.is_informational()
-        && status != reqwest::StatusCode::NO_CONTENT
-        && status != reqwest::StatusCode::NOT_MODIFIED
+        && status != mvm_http::StatusCode::NO_CONTENT
+        && status != mvm_http::StatusCode::NOT_MODIFIED
 }
 
 fn is_static_hop_by_hop_header(name: &str) -> bool {
@@ -708,40 +706,40 @@ mod tests {
 
     #[test]
     fn chunk_response_body_only_when_length_missing_and_body_allowed() {
-        let mut headers = reqwest::header::HeaderMap::new();
+        let mut headers = mvm_http::header::HeaderMap::new();
         assert!(should_chunk_response_body(
             "GET",
-            reqwest::StatusCode::OK,
+            mvm_http::StatusCode::OK,
             &headers
         ));
         headers.insert(
-            reqwest::header::CONTENT_LENGTH,
+            mvm_http::header::CONTENT_LENGTH,
             HeaderValue::from_static("2"),
         );
         assert!(!should_chunk_response_body(
             "GET",
-            reqwest::StatusCode::OK,
+            mvm_http::StatusCode::OK,
             &headers
         ));
         headers.clear();
         assert!(!should_chunk_response_body(
             "HEAD",
-            reqwest::StatusCode::OK,
+            mvm_http::StatusCode::OK,
             &headers
         ));
         assert!(!should_chunk_response_body(
             "GET",
-            reqwest::StatusCode::NO_CONTENT,
+            mvm_http::StatusCode::NO_CONTENT,
             &headers
         ));
     }
 
     #[tokio::test]
     async fn response_head_writes_explicit_chunked_framing_when_length_missing() {
-        let headers = reqwest::header::HeaderMap::new();
+        let headers = mvm_http::header::HeaderMap::new();
         let (mut client, mut server) = tokio::io::duplex(512);
         let task = tokio::spawn(async move {
-            write_response_head_async(&mut server, reqwest::StatusCode::OK, &headers, true)
+            write_response_head_async(&mut server, mvm_http::StatusCode::OK, &headers, true)
                 .await
                 .unwrap();
             server.shutdown().await.unwrap();
