@@ -1395,19 +1395,61 @@ git commit -m "docs: record cgroup v2 cpu-delegation findings for the grants pla
 
 ---
 
-### Task 9: The cgroup writer, born-into not moved-into
+### Task 9: The CPU bound, via a systemd transient scope
 
-A cgroup applied after the VMM is running leaves a window in which the
-workload is uncapped, and a workload built to burn CPU will use exactly that
-window. The process must be *born* into the cgroup.
+**Redesigned after Task 8's spike. Read `specs/plans/308-cgroup-delegation-findings.md`
+before starting.** The original design — `mkdir` a leaf under
+`user@<uid>.service` and migrate the VMM into it — does not work unprivileged,
+and the reason is not the one the plan assumed. The `cpu` controller *is*
+delegated and `cpu.max` *is* writable. What fails is the **migration**: cgroup
+v2 requires write access to the common ancestor of a process's current cgroup
+and its destination, and a login session's `session-N.scope` is `Delegate=no`.
+So a process launched from any normal shell cannot move itself into the
+delegated subtree.
+
+`systemd-run --user --scope -p CPUQuota=<n>%` sidesteps this because the
+user's own `systemd --user` manager performs the placement from *inside* the
+delegated tree. Measured on the spike box: 1.495 cores against a 1.5-core
+target, with `nr_throttled` confirming the kernel was actively throttling.
+
+This also settles the born-into-the-cgroup requirement for free, and that is
+worth stating rather than leaving implicit: systemd creates the scope and
+*then* spawns the payload inside it, so there is no interval in which the
+workload runs uncapped. The original design needed `CLONE_INTO_CGROUP` to
+achieve the same property by hand.
 
 **Files:**
-- Create: `crates/mvm-hostd/src/cgroup.rs`
+- Create: `crates/mvm-hostd/src/cpu_scope.rs`
 - Modify: `crates/mvm-hostd/src/lib.rs` (module decl)
 
 **Interfaces:**
 - Consumes: `CpuGrant` (Task 1); `EnforcedTier` (Task 5)
-- Produces: `CgroupLeaf::create(machine_id: &str) -> Result<CgroupLeaf>`; `CgroupLeaf::set_cpu_share(&self, millicores: u32) -> Result<EnforcedTier>`; `CgroupLeaf::fd(&self) -> BorrowedFd<'_>` for `CLONE_INTO_CGROUP`; `CgroupLeaf::read_cpu_max(&self) -> Result<String>`
+- Produces: `scope_name(machine_id: &str) -> String`; `validate_scope_id(id: &str) -> Result<()>`; `cpu_quota_percent(millicores: u32) -> Result<u32>`; `wrap_spawn(cmd: Command, machine_id: &str, millicores: u32) -> Result<Command>` (returns the `systemd-run`-wrapped command); `read_back_tier(machine_id: &str) -> Result<EnforcedTier>`
+
+**Design points the implementer must honour:**
+
+- **Wrap the spawn, do not move the process.** Where a backend spawns its VMM
+  today, the argv becomes `systemd-run --user --scope --quiet --unit
+  <scope_name> -p CPUQuota=<n>% -- <original argv>`. Shelling out to
+  `systemd-run` rather than adding a D-Bus client keeps the dependency budget
+  where the project wants it; the same placement is achieved either way.
+- **Percent, not millicores, is systemd's unit.** 1500 millicores is
+  `CPUQuota=150%`. Refuse a zero quota rather than emitting `0%`, which would
+  mean something other than "unbounded".
+- **The scope name derives from the validated machine ID**, never a
+  user-supplied string — a crafted unit name is the same class of hazard as a
+  crafted cgroup path.
+- **Fail honestly when the mechanism is absent.** `systemd-run` may be missing,
+  and a user session bus (`XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS`) may
+  not exist in a headless daemon context — the spike showed the session is what
+  delegation hangs off. Detect both and return `EnforcedTier::Declared` rather
+  than failing the boot, except under `--prod`, which refuses an unenforceable
+  grant.
+- **Read back, do not assume.** Confirm the achieved tier by reading the
+  scope's `cpu.max` (resolve its cgroup path via `systemctl --user show
+  <scope> -p ControlGroup`), not by trusting that the spawn succeeded. Verify
+  the exact property name and path shape on the spike box rather than
+  guessing.
 
 - [ ] **Step 1: Write the failing tests**
 

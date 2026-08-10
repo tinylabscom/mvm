@@ -256,8 +256,8 @@ cheapest and most rigorous, not the one where it is hardest.
       chosen here rather than discovered during implementation.
 
 - [ ] **WS4 — Linux CPU quota, wall clock, admission budget.**
-      cgroup v2 `cpu.max` via unprivileged user delegation under
-      `user@$UID.service` — no `sudo`. Cgroup leaf name derives from the
+      A systemd transient scope via `systemd-run --user` (redesigned after the
+      WS4.0 spike: raw cgroup migration fails unprivileged because a login
       validated machine ID, never a user-supplied string; the delegated
       subtree is opened once `O_DIRECTORY` with `openat`-relative writes.
 
