@@ -12,6 +12,7 @@ use std::path::Path;
 use std::ptr::NonNull;
 
 use super::HvfError;
+use zeroize::Zeroize;
 
 /// Apple-silicon hypervisor page size; `hv_vm_map` and `MAP_FIXED` sub-maps
 /// must stay aligned to this boundary.
@@ -69,26 +70,7 @@ impl GuestRam {
     /// same region after selected pages have been written.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn resident_bytes(&self) -> Result<usize, std::io::Error> {
-        let raw_page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        let page_size = usize::try_from(raw_page_size)
-            .map_err(|_| std::io::Error::other("system page size is invalid"))?;
-        if page_size == 0 {
-            return Err(std::io::Error::other("system page size is zero"));
-        }
-        let page_count = self.len.div_ceil(page_size);
-        let mut residency = vec![0_u8; page_count];
-        // SAFETY: the mapping is live for `self`'s lifetime, `self.len` is its
-        // exact mapped length, and `residency` has one byte per system page.
-        let result = unsafe {
-            libc::mincore(
-                self.ptr.as_ptr().cast(),
-                self.len,
-                residency.as_mut_ptr().cast(),
-            )
-        };
-        if result != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        let (page_size, residency) = self.page_residency()?;
         residency
             .iter()
             .filter(|state| **state & 1 != 0)
@@ -115,6 +97,76 @@ impl GuestRam {
             core::ptr::copy(bytes.as_ptr(), self.as_ptr(), self.len);
         }
         Ok(())
+    }
+
+    /// Overwrite resident pages in the mapping before it is released.
+    ///
+    /// This is intentionally separate from construction: demand-zero
+    /// allocation must not fault in every page, while teardown must not leave
+    /// guest runtime data in a host mapping that can be reused.
+    fn zeroize_mapping(&mut self) {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Ok((page_size, residency)) = self.page_residency() {
+            for (index, state) in residency.iter().enumerate() {
+                if state & 1 == 0 {
+                    continue;
+                }
+                let offset = index * page_size;
+                let len = page_size.min(self.len - offset);
+                // SAFETY: `offset` comes from the mapping's page count and
+                // `len` is clipped to the exact mapping length.
+                unsafe {
+                    std::slice::from_raw_parts_mut(self.as_ptr().add(offset), len).zeroize();
+                }
+            }
+        } else {
+            self.zeroize_all();
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        self.zeroize_all();
+
+        // Discard clean anonymous and private-COW pages after scrubbing the
+        // resident pages. Anonymous pages will be zero-filled if faulted
+        // again; private file-backed pages revert to their source file.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        unsafe {
+            let _ = libc::madvise(self.as_ptr().cast(), self.len, libc::MADV_DONTNEED);
+        }
+    }
+
+    fn zeroize_all(&mut self) {
+        // SAFETY: the mapping is live for `self`'s lifetime and covers exactly
+        // `self.len` writable bytes. Private file-backed subranges remain
+        // private, so scrubbing them cannot modify the snapshot file.
+        unsafe {
+            std::slice::from_raw_parts_mut(self.as_ptr(), self.len).zeroize();
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn page_residency(&self) -> Result<(usize, Vec<u8>), std::io::Error> {
+        let raw_page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page_size = usize::try_from(raw_page_size)
+            .map_err(|_| std::io::Error::other("system page size is invalid"))?;
+        if page_size == 0 {
+            return Err(std::io::Error::other("system page size is zero"));
+        }
+        let page_count = self.len.div_ceil(page_size);
+        let mut residency = vec![0_u8; page_count];
+        // SAFETY: the mapping is live for `self`'s lifetime, `self.len` is its
+        // exact mapped length, and `residency` has one byte per system page.
+        let result = unsafe {
+            libc::mincore(
+                self.ptr.as_ptr().cast(),
+                self.len,
+                residency.as_mut_ptr().cast(),
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((page_size, residency))
     }
 
     /// Replace the complete RAM mapping with a private file-backed mapping.
@@ -202,6 +254,7 @@ pub(crate) fn page_rounded_len(len: usize) -> Result<usize, HvfError> {
 
 impl Drop for GuestRam {
     fn drop(&mut self) {
+        self.zeroize_mapping();
         // SAFETY: ptr/len come from a successful mmap in new() and are unmapped
         // exactly once, here.
         unsafe {
@@ -287,6 +340,14 @@ mod tests {
     }
 
     #[test]
+    fn zeroize_mapping_clears_guest_runtime_bytes() {
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).expect("mmap");
+        ram.copy_at(0, &[0xa5; HVF_PAGE_SIZE * 2]).unwrap();
+        ram.zeroize_mapping();
+        assert!(ram.snapshot_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
     fn private_file_mapping_copies_on_guest_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ram.bin");
@@ -298,6 +359,7 @@ mod tests {
         assert_eq!(ram.snapshot_bytes(), original);
         ram.copy_at(0, b"child").unwrap();
         assert_eq!(&ram.snapshot_bytes()[..5], b"child");
+        ram.zeroize_mapping();
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
