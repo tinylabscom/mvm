@@ -491,6 +491,20 @@ pub struct VmCapabilities {
     /// non-prod, non-sealed; the virtiofs-root dev path carries a weaker
     /// integrity contract and does **not** witness the verified-boot claim.
     pub virtiofs_root: bool,
+    /// Which resource dimensions this backend can actually bound. Declared
+    /// separately from what a caller requests so a refusal can name the gap.
+    #[serde(default = "default_resource_controls")]
+    pub resource_controls: crate::protocol::resource_controls::ResourceControls,
+}
+
+fn default_resource_controls() -> crate::protocol::resource_controls::ResourceControls {
+    use crate::protocol::resource_controls::{CpuControl, ResourceControls, WallClockControl};
+    // The safe default is "enforces nothing", so an unset value understates
+    // rather than overstates what a backend does.
+    ResourceControls {
+        cpu: CpuControl::None,
+        wall_clock: WallClockControl::None,
+    }
 }
 
 /// The capabilities a run/plan requires from its backend.

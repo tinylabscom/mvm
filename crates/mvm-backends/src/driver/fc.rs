@@ -22,8 +22,8 @@ use mvm_agentd::vsock::{
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
-    VmId, VmStatus,
+    ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
+    VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
@@ -568,6 +568,9 @@ impl VmmDriver for FcDriver {
             l3_vsock: true,
             balloon: true,
             fs_quick_checkpoint: false,
+            // Named explicitly: the per-VM supervisor process backing this
+            // VMM is cgroup-able, unlike the all-`None` struct-update default.
+            resource_controls: ResourceControls::for_backend(BackendKind::Firecracker),
             ..VmCapabilities::default()
         }
     }

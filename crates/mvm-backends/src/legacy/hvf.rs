@@ -22,8 +22,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::config::{vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, ResourceControls,
+    SnapshotCapability, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig,
+    VmStatus,
 };
 use mvm_vmm::host::hvf_supervisor::{
     ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
@@ -422,6 +423,10 @@ impl VmBackend for HvfBackend {
             // non-prod, non-sealed workloads. This stays gated on the launchable
             // supervisor path — it is a dev-tier boot capability, not egress.
             virtiofs_root: proxy_path_ready,
+            // Named explicitly rather than left to `..Default::default()`:
+            // the honest HVF answer (no cgroup, but a supervisor wall-clock
+            // timer) differs from the all-`None` default.
+            resource_controls: ResourceControls::for_backend(BackendKind::Hvf),
             // pause/snapshot/cow/remap land as they are wired onto the primitive.
             ..Default::default()
         }

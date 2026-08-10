@@ -19,6 +19,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
 pub use mvm_contract::protocol::capability_negotiation::{CapabilityAlternative, CapabilityGap};
+pub use mvm_contract::protocol::resource_controls::{
+    CpuControl, EnforcedGrants, EnforcedTier, ResourceControls, WallClockControl,
+};
 pub use mvm_contract::protocol::vm_backend::{
     BackendKind, BackendSecurityProfile, BalloonState, ClaimStatus, GuestChannelInfo,
     LayerCoverage, RequiredCapabilities, ReseedStatus, RuntimeSourceLaunchKind,
@@ -369,6 +372,20 @@ pub trait VmBackend: Send + Sync {
     /// matrix says would be exactly the dishonest tier the backend ADR forbids.
     fn negotiate(&self, required: &RequiredCapabilities) -> Result<(), Vec<CapabilityGap>> {
         self.capabilities().negotiate(required, self.kind())
+    }
+
+    /// Apply `grants` to a running VM and report what was actually achieved.
+    ///
+    /// The default enforces nothing and says so. A backend that silently
+    /// ignored grants while reporting success would produce a receipt
+    /// asserting an enforcement that never happened, which is worse than
+    /// having no control at all.
+    fn apply_grants(
+        &self,
+        _id: &VmId,
+        _grants: &mvm_contract::grants::Grants,
+    ) -> Result<mvm_contract::protocol::resource_controls::EnforcedGrants> {
+        Ok(mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared())
     }
 
     /// Whether a warm claim transfers a resident paused VMM directly into the

@@ -48,8 +48,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::config::{vm_console_log, vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig,
-    VmStatus,
+    ResourceControls, SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmId, VmInfo,
+    VmStartConfig, VmStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -298,6 +298,9 @@ impl VmBackend for QemuBackend {
             tap_networking: false,
             balloon: false,
             fs_quick_checkpoint: false,
+            // Named explicitly: this backend's per-VM process is cgroup-able,
+            // unlike the all-`None` struct-update default.
+            resource_controls: ResourceControls::for_backend(BackendKind::Qemu),
             ..VmCapabilities::default()
         }
     }
