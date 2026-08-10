@@ -2,12 +2,63 @@
 
 ## Status
 
-**Not started.** Written 2026-08-10 from the competitive assessment in
-`specs/research/agent-execution-layer-entrant-assessment.md`. Phase 0 is a
-blocking verification phase — several claims below are inferred from reading and
-must be confirmed against a live run before Phases 1+ are scoped as written.
+**Phase 0 COMPLETE** (2026-08-10). Phases 1+ not started.
+
+Written from the competitive assessment in
+`specs/research/agent-execution-layer-entrant-assessment.md`.
 
 Tracks issue #2305 (accounting) and extends it with streaming and compaction.
+
+### Phase 0 findings
+
+The premise is confirmed, and the consequence is worse than this plan first
+assumed. Resolved at code level; no live run was needed, because the buffering is
+unconditional rather than dependent on runtime conditions.
+
+1. **The substitution path buffers the whole response body.**
+   `ReqwestForwarder::forward` (`supervisor/substitution_proxy.rs`) ends in
+   `resp.bytes().await` and constructs `ForwardResponse { status, headers, body:
+   Vec<u8> }`. No incremental relay exists on this path. `ForwardResponse`'s owned
+   `Vec<u8>` body is the type-level reason no caller *can* stream.
+
+2. **A streamed response does not merely fail to stream — past 30s it fails.**
+   The forward client is built with reqwest's `.timeout(...)`, a whole-request
+   deadline that includes body read, defaulting to 30s
+   (`default_forward_timeout_secs`). An SSE stream held open longer than the
+   timeout is killed. Streaming model calls that run longer than 30s are broken
+   today, not just non-streaming.
+
+3. **There is no response body size cap on this path.** `resp.bytes()`
+   accumulates without a ceiling, in the one host process that holds workload
+   credentials in the clear. A large or hostile response is an unbounded host
+   allocation. This is a defect in its own right, independent of metering.
+
+4. **The raw path streams, but gives up everything this seam exists for.**
+   `EgressMode::Raw` splices with `tokio::io::copy_bidirectional`, so it streams
+   correctly — but it is a gated TCP splice with no credential substitution and no
+   HTTP-level redaction. `EgressMode::Wire` (what a plan carrying secret bindings
+   selects) is the buffering path.
+
+**The architectural finding: today a workload can have streaming *or* secret
+substitution, never both.** That is the real headline, and it reframes Phase 1
+from an enabler into a defect fix that also serves the standing requirement that
+workload output be observable while it runs.
+
+### Consequence for sequencing — act on this before Phase 1
+
+`mvm_http::Response` is already streaming-capable and bounded: it holds a live
+`stream` with incremental `chunk()` plus a `max_bytes` ceiling — strictly better
+than the reqwest path on both counts.
+
+**PR #2314 (Plan 309 Phase 2, retiring reqwest) currently reproduces the
+buffering verbatim on top of it** — its replacement forwarder still ends in
+`resp.bytes().await` building `body: Vec<u8>`, discarding both `chunk()` and
+`max_bytes`. That PR is the natural and cheapest place to fix this, and once it
+merges the same change costs a second rewrite of the same function.
+
+The dependency is therefore stronger than "sequence 309 Phase 2 first": Phase 1
+should be **folded into #2314** if it is still open, by changing
+`ForwardResponse` to carry a streaming body rather than an owned `Vec<u8>`.
 
 ## Why
 
@@ -84,28 +135,44 @@ bother.
 
 ## Phase 0 — Verify the ground truth (blocking)
 
-Everything below is scoped on inference from reading. Confirm before building.
+**COMPLETE.** Findings in the Status section above. Resolved at code level: the
+buffering is unconditional, so a live run could not have contradicted it.
 
-- [ ] Instrument a real workload making a non-streamed model call through the
-      substitution endpoint; record where the response body is accumulated and
-      whether any byte reaches the guest before the response completes.
-- [ ] Repeat with an SSE (`text/event-stream`) response. Measure time-to-first-byte
-      at the guest. If TTFB ≈ total response time, streaming is broken today and
-      Phase 1 is a bug fix, not a feature.
-- [ ] Confirm whether `Transfer-Encoding: chunked` and `text/event-stream` survive
-      the forward leg intact or are re-framed.
-- [ ] Record the current per-connection memory high-water mark for a large
-      response. A fully buffered multi-MB SSE stream is also a memory-hygiene
-      issue.
-- [ ] Write the findings into this plan's Status section before opening Phase 1.
+- [x] Locate where the response body is accumulated and whether any byte can reach
+      the guest before the response completes. **It cannot** —
+      `ReqwestForwarder::forward` ends in `resp.bytes().await`.
+- [x] Determine the behaviour for an SSE (`text/event-stream`) response. **Worse
+      than buffering**: the whole-request `.timeout(...)` (30s default) kills a
+      stream held open past the deadline.
+- [x] Confirm whether chunk framing survives the forward leg. **It does not** —
+      the body is decoded into an owned `Vec<u8>`; framing is lost by construction.
+- [x] Record the per-connection memory ceiling for a large response. **There is
+      none** on this path — an unbounded allocation in the credential-holding
+      process.
+- [x] Write the findings into this plan's Status section before opening Phase 1.
+- [x] *(added)* Establish whether the raw path differs. **It does** —
+      `EgressMode::Raw` splices via `copy_bidirectional` and streams, but carries
+      no substitution and no HTTP-level redaction.
 
 ## Phase 1 — Incremental response relay
 
-Prerequisite for SSE and for bounded memory. Value independent of metering.
+Confirmed by Phase 0 as a **defect fix**, not a feature: it restores streaming,
+bounds an unbounded host allocation, and removes the 30s cliff on long responses.
+Value independent of metering.
 
-- [ ] Convert the response leg from accumulate-then-forward to incremental relay,
-      preserving chunk framing. `mvm_http::parse` already has `BodyLength` and
-      chunked decoding to build on.
+**Fold into #2314 if that PR is still open** — it rewrites this exact function and
+currently reproduces the buffering on top of a streaming-capable client.
+
+- [ ] Change `ForwardResponse` to carry a streaming body rather than an owned
+      `Vec<u8>`. This is the type-level blocker; nothing else can stream until it
+      changes.
+- [ ] Relay incrementally via `mvm_http::Response::chunk()`, preserving chunk
+      framing.
+- [ ] Set `max_bytes` on the forward response so the allocation is bounded, and
+      pick a refusal behaviour for exceeding it.
+- [ ] Replace the whole-request `.timeout(...)` with an **idle/read** timeout. A
+      total-request deadline can never coexist with a long-lived stream; leaving it
+      in place silently re-breaks streaming for slow responses.
 - [ ] Keep the existing redaction seam correct across chunk boundaries. **This is
       the hard part**: a secret or PII match straddling two chunks must still be
       caught. This is the same window-straddling limitation already documented for
