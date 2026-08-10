@@ -462,14 +462,53 @@ fn blocking_decodes_a_chunked_body() {
 
 #[test]
 fn blocking_honours_the_body_cap() {
+    // The body streams, so the cap is enforced as it is read rather than at
+    // `send` — the same shape as the async face. `send` returning Ok is the
+    // head having arrived, not the body having been accepted.
     let addr = serve_raw_blocking(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world");
     let c = blocking_client_for(addr);
     let err = c
         .get(url_for(addr))
         .max_response_bytes(4)
         .send()
+        .expect("head arrives")
+        .bytes()
         .unwrap_err();
     assert!(matches!(err, Error::BodyTooLarge { limit: 4 }), "{err:?}");
+}
+
+#[test]
+fn blocking_response_streams_through_io_read() {
+    // `http_forward`'s Linux relay hands the guest an upstream response
+    // incrementally via `io::Read`; buffering would delay an SSE or long-poll
+    // body until completion.
+    use std::io::Read as _;
+    let addr = serve_raw_blocking(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n",
+    );
+    let c = blocking_client_for(addr);
+    let mut resp = c.get(url_for(addr)).send().unwrap();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 2];
+    loop {
+        let n = resp.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(out, b"foobar");
+}
+
+#[test]
+fn blocking_io_copy_drains_the_whole_body() {
+    // The other shape the relay uses, when it is not re-chunking.
+    let addr = serve_raw_blocking(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world");
+    let c = blocking_client_for(addr);
+    let mut resp = c.get(url_for(addr)).send().unwrap();
+    let mut out: Vec<u8> = Vec::new();
+    std::io::copy(&mut resp, &mut out).unwrap();
+    assert_eq!(out, b"hello world");
 }
 
 #[test]

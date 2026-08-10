@@ -62,7 +62,9 @@ pub fn download_file(url: &str, dest: &Path) -> Result<()> {
         anyhow::bail!("HTTP {} downloading {}", status, url);
     }
 
-    let bytes = resp.bytes();
+    let bytes = resp
+        .bytes()
+        .with_context(|| format!("Failed to read download body: {}", url))?;
 
     let mut file = std::fs::File::create(dest)
         .with_context(|| format!("Failed to create file: {}", dest.display()))?;

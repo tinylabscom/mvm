@@ -2,10 +2,17 @@
 //!
 //! Several callers are plain synchronous code — CLI downloads, the Stage 0
 //! asset fetch — and giving them a runtime of their own is simpler than making
-//! their callers async. The body is fully buffered here rather than streamed,
-//! because every blocking caller in this workspace wants the whole thing
-//! (`text`, `json`, `bytes`); a blocking streaming reader would be API surface
-//! nobody uses.
+//! their callers async.
+//!
+//! The body **streams**. An earlier version buffered it eagerly, on the reasoning
+//! that every blocking caller wants the whole thing (`text`, `json`, `bytes`).
+//! That was wrong, and only a Linux build showed it: `http_forward`'s
+//! `cfg(target_os = "linux")` path relays the upstream response to the guest in
+//! 8 KiB chunks through `io::Read`. Buffering would have held a whole response
+//! in memory and, worse, delayed an SSE or long-poll body until completion —
+//! defeating the incremental relay the egress path depends on. So `Response`
+//! implements `Read`, and `bytes`/`text`/`json` are drains over the same
+//! stream.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -183,7 +190,7 @@ impl RequestBuilder {
         self
     }
 
-    /// Send, and buffer the whole body.
+    /// Send and return the response with its head read; the body streams.
     ///
     /// Refuses rather than deadlocks when called from inside an async runtime:
     /// `block_on` would park a thread the executor is depending on.
@@ -191,39 +198,51 @@ impl RequestBuilder {
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(Error::BlockingInAsyncContext);
         }
-        // Built after the refusal above, so this runtime is never created — or
-        // dropped — inside an async context.
+        // Built after the refusal above, so this runtime is never created inside
+        // an async context. `Response`'s `Drop` handles the other end.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(Error::Io)?;
         let inner = self.inner;
-        rt.block_on(async move {
-            let resp = inner.send().await?;
-            let status = resp.status();
-            let headers = resp.headers().clone();
-            let url = resp.url().to_string();
-            let declared = resp.content_length();
-            let body = resp.bytes().await?;
-            Ok(Response {
-                status,
-                headers,
-                url,
-                body,
-                declared_length: declared,
-            })
+        let resp = rt.block_on(async move { inner.send().await })?;
+        Ok(Response {
+            status: resp.status(),
+            headers: resp.headers().clone(),
+            url: resp.url().to_string(),
+            declared_length: resp.content_length(),
+            rt: Some(rt),
+            inner: Some(resp),
+            pending: Bytes::new(),
         })
     }
 }
 
-/// A blocking response, body already buffered.
-#[derive(Debug, Clone)]
+/// A blocking response. The head is read; the body streams on demand.
+#[derive(Debug)]
 pub struct Response {
     status: StatusCode,
     headers: HeaderMap,
     url: String,
-    body: Bytes,
     declared_length: Option<u64>,
+    /// Drives the async body. `Option` only so `Drop` can take it.
+    rt: Option<tokio::runtime::Runtime>,
+    inner: Option<crate::Response>,
+    /// Bytes pulled from the body but not yet handed to a `read` caller.
+    pending: Bytes,
+}
+
+impl Drop for Response {
+    fn drop(&mut self) {
+        // Dropping a runtime inside an async context panics in tokio's shutdown
+        // path. `send` refuses to run there, so this response was created
+        // outside one — but nothing stops a caller moving it in, so shut down
+        // in the background rather than blocking on drop. There are no spawned
+        // tasks to wait for: this runtime only ever drives `block_on`.
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
+    }
 }
 
 impl Response {
@@ -247,20 +266,62 @@ impl Response {
         }
         Err(Error::Status {
             status: self.status,
-            url: self.url,
+            url: self.url.clone(),
         })
     }
 
-    pub fn bytes(self) -> Bytes {
-        self.body
+    /// Next piece of the body, or `None` at its end.
+    fn next_chunk(&mut self) -> Result<Option<Bytes>> {
+        let (Some(rt), Some(inner)) = (self.rt.as_ref(), self.inner.as_mut()) else {
+            return Ok(None);
+        };
+        rt.block_on(inner.chunk())
+    }
+
+    /// Drain the whole body, subject to the client's cap.
+    pub fn bytes(mut self) -> Result<Bytes> {
+        let mut out = bytes::BytesMut::new();
+        out.extend_from_slice(&std::mem::take(&mut self.pending));
+        while let Some(chunk) = self.next_chunk()? {
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out.freeze())
     }
 
     pub fn text(self) -> Result<String> {
-        String::from_utf8(self.body.to_vec()).map_err(|_| Error::NotUtf8)
+        let b = self.bytes()?;
+        String::from_utf8(b.to_vec()).map_err(|_| Error::NotUtf8)
     }
 
     pub fn json<T: serde::de::DeserializeOwned>(self) -> Result<T> {
-        Ok(serde_json::from_slice(&self.body)?)
+        let b = self.bytes()?;
+        Ok(serde_json::from_slice(&b)?)
+    }
+}
+
+/// Streaming read over the body.
+///
+/// This is what `http_forward`'s Linux relay uses to hand the guest an
+/// upstream response incrementally rather than after it completes.
+impl std::io::Read for Response {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // Loop past any empty chunk rather than returning 0 for one: to `Read`,
+        // 0 means end of stream, so a spurious empty chunk would silently
+        // truncate a body mid-relay.
+        while self.pending.is_empty() {
+            match self.next_chunk() {
+                Ok(None) => return Ok(0),
+                Ok(Some(chunk)) => self.pending = chunk,
+                Err(e) => return Err(std::io::Error::other(e)),
+            }
+        }
+        let n = buf.len().min(self.pending.len());
+        buf[..n].copy_from_slice(&self.pending[..n]);
+        self.pending = self.pending.slice(n..);
+        Ok(n)
     }
 }
 
@@ -308,12 +369,16 @@ mod tests {
 
     #[test]
     fn error_for_status_passes_2xx_and_refuses_others() {
+        // No runtime or body: `error_for_status` reads only the status, and a
+        // `None` runtime is exactly the shape `Drop` is written to tolerate.
         let mk = |code: u16| Response {
             status: StatusCode::from_u16(code).unwrap(),
             headers: HeaderMap::new(),
             url: "http://example/".into(),
-            body: Bytes::new(),
             declared_length: None,
+            rt: None,
+            inner: None,
+            pending: Bytes::new(),
         };
         assert!(mk(200).error_for_status().is_ok());
         assert!(mk(204).error_for_status().is_ok());

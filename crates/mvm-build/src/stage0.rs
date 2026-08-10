@@ -556,7 +556,9 @@ fn fetch_to(target: &Path, asset: &BootstrapAsset) -> Result<()> {
         .with_context(|| format!("GET {}", asset.url))?
         .error_for_status()
         .with_context(|| format!("GET {} returned non-success status", asset.url))?;
-    let bytes = resp.bytes();
+    let bytes = resp
+        .bytes()
+        .with_context(|| format!("reading body from {}", asset.url))?;
 
     let got_hex = hex::encode(Sha256::digest(&bytes));
     if !got_hex.eq_ignore_ascii_case(asset.sha256_hex) {
