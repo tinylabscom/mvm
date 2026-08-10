@@ -1,19 +1,10 @@
 use std::io::Write;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 
-fn install_rustls_provider() {
-    static PROVIDER: OnceLock<()> = OnceLock::new();
-    PROVIDER.get_or_init(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-}
-
-fn build_blocking_client(timeout: std::time::Duration) -> Result<reqwest::blocking::Client> {
-    install_rustls_provider();
-    reqwest::blocking::Client::builder()
+fn build_blocking_client(timeout: std::time::Duration) -> Result<mvm_http::blocking::Client> {
+    mvm_http::blocking::Client::builder()
         .user_agent(concat!("mvmctl/", env!("CARGO_PKG_VERSION")))
         .timeout(timeout)
         .build()
@@ -44,7 +35,7 @@ pub fn fetch_json(url: &str) -> Result<serde_json::Value> {
 
     let resp = client
         .get(url)
-        .header("Accept", "application/json")
+        .header("accept", "application/json")
         .send()
         .with_context(|| format!("HTTP request failed: {}", url))?;
 
@@ -71,9 +62,7 @@ pub fn download_file(url: &str, dest: &Path) -> Result<()> {
         anyhow::bail!("HTTP {} downloading {}", status, url);
     }
 
-    let bytes = resp
-        .bytes()
-        .with_context(|| format!("Failed to read download body: {}", url))?;
+    let bytes = resp.bytes();
 
     let mut file = std::fs::File::create(dest)
         .with_context(|| format!("Failed to create file: {}", dest.display()))?;

@@ -23,9 +23,22 @@ pub enum TlsVersion {
     Tls13,
 }
 
+/// What the TLS config will be built from, kept until first use.
+#[derive(Debug)]
+struct TlsSpec {
+    min_tls: TlsVersion,
+    roots: Option<rustls::RootCertStore>,
+}
+
 #[derive(Debug)]
 struct Inner {
-    tls: Arc<rustls::ClientConfig>,
+    /// Built on first send. Constructing it touches the platform trust store,
+    /// which can fail for reasons that have nothing to do with the caller's
+    /// configuration — so failing here rather than at `new()` keeps the common
+    /// constructor infallible while still surfacing the error, instead of
+    /// panicking the way reqwest's `Client::new` does.
+    tls: std::sync::OnceLock<std::result::Result<Arc<rustls::ClientConfig>, String>>,
+    tls_spec: TlsSpec,
     resolver: Arc<dyn Resolve>,
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
@@ -44,33 +57,45 @@ pub struct Client {
     inner: Arc<Inner>,
 }
 
+impl Default for Client {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Client {
     pub fn builder() -> ClientBuilder {
         ClientBuilder::default()
     }
 
     /// A client with default settings.
-    pub fn new() -> Result<Self> {
-        ClientBuilder::default().build()
+    ///
+    /// Infallible: the default user agent is a valid header value by
+    /// construction, and the TLS config is built on first use.
+    pub fn new() -> Self {
+        ClientBuilder::default()
+            .build()
+            .expect("the default ClientBuilder cannot fail to validate")
     }
 
-    pub fn get(&self, url: &str) -> RequestBuilder {
+    pub fn get(&self, url: impl AsRef<str>) -> RequestBuilder {
         self.request(Method::GET, url)
     }
-    pub fn post(&self, url: &str) -> RequestBuilder {
+    pub fn post(&self, url: impl AsRef<str>) -> RequestBuilder {
         self.request(Method::POST, url)
     }
-    pub fn put(&self, url: &str) -> RequestBuilder {
+    pub fn put(&self, url: impl AsRef<str>) -> RequestBuilder {
         self.request(Method::PUT, url)
     }
-    pub fn delete(&self, url: &str) -> RequestBuilder {
+    pub fn delete(&self, url: impl AsRef<str>) -> RequestBuilder {
         self.request(Method::DELETE, url)
     }
-    pub fn head(&self, url: &str) -> RequestBuilder {
+    pub fn head(&self, url: impl AsRef<str>) -> RequestBuilder {
         self.request(Method::HEAD, url)
     }
 
-    pub fn request(&self, method: Method, url: &str) -> RequestBuilder {
+    pub fn request(&self, method: Method, url: impl AsRef<str>) -> RequestBuilder {
+        let url = url.as_ref();
         RequestBuilder {
             client: self.clone(),
             method,
@@ -170,40 +195,16 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Result<Client> {
-        use rustls_platform_verifier::BuilderVerifierExt as _;
-
-        let versions: &[&rustls::SupportedProtocolVersion] = match self.min_tls {
-            TlsVersion::Tls13 => &[&rustls::version::TLS13],
-            TlsVersion::Tls12 => &[&rustls::version::TLS13, &rustls::version::TLS12],
-        };
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let builder = rustls::ClientConfig::builder_with_provider(provider)
-            .with_protocol_versions(versions)
-            .map_err(|e| Error::Tls {
-                host: "<config>".into(),
-                source: std::io::Error::other(e.to_string()),
-            })?;
-
-        // The platform trust store by default, so enterprise CA policy and
-        // root revocation keep applying — the same posture reqwest gave us.
-        // An explicit root store is only for tests and pinned-CA callers.
-        let tls = match self.roots {
-            Some(roots) => builder.with_root_certificates(roots).with_no_client_auth(),
-            None => builder
-                .with_platform_verifier()
-                .map_err(|e| Error::Tls {
-                    host: "<platform trust store>".into(),
-                    source: std::io::Error::other(e.to_string()),
-                })?
-                .with_no_client_auth(),
-        };
-
         let user_agent = HeaderValue::from_str(&self.user_agent)
             .map_err(|_| Error::Header(format!("user agent {:?}", self.user_agent)))?;
 
         Ok(Client {
             inner: Arc::new(Inner {
-                tls: Arc::new(tls),
+                tls: std::sync::OnceLock::new(),
+                tls_spec: TlsSpec {
+                    min_tls: self.min_tls,
+                    roots: self.roots,
+                },
                 resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
                 timeout: self.timeout,
                 connect_timeout: self.connect_timeout,
@@ -213,6 +214,52 @@ impl ClientBuilder {
             }),
         })
     }
+}
+
+impl Inner {
+    /// The TLS config, built once on first use.
+    fn tls(&self) -> Result<Arc<rustls::ClientConfig>> {
+        self.tls
+            .get_or_init(|| build_tls(&self.tls_spec).map_err(|e| e.to_string()))
+            .clone()
+            .map_err(|e| Error::Tls {
+                host: "<tls config>".into(),
+                source: std::io::Error::other(e),
+            })
+    }
+}
+
+fn build_tls(spec: &TlsSpec) -> Result<Arc<rustls::ClientConfig>> {
+    use rustls_platform_verifier::BuilderVerifierExt as _;
+
+    let versions: &[&rustls::SupportedProtocolVersion] = match spec.min_tls {
+        TlsVersion::Tls13 => &[&rustls::version::TLS13],
+        TlsVersion::Tls12 => &[&rustls::version::TLS13, &rustls::version::TLS12],
+    };
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(versions)
+        .map_err(|e| Error::Tls {
+            host: "<config>".into(),
+            source: std::io::Error::other(e.to_string()),
+        })?;
+
+    // The platform trust store by default, so enterprise CA policy and root
+    // revocation keep applying — the same posture reqwest gave us. An explicit
+    // root store is only for tests and pinned-CA callers.
+    let tls = match &spec.roots {
+        Some(roots) => builder
+            .with_root_certificates(roots.clone())
+            .with_no_client_auth(),
+        None => builder
+            .with_platform_verifier()
+            .map_err(|e| Error::Tls {
+                host: "<platform trust store>".into(),
+                source: std::io::Error::other(e.to_string()),
+            })?
+            .with_no_client_auth(),
+    };
+    Ok(Arc::new(tls))
 }
 
 /// A request under construction.
@@ -231,7 +278,8 @@ pub struct RequestBuilder {
 
 impl RequestBuilder {
     #[must_use]
-    pub fn header(mut self, name: &str, value: &str) -> Self {
+    pub fn header(mut self, name: impl AsRef<str>, value: impl AsRef<str>) -> Self {
+        let (name, value) = (name.as_ref(), value.as_ref());
         match (
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(value),
@@ -254,18 +302,19 @@ impl RequestBuilder {
     }
 
     #[must_use]
-    pub fn bearer_auth(self, token: &str) -> Self {
-        self.header("authorization", &format!("Bearer {token}"))
+    pub fn bearer_auth(self, token: impl AsRef<str>) -> Self {
+        self.header("authorization", format!("Bearer {}", token.as_ref()))
     }
 
     #[must_use]
-    pub fn basic_auth(self, user: &str, pass: Option<&str>) -> Self {
+    pub fn basic_auth(self, user: impl AsRef<str>, pass: Option<impl AsRef<str>>) -> Self {
+        let user = user.as_ref();
         let raw = match pass {
-            Some(p) => format!("{user}:{p}"),
+            Some(p) => format!("{user}:{}", p.as_ref()),
             None => format!("{user}:"),
         };
         let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
-        self.header("authorization", &format!("Basic {encoded}"))
+        self.header("authorization", format!("Basic {encoded}"))
     }
 
     #[must_use]
@@ -387,6 +436,7 @@ async fn send_once(
         stream,
         method == Method::HEAD,
         max_response_bytes.or(inner.max_response_bytes),
+        url.to_string(),
     )
     .await
 }
@@ -421,7 +471,7 @@ async fn connect(
                 }
                 let server_name = rustls_pki_types::ServerName::try_from(host.to_string())
                     .map_err(|_| Error::Url(format!("invalid dns name {host}")))?;
-                let connector = tokio_rustls::TlsConnector::from(inner.tls.clone());
+                let connector = tokio_rustls::TlsConnector::from(inner.tls()?);
                 let tls = connector
                     .connect(server_name, tcp)
                     .await
@@ -517,6 +567,7 @@ async fn read_response(
     mut stream: Stream,
     request_was_head: bool,
     max_response_bytes: Option<u64>,
+    url: String,
 ) -> Result<Response> {
     use tokio::io::AsyncReadExt as _;
     let mut buf = BytesMut::with_capacity(8 * 1024);
@@ -530,6 +581,7 @@ async fn read_response(
                 rest,
                 head.body_length,
                 max_response_bytes,
+                url,
             ));
         }
         let start = buf.len();
@@ -550,15 +602,11 @@ mod tests {
 
     fn inner() -> Inner {
         Inner {
-            tls: Arc::new(
-                rustls::ClientConfig::builder_with_provider(Arc::new(
-                    rustls::crypto::ring::default_provider(),
-                ))
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .unwrap()
-                .with_root_certificates(rustls::RootCertStore::empty())
-                .with_no_client_auth(),
-            ),
+            tls: std::sync::OnceLock::new(),
+            tls_spec: TlsSpec {
+                min_tls: TlsVersion::Tls12,
+                roots: Some(rustls::RootCertStore::empty()),
+            },
             resolver: Arc::new(SystemResolver),
             timeout: None,
             connect_timeout: None,

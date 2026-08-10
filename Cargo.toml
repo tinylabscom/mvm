@@ -349,6 +349,7 @@ mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-feature
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0" }
 mvm-backends = { path = "crates/mvm-backends", version = "0.18.0" }
 mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
+mvm-http = { path = "crates/mvm-http", version = "0.18.0" }
 mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
 mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.0", default-features = false }

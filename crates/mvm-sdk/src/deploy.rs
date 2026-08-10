@@ -645,9 +645,8 @@ impl MvmdClient {
                 reason: format!("opening bundle: {error}"),
             })?;
         let (content_type, form_body) = deploy_multipart_body(&record_json, &bundle_bytes);
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+        // mvm-http never follows redirects, so there is no policy to set.
+        let client = mvm_http::blocking::Client::builder()
             .build()
             .map_err(|error| DeployError::RemoteProtocol {
                 base_url: self.base_url.clone(),
@@ -656,7 +655,7 @@ impl MvmdClient {
         let response = client
             .post(endpoint)
             .bearer_auth(&self.api_key)
-            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .header("content-type", content_type)
             .body(form_body)
             .send()
             .map_err(|error| DeployError::RemoteTransportUnavailable {
@@ -699,7 +698,7 @@ fn deploy_multipart_body(record_json: &str, bundle_bytes: &[u8]) -> (String, Vec
 }
 
 fn remote_upload_endpoint(base_url: &str) -> Result<String, DeployError> {
-    let parsed = reqwest::Url::parse(base_url).map_err(|error| DeployError::RemoteProtocol {
+    let parsed = mvm_http::Url::parse(base_url).map_err(|error| DeployError::RemoteProtocol {
         base_url: base_url.to_string(),
         reason: format!("invalid URL: {error}"),
     })?;
@@ -716,7 +715,7 @@ fn remote_upload_endpoint(base_url: &str) -> Result<String, DeployError> {
     ))
 }
 
-fn is_loopback_url(url: &reqwest::Url) -> bool {
+fn is_loopback_url(url: &mvm_http::Url) -> bool {
     match url.host_str() {
         Some("localhost") => true,
         Some(host) => host

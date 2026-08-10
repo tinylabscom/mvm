@@ -17,6 +17,7 @@ mvm-backends = { workspace = true }
 mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-fs.workspace = true
+mvm-http.workspace = true
 mvm-hostd.workspace = true
 # The networking-mode compatibility gate: a plan that needs host-side
 # substitution must not be able to select the L3 tunnel, where the host

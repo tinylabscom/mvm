@@ -446,7 +446,7 @@ fn basic_authorization(auth: &BasicAuthFixture) -> String {
 }
 
 fn token_path(challenge: &BearerChallengeFixture) -> String {
-    let mut url = reqwest::Url::parse(&format!("http://fixture{}", challenge.realm_path))
+    let mut url = mvm_http::Url::parse(&format!("http://fixture{}", challenge.realm_path))
         .expect("fixture token URL parses");
     {
         let mut query = url.query_pairs_mut();

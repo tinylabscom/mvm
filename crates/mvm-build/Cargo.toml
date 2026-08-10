@@ -65,6 +65,7 @@ tar.workspace = true
 lzma-rs = "0.3"
 
 mvm-core.workspace = true
+mvm-http.workspace = true
 mvm-fs.workspace = true
 mvm-agentd.workspace = true
 # `LibkrunNetworkProvider` impls the `NetworkProvider`

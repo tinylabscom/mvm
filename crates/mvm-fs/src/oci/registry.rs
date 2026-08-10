@@ -1,8 +1,7 @@
 use crate::oci::OciError;
 use crate::oci::reference::ImageReference;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
+use mvm_http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
 use secrecy::{ExposeSecret, SecretString};
-use std::sync::Once;
 
 const DOCKER_HUB_REGISTRY: &str = "docker.io";
 const DOCKER_HUB_LEGACY_REGISTRY: &str = "index.docker.io";
@@ -77,30 +76,22 @@ impl RegistryAuthConfig {
 
 #[derive(Clone)]
 pub struct RegistryClient {
-    http: reqwest::Client,
+    http: mvm_http::Client,
     config: ClientConfig,
     auth: RegistryAuthConfig,
 }
 
 impl RegistryClient {
-    fn install_rustls_provider() {
-        static INSTALL: Once = Once::new();
-        INSTALL.call_once(|| {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-        });
-    }
-
     pub fn new(config: ClientConfig, auth: RegistryAuthConfig) -> Self {
-        Self::install_rustls_provider();
         Self {
-            http: reqwest::Client::new(),
+            http: mvm_http::Client::new(),
             config,
             auth,
         }
     }
 
     pub fn with_http_client(
-        http: reqwest::Client,
+        http: mvm_http::Client,
         config: ClientConfig,
         auth: RegistryAuthConfig,
     ) -> Self {
@@ -137,7 +128,7 @@ impl RegistryClient {
             .send()
             .await
             .map_err(|e| OciError::Registry(format!("GET {url}: {e}")))?;
-        if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+        if response.status() != mvm_http::StatusCode::UNAUTHORIZED {
             return self.registry_response(url, response).await;
         }
 
@@ -161,7 +152,7 @@ impl RegistryClient {
         url: String,
         accept: Option<&[&str]>,
         authorization: Option<String>,
-    ) -> reqwest::RequestBuilder {
+    ) -> mvm_http::RequestBuilder {
         let mut request = self.http.get(url);
         if let Some(accept_values) = accept {
             request = request.header(ACCEPT, accept_values.join(", "));
@@ -171,9 +162,7 @@ impl RegistryClient {
         }
         match &self.auth {
             RegistryAuthConfig::Anonymous => request,
-            RegistryAuthConfig::Bearer { token } => {
-                request.bearer_auth(token.expose_secret().to_string())
-            }
+            RegistryAuthConfig::Bearer { token } => request.bearer_auth(token.expose_secret()),
             RegistryAuthConfig::Basic { username, password } => {
                 request.basic_auth(username, Some(password.expose_secret().to_string()))
             }
@@ -183,7 +172,7 @@ impl RegistryClient {
     async fn registry_response(
         &self,
         url: String,
-        response: reqwest::Response,
+        response: mvm_http::Response,
     ) -> Result<RegistryResponse, OciError> {
         let status = response.status();
         if !status.is_success() {
@@ -214,7 +203,7 @@ impl RegistryClient {
         original_url: &str,
         challenge: &BearerChallenge,
     ) -> Result<String, OciError> {
-        let mut token_url = reqwest::Url::parse(&challenge.realm).map_err(|e| {
+        let mut token_url = mvm_http::Url::parse(&challenge.realm).map_err(|e| {
             OciError::Registry(format!(
                 "bearer auth realm for {original_url} is not a valid URL: {e}"
             ))
@@ -279,7 +268,7 @@ impl RegistryClient {
 pub struct RegistryResponse {
     pub content_type: Option<String>,
     pub docker_content_digest: Option<String>,
-    pub response: reqwest::Response,
+    pub response: mvm_http::Response,
 }
 
 fn manifest_path(reference: &ImageReference) -> String {

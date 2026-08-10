@@ -7,7 +7,7 @@
 //! Feature-gated behind `client` so the runtime-free default build of this
 //! crate is unaffected: the trait pulls `async-trait` (a proc-macro that
 //! desugars async methods to boxed futures — no async runtime), and the remote
-//! gateway (`client-remote`) pulls `reqwest`. `LocalBackend` lives one crate
+//! gateway (`client-remote`) pulls `mvm-http`. `LocalBackend` lives one crate
 //! up in `mvm-client`, where it can link the runtime backend.
 
 use async_trait::async_trait;

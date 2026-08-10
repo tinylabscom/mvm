@@ -38,6 +38,8 @@ pub struct Response {
     pub(crate) read_total: u64,
     /// The `Content-Length` the server declared, verbatim.
     pub(crate) declared_length: Option<u64>,
+    /// The URL requested, for error messages.
+    pub(crate) url: String,
 }
 
 impl Response {
@@ -48,6 +50,7 @@ impl Response {
         buf: BytesMut,
         body_length: BodyLength,
         max_bytes: Option<u64>,
+        url: String,
     ) -> Self {
         let state = match body_length {
             BodyLength::None => BodyState::Done,
@@ -81,6 +84,7 @@ impl Response {
             max_bytes,
             read_total: 0,
             declared_length,
+            url,
         }
     }
 
@@ -90,6 +94,11 @@ impl Response {
 
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
+    }
+
+    /// The URL this response came from.
+    pub fn url(&self) -> &str {
+        &self.url
     }
 
     /// The `Content-Length` the server declared, or `None` if it declared
@@ -165,6 +174,20 @@ impl Response {
                 }
             }
         }
+    }
+
+    /// Refuse a non-2xx status.
+    ///
+    /// Nothing raises this implicitly: a response that arrived is a successful
+    /// exchange, and several callers act on 3xx/4xx deliberately.
+    pub fn error_for_status(self) -> Result<Self> {
+        if self.status.is_success() {
+            return Ok(self);
+        }
+        Err(Error::Status {
+            status: self.status,
+            url: self.url.clone(),
+        })
     }
 
     /// Drain the whole body, subject to the cap.

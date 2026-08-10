@@ -36,6 +36,7 @@ async-trait = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest.workspace = true
+mvm-http.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
 
