@@ -131,7 +131,7 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// `rustls-platform-verifier` stay, because `mvm-http` uses them rather than
 /// hand-rolling header validation, head parsing, URL parsing, or trust-store
 /// handling. Measured net −20.
-const CLOSURE_BUDGET: usize = 242;
+pub(crate) const CLOSURE_BUDGET: usize = 242;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

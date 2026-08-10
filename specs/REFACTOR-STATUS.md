@@ -1033,8 +1033,10 @@ for detailed scope and acceptance criteria.
   - [ ] Phase 3 — the product decisions: `tracing-subscriber`, `toml`, and the
         deferred `serde_jcs`. tree-sitter grammar gating is **struck** — the
         grammars are the SDK-to-Nix translation, not a tradeable dependency
-  - [ ] Phase 4 — a lockfile-count ratchet, so the ~62 `wasmtime`-family
-        packages an off-by-default feature adds stay visible to `cargo deny`
+  - [x] Phase 4 — `check-feature-closure-budget` bounds the all-features
+        closure at 468, so the ~62 `wasmtime`-family packages behind an
+        off-by-default feature stay observed. Not a lockfile count: measured,
+        that number does not move when a dependency is removed (~120 orphans)
 
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
   (`specs/plans/313-egress-token-accounting-and-compaction.md`)

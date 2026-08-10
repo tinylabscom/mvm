@@ -337,21 +337,43 @@ That is hygiene for `check-duplicate-majors`, not a closure saving.
 
 ---
 
-## Phase 4 — hold the line
+## Phase 4 — hold the line (COMPLETE)
 
-The ratchet only works if it moves. Every phase above must land its
-`CLOSURE_BUDGET` reduction *in the same PR* as the cut.
+The ratchet only works if it moves, and if it measures the right thing.
 
-- [ ] Ratchet `CLOSURE_BUDGET` down at each phase exit (280 → 262 → 235).
-- [ ] Add `xtask check-lockfile-budget`: a second ratchet on total `Cargo.lock`
-      package count. The closure budget cannot see the ~62 `wasmtime` packages
-      that an off-by-default feature drags into `cargo audit` / `cargo deny`
-      scope and into `--all-features` CI builds. `wasm-backend` has an active
-      design (Plan 301) and is **not** a deletion candidate — but its cost
-      should be visible and bounded.
-- [ ] Consider moving `wasm-backend` to its own workspace member with its own
-      lockfile, so the main `Cargo.lock` stops carrying the `cranelift` family.
-      Evaluate against Plan 301's Part A before acting.
+- [x] `CLOSURE_BUDGET` ratcheted at every phase exit: 286 → 280 → 263 → 262 →
+      **242**.
+- [x] **`xtask check-feature-closure-budget`** (new): bounds the workspace's
+      all-features, no-dev closure at **468**, wired into the `Lint policy` job.
+      The default-closure gate cannot see an off-by-default feature, so
+      `wasm-backend`'s ~62-crate `wasmtime`/`cranelift` family was growing
+      unobserved — not shipped, but compiled by `--all-features` lanes and
+      scanned by `cargo deny` and `cargo audit`. A compile-time assertion pins
+      the feature budget above the default one, since the two measure nested
+      sets and an edit inverting them should not build. Both the runtime gate
+      and the const assertion were verified to fail when violated.
+- [ ] Moving `wasm-backend` to its own workspace member so the main `Cargo.lock`
+      stops carrying the `cranelift` family. Still open; evaluate against
+      Plan 301 before acting.
+
+### Why the gate is not a `Cargo.lock` count
+
+The original sketch here was "ratchet total lockfile packages". Measured, that
+does not work: Cargo retains entries for packages unreachable from any target,
+feature, or dev-dependency. This workspace's lockfile holds **672** while only
+**552** are reachable with every feature *and* all dev-dependencies enabled —
+about 120 orphans. Removing a real dependency can leave the count unchanged,
+which was confirmed by dropping one and re-resolving: 672 before, 672 after. A
+ratchet on that number would give false comfort in both directions.
+
+The resolved-graph counts do respond, and they nest cleanly:
+
+| metric | count | gate |
+|---|---|---|
+| default `mvmctl`, no-dev | 242 | `check-closure-budget` |
+| workspace, no-dev, all-features | 468 | `check-feature-closure-budget` |
+| workspace, with-dev, all-features | 552 | ungated (test-only tooling) |
+| `Cargo.lock` raw | 672 | **not a metric** — ~120 orphans |
 
 ## Expected outcome
 
@@ -363,6 +385,8 @@ The ratchet only works if it moves. Every phase above must land its
 | `fs2` → std locking | 262 | −24 | **landed** |
 | Phase 2 stage A (crate only) | 262 | −24 | **landed** |
 | Phase 2 stage B (all callers) | **242** | **−44** | **landed** |
+| Phase 3 | 242 | — | measured and **declined** |
+| Phase 4 | 242 | — | **landed** (a second ratchet, not a cut) |
 
 ## What landed (2026-08-09)
 
