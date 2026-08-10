@@ -836,16 +836,18 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_tier_names_itself_as_unenforced() {
-        assert_eq!(EnforcedTier::declared().mechanism, "declared");
-        assert!(!EnforcedTier::declared().is_enforced());
+    fn a_declared_tier_reports_itself_as_unenforced() {
+        assert!(!EnforcedTier::Declared.is_enforced());
+        assert_eq!(EnforcedTier::Declared.label(), "declared");
     }
 
     #[test]
-    fn an_enforced_tier_names_its_mechanism() {
-        let t = EnforcedTier::enforced("cgroup2:cpu.max");
-        assert_eq!(t.mechanism, "cgroup2:cpu.max");
-        assert!(t.is_enforced());
+    fn every_enforced_tier_names_its_mechanism() {
+        assert!(EnforcedTier::Cgroup2CpuMax.is_enforced());
+        assert_eq!(EnforcedTier::Cgroup2CpuMax.label(), "cgroup2:cpu.max");
+        assert_eq!(EnforcedTier::WasmFuel.label(), "wasmtime:fuel");
+        assert_eq!(EnforcedTier::WasmEpoch.label(), "wasmtime:epoch");
+        assert_eq!(EnforcedTier::SupervisorTimer.label(), "supervisor:timer");
     }
 }
 ```
@@ -956,34 +958,41 @@ impl ResourceControls {
     }
 }
 
-/// What was achieved in one dimension. Built from a read-back, never from the
-/// value that was written.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnforcedTier {
-    /// The mechanism that actually bounded this dimension, or `"declared"`
-    /// when nothing did.
-    pub mechanism: &'static str,
+/// What actually bounded one dimension. Constructed from a read-back of the
+/// live control, never from the value that was written.
+///
+/// An enum rather than a string: a receipt label is a security-relevant
+/// assertion, and a typo in a free-form mechanism string would be
+/// indistinguishable from a real tier. `label()` renders for display; nothing
+/// dispatches on the rendered text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcedTier {
+    /// Nothing bounded this dimension; the value is a declaration only.
+    Declared,
+    Cgroup2CpuMax,
+    WasmFuel,
+    WasmEpoch,
+    SupervisorTimer,
 }
 
 impl EnforcedTier {
-    /// Nothing enforced this dimension; the value is a declaration only.
+    /// Whether a mechanism actually bounded this dimension.
     #[must_use]
-    pub const fn declared() -> Self {
-        Self {
-            mechanism: "declared",
+    pub const fn is_enforced(self) -> bool {
+        !matches!(self, Self::Declared)
+    }
+
+    /// Display rendering for receipts and `doctor` output.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Cgroup2CpuMax => "cgroup2:cpu.max",
+            Self::WasmFuel => "wasmtime:fuel",
+            Self::WasmEpoch => "wasmtime:epoch",
+            Self::SupervisorTimer => "supervisor:timer",
         }
-    }
-
-    /// A mechanism confirmed to be in effect by reading it back.
-    #[must_use]
-    pub const fn enforced(mechanism: &'static str) -> Self {
-        Self { mechanism }
-    }
-
-    #[must_use]
-    pub fn is_enforced(&self) -> bool {
-        self.mechanism != "declared"
     }
 }
 
@@ -1000,8 +1009,8 @@ impl EnforcedGrants {
     #[must_use]
     pub const fn all_declared() -> Self {
         Self {
-            cpu: EnforcedTier::declared(),
-            wall_clock: EnforcedTier::declared(),
+            cpu: EnforcedTier::Declared,
+            wall_clock: EnforcedTier::Declared,
         }
     }
 }
@@ -1695,7 +1704,21 @@ in `mvm:egress`.
 
 **Interfaces:**
 - Consumes: `Grants`, `CpuGrant`, `WallClockGrant` (Task 1); `EnforcedGrants`, `EnforcedTier` (Task 5)
-- Produces: `WasmBackend::apply_grants` override
+- Produces: `WasmBackend::apply_grants` override; and three helpers this task
+  must define, because the tests below call them and nothing else in the plan
+  creates them:
+  - `WasmBackend::pending_grants(&self) -> &Mutex<Option<Grants>>` — grants
+    applied before a module runs are stashed here and consumed at
+    engine/store construction, since `apply_grants` takes `&self` and the
+    store does not exist yet.
+  - `WasmBackend::run_module_with_grants(&self, wat: &str, grants: &Grants) -> Result<()>`
+    — test-facing entry point: applies grants, builds the engine and store
+    with them, instantiates the module, and calls `_start`. Mark it
+    `#[cfg(test)]` unless a production caller appears.
+  - `validate_wasm_grants(grants: &Grants) -> Result<()>` — the refusal rules
+    (share is not a wasm unit; fuel without wall_clock bounds nothing),
+    factored out so `apply_grants` and `run_module_with_grants` cannot drift
+    apart on what they accept.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1773,8 +1796,8 @@ Add to that file's test module:
         let e = b
             .apply_grants(&VmId::from("wasm-test"), &grants)
             .expect("applies");
-        assert_eq!(e.cpu.mechanism, "wasmtime:fuel");
-        assert_eq!(e.wall_clock.mechanism, "wasmtime:epoch");
+        assert_eq!(e.cpu, EnforcedTier::WasmFuel);
+        assert_eq!(e.wall_clock, EnforcedTier::WasmEpoch);
     }
 ```
 
@@ -1813,39 +1836,50 @@ adding to `WasmHostState`:
 - [ ] **Step 4: Implement `apply_grants`**
 
 ```rust
+/// The rules for what the wasm tier will accept. Shared by `apply_grants` and
+/// `run_module_with_grants` so the two cannot drift apart on what they admit.
+fn validate_wasm_grants(grants: &Grants) -> anyhow::Result<()> {
+    // A share is a fraction of host CPU time; this tier counts instructions.
+    // Different units, and no conversion between them exists.
+    if matches!(grants.cpu, Some(CpuGrant::Share { .. })) {
+        anyhow::bail!(
+            "the wasm tier cannot bound a CPU share; express it as fuel \
+             (a deterministic instruction budget)"
+        );
+    }
+    // Fuel does not tick inside a host call, so a module parked in one is
+    // unbounded by fuel alone. Epoch interruption is what preempts it.
+    if matches!(grants.cpu, Some(CpuGrant::Fuel { .. }))
+        && !matches!(grants.wall_clock, Some(WallClockGrant::Secs { .. }))
+    {
+        anyhow::bail!(
+            "a fuel grant needs a bounded wall_clock grant: fuel does not tick \
+             inside a host call, so a module parked in one would be unbounded"
+        );
+    }
+    Ok(())
+}
+
     fn apply_grants(
         &self,
         _id: &VmId,
         grants: &Grants,
     ) -> anyhow::Result<EnforcedGrants> {
+        validate_wasm_grants(grants)?;
+
+        // Stash for the engine/store construction: `apply_grants` takes
+        // `&self` and the store does not exist yet.
+        *self.pending_grants().lock().expect("pending grants lock") = Some(grants.clone());
+
         let cpu = match grants.cpu {
-            // A share is a fraction of host CPU time; this tier counts
-            // instructions. Different units, no conversion.
-            Some(CpuGrant::Share { .. }) => anyhow::bail!(
-                "the wasm tier cannot bound a CPU share; express it as fuel \
-                 (a deterministic instruction budget)"
-            ),
-            Some(CpuGrant::Fuel { instructions }) => {
-                if grants.wall_clock.is_none() {
-                    anyhow::bail!(
-                        "a fuel grant needs a wall_clock grant: fuel does not tick \
-                         inside a host call, so a module parked in one is unbounded"
-                    );
-                }
-                self.set_fuel(instructions)?;
-                EnforcedTier::enforced("wasmtime:fuel")
-            }
-            None => EnforcedTier::declared(),
+            Some(CpuGrant::Fuel { .. }) => EnforcedTier::WasmFuel,
+            Some(CpuGrant::Share { .. }) => unreachable!("refused by validate_wasm_grants"),
+            None => EnforcedTier::Declared,
         };
-
         let wall_clock = match grants.wall_clock {
-            Some(WallClockGrant::Secs { secs }) => {
-                self.set_epoch_deadline(u64::from(secs.get()))?;
-                EnforcedTier::enforced("wasmtime:epoch")
-            }
-            Some(WallClockGrant::Unbounded) | None => EnforcedTier::declared(),
+            Some(WallClockGrant::Secs { .. }) => EnforcedTier::WasmEpoch,
+            Some(WallClockGrant::Unbounded) | None => EnforcedTier::Declared,
         };
-
         Ok(EnforcedGrants { cpu, wall_clock })
     }
 ```
