@@ -1030,8 +1030,9 @@ for detailed scope and acceptance criteria.
   - [x] Phase 2 — `mvm-http` over rustls retires `reqwest`; measured −20, not
         the −27 the raw subtree suggested. Differential harness against reqwest
         landed first and stays as a dev-dep oracle. Closure 262 → 242
-  - [ ] Phase 3 — the product decisions: tree-sitter grammar gating,
-        `tracing-subscriber`, `toml`, and the deferred `serde_jcs`
+  - [ ] Phase 3 — the product decisions: `tracing-subscriber`, `toml`, and the
+        deferred `serde_jcs`. tree-sitter grammar gating is **struck** — the
+        grammars are the SDK-to-Nix translation, not a tradeable dependency
   - [ ] Phase 4 — a lockfile-count ratchet, so the ~62 `wasmtime`-family
         packages an off-by-default feature adds stay visible to `cargo deny`
 

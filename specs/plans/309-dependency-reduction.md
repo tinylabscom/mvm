@@ -43,7 +43,7 @@ reachable only through the off-by-default `wasm-backend` feature.
 | `rcgen` | 20 (11 from its `x509-parser` feature alone) | 1 module, `mvm-core/src/crypto/egress_ca.rs` |
 | `aes-gcm` | 10 | 2 files |
 | `tracing-subscriber` | 7 | 12 files |
-| `tree-sitter` + 4 grammars | 7 | `mvm-sdk` compile/decorator |
+| `tree-sitter` + 4 grammars | 7 | `mvm-sdk` compile/decorator — **keep**, see non-goals |
 | `toml` | 6 | 10 crates |
 | `clap` | 6 | pervasive |
 | `rayon` | 5 | 5 files |
@@ -68,6 +68,17 @@ Ruthless is not reckless. These are *not* cut, and the reasons are load-bearing:
 - **`clap`, `chrono`, `serde`, `serde_json`, `flate2`, `rand`.** Pervasive, and
   the closure cost is small relative to what re-implementing them would cost in
   correctness.
+- **`tree-sitter` + its four grammars (7 crates).** Measured and then ruled
+  out (maintainer call, 2026-08-10). These are the only C-compiling crates in
+  the closure besides `ring`/`blake3`, so gating the JS/TS grammars behind an
+  `sdk-node` feature looked attractive on build time. It is not available: the
+  grammars *are* the SDK-to-Nix translation. `decorator/{python,typescript}.rs`
+  parse the decorators, `compile/reachability.rs` and `compile/func_describe.rs`
+  scope a function entrypoint to reachable code, `compile/strip_framework.rs`
+  rewrites the source, and `addon/validator.rs` validates the Nix bodies with
+  `tree-sitter-nix`. Gating them would make a default `mvmctl` unable to compile
+  the workloads it exists to compile. Not a dependency to trade.
+
 - **`smoltcp` / `mio` / `socket2` (6 crates).** A whole userspace forwarding
   backend; on macOS it is the only one.
 - **`ring`, `rustls`, `ed25519-dalek`, `sha2`, `blake3`, `leakguard`,
@@ -303,14 +314,6 @@ before starting rather than discovered halfway.
 
 Not scheduled. Each needs a call that is not the implementer's to make.
 
-- [ ] **`tree-sitter` + 4 grammars (−7 crates).** These and `ring`/`blake3` are
-      the only C-compiling crates in the closure, so they cost build time out of
-      proportion to their count. All four grammars are genuinely used: Python
-      (decorator parse, reachability, `func_describe`, `strip_framework`),
-      TypeScript/TSX + JavaScript (reachability, `func_describe`), Nix (addon
-      body validator). Gating JS/TS behind an `sdk-node` feature would cut C
-      compilation for the common Python case — but a default `mvmctl` would then
-      refuse to compile Node workloads. **Product decision.**
 - [ ] **`tracing-subscriber` (−4 measured, not −7).** Its features were
       measured too: dropping `json` alone is −1, `env-filter` alone is −1, and
       `fmt`+`std` only is −4. None is free — `EnvFilter::try_from_default_env`
