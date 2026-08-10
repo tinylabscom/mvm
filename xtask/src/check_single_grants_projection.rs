@@ -23,6 +23,13 @@
 //! policy(&self) -> NetworkPolicy`) names neither type in its signature and
 //! is not detectable by a text gate. That shape has to be caught in review,
 //! not here.
+//!
+//! Signatures are matched whole, not line-by-line: rustfmt wraps any
+//! signature past its width limit, which puts the parameters and the return
+//! type on different lines — the single most likely shape a real second
+//! projection would actually take, and invisible to a line-based check.
+//! Comments are stripped first so prose quoting a signature is not mistaken
+//! for one.
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -57,15 +64,17 @@ pub fn run(workspace: &Path) -> Result<()> {
             if rel == PROJECTION_FILE {
                 return;
             }
-            for line in body.lines() {
-                let Some((before, after)) = line.split_once("->") else {
+            // The return-type arrow is matched with `rsplit_once` (last
+            // occurrence, not first): a parameter of type `impl Fn() -> T`
+            // carries its own `->` before the real one, and taking the first
+            // occurrence would split there instead of at the signature's
+            // actual return type.
+            for signature in fn_signatures(&strip_line_comments(body)) {
+                let Some((params, ret)) = signature.rsplit_once("->") else {
                     continue;
                 };
-                if before.contains("fn ")
-                    && before.contains("Grants")
-                    && after.contains("NetworkPolicy")
-                {
-                    offenders.push(format!("{rel}: {}", line.trim()));
+                if params.contains("Grants") && ret.contains("NetworkPolicy") {
+                    offenders.push(format!("{rel}: {}", signature.trim()));
                     break;
                 }
             }
@@ -80,6 +89,45 @@ pub fn run(workspace: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Drop `//`-style comments so prose quoting a signature is not read as one.
+/// Block comments are left alone: a `/* */` containing a full signature is
+/// rare enough that the false positive is cheaper than a comment parser.
+fn strip_line_comments(body: &str) -> String {
+    body.lines()
+        .map(|line| match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every function signature in `body`, each flattened to one line.
+///
+/// A signature runs from `fn ` to the `{` opening its body (or the `;`
+/// ending a trait method), so a rustfmt-wrapped signature is returned whole
+/// rather than in fragments.
+fn fn_signatures(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("fn ") {
+        rest = &rest[start..];
+        let end = rest
+            .find('{')
+            .into_iter()
+            .chain(rest.find(';'))
+            .min()
+            .unwrap_or(rest.len());
+        out.push(rest[..end].split_whitespace().collect::<Vec<_>>().join(" "));
+        rest = &rest[end.min(rest.len())..];
+        if rest.is_empty() {
+            break;
+        }
+        rest = &rest[1.min(rest.len())..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -158,10 +206,44 @@ mod tests {
             "pub fn sneaky(grants: &Grants) -> NetworkPolicy { unimplemented!() }",
         );
         let err = run(&tmp).unwrap_err();
+        // The reported text starts at `fn ` (visibility is not part of the
+        // matched signature); the file and the rest of the signature must
+        // still be present so the failure is actionable.
+        assert!(
+            err.to_string().contains(
+                "crates/mvm-core/src/lib.rs: fn sneaky(grants: &Grants) -> NetworkPolicy"
+            )
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_rustfmt_wrapped_signature_is_still_caught() {
+        // Written exactly as rustfmt would emit a signature past its width
+        // limit: parameters and return type on separate lines. This is the
+        // shape a line-based check misses.
+        let tmp = fixture_with_offender(
+            "rustfmt-wrapped",
+            "pub fn policy_for(\n    g: &Grants,\n) -> NetworkPolicy {\n    unimplemented!()\n}\n",
+        );
+        let err = run(&tmp).unwrap_err();
+        assert!(err.to_string().contains("crates/mvm-core/src/lib.rs"));
         assert!(
             err.to_string()
-                .contains("pub fn sneaky(grants: &Grants) -> NetworkPolicy")
+                .contains("fn policy_for( g: &Grants, ) -> NetworkPolicy")
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_doc_comment_quoting_a_signature_is_not_flagged() {
+        // A `///` line quoting the projection's own signature must not be
+        // mistaken for a second definition.
+        let tmp = fixture_with_offender(
+            "doc-comment",
+            "/// Calls `fn helper(grants: &Grants) -> NetworkPolicy` internally.\npub fn helper() {}\n",
+        );
+        run(&tmp).expect("a doc comment quoting a signature is not a second projection");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
