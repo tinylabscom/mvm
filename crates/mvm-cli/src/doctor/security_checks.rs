@@ -686,20 +686,20 @@ pub(super) fn security_snapshot_dirs_check() -> Check {
     }
 }
 
-/// macOS-only: every sign target (mvmctl plus the supervisor binaries) needs
-/// the virtualization and hypervisor entitlements. Probes all paths from
+/// macOS-only: every executable in the active VM launch set needs the
+/// entitlement for its runtime role. Probes all paths from
 /// `collect_sign_targets` so an unsigned supervisor is not left unreported.
 /// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 pub(super) fn security_signing_check() -> Check {
-    use mvm_runtime::codesign::{collect_sign_targets, entitlements_present};
+    use mvm_runtime::codesign::{collect_sign_targets, entitlement_present};
     let targets = collect_sign_targets();
-    // `entitlements_present` returns `None` off macOS for every path, so if
+    // `entitlement_present` returns `None` off macOS for every path, so if
     // the first target gives `None` the whole check is n/a.
     let probed: Vec<(std::path::PathBuf, Option<bool>)> = targets
         .into_iter()
-        .map(|p| {
-            let r = entitlements_present(&p);
-            (p, r)
+        .map(|target| {
+            let r = entitlement_present(&target.path, target.required);
+            (target.path, r)
         })
         .collect();
     signing_check_from_probes(&probed)
@@ -738,8 +738,7 @@ fn signing_check_from_probes(probes: &[(std::path::PathBuf, Option<bool>)]) -> C
             name: "signing",
             category: "security",
             ok: true,
-            info: "virtualization + hypervisor entitlements present on all sign targets"
-                .to_string(),
+            info: "required VM entitlements present on all launch targets".to_string(),
         }
     } else {
         Check {
@@ -747,7 +746,8 @@ fn signing_check_from_probes(probes: &[(std::path::PathBuf, Option<bool>)]) -> C
             category: "security",
             ok: false,
             info: format!(
-                "entitlements missing on: {} — run `mvmctl sign`",
+                "required VM entitlements missing on: {} — reinstall or update mvmctl \
+                 (advanced repair: `mvmctl env sign`)",
                 unsigned.join(", ")
             ),
         }
@@ -924,8 +924,8 @@ mod tests {
         let c = signing_check_from_probes(&probes);
         assert!(c.ok, "all signed → ok; got: {}", c.info);
         assert!(
-            c.info.contains("all sign targets"),
-            "expected 'all sign targets', got: {}",
+            c.info.contains("all launch targets"),
+            "expected 'all launch targets', got: {}",
             c.info
         );
     }
@@ -951,7 +951,7 @@ mod tests {
             c.info
         );
         assert!(
-            c.info.contains("mvmctl sign"),
+            c.info.contains("mvmctl env sign"),
             "info must carry the remediation hint; got: {}",
             c.info
         );

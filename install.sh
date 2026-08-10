@@ -1,8 +1,7 @@
 #!/bin/sh
 # mvmctl installer. Downloads the released binary for this platform from
 # GitHub releases, verifies its sha256 (and cosign signature if cosign is
-# present), installs it, and on macOS re-codesigns with the
-# Hypervisor.framework entitlement.
+# present), installs it, and on macOS applies the required VM entitlements.
 #
 # Env knobs:
 #   MVM_VERSION            pin a release tag (e.g. v0.15.2); default: latest
@@ -137,9 +136,8 @@ $SUDO install -m 0755 "$SRC/mvmctl" "$INSTALL_DIR/mvmctl"
 # them — installing only mvmctl strands them. copy-if-exists: the bundled set
 # differs by platform (macOS ships the supervisors + bridge + endpoint; Linux
 # ships the bridge + endpoint).
-# No codesigning here: the hvf/libkrun supervisors self-sign with the
-# required entitlements on first spawn (ensure_signed); mvm-bridge and the
-# substitution endpoint need no entitlement.
+# mvm-bridge and the substitution endpoint need no VM entitlement. The
+# supervisors are signed below before the install is reported successful.
 for hostbin in mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
   if [ -f "$SRC/$hostbin" ]; then
     $SUDO install -m 0755 "$SRC/$hostbin" "$INSTALL_DIR/$hostbin"
@@ -152,17 +150,29 @@ if [ -d "$SRC/assets" ]; then
   $SUDO cp -R "$SRC/assets" "$INSTALL_DIR/assets"
 fi
 
-# macOS: Hypervisor.framework needs the entitlement. Best-effort —
-# a re-sign failure warns but doesn't fail the install (the binary
-# still runs for non-hypervisor uses; `codesign` can be re-run).
-if [ "$(uname -s)" = "Darwin" ] && [ "${MVM_SKIP_CODESIGN:-}" != "1" ]; then
-  ent="$INSTALL_DIR/assets/mvmctl.entitlements"
-  if command -v codesign >/dev/null 2>&1 && [ -f "$ent" ]; then
-    if $SUDO codesign --entitlements "$ent" -f -s - "$INSTALL_DIR/mvmctl" 2>/dev/null; then
-      say "Codesigned with Hypervisor.framework entitlement."
-    else
-      warn "codesign failed — re-run: codesign --entitlements $ent -f -s - $INSTALL_DIR/mvmctl"
-    fi
+# macOS: every executable on the VM launch path must carry its role-specific
+# entitlement. Treat this as part of installation integrity: a successful
+# install must be ready to launch a VM without a hidden first-run repair.
+if [ "$(uname -s)" = "Darwin" ]; then
+  if [ "${MVM_SKIP_CODESIGN:-}" = "1" ]; then
+    warn "MVM_SKIP_CODESIGN=1 — skipping macOS VM entitlement signing"
+  else
+    command -v codesign >/dev/null 2>&1 || die "codesign is required on macOS"
+
+    sign_target() {
+      target="$1"
+      entitlements="$2"
+      [ -f "$target" ] || return 0
+      [ -f "$entitlements" ] || die "missing entitlement profile: $entitlements"
+      output="$($SUDO codesign --sign - --force --entitlements "$entitlements" "$target" 2>&1)" \
+        || die "codesign failed for $target: $output"
+      say "Codesigned: $target"
+    }
+
+    sign_target "$INSTALL_DIR/mvmctl" "$INSTALL_DIR/assets/mvmctl.entitlements"
+    for hostbin in mvm-hvf-supervisor mvm-libkrun-supervisor; do
+      sign_target "$INSTALL_DIR/$hostbin" "$INSTALL_DIR/assets/mvm-supervisor.entitlements"
+    done
   fi
 fi
 

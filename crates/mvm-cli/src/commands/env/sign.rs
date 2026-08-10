@@ -1,6 +1,6 @@
-//! `mvmctl sign` — re-sign mvmctl + supervisor binaries with the
-//! virtualization/hypervisor entitlements (user-facing repair of the auto-sign
-//! path). macOS-only; a no-op on other platforms.
+//! `mvmctl env sign` — repair the macOS entitlements on mvmctl's VM launch
+//! targets. Normal installs and updates do this automatically; this remains
+//! useful for source builds and older installations.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -22,13 +22,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         if args.json {
             crate::json_out::emit_json(&Vec::<mvm_runtime::codesign::SignReport>::new())?;
         } else {
-            ui::info("mvmctl sign is macOS-only (codesign entitlements); nothing to do here.");
+            ui::info("mvmctl env sign is macOS-only (codesign entitlements); nothing to do here.");
         }
         return Ok(());
     }
 
     let targets = mvm_runtime::codesign::collect_sign_targets();
-    let reports = mvm_runtime::codesign::sign_binaries(&targets);
+    let reports = mvm_runtime::codesign::sign_targets(&targets);
 
     if args.json {
         crate::json_out::emit_json(&reports)?;
@@ -45,9 +45,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ui::status_line(&format!("  {} {}:", mark, r.path.display()), verb);
     }
     if reports.iter().all(|r| r.entitlements_present) {
-        ui::success("All binaries carry the virtualization + hypervisor entitlements.");
+        ui::success("All VM launch targets carry their required macOS entitlements.");
         Ok(())
     } else {
-        anyhow::bail!("one or more binaries failed to acquire both entitlements");
+        anyhow::bail!(
+            "one or more VM launch targets failed to acquire their required entitlements"
+        );
     }
 }
