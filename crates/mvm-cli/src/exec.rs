@@ -898,10 +898,14 @@ fn run_inner(
         req.hypervisor.as_deref(),
     )?;
 
-    // Phase timing (off unless `MVM_PHASE_TIMING` is set): capture a
-    // host-monotonic mark at each run seam, then emit a one-line breakdown
-    // at teardown. When disabled every mark stays `None` and costs nothing.
-    let timing = crate::commands::vm::phase_timing::enabled();
+    // Phase timing (off unless `MVM_PHASE_TIMING` or a launch-sample path is
+    // set): capture a host-monotonic mark at each run seam, then emit a
+    // one-line breakdown and/or the machine-readable sample at teardown. When
+    // both are off every mark stays `None` and costs nothing.
+    let sample_path = crate::commands::vm::launch_sample::sample_path_from_env();
+    let render_line = crate::commands::vm::phase_timing::enabled();
+    let timing = render_line || sample_path.is_some();
+    let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(timing);
     let t_start = timing.then(std::time::Instant::now);
 
     // Resolve image artifacts: either a named template or a pre-built pair.
@@ -918,7 +922,7 @@ fn run_inner(
     // Snapshot eligibility, the dm-verity sidecar probe, the virtiofs-root
     // tier gate, and the effective initrd all fall out of the resolved image
     // + backend capabilities; see `resolve_boot_strategy`.
-    let boot = resolve_boot_strategy(&req, &backend, &resolved)?;
+    let boot = resolve_boot_strategy(&req, &backend, &resolved, &mut sub_marks)?;
 
     // Report the resolved strategy to the command layer for chain-audit. This is
     // the single source of truth — the same value that drives the boot below —
@@ -974,14 +978,29 @@ fn run_inner(
         use_snapshot,
         &boot_attempt,
         timing.then_some(&mut warm_claim_marks),
+        &mut sub_marks,
     )?;
     let t_backend_started = timing.then(std::time::Instant::now);
+
+    // Read the backend's own phase sidecar now: teardown removes the state
+    // directory that holds it, and by the time the sample is assembled it is
+    // gone. A backend that does not trace itself yields nothing here.
+    let backend_trace = timing
+        .then(|| mvm_core::launch_trace::read_trace(&mvm_core::config::vm_state_dir(&vm_name)))
+        .flatten();
+    let backend_phases = backend_trace
+        .as_ref()
+        .map(|trace| trace.phases.clone())
+        .unwrap_or_default();
+    let degraded = backend_trace
+        .map(|trace| trace.degraded)
+        .unwrap_or_default();
 
     // Install Ctrl-C handler that tears the VM down.
     let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
 
     // Run the command + always tear down.
-    let run_outcome = run_in_guest(&vm_name, &req, capture, timing);
+    let run_outcome = run_in_guest(&vm_name, &req, capture, timing, &mut sub_marks);
     let t_command_done = timing.then(std::time::Instant::now);
     let (result, t_vsock_ready) = match run_outcome {
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
@@ -995,7 +1014,9 @@ fn run_inner(
     // maintenance pass cannot delay admission or the first guest operation.
     let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
 
-    teardown_transient_vm(&backend, &vm_name, &start_config, &requested_vm_name);
+    sub_marks.start(crate::commands::vm::phase_timing::SubPhase::CleanupHandoff);
+    teardown_transient_vm(&backend, &vm_name, &requested_vm_name, &mut sub_marks);
+    sub_marks.finish(crate::commands::vm::phase_timing::SubPhase::CleanupHandoff);
     let t_torn_down = timing.then(std::time::Instant::now);
 
     // Emit the phase breakdown when every seam was marked (i.e. timing was
@@ -1032,13 +1053,93 @@ fn run_inner(
             command_done,
             torn_down,
         };
-        eprintln!("{}", marks.to_timings().render());
+        let phases = marks.to_timings();
+        let sub_phases = sub_marks.to_timings();
+        if render_line {
+            eprintln!("{}", phases.render());
+            eprintln!("{}", sub_phases.render());
+        }
+        if let Some(path) = sample_path.as_deref() {
+            let sample = build_launch_sample(LaunchSampleInputs {
+                backend: backend.name(),
+                start_config: &start_config,
+                launch_mode,
+                mount_materialized: sub_marks
+                    .recorded(crate::commands::vm::phase_timing::SubPhase::MountMaterialize),
+                phases,
+                sub_phases,
+                backend_phases: backend_phases.clone(),
+                degraded: degraded.clone(),
+            });
+            if let Err(e) = crate::commands::vm::launch_sample::write_sample(path, &sample) {
+                // A measurement that cannot be recorded must be loud: a
+                // silently missing sample reads downstream as a launch that
+                // never ran, not as a launch nobody wrote down.
+                eprintln!("[mvm] launch sample not written: {e:#}");
+            }
+        }
     }
 
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("interrupted");
     }
     result
+}
+
+/// Everything one finished launch knows about itself that a sample records.
+struct LaunchSampleInputs<'a> {
+    backend: &'a str,
+    start_config: &'a VmStartConfig,
+    launch_mode: crate::commands::vm::phase_timing::LaunchMode,
+    /// Whether a mount image was materialized on this launch.
+    mount_materialized: bool,
+    phases: crate::commands::vm::phase_timing::RunPhaseTimings,
+    sub_phases: crate::commands::vm::launch_sample::LaunchSubTimings,
+    /// Phases the backend recorded inside `start`, read from its sidecar
+    /// before teardown removed the state directory holding it.
+    backend_phases: Vec<mvm_core::launch_trace::TracePhase>,
+    /// Capabilities the backend reported coming up without.
+    degraded: Vec<String>,
+}
+
+/// Assemble the machine-readable sample for a finished launch.
+///
+/// Artifact **paths** go in, not digests: hashing them here would charge the
+/// measured launch for work a consumer can do once, afterwards.
+fn build_launch_sample(
+    inputs: LaunchSampleInputs<'_>,
+) -> crate::commands::vm::launch_sample::LaunchSample {
+    use crate::commands::vm::launch_sample as sample;
+
+    let config = inputs.start_config;
+    sample::LaunchSample {
+        schema_version: sample::LAUNCH_SAMPLE_SCHEMA_VERSION,
+        build_profile: sample::BuildProfile::current(),
+        mvm_version: env!("CARGO_PKG_VERSION").to_string(),
+        backend: inputs.backend.to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        launch_mode: inputs.launch_mode,
+        sizing: sample::GuestSizing {
+            cpus: config.cpus,
+            memory_mib: config.memory_mib,
+            mem_initial_mib: config.mem_initial_mib,
+        },
+        artifacts: sample::ArtifactPaths {
+            kernel: config.kernel_path.clone(),
+            initramfs: config.initrd_path.clone(),
+            runtime_overlay: config.runtime_overlay_path.clone(),
+            rootfs: Some(config.rootfs_path.clone()),
+        },
+        work: sample::recorded_work(
+            inputs.mount_materialized,
+            inputs.launch_mode == crate::commands::vm::phase_timing::LaunchMode::Warm,
+        ),
+        phases: inputs.phases,
+        sub_phases: inputs.sub_phases,
+        backend_phases: inputs.backend_phases,
+        degraded: inputs.degraded,
+    }
 }
 
 /// Kernel/rootfs/initrd + provenance resolved from `req.image`: either a
@@ -1143,7 +1244,10 @@ fn resolve_boot_strategy(
     req: &ExecRequest,
     backend: &AnyBackend,
     resolved: &ResolvedImage,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<BootStrategy> {
+    use crate::commands::vm::phase_timing::SubPhase;
+
     // Snapshot path is taken when the request is eligible; otherwise cold boot.
     let use_snapshot = snapshot_eligible(
         &req.image,
@@ -1156,7 +1260,9 @@ fn resolve_boot_strategy(
     // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
     // absence is the dev-VM exemption. This is host-local and side-effect-free;
     // foreground OCI launches must never boot the builder/dev VM just to probe.
+    sub.start(SubPhase::ArtifactVerify);
     let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&resolved.rootfs);
+    sub.finish(SubPhase::ArtifactVerify);
 
     // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
     // dev run boots from the unpacked tree over virtio-fs (no ext4 materialize);
@@ -1274,14 +1380,21 @@ fn boot_transient_vm(
     use_snapshot: bool,
     attempt: &BootAttempt<'_>,
     mut warm_claim_marks: Option<&mut crate::commands::vm::phase_timing::WarmClaimMarks>,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<(String, crate::commands::vm::phase_timing::LaunchMode)> {
-    let phase_timing = crate::commands::vm::phase_timing::enabled();
+    use crate::commands::vm::phase_timing::SubPhase;
+
+    let phase_timing = warm_claim_marks.is_some();
     let boot_started = phase_timing.then(std::time::Instant::now);
     if let Some(marks) = warm_claim_marks.as_mut() {
         marks.pool_wait_started = boot_started;
     }
+    // The per-phase warm-claim lines are a human diagnostic; the marks above
+    // feed the machine-readable sample and are collected whenever either is
+    // asked for.
+    let render_phases = crate::commands::vm::phase_timing::enabled();
     let report_phase = |phase: &'static str| {
-        if let Some(started) = boot_started {
+        if let Some(started) = boot_started.filter(|_| render_phases) {
             eprintln!(
                 "[mvm] warm-claim-phase: {phase}={:.1}ms",
                 started.elapsed().as_secs_f64() * 1_000.0
@@ -1347,10 +1460,17 @@ fn boot_transient_vm(
 
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
+        sub.start(SubPhase::VmmCreate);
         if let Err(e) = attempt.backend.start(attempt.start_config) {
             remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
             return Err(e).context("starting transient microVM");
         }
+        // How far into guest boot `start` has already gone is backend-defined
+        // — a backend that confirms boot before returning leaves almost
+        // nothing for the span below. Splitting VMM setup from guest boot
+        // needs marks inside the driver, not here.
+        sub.finish(SubPhase::VmmCreate);
+        sub.start(SubPhase::GuestKernelEntry);
     }
     let launch_mode = if warm_claimed {
         crate::commands::vm::phase_timing::LaunchMode::Warm
@@ -1393,23 +1513,31 @@ fn install_ctrlc_teardown(
 fn teardown_transient_vm(
     backend: &AnyBackend,
     vm_name: &str,
-    start_config: &VmStartConfig,
     requested_vm_name: &str,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) {
+    use crate::commands::vm::phase_timing::SubPhase;
+
+    sub.start(SubPhase::StopTransient);
     let _ = backend.stop_transient(&VmId(vm_name.to_string()));
+    sub.finish(SubPhase::StopTransient);
 
-    // Top the warm pool back toward target after the run (best-effort,
-    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; the
-    // image-bound boot+capture rewarm a supervisor-config backend used to do
-    // stays explicit via `pool warm` so teardown does not spawn background
-    // work that can contend with foreground launches.
-    if let Err(e) = crate::commands::pool::replenish_after_launch(backend, start_config) {
-        tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
-    }
+    // Refilling the pool is not this VM's cleanup: it boots a standby parent
+    // for the *next* launch and holds nothing this launch owns. Doing it here
+    // cost a measured 1026ms p50 on a launch whose own dispatch window was
+    // 27ms, so a run spent three quarters of its wall clock provisioning for a
+    // successor that might never come. Filling the pool is explicit
+    // (`mvmctl pool warm`), which is what the same reasoning already settled on
+    // for the image-bound rewarm: teardown does not spawn background work that
+    // can contend with foreground launches, and it no longer does the work
+    // inline either. A launch that finds no claimable standby cold-boots, which
+    // is far cheaper than building one first.
 
+    sub.start(SubPhase::StateRemove);
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
     let requested_state_dir = mvm_core::config::vm_state_dir(requested_vm_name);
     remove_transient_state_dirs(&state_dir, &requested_state_dir);
+    sub.finish(SubPhase::StateRemove);
 }
 
 /// Remove both state directories involved in a transient launch. A warm-pool
@@ -1495,9 +1623,12 @@ fn run_in_guest(
     req: &ExecRequest,
     capture: bool,
     timing: bool,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<(Either<i32, ExecOutput>, Option<std::time::Instant>)> {
+    use crate::commands::vm::phase_timing::SubPhase;
     use std::io::Write as _;
-    if !wait_for_agent(vm_name, 30) {
+
+    if !wait_for_agent_timed(vm_name, 30, sub) {
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
     // Agent reachable over vsock: the command is about to be dispatched.
@@ -1511,8 +1642,12 @@ fn run_in_guest(
         return Ok((Either::Left(exit_code), vsock_ready));
     }
 
+    // Establishing the channel the command goes out on — the dispatch cost,
+    // distinct from how long the command itself then runs in the guest.
+    sub.start(SubPhase::FirstDispatch);
     let transport = vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    sub.finish(SubPhase::FirstDispatch);
     // Inbound vsock RPC audit. exec.rs is a top-level module that can't
     // reach the private `commands::shared` re-export, so inline the audit
     // emit here. The detail format matches
@@ -1861,8 +1996,31 @@ pub fn tear_down_session_vm(vm: SessionVm) {
 }
 
 pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
+    let mut untimed = crate::commands::vm::phase_timing::LaunchSubMarks::new(false);
+    wait_for_agent_timed(vm_name, timeout_secs, &mut untimed)
+}
+
+/// [`wait_for_agent`], recording where the readiness wait went.
+///
+/// Two spans come out of it. `GuestKernelEntry` — opened when the VMM started
+/// its vCPUs — closes at the start of the attempt that succeeded, so it is the
+/// guest-boot window bounded below by the poll interval, not an exact mark.
+/// `AgentAuth` covers only that successful attempt's connect and authenticated
+/// ping, which is exact.
+fn wait_for_agent_timed(
+    vm_name: &str,
+    timeout_secs: u64,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+) -> bool {
+    use crate::commands::vm::phase_timing::SubPhase;
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut attempt = 0u32;
     while std::time::Instant::now() < deadline {
+        // Each attempt re-opens the handshake span, so a failed probe leaves
+        // no partial span behind and the reported cost is the one that worked.
+        sub.finish(SubPhase::GuestKernelEntry);
+        sub.start(SubPhase::AgentAuth);
         // Re-pick the transport on each iteration: a Firecracker VM
         // that's still booting may not show up in
         // resolve_running_vm_dir until the daemon registers it.
@@ -1888,19 +2046,25 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
                 mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok()
             }
         {
+            sub.finish(SubPhase::AgentAuth);
             return true;
         }
-        // Tight poll: the guest agent comes up within ~1s, so a coarse
-        // cadence would round readiness up to the next tick and add hundreds
-        // of ms to perceived launch latency. The connect+hello attempts are
-        // cheap and fail fast while the guest is still booting.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Adaptive, not fixed: readiness is only observed on a tick, so the
+        // cadence is a floor under the reported wait. A flat 50ms tick put
+        // guest-ready at 53.8ms p50 on a backend whose VM creation takes
+        // 53.8ms — the number was reporting the tick, not the guest. Starting
+        // fine and backing off keeps a fast guest cheap to notice while a slow
+        // one still costs few attempts. The probes are connect+hello and fail
+        // fast while the guest is still booting.
+        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        attempt = attempt.saturating_add(1);
     }
     false
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     use mvm_core::util::test_env::TestEnv;

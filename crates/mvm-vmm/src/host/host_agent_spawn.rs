@@ -84,6 +84,18 @@ fn is_transient_control_error(err: &(dyn std::error::Error + 'static)) -> bool {
     })
 }
 
+/// Whether a failed control attempt is worth another try.
+///
+/// The retry ladder exists so the register path can wait out a daemon that has
+/// bound its socket but is not serving yet. It cannot wait a socket that is
+/// not on disk into existence: no daemon is listening there, so nothing is
+/// registered for a deregister to change and nothing will answer a register.
+/// Without this, tearing down a VM whose daemon never started sleeps through
+/// the whole ladder to reach a conclusion it could have drawn immediately.
+fn should_retry_control(err: &(dyn std::error::Error + 'static), socket_exists: bool) -> bool {
+    socket_exists && is_transient_control_error(err)
+}
+
 fn control_socket_is_ready(control_socket: &Path) -> bool {
     UnixStream::connect(control_socket).is_ok()
 }
@@ -387,6 +399,19 @@ pub enum ServicesGuard {
 }
 
 impl ServicesGuard {
+    /// Whether host services are actually registered for this VM.
+    ///
+    /// Registration is best-effort: a failure is logged and the workload still
+    /// runs, which means a launch can succeed with `host.audit.v1` unavailable.
+    /// Something has to be able to see that, or a degraded launch is
+    /// indistinguishable from a healthy one.
+    #[must_use]
+    pub fn is_registered(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+impl ServicesGuard {
     /// Disarm whichever path armed; the `stop` path owns teardown after this.
     pub fn defuse(&mut self) {
         match self {
@@ -433,7 +458,7 @@ fn send_control(
         match result {
             Ok(()) => return Ok(()),
             Err(e) => {
-                if !is_transient_control_error(e.root_cause()) {
+                if !should_retry_control(e.root_cause(), control_socket.exists()) {
                     return Err(e);
                 }
                 last_err = Some(e);
@@ -778,5 +803,50 @@ mod tests {
         let mut g = HostAgentServicesGuard::defused();
         g.defuse();
         drop(g);
+    }
+}
+
+#[cfg(test)]
+mod retry_policy_tests {
+    use super::*;
+
+    fn io(kind: std::io::ErrorKind) -> std::io::Error {
+        std::io::Error::new(kind, "synthetic")
+    }
+
+    #[test]
+    fn a_transient_error_retries_only_while_the_socket_exists() {
+        let err = io(std::io::ErrorKind::ConnectionRefused);
+        assert!(
+            should_retry_control(&err, true),
+            "a refused connect to a live socket is worth retrying"
+        );
+        assert!(
+            !should_retry_control(&err, false),
+            "no socket on disk means no daemon to wait for"
+        );
+    }
+
+    #[test]
+    fn a_missing_socket_is_not_waited_out() {
+        // The exact shape that cost 700ms: connecting to an absent socket
+        // yields NotFound, which is transient in general but not when the
+        // socket itself is what is absent.
+        let err = io(std::io::ErrorKind::NotFound);
+        assert!(is_transient_control_error(&err));
+        assert!(!should_retry_control(&err, false));
+        assert!(should_retry_control(&err, true));
+    }
+
+    #[test]
+    fn a_permanent_error_never_retries() {
+        let err = io(std::io::ErrorKind::PermissionDenied);
+        assert!(!should_retry_control(&err, true));
+        assert!(!should_retry_control(&err, false));
+    }
+
+    #[test]
+    fn an_unregistered_guard_reports_itself_as_degraded() {
+        assert!(!ServicesGuard::None.is_registered());
     }
 }

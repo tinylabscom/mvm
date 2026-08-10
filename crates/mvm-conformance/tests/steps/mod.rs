@@ -4,6 +4,7 @@ mod admission_audit;
 mod apple_container;
 mod claim;
 pub(crate) mod cli;
+mod cold_launch;
 mod hvf_save_restore;
 mod initramfs;
 mod kernel_pin;

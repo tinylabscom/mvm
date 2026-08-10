@@ -297,6 +297,13 @@ pub struct CliWorld {
     pub warm_restore_tampered_file: Option<String>,
     /// Restored device model produced by the most recent restore probe.
     pub warm_restore_device_model: Option<mvm_runtime::microvm::RestoredDeviceModel>,
+
+    /// The launch sample a prepared-cold lane scenario stages.
+    pub cold_launch_sample: Option<mvm_cli::bench::cold_launch::LaunchSample>,
+    /// The lane gate's verdict on it, with any refusal reduced to its
+    /// rendered text so the scenario asserts what an operator would read.
+    pub cold_launch_lane_result: Option<Result<(), String>>,
+
     /// Page-merge scopes staged for the most recent merge-decision step.
     pub warm_merge_scopes: Vec<(String, mvm_core::page_merge::PageMergeScope)>,
     /// The most recent page-merge decision.

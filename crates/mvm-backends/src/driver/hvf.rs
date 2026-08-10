@@ -282,6 +282,7 @@ fn boot_with_handoff(
         .write_all(json.as_bytes())
         .map_err(|e| anyhow!("pipe HvfSupervisorConfig to supervisor stdin: {e}"))?;
     let deadline = Instant::now() + PID_FILE_TIMEOUT;
+    let mut attempt = 0u32;
     loop {
         if paths.pid_file.exists() {
             break;
@@ -302,7 +303,8 @@ fn boot_with_handoff(
                 paths.console_log.display()
             );
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        attempt = attempt.saturating_add(1);
     }
     drop(child);
     let agent_socket = hvf_agent_socket(&paths.state_dir);
@@ -591,6 +593,7 @@ fn hvf_agent_socket(state_dir: &std::path::Path) -> PathBuf {
 fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
     let socket = hvf_agent_socket(state_dir);
     let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    let mut attempt = 0u32;
     while Instant::now() < deadline {
         if socket.exists() {
             // The HVF agent socket is the bridge's direct stream endpoint. It
@@ -607,7 +610,8 @@ fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        attempt = attempt.saturating_add(1);
     }
     anyhow::bail!(
         "guest agent socket {} was not responsive within 10s",

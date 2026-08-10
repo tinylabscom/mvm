@@ -671,6 +671,10 @@ type BuiltGuestBinaries = (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf)
 pub fn build_guest_binaries(
     spec: &GuestAgentBuildSpec,
 ) -> Result<BuiltGuestBinaries, GuestAgentBuildError> {
+    // Reaching here means a guest cross-compile is about to run. A launch
+    // measurement that hides a multi-minute build behind a "prepared" label is
+    // worthless, so it is recorded at the one site that starts one.
+    mvm_core::launch_trace::record_image_build();
     let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
     let argv = spec.argv();
     tracing::info!(

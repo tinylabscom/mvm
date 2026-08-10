@@ -14,6 +14,8 @@
 //! a launch shape that can actually ship. It is feature-gated behind
 //! `libkrun-live` since it boots a real guest.
 
+pub mod cold_launch;
+pub mod cold_launch_runner;
 pub mod harness;
 pub mod interaction;
 pub mod probe;

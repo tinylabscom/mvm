@@ -86,6 +86,35 @@ for detailed scope and acceptance criteria.
         binding untouched; fresh child identity on every fork
   - [x] BDD suite `s11_snapshot/hvf_save_restore.feature` + benchmark evidence
 
+- [~] Plan 299 — Prepared cold-launch performance
+      (`specs/plans/299-cold-launch-performance.md`), branch
+      `plan/cold-launch-performance`
+  - [x] Phase 0 — trustworthy baseline COMPLETE. Both native lanes measured
+        from release binaries: HVF/aarch64 prepared cold 112.6 ms p50 /
+        116.6 ms p99 (warm claim 18.9 / 20.0 ms), Firecracker/x86_64 674.0 /
+        888.6 ms. The difference is the VMM boot (`driver_boot` 53.8 vs
+        623.6 ms on identical code), retargeting Phase 3 at the Firecracker
+        path. Foreground teardown is the other dominant cost, promoting
+        Phase 6 ahead of Phase 3.
+  - [ ] Phase 1 — content-addressed `--mount` image cache
+  - [ ] Phase 2 — artifact preparation outside the launch path
+  - [ ] Phase 3 — reduce backend cold-start latency
+  - [ ] Phase 4 — parallelize independent host work
+  - [~] Phase 5 — event-driven guest readiness. The flat 50 ms readiness poll
+        was quantizing every launch: adaptive backoff cut `guest_kernel_entry`
+        from 53.8 ms to 18.0 ms p50 and HVF dispatch from 117.2 ms to 81.4 ms.
+        Three further fixed 50 ms polls (driver PID-file wait, standby agent
+        wait, teardown pid-exit) now share one backoff in
+        `mvm_core::poll_backoff`: VM creation reads 4.6 ms rather than 53.8 ms
+        of tick, and total is 310.1 ms p50. The authenticated readiness
+        notification itself remains.
+  - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
+        decomposed and the warm-pool refill removed from it: a default
+        `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
+        `stop_transient` 142.9 ms, which is real cleanup. Follow-up: give pool
+        maintenance to the resident per-tenant daemon.
+  - [ ] Phase 7 — live validation and regression gates
+
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
   - [x] Remove the standalone `mvm-ebpf-egress` crate; fold the Aya loader

@@ -11,7 +11,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use mvm_agentd::vsock::BROKER_PORT;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
@@ -48,8 +47,7 @@ use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent
 use mvm_vmm::host::cmdline;
 use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 use mvm_vmm::host::spec_map::{
-    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_dir_share_support,
-    workload_spec, workload_vsock_ports,
+    WorkloadSpecInputs, ensure_dir_share_support, workload_spec, workload_vsock_ports,
 };
 use mvm_vmm::host::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
@@ -59,9 +57,11 @@ use mvm_vmm::post_restore::PostRestoreOutcome;
 
 mod backend;
 mod refusal;
+mod sockets;
 mod warm_claim;
 
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
+use sockets::standing_sockets;
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
 pub struct EndpointSpawnRequest<'a> {
@@ -285,65 +285,6 @@ pub struct WorkloadLaunchInputs<'a> {
     pub cmdline: String,
 }
 
-/// The standing host sockets a workload's vsock channels bind to, resolved
-/// under its per-VM state dir. The egress gateway is the endpoint UDS the
-/// spawner returns, not a state-dir path — it is the one gate off the box. A
-/// deny-all, secret-free workload carries no egress path at all.
-struct StandingSockets {
-    agent: PathBuf,
-    exit: PathBuf,
-    /// Host-services broker socket, resolved only for an admitted workload
-    /// (`tenant_id.is_some()`). `None` for an unadmitted VM, which carries no
-    /// broker channel at all. The one path threaded into both the spec and the
-    /// `BrokerRegistrar::register` call so the relay target and bind path match.
-    broker: Option<PathBuf>,
-    console_log: PathBuf,
-    /// Per-port UDS for the interactive console data range. Non-empty only when
-    /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
-    console_data: Vec<(u32, PathBuf)>,
-}
-
-impl StandingSockets {
-    /// Bind these resolved sockets to `egress_uds` — the gating endpoint the
-    /// guest's `EGRESS_PORT` relays to — yielding the channel description both
-    /// start paths map through [`workload_vsock_ports`]. `None` is the explicit
-    /// fail-closed shape for a deny-all, secret-free workload.
-    ///
-    /// The one place a workload's channel description is built. A cold boot
-    /// composes the mapped channels into the spec it boots; a warm claim hands
-    /// the same mapped channels to the fork, which wires them before the
-    /// restored child resumes. Adding a channel to the mapper therefore reaches
-    /// both, and neither path can grow one the other lacks.
-    fn with_egress<'a>(&'a self, egress_uds: Option<&'a Path>) -> WorkloadSockets<'a> {
-        WorkloadSockets {
-            agent: &self.agent,
-            egress_gateway: egress_uds,
-            exit: &self.exit,
-            broker: self.broker.as_deref(),
-            network_control: None,
-            network_data: None,
-            console_data: self.console_data.clone(),
-        }
-    }
-}
-
-fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets {
-    StandingSockets {
-        // Single source of truth shared with the host-side resolver so the
-        // guest agent bridge can't drift out of the host's reach.
-        agent: mvm_core::config::vm_inhouse_agent_socket_at(state_dir),
-        exit: state_dir.join("workload.exit"),
-        // Admitted-only: an unadmitted VM gets no broker channel, so a stray
-        // guest BROKER_PORT dial stays ECONNREFUSED (fail-closed).
-        broker: config
-            .tenant_id
-            .is_some()
-            .then(|| mvm_core::config::vm_vsock_port_socket_at(state_dir, BROKER_PORT)),
-        console_log: state_dir.join("console.log"),
-        console_data: console_data_sockets(state_dir, config.dev_console),
-    }
-}
-
 /// The warm-pool substrate a claim needs beyond the runner's cold-boot fields.
 /// Cold boot never carries it, so it is a per-claim context rather than a runner
 /// field: the standby pool, the content-addressed checkpoint + snapshot stores,
@@ -460,6 +401,12 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // `workload_blocks`.
         ensure_dir_share_support(inputs.config, self.driver.supports_directory_shares())?;
 
+        // A caller times this call from outside and cannot see past it, yet the
+        // VMM boot and every post-boot registration happen in here. Off unless
+        // a measurement asked for it.
+        let mut trace =
+            mvm_core::launch_trace::LaunchTraceRecorder::new(self.driver.kind().as_str());
+
         let state_dir = vm_state_dir(&inputs.config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
@@ -479,6 +426,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 network_policy: inputs.network_policy,
             },
         )?;
+        trace.mark("endpoint_spawn");
 
         let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
@@ -488,7 +436,9 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             console_log: socks.console_log.clone(),
         });
 
+        trace.mark("spec_assembly");
         let vm = self.driver.boot(&spec)?;
+        trace.mark("driver_boot");
 
         // Unconditional and best-effort, and before the fallible activation
         // handshake below rather than after it: the console is the only
@@ -500,6 +450,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         });
+        trace.mark("console_stream_start");
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
         // ActivateEnvironment before exposing operational RPCs. Send it now,
@@ -510,6 +461,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             crate::microvm::activate_workload(&*vm, inputs.config)
                 .context("activate workload after boot")?;
         }
+        trace.mark("activate_workload");
 
         // Register the per-VM host-services broker (host.audit.v1 /
         // host.secrets.v1) for an admitted workload — the same registration the
@@ -525,6 +477,9 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         })?;
         endpoint.defuse();
         broker_guard.defuse();
+        trace.mark("broker_register");
+        trace.degrade_unless("host_services", broker_guard.0.is_registered());
+        trace.write_to(&state_dir);
         Ok(vm)
     }
 
@@ -1456,7 +1411,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
+    use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, GUEST_AGENT_PORT};
     use mvm_core::plan::{Nonce, SecretBinding, SecretSource, VerbGrant, VerbId};
     use mvm_core::policy::network_policy::HostPort;
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;

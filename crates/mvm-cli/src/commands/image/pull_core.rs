@@ -204,6 +204,10 @@ fn pull_image_ref(
     supplied_reference: &str,
     prod: bool,
 ) -> Result<(CachedOciImage, OciTrustDecision, String)> {
+    // Reaching here means the cache did not answer and bytes are coming off a
+    // registry. A launch measurement that hides an acquisition is not a launch
+    // measurement, so it is recorded where the fetch actually happens.
+    mvm_core::launch_trace::record_image_pull();
     let prod_policy = if prod {
         let policy = load_oci_registry_policy()?;
         enforce_registry_allowlist(&image_ref, &policy)?;

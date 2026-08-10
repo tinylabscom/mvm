@@ -1646,6 +1646,61 @@ Then unify + retire the old paths:
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.
 
+**WS-DX-COLD — prepared cold-launch performance**
+
+- [x] **Trustworthy baseline (Plan 299 Phase 0) — COMPLETE.** A transient run
+  writes a machine-readable launch sample; the backend records its own phases
+  into a state-dir sidecar so a caller can see inside `VmBackend::start`; the
+  benchmark invokes a built `mvmctl` directly, refuses a debug build, a
+  contaminated lane, and a degraded launch, and reports raw samples with
+  p50/p95/p99. Both native baselines measured (20 runs + 2 warm-ups, release):
+  **HVF/aarch64 prepared cold 112.6 ms p50 / 116.6 ms p99** (warm claim 18.9 /
+  20.0 ms) — inside budget; **Firecracker/x86_64 674.0 / 888.6 ms** — 3x over.
+  The gap is the VMM boot itself (`driver_boot` 53.8 ms vs 623.6 ms on the same
+  code path), so Phase 3 is now a Firecracker-path phase with HVF's number as
+  its target. Foreground teardown is the other dominant cost (1086 ms of a
+  1216 ms warm launch, from inline pool replenish), promoting Phase 6 ahead of
+  Phase 3. **Phase 6 first change landed:** teardown no longer refills the warm
+  pool, cutting a default `machine run` from 1366 ms to 353.8 ms p50 (3.9x) and
+  leaving teardown as this VM's own cleanup only. **Phase 5 first change
+  landed:** the readiness poll's flat 50 ms tick was a floor under every
+  reported wait — adaptive backoff cut HVF dispatch from 117.2 ms to 81.4 ms
+  p50, 2.5x inside the ≤200 ms budget. Two defects found and fixed on
+  the way: a failed host-services
+  registration slept 700 ms and lost `host.audit.v1` silently. Gates green:
+  workspace Clippy, 10,648 nextest, doctests, hermetic BDD 153/153, Lint xtask
+  gates, Linux cross-compile.
+- [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
+  set and a new guest identity, reach authenticated guest readiness and run
+  `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon
+  HVF and Linux Firecracker/KVM. This is a prepared-cold requirement, not a
+  warm-pool or snapshot-restore claim.
+- [ ] **Separate the cold lanes:** report prepared cold, prepared cold with a
+  mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
+  distributions. A first-use image pull, build, digest, or ext4 materialization
+  may not be hidden inside the launch SLO.
+- [ ] **Content-addressed mount cache:** fingerprint source content and mount
+  policy, publish immutable images atomically under `MVM_HOME`, verify the
+  manifest and image digest before attach, support read-only direct attach and
+  writable copy-on-write, and remove obsolete internal add-directory naming.
+- [ ] **Explicit artifact preparation:** move image, kernel, initramfs, and
+  optional verity preparation out of the launch critical path. Prepared
+  manifests must be local, digest-verified, and free of host-path or network
+  dependencies when launch begins.
+- [ ] **Backend cold path:** profile and reduce VMM creation, memory mapping,
+  vCPU/device setup, and first-instruction latency for HVF, Firecracker/KVM,
+  and libkrun where supported. Reuse immutable host mappings and a resident
+  control plane only; every launch still gets a fresh guest identity and
+  authenticated channel.
+- [ ] **Readiness and cleanup:** replace polling with event-driven authenticated
+  readiness, preserve generation/key checks, and measure command completion and
+  teardown separately. Foreground cleanup must remain bounded without weakening
+  reaper, state-retention, egress, or crash-recovery guarantees.
+- [ ] **Live evidence:** run release-built matrices on Apple Silicon/HVF and
+  the Linux Firecracker host, attach signed timing evidence, add BDD and
+  hermetic regression coverage, and fail CI on prepared-cold p99 regressions.
+  The complete work is tracked in [Plan 299](plans/299-cold-launch-performance.md).
+
 ### Phase 4 — Docs, close-out, stretch
 
 **WS12 — ADRs alive + website docs**
