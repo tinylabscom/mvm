@@ -814,6 +814,10 @@ impl RunningVm for HvfRunningVm {
         &self.id
     }
 
+    fn host_process_id(&self) -> Option<u32> {
+        hvf_backend::read_pid(&self.pid_file).and_then(|pid| u32::try_from(pid).ok())
+    }
+
     fn wait(&self) -> Result<VmExitStatus> {
         Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
             &self.state_dir,
@@ -1233,6 +1237,20 @@ mod tests {
 
         // Ports outside the agent port and the console data range are not host-dialable.
         assert!(vm.vsock_connect(GUEST_AGENT_PORT + 1).is_err());
+    }
+
+    #[test]
+    fn running_vm_reads_the_supervisor_host_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join(PID_FILE_NAME);
+        std::fs::write(&pid_file, "4242\n").unwrap();
+        let vm = HvfRunningVm {
+            id: VmId("measured-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file,
+            agent_socket: dir.path().join("hvf-agent.sock"),
+        };
+        assert_eq!(vm.host_process_id(), Some(4242));
     }
 
     // --- console_socket_for_port ---

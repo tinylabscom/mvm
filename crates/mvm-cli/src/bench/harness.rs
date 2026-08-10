@@ -6,6 +6,8 @@ use std::thread;
 
 use anyhow::{Context, Result, bail};
 
+use crate::commands::vm::launch_sample::ProcessMemorySnapshot;
+
 use super::report::{BenchReport, build_report};
 use super::report::{HostDescriptor, LaunchDistributionReport, build_launch_distribution_report};
 use super::stats::IterationTiming;
@@ -113,6 +115,28 @@ pub fn parse_linux_smaps_rollup_pss_bytes(input: &str) -> Result<u64> {
     bail!("smaps_rollup did not contain a Pss line")
 }
 
+/// Parse the process's own minor and major page-fault counters from Linux
+/// `/proc/<pid>/stat`. The command name is parenthesized and may contain
+/// whitespace or parentheses, so fields are counted only after its final `)`.
+#[cfg(any(test, target_os = "linux"))]
+pub fn parse_linux_proc_stat_faults(input: &str) -> Result<(u64, u64)> {
+    let command_end = input
+        .rfind(')')
+        .context("proc stat did not contain a parenthesized command")?;
+    let fields: Vec<&str> = input[command_end + 1..].split_whitespace().collect();
+    let minor = fields
+        .get(7)
+        .context("proc stat did not contain minflt field 10")?
+        .parse::<u64>()
+        .context("parsing proc stat minflt field")?;
+    let major = fields
+        .get(9)
+        .context("proc stat did not contain majflt field 12")?
+        .parse::<u64>()
+        .context("parsing proc stat majflt field")?;
+    Ok((minor, major))
+}
+
 #[cfg(target_os = "linux")]
 pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     let path = PathBuf::from("/proc")
@@ -121,6 +145,22 @@ pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     let body =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     parse_linux_smaps_rollup_pss_bytes(&body)
+}
+
+/// Read whole-process resident memory and fault counters for one Linux VMM.
+#[cfg(target_os = "linux")]
+pub fn read_process_memory_snapshot(pid: u32) -> Result<ProcessMemorySnapshot> {
+    let resident_bytes = mvm_agentd::worker_pool::process_rss_bytes(pid)
+        .with_context(|| format!("reading unprivileged RSS for host process {pid}"))?;
+    let path = PathBuf::from("/proc").join(pid.to_string()).join("stat");
+    let stat =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let (minor_faults, major_faults) = parse_linux_proc_stat_faults(&stat)?;
+    Ok(ProcessMemorySnapshot {
+        resident_bytes,
+        minor_faults: Some(minor_faults),
+        major_faults: Some(major_faults),
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -141,9 +181,25 @@ pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     Ok(info.ri_phys_footprint)
 }
 
+/// Read whole-process physical footprint for one macOS VMM. macOS does not
+/// expose Linux-equivalent minor/major fault counters through this API.
+#[cfg(target_os = "macos")]
+pub fn read_process_memory_snapshot(pid: u32) -> Result<ProcessMemorySnapshot> {
+    Ok(ProcessMemorySnapshot {
+        resident_bytes: read_process_footprint_bytes(pid)?,
+        minor_faults: None,
+        major_faults: None,
+    })
+}
+
 #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
 pub fn read_process_footprint_bytes(_pid: u32) -> Result<u64> {
     bail!("process footprint sampling is only implemented on Linux and macOS")
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+pub fn read_process_memory_snapshot(_pid: u32) -> Result<ProcessMemorySnapshot> {
+    bail!("process memory sampling is only implemented on Linux and macOS")
 }
 
 #[cfg(test)]
@@ -183,6 +239,29 @@ Pss_Dirty:           128 kB
     fn smaps_rollup_pss_parser_rejects_missing_pss() {
         let err = parse_linux_smaps_rollup_pss_bytes("Rss: 10 kB\n").unwrap_err();
         assert!(err.to_string().contains("Pss"), "unexpected error: {err:#}");
+    }
+
+    #[test]
+    fn proc_stat_parser_handles_spaces_and_parentheses_in_command() {
+        let fixture = "4321 (vmm worker (ready)) S 1 2 3 4 5 6 701 8 11 9 10";
+        assert_eq!(parse_linux_proc_stat_faults(fixture).unwrap(), (701, 11));
+    }
+
+    #[test]
+    fn proc_stat_parser_rejects_missing_fault_fields() {
+        let err = parse_linux_proc_stat_faults("4321 (vmm) S 1 2").unwrap_err();
+        assert!(
+            err.to_string().contains("minflt"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn process_memory_reader_uses_unprivileged_rss() {
+        let sample = read_process_memory_snapshot(std::process::id()).unwrap();
+        assert!(sample.resident_bytes > 0);
+        assert!(sample.minor_faults.is_some());
     }
 
     /// Deterministic probe so the orchestration loop is testable

@@ -937,6 +937,11 @@ impl AnyBackend {
         self.inner().start(config)
     }
 
+    /// Host process that owns the running VM's address space, when known.
+    pub fn host_process_id(&self, id: &VmId) -> Result<Option<u32>> {
+        self.inner().host_process_id(id)
+    }
+
     pub fn stop(&self, id: &VmId) -> Result<()> {
         self.inner().stop(id)
     }

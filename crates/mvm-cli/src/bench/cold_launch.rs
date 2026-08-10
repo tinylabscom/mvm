@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::commands::vm::launch_sample::{
     ArtifactPaths, BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchRootStrategy,
-    LaunchSample, LaunchSubTimings, LaunchWork,
+    LaunchSample, LaunchSubTimings, LaunchWork, ProcessMemoryDelta, ProcessMemorySnapshot,
+    WarmFirstCommandMemory,
 };
 pub use crate::commands::vm::phase_timing::{
     LaunchMode, LaunchSubMarks, RunPhaseTimings, SubPhase,
@@ -26,10 +27,11 @@ use super::stats::percentile;
 
 /// Report schema version for [`ColdLaunchReport`]. Version 2 added artifact
 /// byte measurements and optional resolved kernel-config evidence; version 3
-/// adds the selected root filesystem strategy. Older reports remain readable
-/// through serde defaults but are not comparable without the new substrate
-/// fields.
-pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 3;
+/// adds the selected root filesystem strategy; version 4 adds whole-VMM warm
+/// resident-memory and first-command fault evidence; version 5 changes Linux
+/// memory accounting from PSS to RSS. Older reports remain readable through
+/// serde defaults but are not comparable without the new substrate.
+pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 5;
 
 /// The measurement lanes the cold-launch contract reports independently.
 ///
@@ -102,6 +104,8 @@ pub enum LaneViolation {
     SchemaMismatch { found: u32, expected: u32 },
     /// The current sample does not identify its selected root filesystem path.
     MissingRootStrategy,
+    /// A warm sample omitted the required process-memory evidence.
+    MissingWarmMemory,
     /// The launch performed work the lane forbids.
     ForbiddenWork {
         lane: LaunchLane,
@@ -134,6 +138,10 @@ impl std::fmt::Display for LaneViolation {
             Self::MissingRootStrategy => write!(
                 f,
                 "launch sample does not identify its selected root filesystem strategy"
+            ),
+            Self::MissingWarmMemory => write!(
+                f,
+                "warm launch sample does not contain whole-VMM first-command memory evidence"
             ),
             Self::ForbiddenWork { lane, performed } => write!(
                 f,
@@ -264,6 +272,9 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                     lane,
                     expected: "warm_claim",
                 });
+            }
+            if sample.warm_first_command_memory.is_none() {
+                return Err(LaneViolation::MissingWarmMemory);
             }
             Ok(())
         }
@@ -396,6 +407,9 @@ pub struct ColdLaunchSample {
     pub launch_mode: LaunchMode,
     pub phases: RunPhaseTimings,
     pub sub_phases: LaunchSubTimings,
+    /// Whole-VMM warm-ready and first-command memory evidence.
+    #[serde(default)]
+    pub warm_first_command_memory: Option<WarmFirstCommandMemory>,
     /// Phases the backend recorded inside its own `start`.
     #[serde(default)]
     pub backend_phases: Vec<TracePhase>,
@@ -610,8 +624,28 @@ mod tests {
             work: LaunchWork::default(),
             phases: phases(148.0),
             sub_phases: LaunchSubTimings::default(),
+            warm_first_command_memory: None,
             backend_phases: Vec::new(),
             degraded: Vec::new(),
+        }
+    }
+
+    fn warm_memory() -> WarmFirstCommandMemory {
+        let ready = ProcessMemorySnapshot {
+            resident_bytes: 10,
+            minor_faults: Some(2),
+            major_faults: Some(0),
+        };
+        let after_first_command = ProcessMemorySnapshot {
+            resident_bytes: 14,
+            minor_faults: Some(5),
+            major_faults: Some(1),
+        };
+        WarmFirstCommandMemory {
+            pid: 42,
+            ready,
+            after_first_command,
+            delta: ProcessMemoryDelta::between(ready, after_first_command),
         }
     }
 
@@ -647,6 +681,7 @@ mod tests {
                 vmm_create_ms: Some(total_ms / 2.0),
                 ..LaunchSubTimings::default()
             },
+            warm_first_command_memory: None,
             backend_phases: vec![TracePhase {
                 name: "boot_confirm".to_string(),
                 ms: total_ms / 4.0,
@@ -931,6 +966,11 @@ mod tests {
         ));
         sample.work.warm_claim = true;
         sample.launch_mode = LaunchMode::Warm;
+        assert_eq!(
+            validate_lane(LaunchLane::WarmClaim, &sample),
+            Err(LaneViolation::MissingWarmMemory)
+        );
+        sample.warm_first_command_memory = Some(warm_memory());
         assert_eq!(validate_lane(LaunchLane::WarmClaim, &sample), Ok(()));
     }
 

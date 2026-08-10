@@ -276,6 +276,7 @@ fn cold_launch_sample(
         launch_mode: sample.launch_mode,
         phases: sample.phases,
         sub_phases: sample.sub_phases,
+        warm_first_command_memory: sample.warm_first_command_memory,
         backend_phases: sample.backend_phases.clone(),
         degraded: sample.degraded.clone(),
     })
@@ -410,7 +411,8 @@ mod tests {
     use super::*;
     use crate::commands::vm::launch_sample::{
         BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchRootStrategy,
-        LaunchSubTimings, LaunchWork, write_sample,
+        LaunchSubTimings, LaunchWork, ProcessMemoryDelta, ProcessMemorySnapshot,
+        WarmFirstCommandMemory, write_sample,
     };
     use crate::commands::vm::phase_timing::{LaunchMode, RunPhaseTimings};
 
@@ -449,6 +451,7 @@ mod tests {
                 vmm_create_ms: Some(90.0),
                 ..LaunchSubTimings::default()
             },
+            warm_first_command_memory: None,
             backend_phases: Vec::new(),
             degraded: Vec::new(),
         }
@@ -589,6 +592,31 @@ tmpfs /tmp tmpfs rw 0 0
         assert!(lane_sample.cache.artifacts_cached);
         assert_eq!(lane_sample.phases.total_ms, 148.0);
         assert_eq!(lane_sample.sub_phases.vmm_create_ms, Some(90.0));
+    }
+
+    #[test]
+    fn lane_sample_preserves_warm_memory_evidence() {
+        let mut sample = sample_for(148.0);
+        let ready = ProcessMemorySnapshot {
+            resident_bytes: 100,
+            minor_faults: Some(3),
+            major_faults: Some(1),
+        };
+        let after_first_command = ProcessMemorySnapshot {
+            resident_bytes: 120,
+            minor_faults: Some(8),
+            major_faults: Some(1),
+        };
+        let measurement = WarmFirstCommandMemory {
+            pid: 42,
+            ready,
+            after_first_command,
+            delta: ProcessMemoryDelta::between(ready, after_first_command),
+        };
+        sample.warm_first_command_memory = Some(measurement);
+
+        let lane_sample = cold_launch_sample(LaunchLane::WarmClaim, 1, &sample, None).unwrap();
+        assert_eq!(lane_sample.warm_first_command_memory, Some(measurement));
     }
 
     /// A stand-in `mvmctl` that writes the sample its argument names. It
