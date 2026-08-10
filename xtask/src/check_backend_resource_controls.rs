@@ -12,10 +12,15 @@
 //! because libkrun is a macOS workload default too), and a scan that stops at
 //! the first bare `}` never reaches the arms that follow it.
 //!
-//! Rather than hardcode wildcard spellings, every arm's pattern (the text
-//! before its `=>`) is required to mention `BackendKind::` — the one thing
-//! every real, explicit arm in this match does and a wildcard or bare
-//! binding, spelled any way, never does.
+//! Rather than hardcode wildcard spellings, every *alternative* of every
+//! arm's pattern (the text before its `=>`, split on top-level `|`) is
+//! required to mention `BackendKind::` — the one thing every real, explicit
+//! arm in this match does and a wildcard or bare binding, spelled any way,
+//! never does. Checking the whole pattern as one string is not enough: an
+//! or-pattern like `BackendKind::Mock | _` contains `BackendKind::`, so a
+//! whole-pattern substring check waves it through even though it is a
+//! catch-all — every *other* variant lands in that arm too. Splitting on `|`
+//! first and checking each alternative on its own is what catches that.
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -28,7 +33,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     let path = workspace.join(CONTROLS_FILE);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("reading {CONTROLS_FILE}: {e}"))?;
-    let body = strip_line_comments(&raw);
+    let body = strip_comments(&raw);
 
     let fn_block = extract_marked_block(&body, FN_MARKER)
         .ok_or_else(|| anyhow::anyhow!("{CONTROLS_FILE} no longer defines for_backend"))?;
@@ -46,29 +51,57 @@ pub fn run(workspace: &Path) -> Result<()> {
     })?;
 
     for pattern in arm_patterns(match_block.body) {
-        if !pattern.contains(ENUM_PATH) {
-            bail!(
-                "for_backend has a match arm whose pattern is `{}`, which never \
-                 names {ENUM_PATH} — a wildcard or bare binding. Every BackendKind \
-                 variant must state its controls explicitly; inheriting a default \
-                 nobody chose is exactly the dishonesty this seam exists to prevent.",
-                pattern.trim()
-            );
+        for alternative in pattern_alternatives(&pattern) {
+            if alternative.trim().is_empty() {
+                continue;
+            }
+            if !alternative.contains(ENUM_PATH) {
+                bail!(
+                    "for_backend has a match arm `{}` whose alternative `{}` never \
+                     names {ENUM_PATH} — a wildcard or bare binding, alone or beside \
+                     a real variant in an or-pattern. Every BackendKind variant must \
+                     state its controls explicitly; inheriting a default nobody \
+                     chose is exactly the dishonesty this seam exists to prevent.",
+                    pattern.trim(),
+                    alternative.trim()
+                );
+            }
         }
     }
     Ok(())
 }
 
-/// Drop `//`-style comments so prose that happens to mention `BackendKind::`
-/// next to a wildcard arm can't be mistaken for the arm naming it.
-fn strip_line_comments(body: &str) -> String {
-    body.lines()
-        .map(|line| match line.find("//") {
-            Some(i) => &line[..i],
-            None => line,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Drop `//` and `/* */` comments so prose that happens to mention
+/// `BackendKind::` next to a wildcard or bare-binding arm can't be mistaken
+/// for the arm naming it itself — `_ /* BackendKind::Mock */ =>` bypasses a
+/// substring check that only strips line comments.
+fn strip_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '/' && chars.peek() == Some(&'/') {
+            for c2 in chars.by_ref() {
+                if c2 == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut prev = '\0';
+            for c2 in chars.by_ref() {
+                if prev == '*' && c2 == '/' {
+                    break;
+                }
+                prev = c2;
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A block found by locating `marker`, then the `{` that follows it: `header`
@@ -154,6 +187,31 @@ fn push_arm_pattern(arms: &mut Vec<String>, arm_text: &str) {
     }
 }
 
+/// Every top-level alternative of a pattern, split on `|` at
+/// `{ } ( ) [ ]`-depth zero. Every `BackendKind` variant matched here is a
+/// unit variant, so no alternative can contain an unbalanced `|` nested
+/// inside its own delimiters today — but the split is depth-aware anyway,
+/// so a future tuple- or struct-patterned variant (whose own fields might
+/// use `|` inside nested parens) would not silently defeat this rule.
+fn pattern_alternatives(pattern: &str) -> Vec<String> {
+    let mut alternatives = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, b) in pattern.bytes().enumerate() {
+        match b {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth -= 1,
+            b'|' if depth == 0 => {
+                alternatives.push(pattern[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    alternatives.push(pattern[start..].to_string());
+    alternatives
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +281,71 @@ mod tests {
             "newline-split",
             "_\n=> Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
         );
+    }
+
+    #[test]
+    fn a_real_variant_beside_a_wildcard_in_an_or_pattern_is_caught() {
+        // `BackendKind::Mock | _` contains "BackendKind::" as a whole-pattern
+        // substring, so a check that didn't split on `|` would wave this
+        // through even though every variant besides Mock lands here silently.
+        assert_arm_rejected(
+            "or-pattern-wildcard-second",
+            "BackendKind::Mock | _ => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_wildcard_first_in_an_or_pattern_is_caught() {
+        assert_arm_rejected(
+            "or-pattern-wildcard-first",
+            "_ | BackendKind::Mock => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_bare_binding_beside_a_real_variant_in_an_or_pattern_is_caught() {
+        assert_arm_rejected(
+            "or-pattern-bare-binding",
+            "BackendKind::Mock | k => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_block_comment_disguising_a_wildcard_is_caught() {
+        // `_ /* BackendKind::Mock */ =>` contains "BackendKind::" only
+        // inside a block comment; a check that only stripped `//` comments
+        // would be fooled by it the same way the or-pattern case fools a
+        // whole-pattern substring check.
+        assert_arm_rejected(
+            "block-comment-disguise",
+            "_ /* BackendKind::Mock */ => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_legitimate_multi_variant_arm_is_accepted() {
+        // The real production file has exactly this shape twice
+        // (`Hvf | AppleContainer` and `Firecracker | Libkrun | Qemu`) — the
+        // or-pattern fix must not turn a real multi-variant arm into a
+        // false positive.
+        let controls_body = r#"
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            BackendKind::Hvf | BackendKind::AppleContainer => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::SupervisorTimer,
+            },
+            BackendKind::Mock => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::None,
+            },
+        }
+    }
+"#;
+        let tmp = write_controls_fixture("legitimate-multi-variant", controls_body);
+        run(&tmp)
+            .expect("a real multi-variant arm naming BackendKind:: on every alternative must pass");
+        cleanup(&tmp);
     }
 
     #[test]
