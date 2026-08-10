@@ -257,6 +257,16 @@ mod tests {
         let fx = builder_fixture(&mut env);
         let tmp = &fx.tmp;
 
+        // Reap the endpoint this test spawns. `build` defuses its own guard on
+        // success, because in production the endpoint outlives the build and is
+        // reaped by the stop path — but a test has no stop path, so without a
+        // guard of its own the stub survives the run. It does not even reach its
+        // `sleep 30`: it blocks in `cat >/dev/null` waiting for an stdin EOF
+        // that never comes, so the leak is permanent rather than brief. Held as
+        // a guard rather than reaped at the end of the test so a panicking
+        // assertion cannot skip it.
+        let _endpoint = EndpointGuard::new("bld-unit");
+
         // A run-to-completion builder: the mock VM reports Stopped so the
         // poll-until-off loop returns at once.
         let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
@@ -302,6 +312,10 @@ mod tests {
         let tmp = &fx.tmp;
         let closure = tmp.path().join("nix-closure.nar");
         std::fs::write(&closure, b"pretend-nar-bytes").unwrap();
+
+        // See the sibling test: `build` defuses its own guard on success, so
+        // without one here the stub endpoint outlives the run permanently.
+        let _endpoint = EndpointGuard::new("bld-closure");
 
         let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
         let outcome = runner
