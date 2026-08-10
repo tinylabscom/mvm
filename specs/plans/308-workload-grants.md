@@ -160,16 +160,25 @@ the manifest, is what actually bounds the outcome.
 
 ### Per-backend mechanism
 
-| Dimension | Firecracker / libkrun / QEMU (Linux) | HVF (macOS) | wasm (wasmtime) |
+| Dimension | Firecracker / libkrun / QEMU **on Linux** | HVF, and libkrun **on macOS** | wasm (wasmtime) |
 | --- | --- | --- | --- |
-| CPU | cgroup v2 `cpu.max` on the per-VM supervisor process | none — declared vCPU count | `consume_fuel` + `Store::set_fuel` |
+| CPU | cgroup v2 `cpu.max` on the VM's own process | none — declared vCPU count | `consume_fuel` + `Store::set_fuel` |
 | Memory | fixed guest RAM by construction | fixed guest RAM by construction | `StoreLimits` memory cap |
 | Wall clock | supervisor timer | supervisor timer | `epoch_interruption` + deadline |
 | Egress | `EgressGate` over vsock | `EgressGate` over vsock | `mvm:egress` host import |
 
+**The CPU row is host-conditional, not backend-conditional.** libkrun is the
+macOS 13-25 workload default as well as a Linux backend, so its CPU answer
+depends on where it is running: a cgroup quota on Linux, nothing on macOS.
+Keying that answer off the backend alone would declare a quota mechanism that
+does not exist on a Mac, and a share grant would then be accepted at
+negotiation and fail only at apply time — the failure this table exists to
+prevent. HVF is macOS-only and so is unconditionally `None`.
+
 libkrun and HVF are in-process VMMs, but each runs under its own per-VM
-supervisor binary (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`), so a
-cgroup on that process is correctly per-VM.
+supervisor binary (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`); Firecracker
+and QEMU are spawned as direct child processes. Either way the process is
+per-VM, which is what makes a cgroup on it correctly scoped.
 
 macOS has no cgroup equivalent. Thread QoS affects scheduling *priority*,
 not quota — a hint, not a limit — so it is not claimed. The tier is

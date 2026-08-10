@@ -1000,9 +1000,22 @@ impl ResourceControls {
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
-            // Linux VMM tiers: the per-VM supervisor process is cgroup-able.
+            // A cgroup can bound any Linux process, so on Linux these tiers
+            // carry a real CPU quota. libkrun is *not* Linux-only — it is the
+            // macOS 13-25 workload default — and macOS has no cgroup, so the
+            // answer has to depend on the host rather than the kind alone.
+            // Declaring `CgroupShare` on a Mac would let a share grant be
+            // accepted and then fail at apply time, which is precisely the
+            // overstatement the macOS arm below exists to avoid.
+            //
+            // `cfg!` is the right test because mvm runs on the host it was
+            // built for; there is no cross-host execution to disagree with it.
             BackendKind::Firecracker | BackendKind::Libkrun | BackendKind::Qemu => Self {
-                cpu: CpuControl::CgroupShare,
+                cpu: if cfg!(target_os = "linux") {
+                    CpuControl::CgroupShare
+                } else {
+                    CpuControl::None
+                },
                 wall_clock: WallClockControl::SupervisorTimer,
             },
             // macOS has no cgroup equivalent; thread QoS is priority, not quota.
