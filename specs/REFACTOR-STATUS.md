@@ -954,3 +954,19 @@ for detailed scope and acceptance criteria.
   - [ ] Pin the egress predicate algebra; enumerate escalation as deny-loud
   - [ ] Replay vectors for the audit chain's canonical signed bytes
   - [ ] Double-key the stale-name relief valves
+
+- [ ] Plan 309 — dependency reduction
+  (`specs/plans/309-dependency-reduction.md`)
+  - [x] Phase 0 — the three defects: `mvm-build`'s hardcoded `thiserror` 1,
+        the dead `rtnetlink` workspace entry, and `mvm-sdk`'s unconditional
+        `schemars` leaking through feature unification into every consumer
+  - [x] Phase 1 — drop rcgen's `x509-parser` feature (the ASN.1 tower and the
+        closure's last `nom` 7) and replace `rayon` with an order-preserving
+        scoped-thread `par_map`; closure 286 → 263, budget ratcheted
+  - [ ] Phase 2 — `mvm-http` over rustls to retire `reqwest` (−27), gated on
+        differential + fuzz coverage because it lands on the egress
+        re-origination and SSRF-hardening paths
+  - [ ] Phase 3 — the product decisions: tree-sitter grammar gating,
+        `tracing-subscriber`, `toml`, and the deferred `serde_jcs`
+  - [ ] Phase 4 — a lockfile-count ratchet, so the ~62 `wasmtime`-family
+        packages an off-by-default feature adds stay visible to `cargo deny`
