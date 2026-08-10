@@ -680,34 +680,54 @@ use std::path::Path;
 /// The sole file permitted to construct a `NetworkPolicy` from `Grants`.
 const PROJECTION_FILE: &str = "crates/mvm-contract/src/grants/projection.rs";
 
-/// Signatures that would constitute a second projection.
-const FORBIDDEN_MARKERS: [&str; 2] = ["grants) -> NetworkPolicy", "grants: &Grants) -> NetworkPolicy"];
-
 pub fn run(workspace: &Path) -> Result<()> {
     let projection = workspace.join(PROJECTION_FILE);
     if !projection.is_file() {
         bail!("the grants projection is missing at {PROJECTION_FILE}");
     }
 
+    // The rule: outside the projection file, no function signature may both
+    // take a `Grants` and return a `NetworkPolicy`. Keying on the signature
+    // rather than on fixed marker strings is what makes the gate survive the
+    // refactors that would otherwise slip past it — a renamed parameter, a
+    // by-value `Grants`, or a `Result`/`Option`-wrapped return are all still
+    // the same second decision point.
+    //
+    // Visibility is deliberately not part of the rule. Even a private
+    // delegating wrapper is a second name for the one decision, and it belongs
+    // in the projection file. Testing visibility file-wide (rather than per
+    // declaration) is also what would make this gate fire on unrelated code.
     let mut offenders = Vec::new();
-    for entry in crate::fs_walk::rust_sources(workspace)? {
-        let rel = entry
-            .strip_prefix(workspace)
-            .unwrap_or(&entry)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if rel == PROJECTION_FILE {
+    let roots = ["crates", "src", "tests"];
+    for root in roots {
+        let dir = workspace.join(root);
+        if !dir.is_dir() {
             continue;
         }
-        let body = std::fs::read_to_string(&entry)?;
-        // Test modules legitimately call the one projection; only a second
-        // *definition* is a violation.
-        if FORBIDDEN_MARKERS
-            .iter()
-            .any(|marker| body.contains(marker) && body.contains("pub fn"))
-        {
-            offenders.push(rel);
-        }
+        crate::fs_walk::for_each_file(&dir, Some("rs"), &mut |path| {
+            let rel = path
+                .strip_prefix(workspace)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == PROJECTION_FILE {
+                return Ok(());
+            }
+            let body = std::fs::read_to_string(path)?;
+            for line in body.lines() {
+                let Some((before, after)) = line.split_once("->") else {
+                    continue;
+                };
+                if before.contains("fn ")
+                    && before.contains("Grants")
+                    && after.contains("NetworkPolicy")
+                {
+                    offenders.push(format!("{rel}: {}", line.trim()));
+                    break;
+                }
+            }
+            Ok(())
+        })?;
     }
 
     if !offenders.is_empty() {
@@ -745,19 +765,29 @@ In the unknown-xtask help string at line 323, append
 Run: `cargo run -p xtask -- check-single-grants-projection`
 Expected: exit 0, no output.
 
-- [ ] **Step 4: Prove the gate goes red**
+- [ ] **Step 4: Prove the gate goes red — against every evasion shape**
 
-A gate that has never failed is not known to work. Temporarily add to
-`crates/mvm-core/src/lib.rs`:
+A gate that has never failed is not known to work, and a gate proven against
+only one shape is not known to hold. Probe each of these in turn by
+temporarily adding it to `crates/mvm-core/src/lib.rs` (with whatever `use`
+lines it needs to compile), running the gate, confirming it fails and names
+the file, then removing it:
 
 ```rust
 pub fn sneaky(grants: &Grants) -> NetworkPolicy { unimplemented!() }
+pub fn policy_for(g: &Grants) -> NetworkPolicy { unimplemented!() }
+pub fn derive(grants: Grants) -> NetworkPolicy { unimplemented!() }
+fn private_wrapper(grants: &Grants) -> NetworkPolicy { unimplemented!() }
+pub fn try_policy(grants: &Grants) -> Result<NetworkPolicy, ()> { unimplemented!() }
 ```
 
-Run: `cargo run -p xtask -- check-single-grants-projection`
-Expected: FAIL naming `crates/mvm-core/src/lib.rs`.
+All five must be caught. After the last one, confirm `git status --short` is
+clean and the gate exits 0.
 
-Then **remove those two lines** and re-run to confirm exit 0.
+Known and accepted limit, to be stated in the gate's doc comment rather than
+papered over: a method on a struct that holds `Grants` (`fn policy(&self) ->
+NetworkPolicy`) names neither type in its signature and is not detectable by
+a text gate. Say so, so the next reader knows the boundary.
 
 - [ ] **Step 5: Commit**
 
