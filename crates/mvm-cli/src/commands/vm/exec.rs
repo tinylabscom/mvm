@@ -107,6 +107,11 @@ pub(in crate::commands) enum RunProfile {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct RunArgs {
+    /// The transport this launch derived, carried to admission so the signed
+    /// plan records the mode the workload actually gets. Not a flag: the
+    /// machine surface derives it from what the workload declares it needs.
+    #[arg(skip)]
+    pub network_mode: mvm_contract::plan::NetworkMode,
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
     /// legacy slot name). If omitted, the bundled default microVM image is used.
     #[arg(short = 'm', long, conflicts_with = "image")]
@@ -384,6 +389,7 @@ pub(in crate::commands) fn run_secure_with_source(
     // The closure below moves `admit_backend`; keep a copy for the receipt's
     // honest per-backend enforcement tier.
     let receipt_backend = admit_backend.clone();
+    let admit_network_mode = args.network_mode;
     let admit_cpus = args.cpus;
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
@@ -410,6 +416,7 @@ pub(in crate::commands) fn run_secure_with_source(
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            network_mode: admit_network_mode,
             tenant: "local",
             vm_name,
             backend_name: &admit_backend,
@@ -1557,6 +1564,7 @@ mod tests {
 
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             warm_pool_size: 0,
             pty: false,
             vm_name: None,
