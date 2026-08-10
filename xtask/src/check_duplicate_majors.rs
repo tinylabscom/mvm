@@ -21,8 +21,8 @@ use std::path::Path;
 use std::process::Command;
 
 /// Crates known to resolve at more than one major today. Baseline recaptured
-/// 2026-07-19 from `cargo metadata --locked` after the workspace consolidation
-/// de-duplicated the OCI/TLS stack (ratcheted 44 → 11 entries). Remove an entry
+/// 2026-08-10 from `cargo metadata --locked` after Plan 309 Phases 0-1 cut 23
+/// crates from the shipped closure (ratcheted 44 → 11 entries). Remove an entry
 /// freely once the duplication is gone (the gate flags stale entries); adding
 /// one must be justified in the PR that does — it admits a new duplicate major
 /// into the build.
@@ -54,21 +54,13 @@ const ALLOWLIST: &[&str] = &[
     // pins 0.12.1; the two rust-vmm families track different vmm-sys-util
     // majors until they converge.
     "vmm-sys-util",
-    // windows-sys 0.52 and 0.60/0.61 are already an accepted split. Those
-    // versions necessarily resolve matching windows-targets and per-architecture
-    // support crates at 0.52 and 0.53; none of these crates is independently
-    // selectable until the upstream windows-sys users converge.
+    // windows-sys 0.52 and 0.60/0.61 remain a split; windows-core follows.
+    // The per-architecture support crates (windows_aarch64_*, windows_i686_*,
+    // windows_x86_64_*, windows-targets) converged after Plan 309 dropped rayon
+    // and the rcgen x509-parser feature, so they are no longer duplicated and
+    // are not listed here.
     "windows-core",
     "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
