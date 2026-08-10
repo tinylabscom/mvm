@@ -27,8 +27,11 @@ for detailed scope and acceptance criteria.
       exposes bounded resident host-process capture, and the HVF guest-RAM seam
       exposes resident bytes with a demand-fault witness and records private
       restore-mapping duration. The libkrun density report also carries the
-      readiness-bound guest-agent RSS witness; whole-VM guest working-set,
-      first-use restore-fault, and cross-backend evidence remain open.
+      readiness-bound guest-agent RSS witness. Backend-neutral warm launch
+      evidence now samples the whole VMM host process at authenticated
+      readiness and after the first command, including Linux fault deltas and
+      macOS physical footprint. The real-host Firecracker/HVF matrix,
+      canonical budget table, and gates remain open.
 
 ## In-flight plans
 - [x] Plan 2167 — durable agent session and event contract
@@ -174,9 +177,10 @@ for detailed scope and acceptance criteria.
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
   - [~] Kernel/boot-substrate budget and filesystem-path evaluation tracked by
         issues #2280 and #2281. The artifact-ledger slice of #2280 and the
-        pure-Rust ext4 baseline report are landed; live timing, restore,
-        density, candidate filesystem comparison, and the adopt/decline
-        decision remain open.
+        pure-Rust ext4 baseline report are landed. Whole-VMM warm-ready and
+        first-command memory/fault instrumentation is also landed; its
+        real-host matrix, canonical budget/gates, candidate filesystem
+        comparison, and the adopt/decline decision remain open.
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images
       (`specs/plans/311-launch-critical-path-waste.md`), branch

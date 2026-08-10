@@ -655,6 +655,16 @@ optimization backend-local and the benchmark backend-neutral.
       when a restore file is supplied. These are allocation and mapping
       witnesses, not substitutes for end-to-end guest working-set or first-use
       restore-fault measurements.
+- [x] Add a backend-neutral whole-VMM warm first-command witness. The shared
+      running-VM and backend traits expose the host process that owns each VM,
+      implemented for Firecracker, libkrun, and HVF without backend-name
+      dispatch. A warm launch sample captures that process after authenticated
+      readiness and immediately after the first guest command. Linux records
+      PSS plus process minor/major fault deltas; macOS records physical
+      footprint and explicitly leaves Linux-only fault counters unavailable.
+      Launch-sample schema v3 and cold-launch schema v4 carry the evidence, and
+      the warm-lane gate rejects a sample that omits it. The real-host backend
+      matrix and canonical budget table remain before #2280 can close.
 - [x] Add a baseline filesystem-path report at the existing pure-Rust
       materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
       content digest, node composition, file bytes, emitted image size/digest,
