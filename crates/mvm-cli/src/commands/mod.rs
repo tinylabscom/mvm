@@ -113,7 +113,7 @@ pub(in crate::commands) enum Commands {
     /// Build-time commands (image, compile, validate, kernel)
     #[command(display_order = 3)]
     Build(build::group::Args),
-    /// Build, seal, and record a workload locally; optionally ship it to mvmd
+    /// Build, seal, and record a workload; optionally ship it to mvmd
     #[command(display_order = 4)]
     Deploy(deploy::Args),
     /// Build the custom microVM kernels (builder / workload)
@@ -140,7 +140,7 @@ pub(in crate::commands) enum Commands {
     /// Rebuild a workload when its local inputs change
     #[command(display_order = 8)]
     Watch(watch::Args),
-    /// Manage the versioned pack cache (list/rollback/prune/download/update)
+    /// Manage versioned packs (list/rollback/prune/download/update)
     #[command(display_order = 9)]
     Pack(pack::Args),
     /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing

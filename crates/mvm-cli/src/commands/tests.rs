@@ -167,6 +167,41 @@ fn top_level_command_summaries_stay_short() {
 }
 
 #[test]
+fn top_level_command_descriptions_share_a_column() {
+    let command = cli_command();
+    let visible_command_names = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .map(|subcommand| subcommand.get_name().to_owned())
+        .collect::<Vec<_>>();
+    let error = command
+        .try_get_matches_from(["mvmctl", "--help"])
+        .expect_err("--help must stop argument parsing");
+    let help = constrain_help_output(&error.to_string());
+    let description_columns = visible_command_names
+        .iter()
+        .map(|name| {
+            let prefix = format!("  {name}");
+            let line = help
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("help is missing the `{name}` command:\n{help}"));
+            line[prefix.len()..]
+                .find(|character: char| !character.is_whitespace())
+                .map(|offset| prefix.len() + offset)
+                .unwrap_or_else(|| panic!("help is missing the `{name}` description:\n{help}"))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        description_columns
+            .windows(2)
+            .all(|columns| columns[0] == columns[1]),
+        "top-level command descriptions must share one column; got {description_columns:?}:\n{help}"
+    );
+}
+
+#[test]
 fn deps_capture_parses_seal_inputs() {
     let cli = Cli::try_parse_from([
         "mvmctl",
