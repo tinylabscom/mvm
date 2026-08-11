@@ -56,6 +56,8 @@ const EXEMPT: &[&str] = &[
 /// would fail the gate on prose that has already been corrected at the source.
 const SKIP_DIRS: &[&str] = &[
     ".git",
+    ".mvm-test",
+    ".mvm-verify",
     "target",
     "node_modules",
     ".worktrees",
@@ -216,6 +218,20 @@ mod tests {
         );
         // ...and the gate itself passes despite the planted name behind it.
         run(&root).expect("a symlinked tree must not fail the gate");
+    }
+
+    #[test]
+    fn generated_mvm_state_directories_are_not_scanned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for dir in [".mvm-test", ".mvm-verify"] {
+            let generated = tmp.path().join(dir).join("cargo");
+            std::fs::create_dir_all(&generated).expect("generated state directory");
+            std::fs::write(generated.join("third-party.txt"), "gvproxy\n")
+                .expect("generated state file");
+        }
+        std::fs::write(tmp.path().join("source.txt"), "clean\n").expect("source file");
+
+        run(tmp.path()).expect("generated mvm state must not enter source policy scans");
     }
 
     /// `passthru` is a Nix attribute used throughout the builder pipeline and
