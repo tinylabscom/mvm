@@ -64,13 +64,6 @@
      gutter (Section.tsx's `px-6`), so both page families share one
      margin rhythm at narrow widths. */
   --sl-content-pad-x: 1.5rem;
-
-  /* Height of the horizontal section-tab bar (DocsTabBar.astro, mounted
-     from the Header.astro override) on docs pages. Every fixed-position
-     piece of docs chrome that anchors itself to --sl-nav-height also adds
-     this — see the "Docs tab bar" section below — so the tab bar reads as
-     a permanent second row of the header rather than overlapping content. */
-  --docs-tabbar-height: 2.75rem;
 }
 
 /*  Tell the browser the supported schemes so native form controls,
@@ -124,47 +117,13 @@ body {
   border-bottom: 1px solid var(--color-glass-border);
 }
 
-/* ── Docs tab bar — reserve space for it in every fixed chrome piece ──
- *
- *  DocsTabBar.astro renders as `position: fixed; top: var(--sl-nav-height)`
- *  — a second bar below the header, not part of the header's own box — so
- *  nothing downstream of PageFrame/TwoColumnContent/MobileTableOfContents
- *  knows to leave room for it. Each rule below re-states a Starlight
- *  built-in's own offset formula with `+ var(--docs-tabbar-height)` added.
- *  Structural selectors: `.main-frame` (PageFrame.astro), `.sidebar-pane`
- *  (PageFrame.astro), `.right-sidebar` (TwoColumnContent.astro), and
- *  `mobile-starlight-toc nav` (MobileTableOfContents.astro) — none of
- *  these are exposed as --sl-* custom properties, so an upgrade that
- *  renames them silently drops back to stock spacing (the tab bar would
- *  then overlap the first line of content) rather than breaking the build.
- */
-html[data-has-sidebar] .main-frame {
-  padding-top: calc(var(--sl-nav-height) + var(--sl-mobile-toc-height) + var(--docs-tabbar-height));
-}
-
-html[data-has-sidebar] .sidebar-pane {
-  inset-block-start: calc(var(--sl-nav-height) + var(--docs-tabbar-height));
-}
-
-@media (min-width: 72rem) {
-  html[data-has-sidebar] .right-sidebar {
-    padding-top: calc(var(--sl-nav-height) + var(--docs-tabbar-height));
-  }
-}
-
-html[data-has-sidebar] mobile-starlight-toc nav {
-  top: calc(var(--sl-nav-height) + var(--docs-tabbar-height) - 1px);
-}
-
-html[data-has-sidebar] {
-  scroll-padding-top: calc(1.5rem + var(--sl-nav-height) + var(--sl-mobile-toc-height) + var(--docs-tabbar-height));
-}
-
-@media (min-width: 72em) {
-  html[data-has-sidebar] {
-    scroll-padding-top: calc(1.5rem + var(--sl-nav-height) + var(--docs-tabbar-height));
-  }
-}
+/*  The section tab bar that used to sit below the header is gone, and with
+ *  it the block of rules that re-stated Starlight's own fixed-chrome offset
+ *  formulas with the bar's height added. Those offsets are deliberately NOT
+ *  replaced here: Starlight's stock values for `.main-frame`,
+ *  `.sidebar-pane`, `.right-sidebar`, `mobile-starlight-toc nav` and
+ *  `scroll-padding-top` are correct again now that nothing occupies that
+ *  space. Re-adding an override would reintroduce a gap. */
 
 /* ── Typography — slightly larger base ── */
 html {

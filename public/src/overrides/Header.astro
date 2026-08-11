@@ -3,7 +3,6 @@
 // On the splash page, render a clean landing-page header with hamburger menu.
 // On all other pages, render the default Starlight Header.
 import Default from "@astrojs/starlight/components/Header.astro";
-import DocsTabBar from "../components/docs/DocsTabBar.astro";
 
 const route = Astro.locals.starlightRoute;
 const isSplash = route?.entry?.data?.template === "splash";
@@ -82,10 +81,7 @@ const navLinks = [
     </nav>
   </header>
 ) : (
-  <>
-    <Default />
-    {route?.hasSidebar && <DocsTabBar sidebar={route.sidebar} />}
-  </>
+  <Default />
 )}
 
 <script>

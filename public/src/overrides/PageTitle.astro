@@ -5,8 +5,8 @@
 // id/anchor behaviour stays exactly Starlight's own.
 import Default from "@astrojs/starlight/components/PageTitle.astro";
 
-// Same locally-duplicated sidebar shape as DocsTabBar.astro — see that
-// file's comment for why this isn't imported from the package.
+// Starlight doesn't export this shape from the package, so it's declared
+// locally to type the sidebar entries this component walks.
 interface SidebarLink {
   type: "link";
   label: string;
