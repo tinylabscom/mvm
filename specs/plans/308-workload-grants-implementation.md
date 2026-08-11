@@ -2794,3 +2794,45 @@ Two things worth recording that the task text did not anticipate:
   every field was already `Eq`.
 
 Not done here: the SDK parity fixture (WS6) and everything in WS6b.
+
+---
+
+### Task 18: Report the tier on the path a user actually boots
+
+**Found by live measurement on real hardware, not by any test or review.**
+The CPU quota genuinely binds — measured 1.5003 cores against a 1.5-core
+grant with 100 of 100 accounting periods throttled — and the read-back
+correctly returns `Cgroup2CpuMax`. **The two are not connected on the shipped
+path.**
+
+`apply_grants` is called only from `admit_and_start`, whose sole caller is
+`mvm_hostd::run::admit_and_boot_local` — reached through the `mvm-client`
+facade, which the CLI does not use for booting. `mvmctl` boots via
+`mvm_client::start_prepared` (`commands/vm/up/oci_persist.rs`). So a
+genuinely bounded CLI boot emits `plan.admitted`, `plan.policy_resolved` and
+`plan.launched` — and **no `plan.grants_enforced`**. The per-VM audit file
+was 0 bytes, and `machine inspect --json` shows only the *requested* grant.
+
+This is the sixth control in this plan to ship correct, tested, and reachable
+by nothing, and it is the most consequential: every claim that a receipt
+records what was actually enforced is false for every CLI user. A tier that
+is only observable from an `#[ignore]`d test is not a report.
+
+**The work:** call `apply_grants` on the path `mvmctl` actually takes, record
+the returned `EnforcedGrants`, and emit `plan.grants_enforced` to the
+chain-signed log. The tier must also be visible to a user — `machine inspect`
+currently shows the request, which is precisely the confusion the read-back
+exists to prevent.
+
+**Second finding, same measurement:** with no user session bus the boot
+degrades to unbounded, as designed — but **emits no operator warning**. That
+path is the common one in CI and automation, so silence there means a user
+asks for a bound, gets none, and is told nothing.
+
+**Witnesses:**
+- `a_bounded_cli_boot_emits_grants_enforced` — assert the audit entry on the
+  path `mvmctl` takes, not on `admit_and_boot_local`
+- `machine_inspect_shows_the_enforced_tier_not_only_the_request`
+- `a_degraded_boot_warns` — the silence case
+- a gate or test that `apply_grants` has a caller on the CLI boot path, so
+  this cannot regress to unreachable a seventh time
