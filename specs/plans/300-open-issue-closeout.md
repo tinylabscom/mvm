@@ -1,6 +1,6 @@
 # Plan 300 — Open issue closeout
 
-**Status:** TRIAGE COMPLETE — execution pending
+**Status:** IN PROGRESS — concrete-fix batch underway
 **Snapshot date:** 2026-08-10
 
 ## Objective
@@ -12,6 +12,15 @@ tests, live witnesses where required, documentation, and GitHub state agree.
 This plan is a closeout map, not permission to weaken a security claim or to
 close an issue because a nearby implementation exists. Mixed issues must be
 split or narrowed before closure.
+
+## Execution update — first concrete-fix batch
+
+The first implementation batch addresses two user-visible correctness/security
+defects before the larger dependency graphs: #2165 makes every workload-runner
+root command line agree with the read-only root block, and #2321 bounds the
+credential-bearing forward response before it can be accumulated. #2323 uses
+the shared bounded poll backoff for Firecracker teardown. These changes stay
+open until their PRs are merged and the required live witnesses are recorded.
 
 ## Closure rules
 

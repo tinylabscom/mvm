@@ -10,6 +10,11 @@ for detailed scope and acceptance criteria.
       at 80 columns for `--help`, `-h`, and `mvmctl help <path>`; generated-tree
       BDD coverage executes the real binary and automatically includes future
       subcommands.
+- [~] **Issue-closeout batch — #2165, #2321, and #2323.** The workload runner
+      now emits read-only root bootargs for read-only root devices, the
+      credential-bearing substitution response is incrementally capped, and
+      Firecracker teardown uses the shared poll backoff. PR merge and required
+      live evidence remain before these issues close.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
