@@ -117,6 +117,11 @@ for detailed scope and acceptance criteria.
         formatting, and the static mutation surface gate; the workspace suite
         passed all repaired areas before one unrelated host-agent socket-bind
         timeout whose isolated integration rerun passed 4/4
+  - [x] Pass every mutation and security job in exact run 31516221103 and add a
+        bounded, directly witnessed retry for the repeated Linux `ETXTBSY`
+        shutdown-hook fixture spawn that remained; workspace all-target Clippy
+        passes, and the sole parallel CLI failure passed its exact isolated
+        rerun
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
 - [~] Plan 300 — 30-issue reconciliation and closeout
