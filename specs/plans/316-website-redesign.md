@@ -1,6 +1,6 @@
 # Plan 316 — Website and docs redesign
 
-**Status: IMPLEMENTATION COMPLETE — awaiting human browser verification**
+**Status: COMPLETE — merged behaviour verified by measurement; design review with the maintainer is ongoing**
 **Last updated: 2026-08-11**
 **Branch:** `feat/website-redesign`
 **Scope:** `public/` only. No Rust crate, CLI, or doc *content* changes.
@@ -14,6 +14,13 @@ near-black canvas, drifting gradient blooms, glass-edged cards, a
 display/mono type pairing, numbered section eyebrows, generous vertical
 rhythm — plus structural cues of large typographic statements, alternating
 full-width feature blocks, and a four-up capability row.
+
+**What survived, and what didn't.** The numbered eyebrows, the card grids and
+the multi-bloom treatment all shipped and were then removed: uniformly applied,
+they were exactly what made the page read as machine-generated. One bloom
+remains, in the hero. The mono/sans pairing survived but inverted — mono
+headings, sans body. A later direction change replaced the whole section set
+with the arrangement recorded below.
 
 We match the visual *language*. We do not copy either reference's stylesheet,
 assets, markup, or copy. Every value in this plan is expressed as our own
@@ -77,8 +84,13 @@ block and the `prefers-color-scheme: light` block, which must stay in sync):**
   `--color-heading`. Dark: a lifted hairline. Light: a slightly *stronger*
   hairline, because light mode loses the glow and needs the edge to carry the
   card.
-- `--font-display` → a self-hosted variable sans, paired against the existing
-  JetBrains Mono. Self-hosted, not a third-party CDN fetch.
+- `--font-display` → **JetBrains Mono Variable**, and `--font-body` → **Inter
+  Variable**. Both self-hosted; the previous CDN fetch is gone. The plan
+  originally specified a display *sans* against a mono; that inverted during
+  the visual-language pass — mono headings are what give the page its
+  character, and Inter body is what keeps long prose readable. The two are
+  separate tokens because `--sl-font` had been aliased to `--font-display`,
+  so repointing the display face silently took all docs body copy with it.
 
 Constraint carried forward from the file's existing rules: **no component may
 hardcode a hex value.** The only sanctioned exception remains the terminal-dot
@@ -110,27 +122,41 @@ one of these paths must be verified, not assumed.
 
 ### 3. Homepage sections
 
+> **Superseded during implementation.** The eight-section list this plan
+> originally specified shipped, was reviewed by the maintainer as reading
+> "like an agent built it", and was then restructured twice more. What
+> follows is what actually shipped. The original list is in git history.
+
 `Landing.tsx` composes, in order:
 
-1. **Hero** — `Bloom` backdrop, headline, subhead, copy-to-clipboard install
-   command, primary/secondary CTAs, stats row. The existing animated terminal
-   component is retained; it is the best thing on the current page.
-2. **Install** — the one-liner, plus platform tabs (macOS / Linux / WSL2).
-3. **`01`–`04` numbered feature walk** — `GlowCard` four-up, rotating accents,
-   `Reveal`-staggered.
-4. **Scroll-synced walkthrough** — *the new centrepiece.* Steps scroll on the
-   left; a code panel sticks on the right and swaps as each step enters view.
-   Walks one real task end to end: define a workload, build it, run it, read
-   the result. Implemented with IntersectionObserver against step markers —
-   no scroll hijacking, no pinning library, native scrolling throughout.
-5. **SDKs and CLI** — the explicit ask. One tabbed block, four tabs — Python,
-   Node.js, Rust, CLI — showing *the same task* four ways, so the choice of
-   surface is legible at a glance. Builds on the existing `ui/tabs` and
-   `ui/code-block` primitives rather than a new mechanism.
-6. **Architecture** — the host → builder VM → microVM diagram, restyled.
-7. **Security** — the claims, presented as cards linking into
-   `docs/security/`.
-8. **CTA + Footer.**
+1. **Hero** — badge row (licence, platforms, repo), headline with one accent
+   word, subhead, platform install tabs, primary + secondary action and a
+   tertiary text link, and `HeroStackDiagram` as the visual anchor.
+2. **Credibility band** — label left, verified facts right. Deliberately not
+   a customer-logo wall: there are no adopters we can name, and inventing
+   them would defeat the section's purpose.
+3. **Quickstart** — heading and supporting line left, a tabbed
+   Define/Build/Run/Result panel right. The scroll-synced walkthrough was
+   folded in here; the fixed-panel block shape left it no slot.
+4. **Positioning** — a marker-highlighted statement heading, then a zig-zag
+   of three alternating rows: CLI, Declare, Runtime. Replaces the earlier
+   single tabbed block, which the maintainer called worthless — as three
+   full rows each surface gets room to say what it is *for*.
+5. **Why a microVM** — a positive case built on `ContainmentDiagram`, the
+   nested machine ⊃ hypervisor ⊃ microVM ⊃ kernel ⊃ workload model from
+   `security/matryoshka.md`. An earlier revision framed this as "why not a
+   container" with a side-by-side comparison; the positive framing replaced
+   it at the maintainer's direction.
+6. **Split feature panel** — the backend-selection prose and chips left, the
+   `1 kernel per workload` figure right.
+7. **Security** — all four claims as cards, wording verbatim from the gated
+   claims table, each with its witness identifiers.
+8. **FAQ** — two columns, first row open by default.
+9. **Closing band + footer.**
+
+Two diagrams carry the visual identity, both inline SVG built from role
+tokens so they work in either scheme: `HeroStackDiagram` (where the boundary
+sits in the stack) and `ContainmentDiagram` (what encloses what).
 
 **All code samples on the homepage must be real.** Every snippet is taken from
 a working example under `examples/` or from the CLI's own `--help` surface, not
@@ -171,24 +197,33 @@ What must pass before this is called done:
 
 - [x] `pnpm build` in `public/` completes with no errors and no new warnings
       (Task 20 verification, 2026-08-11 — `pnpm build`, 131 pages, clean).
-- [ ] Homepage screenshotted in **dark** and **light**, both at desktop and at
-      a narrow mobile width. **Awaits human browser verification** — no agent
-      in this pass can drive a browser; see the checklist in the Task 20
-      report (`.superpowers/sdd/316-website-redesign-implementation/task-20-report.md`).
-- [ ] A representative docs page (long prose + code + table + callout)
-      screenshotted in dark and light. **Awaits human browser verification.**
-- [ ] `prefers-reduced-motion: reduce` pass: blooms static, no reveal
-      transitions, walkthrough degraded to the stacked fallback. **Awaits
-      human browser verification** — this is also where the JS-enabled
-      hydration check for the `html.js` reveal gate must run; see report.
-- [ ] Keyboard traversal of the SDK tab block and the header nav. **Awaits
-      human browser verification.**
+- [x] Homepage rendered in **dark** and **light** at 1440 / 1024 / 390 and
+      reviewed screenshot-by-screenshot through the redesign passes
+      (2026-08-11, headless Chromium via playwright-core).
+- [x] A representative docs page (long prose + code + table + callout)
+      rendered in dark and light at 1440 and 390.
+- [x] `prefers-reduced-motion: reduce` pass — verified in a `reducedMotion:
+      'reduce'` context: bloom and terminal-cursor animations resolve to
+      `animation-name: none`, reveals render immediately, the walkthrough
+      serves its stacked fallback.
+- [x] Keyboard traversal — all **57** focusable elements on the landing page
+      show a visible focus indicator (outline or ring), measured by focusing
+      each in turn and reading computed style.
+- [x] Colour contrast at WCAG AA — **0** text nodes below threshold on the
+      landing page (dark and light) and on a docs page, measured by flattening
+      each element's colour over its resolved background.
+- [x] No horizontal overflow at 390 / 768 / 1024 on landing **and** docs;
+      no code block scrolls horizontally on either.
+- [x] Gutters consistent across every section and the header at
+      108 / 34 / 26 (1440 / 1024 / 390).
 - [x] No hardcoded hex outside the sanctioned terminal-dot exception —
-      grep-checked (Task 20 verification, 2026-08-11 — `pnpm check:tokens`
-      passes).
-- [x] Every homepage code sample traced to a real `examples/` file or a real
-      `--help` output (Task 20 verification, 2026-08-11 — `pnpm check:samples`
-      reports 9/9).
+      `pnpm check:tokens` passes.
+- [x] Every homepage code sample traced to a real repo file —
+      `pnpm check:samples` reports 10/10.
+
+Still genuinely outstanding, and not agent-checkable: whether the result
+*reads* well to a human on a real device. Everything above is a measurement,
+not a judgement.
 
 ## Explicitly out of scope
 
