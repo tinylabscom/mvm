@@ -24,12 +24,14 @@
 
 mod histogram;
 mod layer;
+mod prometheus;
 mod registry;
 
 use std::fmt::Write as _;
 
 pub use histogram::LogHistogram;
 pub use layer::SpanTimingLayer;
+pub use prometheus::{escape_label_value, prometheus_exposition};
 pub use registry::{SpanKey, SpanProfile, SpanReport, SpanSample, SpanTimings, global};
 
 /// Environment variable enabling profiling and selecting the report format.

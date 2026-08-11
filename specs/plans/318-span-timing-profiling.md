@@ -1,6 +1,6 @@
 # Plan 318 — Span-timing profiling for `#[instrument]`
 
-**Status:** Phase 1 COMPLETE
+**Status:** COMPLETE (Phases 1-3)
 **Date opened:** 2026-08-10
 **Branch:** `perf/318-span-timing`
 
@@ -119,14 +119,74 @@ instrumentation at all. The two are deliberately not bridged.
 - Pure predicates (`argv_is_shell`, `program_basename`) and `mvm-contract`
   (`no_std`, no `tracing` by design).
 
-### Phase 3 — deferred
+### Phase 3 (COMPLETE)
 
-- [ ] Feed `SpanReport` into the `bench/` regression harness so launch-path
-      profiles are diffable run over run rather than read by eye.
-- [ ] Export the report through `Metrics::prometheus_exposition` for `mvmd`.
-- [ ] Decide whether the per-close mutex needs replacing with sharded or
-      thread-local accumulation. It is adequate while profiling is opt-in and
-      instrumentation stays coarse; it would not be if either changes.
+- [x] **Prometheus export.** `span_timing::prometheus_exposition` renders a
+      `SpanReport` as labelled series — `mvm_span_calls_total`,
+      `mvm_span_self_seconds_total`, `mvm_span_total_seconds_total`,
+      `mvm_span_max_seconds`, each carrying `target` and `span` labels. The
+      existing `Metrics` counters are fixed-name singletons, so labels are what
+      a per-call-site metric needs. Durations are exported in seconds per
+      Prometheus convention. Label values are escaped: an unescaped quote in a
+      span name would produce a malformed exposition that breaks the whole
+      scrape rather than one series. Appended to the served body in
+      `mvm-cli/src/metrics_server.rs`, and empty unless the process is
+      profiling, so the scrape shape is unchanged for everyone else.
+
+      Not wired into `mvmctl ops metrics`. It was, briefly, until a live run
+      showed it structurally empty: a profile accumulates in the process that
+      ran the instrumented code, and that command renders its output before
+      doing any. The scrape endpoint is different — there the serving process is
+      the one doing the work, so each scrape reflects what has happened so far.
+
+- [x] **Bench-harness diffing.** `mvm-cli/src/bench/span_profile.rs`. The launch
+      harness spawns `mvmctl` as a child, so `profile_env` supplies the env that
+      makes the child write a JSON profile and `read_profile` reads it back;
+      this composes with the runner's existing env list without changing it.
+      `compare_span_reports` is pure and returns a per-call-site
+      `RegressionVerdict` (reusing `regression.rs`'s enum), plus the spans that
+      appeared or disappeared between runs.
+
+      The gate compares **per-call** self time, not total. Two runs may execute
+      a different number of iterations, and a total-time gate would read that as
+      a regression. Call counts are reported alongside via
+      `SpanDelta::call_count_changed`, because "this function got slower" and
+      "this function got called twice as often" are different defects that need
+      telling apart — the second is exactly the shape of the Plan 311 re-hash. A
+      zero or call-less baseline returns `Incomparable` rather than a pass,
+      since a ratio against zero would be a false green.
+
+- [x] **The per-close mutex stays.** Measured rather than argued, in
+      `crates/mvm-core/tests/span_timing_overhead.rs` (debug build, Apple
+      silicon; release is faster and the ratios are what matter):
+
+      | scenario                        | ns/span |
+      | ------------------------------- | ------- |
+      | profiling disabled (filtered)   | 12      |
+      | enabled, 1 thread               | 4,278   |
+      | enabled, 8 threads (aggregate)  | 2,084   |
+
+      Aggregate throughput *improves* roughly 2x under 8 threads rather than
+      collapsing, so the lock is not the bottleneck at entry-point granularity —
+      most of the per-span cost sits outside the critical section. Sharded or
+      thread-local accumulation would be speculative complexity, so it is not
+      built. The disabled path costs 12 ns/span, which is what every
+      non-profiling run pays.
+
+      The tests assert a deliberately loose ceiling. They exist to catch a
+      pathological regression — a deadlock, or per-record work that grows with
+      what the registry already holds — not to pin a number on a shared CI box.
+      Revisit if instrumentation moves into an inner loop; that is the condition
+      that would change the answer.
+
+### Still deferred
+
+- [ ] Wire `compare_span_reports` into a CI lane. The comparison and capture are
+      in place and tested; choosing a baseline artifact and a tolerance is a
+      launch-lane decision that belongs with Plan 311's large-image work, not
+      here.
+- [ ] Guest-side profiling for `mvm-agentd`, which needs a path to get a profile
+      out of the guest before instrumenting it is worth anything.
 
 ## Usage
 
