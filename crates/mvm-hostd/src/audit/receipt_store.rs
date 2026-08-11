@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use mvm_core::receipt::SignedExecutionReceipt;
 use serde::{Deserialize, Serialize};
 
-use crate::audit::emitter::write_atomic;
+use crate::audit::emitter::{write_atomic, write_atomic_unsynced};
 use crate::supervisor::audit_file::flock_exclusive;
 
 /// Head file content: the chain tip for one tenant's receipt store.
@@ -125,19 +125,76 @@ impl ReceiptStore {
             .join(format!("{seq:0>8}-{receipt_type}.json"))
     }
 
-    fn read_head(&self) -> Head {
-        if !self.head_path.exists() {
-            return Head::default();
+    /// The highest-sequence receipt actually on disk, and its id.
+    ///
+    /// The receipts are the record; the head is a cache of where it ends. A
+    /// head lost or left behind by a crash is recovered from here rather than
+    /// silently restarting the chain at sequence 0, which would reuse sequence
+    /// numbers and fork the chain a verifier reads.
+    fn scan_tip(&self) -> Option<Head> {
+        let entries = std::fs::read_dir(&self.tenant_dir).ok()?;
+        let mut best: Option<(u64, PathBuf)> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // `<seq>-<type>.json`, written by `receipt_path`. Anything else in
+            // the directory — the head, the lock, a temp file — is not a
+            // receipt and must not be mistaken for one.
+            let Some((seq_part, rest)) = name.split_once('-') else {
+                continue;
+            };
+            if !rest.ends_with(".json") || name.starts_with('.') {
+                continue;
+            }
+            let Ok(seq) = seq_part.parse::<u64>() else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(b, _)| seq > *b) {
+                best = Some((seq, entry.path()));
+            }
         }
-        std::fs::read_to_string(&self.head_path)
+        let (sequence, path) = best?;
+        let body = std::fs::read_to_string(&path).ok()?;
+        let receipt: SignedExecutionReceipt = serde_json::from_str(&body).ok()?;
+        Some(Head {
+            last_receipt_id: Some(receipt.payload.receipt_id),
+            sequence,
+        })
+    }
+
+    /// Persist the chain tip.
+    ///
+    /// Not fsynced. The head is a pointer into a directory whose receipts are
+    /// each already durable, and everything it records is recoverable from
+    /// them — which is what [`Self::read_head`] now does. On a host where
+    /// fdatasync costs ~42 ms this was a second synchronous flush, ahead of a
+    /// VMM start, for a value that can be rebuilt.
+    /// The chain tip, from the head file when it is current and from the
+    /// receipts themselves when it is not.
+    ///
+    /// A head that is missing, truncated, or unparseable used to read as
+    /// `Head::default()` — sequence 0 — while the receipts it named were still
+    /// on disk. The next append then reused sequence 1, overwriting an
+    /// existing receipt, and linked to no parent. This module's own preamble
+    /// says what that looks like downstream: two receipts naming one parent,
+    /// which every offline verifier is obliged to read as a deleted or
+    /// reordered receipt. Taking the later of the head and the files makes a
+    /// lost head recoverable instead of destructive.
+    fn read_head(&self) -> Head {
+        let stored = std::fs::read_to_string(&self.head_path)
             .ok()
-            .and_then(|s| serde_json::from_str::<Head>(&s).ok())
-            .unwrap_or_default()
+            .and_then(|s| serde_json::from_str::<Head>(&s).ok());
+        match (stored, self.scan_tip()) {
+            (Some(head), Some(tip)) if tip.sequence > head.sequence => tip,
+            (Some(head), _) => head,
+            (None, Some(tip)) => tip,
+            (None, None) => Head::default(),
+        }
     }
 
     fn write_head(&self, head: &Head) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(head).context("serializing receipt head")?;
-        write_atomic(&self.head_path, &bytes)
+        write_atomic_unsynced(&self.head_path, &bytes)
     }
 
     /// Take the exclusive per-tenant lock, blocking until it is available.
@@ -350,6 +407,90 @@ mod tests {
     /// A failure inside `build` must leave the store exactly as it was: no
     /// sequence burned, no head moved, no partial receipt on disk. A receipt
     /// that could not be signed is a receipt that never happened.
+    /// The head is no longer fsynced, so a crash can lose it while the
+    /// receipts it named are on disk. Recovery has to find them — restarting
+    /// at sequence 0 would overwrite an existing receipt and leave a verifier
+    /// with two receipts claiming one parent.
+    #[test]
+    fn a_lost_head_is_recovered_from_the_receipts_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(dir.path(), "t1").unwrap();
+        for i in 1..=3 {
+            store
+                .append_chained(|prev| Ok(sample_receipt(prev, i)))
+                .unwrap();
+        }
+        let before = store.head().unwrap();
+        assert_eq!(before.sequence, 3);
+
+        // Simulate the crash: the head write never reached disk.
+        std::fs::remove_file(dir.path().join("receipts/t1/head.json")).unwrap();
+
+        let recovered = store.head().unwrap();
+        assert_eq!(recovered.sequence, 3, "sequence recovered from the files");
+        assert_eq!(
+            recovered.last_receipt_id, before.last_receipt_id,
+            "the chain tip is the last receipt actually written"
+        );
+
+        // And the next append continues the chain rather than forking it.
+        let seq = store
+            .append_chained(|prev| {
+                assert_eq!(prev, before.last_receipt_id, "links to the recovered tip");
+                Ok(sample_receipt(prev, 4))
+            })
+            .unwrap();
+        assert_eq!(seq, 4);
+    }
+
+    /// A head left *behind* by a crash is as dangerous as a missing one: it
+    /// would handeout a sequence number that is already taken.
+    #[test]
+    fn a_stale_head_loses_to_the_receipts_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(dir.path(), "t1").unwrap();
+        for i in 1..=3 {
+            store
+                .append_chained(|prev| Ok(sample_receipt(prev, i)))
+                .unwrap();
+        }
+        let tip = store.head().unwrap();
+
+        // Rewind the head to an earlier point, as a lost tail would.
+        let stale = serde_json::json!({ "last_receipt_id": "sha256:stale", "sequence": 1 });
+        std::fs::write(
+            dir.path().join("receipts/t1/head.json"),
+            serde_json::to_vec_pretty(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let recovered = store.head().unwrap();
+        assert_eq!(recovered.sequence, 3, "the receipts win over a stale head");
+        assert_eq!(recovered.last_receipt_id, tip.last_receipt_id);
+    }
+
+    /// The scan reads receipts, not whatever else shares the directory. A
+    /// head, a lock, or a leftover temp file must not be parsed as one.
+    #[test]
+    fn the_scan_ignores_non_receipt_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(dir.path(), "t1").unwrap();
+        store
+            .append_chained(|prev| Ok(sample_receipt(prev, 1)))
+            .unwrap();
+        let tenant_dir = dir.path().join("receipts/t1");
+        std::fs::write(tenant_dir.join(".00000009-tmp.json"), b"{}").unwrap();
+        std::fs::write(tenant_dir.join("notes.txt"), b"not a receipt").unwrap();
+        std::fs::write(tenant_dir.join("abc-thing.json"), b"{}").unwrap();
+
+        std::fs::remove_file(tenant_dir.join("head.json")).unwrap();
+        assert_eq!(
+            store.head().unwrap().sequence,
+            1,
+            "only <seq>-<type>.json counts"
+        );
+    }
+
     #[test]
     fn a_failed_build_advances_nothing() {
         let dir = tempfile::tempdir().unwrap();
