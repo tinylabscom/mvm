@@ -152,11 +152,11 @@ pub(in crate::commands) enum Commands {
     /// Internal SDK host-dispatch transport for `MVM_NO_VM=1`.
     #[command(name = "__sdk-no-vm", hide = true)]
     SdkNoVm(vm::sdk_no_vm::Args),
-    /// Prepare the environment + pre-fetch the builder VM image
+    /// Prepare the environment and machine infrastructure
     ///
-    /// Runs host-tooling setup and pre-acquires the builder VM image so the
-    /// first build is fast. Run automatically by install.sh unless
-    /// `MVM_SKIP_BUILDER_PREFETCH=1`.
+    /// Runs host-tooling setup and pre-acquires the builder VM image plus the
+    /// verified workload kernel. Run automatically by install.sh unless
+    /// `MVM_SKIP_BOOTSTRAP=1`.
     Bootstrap(bootstrap::Args),
     /// Internal: bootstrap only the builder VM image cache.
     #[command(name = "__builder-vm-bootstrap", hide = true)]
@@ -512,7 +512,8 @@ fn install_signal_handler() {
         if IN_CONSOLE_MODE.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        eprintln!("\nInterrupted, cleaning up...");
+        let stage0_active = env::builder_vm::stage0_active_in_process();
+        eprintln!("\n{}", interrupt_cleanup_message(stage0_active));
         let _ = mvm_runtime::handle_registry::stop_all_attached();
         if let Ok(pids) = pids.lock() {
             for &pid in pids.iter() {
@@ -524,6 +525,35 @@ fn install_signal_handler() {
         std::process::exit(130);
     }) {
         tracing::warn!("failed to install signal handler: {e}");
+    }
+}
+
+fn interrupt_cleanup_message(stage0_active: bool) -> &'static str {
+    if stage0_active {
+        "Stage 0 build interrupted; no incomplete artifact was cached. The persistent Nix build store was preserved for retry. Cleaning up..."
+    } else {
+        "Interrupted, cleaning up..."
+    }
+}
+
+#[cfg(test)]
+mod interrupt_message_tests {
+    use super::interrupt_cleanup_message;
+
+    #[test]
+    fn stage0_interrupt_explains_cache_and_retry_state() {
+        let message = interrupt_cleanup_message(true);
+        assert!(message.contains("Stage 0 build interrupted"));
+        assert!(message.contains("incomplete artifact was cached"));
+        assert!(message.contains("Nix build store was preserved"));
+    }
+
+    #[test]
+    fn ordinary_interrupt_keeps_the_generic_cleanup_message() {
+        assert_eq!(
+            interrupt_cleanup_message(false),
+            "Interrupted, cleaning up..."
+        );
     }
 }
 

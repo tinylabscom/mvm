@@ -143,11 +143,13 @@ fn verify_cached_kernel(kernel: &Path) -> Result<VerifiedKernel, KernelFetchErro
     Ok(VerifiedKernel(kernel.to_path_buf()))
 }
 
-/// Remove a rejected kernel and its sidecar. Removing only one would leave the
-/// other to be re-adopted, which is how a poisoned artifact survives eviction.
+/// Remove a rejected kernel, its sidecar, and its optional resolved config.
+/// Removing only part of the entry can leave stale capability metadata beside
+/// the replacement, or let a poisoned artifact be re-adopted.
 fn evict_kernel(kernel: &Path) {
     let _ = std::fs::remove_file(kernel);
     let _ = std::fs::remove_file(kernel_digest_sidecar(kernel));
+    let _ = std::fs::remove_file(kernel.with_file_name("config"));
 }
 
 /// How a kernel pin resolves to a concrete `vmlinux` for a given backend.
@@ -386,10 +388,12 @@ mod tests {
         }
 
         #[test]
-        fn a_modified_kernel_is_rejected_and_both_files_evicted() {
+        fn a_modified_kernel_is_rejected_and_the_full_entry_is_evicted() {
             let _env = env_guard();
             let dir = tempfile::tempdir().unwrap();
             let kernel = staged(dir.path(), b"the real kernel", true);
+            let config = kernel.with_file_name("config");
+            std::fs::write(&config, "CONFIG_DM_VERITY=y\n").unwrap();
             // Same length, so a size check would not notice.
             std::fs::write(&kernel, b"the fake kernel").unwrap();
 
@@ -402,6 +406,7 @@ mod tests {
                 !kernel_digest_sidecar(&kernel).exists(),
                 "its pin removed too — leaving one lets the other be re-adopted"
             );
+            assert!(!config.exists(), "stale capability metadata removed too");
         }
 
         #[test]

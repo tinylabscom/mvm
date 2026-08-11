@@ -877,6 +877,13 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     verbose: bool,
 ) -> Result<()> {
     let _stage0_guard = acquire_stage0_lock(out_dir)?;
+    let removed = sweep_stage0_staging_siblings(std::path::Path::new(out_dir))?;
+    if removed > 0 {
+        ui::info(&format!(
+            "Removed {removed} incomplete Stage 0 builder-image director{} from an earlier interruption.",
+            if removed == 1 { "y" } else { "ies" }
+        ));
+    }
 
     // Time each host-visible Stage 0 step and print a one-line
     // `[mvm] <step> … <secs>s` so perceived speed matches the actual

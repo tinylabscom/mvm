@@ -226,7 +226,7 @@ fn install_sh_downloads_verifies_and_installs() {
 }
 
 #[test]
-fn install_sh_prefetches_builder_image_by_default_and_skips_on_optout() {
+fn install_sh_runs_machine_readiness_bootstrap_by_default_and_honors_optout() {
     let target = host_target();
     let tarball = make_tarball(target);
     let archive = format!("mvmctl-{target}.tar.gz");
@@ -243,7 +243,7 @@ fn install_sh_prefetches_builder_image_by_default_and_skips_on_optout() {
     ];
     let (base, _stop) = serve(routes);
 
-    let run = |skip_prefetch: bool| -> String {
+    let run = |skip_env: Option<&str>| -> String {
         let install_dir = tempfile::tempdir().unwrap();
         let log = install_dir.path().join("invocations.log");
         let mut cmd = Command::new("sh");
@@ -253,8 +253,8 @@ fn install_sh_prefetches_builder_image_by_default_and_skips_on_optout() {
             .env("MVM_INSTALL_DIR", install_dir.path())
             .env("MVM_SKIP_CODESIGN", "1")
             .env("MVM_TEST_INVOCATION_LOG", &log);
-        if skip_prefetch {
-            cmd.env("MVM_SKIP_BUILDER_PREFETCH", "1");
+        if let Some(name) = skip_env {
+            cmd.env(name, "1");
         }
         assert!(cmd.status().unwrap().success(), "install.sh should succeed");
         std::fs::read_to_string(&log).unwrap_or_default()
@@ -262,13 +262,13 @@ fn install_sh_prefetches_builder_image_by_default_and_skips_on_optout() {
 
     // Default: install.sh runs `mvmctl bootstrap`.
     assert!(
-        run(false).contains("bootstrap"),
-        "default install must prefetch via `mvmctl bootstrap`"
+        run(None).contains("bootstrap"),
+        "default install must prepare infrastructure via `mvmctl bootstrap`"
     );
-    // Opt-out: MVM_SKIP_BUILDER_PREFETCH=1 suppresses the prefetch.
+    // Preferred opt-out suppresses the whole readiness bootstrap.
     assert!(
-        !run(true).contains("bootstrap"),
-        "MVM_SKIP_BUILDER_PREFETCH=1 must skip the prefetch"
+        !run(Some("MVM_SKIP_BOOTSTRAP")).contains("bootstrap"),
+        "MVM_SKIP_BOOTSTRAP=1 must skip bootstrap"
     );
 }
 

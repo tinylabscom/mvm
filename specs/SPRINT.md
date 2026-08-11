@@ -10,6 +10,21 @@
 
 ## Current issue delivery
 
+- [~] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
+      prepares both the builder VM and verified dm-verity workload kernel, so a
+      successful bootstrap does not defer an infrastructure build to the next
+      `machine run`. Kernel downloads verify before replacement, local Stage 0
+      builds validate every artifact before per-file atomic publication, and
+      verified reads reject any crash-skewed cache. Interrupted staging is swept
+      on retry while the persistent Nix store remains warm. Local capability validation
+      uses the resolved kernel config instead of searching a KALLSYMS-free raw
+      image for symbol strings. Formatting, focused tests, all 172 BDD
+      scenarios, workspace check, and host workspace all-target Clippy pass.
+      Full workspace tests pass the changed crates but expose unrelated,
+      non-deterministic `mvm-hostd` shared-state/timing failures; the Linux
+      all-target Clippy rerun remains for CI or a supported builder-VM entry
+      point.
+
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
       rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three

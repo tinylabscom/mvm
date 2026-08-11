@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** WS1–WS3 landed; WS4 (shared sidecar helper) and WS5 (CI caller gate) open. Completes plan 276 WS6 — its dev-build-artifact half shipped in #2053; this is the kernel half. Not yet scheduled into `specs/SPRINT.md`.
+**Status:** WS1–WS3 landed; WS4 (shared sidecar helper) and WS5 (CI caller gate) open. The 2026-08-10 bootstrap-readiness repair closed the remaining producer interruption gaps and routed the default workload-kernel acquisition through the verified resolver. Completes plan 276 WS6 — its dev-build-artifact half shipped in #2053; this is the kernel half.
 
 **Goal:** No workload or builder kernel is booted from cache without its bytes being checked against a recorded digest. The check must fail closed, evict what it rejects, and be impossible for a future caller to skip by accident.
 
@@ -65,24 +65,24 @@ Plan 276 WS6, second half. Recon §7.1 (`specs/research/uor-hologram-cross-proje
 
 ### WS1 — Make an unverified kernel path unrepresentable
 
-- [ ] Replace `KernelResolution::Cached(PathBuf)` with a variant carrying a type that cannot be constructed without a successful verification (`VerifiedKernel`, private field, constructor only in `kernel_fetch`).
-- [ ] `NeedsBuild` / `NeedsFetch` keep bare paths — they are *destinations*, not artifacts to trust.
-- [ ] The only way to a bootable path is a method on the verified type, so a future caller that skips verification does not compile.
-- [ ] Compile-fail test pinning that boundary (mirror `apple_container`'s existing compile-fail test for its asserter anchor).
+- [x] Replace `KernelResolution::Cached(PathBuf)` with a variant carrying a type that cannot be constructed without a successful verification (`VerifiedKernel`, private field, constructor only in `kernel_fetch`).
+- [x] `NeedsBuild` / `NeedsFetch` keep bare paths — they are *destinations*, not artifacts to trust.
+- [x] The only way to a bootable path is a method on the verified type, so a future caller that skips verification does not compile.
+- [x] Compile-fail test pinning that boundary (mirror `apple_container`'s existing compile-fail test for its asserter anchor).
 
 ### WS2 — Producers record a digest
 
-- [ ] **Fetch path:** after `crate::update::download_kernel`, verify the bytes against the published `checksums-sha256.txt` entry *before* admitting them to the cache, then write the sidecar. This is verify-on-write, which S3's read check then rests on.
-- [ ] **Build path:** after `build_kernel_via_stage0` produces a kernel, write the sidecar from the bytes just built (S2 — records what we built, claims nothing more).
-- [ ] Both writes are atomic (temp + rename) so an interrupted producer cannot leave a sidecar that disagrees with the artifact beside it.
-- [ ] A producer that cannot write a sidecar must not leave the kernel in place — an unverifiable artifact is worse than a missing one, because the next resolve will trust the path.
+- [x] **Fetch path:** after `crate::update::download_kernel`, verify the bytes against the published `checksums-sha256.txt` entry *before* admitting them to the cache, then write the sidecar. This is verify-on-write, which S3's read check then rests on.
+- [x] **Build path:** after `build_kernel_via_stage0` produces a kernel, write the sidecar from the bytes just built (S2 — records what we built, claims nothing more).
+- [x] Both writes are atomic (temp + rename) so an interrupted producer cannot leave a sidecar that disagrees with the artifact beside it.
+- [x] A producer that cannot write a sidecar must not leave the kernel in place — an unverifiable artifact is worse than a missing one, because the next resolve will trust the path.
 
 ### WS3 — Consumers verify on read
 
-- [ ] `resolve_kernel` verifies before returning `Cached`, via `verify_fetched_kernel` — giving that function the production callers it has never had.
-- [ ] On mismatch or missing sidecar: fail closed, evict kernel + sidecar, and fall through to `NeedsBuild` / `NeedsFetch` so the next step re-derives rather than re-adopting.
-- [ ] Update `resolve_pinned_kernel_with` (`crates/mvm-cli/src/commands/vm/up/kernel.rs`) and `mvm_client::local`'s `cached_kernel_path` use to the verified type.
-- [ ] Log the eviction at warn with the reason — a silent re-download is indistinguishable from a slow one.
+- [x] `resolve_kernel` verifies before returning `Cached`, via `verify_fetched_kernel` — giving that function the production callers it has never had.
+- [x] On mismatch or missing sidecar: fail closed, evict kernel + sidecar, and fall through to `NeedsBuild` / `NeedsFetch` so the next step re-derives rather than re-adopting.
+- [x] Update `resolve_pinned_kernel_with` (`crates/mvm-cli/src/commands/vm/up/kernel.rs`) and `mvm_client::local`'s `cached_kernel_path` use to the verified type.
+- [x] Log the eviction at warn with the reason — a silent re-download is indistinguishable from a slow one.
 
 ### WS4 — One sidecar helper, not two
 

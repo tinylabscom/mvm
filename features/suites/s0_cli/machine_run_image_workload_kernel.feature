@@ -1,13 +1,14 @@
 Feature: machine run --image workload-kernel precondition
 
-  Booting an OCI image needs a dm-verity-capable workload kernel. When the
-  cached workload kernel cannot boot a verity-sealed rootfs, `machine run
-  --image` must fail fast with an actionable message *before* pulling the image
-  — never a silent hang after the pull.
+  Booting an OCI image needs a dm-verity-capable workload kernel. When a
+  verified cache entry carries an explicit non-verity config, `machine run
+  --image` must discard the whole entry and start verified reacquisition before
+  pulling the image. This hermetic scenario points reacquisition at a closed
+  local endpoint so it proves the transition without network or Stage 0.
 
-  Scenario: machine run --image fails fast when the workload kernel cannot boot verity-sealed rootfs
+  Scenario: machine run --image evicts an incompatible workload kernel and reacquires it
     Given an isolated mvm home with a cached non-verity workload kernel
     When I run mvmctl in the isolated mvm home with "machine run --image alpine -- /bin/true"
     Then the command exits with code 1
-    And the error output contains "workload kernel"
-    And the error output contains "kernel build --which workload"
+    And the output contains "discarding it and preparing a correct kernel"
+    And the incompatible workload kernel cache is evicted

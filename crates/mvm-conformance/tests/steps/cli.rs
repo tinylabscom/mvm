@@ -118,12 +118,14 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
     let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
         panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
     });
-    let output = cmd
-        .args(args.split_whitespace())
+    cmd.args(args.split_whitespace())
         .env("HOME", home.path())
-        .env("MVM_HOME", home.path())
-        .output()
-        .expect("failed to spawn mvmctl");
+        .env("MVM_HOME", home.path());
+    if world.kernel_reacquisition_must_fail {
+        cmd.env("MVM_KERNEL_SOURCE", "download")
+            .env("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:9");
+    }
+    let output = cmd.output().expect("failed to spawn mvmctl");
     world.last_run = Some(output);
 }
 
@@ -144,14 +146,39 @@ fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
         .join("kernels")
         .join("workload");
     std::fs::create_dir_all(&kernel_dir).expect("create fake workload kernel cache dir");
-    // A kernel file that is recognisably a kernel but carries no device-mapper /
-    // dm-verity markers, so `assert_workload_kernel_supports_verity` fails fast.
+    let kernel = kernel_dir.join("vmlinux");
+    std::fs::write(&kernel, b"KALLSYMS-free fake kernel bytes\n")
+        .expect("write fake workload kernel");
+    mvm_build::kernel_fetch::record_kernel_digest(&kernel)
+        .expect("record fake workload kernel digest");
     std::fs::write(
-        kernel_dir.join("vmlinux"),
-        b"Linux version 6.12.0 (fake non-verity kernel for BDD)\n",
+        kernel_dir.join("config"),
+        "# CONFIG_BLK_DEV_DM is not set\n# CONFIG_DM_VERITY is not set\n",
     )
-    .expect("write fake workload kernel");
+    .expect("write fake non-verity kernel config");
     world.isolated_home = Some(home);
+    world.kernel_reacquisition_must_fail = true;
+}
+
+#[then(expr = "the incompatible workload kernel cache is evicted")]
+fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home must remain available");
+    let kernel_dir = home
+        .path()
+        .join("cache")
+        .join("builder-vm")
+        .join(std::env::consts::ARCH)
+        .join("kernels")
+        .join("workload");
+    for name in ["vmlinux", "vmlinux.sha256", "config"] {
+        assert!(
+            !kernel_dir.join(name).exists(),
+            "incompatible cache member {name} survived"
+        );
+    }
 }
 
 #[given(expr = "warm residency is enabled")]

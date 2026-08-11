@@ -228,8 +228,19 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
     }
 
     let asset_url = format!("{base}/{GITHUB_REPO}/releases/download/{tag}/{asset}");
+    let parent = dest
+        .parent()
+        .with_context(|| format!("kernel destination has no parent: {}", dest.display()))?;
+    let download = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| {
+            format!(
+                "creating kernel download staging file in {}",
+                parent.display()
+            )
+        })?
+        .into_temp_path();
     let sp = ui::spinner(&format!("Downloading {asset} ({tag})..."));
-    let dl = http::download_file(&asset_url, dest);
+    let dl = http::download_file(&asset_url, &download);
     sp.finish_and_clear();
     dl.with_context(|| {
         format!(
@@ -240,7 +251,7 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
 
     if std::env::var("MVM_SKIP_HASH_VERIFY").is_ok() {
         ui::warn("MVM_SKIP_HASH_VERIFY set — skipping kernel checksum verification (never in CI).");
-        record_kernel_pin(dest);
+        publish_downloaded_kernel(download, dest)?;
         return Ok(());
     }
 
@@ -252,20 +263,19 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
         .with_context(|| format!("{asset} not found in {checksums}"))
         .and_then(parse_checksum_line)?;
 
-    let bytes =
-        std::fs::read(dest).with_context(|| format!("reading {} for checksum", dest.display()))?;
+    let bytes = std::fs::read(&download)
+        .with_context(|| format!("reading {} for checksum", download.display()))?;
     let actual: [u8; 32] = Sha256::digest(&bytes).into();
     if actual != expected {
-        let _ = std::fs::remove_file(dest);
         anyhow::bail!(
             "Kernel checksum mismatch for {asset}!\n  expected: {}\n  actual:   {}\n\
-             Download rejected and removed.",
+             Staged download rejected; any existing cached kernel was preserved.",
             hex_encode(&expected),
             hex_encode(&actual),
         );
     }
     ui::success(&format!("Verified {asset}."));
-    record_kernel_pin(dest);
+    publish_downloaded_kernel(download, dest)?;
     Ok(())
 }
 
@@ -278,17 +288,21 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
 ///
 /// The checksum-manifest comparison above happens once, at fetch. Nothing
 /// re-derived it afterwards, so a kernel that rotted, was truncated, or was
-/// replaced on disk was served on the strength of its filename. Best-effort:
-/// failing to write the pin costs a re-fetch next time, which is the safe
-/// direction.
+/// replaced on disk was served on the strength of its filename. The staged
+/// download is renamed into place only after checksum verification, and a
+/// sidecar failure evicts it rather than leaving an unservable cache entry.
 #[cfg(feature = "builder-vm")]
-fn record_kernel_pin(dest: &Path) {
-    if let Err(e) = mvm_build::kernel_fetch::record_kernel_digest(dest) {
-        ui::warn(&format!(
-            "could not record the kernel digest beside {} ({e}); it will be re-fetched on next use",
-            dest.display()
-        ));
+fn publish_downloaded_kernel(download: tempfile::TempPath, dest: &Path) -> Result<()> {
+    download
+        .persist(dest)
+        .map_err(|error| error.error)
+        .with_context(|| format!("publishing downloaded kernel to {}", dest.display()))?;
+    if let Err(error) = mvm_build::kernel_fetch::record_kernel_digest(dest) {
+        let _ = std::fs::remove_file(dest);
+        let _ = std::fs::remove_file(mvm_build::kernel_fetch::kernel_digest_sidecar(dest));
+        return Err(error).context("recording downloaded kernel digest");
     }
+    Ok(())
 }
 
 /// Check if a directory is writable by the current user.
@@ -892,6 +906,27 @@ mod tests {
             valid_targets.contains(&target),
             "Unexpected target: {}",
             target
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn downloaded_kernel_publish_replaces_atomically_and_records_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("vmlinux");
+        std::fs::write(&dest, b"old kernel").unwrap();
+        let mut download = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        download.write_all(b"new verified kernel").unwrap();
+        download.flush().unwrap();
+
+        publish_downloaded_kernel(download.into_temp_path(), &dest).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new verified kernel");
+        let recorded =
+            std::fs::read_to_string(mvm_build::kernel_fetch::kernel_digest_sidecar(&dest)).unwrap();
+        assert_eq!(
+            recorded.trim(),
+            mvm_fs::overlay::compute_file_sha256(&dest).unwrap()
         );
     }
 }

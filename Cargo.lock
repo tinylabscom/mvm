@@ -3014,7 +3014,6 @@ dependencies = [
  "hex",
  "libc",
  "libkrun-sys",
- "memchr",
  "mvm-agentd",
  "mvm-backends",
  "mvm-build",

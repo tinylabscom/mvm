@@ -1268,10 +1268,9 @@ mod linux {
     }
 
     fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {
-        // `cp -L`: follow the store symlink and copy the real file.
-        std::fs::copy(src, dst)
+        mvm_build::stage0::copy_nonempty_file(src, dst)
             .map(|_| ())
-            .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))
+            .map_err(|error| error.to_string())
     }
 
     fn power_off() -> ExitCode {
@@ -1559,6 +1558,7 @@ mod linux {
                 std::fs::read(out.join("manifest.json")).expect("read source manifest")
             );
         }
+
         #[test]
         fn seed_store_runtime_check_requires_nix_and_cacert() {
             let root = tempfile::tempdir().expect("tempdir");

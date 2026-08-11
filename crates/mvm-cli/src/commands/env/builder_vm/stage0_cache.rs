@@ -1,5 +1,33 @@
 use super::*;
 
+#[cfg(any(feature = "builder-vm", test))]
+static ACTIVE_STAGE0_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Held for the lifetime of an in-process Stage 0 build. The inner file lock
+/// serializes the shared store; the process-local count lets Ctrl-C explain
+/// exactly what was interrupted without probing another process's lock.
+#[cfg(any(feature = "builder-vm", test))]
+pub(super) struct Stage0LockGuard {
+    _lock: mvm_core::atomic_io::FileLock,
+}
+
+#[cfg(any(feature = "builder-vm", test))]
+impl Drop for Stage0LockGuard {
+    fn drop(&mut self) {
+        ACTIVE_STAGE0_BUILDS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub(in crate::commands) fn stage0_active_in_process() -> bool {
+    #[cfg(any(feature = "builder-vm", test))]
+    {
+        ACTIVE_STAGE0_BUILDS.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+    #[cfg(not(any(feature = "builder-vm", test)))]
+    false
+}
+
 /// Which phase of Stage 0 failed. Each variant maps to a
 /// `stage=...` value in the `Stage0Failed` audit detail so a dashboard
 /// can break down "Stage 0 reliability" by failure phase. String
@@ -104,7 +132,7 @@ pub(super) fn stage0_failure_reason_summary(err: &anyhow::Error) -> String {
 /// the lock anchor is its sibling `stage0` (so `FileLock::try_acquire`
 /// produces `stage0.lock`).
 #[cfg(any(feature = "builder-vm", test))]
-pub(super) fn acquire_stage0_lock(out_dir: &str) -> Result<mvm_core::atomic_io::FileLock> {
+pub(super) fn acquire_stage0_lock(out_dir: &str) -> Result<Stage0LockGuard> {
     use mvm_core::atomic_io::FileLock;
 
     let parent = std::path::Path::new(out_dir)
@@ -115,7 +143,10 @@ pub(super) fn acquire_stage0_lock(out_dir: &str) -> Result<mvm_core::atomic_io::
     let lock_anchor = parent.join("stage0");
 
     match FileLock::try_acquire(&lock_anchor) {
-        Ok(Some(guard)) => Ok(guard),
+        Ok(Some(guard)) => {
+            ACTIVE_STAGE0_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Stage0LockGuard { _lock: guard })
+        }
         Ok(None) => anyhow::bail!(
             "another caller of Stage 0 is already bootstrapping the \
              builder VM image on this host (lock held at {}.lock). Wait for it to finish, or — \
@@ -125,6 +156,38 @@ pub(super) fn acquire_stage0_lock(out_dir: &str) -> Result<mvm_core::atomic_io::
         ),
         Err(e) => Err(e.context("acquiring Stage 0 advisory lock")),
     }
+}
+
+/// Remove incomplete Stage 0 directories belonging to one final cache
+/// directory. The caller holds the shared Stage 0 lock, so every matching
+/// sibling is from an earlier interrupted process rather than a live writer.
+#[cfg(any(feature = "builder-vm", test))]
+pub(super) fn sweep_stage0_staging_siblings(final_dir: &std::path::Path) -> Result<u64> {
+    let parent = final_dir.parent().ok_or_else(|| {
+        anyhow::anyhow!("Stage 0 cache path has no parent: {}", final_dir.display())
+    })?;
+    if !parent.is_dir() {
+        return Ok(0);
+    }
+    let name = final_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow::anyhow!("kernel cache basename is not UTF-8"))?;
+    let prefix = format!(".{name}.stage0-");
+    let mut removed = 0u64;
+    for entry in std::fs::read_dir(parent)
+        .with_context(|| format!("reading Stage 0 cache parent {}", parent.display()))?
+        .flatten()
+    {
+        let path = entry.path();
+        if !path.is_dir() || !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        std::fs::remove_dir_all(&path)
+            .with_context(|| format!("removing interrupted Stage 0 output {}", path.display()))?;
+        removed = removed.saturating_add(1);
+    }
+    Ok(removed)
 }
 
 #[cfg(any(feature = "builder-vm", test))]
