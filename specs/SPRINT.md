@@ -49,6 +49,14 @@
       uses the shared bounded poll backoff. Targeted tests and clippy pass;
       merge and backend live evidence remain before closure.
 
+- [x] Release-artifact download failures no longer send macOS users into a
+      host-Nix setup that writes SSH credentials under `/etc/nix` and forces a
+      fresh `sudo` password prompt. Recovery guidance now matches the product
+      boundary: mvm manages its own Linux builder, release users retry or inspect
+      the versioned release assets, and source-checkout users bootstrap from the
+      in-repo builder image. A focused regression test forbids the stale
+      `sudo`, `darwin.linux-builder`, and `/etc/nix` instructions.
+
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
       rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three

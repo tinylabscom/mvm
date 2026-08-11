@@ -181,6 +181,23 @@ pub(super) fn curl_download_args(dest: &str, url: &str) -> Vec<String> {
     ]
 }
 
+fn download_failure_message() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        "Download failed. Published artifacts for v{version} may not yet be\n\
+         available — release tags are pushed before the artifact-build matrix\n\
+         completes, so a 404 often means publishing is still in progress.\n\
+         Check the release page or retry in a few minutes:\n\
+         \n\
+         \x20   https://github.com/tinylabscom/mvm/releases/tag/v{version}\n\
+         \n\
+         mvm manages its own Linux builder; no host Nix configuration is required.\n\
+         If you are developing from a source checkout, use the\n\
+         mvmctl binary built from that checkout so it bootstraps the project\n\
+         builder VM from the in-repo image source."
+    )
+}
+
 /// Download a file from a URL using curl, resuming a partial `dest`.
 pub(super) fn download_file(url: &str, dest: &str) -> Result<()> {
     let status = std::process::Command::new("curl")
@@ -196,25 +213,7 @@ pub(super) fn download_file(url: &str, dest: &str) -> Result<()> {
         // run. It's never hash-accepted while incomplete — verify runs
         // only after a successful download, and the SHA-256 gate deletes
         // on mismatch — so leaving it is safe and saves re-fetching.
-        anyhow::bail!(
-            "Download failed. Pre-built images for v{version} may not yet be\n\
-             published — release tags are pushed before the artifact-build\n\
-             matrix completes, so a 404 here often just means the build is\n\
-             still in flight. Check the release page or retry in a few\n\
-             minutes:\n\
-             \n\
-             \x20   https://github.com/tinylabscom/mvm/releases/tag/v{version}\n\
-             \n\
-             To build locally instead, set up a Nix Linux builder:\n\
-             \n\
-             \x20 Option 1 — Temporary (run in another terminal):\n\
-             \x20   nix run 'nixpkgs#darwin.linux-builder'\n\
-             \n\
-             \x20 Option 2 — Permanent (add to /etc/nix/nix.conf):\n\
-             \x20   builders = ssh-ng://builder@linux-builder aarch64-linux /etc/nix/builder_ed25519 4 1 kvm,big-parallel - -\n\
-             \x20   builders-use-substitutes = true",
-            version = env!("CARGO_PKG_VERSION")
-        );
+        anyhow::bail!("{}", download_failure_message());
     }
     Ok(())
 }
@@ -239,6 +238,21 @@ mod tests {
         );
         assert!(args.contains(&"-fSL".to_string()));
         assert_eq!(args.last().unwrap(), "https://example/x");
+    }
+
+    #[test]
+    fn download_failure_guidance_uses_mvm_managed_builder_without_sudo() {
+        let message = download_failure_message();
+
+        assert!(message.contains("mvm manages its own Linux builder"));
+        assert!(message.contains("no host Nix configuration is required"));
+        assert!(message.contains("https://github.com/tinylabscom/mvm/releases/tag/v"));
+        for forbidden in ["sudo", "darwin.linux-builder", "/etc/nix"] {
+            assert!(
+                !message.contains(forbidden),
+                "download recovery guidance must not recommend {forbidden}: {message}"
+            );
+        }
     }
 
     /// Compute the canonical lowercase-hex SHA-256 of a byte slice. Tests
