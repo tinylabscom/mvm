@@ -2,10 +2,8 @@ export type Sample = {
   id: string;
   label: string;
   language: string;
-  /** Repo-relative path, or the literal "cli-help". */
+  /** Repo-relative path. */
   source: string;
-  /** Present iff source === "cli-help": argv after `mvmctl`. */
-  helpArgs?: string[];
   code: string;
 };
 

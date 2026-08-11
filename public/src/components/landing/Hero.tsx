@@ -80,13 +80,6 @@ export function Hero() {
         <div className="grid items-center gap-16 lg:grid-cols-2 lg:gap-20">
           {/* Left — copy */}
           <div className="flex flex-col gap-8">
-            <Reveal delay={0}>
-              <div className="flex items-center gap-2">
-                <span className="inline-block h-2 w-2 rounded-full bg-green animate-pulse" />
-                <span className="text-sm font-medium text-green">v0.7 — Multi-backend VM support</span>
-              </div>
-            </Reveal>
-
             <Reveal delay={80}>
               <h1 className="font-display text-5xl font-bold leading-[1.1] tracking-tight text-title sm:text-6xl xl:text-7xl">
                 Local. A real microVM

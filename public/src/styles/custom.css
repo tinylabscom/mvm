@@ -405,10 +405,6 @@ nav[aria-label="Main"] ul ul li {
 }
 
 
-h2.text-title {
-  margin-bottom: 1.5rem;
-}
-
 /* ── Terminal dots — red/yellow/green (docs pages only) ── */
 [data-has-sidebar] .expressive-code .frame.is-terminal .header::before {
   background-color: transparent !important;
@@ -953,6 +949,22 @@ h2.text-title {
   html.js .site-reveal.is-shown {
     opacity: 1;
     transform: none;
+  }
+
+  /* Failsafe: if React never hydrates (a thrown error, a slow/failed
+     chunk load), .is-shown never gets added and content would stay at
+     opacity: 0 forever. Force the revealed state after a delay so a
+     hydration failure degrades to "no reveal animation", not "the page
+     never becomes readable". The delay outlasts the 600ms transition
+     above, so a successful reveal always wins this race first. */
+  html.js .site-reveal {
+    animation: site-reveal-failsafe 0s linear 4s forwards;
+  }
+  @keyframes site-reveal-failsafe {
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
 }
 

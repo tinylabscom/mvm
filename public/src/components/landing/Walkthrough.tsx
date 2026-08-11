@@ -47,7 +47,11 @@ export function Walkthrough() {
     return () => io.disconnect();
   }, []);
 
-  const sample = (id: string) => SAMPLES.find((s) => s.id === id)!;
+  // Returns undefined on a typo'd/missing id rather than throwing, so a
+  // bad sample id degrades to "no code block for this step" instead of
+  // taking the whole island down.
+  const sample = (id: string) => SAMPLES.find((s) => s.id === id);
+  const activeSample = sample(STEPS[active].id);
 
   return (
     <Section rule>
@@ -68,27 +72,40 @@ export function Walkthrough() {
               }}
               className={`transition-opacity duration-500 ${active === i ? "opacity-100" : "opacity-40"}`}
             >
-              <Eyebrow n={String(i + 1).padStart(2, "0")}>{s.title}</Eyebrow>
+              <h3 className="mb-3 font-mono text-xs tracking-[0.2em] uppercase text-accent">
+                Step {i + 1}
+              </h3>
+              <p className="mb-1 text-lg font-semibold text-title">{s.title}</p>
               <p className="max-w-md text-lg leading-relaxed text-body">{s.body}</p>
             </div>
           ))}
         </div>
         <div className="hidden lg:block">
           <div className="sticky top-32">
-            <CodeBlock code={sample(STEPS[active].id).code} language={sample(STEPS[active].id).language} />
+            {activeSample && (
+              <CodeBlock code={activeSample.code} language={activeSample.language} />
+            )}
           </div>
         </div>
       </div>
 
       {/* Stacked fallback: reduced motion, and every viewport below lg. */}
       <div className="site-walk-static flex flex-col gap-12 lg:hidden">
-        {STEPS.map((s, i) => (
-          <div key={s.id}>
-            <Eyebrow n={String(i + 1).padStart(2, "0")}>{s.title}</Eyebrow>
-            <p className="mb-4 max-w-md text-lg leading-relaxed text-body">{s.body}</p>
-            <CodeBlock code={sample(s.id).code} language={sample(s.id).language} />
-          </div>
-        ))}
+        {STEPS.map((s, i) => {
+          const stepSample = sample(s.id);
+          return (
+            <div key={s.id}>
+              <h3 className="mb-3 font-mono text-xs tracking-[0.2em] uppercase text-accent">
+                Step {i + 1}
+              </h3>
+              <p className="mb-1 text-lg font-semibold text-title">{s.title}</p>
+              <p className="mb-4 max-w-md text-lg leading-relaxed text-body">{s.body}</p>
+              {stepSample && (
+                <CodeBlock code={stepSample.code} language={stepSample.language} />
+              )}
+            </div>
+          );
+        })}
       </div>
     </Section>
   );

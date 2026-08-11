@@ -103,8 +103,8 @@ export function Features() {
 
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {features.map((f, i) => (
-            <Reveal key={f.title} delay={i * 80}>
-              <GlowCard accent={f.accent} className="group">
+            <Reveal key={f.title} delay={i * 80} className="h-full">
+              <GlowCard accent={f.accent} className="group h-full">
                 <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg border border-edge/60 bg-canvas text-accent transition-colors group-hover:border-accent/40 group-hover:bg-accent/10">
                   {icons[f.icon]}
                 </div>

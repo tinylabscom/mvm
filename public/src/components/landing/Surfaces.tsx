@@ -14,7 +14,10 @@ const SURFACES = [
 export function Surfaces() {
   const rawBase = import.meta.env.BASE_URL;
   const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
-  const sample = (id: string) => SAMPLES.find((s) => s.id === id)!;
+  // Returns undefined on a typo'd/missing id rather than throwing, so a
+  // bad sample id degrades to a missing pane instead of taking the whole
+  // island down.
+  const sample = (id: string) => SAMPLES.find((s) => s.id === id);
 
   return (
     <Section rule>
@@ -37,11 +40,16 @@ export function Surfaces() {
           ))}
         </TabsList>
 
-        {SURFACES.map((s) => (
-          <TabsContent key={s.tab} value={s.tab}>
-            <CodeBlock code={sample(s.sampleId).code} language={sample(s.sampleId).language} />
-          </TabsContent>
-        ))}
+        {SURFACES.map((s) => {
+          const surfaceSample = sample(s.sampleId);
+          return (
+            <TabsContent key={s.tab} value={s.tab}>
+              {surfaceSample && (
+                <CodeBlock code={surfaceSample.code} language={surfaceSample.language} />
+              )}
+            </TabsContent>
+          );
+        })}
       </Tabs>
 
       <nav className="mt-8 flex flex-wrap gap-x-8 gap-y-3" aria-label="SDK and CLI documentation">

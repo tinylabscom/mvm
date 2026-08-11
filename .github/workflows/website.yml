@@ -1,0 +1,55 @@
+name: Website
+
+# check:tokens and check:samples were developer conventions with no CI gate:
+# a hardcoded hex value or a drifted code sample could land on main and only
+# ever get caught by someone remembering to run pnpm check locally. This is
+# the gate. It's scoped to public/** so it doesn't run (and can't be required)
+# on PRs that never touch the site.
+on:
+  pull_request:
+    paths:
+      - "public/**"
+      - ".github/workflows/website.yml"
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Tokens, samples, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: public/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: public
+        run: pnpm install --frozen-lockfile
+
+      - name: Check design tokens
+        working-directory: public
+        run: pnpm check:tokens
+
+      - name: Check sample provenance
+        working-directory: public
+        run: pnpm check:samples
+
+      - name: Build
+        working-directory: public
+        run: pnpm build

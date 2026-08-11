@@ -13,7 +13,6 @@ const { SAMPLES } = await import(samplesPath);
 
 const failures = [];
 for (const s of SAMPLES) {
-  if (s.source === "cli-help") continue; // checked by Task 14's help-text step
   let fileText;
   try {
     fileText = readFileSync(join(repoRoot, s.source), "utf8");

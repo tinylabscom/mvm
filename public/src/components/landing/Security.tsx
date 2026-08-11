@@ -79,8 +79,8 @@ export function Security() {
 
       <div className="grid gap-5 sm:grid-cols-2">
         {CLAIMS.map((c, i) => (
-          <Reveal key={c.title} delay={i * 80}>
-            <GlowCard accent={c.accent}>
+          <Reveal key={c.title} delay={i * 80} className="h-full">
+            <GlowCard accent={c.accent} className="h-full">
               <h3 className="mb-2 text-lg font-semibold leading-snug tracking-tight text-title">
                 {c.title}
               </h3>
