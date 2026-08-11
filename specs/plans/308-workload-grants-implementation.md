@@ -2794,3 +2794,56 @@ Two things worth recording that the task text did not anticipate:
   every field was already `Eq`.
 
 Not done here: the SDK parity fixture (WS6) and everything in WS6b.
+
+---
+
+### Task 19: The host admission budget, and the ADR-001 claim row
+
+Two remaining pieces, landed together because the second is what makes the
+first honest.
+
+**The budget.** Nothing refuses the eleventh 4 GiB VM on a 32 GiB host. Per-VM
+guest RAM is bounded by construction and CPU is bounded by a quota, but the
+*sum* is unbounded, so a host can be oversubscribed into thrashing by
+perfectly well-formed individual grants.
+
+Sum committed CPU and memory across running machines and refuse a boot that
+would exceed a configurable headroom.
+
+Two constraints that are the whole difficulty:
+
+- **Count only what is live.** A budget summed from inventory *records*
+  refuses every subsequent boot forever once a VM crashes without cleanup —
+  the safety check becomes a permanent lockout, which is a worse failure than
+  the oversubscription it prevents. Derive liveness from the same pid-marker
+  probe the fork path already trusts; do not invent a second notion of
+  "running".
+- **Account against the configured maximum, not current usage.** The balloon
+  controller moves committed memory at runtime under host pressure, so
+  accounting against the live figure drifts away from what admission actually
+  granted.
+
+**The claim row.** `specs/adrs/001-microvm-security-posture.md` carries the
+claims ledger, and `xtask check-claim-catalog` parses it — the table is
+authoritative, the prose is not. This feature has shipped enforcement across
+several PRs with **no row at all**, which is precisely the disease the plan
+opens by naming.
+
+Add it as a `Preview` claim, following the shape of rows 16 and 17. Cite only
+witnesses that exist — run `rg 'fn <name>'` for each before writing it down,
+because `check-witness-citations` will fail the build otherwise and because
+fabricated witness names survived in this repo for months once already.
+
+The row must state the limits as plainly as the mechanism: CPU is enforced on
+Linux and **declared-only on macOS**, which has no cgroup equivalent; the
+wall-clock timer exists only on the libkrun tier, since it is the only VMM
+tier with a supervisor process that outlives the workload; a restored child is
+admission-bounded but its host-side control is not re-armed. A Preview row
+that overstates is worse than no row.
+
+**Witnesses:**
+- `a_boot_past_the_headroom_is_refused`
+- `budget_ignores_dead_machines` — the lockout regression
+- `budget_counts_the_configured_maximum_not_current_usage`
+- `an_empty_host_admits_a_boot_within_headroom`
+- `xtask check-claim-catalog` passes with the new row
