@@ -68,9 +68,9 @@ fn qemu_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     // Serial console + reboot/panic behavior + stable interface naming.
     let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
     if virtiofs_root {
-        format!("{console} rootfstype=virtiofs root=mvmroot rw init=/init")
+        format!("{console} rootfstype=virtiofs root=mvmroot ro init=/init")
     } else if has_disk {
-        format!("{console} root=/dev/vda rw rootwait init=/init")
+        format!("{console} root=/dev/vda ro rootwait init=/init")
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
         // so only the serial-console base is emitted here.

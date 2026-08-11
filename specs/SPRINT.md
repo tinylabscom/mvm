@@ -27,6 +27,12 @@
       workspace all-target Clippy, the serial aggregate workspace suite, and
       the focused x86_64 Linux cross-build are green. Linux-native builder-VM
       tests and all-target Clippy remain the final platform gates.
+- [~] Issue-closeout batch — **#2165, #2321, #2323**. Workload-runner root
+      bootargs now agree with read-only block attachments across the selected
+      drivers; the substitution forward leg rejects oversized declared or
+      streamed response bodies before accumulation; and Firecracker teardown
+      uses the shared bounded poll backoff. Targeted tests and clippy pass;
+      merge and backend live evidence remain before closure.
 
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached

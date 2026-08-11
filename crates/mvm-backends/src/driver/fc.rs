@@ -81,7 +81,7 @@ fn fc_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     // fields the raw Firecracker TAP path appends here are deliberately absent.
     let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
     if virtiofs_root {
-        format!("{console} rootfstype=virtiofs root=mvmroot rw init=/init")
+        format!("{console} rootfstype=virtiofs root=mvmroot ro init=/init")
     } else if has_disk {
         // No `root=` declaration here: Firecracker itself appends the
         // authoritative `root=/dev/vda ro|rw` to the boot args from the root
@@ -440,7 +440,7 @@ fn clear_stale_pid_marker_for_start(
 /// VM or wall-clock waits.
 fn escalate_kill(
     grace: Duration,
-    poll: Duration,
+    mut poll: impl FnMut(u32) -> Duration,
     mut is_running: impl FnMut() -> Result<bool>,
     mut signal: impl FnMut(FcStopSignal),
     mut now: impl FnMut() -> Instant,
@@ -451,11 +451,13 @@ fn escalate_kill(
     }
     signal(FcStopSignal::Terminate);
     let deadline = now() + grace;
+    let mut attempt = 0;
     while now() < deadline {
         if !is_running()? {
             return Ok(KillOutcome::Stopped);
         }
-        sleep(poll);
+        sleep(poll(attempt));
+        attempt = attempt.saturating_add(1);
     }
     // Grace lapsed; force-kill and re-probe to decide whether the signal landed.
     signal(FcStopSignal::ForceKill);
@@ -482,7 +484,7 @@ fn remove_pid_marker_if_matches(pid_file: &Path, pid: u32) {
 pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -> Result<()> {
     let outcome = escalate_kill(
         crate::legacy::libkrun::STOP_TIMEOUT,
-        Duration::from_millis(100),
+        mvm_core::poll_backoff::poll_delay,
         || crate::fc::is_firecracker_pid_running(pid),
         |signal| fc_sudo_signal(pid, signal),
         Instant::now,
@@ -1594,7 +1596,7 @@ mod tests {
         let base = Instant::now();
         let outcome = escalate_kill(
             Duration::from_secs(10),
-            Duration::from_millis(10),
+            |_| Duration::from_millis(10),
             || {
                 assert_eq!(captured_pid, 4242);
                 let probe = probes.get();
@@ -1655,7 +1657,7 @@ mod tests {
         let mut signals = Vec::new();
         let outcome = escalate_kill(
             Duration::from_secs(2),
-            Duration::from_millis(10),
+            |_| Duration::from_millis(10),
             || Ok(false),
             |s| signals.push(s),
             Instant::now,
@@ -1682,7 +1684,7 @@ mod tests {
         let base = Instant::now();
         let outcome = escalate_kill(
             Duration::from_secs(10),
-            Duration::from_millis(10),
+            |_| Duration::from_millis(10),
             is_running,
             |s| signals.push(s),
             || base,
@@ -1711,7 +1713,7 @@ mod tests {
         };
         let outcome = escalate_kill(
             Duration::from_millis(1),
-            Duration::from_millis(10),
+            |_| Duration::from_millis(10),
             || Ok(true),
             |s| signals.push(s),
             now,

@@ -42,6 +42,8 @@ use crate::supervisor::tools::http_hardening::hardened_client_builder;
 
 /// 16 MiB cap on a single routed request/response frame.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// The response body must fit inside the bounded guest-facing response frame.
+const MAX_FORWARD_RESPONSE_BYTES: usize = MAX_FRAME_BYTES;
 #[cfg(not(target_os = "linux"))]
 const RVPROXY_ORIGINAL_DST_MAGIC: &[u8; 8] = b"RVPXOD01";
 
@@ -516,6 +518,15 @@ pub enum ForwardError {
     Failed(String),
 }
 
+fn check_forward_response_length(length: Option<u64>) -> Result<(), ForwardError> {
+    if length.is_some_and(|length| length > MAX_FORWARD_RESPONSE_BYTES as u64) {
+        return Err(ForwardError::Failed(format!(
+            "response body exceeds the {MAX_FORWARD_RESPONSE_BYTES} byte limit"
+        )));
+    }
+    Ok(())
+}
+
 /// Errors from building a [`SubstitutionService`] from an admitted plan.
 #[derive(Debug, thiserror::Error)]
 pub enum FromPlanError {
@@ -592,6 +603,7 @@ impl Forwarder for HardenedForwarder {
         let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
         let client = hardened_client_builder(self.timeout_secs)
+            .max_response_bytes(MAX_FORWARD_RESPONSE_BYTES as u64)
             .build()
             .map_err(|e| ForwardError::Failed(e.to_string()))?;
         let mut rb = client.request(method, &req.url);
@@ -611,6 +623,7 @@ impl Forwarder for HardenedForwarder {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
             .collect();
+        check_forward_response_length(resp.content_length())?;
         let body = resp
             .bytes()
             .await
@@ -1959,6 +1972,22 @@ mod tests {
             prepare_request(&endpoint, req).unwrap_err(),
             ProxyError::BadUrl(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod response_body_tests {
+    use super::*;
+
+    #[test]
+    fn declared_response_length_is_checked_before_reading() {
+        check_forward_response_length(Some(MAX_FORWARD_RESPONSE_BYTES as u64))
+            .expect("a body exactly at the limit is accepted");
+        let err = check_forward_response_length(Some((MAX_FORWARD_RESPONSE_BYTES as u64) + 1))
+            .expect_err("an oversized declaration must be refused before allocation");
+        assert!(err.to_string().contains("response body exceeds"));
+        check_forward_response_length(None)
+            .expect("chunked or close-delimited bodies are streamed");
     }
 }
 

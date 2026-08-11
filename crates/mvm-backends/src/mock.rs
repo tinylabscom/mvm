@@ -382,9 +382,9 @@ impl VmmDriver for MockDriver {
         // comes from the driver rather than a hardcoded HVF default.
         let mut args = "console=hvc0 panic=-1 nokaslr loglevel=8".to_string();
         if virtiofs_root {
-            args.push_str(" rootfstype=virtiofs root=mvmroot rw init=/init");
+            args.push_str(" rootfstype=virtiofs root=mvmroot ro init=/init");
         } else if has_disk {
-            args.push_str(" root=/dev/vda rw init=/init");
+            args.push_str(" root=/dev/vda ro init=/init");
         }
         args
     }
