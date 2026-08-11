@@ -1288,6 +1288,8 @@ mod admit_plan_tests {
             let ledger = InMemoryNonceLedger::new();
             let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
                 network_mode: mode,
+                grants: None,
+                backend_kind: None,
                 tenant: "local",
                 vm_name: "vm-transport",
                 backend_name: "firecracker",
@@ -2190,6 +2192,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-granted",
             backend_name: "firecracker",
@@ -2350,6 +2353,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-over-ceiling",
             backend_name: "firecracker",
@@ -2408,6 +2412,7 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-ungranted",
             backend_name: "firecracker",
