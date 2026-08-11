@@ -3,7 +3,7 @@ import { Hero } from "./Hero";
 import { CredibilityStrip } from "./CredibilityStrip";
 import { Quickstart } from "./Quickstart";
 import { Positioning } from "./Positioning";
-import { WhyNotContainer } from "./WhyNotContainer";
+import { WhyMicrovm } from "./WhyMicrovm";
 import { Boundary } from "./Boundary";
 import { Security } from "./Security";
 import { FAQ } from "./FAQ";
@@ -16,13 +16,13 @@ import { Footer } from "./Footer";
 //   3. Quickstart       — the shortest path from install to a running microVM.
 //   4. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
-//   5. Why not a container — the objection the page used to skip. Placed
-//                         right after Positioning, before the boundary is
-//                         quantified: the reader has just seen how you
-//                         *use* mvm, so this is where "and here's what
-//                         you're actually getting instead of a container"
-//                         lands hardest — right before the boundary panel
-//                         backs it with a figure.
+//   5. Why a microVM      — the positive case for the boundary, made once.
+//                         Placed right after Positioning, before the
+//                         boundary is quantified: the reader has just seen
+//                         how you *use* mvm, so this is where "here's what
+//                         you're actually getting" lands hardest — right
+//                         before the boundary panel backs it with a
+//                         backend-agnostic guarantee.
 //   6. Boundary panel   — the figure: one kernel per workload, regardless
 //                         of which of the three backends resolved.
 //   7. Trust            — named tests and CI jobs, not adjectives.
@@ -45,7 +45,7 @@ export function Landing() {
       <CredibilityStrip />
       <Quickstart />
       <Positioning />
-      <WhyNotContainer />
+      <WhyMicrovm />
       <Boundary />
       <Security />
       <FAQ />
