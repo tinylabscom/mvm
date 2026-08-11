@@ -10,6 +10,19 @@
 
 ## Current issue delivery
 
+- [x] Merge-queue forward progress — **plan 316**. A twelve-entry queue stopped
+      landing changes when four speculative merge groups saturated runner
+      admission, successful checks reported after the 90-minute queue timeout,
+      and the automatic recovery workflow requeued the unchanged timed-out
+      commits. The live ruleset now limits speculation to two entries, permits
+      immediate one-entry progress, and allows 240 minutes for check response.
+      The trusted-base recovery workflow reads the authoritative dequeue reason
+      and refuses to automatically requeue `checks_timed_out`, so capacity
+      pressure can delay or eject one PR but cannot make that PR indefinitely
+      block every entry behind it. Workflow syntax, focused regression tests,
+      formatting, workspace check, all-target host Clippy, and the complete
+      serial workspace test suite pass.
+
 - [~] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
       successful bootstrap does not defer an infrastructure build to the next
@@ -672,6 +685,9 @@ updates only its own entry below.
       names and exact-merge-commit validation remain intact. Plan 281 records
       the measured 38m26s p50 / 2h14m03s p95 queue latency. The live ruleset is
       now set to build concurrency 3, group wait 0, and timeout 90 minutes.
+      Plan 316 supersedes those capacity settings after a later timeout loop:
+      build concurrency 2, minimum batch 1 with no wait, and timeout 240
+      minutes.
 
 - [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
       basename deny-list over the whole workspace root to an allow-list of the

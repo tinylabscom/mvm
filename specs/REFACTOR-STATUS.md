@@ -1,11 +1,16 @@
 # Refactor status
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Plan 316 — merge-queue forward progress.** Reduced live speculative
+      build concurrency from four to two, restored immediate single-entry
+      progress, raised the check-response timeout from 90 to 240 minutes, and
+      made timeout ejections terminal for automatic recovery at an unchanged
+      commit. Required checks and exact merge-commit validation are unchanged.
 - [x] **CLI help width invariant.** Every visible and hidden command is capped
       at 80 columns for `--help`, `-h`, and `mvmctl help <path>`; generated-tree
       BDD coverage executes the real binary and automatically includes future

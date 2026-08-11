@@ -116,3 +116,11 @@ latency that is not explained by them.
 **`max_entries_to_build: 4` → lower.** It multiplies concurrent runner demand,
 but lowering it also lowers throughput once the queue is healthy. No change
 until WS2 is measured.
+
+**Superseded 2026-08-11 by Plan 316.** The measurement arrived as a production
+timeout loop: four speculative groups plus ordinary pull-request and manual
+work delayed successful required checks past the 90-minute response timeout.
+Auto-requeue then repeated the unchanged work while invalidated runs continued
+consuming runners. The live ruleset now builds two speculative entries, permits
+immediate one-entry progress, and waits up to 240 minutes for checks. Timeout
+ejections are no longer automatically requeued at the unchanged commit.
