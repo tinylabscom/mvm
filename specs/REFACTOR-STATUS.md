@@ -633,17 +633,27 @@ for detailed scope and acceptance criteria.
         + gzipped-size budget in the existing wasm lane; B5 delete
         `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
         `mvmctl audit pubkey`
-- [ ] Plan 320 — A live wasm sandbox demo on the website
-      (`specs/plans/320-wasm-browser-demo.md`) — design approved, execution not
-      started. Browser-engine sandbox at `/demo` + landing teaser; relocates the
+- [~] Plan 320 — A live wasm sandbox demo on the website
+      (`specs/plans/320-wasm-browser-demo.md`) — E1 shipped, E2/E3 and the demo
+      itself not started. Browser-engine sandbox at `/demo` + landing teaser; relocates the
       egress decision (`projection.rs`), `${NAME}` substitution, and audit-entry
       construction/chain-signing into `mvm-contract` so host and browser run
       identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
       Sequencing: the landing teaser must be built against PR #2359's redesigned
       landing page, not the current one.
-  - [ ] E1 relocate `projection.rs` → `mvm-contract` (`mvm_core::ln` re-export
-        keeps ~20 call sites unchanged); E2 substitution core; E3 audit writer
-        core. Oracle: `wasm_egress_witness.rs` must stay green **unmodified**.
+  - [x] E1 — `projection.rs` relocated to `mvm-contract` verbatim; the
+        `mvm_core::policy::projection` module re-export kept all ~20 call sites
+        unchanged and `wasm_egress_witness.rs` green **unmodified**. The
+        `is_mandatory_deny`/`mandatory_deny_ranges`/`unmap_v4_mapped`
+        predicates it decides with moved down with it (re-exported the same
+        way); the iptables generators stayed in `mvm-core`. Side effect: the
+        54 projection tests plus 10 mandatory-deny tests now run under
+        `wasm32-wasip1` (651 → 715), closing plan 301 P1's "tests under wasm"
+        gap for this module.
+  - [ ] E2 substitution core; E3 audit writer core. Both are partial splits of
+        a custody/fs/async-bearing file, so each needs a moves/stays pass
+        before code. Oracle: `wasm_egress_witness.rs` must stay green
+        **unmodified**.
   - [ ] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker + thin
         proxy; three curated fixtures (allowed / denied / unbound); tamper
         button; `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane
