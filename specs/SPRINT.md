@@ -1800,6 +1800,18 @@ Then unify + retire the old paths:
   / 77.01 ms p99 to supervisor PID disappearance after SIGTERM; attach,
   endpoint reaping, console cleanup, state-marker removal, and force-kill
   escalation do not account for the stop latency.
+- [x] **Launch resolution without a launch (Plan 299 Phase 2, #2333).**
+  `mvmctl pool warm` could spawn nothing on any backend: it passed no launch
+  config, so the spawn built an image-less compat key and refused itself, and
+  nothing could produce a launch shape without running a launch. The four things
+  a claimable parent needs — rootfs plus verity sidecars, runtime overlay plus
+  universal initramfs, cmdline tokens, and admission — existed only inline in
+  the run path. They now compose into `crate::exec::resolve_launch`, which
+  returns a bootable `VmStartConfig` without booting; `run_inner` calls it, and
+  `pool warm --image/--cpus/--memory` resolves its parents' shape through the
+  same function, so the recorded compat key is the one a claim searches for. The
+  accepted-and-ignored `--rootfs` flag is removed. This is the resolution half
+  of Phase 2 only — the prepared-artifact manifest is still open.
 - [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
   `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon

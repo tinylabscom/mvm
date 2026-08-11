@@ -575,6 +575,17 @@ families.
 
 ## Phase 2 — Artifact preparation outside the launch path
 
+- [x] Make launch-config resolution a step that yields a bootable
+      `VmStartConfig` without starting a VM (`crate::exec::resolve_launch`),
+      composing image-artifact resolution, the boot-strategy tier gate, the
+      start-config assembly, and admission plus the runtime-overlay and
+      universal-initramfs attach. `run_inner` calls it instead of inlining it,
+      and `pool warm --image` calls it to obtain the shape its parents mirror.
+      This was a hard prerequisite for the warm pool, not a parallel
+      optimization — **#2333**. It is the *resolution* half of this phase only:
+      the prepared-artifact manifest and the acquire/prepare split below are
+      untouched, so a `pool warm` against a cold cache still performs the pull
+      and the materialization inline.
 - [ ] Define a prepared-artifact manifest for the kernel, universal initramfs,
       runtime overlay, rootfs, verity sidecars, and their compatibility
       fingerprints. Reuse existing content-addressed verification rather than

@@ -271,6 +271,30 @@ fn effective_transient_initrd(
     )
 }
 
+/// The part of a request that decides a launch's **boot shape** — every field
+/// [`resolve_launch`] reads, and nothing about what the guest will then run.
+///
+/// It exists so a caller that has no command can still resolve a bootable
+/// config: `pool warm` warms ahead of any launch and has no argv, no timeout
+/// and no stdin, but must mirror the boot a real launch performs down to the
+/// verity sidecar and the cmdline-bearing policy fields. Threading an
+/// [`ExecRequest`] with a fabricated empty command would have said the opposite
+/// of what is true.
+pub struct LaunchShape<'a> {
+    /// Explicit VM name, or `None` to generate a throwaway one.
+    pub name: Option<&'a str>,
+    pub image: &'a ImageSource,
+    pub cpus: u32,
+    pub memory_mib: u32,
+    pub mem_initial_mib: Option<u32>,
+    pub dir_shares: &'a [DirShareSpec],
+    pub pty: bool,
+    pub network_policy: &'a mvm_core::network_policy::NetworkPolicy,
+    pub warm_pool_size: u32,
+    pub sdk_sidecar: Option<&'a crate::commands::vm::up::SdkSidecarAttachment>,
+    pub hypervisor: Option<&'a str>,
+}
+
 /// All inputs to the orchestrator.
 #[derive(Debug, Clone)]
 pub struct ExecRequest {
@@ -325,6 +349,27 @@ pub struct ExecRequest {
     /// auto-detect. Kept here so `run_inner`'s backend selection agrees with the
     /// admit/build sites that read it off `RunArgs`.
     pub hypervisor: Option<String>,
+}
+
+impl ExecRequest {
+    /// Borrow the boot-shape half of this request. The launch resolution reads
+    /// only these fields, so a run and a `pool warm` that agree on them resolve
+    /// the same config — which is what makes the warm-pool compat key match.
+    pub fn launch_shape(&self) -> LaunchShape<'_> {
+        LaunchShape {
+            name: self.name.as_deref(),
+            image: &self.image,
+            cpus: self.cpus,
+            memory_mib: self.memory_mib,
+            mem_initial_mib: self.mem_initial_mib,
+            dir_shares: &self.dir_shares,
+            pty: self.pty,
+            network_policy: &self.network_policy,
+            warm_pool_size: self.warm_pool_size,
+            sdk_sidecar: self.sdk_sidecar.as_ref(),
+            hypervisor: self.hypervisor.as_deref(),
+        }
+    }
 }
 
 pub(crate) fn select_exec_backend(
@@ -462,14 +507,14 @@ pub(crate) fn validate_image_egress_backend_name(
     validate_image_egress_backend(&backend, image_requested, network_policy)
 }
 
-fn request_uses_vsock_proxy_backend(req: &ExecRequest) -> bool {
+fn shape_uses_vsock_proxy_backend(shape: &LaunchShape<'_>) -> bool {
     matches!(
-        &req.image,
+        shape.image,
         ImageSource::Prebuilt {
             virtiofs_oci_root: Some(_),
             ..
         }
-    ) && req.network_policy.allows_egress()
+    ) && shape.network_policy.allows_egress()
 }
 
 /// Build the IR healthcheck from the CLI flags. A shell command string becomes
@@ -892,12 +937,6 @@ fn run_inner(
     posture: Option<&PostureSink>,
     runtime_source_policy_sink: Option<&RuntimeSourcePolicySink>,
 ) -> Result<Either<i32, ExecOutput>> {
-    let backend = select_exec_backend(
-        request_uses_vsock_proxy_backend(&req),
-        &req.network_policy,
-        req.hypervisor.as_deref(),
-    )?;
-
     // Phase timing (off unless `MVM_PHASE_TIMING` or a launch-sample path is
     // set): capture a host-monotonic mark at each run seam, then emit a
     // one-line breakdown and/or the machine-readable sample at teardown. When
@@ -908,61 +947,41 @@ fn run_inner(
     let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(timing);
     let t_start = timing.then(std::time::Instant::now);
 
-    // Resolve image artifacts: either a named template or a pre-built pair.
-    // For templates, also probe for a pre-built snapshot so we can skip the
-    // cold-boot cost when the request is snapshot-eligible.
-    let resolved = resolve_image_artifacts(&req.image)?;
-
-    let t_image_resolved = timing.then(std::time::Instant::now);
-
-    // A transient run owns only its state directory. Host directories are
-    // attached as live virtio-fs shares; no host tree is copied or staged.
-    let vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
-
-    // Snapshot eligibility, the dm-verity sidecar probe, the virtiofs-root
-    // tier gate, and the effective initrd all fall out of the resolved image
-    // + backend capabilities; see `resolve_boot_strategy`.
-    let boot = resolve_boot_strategy(&req, &backend, &resolved, &mut sub_marks)?;
+    // Everything from backend selection through admission and the runtime
+    // overlay attach. It yields a bootable config without booting, which is
+    // also what `pool warm` needs — so it lives in one function both call
+    // rather than two that are free to drift.
+    let mut resolve_marks = LaunchResolveMarks::new(timing);
+    let launch = resolve_launch(
+        &req.launch_shape(),
+        admit,
+        &mut resolve_marks,
+        &mut sub_marks,
+    )?;
+    let ResolvedLaunch {
+        backend,
+        start_config,
+        use_snapshot,
+        root_strategy,
+        runtime_source_policy,
+        image: resolved,
+    } = launch;
+    let vm_name = start_config.name.clone();
 
     // Report the resolved strategy to the command layer for chain-audit. This is
     // the single source of truth — the same value that drives the boot below —
     // so the `plan.boot_posture` entry can never diverge from what actually
     // booted.
     if let Some(sink) = posture {
-        sink.set(boot.root_strategy);
+        sink.set(root_strategy);
     }
     if let Some(sink) = runtime_source_policy_sink {
-        sink.set(boot.runtime_source_policy);
+        sink.set(runtime_source_policy);
     }
-    let mut use_snapshot = boot.use_snapshot;
 
-    let t_drives_ready = timing.then(std::time::Instant::now);
-
-    // Template-restore VMs run without plan admission. Leave tenant_id /
-    // plan_json / bundle_json at their None defaults (via
-    // `..Default::default()`) so the libkrun/HVF backends take the legacy
-    // `run_supervisor` dispatch. Routing template restores through
-    // admission would add an `admit_for_run` call here and a
-    // `populate_audit_substrate` invocation after the struct literal.
-    let mut start_config = build_start_config(&req, &vm_name, &resolved, &boot);
-
-    // Admit the transient run as a locally-signed workload. Setting
-    // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
-    // `network_policy` and chain-audit the run. Force cold boot when admitted —
-    // snapshot restore is unavailable for workload admission.
-    if let Some(admit_fn) = admit
-        && let Some(sub) = admit_fn(std::path::Path::new(&resolved.rootfs), &vm_name)?
-    {
-        start_config.tenant_id = Some(sub.tenant_id);
-        start_config.plan_json = Some(sub.plan_json);
-        start_config.bundle_json = sub.bundle_json;
-        start_config.config_files.extend(sub.config_files);
-        use_snapshot = false;
-    }
-    crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
-    crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
-    crate::commands::vm::up::emit_runtime_source_status(&start_config);
-    let t_admitted = timing.then(std::time::Instant::now);
+    let t_image_resolved = resolve_marks.image_resolved;
+    let t_drives_ready = resolve_marks.drives_ready;
+    let t_admitted = resolve_marks.admitted;
 
     // Reap stale standbys, try a warm-pool claim, then fall back to
     // snapshot-restore / cold boot. See `boot_transient_vm`.
@@ -1085,7 +1104,7 @@ fn run_inner(
                     backend: backend.name(),
                     start_config: &start_config,
                     launch_mode,
-                    root_strategy: boot.root_strategy,
+                    root_strategy,
                     mount_materialized: sub_marks
                         .recorded(crate::commands::vm::phase_timing::SubPhase::MountMaterialize),
                     phases,
@@ -1328,7 +1347,7 @@ struct BootStrategy {
 /// policy, and the effective initrd. All of these fall out of the resolved
 /// image + `req` + the backend's capabilities.
 fn resolve_boot_strategy(
-    req: &ExecRequest,
+    shape: &LaunchShape<'_>,
     backend: &AnyBackend,
     resolved: &ResolvedImage,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
@@ -1337,8 +1356,8 @@ fn resolve_boot_strategy(
 
     // Snapshot path is taken when the request is eligible; otherwise cold boot.
     let use_snapshot = snapshot_eligible(
-        &req.image,
-        &req.dir_shares,
+        shape.image,
+        shape.dir_shares,
         resolved.snap_info.is_some(),
         backend.capabilities().snapshot_capability,
     );
@@ -1355,7 +1374,7 @@ fn resolve_boot_strategy(
     // dev run boots from the unpacked tree over virtio-fs (no ext4 materialize);
     // prod, sealed, and block backends stay on the materialized rootfs (claim 3).
     let virtiofs_root = resolve_virtiofs_root(
-        &req.image,
+        shape.image,
         backend.capabilities().virtiofs_root,
         verity_path.is_some(),
     );
@@ -1365,13 +1384,13 @@ fn resolve_boot_strategy(
         mvm_build::run_image::RootStrategy::BlockExt4
     };
     let runtime_source_policy = runtime_source_policy_for(
-        &req.image,
+        shape.image,
         backend.name(),
         verity_path.is_some(),
         root_strategy,
     );
     let effective_initrd = effective_transient_initrd(
-        &req.image,
+        shape.image,
         resolved.initrd.as_deref(),
         &resolved.rootfs,
         runtime_source_policy,
@@ -1394,7 +1413,7 @@ fn resolve_boot_strategy(
 /// overlay attach happen in the caller, after this returns — this only
 /// assembles the struct.
 fn build_start_config(
-    req: &ExecRequest,
+    shape: &LaunchShape<'_>,
     vm_name: &str,
     resolved: &ResolvedImage,
     boot: &BootStrategy,
@@ -1403,7 +1422,7 @@ fn build_start_config(
     // non-sealed images. OCI/dev images can carry verity sidecars and still be
     // interactive, so the sidecar's sealed bit is the load-bearing signal here.
     let image_sealed = crate::commands::vm::image_is_sealed(std::path::Path::new(&resolved.rootfs));
-    let dev_console = transient_run_dev_console(req.pty, image_sealed);
+    let dev_console = transient_run_dev_console(shape.pty, image_sealed);
 
     VmStartConfig {
         name: vm_name.to_string(),
@@ -1418,13 +1437,13 @@ fn build_start_config(
         revision_hash: resolved.revision.clone(),
         flake_ref: resolved.flake_ref.clone(),
         profile: resolved.profile.clone(),
-        cpus: req.cpus,
-        memory_mib: req.memory_mib,
-        mem_initial_mib: req.mem_initial_mib,
+        cpus: shape.cpus,
+        memory_mib: shape.memory_mib,
+        mem_initial_mib: shape.mem_initial_mib,
         ports: Vec::new(),
         // Live shares precede the SDK sidecar so their tags and admission
         // records remain stable across sidecar changes.
-        volumes: req
+        volumes: shape
             .dir_shares
             .iter()
             .map(|share| VmVolume {
@@ -1434,16 +1453,153 @@ fn build_start_config(
                 kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
                 ..Default::default()
             })
-            .chain(req.sdk_sidecar.iter().map(|a| a.volume.clone()))
+            .chain(shape.sdk_sidecar.iter().map(|a| a.volume.clone()))
             .collect(),
         config_files: Vec::new(),
         secret_files: Vec::new(),
         runner_dir: None,
-        network_policy: req.network_policy.clone(),
-        warm_pool_size: req.warm_pool_size,
+        network_policy: shape.network_policy.clone(),
+        warm_pool_size: shape.warm_pool_size,
         runtime_source_policy: boot.runtime_source_policy,
         ..Default::default()
     }
+}
+
+/// Host-monotonic marks the launch resolution crosses, handed back so the run
+/// path can render its phase breakdown. `new(false)` records nothing and costs
+/// nothing — the shape `pool warm` uses, since it emits no breakdown.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LaunchResolveMarks {
+    enabled: bool,
+    /// After the image artifacts (kernel/rootfs/initrd) are resolved.
+    pub image_resolved: Option<std::time::Instant>,
+    /// After the boot strategy — verity probe, tier gate, effective initrd.
+    pub drives_ready: Option<std::time::Instant>,
+    /// After admission and the runtime-overlay/initramfs attach.
+    pub admitted: Option<std::time::Instant>,
+}
+
+impl LaunchResolveMarks {
+    #[must_use]
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Self::default()
+        }
+    }
+
+    fn now(&self) -> Option<std::time::Instant> {
+        self.enabled.then(std::time::Instant::now)
+    }
+}
+
+/// One launch's boot shape, resolved without starting a VM.
+///
+/// This is the whole of what a launch knows about itself before
+/// [`boot_transient_vm`] runs: the backend it resolved against, a
+/// [`VmStartConfig`] carrying the rootfs and its verity sidecars, the runtime
+/// overlay and universal initramfs, the cmdline-bearing policy fields, and —
+/// when the caller supplied an admission hook — the tenant and signed plan.
+///
+/// Producing one without booting is what lets the warm pool spawn a parent that
+/// mirrors a real launch: `pool warm` resolves this, hands it to
+/// `warm_to_target`, and the spawn derives the parent's boot shape and the
+/// pool's compat key from the same value the launch will later be matched on.
+pub struct ResolvedLaunch {
+    /// The backend the launch resolved against. Selected here rather than by
+    /// the caller so a warm spawn and the run it serves cannot disagree about
+    /// which backend's capabilities shaped the config.
+    pub backend: AnyBackend,
+    pub start_config: VmStartConfig,
+    /// Whether snapshot restore survives admission (an admitted workload
+    /// always cold-boots).
+    pub use_snapshot: bool,
+    /// Rootfs strategy the run-path tier gate selected — the value the run path
+    /// records as `plan.boot_posture`.
+    pub root_strategy: mvm_build::run_image::RootStrategy,
+    pub runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+    /// Resolved image artifacts, kept for the snapshot-restore leg of the boot.
+    image: ResolvedImage,
+}
+
+/// Resolve a launch's bootable [`VmStartConfig`] **without starting a VM**.
+///
+/// Composes the four steps that used to exist only inline in [`run_inner`]:
+/// image-artifact resolution, the boot-strategy tier gate, the start-config
+/// assembly, and the admission + runtime-overlay/initramfs attach. Anything
+/// that wants a launch's boot shape calls this; resolving it a second way is
+/// how a warm parent comes to boot a shape no claim can match.
+///
+/// `admit` binds the run to a signed [`mvm_core::plan::ExecutionPlan`] and is
+/// what makes the config claim-eligible. A warm spawn passes `None`: a factory
+/// parent carries no workload authority, and the spawn drops the tenant and
+/// plan from the config it is handed anyway.
+pub fn resolve_launch(
+    shape: &LaunchShape<'_>,
+    admit: Option<&SessionAdmit<'_>>,
+    marks: &mut LaunchResolveMarks,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+) -> Result<ResolvedLaunch> {
+    let backend = select_exec_backend(
+        shape_uses_vsock_proxy_backend(shape),
+        shape.network_policy,
+        shape.hypervisor,
+    )?;
+
+    // Resolve image artifacts: either a named template or a pre-built pair.
+    // For templates, also probe for a pre-built snapshot so we can skip the
+    // cold-boot cost when the request is snapshot-eligible.
+    let image = resolve_image_artifacts(shape.image)?;
+    marks.image_resolved = marks.now();
+
+    // A transient run owns only its state directory. Host directories are
+    // attached as live virtio-fs shares; no host tree is copied or staged.
+    let vm_name = shape
+        .name
+        .map(str::to_string)
+        .unwrap_or_else(transient_vm_name);
+
+    // Snapshot eligibility, the dm-verity sidecar probe, the virtiofs-root
+    // tier gate, and the effective initrd all fall out of the resolved image
+    // + backend capabilities; see `resolve_boot_strategy`.
+    let boot = resolve_boot_strategy(shape, &backend, &image, sub)?;
+    marks.drives_ready = marks.now();
+
+    // Template-restore VMs run without plan admission. Leave tenant_id /
+    // plan_json / bundle_json at their None defaults (via
+    // `..Default::default()`) so the libkrun/HVF backends take the legacy
+    // `run_supervisor` dispatch. Routing template restores through
+    // admission would add an `admit_for_run` call here and a
+    // `populate_audit_substrate` invocation after the struct literal.
+    let mut start_config = build_start_config(shape, &vm_name, &image, &boot);
+    let mut use_snapshot = boot.use_snapshot;
+
+    // Admit the transient run as a locally-signed workload. Setting
+    // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
+    // `network_policy` and chain-audit the run. Force cold boot when admitted —
+    // snapshot restore is unavailable for workload admission.
+    if let Some(admit_fn) = admit
+        && let Some(sub) = admit_fn(std::path::Path::new(&image.rootfs), &vm_name)?
+    {
+        start_config.tenant_id = Some(sub.tenant_id);
+        start_config.plan_json = Some(sub.plan_json);
+        start_config.bundle_json = sub.bundle_json;
+        start_config.config_files.extend(sub.config_files);
+        use_snapshot = false;
+    }
+    crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
+    crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
+    crate::commands::vm::up::emit_runtime_source_status(&start_config);
+    marks.admitted = marks.now();
+
+    Ok(ResolvedLaunch {
+        backend,
+        start_config,
+        use_snapshot,
+        root_strategy: boot.root_strategy,
+        runtime_source_policy: boot.runtime_source_policy,
+        image,
+    })
 }
 
 /// Everything [`boot_transient_vm`] needs beyond the caller-varying
@@ -2263,6 +2419,142 @@ mod tests {
         .expect("hvf should satisfy the proxy backend requirement");
 
         assert_eq!(selected, "hvf");
+    }
+
+    /// A launch shape resolved from an `ExecRequest` must carry every field the
+    /// resolution reads. If one is dropped here, a `pool warm` that builds its
+    /// shape by hand and a run that builds one from its request resolve
+    /// different configs — and the pool fills with parents no claim matches,
+    /// with no error anywhere.
+    #[test]
+    fn launch_shape_borrows_every_field_the_resolution_reads() {
+        let share = crate::commands::DirShareSpec {
+            host_dir: "/host/data".into(),
+            guest_mount: "/data".into(),
+            read_only: true,
+        };
+        let req = ExecRequest {
+            name: Some("named-vm".into()),
+            warm_pool_size: 3,
+            image: ImageSource::Template("t".into()),
+            cpus: 4,
+            memory_mib: 2048,
+            mem_initial_mib: Some(512),
+            dir_shares: vec![share.clone()],
+            env: vec![("K".into(), "V".into())],
+            target: ExecTarget::Inline { argv: vec![] },
+            timeout_secs: Some(30),
+            pty: true,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: b"ignored".to_vec(),
+            healthcheck: None,
+            hypervisor: Some("mock".into()),
+            sdk_sidecar: None,
+        };
+
+        let shape = req.launch_shape();
+
+        assert_eq!(shape.name, Some("named-vm"));
+        assert!(matches!(shape.image, ImageSource::Template(n) if n == "t"));
+        assert_eq!(shape.cpus, 4);
+        assert_eq!(shape.memory_mib, 2048);
+        assert_eq!(shape.mem_initial_mib, Some(512));
+        assert_eq!(shape.dir_shares.len(), 1);
+        assert_eq!(shape.dir_shares[0].guest_mount, share.guest_mount);
+        assert!(shape.pty);
+        assert_eq!(shape.warm_pool_size, 3);
+        assert_eq!(shape.hypervisor, Some("mock"));
+        assert!(shape.sdk_sidecar.is_none());
+        assert_eq!(*shape.network_policy, req.network_policy);
+    }
+
+    /// The whole point of the extraction: a bootable config, verity sidecars
+    /// included, obtained without starting a VM. `pool warm` depends on this —
+    /// a pre-warm that had to boot to learn its own boot shape would be no
+    /// pre-warm at all.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn resolve_launch_yields_a_bootable_config_without_starting_a_vm() {
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        // A production rootfs ships its dm-verity sidecar pair beside it; the
+        // resolution must pick both up, since a parent booting without them
+        // boots a different shape than the launch it is meant to serve.
+        std::fs::write(tmp.path().join("rootfs.verity"), b"verity").unwrap();
+        std::fs::write(tmp.path().join("rootfs.roothash"), b"deadbeef\n").unwrap();
+
+        let image = ImageSource::Prebuilt {
+            kernel_path: kernel.display().to_string(),
+            rootfs_path: rootfs.display().to_string(),
+            initrd_path: None,
+            label: "fixture".into(),
+            virtiofs_oci_root: None,
+        };
+        let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
+        let shape = LaunchShape {
+            name: None,
+            image: &image,
+            cpus: 2,
+            memory_mib: 1024,
+            mem_initial_mib: None,
+            dir_shares: &[],
+            pty: false,
+            network_policy: &policy,
+            warm_pool_size: 1,
+            sdk_sidecar: None,
+            hypervisor: Some("mock"),
+        };
+
+        let resolved = resolve_launch(
+            &shape,
+            None,
+            &mut LaunchResolveMarks::new(false),
+            &mut crate::commands::vm::phase_timing::LaunchSubMarks::new(false),
+        )
+        .expect("a prebuilt image resolves without a VM");
+
+        assert_eq!(resolved.start_config.rootfs_path, rootfs.display().to_string());
+        assert_eq!(
+            resolved.start_config.kernel_path.as_deref(),
+            Some(kernel.display().to_string().as_str())
+        );
+        assert!(
+            resolved.start_config.verity_path.is_some(),
+            "the verity sidecar beside the rootfs must reach the config"
+        );
+        assert_eq!(resolved.start_config.roothash.as_deref(), Some("deadbeef"));
+        assert_eq!(resolved.start_config.cpus, 2);
+        assert_eq!(resolved.start_config.memory_mib, 1024);
+        assert!(
+            !resolved.start_config.name.is_empty(),
+            "an unnamed launch generates a throwaway name"
+        );
+        // No admission hook, so no workload authority is bound.
+        assert!(resolved.start_config.tenant_id.is_none());
+        assert!(resolved.start_config.plan_json.is_none());
+        // And nothing booted: the mock backend records every started VM.
+        assert!(
+            resolved.backend.list_all().unwrap_or_default().is_empty(),
+            "resolving a launch must not start a VM"
+        );
+    }
+
+    /// Timing marks are opt-in. `pool warm` resolves with them off and must pay
+    /// nothing for a breakdown it never renders.
+    #[test]
+    fn launch_resolve_marks_record_nothing_when_disabled() {
+        let marks = LaunchResolveMarks::new(false);
+        assert!(marks.now().is_none());
+        assert!(LaunchResolveMarks::new(true).now().is_some());
     }
 
     #[test]

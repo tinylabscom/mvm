@@ -161,7 +161,14 @@ for detailed scope and acceptance criteria.
         path. Foreground teardown is the other dominant cost, promoting
         Phase 6 ahead of Phase 3.
   - [ ] Phase 1 — content-addressed `--mount` image cache
-  - [ ] Phase 2 — artifact preparation outside the launch path
+  - [~] Phase 2 — artifact preparation outside the launch path. The resolution
+        half landed as the warm pool's hard prerequisite (**#2333**):
+        `crate::exec::resolve_launch` yields a bootable `VmStartConfig` without
+        starting a VM, `run_inner` calls it instead of inlining it, and
+        `pool warm --image` uses it to spawn parents a matching launch claims.
+        `pool warm` could previously spawn nothing on any backend. The
+        prepared-artifact manifest and the acquire/prepare split are still open,
+        so a cold cache is still populated inline.
   - [~] Phase 3 — reduce backend cold-start latency. Re-measured on KVM at
         `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
         623.6 ms, so the cost is real rather than a poll artifact and can be
