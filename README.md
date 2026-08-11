@@ -144,12 +144,18 @@ mvmctl machine inspect web
 Nix builds run inside a **headless builder VM** that mvm manages for you — there
 is no interactive shell into it. It exists only to run `nix build`, and you debug
 it through its logs. It auto-bootstraps on the first `machine build` / `machine
-run`; to set up host tooling and pre-acquire its image ahead of time:
+run`; to set up host tooling and pre-acquire both the builder image and the
+dm-verity workload kernel ahead of time:
 
 ```bash
-mvmctl bootstrap      # host setup + pre-fetch the builder VM image (fast first build)
+mvmctl bootstrap      # host setup + builder VM and workload-kernel acquisition
 mvmctl doctor         # diagnose host deps + the resolved builder/runtime backend
 ```
+
+`bootstrap` is safe to rerun. It verifies warm artifacts and only rebuilds or
+downloads what is missing or invalid. If a Stage 0 source build is interrupted,
+the incomplete output is never installed; rerunning resumes with the persistent
+Nix store still warm.
 
 For an interactive shell you want a *workload* microVM, not the builder — use a
 transient run against a dev-tier image: `mvmctl machine run --image alpine -it -- /bin/sh`.

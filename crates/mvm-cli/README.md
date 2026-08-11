@@ -7,7 +7,7 @@ Clap-based CLI commands, bootstrap workflow, diagnostics, update mechanism, and 
 | Module | Purpose |
 |--------|---------|
 | `commands` | Main CLI entry point (`run()`), all command definitions and handlers |
-| `bootstrap` | Full environment setup (Homebrew/apt, Nix, builder VM image pre-fetch) |
+| `bootstrap` | Full environment setup and machine infrastructure readiness |
 | `doctor` | System diagnostics and dependency checks (`mvmctl doctor`) |
 | `update` | Self-update from GitHub releases |
 | `template_cmd` | Template CRUD commands (create, list, build, delete, push, pull) |
@@ -20,7 +20,7 @@ Clap-based CLI commands, bootstrap workflow, diagnostics, update mechanism, and 
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl bootstrap` | Full setup from scratch (builder VM image pre-fetch) |
+| `mvmctl bootstrap` | Full setup plus builder VM and workload-kernel acquisition |
 | `mvmctl build image --flake .` | Build a microVM image from a Nix flake |
 | `mvmctl run --flake .` | Build + start a microVM |
 | `mvmctl console <name>` | Interactive PTY over vsock (dev-mode only) |

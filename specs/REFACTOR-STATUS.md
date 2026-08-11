@@ -43,6 +43,14 @@ for detailed scope and acceptance criteria.
       canonical budget table, and gates remain open.
 
 ## In-flight plans
+- [~] Plan 315 — Bootstrap means machine-ready
+      (`specs/plans/315-bootstrap-machine-readiness.md`)
+  - [x] Bootstrap acquires and verifies both builder image and workload kernel
+  - [x] Downloaded/local kernel publication is staged and verified reads fail closed
+  - [x] Local dm-verity capability uses resolved config, not raw-image strings
+  - [~] Workspace tests expose unrelated non-deterministic `mvm-hostd` failures;
+        Linux all-target Clippy remains for CI or a supported builder entry point
+
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
   - [x] Restore bounded guest credit recording, fail-closed unknown-credit

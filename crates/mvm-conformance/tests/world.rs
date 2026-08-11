@@ -157,6 +157,9 @@ pub struct CliWorld {
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
     /// steps that need to inspect the filesystem after a run.
     pub isolated_home: Option<tempfile::TempDir>,
+    /// Force workload-kernel reacquisition through a closed local endpoint so
+    /// invalid-cache scenarios prove eviction without network or Stage 0.
+    pub kernel_reacquisition_must_fail: bool,
     /// Process-wide `MVM_HOME` override held across the steps of one
     /// scenario (dropped — and the previous value restored — when the
     /// world is dropped at scenario end).
@@ -429,6 +432,10 @@ impl fmt::Debug for CliWorld {
             .field(
                 "isolated_home",
                 &self.isolated_home.as_ref().map(|t| t.path().to_path_buf()),
+            )
+            .field(
+                "kernel_reacquisition_must_fail",
+                &self.kernel_reacquisition_must_fail,
             )
             .field("warm_residency", &self.warm_residency)
             .field("kernel_pins", &self.kernel_pins)

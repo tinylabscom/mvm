@@ -304,6 +304,16 @@ Issue #2274.
 
 Issue #2275.
 
+**Corrected 2026-08-10:** the byte-marker probe was not a valid capability
+witness. The size-optimized raw ARM64 workload image deliberately disables
+`CONFIG_KALLSYMS`, so a correct dm-verity kernel can contain none of the searched
+symbol strings. The resulting linear scan was both launch-path waste and a
+false rejection. Local Stage 0 builds now publish and validate the resolved
+kernel config (`CONFIG_BLK_DEV_DM=y` and `CONFIG_DM_VERITY=y`); published kernels
+are bound to their variant-specific release checksum. No kernel-byte scan runs
+at launch. The historical checklist below records what landed in the original
+phase, but its marker-preservation premise is superseded by this correction.
+
 - [x] Replace `byte_contains`
       (`crates/mvm-cli/src/commands/env/builder_vm/default_microvm.rs:141`) with a
       skip-capable substring search. Confirm whether `memchr` is already in the

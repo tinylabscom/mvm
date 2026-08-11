@@ -55,7 +55,6 @@ sha2.workspace = true
 tar = "0.4"
 flate2.workspace = true
 hex.workspace = true
-memchr.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 notify = { workspace = true, optional = true }

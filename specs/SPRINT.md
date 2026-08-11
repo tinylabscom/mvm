@@ -10,6 +10,21 @@
 
 ## Current issue delivery
 
+- [~] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
+      prepares both the builder VM and verified dm-verity workload kernel, so a
+      successful bootstrap does not defer an infrastructure build to the next
+      `machine run`. Kernel downloads verify before replacement, local Stage 0
+      builds validate every artifact before per-file atomic publication, and
+      verified reads reject any crash-skewed cache. Interrupted staging is swept
+      on retry while the persistent Nix store remains warm. Local capability validation
+      uses the resolved kernel config instead of searching a KALLSYMS-free raw
+      image for symbol strings. Formatting, focused tests, all 172 BDD
+      scenarios, workspace check, and host workspace all-target Clippy pass.
+      Full workspace tests pass the changed crates but expose unrelated,
+      non-deterministic `mvm-hostd` shared-state/timing failures; the Linux
+      all-target Clippy rerun remains for CI or a supported builder-VM entry
+      point.
+
 - [~] HVF large-response integrity — **plan 315**. Restored bounded
       virtio-vsock host-to-guest credit accounting that had been removed while
       its relay-side readers remained. Every guest header refreshes the actual
