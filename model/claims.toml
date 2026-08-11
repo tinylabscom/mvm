@@ -141,12 +141,22 @@ witness_kinds = ["fn"]
 suite = "admission_audit"
 statement = "Every workload runs from a signed, audited ExecutionPlan"
 independent_verifiers = 2
+# The last four hold the line that splitting the chain into sequenced segments
+# does not quietly become a licence to edit it: the genesis anchor still
+# refuses a front-truncated file; a segment cannot be moved behind a
+# predecessor it never continued; a deleted segment is named rather than
+# silently skipped; and a crash mid-rotation continues the chain instead of
+# starting a fresh one that orphans everything behind it.
 witnesses = [
     "fn:synthesize_plan",
     "fn:admit_for_run",
     "fn:verify_audit_chain",
     "fn:frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts",
     "fn:no_std_verifier_accepts_the_same_corpus_the_host_verifier_does",
+    "fn:naively_dropping_old_entries_fails_verification_at_line_zero",
+    "fn:a_spliced_segment_is_refused",
+    "fn:a_missing_segment_is_named_not_silently_skipped",
+    "fn:an_interrupted_rotation_continues_history_instead_of_restarting_it",
 ]
 
 [[claim]]
