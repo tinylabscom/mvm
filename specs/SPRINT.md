@@ -23,7 +23,9 @@
       two-hour cold-build window. ARM64 workload kernels carry the console
       drivers required by Firecracker and HVF/QEMU, while bounded OCI blob
       redirects reach only exact trusted Docker CDN origins without forwarding
-      registry authorization. Formatting, workspace check, host workspace
+      registry authorization. The required console dependencies move only the
+      ARM64 built-in-symbol ratchet from 944 to its measured 959; x86_64 stays
+      at 917. Formatting, workspace check, host workspace
       all-target Clippy, the complete serialized workspace suite and doctests,
       the exact 461-test `xtask --features man` CI lane, and all 172 BDD
       scenarios pass. A KVM-backed ARM64 acceptance run completed cold

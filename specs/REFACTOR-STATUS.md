@@ -48,6 +48,8 @@ for detailed scope and acceptance criteria.
   - [x] Bootstrap acquires and verifies both builder image and workload kernel
   - [x] Downloaded/local kernel publication is staged and verified reads fail closed
   - [x] Local dm-verity capability uses resolved config, not raw-image strings
+  - [x] Required ARM64 cross-backend console support is pinned to its measured
+        959-symbol budget; the unaffected x86_64 ratchet remains 917
   - [x] Full serialized workspace tests and doctests, host all-target Clippy,
         the 461-test `xtask --features man` CI lane, and 172 BDD scenarios pass;
         KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0

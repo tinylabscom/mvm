@@ -44,7 +44,8 @@ store remains reusable.
       allow a real cold kernel compile to run for up to two hours with honest
       first-build messaging.
 - [x] Keep the ARM64 workload kernel bootable across Firecracker, HVF/QEMU,
-      and libkrun by building in both 8250 and PL011/HVC console support.
+      and libkrun by building in both 8250 and PL011/HVC console support. Pin
+      its measured built-in-symbol ratchet at 959 while leaving x86_64 at 917.
 - [x] Follow only bounded, HTTPS OCI blob redirects to the exact trusted Docker
       CDN origins, stripping registry authorization at the origin boundary and
       refusing redirects for manifests.
