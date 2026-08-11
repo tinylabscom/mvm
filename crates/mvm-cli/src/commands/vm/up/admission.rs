@@ -5,11 +5,12 @@
 
 use anyhow::{Context, Result, bail};
 
-use mvm_core::plan::{StreamRetention, SynthesisInput};
+use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
 use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
-    AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
+    AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, RunPosture, SystemClock,
+    admit_for_run,
 };
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
@@ -337,6 +338,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         .map(|(policy_ref, _)| policy_ref.as_str());
 
     let input = SynthesisInput {
+        grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: p.network_mode,
@@ -393,6 +395,15 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         }),
         _ => None,
     };
+    // The posture the grant gate reads. `restrict_agent_verbs` is this
+    // codebase's sealed-production signal — the same one the input-grant
+    // refusal above is scoped to — so a sealed boot refuses a grant nothing
+    // can enforce, and a dev boot is told about it and proceeds.
+    let variant = if p.restrict_agent_verbs {
+        Variant::Prod
+    } else {
+        Variant::Dev
+    };
     let t_pre_sign = std::time::Instant::now();
     tracing::debug!(
         ms = (t_pre_sign - t_sha).as_secs_f64() * 1000.0,
@@ -404,6 +415,13 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         p.ledger,
         p.keys_dir,
         admission_ctx.as_ref(),
+        // This path admits before the caller hands us anything typed for the
+        // backend — it carries a name, and a name is not a tier. So a declared
+        // grant is unverifiable here: a sealed run refuses it, a dev run is
+        // warned. Threading the resolved backend in is what makes a grant
+        // admissible on a sealed boot, and belongs with the surface that first
+        // lets one be authored.
+        RunPosture::without_backend(variant),
     )?;
     let t_signed = std::time::Instant::now();
     tracing::debug!(

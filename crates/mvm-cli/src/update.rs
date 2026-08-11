@@ -445,6 +445,7 @@ fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Resu
 
     install_release_host_binaries(&extracted_dir, install_dir, needs_sudo)
         .context("Failed to update adjacent host helper binaries")?;
+    sign_installed_binaries().context("Failed to apply macOS VM entitlements")?;
 
     // --- Replace resources ---
     let new_resources = extracted_dir.join("resources");
@@ -524,6 +525,31 @@ fn install_release_host_binaries(
         }
     }
     Ok(())
+}
+
+/// Apply the macOS entitlements immediately after replacing a release binary
+/// and its adjacent supervisors. A successful update must not leave the next
+/// invocation dependent on a lazy first-boot repair.
+fn sign_installed_binaries() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    let targets = mvm_runtime::codesign::collect_sign_targets();
+    let reports = mvm_runtime::codesign::sign_targets(&targets);
+    let failed: Vec<String> = reports
+        .iter()
+        .filter(|report| !report.entitlements_present)
+        .map(|report| report.path.display().to_string())
+        .collect();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "required VM entitlements are missing on: {}",
+            failed.join(", ")
+        )
+    }
 }
 
 fn run_sudo_mv(from: &Path, to: &Path) -> Result<()> {

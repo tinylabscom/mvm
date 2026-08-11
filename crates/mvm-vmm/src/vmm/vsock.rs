@@ -24,7 +24,8 @@ use super::device_state::{
 use super::vsock_handlers::{VsockHandlerContext, VsockHandlerRegistry, VsockLifecycleState};
 #[cfg(test)]
 use super::vsock_transport::{
-    GUEST_CID, HOST_BUF_ALLOC, HOST_CID, TYPE_STREAM, VIRTIO_ID_VSOCK, VIRTIO_MAGIC, VIRTIO_VERSION,
+    GUEST_CID, HOST_BUF_ALLOC, HOST_CID, OP_SHUTDOWN, TYPE_STREAM, VIRTIO_ID_VSOCK, VIRTIO_MAGIC,
+    VIRTIO_VERSION,
 };
 use super::vsock_transport::{
     NUM_QUEUES, OP_CREDIT_UPDATE, OP_REQUEST, OP_RESPONSE, OP_RST, OP_RW, Queue, RegisterWrite,
@@ -257,6 +258,11 @@ impl VsockShared {
     }
 
     fn handle_packet(&mut self, hdr: VsockHdr, payload: &[u8]) {
+        if !self.transport.record_tx_credit(&hdr) {
+            let mut ctx = VsockHandlerContext::new(&mut self.transport, &mut self.lifecycle);
+            ctx.queue_reply(&hdr, OP_RST, &[]);
+            return;
+        }
         let mut ctx = VsockHandlerContext::new(&mut self.transport, &mut self.lifecycle);
         if self.handlers.dispatch_packet(&mut ctx, hdr, payload) {
             return;
@@ -292,6 +298,7 @@ impl VsockShared {
     pub(super) fn cancel(&mut self) {
         self.handlers.cancel();
         self.transport.recv_cnt.clear();
+        self.transport.clear_tx_credit();
         self.transport.pending_rx.clear();
     }
 
@@ -759,6 +766,12 @@ impl VsockShared {
                 field: "receive_credit_sessions",
             });
         }
+        if self.transport.has_tx_credit() {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "transmit_credit_sessions",
+            });
+        }
         if !self.transport.pending_rx.is_empty() {
             return Err(DeviceStateError::InvalidValue {
                 kind,
@@ -1013,6 +1026,35 @@ mod tests {
     }
 
     #[test]
+    fn transmit_credit_state_is_rejected_before_capture() {
+        let source = virtio_dev();
+        {
+            let mut shared = source.lock();
+            shared.handle_packet(
+                VsockHdr {
+                    src_cid: GUEST_CID,
+                    dst_cid: HOST_CID,
+                    src_port: 1000,
+                    dst_port: mvm_agentd::vsock::EGRESS_PORT,
+                    op: OP_CREDIT_UPDATE,
+                    typ: TYPE_STREAM,
+                    buf_alloc: 64,
+                    ..Default::default()
+                },
+                &[],
+            );
+            shared.transport.pending_rx.clear();
+        }
+        assert!(matches!(
+            source.snapshot_state(),
+            Err(DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioVsock,
+                field: "transmit_credit_sessions"
+            })
+        ));
+    }
+
+    #[test]
     fn host_endpoint_binding_is_rejected_before_capture() {
         let dir = tempfile::tempdir().unwrap();
         let source = virtio_dev();
@@ -1086,6 +1128,7 @@ mod tests {
             len: 5,
             op: OP_RW,
             typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, b"hello");
@@ -1163,6 +1206,7 @@ mod tests {
             len: raw.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, &raw);
@@ -1271,6 +1315,7 @@ mod tests {
             len: raw.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, &raw);
@@ -1334,6 +1379,7 @@ mod tests {
             len: 5,
             op: OP_RW,
             typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(cap, b"hello");
@@ -1426,6 +1472,7 @@ mod tests {
             len: 5,
             op: OP_RW,
             typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
             ..Default::default()
         };
         d.handle_packet(rw, b"1.2.3");
@@ -1446,6 +1493,239 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(framed);
+    }
+
+    #[test]
+    fn host_honors_guest_transmit_credit_and_resumes_after_update() {
+        use std::io::{Read, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("credit.sock");
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 64];
+            let _ = connection.read(&mut request).unwrap();
+            connection.write_all(&[b'x'; 200]).unwrap();
+            connection.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+
+        let mut device = dev();
+        device.set_substitution_endpoint(&sock);
+        let target = b"files.pythonhosted.org:443\n";
+        device.handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: 1700,
+                dst_port: mvm_agentd::vsock::EGRESS_PORT,
+                len: target.len() as u32,
+                op: OP_RW,
+                typ: TYPE_STREAM,
+                buf_alloc: 64,
+                ..Default::default()
+            },
+            target,
+        );
+
+        let mut received = Vec::new();
+        for _ in 0..100 {
+            let _ = device.service_host_io();
+            for (header, payload) in device.transport.pending_rx.drain(..) {
+                if header.op == OP_RW && header.dst_port == 1700 {
+                    received.extend_from_slice(&payload);
+                }
+            }
+            if !received.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let first_window = received.len();
+
+        device.handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: 1700,
+                dst_port: mvm_agentd::vsock::EGRESS_PORT,
+                op: OP_CREDIT_UPDATE,
+                typ: TYPE_STREAM,
+                buf_alloc: 64,
+                fwd_cnt: 64,
+                ..Default::default()
+            },
+            &[],
+        );
+        for _ in 0..100 {
+            let _ = device.service_host_io();
+            for (header, payload) in device.transport.pending_rx.drain(..) {
+                if header.op == OP_RW && header.dst_port == 1700 {
+                    received.extend_from_slice(&payload);
+                }
+            }
+            if received.len() >= 128 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        server.join().unwrap();
+        assert_eq!(first_window, 64, "host exceeded the guest's first window");
+        assert_eq!(
+            received.len(),
+            128,
+            "host did not stop at or resume for the second window"
+        );
+    }
+
+    #[test]
+    fn large_egress_reply_obeys_credit_and_arrives_without_loss() {
+        use std::io::{Read, Write};
+
+        const PAYLOAD_LEN: usize = 32 * 1024 * 1024;
+        const GUEST_WINDOW: usize = 64 * 1024;
+        const SERVER_CHUNK: usize = 16 * 1024;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("large-credit.sock");
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut byte = [0u8; 1];
+            loop {
+                connection.read_exact(&mut byte).unwrap();
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            let mut offset = 0usize;
+            let mut chunk = [0u8; SERVER_CHUNK];
+            while offset < PAYLOAD_LEN {
+                let len = SERVER_CHUNK.min(PAYLOAD_LEN - offset);
+                for (index, byte) in chunk[..len].iter_mut().enumerate() {
+                    *byte = ((offset + index) % 251) as u8;
+                }
+                connection.write_all(&chunk[..len])?;
+                offset += len;
+            }
+            Ok::<(), std::io::Error>(())
+        });
+
+        let mut device = dev();
+        device.set_substitution_endpoint(&sock);
+        let target = b"files.pythonhosted.org:443\n";
+        device.handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: 1800,
+                dst_port: mvm_agentd::vsock::EGRESS_PORT,
+                len: target.len() as u32,
+                op: OP_RW,
+                typ: TYPE_STREAM,
+                buf_alloc: GUEST_WINDOW as u32,
+                ..Default::default()
+            },
+            target,
+        );
+
+        let mut received = Vec::with_capacity(PAYLOAD_LEN);
+        let mut largest_window = 0usize;
+        let mut shutdown_seen = false;
+        for _ in 0..40_000 {
+            let _ = device.service_host_io();
+            let mut window_bytes = 0usize;
+            for (header, payload) in device.transport.pending_rx.drain(..) {
+                if header.op == OP_RW && header.dst_port == 1800 {
+                    window_bytes += payload.len();
+                    received.extend_from_slice(&payload);
+                } else if header.op == OP_SHUTDOWN && header.dst_port == 1800 {
+                    shutdown_seen = true;
+                }
+            }
+            largest_window = largest_window.max(window_bytes);
+            if window_bytes > 0 {
+                device.handle_packet(
+                    VsockHdr {
+                        src_cid: GUEST_CID,
+                        dst_cid: HOST_CID,
+                        src_port: 1800,
+                        dst_port: mvm_agentd::vsock::EGRESS_PORT,
+                        op: OP_CREDIT_UPDATE,
+                        typ: TYPE_STREAM,
+                        buf_alloc: GUEST_WINDOW as u32,
+                        fwd_cnt: received.len() as u32,
+                        ..Default::default()
+                    },
+                    &[],
+                );
+            }
+            if !shutdown_seen {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            if shutdown_seen {
+                break;
+            }
+        }
+
+        drop(device);
+        let server_result = server.join().unwrap();
+        assert!(
+            shutdown_seen,
+            "large egress stream did not close gracefully"
+        );
+        assert!(server_result.is_ok(), "large egress writer was cut off");
+        assert!(
+            largest_window <= GUEST_WINDOW,
+            "host queued {largest_window} bytes into an {GUEST_WINDOW}-byte guest window"
+        );
+        assert_eq!(received.len(), PAYLOAD_LEN);
+        assert!(
+            received
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| *byte == (index % 251) as u8),
+            "large egress stream was corrupted"
+        );
+    }
+
+    #[test]
+    fn cancel_clears_transmit_credit_state() {
+        let mut device = dev();
+        device.handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: 1900,
+                dst_port: mvm_agentd::vsock::EGRESS_PORT,
+                op: OP_CREDIT_UPDATE,
+                typ: TYPE_STREAM,
+                buf_alloc: 64,
+                ..Default::default()
+            },
+            &[],
+        );
+        assert_eq!(
+            device
+                .transport
+                .tx_credit_available(mvm_agentd::vsock::EGRESS_PORT, 1900),
+            64
+        );
+
+        device.cancel();
+
+        assert_eq!(
+            device
+                .transport
+                .tx_credit_available(mvm_agentd::vsock::EGRESS_PORT, 1900),
+            0
+        );
     }
 
     #[test]

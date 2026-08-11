@@ -313,20 +313,34 @@ impl VsockTransportCore {
         true
     }
 
-    pub(crate) fn evict_idle_recv(&mut self) -> Vec<VsockConnectionKey> {
-        self.evict_idle_recv_at(Instant::now())
+    pub(crate) fn evict_idle_connections(&mut self) -> Vec<VsockConnectionKey> {
+        self.evict_idle_connections_at(Instant::now())
     }
 
-    fn evict_idle_recv_at(&mut self, now: Instant) -> Vec<VsockConnectionKey> {
-        let mut expired = Vec::new();
-        self.recv_cnt.retain(|key, credit| {
-            let keep =
-                now.saturating_duration_since(credit.last_activity) < CONNECTION_IDLE_TIMEOUT;
-            if !keep {
-                expired.push(*key);
-            }
-            keep
-        });
+    fn evict_idle_connections_at(&mut self, now: Instant) -> Vec<VsockConnectionKey> {
+        let mut latest_activity =
+            HashMap::with_capacity(self.recv_cnt.len() + self.tx_credit.len());
+        for (key, credit) in &self.recv_cnt {
+            latest_activity.insert(*key, credit.last_activity);
+        }
+        for (key, credit) in &self.tx_credit {
+            latest_activity
+                .entry(*key)
+                .and_modify(|activity| *activity = (*activity).max(credit.last_activity))
+                .or_insert(credit.last_activity);
+        }
+
+        let mut expired: Vec<_> = latest_activity
+            .into_iter()
+            .filter_map(|(key, activity)| {
+                (now.saturating_duration_since(activity) >= CONNECTION_IDLE_TIMEOUT).then_some(key)
+            })
+            .collect();
+        expired.sort_unstable_by_key(|key| (key.host_port, key.guest_port));
+        for key in &expired {
+            self.recv_cnt.remove(key);
+            self.tx_credit.remove(key);
+        }
         expired
     }
 
@@ -335,6 +349,34 @@ impl VsockTransportCore {
             host_port,
             guest_port,
         });
+    }
+
+    /// Record the receive window advertised by the guest on an incoming packet.
+    /// Every virtio-vsock stream header carries the peer's current `buf_alloc`
+    /// and cumulative `fwd_cnt`, so refreshing this state before dispatch keeps
+    /// host-to-guest writes inside the guest's actual buffer capacity.
+    pub(crate) fn record_tx_credit(&mut self, inbound: &VsockHdr) -> bool {
+        self.record_tx_credit_at(inbound, Instant::now())
+    }
+
+    fn record_tx_credit_at(&mut self, inbound: &VsockHdr, now: Instant) -> bool {
+        let key = VsockConnectionKey {
+            host_port: inbound.dst_port,
+            guest_port: inbound.src_port,
+        };
+        if !self.tx_credit.contains_key(&key) && self.tx_credit.len() >= MAX_CONNECTIONS {
+            return false;
+        }
+        let entry = self.tx_credit.entry(key).or_insert(TxCredit {
+            peer_buf_alloc: inbound.buf_alloc,
+            peer_fwd_cnt: inbound.fwd_cnt,
+            tx_cnt: 0,
+            last_activity: now,
+        });
+        entry.peer_buf_alloc = inbound.buf_alloc;
+        entry.peer_fwd_cnt = inbound.fwd_cnt;
+        entry.last_activity = now;
+        true
     }
 
     pub(crate) fn tx_credit_available(&self, host_port: u32, guest_port: u32) -> u32 {
@@ -346,10 +388,9 @@ impl VsockTransportCore {
             .map(|credit| {
                 credit
                     .peer_buf_alloc
-                    .saturating_add(credit.peer_fwd_cnt)
-                    .saturating_sub(credit.tx_cnt)
+                    .saturating_sub(credit.tx_cnt.wrapping_sub(credit.peer_fwd_cnt))
             })
-            .unwrap_or(HOST_BUF_ALLOC)
+            .unwrap_or(0)
     }
 
     pub(crate) fn consume_tx_credit(&mut self, host_port: u32, guest_port: u32, n: u32) {
@@ -357,7 +398,7 @@ impl VsockTransportCore {
             host_port,
             guest_port,
         }) {
-            credit.tx_cnt = credit.tx_cnt.saturating_add(n);
+            credit.tx_cnt = credit.tx_cnt.wrapping_add(n);
             credit.last_activity = Instant::now();
         }
     }
@@ -367,6 +408,14 @@ impl VsockTransportCore {
             host_port,
             guest_port,
         });
+    }
+
+    pub(crate) fn clear_tx_credit(&mut self) {
+        self.tx_credit.clear();
+    }
+
+    pub(crate) fn has_tx_credit(&self) -> bool {
+        !self.tx_credit.is_empty()
     }
 
     pub(crate) fn queue_host_packet(
@@ -913,13 +962,154 @@ mod tests {
         );
 
         assert_eq!(
-            core.evict_idle_recv_at(now),
+            core.evict_idle_connections_at(now),
             vec![VsockConnectionKey {
                 host_port: 9000,
                 guest_port: 7,
             }]
         );
         assert!(core.recv_cnt.is_empty());
+    }
+
+    #[test]
+    fn unknown_transmit_credit_fails_closed() {
+        let core = transport();
+        assert_eq!(core.tx_credit_available(9000, 7), 0);
+    }
+
+    #[test]
+    fn transmit_credit_stops_at_the_window_and_resumes_on_forward_progress() {
+        let mut core = transport();
+        let mut header = VsockHdr {
+            dst_port: 9000,
+            src_port: 7,
+            buf_alloc: 64,
+            ..Default::default()
+        };
+        assert!(core.record_tx_credit(&header));
+        assert_eq!(core.tx_credit_available(9000, 7), 64);
+
+        core.consume_tx_credit(9000, 7, 64);
+        assert_eq!(core.tx_credit_available(9000, 7), 0);
+
+        header.fwd_cnt = 64;
+        assert!(core.record_tx_credit(&header));
+        assert_eq!(core.tx_credit_available(9000, 7), 64);
+    }
+
+    #[test]
+    fn transmit_credit_counters_wrap_without_reopening_the_window_early() {
+        let mut core = transport();
+        let key = VsockConnectionKey {
+            host_port: 9000,
+            guest_port: 7,
+        };
+        core.tx_credit.insert(
+            key,
+            TxCredit {
+                peer_buf_alloc: 64,
+                peer_fwd_cnt: u32::MAX - 31,
+                tx_cnt: u32::MAX - 31,
+                last_activity: Instant::now(),
+            },
+        );
+
+        core.consume_tx_credit(9000, 7, 64);
+        assert_eq!(core.tx_credit_available(9000, 7), 0);
+
+        assert!(core.record_tx_credit(&VsockHdr {
+            dst_port: 9000,
+            src_port: 7,
+            buf_alloc: 64,
+            fwd_cnt: 32,
+            ..Default::default()
+        }));
+        assert_eq!(core.tx_credit_available(9000, 7), 64);
+    }
+
+    #[test]
+    fn transmit_credit_table_refuses_new_connections_at_the_cap() {
+        let mut core = transport();
+        for guest_port in 0..MAX_CONNECTIONS as u32 {
+            assert!(core.record_tx_credit(&VsockHdr {
+                dst_port: 9000,
+                src_port: guest_port,
+                buf_alloc: 64,
+                ..Default::default()
+            }));
+        }
+
+        let refused_port = MAX_CONNECTIONS as u32;
+        assert!(!core.record_tx_credit(&VsockHdr {
+            dst_port: 9000,
+            src_port: refused_port,
+            buf_alloc: u32::MAX,
+            ..Default::default()
+        }));
+        assert_eq!(core.tx_credit_available(9000, refused_port), 0);
+        assert_eq!(core.tx_credit.len(), MAX_CONNECTIONS);
+    }
+
+    #[test]
+    fn idle_transmit_credit_is_evicted_and_releases_identity() {
+        let mut core = transport();
+        let now = Instant::now();
+        let header = VsockHdr {
+            dst_port: 9000,
+            src_port: 7,
+            buf_alloc: 64,
+            ..Default::default()
+        };
+        assert!(core.record_tx_credit_at(
+            &header,
+            now - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1)
+        ));
+
+        assert_eq!(
+            core.evict_idle_connections_at(now),
+            vec![VsockConnectionKey {
+                host_port: 9000,
+                guest_port: 7,
+            }]
+        );
+        assert!(core.tx_credit.is_empty());
+    }
+
+    #[test]
+    fn transmit_progress_keeps_download_connection_alive_past_receive_idle_timeout() {
+        let mut core = transport();
+        let opened_at = Instant::now();
+        let mut header = VsockHdr {
+            dst_port: 9000,
+            src_port: 7,
+            buf_alloc: 64,
+            ..Default::default()
+        };
+        assert!(core.try_add_recv_at(&header, 1, opened_at));
+        assert!(core.record_tx_credit_at(&header, opened_at));
+
+        let download_active_at = opened_at + CONNECTION_IDLE_TIMEOUT + Duration::from_secs(1);
+        header.fwd_cnt = 64;
+        assert!(core.record_tx_credit_at(&header, download_active_at));
+
+        assert!(
+            core.evict_idle_connections_at(download_active_at)
+                .is_empty(),
+            "fresh transmit progress must keep the whole connection alive"
+        );
+        assert_eq!(core.recv_cnt.len(), 1);
+        assert_eq!(core.tx_credit.len(), 1);
+
+        let wholly_idle_at = download_active_at + CONNECTION_IDLE_TIMEOUT + Duration::from_secs(1);
+        assert_eq!(
+            core.evict_idle_connections_at(wholly_idle_at),
+            vec![VsockConnectionKey {
+                host_port: 9000,
+                guest_port: 7,
+            }]
+        );
+        assert!(core.recv_cnt.is_empty());
+        assert!(core.tx_credit.is_empty());
     }
 
     // ---- TX virtio-queue migration: differential equivalence ----------------

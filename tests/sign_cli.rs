@@ -1,4 +1,4 @@
-//! CLI surface tests for `mvmctl sign`.
+//! CLI surface tests for `mvmctl env sign`.
 
 use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
@@ -23,7 +23,7 @@ fn sign_help_lists_json_flag() {
     );
     assert!(
         stdout.contains("--json"),
-        "`mvmctl sign --help` missing --json; got:\n{stdout}"
+        "`mvmctl env sign --help` missing --json; got:\n{stdout}"
     );
 }
 

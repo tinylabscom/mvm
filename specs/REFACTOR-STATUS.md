@@ -6,6 +6,10 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **CLI help width invariant.** Every visible and hidden command is capped
+      at 80 columns for `--help`, `-h`, and `mvmctl help <path>`; generated-tree
+      BDD coverage executes the real binary and automatically includes future
+      subcommands.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
@@ -41,6 +45,20 @@ for detailed scope and acceptance criteria.
   - [x] Local dm-verity capability uses resolved config, not raw-image strings
   - [~] Workspace tests expose unrelated non-deterministic `mvm-hostd` failures;
         Linux all-target Clippy remains for CI or a supported builder entry point
+
+- [~] Plan 315 — HVF virtio-vsock transmit-credit regression
+      (`specs/plans/315-hvf-vsock-credit-regression.md`)
+  - [x] Restore bounded guest credit recording, fail-closed unknown-credit
+        behavior, protocol counter wrapping, and complete state teardown
+  - [x] Prove first-window stop/resume and byte-for-byte 32 MiB delivery;
+        prove no lifetime quota over a simulated 4 GiB transfer; prove active
+        download credit prevents request-side idle eviction after 60 seconds;
+        add the live documented pandas-install scenario
+  - [x] Pass all 446 `mvm-vmm` tests, the serial aggregate workspace suite,
+        workspace check, macOS workspace all-target Clippy, and the focused
+        x86_64 Linux cross-build
+  - [ ] Run Linux-native workspace Clippy/tests in the project builder
+        environment
 
 - [x] Plan 2167 — durable agent session and event contract
       (`specs/plans/2167-agent-session-contract.md`)
@@ -1068,3 +1086,39 @@ for detailed scope and acceptance criteria.
         elision recorded as a digest and never as content
   - [ ] Phase 6 — fleet aggregation from the same chain entries, derivable on
         customer hardware with no call home
+
+- [~] Plan 308 — workload grants: one declaration, per-backend enforcement
+  (`specs/plans/308-workload-grants.md`)
+  - [x] WS1 — `Grants` in `mvm-contract`; `deny_unknown_fields` and an explicit
+        `Unbounded` (no magic zero). The precedence resolver is NOT built — it
+        belongs with the surfaces (WS6), since nothing yet has sources to resolve
+  - [x] WS1b — `GrantCeiling`: separate trust root, unreachable from the
+        precedence chain, so a plan signer cannot grant itself the machine
+  - [x] WS2 — single Grants→`NetworkPolicy` projection, derived and fail-closed
+  - [x] WS3 — `resource_controls` on `VmCapabilities` + `apply_grants` on
+        `VmBackend`, tier read back rather than assumed
+  - [x] WS3b — the seams made load-bearing: the signed plan carries `grants`,
+        the ceiling is resolved from host config and checked before the plan
+        is signed, `Supervisor::launch` applies grants and records the tier
+        that came back, and a sealed run refuses a grant no mechanism on that
+        tier backs (dev warns). No backend implements a real control yet —
+        every tier still answers `declared`, which is WS4/WS5
+  - [x] WS4.0 — spike COMPLETE. `cpu` *is* delegated and `cpu.max` *is*
+        writable, but cgroup v2 **migration** needs write access to the common
+        ancestor and a login session's `session-N.scope` is `Delegate=no`. So
+        WS4 became a systemd transient scope: measured 1.4937 cores against a
+        1.5 target, `nr_throttled` confirming live throttling
+  - [~] WS4 — CPU quota via `systemd-run --user --scope` (born bounded for
+        free: systemd registers the scope before exec'ing the payload). Per-boot
+        unique unit name, recorded in the VM state dir so the read-back can
+        still resolve it. Prod gate consults host mechanism availability, not
+        just backend kind. STILL OPEN: `exec_secs` enforcement and the
+        admission budget; and the live measurement predates the read-back
+        landing, so a bounded boot's *reported tier* is unwitnessed on hardware
+  - [ ] WS5 — wasm fuel **and** epoch (fuel alone bounds nothing in a host
+        call) + `StoreLimits`
+  - [ ] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
+        the restore-laundering path
+  - [ ] WS6 — four surfaces: manifest, JSON, CLI, library + SDK parity fixture
+  - [ ] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs
+        gate, BDD suite

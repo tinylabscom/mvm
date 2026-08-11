@@ -164,18 +164,11 @@ fn read_observability_target(vm_name: &str) -> Option<ObservabilityTarget> {
     Some(obs)
 }
 
+/// Telemetry is observability-only, so an unreadable label degrades to the
+/// inert tier rather than failing the attach.
 fn parse_backend_kind(s: &str) -> mvm_core::vm_backend::BackendKind {
-    match s {
-        "firecracker" => mvm_core::vm_backend::BackendKind::Firecracker,
-        "libkrun" => mvm_core::vm_backend::BackendKind::Libkrun,
-        "hvf" => mvm_core::vm_backend::BackendKind::Hvf,
-        "qemu" => mvm_core::vm_backend::BackendKind::Qemu,
-        "mock" => mvm_core::vm_backend::BackendKind::Mock,
-        "wasm" => mvm_core::vm_backend::BackendKind::Wasm,
-        "docker" => mvm_core::vm_backend::BackendKind::Docker,
-        "applecontainer" => mvm_core::vm_backend::BackendKind::AppleContainer,
-        _ => mvm_core::vm_backend::BackendKind::Mock,
-    }
+    mvm_core::vm_backend::BackendKind::from_label(s)
+        .unwrap_or(mvm_core::vm_backend::BackendKind::Mock)
 }
 
 #[cfg(test)]

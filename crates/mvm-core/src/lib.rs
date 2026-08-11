@@ -22,6 +22,12 @@ pub mod checkpoint;
 pub mod client;
 pub mod config;
 pub mod conformance_badge;
+/// Per-VM CPU bounds through a transient systemd scope on the user's own
+/// manager — the one mechanism that both places an unprivileged process under a
+/// cgroup v2 `cpu.max` quota and reports back what is actually in effect. Lives
+/// here, beside the [`vm_backend::VmBackend`] trait it serves, so the backend
+/// crates that spawn per-VM processes can reach it.
+pub mod cpu_scope;
 pub mod dev_network;
 pub mod did_key;
 /// The single `sha256:<64 lowercase hex>` shape check every prefixed

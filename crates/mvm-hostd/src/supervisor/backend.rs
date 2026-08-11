@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use mvm_core::plan::{ExecutionPlan, PlanId};
+use mvm_core::vm_backend::EnforcedGrants;
 use mvm_runtime::base::config::VmSlot;
 use thiserror::Error;
 
@@ -68,6 +69,21 @@ pub trait BackendLauncher: Send + Sync {
 
     /// Stop the workload identified by `plan_id`.
     async fn stop(&self, plan_id: &PlanId) -> Result<(), BackendError>;
+
+    /// Apply the plan's grants to the VM this launcher just started and report
+    /// which mechanism actually bounded each dimension.
+    ///
+    /// Called after [`launch`](BackendLauncher::launch), because a cgroup or a
+    /// timer needs a process to attach to. A real launcher forwards to
+    /// [`mvm_core::vm_backend::VmBackend::apply_grants`] on the backend it
+    /// wraps; the default here answers `Declared` across the board, which is
+    /// the honest answer for a launcher that bounds nothing.
+    ///
+    /// The returned tiers — never the requested grants — are what the
+    /// supervisor records. A grant is a request; a tier is what happened.
+    async fn apply_grants(&self, _plan: &ExecutionPlan) -> Result<EnforcedGrants, BackendError> {
+        Ok(EnforcedGrants::all_declared())
+    }
 }
 
 /// Fail-closed default. A supervisor wired with `NoopBackendLauncher`

@@ -99,6 +99,7 @@ fn map_elf_kernel(world: &mut CliWorld) {
         initramfs: None,
         cmdline: String::new(),
         vcpus: 1,
+        cpu_grant: None,
         memory_mib: 128,
         mem_initial_mib: None,
         blocks: vec![],

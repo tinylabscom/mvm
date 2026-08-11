@@ -102,6 +102,14 @@ Linux-specific counters unavailable. Firecracker, libkrun, and HVF use the same
 schema and lane gate, which rejects missing warm evidence. Results remain
 comparable only within a matching host, backend, artifact, and sizing context.
 
+The report consumer adds the publication gate shared by all native backends:
+20 measured samples after exactly two warm-ups, per-sample contamination and
+capability validation, and the prepared-cold 200/250/300 ms p50/p95/p99 budget.
+Warm claims retain the independent 30/50 ms p50/p99 target. The report now
+summarizes ready resident memory, first-command resident-memory growth/reclaim, and
+fault deltas without turning an unavailable platform counter into a zero.
+These are enforcement rules; they do not turn a synthetic or degraded local
+run into native matrix evidence.
 ## Filesystem evaluation
 
 The current block-backed rootfs, overlay, dm-verity, and host-directory image
@@ -153,8 +161,9 @@ between warmup or measured samples.
   demand-fault witness plus private restore-mapping duration. The live libkrun
   density report also records guest-agent RSS after readiness. Backend-neutral
   warm samples now capture whole-VMM ready/first-command working set and Linux
-  fault deltas; the real-host Firecracker/HVF matrix, canonical budget table,
-  and enforcement gates remain.
+  fault deltas. The report-level 20-sample/two-warm-up gate and canonical
+  budget enforcement are landed; the real-host Firecracker/HVF matrix and
+  measured result remain.
 - [~] [#2281](https://github.com/tinylabscom/mvm/issues/2281) — baseline the
   current pure-Rust ext4 path and evaluate the guest-local immutable
   filesystem path against it.

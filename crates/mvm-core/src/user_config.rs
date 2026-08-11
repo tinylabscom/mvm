@@ -36,9 +36,39 @@ pub struct MvmConfig {
     /// Default: 30 seconds. Override via the `MVM_SERVICES_HEALTH_TIMEOUT_SECS`
     /// environment variable when ad-hoc tuning beats a config edit.
     pub services_health_timeout_secs: u64,
+    /// Ceiling on the CPU share any workload on this host may be granted,
+    /// in thousandths of one host core. `None` = unbounded in this dimension.
+    ///
+    /// This and its two siblings below are the host operator's bound on what a
+    /// grant may *ask for*. They live in host config rather than in the plan
+    /// precisely because a plan signer who is also the grant author would
+    /// otherwise be able to grant itself the machine.
+    pub max_cpu_millicores: Option<u32>,
+    /// Ceiling on memory any workload on this host may be granted, in MiB.
+    /// `None` = unbounded in this dimension.
+    pub max_memory_mib: Option<u64>,
+    /// Ceiling on wall-clock runtime any workload on this host may be granted,
+    /// in seconds. `None` = unbounded in this dimension; note that a bounded
+    /// value here refuses an explicitly unbounded grant rather than clamping
+    /// it, so a caller learns the host forbids what it asked for.
+    pub max_wall_clock_secs: Option<u32>,
 }
 
 impl MvmConfig {
+    /// The host's bound on what a workload may be granted.
+    ///
+    /// Read at admission, never from the plan being admitted: the ceiling and
+    /// the grant have different trust roots, and collapsing them would make the
+    /// bound writable by the party it exists to bound.
+    #[must_use]
+    pub fn grant_ceiling(&self) -> mvm_contract::grants::ceiling::GrantCeiling {
+        mvm_contract::grants::ceiling::GrantCeiling {
+            max_cpu_millicores: self.max_cpu_millicores,
+            max_memory_mib: self.max_memory_mib,
+            max_wall_clock_secs: self.max_wall_clock_secs,
+        }
+    }
+
     /// Resolve the effective services-health timeout, honoring an
     /// `MVM_SERVICES_HEALTH_TIMEOUT_SECS` env-var override over the
     /// config field. Env-var takes precedence so a single shell
@@ -65,6 +95,12 @@ impl Default for MvmConfig {
             catalog_url: None,
             mvmd_url: None,
             services_health_timeout_secs: 30,
+            // Unset by default: a single-user host is not multi-tenant, and a
+            // ceiling invented here would refuse legitimate local runs while
+            // protecting nobody. An operator who shares the host sets them.
+            max_cpu_millicores: None,
+            max_memory_mib: None,
+            max_wall_clock_secs: None,
         }
     }
 }
@@ -122,6 +158,22 @@ pub fn save(cfg: &MvmConfig, override_dir: Option<&Path>) -> Result<()> {
     let text = toml::to_string_pretty(cfg).context("Failed to serialize config")?;
     std::fs::write(&path, text)
         .with_context(|| format!("Failed to write config to {}", path.display()))
+}
+
+/// Parse a numeric setting that has an explicit "no bound" spelling.
+///
+/// `none` and the empty string clear the key. A ceiling is a bound, so
+/// clearing it has to be something the operator writes on purpose — an
+/// unparseable value is an error rather than a silent `None`, or a typo would
+/// remove the bound it was meant to change.
+fn optional_number<T: std::str::FromStr>(key: &str, value: &str) -> Result<Option<T>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "none" {
+        return Ok(None);
+    }
+    trimmed.parse::<T>().map(Some).map_err(|_| {
+        anyhow::anyhow!("{key} must be a non-negative integer or \"none\", got {value:?}")
+    })
 }
 
 /// Update a single named field in `cfg` from a string value.
@@ -185,10 +237,20 @@ pub fn set_key(cfg: &mut MvmConfig, key: &str, value: &str) -> Result<()> {
                 Some(value.to_string())
             };
         }
+        "max_cpu_millicores" => {
+            cfg.max_cpu_millicores = optional_number(key, value)?;
+        }
+        "max_memory_mib" => {
+            cfg.max_memory_mib = optional_number(key, value)?;
+        }
+        "max_wall_clock_secs" => {
+            cfg.max_wall_clock_secs = optional_number(key, value)?;
+        }
         other => {
             anyhow::bail!(
                 "Unknown config key {:?}. Valid keys: dev_vm_cpus, dev_vm_mem_gib, \
-                 default_cpus, default_memory_mib, log_format, metrics_port, catalog_url, mvmd_url",
+                 default_cpus, default_memory_mib, log_format, metrics_port, catalog_url, \
+                 mvmd_url, max_cpu_millicores, max_memory_mib, max_wall_clock_secs",
                 other
             );
         }
@@ -340,6 +402,52 @@ mod tests {
     fn test_catalog_url_default_none() {
         let cfg = MvmConfig::default();
         assert!(cfg.catalog_url.is_none());
+    }
+
+    #[test]
+    fn an_unset_ceiling_bounds_nothing() {
+        // A host with no ceiling configured must admit what it always did:
+        // inventing a default here would refuse legitimate local runs.
+        let ceiling = MvmConfig::default().grant_ceiling();
+        assert_eq!(
+            ceiling,
+            mvm_contract::grants::ceiling::GrantCeiling::default()
+        );
+    }
+
+    #[test]
+    fn the_ceiling_is_read_from_the_configured_keys() {
+        let mut cfg = MvmConfig::default();
+        set_key(&mut cfg, "max_cpu_millicores", "4000").unwrap();
+        set_key(&mut cfg, "max_memory_mib", "8192").unwrap();
+        set_key(&mut cfg, "max_wall_clock_secs", "3600").unwrap();
+
+        let ceiling = cfg.grant_ceiling();
+        assert_eq!(ceiling.max_cpu_millicores, Some(4000));
+        assert_eq!(ceiling.max_memory_mib, Some(8192));
+        assert_eq!(ceiling.max_wall_clock_secs, Some(3600));
+
+        // The config file is where an operator writes it, so it has to survive
+        // the round trip that persists it.
+        let parsed: MvmConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed.grant_ceiling(), ceiling);
+    }
+
+    #[test]
+    fn a_typo_does_not_silently_remove_a_ceiling() {
+        // Clearing a bound is an explicit `none`; anything else is an error,
+        // because a mistyped ceiling that parses as "unbounded" is a security
+        // control disabled by a spelling mistake.
+        let mut cfg = MvmConfig {
+            max_cpu_millicores: Some(4000),
+            ..MvmConfig::default()
+        };
+        let err = set_key(&mut cfg, "max_cpu_millicores", "4o00").unwrap_err();
+        assert!(err.to_string().contains("max_cpu_millicores"));
+        assert_eq!(cfg.max_cpu_millicores, Some(4000), "the bound must survive");
+
+        set_key(&mut cfg, "max_cpu_millicores", "none").unwrap();
+        assert!(cfg.max_cpu_millicores.is_none());
     }
 
     #[test]

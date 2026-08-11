@@ -25,6 +25,24 @@
       all-target Clippy rerun remains for CI or a supported builder-VM entry
       point.
 
+- [~] HVF large-response integrity — **plan 315**. Restored bounded
+      virtio-vsock host-to-guest credit accounting that had been removed while
+      its relay-side readers remained. Every guest header refreshes the actual
+      `buf_alloc`/`fwd_cnt` window before dispatch; unknown credit fails closed,
+      32-bit counters wrap per the protocol, and connection/device teardown,
+      connection-wide idle eviction, and snapshot guards cover the new state.
+      Active traffic in either direction keeps the whole stream alive, so a
+      download is not reset merely because its request side has been quiet for
+      60 seconds. The focused
+      suite proves stop/resume behavior and byte-for-byte delivery of a 32 MiB
+      reply; a simulated continuous 4 GiB transfer proves the refillable rate
+      budget is not a lifetime quota. A live BDD scenario pins the documented
+      `python:3.12` pandas
+      install through PyPI. All 446 `mvm-vmm` tests, workspace check, macOS
+      workspace all-target Clippy, the serial aggregate workspace suite, and
+      the focused x86_64 Linux cross-build are green. Linux-native builder-VM
+      tests and all-target Clippy remain the final platform gates.
+
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
       rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three
@@ -52,6 +70,14 @@
       declared CLI option have executable cucumber help witnesses; all 26
       fenced examples are covered by the test-owned manifest, and README
       status text matches the shipped `deploy` and `watch` commands.
+
+- [x] Automatic macOS VM entitlement signing — installers and self-update now
+      sign `mvmctl` and shipped supervisors before reporting success, with
+      role-specific entitlement profiles. `doctor` validates the active launch
+      targets and points normal users to reinstall/update; `mvmctl env sign`
+      remains an advanced repair path for source and legacy installations.
+      Focused Rust and CLI tests plus installer shell validation cover the
+      changed behavior; see `specs/plans/312-automatic-macos-entitlement-signing.md`.
 
 - [x] Audit-chain verification failure no longer reports as "never audited" —
       **issue #2258, plan 302 WS6**. `SignedChainAnchor` remembers the chains
@@ -1512,6 +1538,10 @@ Then unify + retire the old paths:
 
 **WS7 — simple CLI**
 
+- [x] Enforce an 80-column maximum across every visible and hidden command's
+      `--help`, `-h`, and `mvmctl help <path>` output. The BDD suite discovers
+      paths from the generated Clap tree and executes the real binary, so new
+      subcommands are covered automatically.
 - [ ] Redesign to a small, discoverable verb set; `env` shown in `--help`.
 - [ ] Merge `setup`/`bootstrap` into one first-run `bootstrap`. Add the lifecycle verbs: **`upgrade`** (self-update `mvmctl`); **`uninstall`** (remove everything — the binary, `~/.mvm`, and installed host/guest artifacts); **`env cleanup`** (reclaim `~/.mvm` — caches + transient VM/build state, keeping config + keys); **`env reset`** (wipe `~/.mvm` back to a clean slate). These replace the fragmented `cache prune` / `pack prune` / `storage gc`. `env` becomes a visible top-level subcommand (today `hide = true`).
 - [ ] Replace the 31-arm dispatch `match` with a `Command` trait (`fn run(&self, ctx: &Cli) -> Result<()>`); one module per command; every command calls `mvm-client`.
@@ -1544,7 +1574,11 @@ Then unify + retire the old paths:
   minor/major fault deltas, while macOS reports physical footprint with fault
   counters explicitly unavailable. Warm-lane validation refuses missing
   evidence. The real-host Firecracker/HVF matrix, canonical budget table, and
-  resulting gates remain open.
+  resulting native-host gates remain open. The report-level gate now requires
+  20 measured samples after two warm-ups, revalidates every raw sample, applies
+  the 200/250/300 ms prepared-cold budget and the independent 30/50 ms warm
+  target, and aggregates whole-VMM resident-memory/fault evidence without
+  zero-filling unavailable counters.
 - [x] **Filesystem-path baseline — issue #2281.**
   `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for
   source identity, node composition, emitted ext4 size/digest, materializer

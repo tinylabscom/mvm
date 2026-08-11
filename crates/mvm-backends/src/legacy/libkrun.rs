@@ -32,9 +32,9 @@ use mvm_core::config::{vm_console_log, vm_libkrun_pid, vm_state_dir, vms_dir};
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState,
-    StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError,
-    WarmStartOutcome,
+    ResourceControls, SnapshotCapability, StandbyClaim, StandbyError, StandbyHandle, StandbySpec,
+    StandbyState, StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
+    WarmStartError, WarmStartOutcome,
 };
 use mvm_vmm::host::snapshot_upper::SnapshotUpper;
 use mvm_vmm::host::ui;
@@ -831,6 +831,14 @@ impl VmBackend for LibkrunBackend {
             // file, not an APFS clone-eligible volume mount; no
             // clonefile shortcut here.
             fs_quick_checkpoint: false,
+            // Named explicitly, not left at the all-`None` struct-update
+            // default: on Linux a cgroup can bound whatever process this
+            // backend runs — libkrun does go through the dedicated
+            // mvm-libkrun-supervisor binary, but the cgroup claim doesn't
+            // depend on that; it holds for any Linux process. libkrun's
+            // macOS 13-25 default host has no cgroup at all, so
+            // `for_backend` answers host-conditionally rather than by kind.
+            resource_controls: ResourceControls::for_backend(BackendKind::Libkrun),
             ..VmCapabilities::default()
         }
     }

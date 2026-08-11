@@ -44,21 +44,26 @@ substitution, never both.** That is the real headline, and it reframes Phase 1
 from an enabler into a defect fix that also serves the standing requirement that
 workload output be observable while it runs.
 
-### Consequence for sequencing — act on this before Phase 1
+### Consequence for sequencing — Phase 1 is standalone
 
 `mvm_http::Response` is already streaming-capable and bounded: it holds a live
 `stream` with incremental `chunk()` plus a `max_bytes` ceiling — strictly better
 than the reqwest path on both counts.
 
-**PR #2314 (Plan 309 Phase 2, retiring reqwest) currently reproduces the
-buffering verbatim on top of it** — its replacement forwarder still ends in
-`resp.bytes().await` building `body: Vec<u8>`, discarding both `chunk()` and
-`max_bytes`. That PR is the natural and cheapest place to fix this, and once it
-merges the same change costs a second rewrite of the same function.
+An earlier revision of this section said Phase 1 should be folded into #2314
+(Plan 309 Phase 2, retiring reqwest) while that PR was open, because it rewrote
+this exact function. **#2314 has since merged, and it kept the buffering**: on
+`main` the forwarder still ends in `resp.bytes()` and `ForwardResponse` still
+carries `body: Vec<u8>`, with `max_bytes` unset. Retiring reqwest was kept
+mechanical, which was a reasonable call on an already-large diff.
 
-The dependency is therefore stronger than "sequence 309 Phase 2 first": Phase 1
-should be **folded into #2314** if it is still open, by changing
-`ForwardResponse` to carry a streaming body rather than an owned `Vec<u8>`.
+So the cheap window is closed and **Phase 1 is a standalone change**. Nothing
+about it is blocked any more, and the type-level blocker is unchanged: while
+`ForwardResponse.body` is an owned `Vec<u8>`, no caller can stream.
+
+The unbounded-allocation half is tracked separately as its own defect (see the
+issue referenced from Phase 1), so it can land ahead of the streaming work if
+that is the faster path to a bounded host.
 
 ## Why
 
@@ -160,8 +165,9 @@ Confirmed by Phase 0 as a **defect fix**, not a feature: it restores streaming,
 bounds an unbounded host allocation, and removes the 30s cliff on long responses.
 Value independent of metering.
 
-**Fold into #2314 if that PR is still open** — it rewrites this exact function and
-currently reproduces the buffering on top of a streaming-capable client.
+**Standalone and unblocked.** #2314 has merged and kept the buffering, so there
+is no longer a cheaper carrier for this change. The bounded-allocation item below
+is also tracked as its own defect and may land first.
 
 - [ ] Change `ForwardResponse` to carry a streaming body rather than an owned
       `Vec<u8>`. This is the type-level blocker; nothing else can stream until it

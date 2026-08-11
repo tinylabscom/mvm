@@ -1,8 +1,9 @@
 use crate::catalog;
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
-    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
+    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, ResourceControls,
+    SnapshotCapability, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
+    WarmStartOutcome,
 };
 use mvm_vmm::host::shell::run_in_vm_stdout;
 
@@ -130,6 +131,12 @@ impl VmBackend for FirecrackerBackend {
             host_vsock_proxy: true,
             balloon: true,
             fs_quick_checkpoint: false,
+            // Named explicitly, not left at the all-`None` struct-update
+            // default: on Linux a cgroup can bound any process, and
+            // Firecracker runs as a direct child of this backend — no
+            // mvm-*-supervisor binary in front of it — so the cgroup goes
+            // on that child process directly.
+            resource_controls: ResourceControls::for_backend(BackendKind::Firecracker),
             ..VmCapabilities::default()
         }
     }

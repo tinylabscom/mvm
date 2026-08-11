@@ -562,6 +562,62 @@ clean-dev-state:
 worktrees *ARGS:
     ./scripts/worktree-status.sh {{ ARGS }}
 
+# Remove worktrees the classifier calls finished — preview by default, APPLY=1 to do it
+worktrees-prune:
+    #!/usr/bin/env bash
+    # Separate from `just worktrees`, which is read-only and says so in its own
+    # header. Classifying and deleting are different risks, so they stay
+    # different commands. This one only ever acts on paths that classifier
+    # already called SAFE: the PR merged, and this tip is exactly the merged head.
+    #
+    # Previews by default. `clean-dev-state` is the other way round (DRY_RUN=1)
+    # because its blast radius is one regenerable directory; here it is whole
+    # checkouts, so the cautious mode is the one you get without asking.
+    #
+    # Never passes --force, so git independently refuses any worktree with
+    # uncommitted or untracked files — a second veto behind the classifier.
+    # Branches are kept: removing a worktree does not touch its commits, so
+    # anything that never landed stays reachable by branch name.
+    set -euo pipefail
+    paths=$(./scripts/worktree-status.sh --safe-only)
+    if [ -z "$paths" ]; then
+        echo "worktrees-prune: nothing finished to remove"
+        exit 0
+    fi
+    # Snapshot the process list ONCE. Grepping ps per path inside the loop looks
+    # equivalent and is not: the grep's own argv holds the path it searches for,
+    # so every worktree matches itself and the whole set reads as busy.
+    ps_snapshot=$(ps -eo command 2>/dev/null || true)
+    removed=0
+    while IFS= read -r p; do
+        [ -d "$p" ] || continue
+        # Re-checked at the moment of action: the classification is seconds old,
+        # and a session may have started work in one since.
+        case "$ps_snapshot" in
+            *"$p"*) echo "  skip (in use)     $(basename "$p")"; continue ;;
+        esac
+        if [ -n "$(git -C "$p" status --porcelain 2>/dev/null)" ]; then
+            echo "  skip (now dirty)  $(basename "$p")"; continue
+        fi
+        size=$(du -sh "$p" 2>/dev/null | cut -f1 | tr -d ' ')
+        if [ -z "${APPLY:-}" ]; then
+            echo "  would remove      $(basename "$p")  (${size})"
+            continue
+        fi
+        if git worktree remove "$p" 2>/tmp/wtprune-err.$$; then
+            echo "  removed           $(basename "$p")  (${size})"
+            removed=$((removed + 1))
+        else
+            echo "  refused           $(basename "$p"): $(head -1 /tmp/wtprune-err.$$)"
+        fi
+        rm -f /tmp/wtprune-err.$$
+    done <<< "$paths"
+    if [ -z "${APPLY:-}" ]; then
+        echo "worktrees-prune: preview only — re-run with APPLY=1 to remove"
+    else
+        echo "worktrees-prune: removed ${removed}; branches kept"
+    fi
+
 # Reap leaked host-side helper subprocesses (broker/host-agent/signer/etc.)
 # older than N minutes (default 30). Backstop for the in-binary parent-death
 # watchdog; clears orphans from past test runs across worktrees. DRY_RUN=1 to

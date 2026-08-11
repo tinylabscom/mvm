@@ -218,6 +218,7 @@ pub mod test_support {
     /// Callers override `valid_from`/`valid_until`/`nonce` for their scenario.
     pub fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            grants: None,
             environment: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),

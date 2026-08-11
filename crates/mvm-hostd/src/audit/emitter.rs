@@ -439,6 +439,36 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `plan.grants_enforced` — records what actually bounded this
+    /// workload, as read back off the live controls after the backend started
+    /// it.
+    ///
+    /// Deliberately a separate entry from `plan.admitted`, which records the
+    /// bounds that were *requested*. A reader who only ever sees the request
+    /// cannot tell a run that was bounded from one that declared a bound
+    /// nothing implemented — and those two are the whole point of the
+    /// distinction.
+    pub fn emit_grants_enforced(
+        &self,
+        plan: &ExecutionPlan,
+        enforced: &mvm_contract::protocol::resource_controls::EnforcedGrants,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "plan.grants_enforced",
+            [
+                (
+                    "grants_cpu_tier".to_string(),
+                    enforced.cpu.label().to_string(),
+                ),
+                (
+                    "grants_wall_clock_tier".to_string(),
+                    enforced.wall_clock.label().to_string(),
+                ),
+            ],
+        )
+    }
+
     /// Emit `plan.boot_posture` — records which rootfs strategy the run-path
     /// tier gate actually selected for this boot, so an audit reader can tell a
     /// dev virtiofs-root boot (the weaker dev-tier virtiofs contract — no
@@ -970,7 +1000,20 @@ impl AuditEmitter {
 /// written, fsync'd, then `rename`d over `path`. A concurrent reader sees
 /// either the old file or the complete new one, never a torn write. The
 /// temp name carries the pid so two publishers don't collide on it.
+/// [`write_atomic`], without the fsync.
+///
+/// Still atomic — the rename gives a reader either the whole old file or the
+/// whole new one. What is dropped is survival of power loss, which is the
+/// right trade only for something reconstructible from data already durable.
+pub(crate) fn write_atomic_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_inner(path, bytes, false)
+}
+
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_inner(path, bytes, true)
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
     use std::io::Write;
     let dir = path
         .parent()
@@ -988,8 +1031,10 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("creating temp file {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("writing temp file {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync temp file {}", tmp.display()))?;
+        if sync {
+            f.sync_all()
+                .with_context(|| format!("fsync temp file {}", tmp.display()))?;
+        }
         Ok(())
     })();
     if let Err(e) = write {

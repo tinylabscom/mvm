@@ -2950,6 +2950,7 @@ dependencies = [
  "libc",
  "libkrun-sys",
  "mvm-agentd",
+ "mvm-contract",
  "mvm-core",
  "mvm-net",
  "mvm-vmm",

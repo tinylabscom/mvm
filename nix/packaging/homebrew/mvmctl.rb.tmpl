@@ -42,10 +42,16 @@ class Mvmctl < Formula
       bin.install hostbin if File.exist?(hostbin)
     end
     (prefix/"assets").install Dir["assets/*"] if Dir.exist?("assets")
-    # macOS: Hypervisor.framework requires the entitlement; re-sign ad-hoc.
-    if OS.mac? && File.exist?("assets/mvmctl.entitlements")
-      system "codesign", "--entitlements", "assets/mvmctl.entitlements",
-             "-f", "-s", "-", bin/"mvmctl"
+    # macOS: sign the complete VM launch path with role-specific entitlements.
+    if OS.mac?
+      system "codesign", "--sign", "-", "--force", "--entitlements",
+             prefix/"assets/mvmctl.entitlements", bin/"mvmctl"
+      %w[mvm-hvf-supervisor mvm-libkrun-supervisor].each do |hostbin|
+        next unless (bin/hostbin).exist?
+
+        system "codesign", "--sign", "-", "--force", "--entitlements",
+               prefix/"assets/mvm-supervisor.entitlements", bin/hostbin
+      end
     end
   end
 

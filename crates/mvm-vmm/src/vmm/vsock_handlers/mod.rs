@@ -65,9 +65,9 @@ impl<'a> VsockHandlerContext<'a> {
         self.transport.consume_tx_credit(host_port, guest_port, n);
     }
 
-    pub(crate) fn evict_idle_recv(&mut self) -> Vec<(u32, u32)> {
+    pub(crate) fn evict_idle_connections(&mut self) -> Vec<(u32, u32)> {
         self.transport
-            .evict_idle_recv()
+            .evict_idle_connections()
             .into_iter()
             .map(|key| (key.host_port, key.guest_port))
             .collect()
@@ -281,7 +281,7 @@ impl VsockHandlerRegistry {
         for handler in self.guest_ports.values_mut() {
             delivered |= handler.drain(ctx).is_some();
         }
-        for (host_port, guest_port) in ctx.evict_idle_recv() {
+        for (host_port, guest_port) in ctx.evict_idle_connections() {
             ctx.queue_host_packet(host_port, guest_port, OP_RST, &[]);
             delivered = true;
         }

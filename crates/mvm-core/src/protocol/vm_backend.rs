@@ -19,6 +19,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
 pub use mvm_contract::protocol::capability_negotiation::{CapabilityAlternative, CapabilityGap};
+pub use mvm_contract::protocol::resource_controls::{
+    CpuControl, EnforcedGrants, EnforcedTier, ResourceControls, WallClockControl,
+};
 pub use mvm_contract::protocol::vm_backend::{
     BackendKind, BackendSecurityProfile, BalloonState, ClaimStatus, GuestChannelInfo,
     LayerCoverage, RequiredCapabilities, ReseedStatus, RuntimeSourceLaunchKind,
@@ -163,6 +166,17 @@ pub struct VmStartConfig {
     pub profile: Option<String>,
     /// Number of vCPUs.
     pub cpus: u32,
+    /// The CPU bound this launch was admitted under, if any.
+    ///
+    /// A different control from [`cpus`](Self::cpus), and not a refinement of
+    /// it: the vCPU count is how many processors the guest sees, while this is
+    /// the share of host CPU time the whole VM may consume. Four vCPUs under a
+    /// 1.5-core share is a legitimate, common shape.
+    ///
+    /// Carried on the launch config rather than applied after `start` because a
+    /// backend has to wrap its own spawn for the per-VM process to be *born*
+    /// bounded — see [`crate::cpu_scope`]. `None` is uncapped.
+    pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
     /// Memory cap in MiB. The guest may not allocate beyond this. When
     /// [`mem_initial_mib`](Self::mem_initial_mib) is `None`, this is
     /// also the host-committed amount at boot (the historical mvm
@@ -369,6 +383,20 @@ pub trait VmBackend: Send + Sync {
     /// matrix says would be exactly the dishonest tier the backend ADR forbids.
     fn negotiate(&self, required: &RequiredCapabilities) -> Result<(), Vec<CapabilityGap>> {
         self.capabilities().negotiate(required, self.kind())
+    }
+
+    /// Apply `grants` to a running VM and report what was actually achieved.
+    ///
+    /// The default enforces nothing and says so. A backend that silently
+    /// ignored grants while reporting success would produce a receipt
+    /// asserting an enforcement that never happened, which is worse than
+    /// having no control at all.
+    fn apply_grants(
+        &self,
+        _id: &VmId,
+        _grants: &mvm_contract::grants::Grants,
+    ) -> Result<mvm_contract::protocol::resource_controls::EnforcedGrants> {
+        Ok(mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared())
     }
 
     /// Whether a warm claim transfers a resident paused VMM directly into the

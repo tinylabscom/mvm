@@ -33,6 +33,27 @@ use super::stats::percentile;
 /// serde defaults but are not comparable without the new substrate.
 pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 5;
 
+/// Minimum measured samples in a publishable live matrix lane.
+pub const MIN_MATRIX_SAMPLES: u32 = 20;
+
+/// Required discarded warm-up launches before a publishable live matrix lane.
+pub const MATRIX_WARMUP_SAMPLES: u32 = 2;
+
+/// Prepared-cold dispatch-window p50 budget, in milliseconds.
+pub const PREPARED_COLD_P50_BUDGET_MS: f64 = 200.0;
+
+/// Prepared-cold dispatch-window p95 budget, in milliseconds.
+pub const PREPARED_COLD_P95_BUDGET_MS: f64 = 250.0;
+
+/// Prepared-cold dispatch-window p99 budget, in milliseconds.
+pub const PREPARED_COLD_P99_BUDGET_MS: f64 = 300.0;
+
+/// Warm-claim dispatch-window p50 budget, in milliseconds.
+pub const WARM_CLAIM_P50_BUDGET_MS: f64 = 30.0;
+
+/// Warm-claim dispatch-window p99 budget, in milliseconds.
+pub const WARM_CLAIM_P99_BUDGET_MS: f64 = 50.0;
+
 /// The measurement lanes the cold-launch contract reports independently.
 ///
 /// They are reported separately rather than averaged because they measure
@@ -96,12 +117,14 @@ impl std::str::FromStr for LaunchLane {
 }
 
 /// Why a sample does not belong in the lane it was labeled with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LaneViolation {
     /// The sample came from an unoptimised binary.
     NotReleaseBuild { profile: BuildProfile },
     /// The sample's schema is not the one this consumer understands.
     SchemaMismatch { found: u32, expected: u32 },
+    /// The report schema is not the current matrix schema.
+    ReportSchemaMismatch { found: u32, expected: u32 },
     /// The current sample does not identify its selected root filesystem path.
     MissingRootStrategy,
     /// A warm sample omitted the required process-memory evidence.
@@ -121,6 +144,20 @@ pub enum LaneViolation {
     },
     /// The launch came up without a capability it should have had.
     Degraded { missing: Vec<String> },
+    /// The report does not contain enough repeated observations to publish a
+    /// matrix result.
+    InsufficientSamples { found: u32, required: u32 },
+    /// The report was not produced with the required discarded warm-ups.
+    WrongWarmup { found: u32, required: u32 },
+    /// A percentile exceeded the lane's published budget.
+    BudgetExceeded {
+        lane: LaunchLane,
+        percentile: &'static str,
+        found_ms: f64,
+        budget_ms: f64,
+    },
+    /// The stored summary does not match the report's raw samples.
+    NonCanonicalSummary,
 }
 
 impl std::fmt::Display for LaneViolation {
@@ -134,6 +171,10 @@ impl std::fmt::Display for LaneViolation {
             Self::SchemaMismatch { found, expected } => write!(
                 f,
                 "launch sample schema {found} is not the expected {expected}"
+            ),
+            Self::ReportSchemaMismatch { found, expected } => write!(
+                f,
+                "cold-launch report schema {found} is not the expected {expected}"
             ),
             Self::MissingRootStrategy => write!(
                 f,
@@ -165,7 +206,144 @@ impl std::fmt::Display for LaneViolation {
                 "launch came up without {}; a degraded launch is not a sample of a healthy one",
                 missing.join(", ")
             ),
+            Self::InsufficientSamples { found, required } => write!(
+                f,
+                "matrix lane has {found} measured samples; at least {required} are required"
+            ),
+            Self::WrongWarmup { found, required } => write!(
+                f,
+                "matrix lane discarded {found} warm-up samples; exactly {required} are required"
+            ),
+            Self::BudgetExceeded {
+                lane,
+                percentile,
+                found_ms,
+                budget_ms,
+            } => write!(
+                f,
+                "lane {} {percentile} dispatch percentile {found_ms:.1}ms exceeds {budget_ms:.1}ms",
+                lane.as_str()
+            ),
+            Self::NonCanonicalSummary => {
+                f.write_str("cold-launch report summary does not match its raw samples")
+            }
         }
+    }
+}
+
+/// Validate a complete lane report for publication in the live backend matrix.
+///
+/// Per-sample lane validation happens while a benchmark runs. This second
+/// gate is intentionally report-level: it prevents a one-off successful launch
+/// from being presented as a repeated result and applies the same budget table
+/// to every backend that produces the report.
+pub fn validate_matrix_report(report: &ColdLaunchReport) -> Result<(), LaneViolation> {
+    if report.schema_version != COLD_LAUNCH_SCHEMA_VERSION {
+        return Err(LaneViolation::ReportSchemaMismatch {
+            found: report.schema_version,
+            expected: COLD_LAUNCH_SCHEMA_VERSION,
+        });
+    }
+    if report.raw.len() < MIN_MATRIX_SAMPLES as usize {
+        return Err(LaneViolation::InsufficientSamples {
+            found: u32::try_from(report.raw.len()).unwrap_or(u32::MAX),
+            required: MIN_MATRIX_SAMPLES,
+        });
+    }
+    if report.warmup != MATRIX_WARMUP_SAMPLES {
+        return Err(LaneViolation::WrongWarmup {
+            found: report.warmup,
+            required: MATRIX_WARMUP_SAMPLES,
+        });
+    }
+    for sample in &report.raw {
+        validate_lane(report.lane, &sample_to_launch_sample(sample))?;
+    }
+    let canonical = build_cold_launch_report(report.lane, report.warmup, report.raw.clone());
+    if report.stats != canonical.stats {
+        return Err(LaneViolation::NonCanonicalSummary);
+    }
+    match report.lane {
+        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit => {
+            require_budget(
+                report.lane,
+                "p50",
+                report.stats.dispatch_window_ms.p50,
+                PREPARED_COLD_P50_BUDGET_MS,
+            )?;
+            require_budget(
+                report.lane,
+                "p95",
+                report.stats.dispatch_window_ms.p95,
+                PREPARED_COLD_P95_BUDGET_MS,
+            )?;
+            require_budget(
+                report.lane,
+                "p99",
+                report.stats.dispatch_window_ms.p99,
+                PREPARED_COLD_P99_BUDGET_MS,
+            )?;
+        }
+        LaunchLane::WarmClaim => {
+            require_budget(
+                report.lane,
+                "p50",
+                report.stats.dispatch_window_ms.p50,
+                WARM_CLAIM_P50_BUDGET_MS,
+            )?;
+            require_budget(
+                report.lane,
+                "p99",
+                report.stats.dispatch_window_ms.p99,
+                WARM_CLAIM_P99_BUDGET_MS,
+            )?;
+        }
+        LaunchLane::MountMiss | LaunchLane::ArtifactMiss => {}
+    }
+    Ok(())
+}
+
+fn require_budget(
+    lane: LaunchLane,
+    percentile: &'static str,
+    found: Option<f64>,
+    budget_ms: f64,
+) -> Result<(), LaneViolation> {
+    if let Some(found_ms) = found
+        && found_ms > budget_ms
+    {
+        return Err(LaneViolation::BudgetExceeded {
+            lane,
+            percentile,
+            found_ms,
+            budget_ms,
+        });
+    }
+    Ok(())
+}
+
+/// Reconstruct the producer shape needed by the per-sample gate from a report
+/// sample. The report stores the resolved context and timing, not the original
+/// path-bearing launch wire object, so only fields relevant to contamination
+/// and lane identity are reconstructed here.
+fn sample_to_launch_sample(sample: &ColdLaunchSample) -> LaunchSample {
+    LaunchSample {
+        schema_version: LAUNCH_SAMPLE_SCHEMA_VERSION,
+        build_profile: BuildProfile::Release,
+        mvm_version: sample.context.mvm_version.clone(),
+        backend: sample.context.backend.clone(),
+        os: sample.context.os.clone(),
+        arch: sample.context.arch.clone(),
+        launch_mode: sample.launch_mode,
+        root_strategy: sample.context.root_strategy,
+        sizing: sample.context.sizing,
+        artifacts: sample.context.artifacts.clone(),
+        work: sample.work,
+        phases: sample.phases,
+        sub_phases: sample.sub_phases,
+        warm_first_command_memory: sample.warm_first_command_memory,
+        backend_phases: sample.backend_phases.clone(),
+        degraded: sample.degraded.clone(),
     }
 }
 
@@ -470,6 +648,21 @@ pub struct LaneStats {
     /// rather than from a fixed list.
     #[serde(default)]
     pub backend_phases: Vec<(String, SpanStats)>,
+    /// Whole-VMM resident memory at warm readiness, in bytes.
+    #[serde(default)]
+    pub warm_ready_resident_bytes: SpanStats,
+    /// Resident-memory growth during the first warm command, in bytes.
+    #[serde(default)]
+    pub warm_first_command_resident_growth_bytes: SpanStats,
+    /// Resident-memory reclamation during the first warm command, in bytes.
+    #[serde(default)]
+    pub warm_first_command_resident_reclaimed_bytes: SpanStats,
+    /// Minor faults during the first warm command, when the host exposes them.
+    #[serde(default)]
+    pub warm_first_command_minor_faults: SpanStats,
+    /// Major faults during the first warm command, when the host exposes them.
+    #[serde(default)]
+    pub warm_first_command_major_faults: SpanStats,
 }
 
 /// A lane's full result: raw samples first, percentiles derived from them.
@@ -546,9 +739,52 @@ pub fn build_cold_launch_report(
                 .map(|name| ((*name).to_string(), sub(name)))
                 .collect(),
             backend_phases: backend_phase_stats(&raw),
+            warm_ready_resident_bytes: memory_stats(&raw, |memory| {
+                memory.ready.resident_bytes as f64
+            }),
+            warm_first_command_resident_growth_bytes: memory_stats(&raw, |memory| {
+                memory.delta.resident_growth_bytes as f64
+            }),
+            warm_first_command_resident_reclaimed_bytes: memory_stats(&raw, |memory| {
+                memory.delta.resident_reclaimed_bytes as f64
+            }),
+            warm_first_command_minor_faults: memory_counter_stats(&raw, |memory| {
+                memory.delta.minor_faults
+            }),
+            warm_first_command_major_faults: memory_counter_stats(&raw, |memory| {
+                memory.delta.major_faults
+            }),
         },
         raw,
     }
+}
+
+fn memory_stats(
+    raw: &[ColdLaunchSample],
+    value: impl Fn(&WarmFirstCommandMemory) -> f64,
+) -> SpanStats {
+    SpanStats::from_samples(
+        &raw.iter()
+            .filter_map(|sample| sample.warm_first_command_memory.as_ref().map(&value))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn memory_counter_stats(
+    raw: &[ColdLaunchSample],
+    value: impl Fn(&WarmFirstCommandMemory) -> Option<u64>,
+) -> SpanStats {
+    SpanStats::from_samples(
+        &raw.iter()
+            .filter_map(|sample| {
+                sample
+                    .warm_first_command_memory
+                    .as_ref()
+                    .and_then(&value)
+                    .map(|value| value as f64)
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Summarise the backend-recorded phases across a lane's samples.
@@ -1089,6 +1325,84 @@ mod tests {
         // not as a zero-millisecond span.
         assert_eq!(by_name("mount_materialize").samples, 0);
         assert_eq!(by_name("mount_materialize").p50, None);
+    }
+
+    #[test]
+    fn report_aggregates_whole_vmm_warm_memory_evidence() {
+        let mut sample = cold_sample(1, 90.0);
+        sample.launch_mode = LaunchMode::Warm;
+        sample.work.warm_claim = true;
+        sample.warm_first_command_memory = Some(warm_memory());
+        let report = build_cold_launch_report(LaunchLane::WarmClaim, 2, vec![sample]);
+
+        assert_eq!(report.stats.warm_ready_resident_bytes.p50, Some(10.0));
+        assert_eq!(
+            report.stats.warm_first_command_resident_growth_bytes.p50,
+            Some(4.0)
+        );
+        assert_eq!(
+            report.stats.warm_first_command_resident_reclaimed_bytes.p50,
+            Some(0.0)
+        );
+        assert_eq!(report.stats.warm_first_command_minor_faults.p50, Some(3.0));
+        assert_eq!(report.stats.warm_first_command_major_faults.p50, Some(1.0));
+    }
+
+    #[test]
+    fn matrix_gate_requires_twenty_samples_and_two_warmups() {
+        let report = build_cold_launch_report(
+            LaunchLane::PreparedCold,
+            MATRIX_WARMUP_SAMPLES,
+            (1..MIN_MATRIX_SAMPLES)
+                .map(|number| cold_sample(number, 100.0))
+                .collect(),
+        );
+        assert_eq!(
+            validate_matrix_report(&report),
+            Err(LaneViolation::InsufficientSamples {
+                found: MIN_MATRIX_SAMPLES - 1,
+                required: MIN_MATRIX_SAMPLES,
+            })
+        );
+
+        let report = build_cold_launch_report(
+            LaunchLane::PreparedCold,
+            1,
+            (1..=MIN_MATRIX_SAMPLES)
+                .map(|number| cold_sample(number, 100.0))
+                .collect(),
+        );
+        assert_eq!(
+            validate_matrix_report(&report),
+            Err(LaneViolation::WrongWarmup {
+                found: 1,
+                required: MATRIX_WARMUP_SAMPLES,
+            })
+        );
+    }
+
+    #[test]
+    fn matrix_gate_applies_prepared_cold_percentile_budgets() {
+        let report = build_cold_launch_report(
+            LaunchLane::PreparedCold,
+            MATRIX_WARMUP_SAMPLES,
+            (1..=MIN_MATRIX_SAMPLES)
+                .map(|number| {
+                    let mut sample = cold_sample(number, 301.0);
+                    sample.phases.backend_start_ms = 271.0;
+                    sample
+                })
+                .collect(),
+        );
+        assert_eq!(
+            validate_matrix_report(&report),
+            Err(LaneViolation::BudgetExceeded {
+                lane: LaunchLane::PreparedCold,
+                percentile: "p50",
+                found_ms: 301.0,
+                budget_ms: PREPARED_COLD_P50_BUDGET_MS,
+            })
+        );
     }
 
     #[test]
