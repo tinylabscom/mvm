@@ -18,6 +18,13 @@ const navLinks = [
 ];
 ---
 
+{/* Runs before paint so html.js is present the instant the reveal CSS below
+    is evaluated — the reveal-hidden state only exists under that class, so
+    this must not be a module script (deferred) or land after this point. */}
+<script is:inline>
+  document.documentElement.classList.add("js");
+</script>
+
 {isSplash ? (
   <header class="landing-header">
     <div class="landing-header-inner">

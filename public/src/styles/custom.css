@@ -818,3 +818,21 @@ h2.text-title {
     display: none;
   }
 }
+
+/* Default to visible: if scripting or the observer fails, the page still
+   reads. The hidden state is only applied once JS has taken over. */
+.site-reveal {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html.js .site-reveal {
+    opacity: 0;
+    transform: translateY(0.75rem);
+    transition: opacity 600ms ease, transform 600ms ease;
+  }
+  html.js .site-reveal.is-shown {
+    opacity: 1;
+    transform: none;
+  }
+}
