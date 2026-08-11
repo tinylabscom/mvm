@@ -302,8 +302,8 @@ h2.text-title {
  *
  *  All alpha-tinted amber values route through the --color-amber token
  *  via color-mix(), so the breathing-glow tracks the active palette.
- *  In light mode the amber shifts darker (#9a6700) and the glow gets
- *  a darker base hue without code changes here.
+ *  In light mode --color-amber resolves to a darker shade (see tailwind.css)
+ *  and the glow gets a darker base hue without code changes here.
  */
 [data-has-sidebar] .expressive-code {
   --ec-tm-markBg: color-mix(in srgb, var(--color-amber) 14%, transparent);
