@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -83,7 +83,7 @@ pub struct FileAuditSigner {
     /// Emptied whenever a barrier entry syncs the file it is on, since
     /// `sync_data` is file-wide and carries every earlier write with it. What
     /// remains at drop is flushed there.
-    pending_sync: Mutex<HashSet<PathBuf>>,
+    pending_sync: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 /// Whether an entry must be on disk before this call returns.
@@ -156,7 +156,7 @@ impl FileAuditSigner {
             audit_dir,
             fixed_file: None,
             cursors: Mutex::new(HashMap::new()),
-            pending_sync: Mutex::new(HashSet::new()),
+            pending_sync: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -180,7 +180,7 @@ impl FileAuditSigner {
                 .unwrap_or_else(|| PathBuf::from(".")),
             fixed_file: Some(audit_file),
             cursors: Mutex::new(HashMap::new()),
-            pending_sync: Mutex::new(HashSet::new()),
+            pending_sync: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -687,6 +687,10 @@ mod tests {
                 .unwrap();
         }
         signer.flush_deferred();
+        assert!(
+            signer.pending_sync.lock().unwrap().is_empty(),
+            "an explicit flush drains every pending file"
+        );
 
         let body = std::fs::read_to_string(dir.path().join("t1.jsonl")).unwrap();
         let lines: Vec<&str> = body.lines().collect();
@@ -695,6 +699,27 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             assert_eq!(v["entry"]["event"], expected, "order is preserved");
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_signer_flushes_every_deferred_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = {
+            let signer = FileAuditSigner::open(fresh_key(), dir.path()).unwrap();
+            signer
+                .sign_and_emit(&make_entry("t1", "plan.launched"))
+                .await
+                .unwrap();
+            let pending = Arc::clone(&signer.pending_sync);
+            assert_eq!(pending.lock().unwrap().len(), 1);
+            drop(signer);
+            pending
+        };
+
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "drop must flush and drain every deferred file"
+        );
     }
 
     #[tokio::test]

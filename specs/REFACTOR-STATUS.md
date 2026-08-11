@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -103,13 +103,16 @@ for detailed scope and acceptance criteria.
   - [x] Add direct witnesses for the security-sensitive admission,
         verification, lease, and substitution cleanup invariants
   - [x] Fail closed when an accepted miss leaves the pinned mutation surface,
-        migrate 26 libkrun identities to their current file, and remove 14
-        obsolete misses without adding a waiver (83 accepted misses to 69)
+        migrate 26 libkrun identities to their current file, and remove 15
+        obsolete misses without adding a waiver (83 accepted misses to 68)
   - [x] Catch the current actionable `mvm-vmm`, `mvm-hostd`, and `mvm-agentd`
         mutants in focused mutation proofs
-  - [x] Pass affected-package all-target Clippy, workspace unit/integration
-        tests, the isolated `mvm-cli` doctest rerun, formatting, and the static
-        mutation surface gate on the dedicated fix branch
+  - [x] Add the six witnesses exposed by the first exact rerun and prove the
+        complete contract shard plus the focused five-mutant hostd repair
+  - [x] Pass workspace all-target Clippy, the isolated `mvm-cli` doctest rerun,
+        formatting, and the static mutation surface gate; the workspace suite
+        passed all repaired areas before one unrelated host-agent socket-bind
+        timeout whose isolated integration rerun passed 4/4
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
 - [~] Plan 300 — 30-issue reconciliation and closeout

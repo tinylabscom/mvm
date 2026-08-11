@@ -1650,6 +1650,38 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_cpu_mechanism_gap_requires_a_share_capable_tier_and_a_reported_gap() {
+        use mvm_core::cpu_scope::MechanismGap;
+
+        let missing_bus = Some(MechanismGap::NoUserSessionBus);
+        assert_eq!(
+            host_cpu_mechanism_gap(
+                &mvm_contract::grants::Grants::default(),
+                BackendKind::Firecracker,
+                missing_bus,
+            ),
+            None,
+            "a plan with no CPU share has no CPU mechanism gap"
+        );
+        assert_eq!(
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Wasm, missing_bus),
+            None,
+            "a tier whose CPU control is not a cgroup share does not use the host mechanism"
+        );
+        assert_eq!(
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Firecracker, None),
+            None,
+            "an available host mechanism leaves no gap"
+        );
+
+        let detail =
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Firecracker, missing_bus)
+                .expect("a missing mechanism must be reported for a share-capable tier");
+        assert!(detail.contains("no user session bus"), "{detail}");
+    }
+
     #[test]
     fn admission_refuses_a_grant_over_the_ceiling() {
         let (_env, _home) = host_with_ceiling(mvm_contract::grants::ceiling::GrantCeiling {
