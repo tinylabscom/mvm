@@ -22,11 +22,20 @@ for (const s of SAMPLES) {
     continue;
   }
   const normalize = (t) => t.replace(/\r\n/g, "\n").trim();
-  if (!normalize(fileText).includes(normalize(s.code))) {
+  const normalizedCode = normalize(s.code);
+  if (!normalizedCode) {
+    failures.push(`${s.id}: code is empty or whitespace-only`);
+    continue;
+  }
+  if (!normalize(fileText).includes(normalizedCode)) {
     failures.push(`${s.id}: code is not a verbatim slice of ${s.source}`);
   }
 }
 
+if (SAMPLES.length === 0) {
+  console.error("Sample provenance failures:\n  SAMPLES is empty — the homepage must carry at least one sample");
+  process.exit(1);
+}
 if (failures.length) {
   console.error("Sample provenance failures:\n  " + failures.join("\n  "));
   process.exit(1);
