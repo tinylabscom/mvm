@@ -3120,6 +3120,7 @@ dependencies = [
  "bytes",
  "chrono",
  "ed25519-dalek",
+ "ipnet",
  "schemars",
  "serde",
  "serde_json",
