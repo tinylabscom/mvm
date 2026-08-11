@@ -160,6 +160,23 @@ Nix store still warm.
 For an interactive shell you want a *workload* microVM, not the builder — use a
 transient run against a dev-tier image: `mvmctl machine run --image alpine -it -- /bin/sh`.
 
+On the first image-backed run, mvm may build and cache the workload kernel
+through Stage 0. If the output includes `builder egress endpoint ... exited
+with status signal: 15 (SIGTERM)`, that line is normally cleanup: the
+host-side builder egress endpoint is terminated after the one-shot Stage 0
+build exits. The actionable error is the following one. In particular, a
+message saying that the resolved workload kernel has no device-mapper/dm-verity
+support means the cached kernel cannot boot a verity-sealed workload. Rebuild
+or download the workload kernel explicitly:
+
+```bash
+# Use the release's hash-verified kernel
+mvmctl build kernel build --which workload --source download
+
+# Or compile the host-architecture kernel from this source checkout
+mvmctl build kernel build --which workload --source compile
+```
+
 ### Examples
 
 Working example workloads live in [`examples/`](examples/) — build any of them

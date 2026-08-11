@@ -46,6 +46,20 @@ When the kernel was compiled locally, the cache directory also carries a
 resolved `config` sidecar and `kernel-metrics-<arch>.json`, so you can inspect
 the exact `olddefconfig` result without a CI round-trip.
 
+### Troubleshooting a first-run kernel failure
+
+The first image-backed run may build the workload kernel through Stage 0. If
+the output says `builder egress endpoint ... exited with status signal: 15
+(SIGTERM)`, that is normally the host-side egress endpoint being stopped as
+Stage 0 cleans up. It is not, by itself, a workload boot failure.
+
+Treat a following error such as `resolved workload kernel ... carries no
+device-mapper/dm-verity support` as the real failure. Workloads boot from a
+verity-sealed root and require the workload kernel's device-mapper and
+dm-verity support; a builder kernel cannot be used for this purpose. Rebuild
+the workload variant with `--which workload`, or download the matching
+published kernel.
+
 ## Inspect resolved configs and metrics
 
 ```bash
