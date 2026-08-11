@@ -205,6 +205,7 @@ pub struct BundleAdmissionContext<'a> {
 /// `posture` is what the plan cannot be trusted to say: whether this is a
 /// sealed production launch or a developer's boot, and which backend will
 /// actually boot it. See [`RunPosture`].
+#[tracing::instrument(skip_all)]
 pub fn admit_for_run(
     input: &SynthesisInput<'_>,
     clock: &dyn Clock,
@@ -1050,6 +1051,7 @@ fn run_post_admission_gates(
     Ok(config)
 }
 
+#[tracing::instrument(skip_all)]
 pub fn admit_and_start(
     backend: &AnyBackend,
     params: AdmitAndStartParams<'_>,

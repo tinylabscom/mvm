@@ -776,6 +776,11 @@ impl VmmDriver for FcDriver {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "fc.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         if !spec.shares.is_empty() {
             bail!(

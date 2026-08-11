@@ -31,6 +31,7 @@
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::unpack::StagedRootfs;
 use std::path::{Path, PathBuf};
+use tracing::instrument;
 
 #[cfg(any(target_os = "linux", test))]
 const DISABLED_EXT4_FEATURES: &str = "^has_journal,^orphan_file";
@@ -116,6 +117,7 @@ pub struct MaterializedRootfs {
 /// rounded up to a multiple of `block_size`. The minimum result
 /// is always at least 1 MiB — `mke2fs` rejects smaller images
 /// outright.
+#[instrument(skip_all, fields(staged_root = %staged_root.display()))]
 pub fn estimate_image_size(
     staged_root: &Path,
     options: &Mke2fsOptions,
@@ -146,6 +148,7 @@ pub fn estimate_image_size(
 /// [`OciUnpackError::HostUnsupported`]. The CLI orchestrator
 /// routes the macOS path through the libkrun builder VM — that
 /// routing lives one layer up, not in this module.
+#[instrument(skip_all, fields(output = %output.display()))]
 pub fn materialize_to_ext4(
     staged: &StagedRootfs,
     output: &Path,

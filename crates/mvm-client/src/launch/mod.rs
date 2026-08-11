@@ -559,6 +559,7 @@ impl LocalBackend {
     /// recording, attachment registration, lease acquisition, admitted boot,
     /// registration. Any failure after recording rolls the session-owned
     /// state back (leases via RAII, secret refs + attachments explicitly).
+    #[tracing::instrument(skip_all)]
     async fn launch_transient(&self, request: LaunchRequest) -> Result<LaunchOutcome> {
         let name = request
             .name

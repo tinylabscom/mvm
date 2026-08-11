@@ -128,6 +128,7 @@ const EXCLUDED_BASENAMES: &[&str] = &[
 /// build reads. `None` for `mvm_workspace` is the non-source-checkout
 /// case (the user flake pins `mvm` to a published ref, recorded in its
 /// own `flake.lock`, so the user flake hash alone covers it).
+#[tracing::instrument(skip_all, fields(user_flake = %user_flake.display(), mode = ?mode))]
 pub fn workload_build_fingerprint(
     user_flake: &Path,
     profile: Option<&str>,

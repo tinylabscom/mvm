@@ -239,6 +239,14 @@ pub fn cli_command() -> clap::Command {
 }
 
 pub fn run() -> Result<()> {
+    let result = run_command();
+    // Emitted after the command settles so the profile covers teardown as well.
+    // A no-op unless MVM_SPAN_TIMINGS is set.
+    mvm_core::observability::span_timing::emit_report();
+    result
+}
+
+fn run_command() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = match cli_command().try_get_matches_from(std::env::args_os()) {
         Ok(matches) => Cli::from_arg_matches(&matches)

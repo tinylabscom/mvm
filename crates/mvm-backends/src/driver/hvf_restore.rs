@@ -182,6 +182,7 @@ pub fn hvf_child_restore_config(
 
 /// Start a supervisor that loads `req`'s materialized saved state instead of
 /// booting a kernel, and wait for it to confirm the VM is live.
+#[tracing::instrument(name = "hvf.restore", skip_all, fields(vm = %req.vm_name))]
 pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
     if !req.state_dir.is_dir() {
         bail!(

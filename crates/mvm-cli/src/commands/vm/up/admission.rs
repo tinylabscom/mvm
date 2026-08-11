@@ -630,6 +630,10 @@ fn sibling_deploy_boot_artifact(
 /// immutable across repeated launches. A precomputed digest is different: it
 /// is an external attestation claim, so it must be checked with an uncached
 /// read before it can influence admission. A mismatch fails closed.
+#[tracing::instrument(
+    skip_all,
+    fields(rootfs = %rootfs_path.display(), precomputed = precomputed.is_some())
+)]
 fn resolve_image_sha256(
     rootfs_path: &std::path::Path,
     precomputed: Option<String>,

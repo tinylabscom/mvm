@@ -64,6 +64,30 @@
       guard and use an explicit isolated host configuration, so bounded-host
       fixtures cannot leak their ceiling into parallel admission tests.
 
+- [x] Span-timing profiling — **plan 318**. The workspace's ~60 `#[instrument]`
+      attributes produced no timing data: no layer consumed span close events,
+      and both subscriber setups attached `EnvFilter` to the registry, so at the
+      CLI's default `error` filter the INFO spans were never constructed at all.
+      Plan 318 adds the missing consumer (a `SpanTimingLayer` over a bounded
+      log-scale histogram, reporting self time as well as inclusive total),
+      moves the log filter onto the fmt layer so spans are constructed
+      regardless of verbosity, and instruments the OCI/ext4 paths in `mvm-fs`
+      (which carried no `tracing` dependency at all) plus the four backend
+      `boot` entry points and HVF restore. Opt-in via `MVM_SPAN_TIMINGS=1|json`;
+      off by default. This is the systematic form of the ad-hoc measurement
+      behind the Plan 311 findings below.
+
+      Instrumentation then extends to the launch critical path — `mvm-cli` had
+      none at all, and it owns the orchestration upstream of where
+      `launch_trace`'s six marks begin. `sha256_file` and its cached wrapper are
+      timed separately so the re-hash below is a row in the profile rather than
+      an inference, and the `ps` process-table scan and OCI pull/layer paths are
+      named. Daemon and build entry points (`admit_for_run`, `admit_and_start`,
+      `verify_audit_chain_entries`, `pool_build_with_opts`, `build_via_vsock`,
+      `workload_build_fingerprint`, `launch_transient`) follow. Guest-side
+      `mvm-agentd` is deliberately excluded — its spans would land on the
+      guest's stderr, which needs a collection path that does not exist yet.
+
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
       rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three
