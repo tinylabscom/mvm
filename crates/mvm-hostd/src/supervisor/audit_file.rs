@@ -12,6 +12,26 @@
 //! seed (`prev_hash` for the first entry) is `[0u8; 32]`. The signer
 //! restores its in-memory cursor from the last line on disk so that
 //! a process restart resumes the chain without gaps.
+//!
+//! # Two verifiers, on purpose
+//!
+//! [`verify_audit_chain`] walks from the genesis seed every time. That zero
+//! prefix is an anchor, not a formality: it is what makes a *removed* prefix
+//! detectable, because a truncated file's new first line claims a non-zero
+//! predecessor and fails at line 0.
+//!
+//! [`verify_audit_chain_incremental`] can resume from a [`ChainCheckpoint`],
+//! verifying only what was appended since. It is sound in the sense that
+//! matters — the resumed line's signature covers its `prev_hash`, so the state
+//! the prefix ended in is authenticated and cannot be forged without the host
+//! key. What it gives up is the anchor: whoever can write the checkpoint can
+//! drop history and have the remainder verify clean, since every surviving
+//! line really is signed. Cost is O(entries since the checkpoint) instead of
+//! O(all history), on a log that never shrinks.
+//!
+//! So the fast path is confined to the routine `mvmctl doctor` health check,
+//! which reports that it resumed. `mvmctl trust audit verify` — the on-demand
+//! integrity check — always walks from genesis.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
@@ -451,68 +471,213 @@ pub fn verify_audit_chain_entries(
     verifying_key: &VerifyingKey,
 ) -> Result<Vec<AuditEntry>, VerifyError> {
     let content = std::fs::read_to_string(path).map_err(|e| VerifyError::Io(e.to_string()))?;
+    let walk = walk_chain(&content, verifying_key, ChainStart::Genesis)?;
+    Ok(walk.entries)
+}
+
+/// Where a chain walk begins.
+enum ChainStart {
+    /// Line 0, with the all-zero chain hash. The zero prefix is the anchor
+    /// that makes a removed prefix detectable: a truncated file's new first
+    /// line claims a non-zero predecessor and fails immediately.
+    Genesis,
+    /// Line `line`, with `chain_hash` as the running hash. Sound only because
+    /// the resumed line's signature covers its `prev_hash`, so a valid
+    /// signature there authenticates the state the prefix ended in.
+    Resume { line: usize, chain_hash: [u8; 32] },
+}
+
+/// What a completed walk established.
+struct ChainWalk {
+    entries: Vec<AuditEntry>,
+    /// Total lines consumed, including any skipped prefix.
+    lines: usize,
+    /// Running chain hash after the last line.
+    chain_hash: [u8; 32],
+}
+
+/// Verify every line from `start` to the end of `content`.
+fn walk_chain(
+    content: &str,
+    verifying_key: &VerifyingKey,
+    start: ChainStart,
+) -> Result<ChainWalk, VerifyError> {
     // A record is only complete once its terminator is on disk. `str::lines`
     // does not distinguish "last line" from "last line so far", so check the
     // final byte before walking: without this, a half-written record is
     // reported as malformed JSON or a bad signature, and a crash becomes
     // indistinguishable from someone having edited the log.
     let truncated_tail = !content.is_empty() && !content.ends_with('\n');
-    let mut prev_hash = [0u8; 32];
+    let (skip_to, mut prev_hash) = match start {
+        ChainStart::Genesis => (0, [0u8; 32]),
+        ChainStart::Resume { line, chain_hash } => (line, chain_hash),
+    };
     let mut entries = Vec::new();
-    let last_idx = content.lines().count().saturating_sub(1);
+    let total = content.lines().count();
+    let last_idx = total.saturating_sub(1);
     for (idx, line) in content.lines().enumerate() {
-        if line.is_empty() {
+        if idx < skip_to || line.is_empty() {
             continue;
         }
         if truncated_tail && idx == last_idx {
             return Err(VerifyError::TruncatedTail { line: idx });
         }
-        let envelope: SignedEnvelope =
-            serde_json::from_str(line).map_err(|e| VerifyError::Malformed {
-                line: idx,
-                reason: e.to_string(),
-            })?;
-        let claimed_prev =
-            URL_SAFE_NO_PAD
-                .decode(&envelope.prev_hash)
-                .map_err(|e| VerifyError::Malformed {
-                    line: idx,
-                    reason: format!("prev_hash b64: {e}"),
-                })?;
-        if claimed_prev.as_slice() != prev_hash.as_slice() {
-            return Err(VerifyError::PrevHashMismatch { line: idx });
-        }
-        let sig_bytes =
-            URL_SAFE_NO_PAD
-                .decode(&envelope.signature)
-                .map_err(|e| VerifyError::Malformed {
-                    line: idx,
-                    reason: format!("signature b64: {e}"),
-                })?;
-        let sig_arr: [u8; 64] =
-            sig_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| VerifyError::Malformed {
-                    line: idx,
-                    reason: "signature must be 64 bytes".to_string(),
-                })?;
-        let signature = Signature::from_bytes(&sig_arr);
-        let mut to_verify = signed_bytes_for(&envelope, idx)?;
-        to_verify.extend_from_slice(&prev_hash);
-        verifying_key
-            .verify(&to_verify, &signature)
-            .map_err(|_| VerifyError::SignatureInvalid { line: idx })?;
-        prev_hash = hash_line(line.as_bytes());
-        entries.push(envelope.entry);
+        prev_hash = verify_line(line, idx, &prev_hash, verifying_key, &mut entries)?;
     }
-    Ok(entries)
+    Ok(ChainWalk {
+        entries,
+        lines: total,
+        chain_hash: prev_hash,
+    })
+}
+
+/// Verify one line against the running chain hash, push its entry, and return
+/// the advanced chain hash.
+fn verify_line(
+    line: &str,
+    idx: usize,
+    prev_hash: &[u8; 32],
+    verifying_key: &VerifyingKey,
+    entries: &mut Vec<AuditEntry>,
+) -> Result<[u8; 32], VerifyError> {
+    let envelope: SignedEnvelope =
+        serde_json::from_str(line).map_err(|e| VerifyError::Malformed {
+            line: idx,
+            reason: e.to_string(),
+        })?;
+    let claimed_prev =
+        URL_SAFE_NO_PAD
+            .decode(&envelope.prev_hash)
+            .map_err(|e| VerifyError::Malformed {
+                line: idx,
+                reason: format!("prev_hash b64: {e}"),
+            })?;
+    if claimed_prev.as_slice() != prev_hash.as_slice() {
+        return Err(VerifyError::PrevHashMismatch { line: idx });
+    }
+    let sig_bytes =
+        URL_SAFE_NO_PAD
+            .decode(&envelope.signature)
+            .map_err(|e| VerifyError::Malformed {
+                line: idx,
+                reason: format!("signature b64: {e}"),
+            })?;
+    let sig_arr: [u8; 64] =
+        sig_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| VerifyError::Malformed {
+                line: idx,
+                reason: "signature must be 64 bytes".to_string(),
+            })?;
+    let signature = Signature::from_bytes(&sig_arr);
+    let mut to_verify = signed_bytes_for(&envelope, idx)?;
+    to_verify.extend_from_slice(prev_hash);
+    verifying_key
+        .verify(&to_verify, &signature)
+        .map_err(|_| VerifyError::SignatureInvalid { line: idx })?;
+    entries.push(envelope.entry);
+    Ok(hash_line(line.as_bytes()))
 }
 
 fn hash_line(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finalize().into()
+}
+
+/// How far a chain has already been verified, so a later run can resume.
+///
+/// Persisted between runs. Resuming trades the genesis anchor for this stored
+/// value: whoever can write it can have a prefix-truncated chain accepted,
+/// because every surviving line is still genuinely signed. That is why only
+/// the routine health check resumes, and `mvmctl trust audit verify` — claim
+/// 8's witness — always walks from genesis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainCheckpoint {
+    /// Lines already verified; the next walk resumes at this index.
+    pub verified_lines: usize,
+    /// Running chain hash after `verified_lines`, base64url unpadded.
+    pub chain_hash: String,
+}
+
+impl ChainCheckpoint {
+    fn new(verified_lines: usize, chain_hash: [u8; 32]) -> Self {
+        Self {
+            verified_lines,
+            chain_hash: URL_SAFE_NO_PAD.encode(chain_hash),
+        }
+    }
+
+    /// Decode the stored hash, or `None` when it is not 32 base64url bytes.
+    /// An undecodable checkpoint is treated as absent rather than as an error:
+    /// it is a cache, and the fallback is a full walk.
+    fn hash_bytes(&self) -> Option<[u8; 32]> {
+        let raw = URL_SAFE_NO_PAD.decode(&self.chain_hash).ok()?;
+        raw.as_slice().try_into().ok()
+    }
+}
+
+/// What an incremental verification established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalVerification {
+    /// Checkpoint to persist for the next run.
+    pub checkpoint: ChainCheckpoint,
+    /// Entries verified on this pass.
+    pub verified_now: usize,
+    /// Whether the whole chain was walked from genesis. False means the
+    /// prefix was taken on the checkpoint's word, which callers must not
+    /// report as a full-chain guarantee.
+    pub walked_from_genesis: bool,
+}
+
+/// Verify a chain, resuming from `checkpoint` when one is supplied.
+///
+/// A checkpoint that does not fit the file — too long, undecodable, or failing
+/// to verify at the resume point — is **discarded, not reported as tampering**.
+/// A mismatch is equally consistent with log rotation, a replaced file, or a
+/// stale checkpoint, and only a full walk can tell those apart; falling back
+/// keeps the fast path from ever manufacturing a false alarm, and leaves every
+/// refusal backed by a genesis-anchored verification.
+pub fn verify_audit_chain_incremental(
+    path: &Path,
+    verifying_key: &VerifyingKey,
+    checkpoint: Option<&ChainCheckpoint>,
+) -> Result<IncrementalVerification, VerifyError> {
+    let content = std::fs::read_to_string(path).map_err(|e| VerifyError::Io(e.to_string()))?;
+    let total = content.lines().count();
+
+    if let Some(resume) = usable_resume(checkpoint, total)
+        && let Ok(walk) = walk_chain(&content, verifying_key, resume)
+    {
+        return Ok(IncrementalVerification {
+            checkpoint: ChainCheckpoint::new(walk.lines, walk.chain_hash),
+            verified_now: walk.entries.len(),
+            walked_from_genesis: false,
+        });
+    }
+
+    let walk = walk_chain(&content, verifying_key, ChainStart::Genesis)?;
+    Ok(IncrementalVerification {
+        checkpoint: ChainCheckpoint::new(walk.lines, walk.chain_hash),
+        verified_now: walk.entries.len(),
+        walked_from_genesis: true,
+    })
+}
+
+/// A resume point, when the checkpoint is decodable and within the file.
+///
+/// A checkpoint at or beyond the line count means the file shrank (rotation,
+/// truncation, replacement) and there is nothing to resume onto.
+fn usable_resume(checkpoint: Option<&ChainCheckpoint>, total_lines: usize) -> Option<ChainStart> {
+    let checkpoint = checkpoint?;
+    if checkpoint.verified_lines == 0 || checkpoint.verified_lines >= total_lines {
+        return None;
+    }
+    Some(ChainStart::Resume {
+        line: checkpoint.verified_lines,
+        chain_hash: checkpoint.hash_bytes()?,
+    })
 }
 
 #[cfg(test)]
