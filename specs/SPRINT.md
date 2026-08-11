@@ -245,9 +245,12 @@
       bounded delay, witnessed for recovery and retry exhaustion; workspace
       all-target Clippy passes. The workspace suite passed the repaired area but
       one parallel CLI test observed another test's temporary host CPU ceiling;
-      its exact isolated rerun passed. A clean exact Linux Security workflow
-      rerun remains the final merge gate; a subsequent scheduled or release run
-      is still required before issue closure.
+      its exact isolated rerun passed. The next exact run exposed guest-console
+      tests sharing process-global session state; the stateful tests now share
+      one lock and join their completion thread, with 20/20 parallel stress
+      passes. A clean exact Linux Security workflow rerun remains the final
+      merge gate; a subsequent scheduled or release run is still required
+      before issue closure.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,

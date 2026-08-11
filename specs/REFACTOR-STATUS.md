@@ -122,6 +122,9 @@ for detailed scope and acceptance criteria.
         shutdown-hook fixture spawn that remained; workspace all-target Clippy
         passes, and the sole parallel CLI failure passed its exact isolated
         rerun
+  - [x] Serialize the guest-console tests that share process-global session
+        state after the next exact run exposed their race; join the completion
+        thread and pass 20/20 parallel stress runs
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
 - [~] Plan 300 — 30-issue reconciliation and closeout
