@@ -2177,6 +2177,7 @@ allow_hosts = ["localhost:8443"]
 
     #[test]
     fn a_manifest_grant_reaches_the_signed_plan() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let declared = manifest_grants(MANIFEST);
         let config = MvmConfig::default();
         let resolved = resolve_run_grants(GrantInputs {
@@ -2395,6 +2396,7 @@ allow_hosts = ["localhost:8443"]
 
     #[test]
     fn a_run_that_grants_nothing_still_admits_a_grant_free_plan() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         // The pre-grant baseline has to stay byte-identical: an untouched
         // permission set must not become an empty-but-present one.
         let config = MvmConfig::default();
