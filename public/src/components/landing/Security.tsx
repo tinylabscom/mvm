@@ -1,6 +1,5 @@
 import { Section } from "./primitives/Section";
 import { Eyebrow } from "./primitives/Eyebrow";
-import { GlowCard } from "./primitives/GlowCard";
 import { Reveal } from "./primitives/Reveal";
 
 // Copy below is deliberately narrower than plain-language marketing prose —
@@ -54,8 +53,8 @@ export function Security() {
   const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
 
   return (
-    <Section rule>
-      <Eyebrow n="06">Security</Eyebrow>
+    <Section rule space="tight">
+      <Eyebrow>Security</Eyebrow>
       <h2 className="mb-4 font-display text-3xl font-bold text-title sm:text-4xl">
         Claims backed by tests, not adjectives
       </h2>
@@ -66,7 +65,7 @@ export function Security() {
         explicitly out of scope.
       </p>
       <p className="mb-12 max-w-2xl text-sm text-label">
-        The identifiers below each card name real tests and CI jobs, not
+        The identifiers below each claim name real tests and CI jobs, not
         links. mvm's docs follow a{" "}
         <a
           href={`${base}security/claim-ledger/`}
@@ -77,26 +76,27 @@ export function Security() {
         that governs when a claim may be described as a guarantee.
       </p>
 
-      <div className="grid gap-5 sm:grid-cols-2">
+      <div className="max-w-2xl space-y-8">
         {CLAIMS.map((c, i) => (
-          <Reveal key={c.title} delay={i * 80} className="h-full">
-            <GlowCard accent={c.accent} className="h-full">
+          <Reveal key={c.title} delay={i * 60}>
+            <div className="border-t border-edge/30 pt-6 first:border-t-0 first:pt-0">
               <h3 className="mb-2 text-lg font-semibold leading-snug tracking-tight text-title">
                 {c.title}
               </h3>
-              <p className="mb-3 text-sm leading-relaxed text-body">
+              <p className="mb-2 text-sm leading-relaxed text-body">
                 {c.description}
               </p>
-              <p className="mb-3 font-mono text-[11px] text-label">
+              <p className="font-mono text-[11px] text-label">
                 {c.witnesses}
+                {" — "}
+                <a
+                  href={`${base}${c.docHref}`}
+                  className="text-accent underline underline-offset-2 hover:text-accent/80"
+                >
+                  Read more
+                </a>
               </p>
-              <a
-                href={`${base}${c.docHref}`}
-                className="text-sm text-accent underline underline-offset-2 hover:text-accent/80"
-              >
-                Read more
-              </a>
-            </GlowCard>
+            </div>
           </Reveal>
         ))}
       </div>

@@ -1,7 +1,5 @@
 import { useEffect } from "react";
 import { Hero } from "./Hero";
-import { Install } from "./Install";
-import { Features } from "./Features";
 import { Walkthrough } from "./Walkthrough";
 import { Surfaces } from "./Surfaces";
 import { Architecture } from "./Architecture";
@@ -20,8 +18,6 @@ export function Landing() {
   return (
     <div className="min-h-screen w-full bg-canvas">
       <Hero />
-      <Install />
-      <Features />
       <Walkthrough />
       <Surfaces />
       <Architecture />

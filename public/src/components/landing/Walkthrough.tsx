@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { Section } from "./primitives/Section";
-import { Eyebrow } from "./primitives/Eyebrow";
 import { CodeBlock } from "../ui/code-block";
 import { SAMPLES } from "./samples";
 
@@ -54,8 +53,7 @@ export function Walkthrough() {
   const activeSample = sample(STEPS[active].id);
 
   return (
-    <Section rule>
-      <Eyebrow n="03">How it works</Eyebrow>
+    <Section rule space="tight">
       <h2 className="mb-16 font-display text-3xl font-bold text-title sm:text-4xl">
         From a file to a running microVM
       </h2>

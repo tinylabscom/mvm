@@ -20,8 +20,8 @@ export function Surfaces() {
   const sample = (id: string) => SAMPLES.find((s) => s.id === id);
 
   return (
-    <Section rule>
-      <Eyebrow n="04">SDKs and CLI</Eyebrow>
+    <Section rule space="roomy" className="bg-raised">
+      <Eyebrow>SDKs and CLI</Eyebrow>
       <h2 className="mb-4 font-display text-3xl font-bold text-title sm:text-4xl">
         One operation, four surfaces
       </h2>
