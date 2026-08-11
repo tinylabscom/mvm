@@ -109,6 +109,37 @@ mvmctl machine run --flake <project-dir> --name <name> -d
 
 ## Build Issues
 
+### Workload kernel error is preceded by `SIGTERM`
+
+On the first image-backed run, mvm may build the workload kernel through the
+Stage 0 builder. You may see both of these messages:
+
+```text
+builder egress endpoint pid=... exited with status signal: 15 (SIGTERM)
+resolved workload kernel ... carries no device-mapper/dm-verity support
+```
+
+The `SIGTERM` is normally expected cleanup, not the cause of the failure. The
+Stage 0 build starts a host-side egress endpoint and terminates it when the
+one-shot build exits. The actionable message is the dm-verity error: the
+resolved kernel cannot provide `/dev/mapper/control`, so it cannot boot the
+verity-sealed workload.
+
+Rebuild or download the workload kernel explicitly:
+
+```bash
+# Use the release's hash-verified kernel
+mvmctl build kernel build --which workload --source download
+
+# Or compile the host-architecture kernel from a source checkout
+mvmctl build kernel build --which workload --source compile
+```
+
+For a local compile, the cache also contains the resolved kernel config and
+metrics under `~/.mvm/cache/builder-vm/<arch>/kernels/workload/`. An empty
+config sidecar or a zero built-in-symbol count indicates that the generated
+kernel artifact is incomplete and should not be used for a sealed workload.
+
 ### Nix build fails
 
 ```bash

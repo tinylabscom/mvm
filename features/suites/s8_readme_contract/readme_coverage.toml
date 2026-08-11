@@ -31,6 +31,10 @@ classification = "cli-bdd"
 language = "bash"
 
 [[block]]
+classification = "cli-bdd"
+language = "bash"
+
+[[block]]
 classification = "nix-static"
 language = "nix"
 
