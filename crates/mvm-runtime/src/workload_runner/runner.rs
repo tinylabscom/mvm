@@ -1112,6 +1112,22 @@ impl Drop for WarmClaimLease<'_> {
                     "stopping preloaded standby child after failed claim"
                 );
             }
+            // The child is gone either way — killed above, or already dead and
+            // about to lose its state dir below. The record has to stop naming
+            // it: left alone it keeps advertising a paused VMM that no longer
+            // exists, so every later claim refuses on a missing control socket
+            // while the pool still counts the parent as usable capacity. The
+            // parent and its checkpoint are healthy, so demote rather than
+            // remove; the next claim materializes a fresh child from it.
+            if let Err(error) = self.pool.demote_to_saved_state(self.parent_id) {
+                tracing::warn!(
+                    parent = %self.parent_id,
+                    child = %vm_name,
+                    %error,
+                    "could not demote standby to saved-state after its preloaded child was \
+                     destroyed; it will refuse every claim until reaped"
+                );
+            }
         }
         if let Some(dir) = &self.child_dir {
             match std::fs::remove_dir_all(dir) {
@@ -4321,6 +4337,94 @@ mod tests {
         );
         // The fork never ran.
         assert!(runner.driver.forked_children().is_empty());
+    }
+
+    /// A failed claim destroys the preloaded child, so the record must stop
+    /// naming it — otherwise the standby stays `Idle` advertising a paused VMM
+    /// that no longer exists, and every later claim refuses on a missing control
+    /// socket while `idle_count_compatible` still counts it as capacity. That
+    /// made a standby single-use against even a retryable failure.
+    ///
+    /// The parent and its checkpoint are healthy, so it demotes to saved-state
+    /// (the `pid == 0` sentinel) rather than being removed: warm capacity
+    /// survives and the next claim materializes a fresh child from the
+    /// checkpoint.
+    #[test]
+    fn a_failed_claim_demotes_a_preloaded_standby_instead_of_stranding_it() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        // No overlay sidecar → the claim fails the overlay-contract gate, which
+        // is a non-parent-fault failure reached after the child is tracked.
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), false);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let mut handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        // A preloaded standby: the pool owns a paused child VMM instead of being
+        // saved-only, so it carries the child's name and a live pid.
+        let child_name = "preloaded-child".to_string();
+        handle.preloaded_child_vm_name = Some(child_name.clone());
+        handle.pid = std::process::id();
+        pool.record(&handle).unwrap();
+        std::fs::create_dir_all(vm_state_dir(&child_name)).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+
+        runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect_err("the overlay-contract gate must refuse this claim");
+
+        let after = pool.load("warm-parent").unwrap();
+        assert_eq!(
+            after.state,
+            StandbyState::Idle,
+            "a non-parent-fault failure must return the parent to claimable"
+        );
+        assert!(
+            after.preloaded_child_vm_name.is_none(),
+            "the record must stop naming a child the cleanup destroyed"
+        );
+        assert!(
+            after.is_saved_state(),
+            "a standby with no preloaded child is saved-only (pid == 0), so the next \
+             claim materializes a fresh child from the checkpoint"
+        );
+        assert!(
+            SupervisorStandbyPool::is_live_or_saved(&after),
+            "the demoted parent must remain usable capacity, not read as dead"
+        );
+        assert!(
+            runner.driver.killed_vms().contains(&child_name),
+            "the destroyed child's VMM must be stopped, not orphaned: killed {:?}",
+            runner.driver.killed_vms()
+        );
     }
 
     /// An un-audited parent (no signed creation entry) is quarantined by removal,

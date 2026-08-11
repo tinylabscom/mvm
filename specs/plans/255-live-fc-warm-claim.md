@@ -1059,15 +1059,32 @@ reseeded must not be admitted — but it means no warm claim can complete on
 Firecracker until this is fixed, and therefore no claimed-launch measurement
 against the cold baseline is possible yet.
 
-**BUG-5 — a failed claim strands the standby and orphans its VMM.** Found while
-exercising the above. When a claim fails after the child is materialized, the
-cleanup removes the preloaded child's state directory but does **not** kill its
-`firecracker` process. The pool record stays `Idle` while pointing at a child
-whose socket path no longer exists, so every subsequent claim against that
-standby fails with `resume preloaded child: Firecracker socket
-<dir>/fc.socket does not exist — VM is not running`, and a stray VMM leaks per
-attempt (observed: pid alive, `/root/.mvm/vms/vm-*` gone). A standby is
-therefore single-use even against a retryable failure.
+**BUG-5 — a failed claim stranded the standby. FIXED (#2337).** Found while
+exercising the above, and narrower than first reported: `WarmClaimLease::drop`
+does kill the preloaded child and remove its dir. What it never did was update
+the pool record naming that child — `mark_idle` restored `Idle` and left
+`preloaded_child_vm_name` plus a live-looking `pid` pointing at the VMM it had
+just killed.
+
+That is what made a standby single-use against even a retryable failure. Every
+later claim refused with `resume preloaded child: Firecracker socket
+<dir>/fc.socket does not exist — VM is not running`, while
+`idle_count_compatible` still counted it (`is_live_or_saved` sees a non-zero
+pid) — so the pool advertised capacity it could not serve, and `warm_to_target`
+never replaced it because the count already read at target. Silent, and
+self-perpetuating.
+
+`SupervisorStandbyPool::demote_to_saved_state` now clears the child name, the
+control socket and `pid`, restoring the `pid == 0` saved-state sentinel. The
+parent and its checkpoint are healthy, so the standby survives as a saved-state
+parent and the next claim materializes a fresh child from the checkpoint —
+demote rather than remove, because preloading is an optimization over the
+checkpoint, not the standby's value.
+
+The orphaned `firecracker` originally reported alongside this is a separate,
+milder thing: the kill is best-effort and only `warn!`s, so a kill that fails
+still leaves a VMM behind. That stays best-effort by design (the caller is on
+its way out), but it is no longer silent capacity loss.
 
 **BLOCKER-3 — resolved in code; live delivery remains gated behind #1962.**
 #1959 established the host-signer public key as boot-pinned *host identity*
