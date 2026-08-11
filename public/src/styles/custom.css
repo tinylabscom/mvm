@@ -781,3 +781,24 @@ h2.text-title {
     justify-content: flex-start;
   }
 }
+
+/* Background blooms drift slowly. Under reduced-motion they hold still —
+   the tint is decorative, the movement is what triggers discomfort. */
+@keyframes site-bloom-drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(4rem, -2rem, 0) scale(1.12);
+  }
+}
+
+.site-bloom {
+  animation: site-bloom-drift 28s ease-in-out infinite alternate;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-bloom {
+    animation: none;
+  }
+}
