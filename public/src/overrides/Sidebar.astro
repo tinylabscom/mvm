@@ -15,6 +15,46 @@ const github = social.find((entry) => entry.icon === "github");
 ---
 
 <Default />
+<script is:inline>
+  // Give each top-level sidebar group an emoji, bound to the group's
+  // rendered *label text* rather than its position in astro.config.mjs's
+  // `sidebar` array — see custom.css's "Sidebar group icons" comment for
+  // why a position-keyed (`:nth-child`) binding was rejected. Runs
+  // synchronously right after Default renders the sidebar markup, so the
+  // icon is present before first paint (no flash of iconless headings).
+  // Update this map when a group label changes or a group is added; a
+  // label with no entry here simply renders without an icon rather than
+  // erroring.
+  (function () {
+    var GROUP_ICONS = {
+      "Getting Started": "🚀",
+      "Install": "📦",
+      "Working in the MicroVM": "🖥️",
+      "Tutorials": "🎓",
+      "Console": "⌨️",
+      "Templates": "🧩",
+      "Guides": "🧭",
+      "Examples": "💡",
+      "Security": "🔒",
+      "Architecture": "🏛️",
+      "Resources": "📚",
+      "SDK": "🧰",
+      "Reference": "📖",
+      "Contributing": "🤝",
+    };
+    document
+      .querySelectorAll('nav[aria-label="Main"] ul.top-level > li > details > summary > .group-label > .large')
+      .forEach(function (labelEl) {
+        var emoji = GROUP_ICONS[labelEl.textContent.trim()];
+        if (!emoji) return;
+        var icon = document.createElement("span");
+        icon.className = "sidebar-group-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = emoji;
+        labelEl.before(icon);
+      });
+  })();
+</script>
 {
   github && (
     <div class="sidebar-footer">
