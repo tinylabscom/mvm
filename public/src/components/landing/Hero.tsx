@@ -53,12 +53,6 @@ function TerminalAnimation() {
   );
 }
 
-const stats = [
-  { value: "ms", label: "warm microVM starts" },
-  { value: "1", label: "kernel per workload" },
-  { value: "0", label: "SSH or daemon" },
-];
-
 const ONE_LINER =
   "curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh";
 
@@ -92,14 +86,6 @@ function InstallRow({ command }: { command: string }) {
 export function Hero() {
   const rawBase = import.meta.env.BASE_URL;
   const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
-  const [copied, setCopied] = useState(false);
-  const installCmd = ONE_LINER;
-
-  function copyInstall() {
-    navigator.clipboard.writeText(installCmd);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
 
   return (
     <section className="relative overflow-hidden">
@@ -107,117 +93,87 @@ export function Hero() {
       <Bloom accents={[1, 2]} />
 
       <div className="relative mx-auto max-w-7xl px-6 pt-28 pb-24 sm:px-8 lg:pt-40 lg:pb-32">
-        <div className="grid items-center gap-16 lg:grid-cols-2 lg:gap-20">
-          {/* Left — copy */}
-          <div className="flex flex-col gap-8">
-            <Reveal delay={80}>
-              <h1 className="font-display text-5xl font-bold leading-[1.1] tracking-tight text-title sm:text-6xl xl:text-7xl">
-                Local. A real microVM
-                <br />
-                in milliseconds.
-              </h1>
-            </Reveal>
+        <div className="flex max-w-3xl flex-col gap-8">
+          <Reveal delay={80}>
+            <h1
+              className="font-display font-bold leading-[1.02] tracking-[-0.03em] text-title"
+              style={{ fontSize: "clamp(2.75rem, 6vw, 5rem)" }}
+            >
+              Local. A real microVM
+              <br />
+              in milliseconds.
+            </h1>
+          </Reveal>
 
-            <Reveal delay={160}>
-              <p className="max-w-lg text-lg leading-relaxed text-body">
-                Run untrusted code behind a real hypervisor with one command. The
-                first run prepares the image and kernel; warm runs start in
-                milliseconds. No SSH. No daemon. No container fallback.
-              </p>
-            </Reveal>
+          <Reveal delay={160}>
+            <p className="max-w-[46ch] text-lg leading-relaxed text-body">
+              Run untrusted code behind a real hypervisor with one command —
+              no SSH, no daemon, no container fallback.
+            </p>
+          </Reveal>
 
-            {/* Install command */}
-            <Reveal delay={240}>
-              <button
-                type="button"
-                className="group flex w-full max-w-lg items-center gap-3 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 text-left backdrop-blur transition-all hover:border-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-page"
-                onClick={copyInstall}
-                aria-label="Copy install command"
-              >
-                <span className="text-accent/60 text-sm">$</span>
-                <code className="flex-1 text-left font-mono text-sm text-emphasis/90 overflow-x-auto">
-                  {installCmd}
-                </code>
-                <span className="shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent">
-                  {copied ? "Copied!" : "Copy"}
-                </span>
-              </button>
-            </Reveal>
+          {/* Platform-specific install — the single install affordance in
+              the hero. */}
+          <Reveal delay={240}>
+            <Tabs defaultValue="macos" className="max-w-lg">
+              <TabsList>
+                <TabsTrigger value="macos">macOS</TabsTrigger>
+                <TabsTrigger value="linux">Linux</TabsTrigger>
+                <TabsTrigger value="windows">Windows (WSL2)</TabsTrigger>
+              </TabsList>
 
-            {/* Platform-specific install, folded in from the old standalone
-                Install section. */}
-            <Reveal delay={280}>
-              <Tabs defaultValue="macos" className="max-w-lg">
-                <TabsList>
-                  <TabsTrigger value="macos">macOS</TabsTrigger>
-                  <TabsTrigger value="linux">Linux</TabsTrigger>
-                  <TabsTrigger value="windows">Windows (WSL2)</TabsTrigger>
-                </TabsList>
+              <TabsContent value="macos">
+                <p className="mb-4 text-sm leading-relaxed text-body">
+                  Apple Silicon only. Runs the HVF backend on macOS 26+, libkrun on
+                  macOS 13&ndash;25.
+                </p>
+                <InstallRow command={ONE_LINER} />
+              </TabsContent>
 
-                <TabsContent value="macos">
-                  <p className="mb-4 text-sm leading-relaxed text-body">
-                    Apple Silicon only. Runs the HVF backend on macOS 26+, libkrun on
-                    macOS 13&ndash;25.
-                  </p>
-                  <InstallRow command={ONE_LINER} />
-                </TabsContent>
+              <TabsContent value="linux">
+                <p className="mb-4 text-sm leading-relaxed text-body">
+                  Tier 1 target. Needs a kernel with KVM enabled at{" "}
+                  <code className="font-mono text-emphasis/90">/dev/kvm</code>.
+                </p>
+                <InstallRow command={ONE_LINER} />
+              </TabsContent>
 
-                <TabsContent value="linux">
-                  <p className="mb-4 text-sm leading-relaxed text-body">
-                    Tier 1 target. Needs a kernel with KVM enabled at{" "}
-                    <code className="font-mono text-emphasis/90">/dev/kvm</code>.
-                  </p>
-                  <InstallRow command={ONE_LINER} />
-                </TabsContent>
+              <TabsContent value="windows">
+                <p className="mb-4 text-sm leading-relaxed text-body">
+                  Native Windows isn&apos;t a supported microVM host. Run mvm inside
+                  a WSL2 distro with nested KVM and libkrun &mdash; then follow the{" "}
+                  <a
+                    href={`${base}install/windows/`}
+                    className="text-accent underline underline-offset-2 hover:text-accent/80"
+                  >
+                    WSL2 install guide
+                  </a>
+                  .
+                </p>
+              </TabsContent>
+            </Tabs>
+          </Reveal>
 
-                <TabsContent value="windows">
-                  <p className="mb-4 text-sm leading-relaxed text-body">
-                    Native Windows isn&apos;t a supported microVM host. Run mvm inside
-                    a WSL2 distro with nested KVM and libkrun &mdash; then follow the{" "}
-                    <a
-                      href={`${base}install/windows/`}
-                      className="text-accent underline underline-offset-2 hover:text-accent/80"
-                    >
-                      WSL2 install guide
-                    </a>
-                    .
-                  </p>
-                </TabsContent>
-              </Tabs>
-            </Reveal>
-
-            <Reveal delay={320} className="flex flex-wrap gap-3">
-              <a href={`${base}getting-started/installation/`}>
-                <Button size="lg">Get Started</Button>
-              </a>
-              <a
-                href="https://github.com/tinylabscom/mvm"
-                target="_blank"
-                rel="noopener"
-              >
-                <Button variant="outline" size="lg">
-                  GitHub
-                </Button>
-              </a>
-            </Reveal>
-
-            {/* Stats row */}
-            <Reveal delay={400} className="flex flex-wrap gap-8 border-t border-edge/40 pt-6">
-              {stats.map((s) => (
-                <div key={s.label} className="flex flex-col">
-                  <span className="text-2xl font-bold text-title">{s.value}</span>
-                  <span className="text-xs text-label">{s.label}</span>
-                </div>
-              ))}
-            </Reveal>
-          </div>
-
-          {/* Right — terminal */}
-          <div className="relative">
-            <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
-            <TerminalAnimation />
-          </div>
+          <Reveal delay={320} className="flex flex-wrap items-center gap-5">
+            <a href={`${base}getting-started/installation/`}>
+              <Button size="lg">Get Started</Button>
+            </a>
+            <a
+              href="https://github.com/tinylabscom/mvm"
+              target="_blank"
+              rel="noopener"
+              className="text-sm text-label underline underline-offset-4 hover:text-accent"
+            >
+              View on GitHub
+            </a>
+          </Reveal>
         </div>
+
+        {/* Terminal — proof, below the headline, full content width. */}
+        <Reveal delay={360} className="relative mt-16">
+          <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
+          <TerminalAnimation />
+        </Reveal>
       </div>
     </section>
   );

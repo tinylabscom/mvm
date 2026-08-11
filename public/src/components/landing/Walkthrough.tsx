@@ -60,7 +60,7 @@ export function Walkthrough() {
 
       {/* Scroll-synced layout, hidden when motion is reduced. */}
       <div className="site-walk grid gap-12 lg:grid-cols-2">
-        <div className="flex flex-col gap-[40vh]">
+        <div className="flex max-w-[52ch] flex-col gap-[26vh]">
           {STEPS.map((s, i) => (
             <div
               key={s.id}
@@ -68,13 +68,13 @@ export function Walkthrough() {
               ref={(el) => {
                 refs.current[i] = el;
               }}
-              className={`transition-opacity duration-500 ${active === i ? "opacity-100" : "opacity-40"}`}
+              className={`transition-opacity duration-500 ${active === i ? "opacity-100" : "opacity-65"}`}
             >
               <h3 className="mb-3 font-mono text-xs tracking-[0.2em] uppercase text-accent">
                 Step {i + 1}
               </h3>
               <p className="mb-1 text-lg font-semibold text-title">{s.title}</p>
-              <p className="max-w-md text-lg leading-relaxed text-body">{s.body}</p>
+              <p className="text-lg leading-relaxed text-body">{s.body}</p>
             </div>
           ))}
         </div>

@@ -76,22 +76,21 @@ export function Security() {
         that governs when a claim may be described as a guarantee.
       </p>
 
-      <div className="max-w-2xl space-y-8">
+      <div className="max-w-2xl space-y-12">
         {CLAIMS.map((c, i) => (
           <Reveal key={c.title} delay={i * 60}>
-            <div className="border-t border-edge/30 pt-6 first:border-t-0 first:pt-0">
-              <h3 className="mb-2 text-lg font-semibold leading-snug tracking-tight text-title">
+            <div className="border-t border-edge/30 pt-8 first:border-t-0 first:pt-0">
+              <h3 className="mb-3 text-xl font-semibold leading-snug tracking-tight text-title">
                 {c.title}
               </h3>
-              <p className="mb-2 text-sm leading-relaxed text-body">
+              <p className="mb-4 text-base leading-relaxed text-body">
                 {c.description}
               </p>
-              <p className="font-mono text-[11px] text-label">
-                {c.witnesses}
-                {" — "}
+              <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[11px] text-label/70">
+                <span className="font-mono">{c.witnesses}</span>
                 <a
                   href={`${base}${c.docHref}`}
-                  className="text-accent underline underline-offset-2 hover:text-accent/80"
+                  className="font-sans text-accent underline underline-offset-2 hover:text-accent/80"
                 >
                   Read more
                 </a>
