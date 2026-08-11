@@ -71,18 +71,19 @@ pub fn store(chain_path: &Path, checkpoint: &ChainCheckpoint) {
 mod tests {
     use super::*;
 
-    /// Point `MVM_HOME` at a scratch dir so the cache never touches a real one.
+    /// Point the mvm world at a scratch dir so the cache never touches a real
+    /// one.
+    ///
+    /// Goes through `TestEnv` rather than mutating the environment directly:
+    /// env mutation is process-wide, and these tests share a binary with
+    /// hundreds of others running in parallel. `TestEnv` serializes on the
+    /// shared lock and restores prior values on drop, which is the difference
+    /// between a test that is isolated and one that merely passes locally.
     fn with_scratch_home<T>(body: impl FnOnce(&Path) -> T) -> T {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: single-threaded test body; the guard restores the prior value.
-        let prior = std::env::var_os("MVM_HOME");
-        unsafe { std::env::set_var("MVM_HOME", dir.path()) };
-        let out = body(dir.path());
-        match prior {
-            Some(v) => unsafe { std::env::set_var("MVM_HOME", v) },
-            None => unsafe { std::env::remove_var("MVM_HOME") },
-        }
-        out
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        body(dir.path())
     }
 
     fn checkpoint(lines: usize) -> ChainCheckpoint {
@@ -123,9 +124,13 @@ mod tests {
 
     #[test]
     fn same_basename_under_different_roots_gets_different_files() {
-        let a = checkpoint_path(Path::new("/a/audit/local.jsonl"));
-        let b = checkpoint_path(Path::new("/b/audit/local.jsonl"));
-        assert_ne!(a, b, "path must key the checkpoint, not just the basename");
+        // Reads the cache dir, so it holds the env guard too rather than
+        // racing a concurrent test that is moving MVM_HOME.
+        with_scratch_home(|_| {
+            let a = checkpoint_path(Path::new("/a/audit/local.jsonl"));
+            let b = checkpoint_path(Path::new("/b/audit/local.jsonl"));
+            assert_ne!(a, b, "path must key the checkpoint, not just the basename");
+        });
     }
 
     #[test]
