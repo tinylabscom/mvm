@@ -25,7 +25,8 @@ use crate::vmm::vsock_transport::MAX_CONNECTIONS;
 pub(crate) const READ_CHUNK: usize = 16 * 1024;
 /// Maximum number of active raw/SOCKS5/DNS/substitution streams per workload.
 pub(crate) const MAX_EGRESS_STREAMS: usize = 128;
-/// Sustained egress byte budget shared by all host-mediated workload streams.
+/// Sustained egress byte rate shared by all host-mediated workload streams.
+/// This is a refillable throughput limit, not a cumulative download-size cap.
 pub(crate) const EGRESS_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 /// Maximum burst accepted before the sustained budget must refill.
 pub(crate) const EGRESS_BURST_BYTES: u64 = 8 * 1024 * 1024;
@@ -611,6 +612,20 @@ mod tests {
             now + Duration::from_secs(1)
         ));
         assert!(!budget.try_consume_at(1, now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn egress_budget_has_no_lifetime_download_cap() {
+        const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
+
+        let now = Instant::now();
+        let budget = EgressBudget::new_at(now);
+        let chunk = usize::try_from(EGRESS_BYTES_PER_SECOND).unwrap();
+        let seconds = FOUR_GIB / EGRESS_BYTES_PER_SECOND;
+
+        for second in 0..seconds {
+            assert!(budget.try_consume_at(chunk, now + Duration::from_secs(second)));
+        }
     }
 
     #[test]
