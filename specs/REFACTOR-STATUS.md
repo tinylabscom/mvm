@@ -633,6 +633,37 @@ for detailed scope and acceptance criteria.
         + gzipped-size budget in the existing wasm lane; B5 delete
         `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
         `mvmctl audit pubkey`
+- [ ] Plan 320 — A live wasm sandbox demo on the website
+      (`specs/plans/320-wasm-browser-demo.md`) — design approved, execution not
+      started. Browser-engine sandbox at `/demo` + landing teaser; relocates the
+      egress decision (`projection.rs`), `${NAME}` substitution, and audit-entry
+      construction/chain-signing into `mvm-contract` so host and browser run
+      identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
+      Sequencing: the landing teaser must be built against PR #2359's redesigned
+      landing page, not the current one.
+  - [ ] E1 relocate `projection.rs` → `mvm-contract` (`mvm_core::ln` re-export
+        keeps ~20 call sites unchanged); E2 substitution core; E3 audit writer
+        core. Oracle: `wasm_egress_witness.rs` must stay green **unmodified**.
+  - [ ] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker + thin
+        proxy; three curated fixtures (allowed / denied / unbound); tamper
+        button; `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane
+  - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
+        `mvmctl audit pubkey` remain plan 301's
+- [ ] Plan 321 — wasm as a workload format inside a real microVM
+      (`specs/plans/321-wasm-in-microvm-workload-format.md`) — design, not
+      started. ADR-024's sanctioned engine-in-guest path: a wasm workload
+      inherits claims 3/10/13/15 from the microVM it runs inside, because the
+      isolation boundary is the microVM and wasm is only the executable format.
+      No new `BackendKind`.
+  - [ ] WS1 Nix factory row (`interpreter = null` + wrapper-kind discriminator,
+        per `nix/lib/factories/languages/default.nix:17-20`); WS2 end-to-end
+        compute-only run on a real backend; WS3 egress is blocked on WASI
+        Preview 1 having no sockets — deferred deliberately, not shipped
+        half-governed; WS4 stale-reference cleanup + ADR-024 Status fix
+  - [ ] Already present: `Language::Wasm` in `mvm-agentd/src/runner/config.rs`,
+        `wasmtime run` in `mvm-runner.rs:154`, `wasm` in
+        `mvm-contract/data/supported_languages.txt`. Only the image half is
+        missing.
 - [ ] Plan 298 — NANDA-style execution receipts and conformance badges
       (`specs/plans/298-nanda-receipts-and-conformance-badges.md`)
   - [x] WS1 RFC approved: `ExecutionReceipt` and `ConformanceBadge` envelopes,
