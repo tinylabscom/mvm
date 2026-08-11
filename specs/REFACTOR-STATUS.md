@@ -1152,8 +1152,15 @@ for detailed scope and acceptance criteria.
         and wall clock read absence as unbounded, egress as deny-all;
         mismatched CPU units refused, never converted), `CheckpointMeta.grants`
         inside the content-address so a tampered parent record cannot justify
-        a wider child, and the check wired into `validate_child_fork_plan`.
-        STILL OPEN: restore does not re-apply grants through `apply_grants`
+        a wider child (skip-serialized when absent, so an older checkpoint
+        reads as schema-stale rather than tampered). BOTH restore paths check,
+        through one predicate `ensure_child_grants_within_parent`: the vm_full
+        fork and the warm-pool claim.
+        STILL OPEN: (a) restore does not re-apply grants through `apply_grants`;
+        (b) a warm parent seals no grant — a factory parent holds no plan or
+        `cpu_grant` by construction and one parent serves every claim, so
+        bounding a claimed child's CPU/wall clock needs a pool-level grant on
+        `StandbySpec`; its egress is already bounded (absent egress = deny-all)
   - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
         `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
         and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,

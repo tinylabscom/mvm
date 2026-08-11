@@ -28,7 +28,7 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
 use crate::checkpoint::{
     CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, VmFullControl,
     capture_vm_full_with_snapshot_store, capture_vm_full_with_trusted_snapshot_backend,
-    verify_content, verify_lineage,
+    ensure_child_grants_within_parent, verify_content, verify_lineage,
 };
 use crate::driver::{
     ChildForkRequest, PreloadChildRequest, RunningVm, RunningVmStopTiming, StandbyParentSpawn,
@@ -571,6 +571,20 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // A missing plan or a digest mismatch refuses before any child side effect.
         let plan = claim_plan(claim)?;
         bind_plan_to_parent(&plan.image.sha256, &parent).map_err(refuse)?;
+        // The same comparison a vm_full fork makes, against the same
+        // chain-verified parent record and through the same predicate. A warm
+        // claim restores a child out of a parent's saved memory exactly as a
+        // fork does, so it must not be the one restore path where a child can
+        // ask for more than its parent held. Placed beside the image-digest
+        // bind — both bind the admitted plan to this verified parent — and
+        // before the child gets an identity, a state dir, or any bytes.
+        ensure_child_grants_within_parent(plan.grants.as_ref(), parent.grants.as_ref()).map_err(
+            |e| {
+                refuse(ClaimRefusal::GrantsExceedParent {
+                    reason: e.to_string(),
+                })
+            },
+        )?;
 
         // (6a) Fresh, registry-unique identity for the child.
         let child = match preloaded_child_name.clone() {
@@ -887,6 +901,20 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             tag: None,
             created_unix: mvm_core::time::now_unix_secs(),
             retain_paused: true,
+            // A decision, not an omission. A factory parent holds no plan and
+            // no tenant by construction — `factory_parent_config` drops
+            // `plan_json` and `cpu_grant` precisely so a parent cannot carry a
+            // grant admitted for some other workload, and one parent serves
+            // every later claim against this pool. Sealing the mirrored
+            // launch's grant here would bind all of them to whichever workload
+            // happened to provision the pool.
+            //
+            // Sealing nothing is not the same as checking nothing: the claim
+            // path still compares, and an absent parent grant is deny-all
+            // egress, so a claimed child asking to reach anywhere is refused.
+            // It leaves CPU and wall clock unbounded by the *parent*; those are
+            // bounded for a warm child by the host ceiling its own plan was
+            // admitted against, never by this record.
             grants: None,
         };
         let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))
@@ -3281,6 +3309,22 @@ mod tests {
         CheckpointId,
         CheckpointMeta,
     ) {
+        seed_audited_parent_with_grants(store_root, src_root, with_overlay_sidecar, None)
+    }
+
+    /// Seed a warm parent whose sealed record carries `grants`, so a claim has a
+    /// real permission set to be bounded against.
+    fn seed_audited_parent_with_grants(
+        store_root: &Path,
+        src_root: &Path,
+        with_overlay_sidecar: bool,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> (
+        CheckpointStore,
+        FsSnapshotStore,
+        CheckpointId,
+        CheckpointMeta,
+    ) {
         let checkpoints = CheckpointStore::at(store_root.join("checkpoints"));
         let snapshots = FsSnapshotStore::new(store_root.join("snapshots")).unwrap();
 
@@ -3307,7 +3351,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 quiesced: true,
-                grants: None,
+                grants,
             },
         )
         .unwrap();
@@ -3480,6 +3524,19 @@ mod tests {
     /// the CLI mints it before handing the runner the claim.
     fn signed_child_plan_json(image_sha256: &str) -> String {
         signed_child_plan_json_with_verbs(image_sha256, None)
+    }
+
+    fn signed_child_plan_json_with_grants(
+        image_sha256: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> String {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("tenant-x")
+            .grants(grants)
+            .build();
+        plan.image.sha256 = image_sha256.to_string();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap()
     }
 
     fn signed_child_plan_json_with_verbs(
@@ -4461,6 +4518,146 @@ mod tests {
             "no child dir on a plan/parent mismatch"
         );
         assert!(runner.driver.forked_children().is_empty());
+    }
+
+    /// A warm claim restores a child out of a parent's saved state exactly as a
+    /// vm_full fork does, so it must run the same subset check. A parent sealed
+    /// under a tight CPU share cannot hand a claimed child a wider one.
+    #[test]
+    fn claim_refuses_a_child_whose_grants_exceed_the_parents() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) = seed_audited_parent_with_grants(
+            store_root.path(),
+            src.path(),
+            true,
+            Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1000 }),
+                ..Default::default()
+            }),
+        );
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+
+        // Bound to the parent's own rootfs, so the image-digest bind passes and
+        // the grants comparison is what refuses.
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json_with_grants(
+                &parent_digest,
+                Some(mvm_contract::grants::Grants {
+                    cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 4000 }),
+                    ..Default::default()
+                }),
+            ),
+        );
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+
+        let err = runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect_err("a claimed child may not widen its parent's grants");
+        assert!(
+            err.to_string().contains("exceeds the parent's 1000"),
+            "refusal must name the widening: {err}"
+        );
+
+        // Not the parent's fault, so warm capacity is returned rather than
+        // quarantined, and nothing was minted for the refused child.
+        assert_eq!(
+            pool.load("warm-parent").unwrap().state,
+            StandbyState::Idle,
+            "a child-side grant widening must return the parent to claimable"
+        );
+        assert_eq!(orphan_child_dirs(), 0, "no child dir on a grant widening");
+        assert!(runner.driver.forked_children().is_empty());
+    }
+
+    /// The other side of the same check: a claimed child that narrows, or that
+    /// matches, is admitted. Without this the refusal test above would pass just
+    /// as well against a check that refused every claim.
+    #[test]
+    fn claim_admits_a_child_that_narrows_the_parents_grants() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) = seed_audited_parent_with_grants(
+            store_root.path(),
+            src.path(),
+            true,
+            Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 4000 }),
+                ..Default::default()
+            }),
+        );
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json_with_grants(
+                &parent_digest,
+                Some(mvm_contract::grants::Grants {
+                    cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1000 }),
+                    ..Default::default()
+                }),
+            ),
+        );
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+
+        runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect("a narrowing child must still be claimable");
     }
 
     /// A parent whose sealed `meta.json` is edited after capture — without

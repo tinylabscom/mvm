@@ -573,24 +573,37 @@ fn validate_child_fork_plan(
         plan.valid_from <= now && now < plan.valid_until,
         "admitted child plan is outside its validity window"
     );
-    // An absent parent record is `Grants::default()`, not "unchecked": that
-    // still leaves CPU and wall clock open (absent means unbounded) while
-    // holding egress closed (absent means deny-all). Skipping the call instead
-    // would silently open egress.
+    ensure_child_grants_within_parent(plan.grants.as_ref(), parent_grants)?;
+    Ok(plan.grants)
+}
+
+/// Refuse a child whose grants exceed the permission set its parent checkpoint
+/// was sealed under.
+///
+/// The one decision point for "may this child run under these grants, given the
+/// parent it came from". Both restore paths call it — the vm_full fork and the
+/// warm-pool claim — because two implementations of a rule like this drift, and
+/// a path without one is exactly the hole this exists to close.
+///
+/// Either side being `None` means `Grants::default()`, never "unchecked". That
+/// leaves CPU and wall clock open (absent means unbounded) while holding egress
+/// closed (absent means deny-all); skipping the call instead would silently open
+/// egress on the very paths that most need it shut.
+pub fn ensure_child_grants_within_parent(
+    child: Option<&mvm_contract::grants::Grants>,
+    parent: Option<&mvm_contract::grants::Grants>,
+) -> Result<()> {
     let unbounded_cpu_deny_all_egress = mvm_contract::grants::Grants::default();
     mvm_contract::grants::subset::grants_are_subset(
-        plan.grants
-            .as_ref()
-            .unwrap_or(&unbounded_cpu_deny_all_egress),
-        parent_grants.unwrap_or(&unbounded_cpu_deny_all_egress),
+        child.unwrap_or(&unbounded_cpu_deny_all_egress),
+        parent.unwrap_or(&unbounded_cpu_deny_all_egress),
     )
     .map_err(|widening| {
         anyhow::anyhow!(
             "admitted child plan exceeds the permission set its parent checkpoint was \
              captured under: {widening}"
         )
-    })?;
-    Ok(plan.grants)
+    })
 }
 
 /// Liveness probe for a VM by name: any backend pid marker whose process still

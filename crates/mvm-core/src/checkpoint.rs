@@ -355,6 +355,13 @@ struct CheckpointDigestInput<'a> {
     runtime_source_policy: &'a Option<RuntimeSourcePolicy>,
     runtime_overlay_version: &'a Option<String>,
     snapshot_id: &'a Option<String>,
+    /// Skipped when absent so a record that seals no grant hashes exactly as it
+    /// did before the field existed. Without this, every checkpoint captured
+    /// before grants were sealed would recompute to a different digest and be
+    /// reported as `meta_digest drift` — i.e. as *tampered*, when the record is
+    /// only schema-stale. The check is meant to be believed, so it must not cry
+    /// tamper over a field nobody touched.
+    #[serde(skip_serializing_if = "Option::is_none")]
     grants: &'a Option<mvm_contract::grants::Grants>,
 }
 
@@ -679,6 +686,21 @@ mod tests {
         assert_ne!(
             bounded.meta_digest,
             digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]).meta_digest
+        );
+    }
+
+    #[test]
+    fn sealing_no_grant_leaves_a_records_digest_where_it_was() {
+        // A record that seals no grant must hash exactly as it did before the
+        // field existed, or every checkpoint captured earlier reports as
+        // `meta_digest drift` — as tampered rather than as schema-stale. The
+        // literal is this fixture's digest read off the commit before `grants`
+        // was added, not a value re-derived from the code it is checking.
+        let m = digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]);
+        assert!(m.grants.is_none());
+        assert_eq!(
+            m.meta_digest.as_str(),
+            "sha256:47b3411659eddf390da230557216188e6fe4b56572f8f8545702fcc04a608e5b"
         );
     }
 

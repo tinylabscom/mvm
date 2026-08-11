@@ -340,13 +340,33 @@ cheapest and most rigorous, not the one where it is hardest.
       and mismatched CPU units are refused rather than converted.
       `CheckpointMeta.grants` is inside `CheckpointDigestInput`, so a parent
       record edited to widen its own grant stops matching the digest the
-      signed chain recorded and is refused before the comparison runs. Capture
-      seals the VM's admitted grants; a vm_full fork checks the child plan's
-      set against the parent's in `validate_child_fork_plan` and records the
-      child's own (narrower) set; an fs_quick fork inherits the parent's.
-      STILL OPEN: restore does not re-apply the grants through `apply_grants`
-      the way a cold boot does — the child cannot be *admitted* wider, but
-      nothing re-arms the host-side control on the restored VM.
+      signed chain recorded and is refused before the comparison runs (a
+      record sealing no grant is skip-serialized, so an older checkpoint keeps
+      its exact digest and reads as schema-stale rather than as tampered).
+      Capture seals the VM's admitted grants. **Both** restore paths run the
+      comparison through one predicate,
+      `checkpoint::ensure_child_grants_within_parent`: the vm_full fork in
+      `validate_child_fork_plan`, which records the child's own (narrower) set,
+      and the warm-pool claim in `claim_standby`, beside `bind_plan_to_parent`
+      and before the child has an identity or a byte. An fs_quick fork presents
+      no plan and inherits.
+
+      STILL OPEN, two gaps, both real:
+      (a) Restore does not re-apply the grants through `apply_grants` the way a
+      cold boot does — a child cannot be *admitted* wider, but nothing re-arms
+      the host-side control on the restored VM.
+      (b) A warm parent seals no grant, so it bounds a claimed child's egress
+      (absent egress is deny-all) but not its CPU or wall clock. Not an
+      oversight in the capture: a factory parent holds no plan, tenant or
+      `cpu_grant` by construction — `factory_parent_config` drops each so a
+      parent cannot carry authority admitted for some other workload — and one
+      parent serves every later claim, so sealing the provisioning workload's
+      grant would bound unrelated claims to a stranger's number. For the parent
+      to bound those dimensions the *pool* needs a grant of its own: a bound on
+      `StandbySpec`, plumbed from pool configuration and sealed at capture.
+      Until then a warm child's CPU and wall clock are bounded only by the host
+      `GrantCeiling` its own plan was admitted against. Belongs with the rest of
+      the warm-pool arming work.
 
 - [ ] **WS6 — The four surfaces.**
       Manifest: `[grants]` table extending `ManifestMachineWorkflow`.
