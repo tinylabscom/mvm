@@ -15,16 +15,16 @@ export function WhyNotContainer() {
         Why Not A Container
       </h2>
       <p className="mb-4 max-w-2xl text-base leading-relaxed text-body">
-        A container is a set of Linux namespaces and cgroups around
-        processes that still make syscalls straight into the host kernel.
-        That kernel is one thing every container on the box shares — a
-        kernel bug or a namespace escape reaches the host.
+        A container is namespaces and cgroups around a process — the
+        syscalls still land on the host kernel, and every container on the
+        box shares that same kernel.
       </p>
       <p className="mb-10 max-w-2xl text-base leading-relaxed text-body">
-        A microVM doesn&rsquo;t share it. Every workload mvm runs boots its
-        own Linux kernel under a real hypervisor, with its own root
-        filesystem and, on every backend, no guest network device at all
-        &mdash; the isolation is hardware-assisted, not namespace-assisted.
+        An mvm workload boots its own guest kernel under a real hypervisor,
+        on its own root filesystem, with no guest network device on any
+        backend. Same hardware, same host kernel underneath &mdash; one
+        extra layer, and a hardware-assisted boundary instead of a shared
+        one.
       </p>
 
       <Reveal>
