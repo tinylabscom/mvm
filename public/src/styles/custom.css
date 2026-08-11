@@ -836,3 +836,15 @@ h2.text-title {
     transform: none;
   }
 }
+
+/* Walkthrough: scroll-sync relies on motion (opacity swap + sticky scroll
+   feel) to communicate which step is active, so under reduced motion we
+   swap to the stacked layout — same content, no scroll-driven state. */
+@media (prefers-reduced-motion: reduce) {
+  .site-walk {
+    display: none;
+  }
+  .site-walk-static {
+    display: flex;
+  }
+}

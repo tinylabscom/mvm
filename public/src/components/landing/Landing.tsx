@@ -1,6 +1,7 @@
 import { Hero } from "./Hero";
 import { Install } from "./Install";
 import { Features } from "./Features";
+import { Walkthrough } from "./Walkthrough";
 import { Architecture } from "./Architecture";
 import { CodeExample } from "./CodeExample";
 import { CTABanner } from "./CTABanner";
@@ -12,6 +13,7 @@ export function Landing() {
       <Hero />
       <Install />
       <Features />
+      <Walkthrough />
       <Architecture />
       <CodeExample />
       <CTABanner />
