@@ -1037,27 +1037,45 @@ the full four-drive device model coming back (`kick block blk0`..`blk3` after
 captures, the checkpoint exists, and a claim now gets all the way to the reseed
 handshake that "was never exercised".
 
-**BUG-2 — pre-existing, not this branch's. Now the live blocker, exactly as
-predicted below.** The transient run path persists the
+**BUG-2 — pre-existing, not this branch's.** The transient run path persists the
 plan via `write_plan` but never mints `verb-grant.json`, so no
 `mvm.host_signer_pub` reaches the guest and the agent rejects the control
 connection with `rejecting control connection without a pinned host key`. It
 predates this branch's merge base. Track it separately; expect it to be the next
 blocker once BUG-1 is fixed.
 
-Confirmed live once BUG-1 was fixed. The claim reaches `child_forked`, the
-child resumes, and then the guest prints
+**BUG-2 is NOT what blocks the live claim** (checked 2026-08-11, **#2336**).
+Once BUG-1 was fixed the claim reaches `child_forked`, the child resumes, and
+the claim then fails closed with `forked child '<vm>' never answered the
+post-restore identity handshake`. The guest console alongside it prints
 
 ```
 mvm-guest-agent: authenticated control handshake failed: Failed to read frame length
 ```
 
-so the post-restore identity handshake is never answered and the claim fails
-closed with `forked child '<vm>' never answered the post-restore identity
-handshake`. The fail-closed posture is correct — a child that cannot prove it
-reseeded must not be admitted — but it means no warm claim can complete on
-Firecracker until this is fixed, and therefore no claimed-launch measurement
-against the cold baseline is possible yet.
+but **that line is benign readiness-probe noise, not the failure.**
+`PostRestoreSignal::probe_ready` connects to `GUEST_AGENT_PORT` and drops the
+connection without a handshake, while the guest speaks *second*
+(`secure_guest_handshake` opens with `read_frame` awaiting the host's
+`SessionHello`). So every probe — one per `POST_RESTORE_PROBE_INTERVAL`, 50 ms —
+makes the agent accept, wait, hit EOF and print exactly that.
+
+It also rules BUG-2 out as the cause: `handle_client` returns early with
+`rejecting control connection without a pinned host key` when
+`host_signer_key()` is `None`, and that message never appeared — the failing
+line is the one *after* it, so the host key did reach the guest.
+
+The real error is still uncaptured: `probe_ready` succeeded (no `did not become
+reachable within` bail), so the failure is inside `signal.post_restore()`, and
+the reported chain stopped at its `signaling post-restore to {vm}` context
+because the capture was grepped and truncated. Diagnosis before fix: re-run the
+claim capturing complete stderr and read the full `Caused by:` chain. Candidates
+then: the host-side `AuthenticatedSession::host` handshake over vsock state that
+did not survive the restore, or the child's vsock CID/port mapping after the
+fork.
+
+Either way no warm claim completes on Firecracker yet, so no claimed-launch
+measurement against the cold baseline is possible.
 
 **BUG-5 — a failed claim strands the standby and orphans its VMM.** Found while
 exercising the above. When a claim fails after the child is materialized, the
