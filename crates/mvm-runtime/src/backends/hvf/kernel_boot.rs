@@ -1119,11 +1119,11 @@ mod tests {
     #[test]
     fn default_bootargs_mounts_rootfs_when_disk_present() {
         // A virtio-blk disk is a real mkGuest workload rootfs: mount it and run
-        // the baked init, matching the `root=/dev/vda rw init=/init` contract
+        // the baked init, matching the read-only root-device contract
         // the other backends boot mkGuest images with.
         let with = default_bootargs(true);
         assert!(
-            with.contains("root=/dev/vda rw"),
+            with.contains("root=/dev/vda ro"),
             "real workload must mount the virtio-blk rootfs: {with}"
         );
         assert!(

@@ -146,9 +146,15 @@ pub(in crate::commands) struct RunArgs {
     /// 443), repeatable. Implies networking and **wins over `--net`**.
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
-    /// vCPU cores (default: 2)
+    /// vCPU cores the guest sees (default: 2). Not a host CPU share.
     #[arg(long, default_value = "2")]
     pub cpus: u32,
+    /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
+    #[arg(long = "cpu-limit", value_name = "MILLICORES")]
+    pub cpu_limit: Option<u32>,
+    /// Read grants (CPU, wall clock, egress) from a JSON file.
+    #[arg(long = "grants-file", value_name = "PATH")]
+    pub grants_file: Option<PathBuf>,
     /// Memory (supports human-readable: 512M, 1G, ...)
     #[arg(long, default_value = "512M")]
     pub memory: String,
@@ -368,9 +374,23 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         return Ok(());
     }
-    // One policy model for every backend: resolve the egress flags here and
-    // thread the result down both the json/receipt and the streaming paths.
-    let network_policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+    // One policy model for every backend: resolve the grant surfaces here —
+    // which settles the egress policy in the same step — and thread the result
+    // down both the json/receipt and the streaming paths.
+    let host_config = mvm_core::user_config::load(None);
+    let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
+        cpu_limit_millicores: args.cpu_limit,
+        timeout_secs: args.timeout,
+        allow_host: &args.allow_host,
+        net: args.net,
+        grants_file: args.grants_file.as_deref(),
+        // A transient run names its image on the command line and reads no
+        // project manifest; `machine create` is the verb that sources a
+        // `[grants]` table.
+        manifest: None,
+        config: &host_config,
+    })?;
+    let network_policy = resolved_grants.network_policy.clone();
 
     // Every transient run is admitted as a locally-signed workload (uniform
     // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
@@ -379,17 +399,21 @@ pub(in crate::commands) fn run_secure_with_source(
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
-    let admit_backend = crate::exec::select_exec_backend(
+    let selected_backend = crate::exec::select_exec_backend(
         args.image.is_some(),
         &network_policy,
         args.hypervisor.as_deref(),
-    )?
-    .name()
-    .to_string();
+    )?;
+    // The typed kind, taken off the backend object itself: admission measures a
+    // declared grant against the mechanisms this tier really has, and a name
+    // parsed back into a tier would be measuring against whatever was typed.
+    let admit_backend_kind = selected_backend.kind();
+    let admit_backend = selected_backend.name().to_string();
     // The closure below moves `admit_backend`; keep a copy for the receipt's
     // honest per-backend enforcement tier.
     let receipt_backend = admit_backend.clone();
     let admit_network_mode = args.network_mode;
+    let admit_grants = resolved_grants.plan_grants.clone();
     let admit_cpus = args.cpus;
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
@@ -446,6 +470,8 @@ pub(in crate::commands) fn run_secure_with_source(
                 admit_is_dev,
             ),
             services: admit_host_services.clone(),
+            grants: admit_grants.clone(),
+            backend_kind: Some(admit_backend_kind),
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                 "an ad-hoc argv run replaces the image entrypoint",
             ),
@@ -731,6 +757,138 @@ fn run_run_args(
     Ok(())
 }
 
+/// Resolve the [`crate::exec::ImageSource`] a launch boots from: the OCI image
+/// named by `--image`, or — when none was named — the same verified runtime pack
+/// or bundled default microVM a bare `machine run` falls back to.
+///
+/// Shared by the run path and by `pool warm`, because a warm parent must boot
+/// the same rootfs a claim will be matched against: the pool keys on that
+/// rootfs's digest, so resolving the image a second way is how the pool fills
+/// with parents nothing claims. `provenance` is `None` for the warm path — a
+/// factory parent is admitted under no workload plan, so there is no plan for
+/// the claim-14 provenance entry to bind to.
+pub(in crate::commands) fn resolve_launch_image_source(
+    image_ref: Option<&str>,
+    prod: bool,
+    provenance: Option<&OciProvenanceSink>,
+) -> Result<crate::exec::ImageSource> {
+    let Some(reference) = image_ref else {
+        return resolve_default_image_source(prod);
+    };
+    let oci_cache_root = super::super::image::oci_cache_root();
+    // A prod run refuses a mutable OCI tag before ANY work — the
+    // digest-pin policy refusal must be what the user sees, not an
+    // incidental missing-kernel error from the local resolution
+    // below. The pull path re-checks it, so this only reorders the
+    // refusal ahead of the workload-kernel resolution.
+    super::super::image::ensure_prod_digest_pin(reference, prod)?;
+    // Resolve the workload kernel BEFORE the pull. An `--image` run
+    // boots the materialized OCI rootfs (with its injected agent), so
+    // it needs only a workload kernel — a cached workload/default-image
+    // kernel, a local build (source checkout), or the published
+    // download — rather than building/downloading a whole default image
+    // whose rootfs we'd discard. Resolving it first makes a missing or
+    // cold-cache kernel fail fast with an actionable error instead of
+    // surfacing only after a full pull + rootfs materialization. The
+    // rootfs boots verity-sealed, so the kernel must carry dm-verity;
+    // the builder kernel (which drops it) is never a stand-in.
+    let kernel_path = ensure_workload_kernel()?;
+    // Enforce that invariant host-side: a kernel with no dm-verity
+    // support would panic the guest in early init opening
+    // /dev/mapper/control, with no host signal. Fail fast instead.
+    assert_workload_kernel_supports_verity(&kernel_path)?;
+    // A source-checkout run that needs the legacy rootfs guest runtime
+    // cross-compiles it inside materialization — a slow,
+    // output-silent host `cargo zigbuild`. Announce it so the run does
+    // not look wedged after the OCI pull logs.
+    if super::super::image::oci_guest_runtime_compile_pending(&oci_cache_root) {
+        ui::info(
+            "Compiling the mvm guest runtime from your source checkout \
+             (first build for these sources; cached afterward)…",
+        );
+    }
+    let cached = super::super::image::resolve_or_pull_run_image(&oci_cache_root, reference, prod)?;
+    ui::info(&format!(
+        "Using OCI image {} ({})",
+        cached.reference, cached.resolved_digest
+    ));
+    // Hand the provenance to the real admission rather than
+    // minting a plan here to hang it on. This used to synthesize a
+    // throwaway `ExecutionPlan` and emit `plan.admitted` for it,
+    // so one launch wrote two `plan.admitted` entries with
+    // different plan ids — and the first authorized nothing, since
+    // no VM ever booted under it. A reader of the chain could not
+    // tell which of the two was the admission that mattered.
+    if let Some(sink) = provenance {
+        *sink.borrow_mut() = Some(cached.provenance.audit_labels());
+    }
+    if cached.pulled {
+        let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
+        mvm_core::audit_emit!(
+            ImageFetch,
+            "source=run_image reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
+            cached.reference,
+            cached.resolved_digest,
+            prod,
+            cached.provenance.layer_digests.len(),
+            cached.provenance.trust_policy,
+            cached.provenance.verification_status,
+            auth_source
+        );
+    }
+    Ok(crate::exec::ImageSource::Prebuilt {
+        kernel_path,
+        rootfs_path: cached.rootfs_path.display().to_string(),
+        initrd_path: None,
+        label: format!("oci:{}", cached.resolved_digest),
+        // Offer the unpacked+injected tree as a virtiofs-root candidate;
+        // the run-path tier gate (backend cap × prod × sealed) decides.
+        virtiofs_oci_root: cached
+            .unpacked_root
+            .as_ref()
+            .map(|tree| crate::exec::VirtiofsOciRoot {
+                tree_dir: tree.display().to_string(),
+                prod,
+            }),
+    })
+}
+
+/// The image a launch boots when the caller named none: a verified runtime pack
+/// if one is cached for this host, else the bundled default microVM built in the
+/// builder VM.
+fn resolve_default_image_source(prod: bool) -> Result<crate::exec::ImageSource> {
+    if let Some(src) = super::runtime_pack::try_runtime_pack_image_source(prod) {
+        let label = match &src {
+            crate::exec::ImageSource::Prebuilt { label, .. } => label.clone(),
+            crate::exec::ImageSource::Template(name) => name.clone(),
+            crate::exec::ImageSource::PinnedTemplate {
+                slot_hash,
+                revision_hash,
+            } => format!("{slot_hash}@{revision_hash}"),
+        };
+        ui::info(&format!(
+            "Instant boot from verified runtime pack ({label}); skipping the build."
+        ));
+        return Ok(src);
+    }
+    let reason = super::runtime_pack::runtime_pack_diagnosis()
+        .ok()
+        .and_then(|d| super::runtime_pack::not_instant_reason(&d))
+        .unwrap_or_else(|| "no verified runtime pack is cached for this host".to_string());
+    ui::info(&format!(
+        "{reason}; building the bundled default microVM in the builder VM."
+    ));
+    let (kernel_path, rootfs_path) =
+        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+    Ok(crate::exec::ImageSource::Prebuilt {
+        kernel_path,
+        rootfs_path,
+        initrd_path: None,
+        label: "default-microvm".to_string(),
+        virtiofs_oci_root: None,
+    })
+}
+
 fn build_exec_request(
     args: Args,
     command_name: &str,
@@ -804,122 +962,9 @@ fn build_exec_request(
                 };
                 crate::exec::ImageSource::Template(resolved)
             }
-            (None, Some(reference)) => {
-                let oci_cache_root = super::super::image::oci_cache_root();
-                // A prod run refuses a mutable OCI tag before ANY work — the
-                // digest-pin policy refusal must be what the user sees, not an
-                // incidental missing-kernel error from the local resolution
-                // below. The pull path re-checks it, so this only reorders the
-                // refusal ahead of the workload-kernel resolution.
-                super::super::image::ensure_prod_digest_pin(&reference, prod)?;
-                // Resolve the workload kernel BEFORE the pull. An `--image` run
-                // boots the materialized OCI rootfs (with its injected agent), so
-                // it needs only a workload kernel — a cached workload/default-image
-                // kernel, a local build (source checkout), or the published
-                // download — rather than building/downloading a whole default image
-                // whose rootfs we'd discard. Resolving it first makes a missing or
-                // cold-cache kernel fail fast with an actionable error instead of
-                // surfacing only after a full pull + rootfs materialization. The
-                // rootfs boots verity-sealed, so the kernel must carry dm-verity;
-                // the builder kernel (which drops it) is never a stand-in.
-                let kernel_path = ensure_workload_kernel()?;
-                // Enforce that invariant host-side: a kernel with no dm-verity
-                // support would panic the guest in early init opening
-                // /dev/mapper/control, with no host signal. Fail fast instead.
-                assert_workload_kernel_supports_verity(&kernel_path)?;
-                // A source-checkout run that needs the legacy rootfs guest runtime
-                // cross-compiles it inside materialization — a slow,
-                // output-silent host `cargo zigbuild`. Announce it so the run does
-                // not look wedged after the OCI pull logs.
-                if super::super::image::oci_guest_runtime_compile_pending(&oci_cache_root) {
-                    ui::info(
-                        "Compiling the mvm guest runtime from your source checkout \
-                         (first build for these sources; cached afterward)…",
-                    );
-                }
-                let cached = super::super::image::resolve_or_pull_run_image(
-                    &oci_cache_root,
-                    &reference,
-                    prod,
-                )?;
-                ui::info(&format!(
-                    "Using OCI image {} ({})",
-                    cached.reference, cached.resolved_digest
-                ));
-                // Hand the provenance to the real admission rather than
-                // minting a plan here to hang it on. This used to synthesize a
-                // throwaway `ExecutionPlan` and emit `plan.admitted` for it,
-                // so one launch wrote two `plan.admitted` entries with
-                // different plan ids — and the first authorized nothing, since
-                // no VM ever booted under it. A reader of the chain could not
-                // tell which of the two was the admission that mattered.
-                *oci_provenance.borrow_mut() = Some(cached.provenance.audit_labels());
-                if cached.pulled {
-                    let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
-                    mvm_core::audit_emit!(
-                        ImageFetch,
-                        "source=run_image reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
-                        cached.reference,
-                        cached.resolved_digest,
-                        prod,
-                        cached.provenance.layer_digests.len(),
-                        cached.provenance.trust_policy,
-                        cached.provenance.verification_status,
-                        auth_source
-                    );
-                }
-                crate::exec::ImageSource::Prebuilt {
-                    kernel_path,
-                    rootfs_path: cached.rootfs_path.display().to_string(),
-                    initrd_path: None,
-                    label: format!("oci:{}", cached.resolved_digest),
-                    // Offer the unpacked+injected tree as a virtiofs-root candidate;
-                    // the run-path tier gate (backend cap × prod × sealed) decides.
-                    virtiofs_oci_root: cached.unpacked_root.as_ref().map(|tree| {
-                        crate::exec::VirtiofsOciRoot {
-                            tree_dir: tree.display().to_string(),
-                            prod,
-                        }
-                    }),
-                }
+            (None, image_ref) => {
+                resolve_launch_image_source(image_ref.as_deref(), prod, Some(oci_provenance))?
             }
-            (None, None) => match super::runtime_pack::try_runtime_pack_image_source(prod) {
-                Some(src) => {
-                    let label = match &src {
-                        crate::exec::ImageSource::Prebuilt { label, .. } => label.clone(),
-                        crate::exec::ImageSource::Template(name) => name.clone(),
-                        crate::exec::ImageSource::PinnedTemplate {
-                            slot_hash,
-                            revision_hash,
-                        } => format!("{slot_hash}@{revision_hash}"),
-                    };
-                    ui::info(&format!(
-                        "Instant boot from verified runtime pack ({label}); \
-                             skipping the build."
-                    ));
-                    src
-                }
-                None => {
-                    let reason = super::runtime_pack::runtime_pack_diagnosis()
-                        .ok()
-                        .and_then(|d| super::runtime_pack::not_instant_reason(&d))
-                        .unwrap_or_else(|| {
-                            "no verified runtime pack is cached for this host".to_string()
-                        });
-                    ui::info(&format!(
-                        "{reason}; building the bundled default microVM in the builder VM."
-                    ));
-                    let (kernel_path, rootfs_path) =
-                        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
-                    crate::exec::ImageSource::Prebuilt {
-                        kernel_path,
-                        rootfs_path,
-                        initrd_path: None,
-                        label: "default-microvm".to_string(),
-                        virtiofs_oci_root: None,
-                    }
-                }
-            },
         }
     };
     let (_, sdk_sidecar) = super::host_services::resolve_bindings_and_sidecar(&args.host_service)?;
@@ -1574,6 +1619,8 @@ mod tests {
             net: false,
             allow_host: Vec::new(),
             cpus: 2,
+            cpu_limit: None,
+            grants_file: None,
             memory: "512M".to_string(),
             profile,
             agent_verb: Vec::new(),

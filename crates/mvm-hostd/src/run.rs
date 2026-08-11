@@ -10,10 +10,13 @@
 //! window, and non-replayed — the same gate `mvmctl up`/`run` go through.
 //!
 //! The richer knobs the CLI threads (secrets, bundle pins, deps volumes,
-//! per-destination redaction, custom egress policy) are deliberately absent:
-//! the facade `MachineSpec` does not carry them, so exposing them here would
-//! invent a surface no caller can fill. When a driver needs them it uses the
-//! CLI admission path directly.
+//! per-destination redaction) are deliberately absent: the facade
+//! `MachineSpec` does not carry them, so exposing them here would invent a
+//! surface no caller can fill. When a driver needs them it uses the CLI
+//! admission path directly. Egress is the exception, and only because the
+//! facade grew a way to say it: an egress *grant* is carried, and the launch
+//! config's policy is derived from it, so the plan the boot was signed under
+//! and the policy the gate reads come from one authored value.
 
 use std::path::{Path, PathBuf};
 
@@ -65,6 +68,13 @@ pub struct LocalRunRequest {
     /// workload, `false` for a persistent machine that outlives the
     /// admitting call.
     pub destroy_on_exit: bool,
+    /// What this workload is permitted to consume or reach. Baked into the
+    /// signed plan and checked against the host's ceiling during admission; the
+    /// egress dimension additionally becomes the launch config's network
+    /// policy, so what the gate enforces is what the plan was signed for.
+    /// `None` keeps the pre-grant baseline: no CPU cap, no wall-clock bound,
+    /// deny-all egress.
+    pub grants: Option<mvm_contract::grants::Grants>,
 }
 
 /// Admission substrate for a local run: the clock and replay ledger that drive
@@ -168,7 +178,7 @@ pub fn admit_and_boot_local(
         .transpose()?;
 
     let synthesis = SynthesisInput {
-        grants: None,
+        grants: req.grants.clone(),
         stream_edges: Vec::new(),
         kernel_sha256: kernel_sha.as_deref(),
         network_mode: Default::default(),
@@ -226,7 +236,15 @@ pub fn admit_and_boot_local(
                 launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
             },
         ),
-        // network_policy defaults to deny-all via VmStartConfig's Default.
+        // With no egress grant the deny-all default from `VmStartConfig` stands;
+        // a granted allow-list is projected onto it, so the policy the gate
+        // enforces is derived from the same grants the plan was signed for.
+        network_policy: match req.grants.as_ref() {
+            Some(grants) if grants.egress.is_some() => {
+                mvm_contract::grants::projection::network_policy_from_grants(grants)
+            }
+            _ => mvm_core::network_policy::NetworkPolicy::deny_all(),
+        },
         ..Default::default()
     };
     attach_runtime_overlay_from_cache(&mut config, &req.backend_name)?;
@@ -285,6 +303,7 @@ mod tests {
             backend_name: "mock".into(),
             volumes: Vec::new(),
             destroy_on_exit: false,
+            grants: None,
         };
 
         let started = admit_and_boot_local(
@@ -386,6 +405,7 @@ mod tests {
                 encrypted: false,
             }],
             destroy_on_exit: true,
+            grants: None,
         };
         let started = admit_and_boot_local(
             &backend,
@@ -450,6 +470,7 @@ mod tests {
                 encrypted: false,
             }],
             destroy_on_exit: true,
+            grants: None,
         };
         let err = admit_and_boot_local(
             &backend,
@@ -533,6 +554,7 @@ mod tests {
             backend_name: "mock".into(),
             volumes: Vec::new(),
             destroy_on_exit: false,
+            grants: None,
         };
         let err = admit_and_boot_local(
             &backend,

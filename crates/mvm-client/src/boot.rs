@@ -33,6 +33,19 @@ pub fn start_prepared(
     Ok(())
 }
 
+/// The typed tier behind a hypervisor name.
+///
+/// Admission measures a workload's declared grants against the mechanisms its
+/// backend actually has, and that question has to be asked of a `BackendKind`
+/// rather than of a string: a name is a label, and a gate that parsed one would
+/// be deciding which resource controls apply from whatever the caller typed.
+/// The conversion lives here, at the seam that already owns name-to-backend
+/// resolution, so a caller holding only a name still never touches
+/// `AnyBackend` itself.
+pub fn backend_kind_for(hypervisor: &str) -> mvm_core::protocol::vm_backend::BackendKind {
+    mvm_runtime::backend::AnyBackend::from_hypervisor(hypervisor).kind()
+}
+
 /// Whether the named VM is currently `Running` on `hypervisor`. A status-query
 /// error (VM absent) reads as not-running — mirrors the CLI's former inline
 /// `from_hypervisor(...).status(...)` check.

@@ -392,14 +392,21 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
     // A run that granted CPU or wall clock is the only one with anything to
     // enforce here; asking otherwise would warn on every unbounded boot.
     //
-    // `grants.egress` is deliberately outside both this gate and the ceiling.
-    // Egress is not bounded by a numeric ceiling and is not a per-backend
-    // mechanism question: it is enforced at the one substitution endpoint every
-    // workload's traffic already goes through, and the projection that would
-    // turn an egress grant into that endpoint's policy is not wired yet. Until
-    // it is, an egress grant is inert — which is closed, because the policy the
-    // endpoint installs without it is deny-all. Do not read this early return
-    // as egress having been checked.
+    // `grants.egress` is deliberately outside both this gate and the ceiling,
+    // and is enforced elsewhere rather than left unenforced. It is not bounded
+    // by a numeric ceiling, and "can this tier deliver it" is not a per-backend
+    // question for egress: every workload's traffic already leaves through the
+    // one per-VM substitution endpoint, so a granted allow-list is projected
+    // onto the policy that endpoint installs, and its gate is what admits or
+    // drops each flow.
+    //
+    // What this early return does not do is check that the projection happened.
+    // It cannot: the policy the endpoint installs rides on the launch config,
+    // not in the plan body this function reads, so keeping the two derived from
+    // one authored value is the obligation of the seam that builds both. What
+    // holds here unconditionally is the floor — an absent egress grant and an
+    // empty allow-list both project to deny-all, so a workload that granted
+    // nothing reaches nothing.
     if grants.cpu.is_none() && grants.wall_clock.is_none() {
         return Ok(());
     }
@@ -1563,8 +1570,11 @@ mod tests {
     /// Isolate `MVM_HOME` and write an operator config carrying `ceiling`.
     ///
     /// Admission reads the ceiling from host config rather than from a
-    /// parameter, so a test that wants a bounded host has to *be* one. Returns
-    /// the guard and the home dir; both must outlive the admission call.
+    /// parameter, so a test that wants a bounded host has to *be* one. Every
+    /// test that reaches `admit_for_run` or `admit_and_start` must hold the
+    /// returned guard, including tests using the default ceiling; otherwise it
+    /// can observe another parallel test's process-wide `MVM_HOME`. The guard
+    /// and home dir must both outlive the admission call.
     fn host_with_ceiling(
         ceiling: mvm_contract::grants::ceiling::GrantCeiling,
     ) -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
@@ -1638,6 +1648,38 @@ mod tests {
             cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores }),
             ..mvm_contract::grants::Grants::default()
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_cpu_mechanism_gap_requires_a_share_capable_tier_and_a_reported_gap() {
+        use mvm_core::cpu_scope::MechanismGap;
+
+        let missing_bus = Some(MechanismGap::NoUserSessionBus);
+        assert_eq!(
+            host_cpu_mechanism_gap(
+                &mvm_contract::grants::Grants::default(),
+                BackendKind::Firecracker,
+                missing_bus,
+            ),
+            None,
+            "a plan with no CPU share has no CPU mechanism gap"
+        );
+        assert_eq!(
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Wasm, missing_bus),
+            None,
+            "a tier whose CPU control is not a cgroup share does not use the host mechanism"
+        );
+        assert_eq!(
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Firecracker, None),
+            None,
+            "an available host mechanism leaves no gap"
+        );
+
+        let detail =
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Firecracker, missing_bus)
+                .expect("a missing mechanism must be reported for a share-capable tier");
+        assert!(detail.contains("no user session bus"), "{detail}");
     }
 
     #[test]
@@ -1985,6 +2027,7 @@ mod tests {
 
     #[test]
     fn happy_path_returns_admitted_plan_with_plan_id() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let clock = SystemClock;
         let ledger = InMemoryNonceLedger::new();
@@ -2010,6 +2053,7 @@ mod tests {
 
     #[test]
     fn admitted_plan_id_is_a_content_address() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let admitted = admit_for_run(
             &fixture_input("vm1"),
@@ -2081,6 +2125,7 @@ mod tests {
 
     #[test]
     fn admitted_plan_signed_field_round_trips_through_verify() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let admitted = admit_for_run(
             &fixture_input("vm1"),
@@ -2101,6 +2146,7 @@ mod tests {
 
     #[test]
     fn propagates_synthesis_failures() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let err = admit_for_run(
             &fixture_input(""), // empty vm_name fails synthesis
@@ -2119,6 +2165,7 @@ mod tests {
 
     #[test]
     fn two_distinct_admit_calls_produce_distinct_plan_ids_and_nonces() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let clock = SystemClock;
         let ledger = InMemoryNonceLedger::new();
@@ -2245,6 +2292,7 @@ mod tests {
         // Generate the publisher key out of band, build a bundle,
         // enrol the pubkey in the trust store, hand admit_for_run a
         // matching pin + context.
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
@@ -2279,6 +2327,7 @@ mod tests {
         // mvmctl up path didn't wire a BundleAdmissionContext. The
         // admit path refuses rather than silently skipping the
         // re-verify step (fail closed, not fail open).
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
@@ -2301,6 +2350,7 @@ mod tests {
 
     #[test]
     fn admit_with_unknown_publisher_in_trust_store_refuses() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
@@ -2338,6 +2388,7 @@ mod tests {
         // Resolver returns a different archive than the pin describes.
         // The bundle_sha256 cross-check catches it before the
         // signature verify even runs.
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let sk = {
             let mut __ed_seed = [0u8; 32];
@@ -2372,6 +2423,7 @@ mod tests {
     #[test]
     fn thread_tenant_id_sets_only_tenant_label_not_the_bridge_plan() {
         use mvm_core::vm_backend::VmStartConfig;
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let admitted = admit_for_run(
             &fixture_input("vm-tenant-only"),
@@ -2407,6 +2459,7 @@ mod tests {
     #[test]
     fn populate_audit_substrate_threads_tenant_and_signed_envelope() {
         use mvm_core::vm_backend::VmStartConfig;
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let clock = SystemClock;
         let ledger = InMemoryNonceLedger::new();
@@ -2448,6 +2501,7 @@ mod tests {
         // policy_bundle arg, NOT from `admitted.plan().bundle` (the .mvmpkg
         // PlanArtifact pin, a different bundle verified separately).
         use mvm_core::vm_backend::VmStartConfig;
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let clock = SystemClock;
         let ledger = InMemoryNonceLedger::new();
@@ -2599,6 +2653,7 @@ mod tests {
 
     #[test]
     fn caller_audit_labels_flow_through_admission() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let mut input = fixture_input("vm-label");
         input.audit_labels.insert(
@@ -2799,6 +2854,7 @@ mod tests {
 
     #[test]
     fn admit_and_start_admits_then_boots_on_mock() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
@@ -2841,6 +2897,7 @@ mod tests {
     #[test]
     fn the_admitted_grant_reaches_the_launch_config_and_a_caller_supplied_one_does_not() {
         use mvm_core::vm_backend::VmStartConfig;
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let mut input = fixture_input("vm-grant-threaded");
         let grants = mvm_contract::grants::Grants {
@@ -2876,6 +2933,7 @@ mod tests {
     #[test]
     fn an_ungranted_plan_clears_a_caller_supplied_bound() {
         use mvm_core::vm_backend::VmStartConfig;
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let admitted = admit_for_run(
             &fixture_input("vm-no-grant"),
@@ -2901,6 +2959,7 @@ mod tests {
     /// a bound nobody reports is indistinguishable from a bound nobody applied.
     #[test]
     fn an_admitted_boot_records_the_tier_that_bounded_it() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
@@ -2937,6 +2996,7 @@ mod tests {
     /// trail alone must not have to take the caller's word for it.
     #[test]
     fn an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
@@ -3040,6 +3100,7 @@ mod tests {
     fn a_required_admission_record_that_cannot_be_written_stops_the_boot() {
         use crate::audit::durability::AuditDurability;
 
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
@@ -3094,6 +3155,7 @@ mod tests {
     fn a_best_effort_admission_record_does_not_stop_the_boot() {
         use crate::audit::durability::AuditDurability;
 
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
@@ -3136,6 +3198,7 @@ mod tests {
     #[test]
     fn admit_and_start_refuses_unadmitted_volume_before_boot() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();

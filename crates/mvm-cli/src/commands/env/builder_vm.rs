@@ -37,25 +37,26 @@ use bootstrap::{
 };
 #[cfg(all(test, feature = "builder-vm"))]
 use default_microvm::DefaultMicrovmVariant;
-#[cfg(test)]
-use default_microvm::{
-    WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
-    kernel_carries_dm_verity, missing_workload_kernel_message, resolve_workload_kernel_bootstrap,
-};
+#[cfg(any(feature = "builder-vm", test))]
+use default_microvm::workload_config_carries_dm_verity;
 pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
     ensure_workload_verity_initrd,
+};
+#[cfg(test)]
+use default_microvm::{
+    default_microvm_assets, evict_incompatible_workload_kernel, missing_workload_kernel_message,
 };
 use image_ops::validate_dev_image_artifacts;
 #[cfg(feature = "builder-vm")]
 use image_ops::verify_stage0_rootfs_has_init;
 pub(crate) use kernel::KernelSource;
-#[cfg(all(test, feature = "builder-vm"))]
-use kernel::format_compile_elapsed;
 #[cfg(feature = "builder-vm")]
 pub(crate) use kernel::resolve_kernel_source;
 #[cfg(feature = "builder-vm")]
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
+#[cfg(all(test, feature = "builder-vm"))]
+use kernel::{format_compile_elapsed, format_compile_start};
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
 #[cfg(any(
@@ -70,10 +71,13 @@ use stage0_cache::builder_vm_artifact_names;
 #[cfg(feature = "release-artifact-bootstrap")]
 use stage0_cache::download_builder_vm_image;
 pub(in crate::commands) use stage0_cache::{
-    Stage0SweepOutcome, stage0_bootstrap_in_flight, sweep_orphaned_stage0_staging_dirs,
+    Stage0SweepOutcome, stage0_active_in_process, stage0_bootstrap_in_flight,
+    sweep_orphaned_stage0_staging_dirs,
 };
 #[cfg(any(feature = "builder-vm", test))]
-use stage0_cache::{acquire_stage0_lock, unique_builder_vm_stage0_staging_dir};
+use stage0_cache::{
+    acquire_stage0_lock, sweep_stage0_staging_siblings, unique_builder_vm_stage0_staging_dir,
+};
 #[cfg(test)]
 use stage0_cache::{
     builder_vm_source_cache_ready, builder_vm_source_cache_status, builder_vm_source_fingerprint,

@@ -973,6 +973,8 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         restrict_agent_verbs: !parent_agent_verbs.is_empty()
             || super::agent_verbs::grant_eligible(false, false, false),
         services: Vec::new(),
+        grants: None,
+        backend_kind: None,
         entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
             "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
         ),

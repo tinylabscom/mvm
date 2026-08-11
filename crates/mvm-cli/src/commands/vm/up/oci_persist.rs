@@ -90,6 +90,11 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     /// carry an attenuated ProdSafe-only grant. Baked-entrypoint boots (no
     /// trailing argv, non-dev profile) may still receive the grant.
     pub has_ad_hoc_argv: bool,
+    /// The machine spec's resolved permission set, baked into the signed plan
+    /// on every start. Its egress dimension is already reflected in
+    /// [`network_policy`](Self::network_policy), which the caller derived from
+    /// the same spec.
+    pub grants: Option<mvm_contract::grants::Grants>,
 }
 
 fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) -> bool {
@@ -187,6 +192,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         kernel_path,
         agent_verb,
         has_ad_hoc_argv,
+        grants,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     let mut prepared_volumes =
@@ -255,6 +261,11 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             profile == "dev",
         ),
         services: Vec::new(),
+        grants,
+        // The typed kind of the backend this start resolved, so the grant gate
+        // measures a declared bound against the mechanisms that tier has rather
+        // than refusing for want of an answer.
+        backend_kind: Some(mvm_client::backend_kind_for(backend_name)),
         entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
             "the persistent OCI start path resolves no entrypoint",
         ),

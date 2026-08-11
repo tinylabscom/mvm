@@ -235,6 +235,10 @@ pub fn run(workspace: &Path, mode: Mode, package: Option<&str>) -> Result<()> {
 
     let baseline = read_baseline(&baseline_path)?;
     let mut errors = check_accepted_reasons(&baseline.accepted_misses);
+    errors.extend(check_accepted_files_on_surface(
+        &baseline.surface,
+        &baseline.accepted_misses,
+    ));
     errors.extend(check_scope_reasons(&baseline.surface));
     errors.extend(check_shard_matrix(workspace, &baseline.surface));
     errors.extend(diff_surface(&baseline.surface, &resolved));
@@ -643,6 +647,30 @@ pub fn check_accepted_reasons(accepted: &[AcceptedMiss]) -> Vec<String> {
             format!(
                 "accepted miss {} :: {} has no reason — state why the hole is tolerable",
                 a.file, a.mutant
+            )
+        })
+        .collect()
+}
+
+/// Every accepted miss must belong to a file on the pinned mutation surface.
+///
+/// Without this check, moving enforcement code to another crate leaves the old
+/// entries inert: package shards filter accepted misses by their current files,
+/// so the moved mutants are reported as new while the stale debt remains hidden.
+pub fn check_accepted_files_on_surface(
+    surface: &[SurfaceFile],
+    accepted: &[AcceptedMiss],
+) -> Vec<String> {
+    let surface_paths: BTreeSet<&str> = surface.iter().map(|file| file.path.as_str()).collect();
+    accepted
+        .iter()
+        .map(|miss| miss.file.as_str())
+        .filter(|file| !surface_paths.contains(file))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|file| {
+            format!(
+                "accepted misses for {file} are outside the pinned mutation surface — remove them or migrate them to the current enforcement file"
             )
         })
         .collect()
@@ -1177,6 +1205,34 @@ a.rs:5:1: replace x with y
             &[miss("b.rs", "replace x")],
         );
         assert_eq!(v.new_misses, vec![miss("b.rs", "replace x")]);
+    }
+
+    #[test]
+    fn accepted_misses_must_belong_to_the_pinned_surface() {
+        let pinned = vec![surface("crates/a/src/live.rs", vec![1])];
+        let accepted = vec![
+            accepted("crates/a/src/live.rs", "replace live"),
+            accepted("crates/a/src/moved.rs", "replace moved one"),
+            accepted("crates/a/src/moved.rs", "replace moved two"),
+        ];
+
+        let errors = check_accepted_files_on_surface(&pinned, &accepted);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "one error per stale file keeps output concise"
+        );
+        assert!(errors[0].contains("crates/a/src/moved.rs"));
+        assert!(errors[0].contains("outside the pinned mutation surface"));
+    }
+
+    #[test]
+    fn accepted_misses_on_the_pinned_surface_are_valid() {
+        let pinned = vec![surface("crates/a/src/live.rs", vec![1])];
+        let accepted = vec![accepted("crates/a/src/live.rs", "replace live")];
+
+        assert!(check_accepted_files_on_surface(&pinned, &accepted).is_empty());
     }
 
     fn surface(path: &str, claims: Vec<u32>) -> SurfaceFile {

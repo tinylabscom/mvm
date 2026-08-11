@@ -1040,6 +1040,8 @@ fn cmd_start(args: StartArgs) -> Result<()> {
                 false, false, is_dev,
             ),
             services: Vec::new(),
+            grants: None,
+            backend_kind: None,
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                 "the session boot path resolves no entrypoint",
             ),

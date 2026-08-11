@@ -112,7 +112,12 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
 
-        ClaimGuards::new(&self.spawner).admit_overlay_contract(config)?;
+        // A cold boot's rootfs *is* its image, so the gate reads the dir it
+        // already boots from.
+        ClaimGuards::new(&self.spawner).admit_overlay_contract(
+            std::path::Path::new(&config.rootfs_path),
+            config.runtime_source_policy,
+        )?;
         crate::base::runtime_meta::record_from_start_config(
             &config.name,
             StartMode::Detached,

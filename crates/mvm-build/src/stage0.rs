@@ -39,6 +39,47 @@ use sha2::{Digest, Sha256};
 const ROOT_MARKER_FILE: &str = ".mvm-stage0-root";
 const ROOT_MARKER_SCHEMA_VERSION: u32 = 1;
 
+/// Copy a non-empty artifact through an explicit userspace buffer.
+///
+/// Stage 0 copies from its ext4-backed Nix store to a virtio-fs host share.
+/// Optimized cross-filesystem copy syscalls have produced zero-byte outputs on
+/// that boundary, so bootstrap artifacts use ordinary reads and writes and
+/// reject an empty source before it can be reported as successfully emitted.
+pub fn copy_nonempty_file(src: &Path, dst: &Path) -> Result<u64> {
+    let mut input = std::io::BufReader::new(
+        std::fs::File::open(src).with_context(|| format!("open {} for copy", src.display()))?,
+    );
+    let mut output = std::io::BufWriter::new(
+        std::fs::File::create(dst).with_context(|| format!("create {} for copy", dst.display()))?,
+    );
+    let mut buffer = [0u8; 64 * 1024];
+    let mut copied = 0u64;
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .with_context(|| format!("read {}", src.display()))?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .with_context(|| format!("write {}", dst.display()))?;
+        copied = copied.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+    }
+    output
+        .flush()
+        .with_context(|| format!("flush {}", dst.display()))?;
+    if copied == 0 {
+        let _ = std::fs::remove_file(dst);
+        bail!(
+            "copy {} -> {} produced an empty artifact",
+            src.display(),
+            dst.display()
+        );
+    }
+    Ok(copied)
+}
+
 /// One downloadable bootstrap asset, pinned by upstream URL + SHA-256.
 /// The cache key is [`Self::cache_filename`].
 #[derive(Debug, Clone, Copy)]
@@ -592,6 +633,35 @@ fn fetch_to(target: &Path, asset: &BootstrapAsset) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn buffered_artifact_copy_follows_symlinks_and_rejects_empty_sources() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("config.real");
+        let link = temp.path().join("config");
+        let copied = temp.path().join("copied.config");
+        std::fs::write(&source, b"CONFIG_BLK_DEV_DM=y\nCONFIG_DM_VERITY=y\n").unwrap();
+        symlink(&source, &link).unwrap();
+
+        assert_eq!(
+            copy_nonempty_file(&link, &copied).unwrap(),
+            std::fs::metadata(&source).unwrap().len()
+        );
+        assert_eq!(
+            std::fs::read(&copied).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+
+        let empty = temp.path().join("empty");
+        let empty_copy = temp.path().join("empty-copy");
+        std::fs::write(&empty, b"").unwrap();
+        let error = copy_nonempty_file(&empty, &empty_copy).unwrap_err();
+        assert!(error.to_string().contains("empty artifact"));
+        assert!(!empty_copy.exists());
+    }
 
     // ---------------- VendorBlobReport ----------------
 

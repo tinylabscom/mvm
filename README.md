@@ -144,15 +144,38 @@ mvmctl machine inspect web
 Nix builds run inside a **headless builder VM** that mvm manages for you — there
 is no interactive shell into it. It exists only to run `nix build`, and you debug
 it through its logs. It auto-bootstraps on the first `machine build` / `machine
-run`; to set up host tooling and pre-acquire its image ahead of time:
+run`; to set up host tooling and pre-acquire both the builder image and the
+dm-verity workload kernel ahead of time:
 
 ```bash
-mvmctl bootstrap      # host setup + pre-fetch the builder VM image (fast first build)
+mvmctl bootstrap      # host setup + builder VM and workload-kernel acquisition
 mvmctl doctor         # diagnose host deps + the resolved builder/runtime backend
 ```
 
+`bootstrap` is safe to rerun. It verifies warm artifacts and only rebuilds or
+downloads what is missing or invalid. If a Stage 0 source build is interrupted,
+the incomplete output is never installed; rerunning resumes with the persistent
+Nix store still warm.
+
 For an interactive shell you want a *workload* microVM, not the builder — use a
 transient run against a dev-tier image: `mvmctl machine run --image alpine -it -- /bin/sh`.
+
+On the first image-backed run, mvm may build and cache the workload kernel
+through Stage 0. If the output includes `builder egress endpoint ... exited
+with status signal: 15 (SIGTERM)`, that line is normally cleanup: the
+host-side builder egress endpoint is terminated after the one-shot Stage 0
+build exits. The actionable error is the following one. In particular, a
+message saying that the resolved workload kernel has no device-mapper/dm-verity
+support means the cached kernel cannot boot a verity-sealed workload. Rebuild
+or download the workload kernel explicitly:
+
+```bash
+# Use the release's hash-verified kernel
+mvmctl build kernel build --which workload --source download
+
+# Or compile the host-architecture kernel from this source checkout
+mvmctl build kernel build --which workload --source compile
+```
 
 ### Examples
 

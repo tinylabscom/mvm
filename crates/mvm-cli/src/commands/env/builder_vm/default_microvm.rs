@@ -18,57 +18,93 @@ pub(crate) fn ensure_default_microvm_image(
 }
 
 pub(crate) fn ensure_workload_kernel() -> Result<String> {
-    let cache = mvm_core::config::mvm_cache_dir();
+    use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
+
+    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = builder_vm_host_arch();
     let source_checkout = find_builder_vm_flake().is_ok();
-    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, source_checkout);
-    // Name which kernel variant a run resolved and where it came from. Without
-    // this breadcrumb a wrong-kernel boot (e.g. a non-verity kernel under a
-    // verity-sealed rootfs) is invisible host-side until the guest panics.
-    let (provenance, path) = match resolved {
-        WorkloadKernelBootstrap::Cached(path) => ("cached", path),
-        WorkloadKernelBootstrap::BuildLocal(path) => {
-            match workload_kernel_source(source_checkout) {
-                KernelSource::Download => {
-                    download_workload_kernel(arch, &path)?;
-                    ("downloaded", path)
-                }
-                #[cfg(feature = "builder-vm")]
-                KernelSource::Auto => match download_workload_kernel(arch, &path) {
-                    Ok(()) => ("downloaded", path),
-                    Err(download_error) => {
-                        ui::warn(&format!(
-                            "Published workload kernel unavailable ({download_error}); building it locally from the source checkout."
-                        ));
-                        ("built", build_local_workload_kernel()?)
-                    }
-                },
-                KernelSource::Compile => ("built", build_local_workload_kernel()?),
+    let mut resolved = resolve_kernel(&cache, arch, "workload", source_checkout);
+
+    if let KernelResolution::Cached(verified) = &resolved {
+        let cached = verified.path().display().to_string();
+        if let Err(error) = assert_workload_kernel_supports_verity(&cached) {
+            ui::warn(&format!(
+                "Cached workload kernel capability check failed ({error}); discarding it and preparing a correct kernel."
+            ));
+            evict_incompatible_workload_kernel(verified.path())?;
+            resolved = resolve_kernel(&cache, arch, "workload", source_checkout);
+        }
+    }
+
+    let source = workload_kernel_source(source_checkout);
+    let (provenance, path, produced) = match resolved {
+        KernelResolution::Cached(verified) => {
+            ("cached", verified.path().display().to_string(), false)
+        }
+        KernelResolution::NeedsBuild(dest) | KernelResolution::NeedsFetch(dest) => {
+            let (provenance, path) = acquire_workload_kernel(source, source_checkout, arch, &dest)?;
+            (provenance, path, true)
+        }
+    };
+
+    // Re-enter the shared resolver after every producer. This makes a missing
+    // or mismatched digest an acquisition failure instead of allowing the
+    // caller to boot bytes merely because the destination path exists.
+    let verified_path = if produced {
+        match resolve_kernel(&cache, arch, "workload", source_checkout) {
+            KernelResolution::Cached(verified) => verified.path().display().to_string(),
+            KernelResolution::NeedsBuild(dest) | KernelResolution::NeedsFetch(dest) => {
+                anyhow::bail!(
+                    "workload kernel producer left no verified artifact at {}",
+                    dest.display()
+                )
             }
         }
-        WorkloadKernelBootstrap::Download(dest) => match workload_kernel_source(source_checkout) {
-            KernelSource::Compile => {
-                if !source_checkout {
-                    anyhow::bail!(
-                        "{} MVM_KERNEL_SOURCE=compile requires an mvm source checkout so the workload kernel can be built locally. Set MVM_KERNEL_SOURCE=download or unset it to use the published kernel.",
-                        missing_workload_kernel_message(&dest)
-                    );
-                }
-                ("built", build_local_workload_kernel()?)
-            }
-            KernelSource::Download => {
-                download_workload_kernel(arch, &dest)?;
-                ("downloaded", dest)
-            }
-            #[cfg(feature = "builder-vm")]
-            KernelSource::Auto => {
-                download_workload_kernel(arch, &dest)?;
-                ("downloaded", dest)
-            }
-        },
+    } else {
+        path.clone()
     };
+    if verified_path != path {
+        anyhow::bail!(
+            "workload kernel producer returned {path}, but the verified cache resolved {verified_path}"
+        );
+    }
+    assert_workload_kernel_supports_verity(&verified_path)?;
     ui::info(&format!("Workload kernel: {provenance} at {path}"));
     Ok(path)
+}
+
+fn acquire_workload_kernel(
+    source: KernelSource,
+    source_checkout: bool,
+    arch: &str,
+    dest: &std::path::Path,
+) -> Result<(&'static str, String)> {
+    match source {
+        KernelSource::Compile => {
+            if !source_checkout {
+                anyhow::bail!(
+                    "{} MVM_KERNEL_SOURCE=compile requires an mvm source checkout so the workload kernel can be built locally. Set MVM_KERNEL_SOURCE=download or unset it to use the published kernel.",
+                    missing_workload_kernel_message(&dest.display().to_string())
+                );
+            }
+            Ok(("built", build_local_workload_kernel()?))
+        }
+        KernelSource::Download => {
+            download_workload_kernel(arch, dest)?;
+            Ok(("downloaded", dest.display().to_string()))
+        }
+        #[cfg(feature = "builder-vm")]
+        KernelSource::Auto => match download_workload_kernel(arch, dest) {
+            Ok(()) => Ok(("downloaded", dest.display().to_string())),
+            Err(download_error) if source_checkout => {
+                ui::warn(&format!(
+                    "Published workload kernel unavailable ({download_error}); building it locally from the source checkout."
+                ));
+                Ok(("built", build_local_workload_kernel()?))
+            }
+            Err(download_error) => Err(download_error),
+        },
+    }
 }
 
 #[cfg(feature = "builder-vm")]
@@ -92,7 +128,7 @@ pub(super) fn default_workload_kernel_source(source_checkout: bool) -> KernelSou
 #[cfg(feature = "builder-vm")]
 fn build_local_workload_kernel() -> Result<String> {
     ui::notice(
-        "No cached workload kernel. Building it once in Stage 0; the first run can take several minutes, then warm starts use the cache.",
+        "Preparing the workload kernel using the Stage 0 builder. The first source build can take several minutes; the persistent Nix store and finished kernel are reused afterward.",
     );
     let path = build_kernel_via_stage0(KernelVariant::Workload, false)
         .context(
@@ -112,59 +148,61 @@ fn build_local_workload_kernel() -> Result<String> {
     )
 }
 
-/// Whether a kernel image carries device-mapper + dm-verity support (needed to
-/// boot a verity-sealed rootfs). `None` when the input is not a readable,
-/// uncompressed kernel we can judge (a compressed `Image`, a truncated file, or
-/// any non-kernel blob) — callers must NOT block on `None`. `Some(false)` only
-/// when the kernel is readable yet carries no device-mapper/dm-verity symbol at
-/// all — the signature of a kernel built without `CONFIG_BLK_DEV_DM`/`DM_VERITY`
-/// (e.g. the builder kernel, which force-drops them).
-pub(super) fn kernel_carries_dm_verity(bytes: &[u8]) -> Option<bool> {
-    // Only an uncompressed vmlinux exposes symbol strings; anything else is
-    // inconclusive, and blocking on it would false-reject a valid kernel.
-    if !byte_contains(bytes, b"Linux version") {
+pub(super) fn workload_config_carries_dm_verity(config: &str) -> Option<bool> {
+    if !config
+        .lines()
+        .any(|line| line.starts_with("CONFIG_") || line.starts_with("# CONFIG_"))
+    {
         return None;
     }
-    // A dm-verity-capable kernel carries these device-mapper / dm-verity symbols
-    // (via KALLSYMS + the dm subsystem's log strings). A kernel built without the
-    // device-mapper umbrella carries none of them.
-    const MARKERS: &[&[u8]] = &[
-        b"device-mapper",
-        b"dm_bufio",
-        b"verity_ctr",
-        b"dm_table_create",
-        b"dm-verity",
-    ];
-    Some(MARKERS.iter().any(|m| byte_contains(bytes, m)))
-}
-
-/// Substring search across a whole kernel image.
-///
-/// `windows(n).any(..)` is the obvious spelling and is quadratic: it compares
-/// at every offset with no way to skip ahead. Over an 8 MB `vmlinux`, repeated
-/// once per marker, that is milliseconds of every launch — and the refusal
-/// case pays the most, because it is the one that finds no marker and so scans
-/// the image for all of them. `memmem` skips, and is already linked in.
-fn byte_contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.len() <= haystack.len() && memchr::memmem::find(haystack, needle).is_some()
+    Some(
+        config.lines().any(|line| line == "CONFIG_BLK_DEV_DM=y")
+            && config.lines().any(|line| line == "CONFIG_DM_VERITY=y"),
+    )
 }
 
 /// Fail fast when a verity-sealed launch resolved a kernel with no dm-verity
-/// support. Without this the guest panics in early init opening
-/// `/dev/mapper/control` ("No such file or directory") with zero host signal —
-/// so surface a clear host-side error instead. Conservative: only a *readable*
-/// kernel with no dm-verity symbol at all trips it, so an unrecognized/compressed
-/// kernel is never wrongly rejected.
+/// support. Local builds carry their resolved config beside the kernel, which
+/// is authoritative even when the size-optimized image deliberately omits
+/// KALLSYMS and contains no searchable dm-verity symbols. Published kernels
+/// may not carry a local config; their variant-specific release checksum is the
+/// capability identity and the absence of this optional local witness is not a
+/// rejection.
 pub(crate) fn assert_workload_kernel_supports_verity(kernel_path: &str) -> Result<()> {
-    let bytes = std::fs::read(kernel_path)
+    std::fs::metadata(kernel_path)
         .with_context(|| format!("read resolved workload kernel {kernel_path}"))?;
-    if kernel_carries_dm_verity(&bytes) == Some(false) {
+    let config_path = std::path::Path::new(kernel_path).with_file_name("config");
+    let capability = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|config| workload_config_carries_dm_verity(&config));
+    if capability == Some(false) {
         anyhow::bail!(
-            "resolved workload kernel {kernel_path} carries no device-mapper/dm-verity \
-             support, but the workload boots verity-sealed. It would panic the guest at boot \
-             (mvm-verity-init: open /dev/mapper/control: No such file or directory). This \
-             kernel cannot back a sealed workload — rebuild it with `mvmctl kernel build --which workload` or resolve a published kernel."
+            "resolved workload kernel {kernel_path} has a config without CONFIG_BLK_DEV_DM=y \
+             and CONFIG_DM_VERITY=y, but the workload boots verity-sealed. This kernel cannot \
+             back a sealed workload"
         );
+    }
+    Ok(())
+}
+
+pub(super) fn evict_incompatible_workload_kernel(kernel: &std::path::Path) -> Result<()> {
+    for path in [
+        kernel.to_path_buf(),
+        mvm_build::kernel_fetch::kernel_digest_sidecar(kernel),
+        kernel.with_file_name("config"),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "discarding incompatible workload kernel file {}",
+                        path.display()
+                    )
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -227,36 +265,6 @@ fn embedded_verity_init_bytes() -> Option<&'static [u8]> {
         .filter(|b| !b.is_empty())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum WorkloadKernelBootstrap {
-    Cached(String),
-    BuildLocal(String),
-    Download(String),
-}
-
-pub(super) fn resolve_workload_kernel_bootstrap(
-    cache_dir: &str,
-    arch: &str,
-    source_checkout: bool,
-) -> WorkloadKernelBootstrap {
-    if let Some(cached) = find_cached_workload_kernel(cache_dir, arch) {
-        return WorkloadKernelBootstrap::Cached(cached);
-    }
-    // The workload always boots through the verity initrd (mvm-verity-init opens
-    // /dev/mapper/control and builds the dm-verity target), so its kernel must
-    // carry device-mapper + dm-verity built in. The builder kernel force-drops
-    // both (it boots `root=/dev/vda ro` with no roothash), so it can never stand
-    // in for the workload kernel — reusing it panics the guest at boot. Always
-    // resolve the real workload kernel: build it (source checkout) or download
-    // the published one.
-    let dest = format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux");
-    if source_checkout {
-        WorkloadKernelBootstrap::BuildLocal(dest)
-    } else {
-        WorkloadKernelBootstrap::Download(dest)
-    }
-}
-
 pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
     format!(
         "workload kernel missing (expected at {expected_path}). \
@@ -267,48 +275,8 @@ pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
     )
 }
 
-fn download_workload_kernel(arch: &str, dest: &str) -> Result<()> {
-    if let Some(parent) = std::path::Path::new(dest).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let version = env!("CARGO_PKG_VERSION");
-    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
-    let asset = format!("vmlinux-{arch}-workload");
-    let checksums_url = format!("{base_url}/kernel-{arch}-checksums-sha256.txt");
-
-    ui::info(&format!(
-        "Downloading workload kernel {asset} (v{version})..."
-    ));
-    let expected = fetch_expected_hashes(&checksums_url, &[asset.as_str()])?;
-    let asset_url = format!("{base_url}/{asset}");
-    download_file(&asset_url, dest).with_context(|| format!("Failed to download {asset_url}"))?;
-    verify_artifact_hash(dest, &asset, expected.get(&asset))?;
-    ui::success(&format!(
-        "Workload kernel {asset} downloaded, hash-verified, and cached."
-    ));
-    Ok(())
-}
-
-/// The dedicated workload kernel, or `None` when it has not been built or
-/// downloaded yet.
-///
-/// Only the dedicated kernel qualifies. The default-microvm images ship a
-/// general-purpose NixOS kernel, and borrowing it used to be allowed here —
-/// which meant that on a host with no workload kernel cached, a workload
-/// silently booted a kernel built for a different job. Those kernels enable
-/// `CONFIG_USER_NS`, which the workload kernel deliberately leaves unset, so
-/// the borrow handed the guest a user-namespace escape hatch the workload
-/// kernel exists to remove. It was invisible: same command, same image, and a
-/// posture that depended on which kernels happened to be in the local cache.
-///
-/// A cold cache is now resolved by building or downloading the real workload
-/// kernel — which is what the caller already does, and what its own comment
-/// already claimed it did.
-pub(super) fn find_cached_workload_kernel(cache_dir: &str, arch: &str) -> Option<String> {
-    let dedicated = format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux");
-    std::path::Path::new(&dedicated)
-        .is_file()
-        .then_some(dedicated)
+fn download_workload_kernel(arch: &str, dest: &std::path::Path) -> Result<()> {
+    crate::update::download_kernel(arch, "workload", dest)
 }
 
 fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)> {

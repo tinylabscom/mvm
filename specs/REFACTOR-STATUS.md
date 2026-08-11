@@ -10,9 +10,20 @@ for detailed scope and acceptance criteria.
       at 80 columns for `--help`, `-h`, and `mvmctl help <path>`; generated-tree
       BDD coverage executes the real binary and automatically includes future
       subcommands.
+- [~] **Issue-closeout batch — #2165, #2321, and #2323.** The workload runner
+      now emits read-only root bootargs for read-only root devices, the
+      credential-bearing substitution response is incrementally capped, and
+      Firecracker teardown uses the shared poll backoff. PR merge and required
+      live evidence remain before these issues close.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
+- [x] **Issue #2293 — audit-chain durability boundaries.** PR #2302 removed
+      the duplicate synthetic `plan.admitted` and bound OCI provenance to the
+      plan that boots. PR #2317 made admission the pre-action sync barrier,
+      deferred post-hoc records without changing chain content or ordering,
+      retained fail-safe sync for unknown events, and preserved torn-tail
+      detection. The separate receipt-store cost remains open as #2318.
 - [~] **Issue #2289 — kernel pin freshness follow-up.** This PR synchronizes
       the libkrunfw and custom guest kernel inputs on the verified Linux
       6.12.103 LTS source pin and updates structural parity coverage with the
@@ -38,6 +49,18 @@ for detailed scope and acceptance criteria.
       canonical budget table, and gates remain open.
 
 ## In-flight plans
+- [x] Plan 315 — Bootstrap means machine-ready
+      (`specs/plans/315-bootstrap-machine-readiness.md`)
+  - [x] Bootstrap acquires and verifies both builder image and workload kernel
+  - [x] Downloaded/local kernel publication is staged and verified reads fail closed
+  - [x] Local dm-verity capability uses resolved config, not raw-image strings
+  - [x] Required ARM64 cross-backend console support is pinned to its measured
+        959-symbol budget; the unaffected x86_64 ratchet remains 917
+  - [x] Full serialized workspace tests and doctests, host all-target Clippy,
+        the 461-test `xtask --features man` CI lane, and 172 BDD scenarios pass;
+        KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0
+        reuse, and two fully warm Alpine runs complete without a second Stage 0
+
 - [~] Plan 316 — website and docs redesign
       (`specs/plans/316-website-redesign.md`)
   - [x] Homepage sections, docs chrome, and shared primitives rebuilt onto
@@ -64,6 +87,7 @@ for detailed scope and acceptance criteria.
   - [ ] Maintainer design review — ongoing; the remaining question is whether
         the result reads well, which no measurement answers
   - [ ] PR #2359 open against `main`
+
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
   - [x] Restore bounded guest credit recording, fail-closed unknown-credit
@@ -109,12 +133,26 @@ for detailed scope and acceptance criteria.
 - [~] Security lane mutation-witness repair — **issue #2135**
   - [x] Add direct witnesses for the security-sensitive admission,
         verification, lease, and substitution cleanup invariants
-  - [x] Run focused mutation shards for `mvm-cli`, `mvm-core`, `mvm-agentd`,
-        `mvm-hostd`, and `mvm-vmm`
-  - [x] Pass workspace check, all-target Clippy, formatting, and the mutation
-        surface gate on the dedicated fix branch
-  - [ ] Merge the fix and rerun the exact Linux Security workflow before
-        closing the issue
+  - [x] Fail closed when an accepted miss leaves the pinned mutation surface,
+        migrate 26 libkrun identities to their current file, and remove 15
+        obsolete misses without adding a waiver (83 accepted misses to 68)
+  - [x] Catch the current actionable `mvm-vmm`, `mvm-hostd`, and `mvm-agentd`
+        mutants in focused mutation proofs
+  - [x] Add the six witnesses exposed by the first exact rerun and prove the
+        complete contract shard plus the focused five-mutant hostd repair
+  - [x] Pass workspace all-target Clippy, the isolated `mvm-cli` doctest rerun,
+        formatting, and the static mutation surface gate; the workspace suite
+        passed all repaired areas before one unrelated host-agent socket-bind
+        timeout whose isolated integration rerun passed 4/4
+  - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
+        clean scheduled or release run before closing the issue
+- [~] Plan 300 — 30-issue reconciliation and closeout
+      (`specs/plans/300-open-issue-closeout.md`)
+  - [x] Inventory all 30 issues open at the 2026-08-10 snapshot against
+        current `origin/main`, issue comments, owning plans, and workflow state
+  - [x] Close #2293 with merged implementation, CI, and KVM evidence
+  - [ ] Execute the remaining 29 closure paths in the plan's dependency order
+  - [ ] Reconcile a fresh GitHub query after every phase and at final closeout
 - [~] Runtime hardening for production — plan 303, branch
       `feat/plan-303-runtime-hardening`
   - [x] WS1 — `overflow-checks = true` in `[profile.release]`, a
@@ -191,7 +229,14 @@ for detailed scope and acceptance criteria.
         path. Foreground teardown is the other dominant cost, promoting
         Phase 6 ahead of Phase 3.
   - [ ] Phase 1 — content-addressed `--mount` image cache
-  - [ ] Phase 2 — artifact preparation outside the launch path
+  - [~] Phase 2 — artifact preparation outside the launch path. The resolution
+        half landed as the warm pool's hard prerequisite (**#2333**):
+        `crate::exec::resolve_launch` yields a bootable `VmStartConfig` without
+        starting a VM, `run_inner` calls it instead of inlining it, and
+        `pool warm --image` uses it to spawn parents a matching launch claims.
+        `pool warm` could previously spawn nothing on any backend. The
+        prepared-artifact manifest and the acquire/prepare split are still open,
+        so a cold cache is still populated inline.
   - [~] Phase 3 — reduce backend cold-start latency. Re-measured on KVM at
         `c866611af` as Phase 5 asked: `driver_boot` is 630.5 ms, unmoved from
         623.6 ms, so the cost is real rather than a poll artifact and can be
@@ -258,10 +303,11 @@ for detailed scope and acceptance criteria.
         run-to-run noise where they used to differ by ~780 ms. claim-8 /
         claim-14 digests unchanged, chain still verifies. Firecracker/KVM
         repeated: the fixes hold there (both counters zero) but that backend
-        misses the contract for reasons this plan does not own — `driver_boot`
-        630.5 ms (**#2292**) and 294 ms of audit fsync in `admit` (**#2293**).
-        Outstanding: the warm-lane comparison, blocked because no standby pool
-        can be filled today.
+        misses the contract for reasons this plan does not own — residual
+        Firecracker boot work (**#2292**, **#2299**) and receipt durability on
+        the admission path (**#2318**). Audit-chain batching and duplicate
+        admission are closed under #2293. Outstanding: the warm-lane
+        comparison, blocked because no standby pool can be filled today.
 
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
@@ -903,11 +949,16 @@ for detailed scope and acceptance criteria.
           miss, and eviction of **both** the record and the build directory —
           a record-only eviction would leave the poisoned tree under a name a
           later build re-adopts. Unblocks plan 279 WS1
-    - [ ] Workload/builder kernel cache: still path-trusting.
-          `verify_fetched_kernel` exists with **no production caller** —
-          neither the fetch nor the read path checks a kernel against its pin.
-          Scoped as plan 288
-          (`specs/plans/288-kernel-cache-verify-on-read.md`)
+    - [~] Workload/builder kernel cache: plan 288
+          (`specs/plans/288-kernel-cache-verify-on-read.md`). WS1–WS3 + WS5
+          landed — the fetch path verifies against the published checksum
+          manifest and records a digest sidecar, the read path verifies against
+          it and evicts the whole entry on failure, and
+          `check-verified-kernel-reads` keeps new callers on the seam. WS1's
+          `VerifiedKernel` initially reached only the arms that used it: the
+          Firecracker/qemu arm and the CLI's kernel-less-image fallback still
+          booted on presence until 2026-08-11. WS4 (shared sidecar helper with
+          the BLAKE3 artifact path) is the remainder
     - [ ] Cold-tier background scrub (recon §7.9)
   - [~] WS7 — σ/κ separation: `mvm_core::at_rest` gives the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint
@@ -1137,6 +1188,13 @@ for detailed scope and acceptance criteria.
         call) + `StoreLimits`
   - [ ] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
         the restore-laundering path
-  - [ ] WS6 — four surfaces: manifest, JSON, CLI, library + SDK parity fixture
+  - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
+        `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
+        and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,
+        resolved per dimension by `mvm_core::grants_resolve` and wired into the
+        real `mvmctl` admission — `admission.rs` no longer hardcodes
+        `grants: None`. The projection now has production callers, so its
+        `dormant-controls.toml` entry is deleted. STILL OPEN: the SDK parity
+        fixture
   - [ ] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs
         gate, BDD suite

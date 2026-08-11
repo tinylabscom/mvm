@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** WS1–WS3 landed; WS4 (shared sidecar helper) and WS5 (CI caller gate) open. Completes plan 276 WS6 — its dev-build-artifact half shipped in #2053; this is the kernel half. Not yet scheduled into `specs/SPRINT.md`.
+**Status:** WS1–WS3 and WS5 landed; WS4 (shared sidecar helper) open. The 2026-08-10 bootstrap-readiness repair closed the remaining producer interruption gaps and routed the default workload-kernel acquisition through the verified resolver. Completes plan 276 WS6 — its dev-build-artifact half shipped in #2053; this is the kernel half.
+
+**2026-08-11 — WS1's type did not reach two of its callers.** `VerifiedKernel` made the unverified read unrepresentable only for code that resolved through the seam. `cached_kernel_path` stayed public (callers need the location for error messages), and two paths took it and booted on presence: the Firecracker/qemu arm of `mvm_client`'s per-backend resolution, and the CLI's kernel-less-image fallback, which formatted the cache path itself. So the backend carrying real workloads on Linux had the weakest kernel check of any boot route, next to an HVF arm that required a digest match — after this plan's WS1 shipped. Both now resolve through the seam, and WS5's gate is aimed at that shape rather than the one it was originally written for.
 
 **Goal:** No workload or builder kernel is booted from cache without its bytes being checked against a recorded digest. The check must fail closed, evict what it rejects, and be impossible for a future caller to skip by accident.
 
@@ -65,24 +67,24 @@ Plan 276 WS6, second half. Recon §7.1 (`specs/research/uor-hologram-cross-proje
 
 ### WS1 — Make an unverified kernel path unrepresentable
 
-- [ ] Replace `KernelResolution::Cached(PathBuf)` with a variant carrying a type that cannot be constructed without a successful verification (`VerifiedKernel`, private field, constructor only in `kernel_fetch`).
-- [ ] `NeedsBuild` / `NeedsFetch` keep bare paths — they are *destinations*, not artifacts to trust.
-- [ ] The only way to a bootable path is a method on the verified type, so a future caller that skips verification does not compile.
-- [ ] Compile-fail test pinning that boundary (mirror `apple_container`'s existing compile-fail test for its asserter anchor).
+- [x] Replace `KernelResolution::Cached(PathBuf)` with a variant carrying a type that cannot be constructed without a successful verification (`VerifiedKernel`, private field, constructor only in `kernel_fetch`).
+- [x] `NeedsBuild` / `NeedsFetch` keep bare paths — they are *destinations*, not artifacts to trust.
+- [x] The only way to a bootable path is a method on the verified type, so a future caller that skips verification does not compile.
+- [x] Compile-fail test pinning that boundary (mirror `apple_container`'s existing compile-fail test for its asserter anchor).
 
 ### WS2 — Producers record a digest
 
-- [ ] **Fetch path:** after `crate::update::download_kernel`, verify the bytes against the published `checksums-sha256.txt` entry *before* admitting them to the cache, then write the sidecar. This is verify-on-write, which S3's read check then rests on.
-- [ ] **Build path:** after `build_kernel_via_stage0` produces a kernel, write the sidecar from the bytes just built (S2 — records what we built, claims nothing more).
-- [ ] Both writes are atomic (temp + rename) so an interrupted producer cannot leave a sidecar that disagrees with the artifact beside it.
-- [ ] A producer that cannot write a sidecar must not leave the kernel in place — an unverifiable artifact is worse than a missing one, because the next resolve will trust the path.
+- [x] **Fetch path:** after `crate::update::download_kernel`, verify the bytes against the published `checksums-sha256.txt` entry *before* admitting them to the cache, then write the sidecar. This is verify-on-write, which S3's read check then rests on.
+- [x] **Build path:** after `build_kernel_via_stage0` produces a kernel, write the sidecar from the bytes just built (S2 — records what we built, claims nothing more).
+- [x] Both writes are atomic (temp + rename) so an interrupted producer cannot leave a sidecar that disagrees with the artifact beside it.
+- [x] A producer that cannot write a sidecar must not leave the kernel in place — an unverifiable artifact is worse than a missing one, because the next resolve will trust the path.
 
 ### WS3 — Consumers verify on read
 
-- [ ] `resolve_kernel` verifies before returning `Cached`, via `verify_fetched_kernel` — giving that function the production callers it has never had.
-- [ ] On mismatch or missing sidecar: fail closed, evict kernel + sidecar, and fall through to `NeedsBuild` / `NeedsFetch` so the next step re-derives rather than re-adopting.
-- [ ] Update `resolve_pinned_kernel_with` (`crates/mvm-cli/src/commands/vm/up/kernel.rs`) and `mvm_client::local`'s `cached_kernel_path` use to the verified type.
-- [ ] Log the eviction at warn with the reason — a silent re-download is indistinguishable from a slow one.
+- [x] `resolve_kernel` verifies before returning `Cached`, via `verify_fetched_kernel` — giving that function the production callers it has never had.
+- [x] On mismatch or missing sidecar: fail closed, evict kernel + sidecar, and fall through to `NeedsBuild` / `NeedsFetch` so the next step re-derives rather than re-adopting.
+- [x] Update `resolve_pinned_kernel_with` (`crates/mvm-cli/src/commands/vm/up/kernel.rs`) and `mvm_client::local`'s `cached_kernel_path` use to the verified type.
+- [x] Log the eviction at warn with the reason — a silent re-download is indistinguishable from a slow one.
 
 ### WS4 — One sidecar helper, not two
 
@@ -92,10 +94,10 @@ Plan 276 WS6, second half. Recon §7.1 (`specs/research/uor-hologram-cross-proje
 
 ### WS5 — Keep it connected
 
-- [ ] Tests: verified-hit boots; tampered kernel rejected + evicted; missing sidecar rejected; **intact-but-wrong kernel** (swap two variants' kernels — both complete, each the other's) rejected; sidecar/artifact mismatch after an interrupted write rejected.
-- [ ] `specs/VERIFICATION.md` falsifiability rows, each with its planted defect recorded and proved red.
-- [ ] An `xtask` gate asserting `verify_fetched_kernel` has at least one production caller — the failure mode this plan exists to fix was a correct function with no callers, and nothing in CI noticed for the life of the function. Wire it into **both** `ci.yml` and `ci-full.yml` Lint jobs.
-- [ ] Confirm `MVM_SKIP_HASH_VERIFY` is absent from every workflow.
+- [x] Tests: verified-hit boots; tampered kernel rejected + evicted; missing sidecar rejected; **intact-but-wrong kernel** (swap two variants' kernels — both complete, each the other's) rejected; sidecar/artifact mismatch after an interrupted write rejected.
+- [x] `specs/VERIFICATION.md` falsifiability rows, each with its planted defect recorded and proved red.
+- [x] An `xtask` gate — `check-verified-kernel-reads`, wired into **both** `ci.yml` and `ci-full.yml` Lint jobs. **It does not police what this line asked for**, because that target stopped being the right one: WS3 routed the read path through `verify_cached_kernel` against the sidecar, so `verify_fetched_kernel` legitimately has no production caller and a gate demanding one would fail on correct code. The live risk is the other direction — `cached_kernel_path` is public, returns a usable `PathBuf`, and two call sites took it and booted on `is_file()` *after* WS1 shipped the type that was supposed to prevent exactly that. The gate gives that its evidence: a file naming the cache location must also call `resolve_kernel`. Co-presence per file, not a proof the resolved value is the one used — a type that made the bare path unusable would be stronger, but the location is legitimately needed for diagnostics at the same sites that must not boot from it.
+- [x] Confirm `MVM_SKIP_HASH_VERIFY` is absent from every workflow (`rg MVM_SKIP_HASH_VERIFY .github/` — no hits).
 
 ## Sequencing
 

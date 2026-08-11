@@ -445,7 +445,8 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // uninstall/update/sign grouped under `env <sub>`.
     ("env", AuditPosture::DelegatesToSub(ENV_SUB)),
     // Top-level `mvmctl bootstrap` — installer surface (host tooling + builder
-    // VM image prefetch). Same posture as `env bootstrap` and `init`.
+    // VM image and workload-kernel acquisition). Same posture as `env bootstrap`
+    // and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
     // Deploy mutates the local sealed-artifact store and is wrapped by the

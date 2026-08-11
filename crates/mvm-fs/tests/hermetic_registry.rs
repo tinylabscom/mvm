@@ -391,6 +391,67 @@ async fn layer_fetch_happy_path_verifies_digest_and_byte_count() {
 }
 
 #[tokio::test]
+async fn layer_fetch_follows_same_origin_redirect_without_forwarding_auth() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = b"redirected-layer";
+    let token = "registry-only-token";
+    let layer_digest = reg
+        .register_redirected_bearer_blob("library/test", LAYER_MEDIA, layer_bytes, token)
+        .await;
+    let layer = LayerDescriptor {
+        digest: layer_digest,
+        size: layer_bytes.len() as u64,
+        media_type: LAYER_MEDIA.to_string(),
+    };
+    let fetcher = OciLayerFetcher::with_config_and_auth(
+        client_config_for(&reg),
+        LayerFetchOptions::default(),
+        RegistryAuthConfig::bearer(token),
+    );
+    let image = reg.image_ref("library/test", "v1");
+    let mut sink = Vec::new();
+
+    let count = fetcher
+        .fetch_layer(&image, &layer, &mut sink)
+        .await
+        .expect("redirected blob fetch succeeds");
+
+    assert_eq!(count, layer_bytes.len() as u64);
+    assert_eq!(sink, layer_bytes);
+}
+
+#[tokio::test]
+async fn layer_fetch_stops_at_bounded_blob_redirect_limit() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = b"redirect-loop";
+    let layer_digest = reg
+        .register_blob_redirect_loop("library/test", layer_bytes)
+        .await;
+    let layer = LayerDescriptor {
+        digest: layer_digest,
+        size: layer_bytes.len() as u64,
+        media_type: LAYER_MEDIA.to_string(),
+    };
+    let fetcher = OciLayerFetcher::with_config(
+        client_config_for(&reg),
+        LayerFetchOptions {
+            max_retries: 1,
+            ..LayerFetchOptions::default()
+        },
+    );
+    let image = reg.image_ref("library/test", "v1");
+    let mut sink = Vec::new();
+
+    let error = fetcher
+        .fetch_layer(&image, &layer, &mut sink)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("5-redirect OCI blob limit"));
+    assert!(sink.is_empty());
+}
+
+#[tokio::test]
 async fn layer_fetch_rejects_tampered_blob_with_digest_mismatch() {
     let reg = HermeticRegistry::start().await;
 

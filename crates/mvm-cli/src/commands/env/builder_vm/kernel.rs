@@ -156,6 +156,13 @@ pub(super) fn format_compile_elapsed(elapsed: std::time::Duration) -> String {
     format!("still compiling… ({}m{:02}s elapsed)", secs / 60, secs % 60)
 }
 
+#[cfg(feature = "builder-vm")]
+pub(super) fn format_compile_start(label: &str, arch: &str) -> String {
+    format!(
+        "Compiling {label} kernel ({arch}) via Stage 0 — the first build can take several minutes depending on the host; later runs reuse the persistent Nix store."
+    )
+}
+
 /// `mvmctl kernel build --source compile`: compile a single kernel attr
 /// through the Stage 0 nix-seed bootstrap and land its `vmlinux` in the
 /// per-arch builder-VM cache. Returns the cached kernel path.
@@ -183,6 +190,13 @@ pub(crate) fn build_kernel_via_stage0(
         .with_context(|| format!("creating kernel cache dir {out_dir}"))?;
 
     let _stage0_guard = acquire_stage0_lock(&out_dir)?;
+    let removed = sweep_stage0_staging_siblings(out_dir_path)?;
+    if removed > 0 {
+        ui::info(&format!(
+            "Removed {removed} incomplete Stage 0 kernel build director{} from an earlier interruption.",
+            if removed == 1 { "y" } else { "ies" }
+        ));
+    }
 
     let stage0_assets = mvm_build::stage0::assets_for_host_arch();
     let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
@@ -222,11 +236,7 @@ pub(crate) fn build_kernel_via_stage0(
     std::fs::write(staging_dir.join("stage0-build.conf"), conf)
         .with_context(|| format!("writing stage0-build.conf in {}", staging_dir.display()))?;
 
-    ui::info(&format!(
-        "Compiling {} kernel ({arch}) via Stage 0 — first build is slow \
-         (3-10 min); later runs hit the nix store cache.",
-        variant.label()
-    ));
+    ui::info(&format_compile_start(variant.label(), arch));
 
     {
         use mvm_build::builder_backend_select as bbs;
@@ -271,38 +281,127 @@ pub(crate) fn build_kernel_via_stage0(
         result.map_err(|e| anyhow::anyhow!("Stage 0 kernel build: {e}"))?;
     }
 
+    let published = publish_kernel_artifacts(&staging_dir, out_dir_path, variant);
+    let _ = std::fs::remove_dir_all(&staging_dir);
+    published
+}
+
+#[cfg(feature = "builder-vm")]
+fn publish_kernel_artifacts(
+    staging_dir: &std::path::Path,
+    out_dir: &std::path::Path,
+    variant: KernelVariant,
+) -> Result<std::path::PathBuf> {
     let built = staging_dir.join("vmlinux");
-    if !built.is_file() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-        anyhow::bail!(
-            "Stage 0 produced no kernel at {} (attr {})",
-            built.display(),
-            variant.attr()
-        );
+    let kernel_bytes = std::fs::read(&built)
+        .with_context(|| format!("reading Stage 0 kernel {}", built.display()))?;
+    if kernel_bytes.is_empty() {
+        anyhow::bail!("Stage 0 produced an empty kernel at {}", built.display());
     }
-    let dest = out_dir_path.join("vmlinux");
-    std::fs::copy(&built, &dest)
-        .with_context(|| format!("copying kernel to {}", dest.display()))?;
 
     let staged_config = staging_dir.join("mvm-kernel.config");
-    if staged_config.is_file() {
-        let config_dest = out_dir_path.join("config");
-        if let Err(e) = std::fs::copy(&staged_config, &config_dest) {
-            ui::warn(&format!("could not cache the resolved kernel config: {e}"));
-        }
+    let config = std::fs::read_to_string(&staged_config)
+        .with_context(|| format!("reading resolved kernel config {}", staged_config.display()))?;
+    if workload_config_carries_dm_verity(&config).is_none() {
+        anyhow::bail!(
+            "Stage 0 produced no usable resolved kernel config at {}",
+            staged_config.display()
+        );
     }
-    let _ = std::fs::remove_dir_all(&staging_dir);
-
-    // A locally built kernel has no published checksum to check against — a
-    // source checkout is never fetched. The pin records what we just built, so
-    // a later read can still catch rot, truncation, or a swap. It claims that
-    // and nothing more.
-    if let Err(e) = mvm_build::kernel_fetch::record_kernel_digest(&dest) {
-        ui::warn(&format!(
-            "could not record the kernel digest beside {} ({e}); it will be rebuilt on next use",
-            dest.display()
-        ));
+    if variant == KernelVariant::Workload
+        && workload_config_carries_dm_verity(&config) != Some(true)
+    {
+        anyhow::bail!(
+            "Stage 0 workload config must contain CONFIG_BLK_DEV_DM=y and CONFIG_DM_VERITY=y"
+        );
     }
 
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("creating kernel cache dir {}", out_dir.display()))?;
+    let config_dest = out_dir.join("config");
+    mvm_core::util::atomic_io::atomic_write(&config_dest, config.as_bytes())
+        .with_context(|| format!("publishing kernel config {}", config_dest.display()))?;
+    let dest = out_dir.join("vmlinux");
+    mvm_core::util::atomic_io::atomic_write(&dest, &kernel_bytes)
+        .with_context(|| format!("publishing kernel {}", dest.display()))?;
+
+    // A locally built kernel has no published checksum to compare against. The
+    // sidecar records the bytes Stage 0 just produced so later reads detect
+    // truncation, rot, or replacement. Failure is fatal and evicts the kernel:
+    // no producer may leave a path that the verified resolver cannot serve.
+    if let Err(error) = mvm_build::kernel_fetch::record_kernel_digest(&dest) {
+        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(&config_dest);
+        return Err(error).context("recording locally built kernel digest");
+    }
     Ok(dest)
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod tests {
+    use super::*;
+
+    fn stage_kernel(dir: &std::path::Path, kernel: &[u8], config: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("vmlinux"), kernel).unwrap();
+        std::fs::write(dir.join("mvm-kernel.config"), config).unwrap();
+    }
+
+    #[test]
+    fn workload_publish_requires_dm_verity_config_and_preserves_old_cache_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let live = tmp.path().join("workload");
+        stage_kernel(
+            &staging,
+            b"new kernel",
+            "# CONFIG_BLK_DEV_DM is not set\n# CONFIG_DM_VERITY is not set\n",
+        );
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("vmlinux"), b"old kernel").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&live.join("vmlinux")).unwrap();
+
+        let err = publish_kernel_artifacts(&staging, &live, KernelVariant::Workload).unwrap_err();
+
+        assert!(err.to_string().contains("CONFIG_DM_VERITY=y"));
+        assert_eq!(std::fs::read(live.join("vmlinux")).unwrap(), b"old kernel");
+        let expected = mvm_fs::overlay::compute_file_sha256(&live.join("vmlinux")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mvm_build::kernel_fetch::kernel_digest_sidecar(
+                &live.join("vmlinux")
+            ))
+            .unwrap()
+            .trim(),
+            expected
+        );
+    }
+
+    #[test]
+    fn workload_publish_installs_validated_kernel_config_and_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let live = tmp.path().join("workload");
+        stage_kernel(
+            &staging,
+            b"new kernel",
+            "CONFIG_MD=y\nCONFIG_BLK_DEV_DM=y\nCONFIG_DM_VERITY=y\n",
+        );
+
+        let kernel = publish_kernel_artifacts(&staging, &live, KernelVariant::Workload).unwrap();
+
+        assert_eq!(kernel, live.join("vmlinux"));
+        assert_eq!(std::fs::read(&kernel).unwrap(), b"new kernel");
+        assert!(
+            std::fs::read_to_string(live.join("config"))
+                .unwrap()
+                .contains("CONFIG_DM_VERITY=y")
+        );
+        let expected = mvm_fs::overlay::compute_file_sha256(&kernel).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mvm_build::kernel_fetch::kernel_digest_sidecar(&kernel))
+                .unwrap()
+                .trim(),
+            expected
+        );
+    }
 }

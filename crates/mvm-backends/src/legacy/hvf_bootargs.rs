@@ -13,7 +13,7 @@ pub fn default_bootargs(has_disk: bool) -> String {
     let mut args =
         format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8");
     if has_disk {
-        args.push_str(" root=/dev/vda rw init=/init");
+        args.push_str(" root=/dev/vda ro init=/init");
     }
     args
 }
@@ -22,7 +22,7 @@ pub fn default_bootargs(has_disk: bool) -> String {
 pub fn default_virtiofs_bootargs() -> String {
     format!(
         "earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8 \
-         rootfstype=virtiofs root=mvmroot rw init=/init"
+         rootfstype=virtiofs root=mvmroot ro init=/init"
     )
 }
 

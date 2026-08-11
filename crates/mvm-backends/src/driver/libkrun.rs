@@ -61,9 +61,9 @@ impl Default for LibkrunDriver {
 fn libkrun_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     if virtiofs_root {
         // Dev virtiofs-root boot: hvc0 console + the virtiofs guest root.
-        "console=hvc0 rootfstype=virtiofs root=mvmroot rw init=/init".to_string()
+        "console=hvc0 rootfstype=virtiofs root=mvmroot ro init=/init".to_string()
     } else if has_disk {
-        crate::legacy::libkrun::DEFAULT_CMDLINE.to_string()
+        "console=hvc0 root=/dev/vda ro init=/init".to_string()
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
         // so only the console base is emitted here.
@@ -744,7 +744,7 @@ mod tests {
         // Empty cmdline ⇒ the driver supplies the virtiofs-root base.
         assert_eq!(
             cfg.krun.kernel_cmdline.as_deref(),
-            Some("console=hvc0 rootfstype=virtiofs root=mvmroot rw init=/init")
+            Some("console=hvc0 rootfstype=virtiofs root=mvmroot ro init=/init")
         );
     }
 
@@ -875,7 +875,7 @@ mod tests {
         let cfg = relay(&spec);
         assert_eq!(
             cfg.krun.kernel_cmdline.as_deref(),
-            Some(crate::legacy::libkrun::DEFAULT_CMDLINE)
+            Some("console=hvc0 root=/dev/vda ro init=/init")
         );
 
         // Empty + an initramfs (no disk root) ⇒ the console-only verity base.

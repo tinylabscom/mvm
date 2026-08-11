@@ -15,7 +15,7 @@ use mvm_core::checkpoint::CheckpointMeta;
 use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::{VmId, VmStartConfig};
+use mvm_core::vm_backend::VmId;
 
 use crate::substitution_spawn::EndpointGuard;
 use crate::workload_runner::runner::{EndpointSpawnRequest, EndpointSpawner};
@@ -139,15 +139,28 @@ impl<'a> ClaimGuards<'a> {
         Self { spawner }
     }
 
-    /// Refuse a rootfs whose parent dir carries no overlay-aware sidecar (no
+    /// Refuse an image whose dir carries no overlay-aware sidecar (no
     /// `/mvm/runtime` mount point) before any endpoint spawn or boot — the same
     /// gate the raw backends run, so a claim admits exactly what a cold boot does.
-    pub fn admit_overlay_contract(&self, cfg: &VmStartConfig) -> Result<()> {
-        let rootfs = Path::new(&cfg.rootfs_path);
-        let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
+    ///
+    /// `image_rootfs` is the rootfs the claim was **admitted for**, not the
+    /// copy-on-write clone the child boots from. The sidecar records how the
+    /// image was built (`overlayAware`, `runtimeLean`), so it lives beside the
+    /// image and travels with neither the snapshot capture nor the clone: a
+    /// materialized child dir holds `rootfs.ext4` and the saved memory, and
+    /// nothing else. Gating on the clone therefore refused every saved-state
+    /// claim for a missing sidecar while the identical cold boot of the same
+    /// image was admitted — the resident-handoff path already passed the image
+    /// dir here for exactly this reason, and the two must not disagree.
+    pub fn admit_overlay_contract(
+        &self,
+        image_rootfs: &Path,
+        runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+    ) -> Result<()> {
+        let rootfs_dir = image_rootfs.parent().unwrap_or_else(|| Path::new("."));
         mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(
             rootfs_dir,
-            cfg.runtime_source_policy,
+            runtime_source_policy,
         )
     }
 
@@ -187,6 +200,7 @@ impl<'a> ClaimGuards<'a> {
 mod tests {
     use super::*;
     use mvm_core::checkpoint::{CheckpointClass, CheckpointId, ContentBlob};
+    use mvm_core::vm_backend::RuntimeSourcePolicy;
 
     fn fake_meta_with_rootfs(hex: String) -> CheckpointMeta {
         CheckpointMeta::builder(
@@ -249,7 +263,6 @@ mod tests {
     use crate::workload_runner::runner::{EndpointSpawnRequest, EndpointSpawner};
     use mvm_core::policy::RedactionPolicy;
     use mvm_core::policy::network_policy::NetworkPolicy;
-    use mvm_core::vm_backend::VmStartConfig;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -355,29 +368,61 @@ mod tests {
         mvm_build::builder_vm::GuestSidecar::for_oci_run("cg-valid", false, true)
             .write_to_dir(ok_dir.path())
             .unwrap();
-        let valid = VmStartConfig {
-            name: "cg-valid".into(),
-            rootfs_path: ok_rootfs.display().to_string(),
-            ..Default::default()
-        };
-        assert!(guards.admit_overlay_contract(&valid).is_ok());
+        assert!(
+            guards
+                .admit_overlay_contract(&ok_rootfs, RuntimeSourcePolicy::default())
+                .is_ok()
+        );
 
         // A rootfs whose dir carries no sidecar is refused — same message the
         // cold-boot gate emits.
         let bare_dir = tempfile::tempdir().unwrap();
         let bare_rootfs = bare_dir.path().join("rootfs.ext4");
         std::fs::write(&bare_rootfs, b"rootfs").unwrap();
-        let invalid = VmStartConfig {
-            name: "cg-invalid".into(),
-            rootfs_path: bare_rootfs.display().to_string(),
-            ..Default::default()
-        };
         let err = guards
-            .admit_overlay_contract(&invalid)
+            .admit_overlay_contract(&bare_rootfs, RuntimeSourcePolicy::default())
             .expect_err("a rootfs with no overlay-aware sidecar must be refused");
         assert!(
             err.to_string().contains("mvm-meta.json"),
             "refusal must name the missing sidecar: {err}"
+        );
+    }
+
+    /// A saved-state claim gates the image it was admitted for, not the
+    /// copy-on-write clone the child boots. The clone carries `rootfs.ext4` and
+    /// the saved memory and nothing else — the sidecar is not part of the
+    /// capture — so gating the clone refused every such claim for a missing
+    /// sidecar while the identical cold boot of the same image was admitted.
+    #[test]
+    fn admit_overlay_contract_gates_the_image_not_the_materialized_clone() {
+        let spawner = FakeSpawner::default();
+        let guards = ClaimGuards::new(&spawner);
+
+        let image_dir = tempfile::tempdir().unwrap();
+        let image_rootfs = image_dir.path().join("rootfs.ext4");
+        std::fs::write(&image_rootfs, b"rootfs").unwrap();
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("cg-image", false, true)
+            .write_to_dir(image_dir.path())
+            .unwrap();
+
+        // What a materialization actually produces: the blob and the memory
+        // image, no sidecar.
+        let clone_dir = tempfile::tempdir().unwrap();
+        let clone_rootfs = clone_dir.path().join("rootfs.ext4");
+        std::fs::write(&clone_rootfs, b"rootfs").unwrap();
+        std::fs::write(clone_dir.path().join("memory.bin"), b"mem").unwrap();
+
+        assert!(
+            guards
+                .admit_overlay_contract(&image_rootfs, RuntimeSourcePolicy::default())
+                .is_ok(),
+            "the admitted image carries the sidecar and must be admitted"
+        );
+        assert!(
+            guards
+                .admit_overlay_contract(&clone_rootfs, RuntimeSourcePolicy::default())
+                .is_err(),
+            "the clone has no sidecar — proving the gate must not be pointed at it"
         );
     }
 }

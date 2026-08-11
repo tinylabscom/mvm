@@ -50,7 +50,7 @@ pub fn verifying_key_from_hex(hex: &str) -> anyhow::Result<ed25519_dalek::Verify
                 pair[1] as char
             )
         })?;
-        bytes[i] = (hi << 4) | lo;
+        bytes[i] = hi * 16 + lo;
     }
     ed25519_dalek::VerifyingKey::from_bytes(&bytes)
         .map_err(|e| anyhow::anyhow!("host-signer pubkey is not a valid Ed25519 key: {e}"))

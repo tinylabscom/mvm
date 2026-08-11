@@ -52,6 +52,19 @@ pub struct MvmConfig {
     /// value here refuses an explicitly unbounded grant rather than clamping
     /// it, so a caller learns the host forbids what it asked for.
     pub max_wall_clock_secs: Option<u32>,
+    /// Default CPU share, in thousandths of one host core, for a workload no
+    /// higher surface capped. `None` = uncapped.
+    ///
+    /// A default is not a ceiling. The three `max_*` keys above bound what a
+    /// grant may *ask for* and no surface can exceed them; this one only fills
+    /// in a dimension nobody else named, and any surface above host config
+    /// overrides it freely.
+    pub default_cpu_millicores: Option<u32>,
+    /// Default wall-clock bound, in seconds, for a workload no higher surface
+    /// bounded. `None` = unbounded. A configured `0` is ignored rather than
+    /// read as "no time allowed": zero is not expressible as a wall-clock
+    /// grant, and the legacy encoding it resembles means unbounded.
+    pub default_wall_clock_secs: Option<u32>,
 }
 
 impl MvmConfig {
@@ -66,6 +79,28 @@ impl MvmConfig {
             max_cpu_millicores: self.max_cpu_millicores,
             max_memory_mib: self.max_memory_mib,
             max_wall_clock_secs: self.max_wall_clock_secs,
+        }
+    }
+
+    /// The host's default grant: the dimensions this operator wants applied to
+    /// a workload that named none itself.
+    ///
+    /// Egress is deliberately absent and has no config key. A host-wide
+    /// allow-list would open outbound access for every workload that never
+    /// asked for any, which inverts default-deny — the one posture that has to
+    /// hold without anyone opting into it. Egress is authored per workload or
+    /// not at all.
+    #[must_use]
+    pub fn default_grants(&self) -> mvm_contract::grants::Grants {
+        mvm_contract::grants::Grants {
+            cpu: self
+                .default_cpu_millicores
+                .map(|millicores| mvm_contract::grants::CpuGrant::Share { millicores }),
+            wall_clock: self
+                .default_wall_clock_secs
+                .and_then(std::num::NonZeroU32::new)
+                .map(|secs| mvm_contract::grants::WallClockGrant::Secs { secs }),
+            egress: None,
         }
     }
 
@@ -101,6 +136,10 @@ impl Default for MvmConfig {
             max_cpu_millicores: None,
             max_memory_mib: None,
             max_wall_clock_secs: None,
+            // Also unset: a default invented here would cap every local run
+            // with a number nobody chose.
+            default_cpu_millicores: None,
+            default_wall_clock_secs: None,
         }
     }
 }

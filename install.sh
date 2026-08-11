@@ -182,20 +182,20 @@ case ":$PATH:" in
   *) say "Add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
-# Pre-fetch the builder VM + dev images so the first `mvmctl dev up` is fast
-# instead of paying a one-time download/build on the hot path. Opt out with
-# MVM_SKIP_BUILDER_PREFETCH=1 (bandwidth-limited, headless, or CI installs);
+# Prepare the builder VM and workload kernel ahead of the first machine run
+# instead of paying their one-time download/build cost on the launch path. Opt out with
+# MVM_SKIP_BOOTSTRAP=1 (bandwidth-limited, headless, or CI installs).
 # `mvmctl bootstrap` also honors the finer MVM_SKIP_DEV_IMAGE_PREFETCH knob.
-# Non-fatal: a failure just defers the fetch to first `dev up`.
-if [ "${MVM_SKIP_BUILDER_PREFETCH:-}" != "1" ]; then
-  say "Pre-fetching the builder VM + dev images so your first 'dev up' is instant (skip with MVM_SKIP_BUILDER_PREFETCH=1)..."
+# Non-fatal: a failure defers acquisition to the first command that needs it.
+if [ "${MVM_SKIP_BOOTSTRAP:-}" != "1" ]; then
+  say "Preparing the builder VM and workload kernel for your first machine run (skip with MVM_SKIP_BOOTSTRAP=1)..."
   if "$INSTALL_DIR/mvmctl" bootstrap; then
-    say "Builder VM + dev images ready."
+    say "Builder VM and workload kernel ready."
   else
-    warn "image prefetch failed — 'mvmctl dev up' will fetch on first run, or re-run 'mvmctl bootstrap'."
+    warn "bootstrap failed — the first machine command will retry, or re-run 'mvmctl bootstrap' now."
   fi
 else
-  say "Skipping image prefetch — run 'mvmctl bootstrap' before your first 'dev up' for a fast start."
+  say "Skipping bootstrap — run 'mvmctl bootstrap' before your first machine command for a ready first run."
 fi
 
 say "Run 'mvmctl doctor' to check your host."

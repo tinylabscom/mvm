@@ -619,15 +619,21 @@ impl MvmClient for LocalBackend {
                     .into(),
             });
         }
-        let request = crate::launch::LaunchRequest::builder(
+        let mut builder = crate::launch::LaunchRequest::builder(
             crate::launch::LifecycleMode::Persistent,
             spec.image,
         )
         .name(spec.name)
         .cpus(spec.cpus)
-        .memory_mib(spec.memory_mib)
-        .build()?;
-        self.create_from_request(&request)
+        .memory_mib(spec.memory_mib);
+        // Carried, never dropped — the same reason the env refusal above
+        // exists. A permission set the caller believes is in force and is not
+        // is worse than none at all, because it is believed. This is also the
+        // only way a library caller expresses an egress allow-list.
+        if let Some(grants) = spec.grants {
+            builder = builder.grants(grants);
+        }
+        self.create_from_request(&builder.build()?)
     }
 
     async fn run_machine(&self, spec: MachineSpec) -> Result<MachineState> {
@@ -640,15 +646,17 @@ impl MvmClient for LocalBackend {
                     .into(),
             });
         }
-        let request = crate::launch::LaunchRequest::builder(
+        let mut builder = crate::launch::LaunchRequest::builder(
             crate::launch::LifecycleMode::Transient,
             spec.image,
         )
         .name(spec.name)
         .cpus(spec.cpus)
-        .memory_mib(spec.memory_mib)
-        .build()?;
-        let outcome = self.launch(request).await?;
+        .memory_mib(spec.memory_mib);
+        if let Some(grants) = spec.grants {
+            builder = builder.grants(grants);
+        }
+        let outcome = self.launch(builder.build()?).await?;
         Ok(outcome.machine)
     }
 
@@ -1052,6 +1060,7 @@ mod tests {
             cpus: 1,
             memory_mib: 128,
             env: vec![],
+            grants: None,
         };
         let state = be
             .run_machine(spec)
@@ -1082,6 +1091,7 @@ mod tests {
             cpus: 1,
             memory_mib: 128,
             env: vec![],
+            grants: None,
         };
         let state = be.run_machine(spec).await.expect("boot");
         assert!(
@@ -1130,6 +1140,7 @@ mod tests {
             cpus: 1,
             memory_mib: 128,
             env: vec![],
+            grants: None,
         };
         let state = be.run_machine(spec).await.expect("boot");
         assert!(
@@ -1284,6 +1295,7 @@ mod tests {
             last_started_at: None,
             health_check: None,
             deployment: None,
+            grants: None,
         };
         save_machine_spec(&spec, false).expect("persist_test_spec: save failed");
     }

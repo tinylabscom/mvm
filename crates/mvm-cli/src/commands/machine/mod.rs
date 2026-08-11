@@ -273,9 +273,15 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
-    /// Set the vCPU count.
+    /// Set how many vCPUs the guest sees (not a host CPU share).
     #[arg(long, default_value = "2")]
     pub cpus: u32,
+    /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
+    #[arg(long = "cpu-limit", value_name = "MILLICORES")]
+    pub cpu_limit: Option<u32>,
+    /// Read grants (CPU, wall clock, egress) from a JSON file.
+    #[arg(long = "grants-file", value_name = "PATH")]
+    pub grants_file: Option<PathBuf>,
     /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
@@ -419,6 +425,8 @@ impl MachineRunArgs {
             net: self.net,
             allow_host: self.allow_host,
             cpus: self.cpus,
+            cpu_limit: self.cpu_limit,
+            grants_file: self.grants_file,
             memory: self.memory,
             profile: self.profile,
             agent_verb: self.agent_verb,
@@ -698,7 +706,19 @@ fn machine_run_spec(
                  `--runtime-pack` to create machine {name:?}"
         );
     };
-    super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+    let config = mvm_core::user_config::load(None);
+    let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
+        cpu_limit_millicores: args.cpu_limit,
+        timeout_secs: args.timeout,
+        allow_host: &args.allow_host,
+        net: args.net,
+        grants_file: args.grants_file.as_deref(),
+        // A persistent `machine run` names its source on the command line and
+        // reads no project manifest; `machine create` is the verb that sources
+        // a `[grants]` table.
+        manifest: None,
+        config: &config,
+    })?;
     let _ = validate_machine_memory(&args.memory, None)?;
     let profile = run_profile_name(args.profile).to_string();
     Ok(MachineSpec {
@@ -727,6 +747,7 @@ fn machine_run_spec(
             args.health_retries,
             args.health_start_period,
         ),
+        grants: resolved.plan_grants,
     })
 }
 
@@ -750,9 +771,18 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
-    /// vCPU cores for lifecycle starts.
+    /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
+    /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
+    #[arg(long = "cpu-limit", value_name = "MILLICORES")]
+    pub cpu_limit: Option<u32>,
+    /// Bound each start's wall-clock runtime in seconds.
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<u64>,
+    /// Read grants (CPU, wall clock, egress) from a JSON file.
+    #[arg(long = "grants-file", value_name = "PATH")]
+    pub grants_file: Option<PathBuf>,
     /// Memory for lifecycle starts (supports human-readable: 512M, 1G, ...).
     #[arg(long)]
     pub memory: Option<String>,
@@ -1066,7 +1096,18 @@ impl MachineCreateArgs {
         } else {
             self.allow_host
         };
-        super::shared::resolve_run_network_policy(net, &allow_host)?;
+        // Resolving grants also settles the egress policy, so validating it
+        // here validates the same policy the machine will actually boot under.
+        let config = mvm_core::user_config::load(None);
+        let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
+            cpu_limit_millicores: self.cpu_limit,
+            timeout_secs: self.timeout,
+            allow_host: &allow_host,
+            net,
+            grants_file: self.grants_file.as_deref(),
+            manifest: workflow.map(|workflow| &workflow.grants),
+            config: &config,
+        })?;
         let cpus = self
             .cpus
             .or_else(|| workflow.map(|workflow| workflow.cpus))
@@ -1123,6 +1164,7 @@ impl MachineCreateArgs {
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
             health_check: None,
+            grants: resolved.plan_grants,
         })
     }
 }
@@ -1503,6 +1545,8 @@ fn run_args_for_image_revert(
             net: false,
             allow_host: Vec::new(),
             cpus: 2,
+            cpu_limit: None,
+            grants_file: None,
             memory: "512M".to_string(),
             profile: RunProfile::Dev,
             agent_verb: Vec::new(),

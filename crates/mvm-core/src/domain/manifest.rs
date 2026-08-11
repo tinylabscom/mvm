@@ -164,6 +164,13 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "ManifestDev::is_empty")]
     pub dev: ManifestDev,
 
+    /// Optional workload permission set — the project's default grants.
+    /// Empty means the project declares none, and each dimension then resolves
+    /// its own way: an absent egress grant is deny-all, an absent CPU grant is
+    /// uncapped.
+    #[serde(default, skip_serializing_if = "ManifestGrants::is_empty")]
+    pub grants: ManifestGrants,
+
     /// Human-readable data disk size; `"0"` means no data disk.
     #[serde(default = "default_data_disk")]
     pub data_disk: String,
@@ -257,6 +264,17 @@ impl Manifest {
         for entry in &self.network.allow_hosts {
             parse_allow_host(entry)?;
         }
+        // Two authored allow-lists are two answers to one question, and
+        // whichever the enforcement path happens to read becomes the real
+        // policy. Refuse the ambiguity instead of picking a winner silently.
+        if !self.network.allow_hosts.is_empty() && !self.grants.allow_hosts.is_empty() {
+            return Err(anyhow!(
+                "manifest declares an egress allow-list in both `[network].allow_hosts` and \
+                 `[grants].allow_hosts`; keep exactly one — `[grants]` is the granted form \
+                 the egress gate enforces"
+            ));
+        }
+        self.grants.to_grants()?;
         for cmd in &self.dev.init {
             if cmd.trim().is_empty() {
                 return Err(anyhow!(
@@ -299,6 +317,9 @@ impl Manifest {
             cpus: u32::from(self.cpus),
             mem: self.mem.clone(),
             mem_initial: self.mem_initial.clone(),
+            // `validate` already rejected a malformed `[grants]`, and every
+            // constructor runs it, so this cannot fail on a parsed manifest.
+            grants: self.grants.to_grants().unwrap_or_default(),
         })
     }
 
@@ -388,6 +409,107 @@ impl ManifestNetwork {
     }
 }
 
+/// The `[grants]` table: what this project's workload is permitted to consume
+/// or reach, in the manifest's own human-readable spelling.
+///
+/// Kept separate from [`mvm_contract::grants::Grants`] because the wire type is
+/// a tagged union tuned for a signed payload, and a TOML author should not have
+/// to write `cpu = { unit = "share", millicores = 1500 }`. [`to_grants`] is the
+/// one conversion.
+///
+/// [`to_grants`]: ManifestGrants::to_grants
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestGrants {
+    /// CPU share in thousandths of one host core (`1500` = 1.5 cores). This is
+    /// a share of host CPU *time*, not the `cpus` count the guest sees — the
+    /// two are independent and a workload may hold four vCPUs bounded to half
+    /// a core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millicores: Option<u32>,
+    /// Deterministic executed-instruction budget. A different unit from
+    /// `cpu_millicores`, not a finer one; setting both is a parse error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_fuel: Option<u64>,
+    /// Wall-clock bound in seconds. Must be positive: zero means "no time
+    /// allowed", which is not expressible, and the legacy encoding it
+    /// resembles reads zero as *unbounded* — the exact inversion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_secs: Option<u32>,
+    /// Outbound destinations as `HOST[:PORT]`, port defaulting to 443. An
+    /// entry here is what the egress gate ends up enforcing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_hosts: Vec<String>,
+}
+
+impl ManifestGrants {
+    fn is_empty(&self) -> bool {
+        self.cpu_millicores.is_none()
+            && self.cpu_fuel.is_none()
+            && self.wall_clock_secs.is_none()
+            && self.allow_hosts.is_empty()
+    }
+
+    /// Convert to the typed permission set the plan carries.
+    pub fn to_grants(&self) -> Result<mvm_contract::grants::Grants> {
+        use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
+
+        let cpu = match (self.cpu_millicores, self.cpu_fuel) {
+            (Some(_), Some(_)) => {
+                return Err(anyhow!(
+                    "manifest fields `grants.cpu_millicores` and `grants.cpu_fuel` are \
+                     different units, not different precisions; set exactly one"
+                ));
+            }
+            (Some(millicores), None) => {
+                if millicores == 0 {
+                    return Err(anyhow!(
+                        "manifest field `grants.cpu_millicores` must be > 0; omit it to leave \
+                         CPU uncapped"
+                    ));
+                }
+                Some(CpuGrant::Share { millicores })
+            }
+            (None, Some(instructions)) => Some(CpuGrant::Fuel { instructions }),
+            (None, None) => None,
+        };
+
+        let wall_clock = match self.wall_clock_secs {
+            None => None,
+            Some(secs) => Some(WallClockGrant::Secs {
+                secs: std::num::NonZeroU32::new(secs).ok_or_else(|| {
+                    anyhow!(
+                        "manifest field `grants.wall_clock_secs` must be > 0; omit it to leave \
+                         the workload unbounded"
+                    )
+                })?,
+            }),
+        };
+
+        let egress = if self.allow_hosts.is_empty() {
+            None
+        } else {
+            Some(EgressGrant {
+                allow: self
+                    .allow_hosts
+                    .iter()
+                    .map(|entry| {
+                        parse_allow_host(entry).with_context(|| {
+                            format!("invalid `grants.allow_hosts` entry: {entry:?}")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            })
+        };
+
+        Ok(Grants {
+            cpu,
+            wall_clock,
+            egress,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestDev {
@@ -413,6 +535,9 @@ pub struct ManifestMachineWorkflow {
     pub cpus: u32,
     pub mem: String,
     pub mem_initial: Option<String>,
+    /// The project's declared permission set, already in the typed form the
+    /// signed plan carries. Every dimension may be absent.
+    pub grants: mvm_contract::grants::Grants,
 }
 
 /// If exactly one of `mvm.toml` / `Mvmfile.toml` exists in `dir`,
@@ -966,6 +1091,97 @@ mod tests {
         assert_eq!(workflow.mem, "8G");
         assert_eq!(workflow.mem_initial.as_deref(), Some("512M"));
         assert_eq!(workflow.allow_hosts, m.network.allow_hosts);
+    }
+
+    #[test]
+    fn a_grants_table_becomes_typed_workflow_grants() {
+        let toml = r#"
+            image = "alpine:3.20"
+
+            [grants]
+            cpu_millicores = 1500
+            wall_clock_secs = 600
+            allow_hosts = ["api.example.com:443", "db.internal"]
+        "#;
+        let workflow = Manifest::from_toml_str(toml)
+            .expect("parses")
+            .machine_workflow()
+            .expect("image-backed machine workflow");
+        assert_eq!(
+            workflow.grants.cpu,
+            Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 })
+        );
+        assert_eq!(
+            workflow.grants.wall_clock,
+            Some(mvm_contract::grants::WallClockGrant::Secs {
+                secs: std::num::NonZeroU32::new(600).expect("nonzero")
+            })
+        );
+        assert_eq!(
+            workflow.grants.egress.expect("egress granted").allow,
+            vec![
+                crate::network_policy::HostPort::new("api.example.com", 443),
+                // A bare host defaults to 443, matching `[network].allow_hosts`.
+                crate::network_policy::HostPort::new("db.internal", 443),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_a_grants_table_grants_nothing() {
+        let workflow = Manifest::from_toml_str("image = \"alpine:3.20\"")
+            .expect("parses")
+            .machine_workflow()
+            .expect("image-backed machine workflow");
+        assert_eq!(workflow.grants, mvm_contract::grants::Grants::default());
+    }
+
+    #[test]
+    fn two_egress_allow_lists_are_refused_rather_than_silently_ranked() {
+        // Two authored answers to one question; whichever the enforcement path
+        // read would become the real policy.
+        let err = Manifest::from_toml_str(
+            r#"
+            image = "alpine:3.20"
+
+            [network]
+            allow_hosts = ["a.example.com"]
+
+            [grants]
+            allow_hosts = ["b.example.com"]
+        "#,
+        )
+        .expect_err("two allow-lists must not parse");
+        assert!(format!("{err:#}").contains("both"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_zero_wall_clock_grant_is_refused_not_read_as_unbounded() {
+        // The legacy `exec_secs` encoding reads zero as *unbounded*, so a user
+        // writing 0 to mean "no time allowed" would get the exact inversion.
+        let err =
+            Manifest::from_toml_str("image = \"alpine:3.20\"\n[grants]\nwall_clock_secs = 0\n")
+                .expect_err("zero seconds must not parse");
+        assert!(
+            format!("{err:#}").contains("wall_clock_secs"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn cpu_millicores_and_cpu_fuel_are_units_not_precisions() {
+        let err = Manifest::from_toml_str(
+            "image = \"alpine:3.20\"\n[grants]\ncpu_millicores = 1500\ncpu_fuel = 100\n",
+        )
+        .expect_err("two CPU units must not parse");
+        assert!(format!("{err:#}").contains("exactly one"), "got: {err:#}");
+    }
+
+    #[test]
+    fn an_unknown_grants_key_is_refused() {
+        let err = Manifest::from_toml_str("image = \"alpine:3.20\"\n[grants]\ncpu_limt = 1500\n")
+            .expect_err("a misspelled key must not be silently dropped");
+        assert!(format!("{err:#}").contains("cpu_limt"), "got: {err:#}");
     }
 
     #[test]

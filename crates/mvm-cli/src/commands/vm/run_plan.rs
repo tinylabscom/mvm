@@ -564,6 +564,8 @@ mod tests {
             net: false,
             allow_host: Vec::new(),
             cpus: 2,
+            cpu_limit: None,
+            grants_file: None,
             memory: "512M".to_string(),
             profile: RunProfile::Standard,
             agent_verb: Vec::new(),

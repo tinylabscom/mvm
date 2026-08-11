@@ -80,7 +80,15 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         .map(String::from)
         .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
-    let network_policy = shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    // A granted allow-list is what the gate enforces; the legacy
+    // `net`/`allow_host` fields decide the policy only for a spec that granted
+    // no egress. Deriving it from the same spec the plan is admitted under is
+    // what keeps the enforced policy and the signed one from diverging.
+    let network_policy = shared::enforced_network_policy(
+        spec.grants.as_ref().and_then(|g| g.egress.as_ref()),
+        spec.net,
+        &spec.allow_host,
+    )?;
     let (memory_mib, mem_initial_mib) =
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volume_cfg = build_machine_volume_cfg(&spec.volumes)?;
@@ -170,6 +178,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         kernel_path,
         agent_verb: spec.agent_verb.clone(),
         has_ad_hoc_argv: args.has_ad_hoc_argv,
+        grants: spec.grants.clone(),
     })?;
     if !spec.init.is_empty()
         && let Err(err) = run_machine_init_commands(&spec.name, &spec.init)

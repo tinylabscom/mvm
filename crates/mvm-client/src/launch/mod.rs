@@ -182,12 +182,20 @@ pub(crate) struct BootParams {
     pub(crate) backend_override: Option<String>,
     pub(crate) volumes: Vec<mvm_core::vm_backend::VmVolume>,
     pub(crate) transient: bool,
+    /// The request's permission set, carried into the signed plan and — for
+    /// its egress dimension — into the policy the gate enforces.
+    pub(crate) grants: Option<mvm_contract::grants::Grants>,
 }
 
 impl LocalBackend {
-    /// Resolve the per-backend workload kernel: HVF boots an explicit
-    /// verified arm64 kernel from the CLI-populated cache; every other
-    /// backend carries its own.
+    /// Resolve the per-backend workload kernel: every explicit-kernel backend
+    /// boots a verified kernel from the CLI-populated cache; bundled-kernel
+    /// backends carry their own.
+    ///
+    /// One arm serves all of them. Firecracker and the qemu dev tier used to
+    /// take a separate branch that accepted the cache path on `is_file()`, so
+    /// the backend that carries real workloads on Linux booted whatever sat at
+    /// the expected filename while HVF next door required a digest match.
     pub(crate) fn resolve_workload_kernel(backend: &AnyBackend) -> Result<Option<PathBuf>> {
         use mvm_core::protocol::vm_backend::BackendKind;
         let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -196,38 +204,23 @@ impl LocalBackend {
             // Bundled-kernel backends: libkrun boots the libkrunfw kernel and
             // the hermetic mock boots nothing — no host kernel path needed.
             BackendKind::Mock | BackendKind::Libkrun => Ok(None),
-            BackendKind::Hvf => {
-                match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
-                    mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-                        Ok(Some(verified.path().to_path_buf()))
-                    }
-                    _ => Err(crate::local::backend_err(format!(
-                        "hvf needs a verified workload kernel at {} — run a `mvmctl machine run` \
-                         once (or `mvmctl build kernel build`) to populate the cache",
-                        mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload")
-                            .display()
-                    ))),
+            // Cache-hit-or-error; populating the cache is a CLI concern. A hit
+            // means the bytes matched their recorded digest, and an entry that
+            // fails to verify is evicted by the resolve — so the hint below is
+            // the right next step for a rejected kernel as much as a missing
+            // one.
+            _ => match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
+                mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+                    Ok(Some(verified.path().to_path_buf()))
                 }
-            }
-            // Firecracker (and every other explicit-kernel backend, e.g. the
-            // qemu dev tier) hard-refuses a bundled-kernel spec, so resolve the
-            // same cached workload kernel the CLI's machine-run boot path
-            // supplies: `<cache>/builder-vm/<arch>/kernels/workload/vmlinux`
-            // by presence (the driver derives its own FC-loadable sibling from
-            // it). Cache-hit-or-error; populating the cache is a CLI concern.
-            _ => {
-                let path = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
-                if path.is_file() {
-                    Ok(Some(path))
-                } else {
-                    Err(crate::local::backend_err(format!(
-                        "{} needs the cached workload kernel at {} — create it once with \
-                         `mvmctl kernel build --which workload`, then retry",
-                        backend.name(),
-                        path.display()
-                    )))
-                }
-            }
+                _ => Err(crate::local::backend_err(format!(
+                    "{} needs a verified workload kernel at {} — create it once with \
+                     `mvmctl kernel build --which workload`, then retry",
+                    backend.name(),
+                    mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload")
+                        .display()
+                ))),
+            },
         }
     }
 
@@ -259,6 +252,7 @@ impl LocalBackend {
             backend_name: backend.name().to_string(),
             volumes: params.volumes,
             destroy_on_exit: params.transient,
+            grants: params.grants,
         };
 
         // A fresh per-launch ledger: local launches are one-shot from this
@@ -372,6 +366,31 @@ impl LocalBackend {
     }
 }
 
+/// Rebuild the launch request for a persistent start from the stored
+/// definition.
+///
+/// Every field a start needs comes from the spec, `grants` included. A start
+/// that reassembled the request from sizing alone would let a permission set
+/// hold for the machine's first boot and lapse on every one after — deny-all
+/// for egress, and simply unbounded for CPU and wall clock. Split out from
+/// `start_persistent` so that is checkable without booting a VM.
+fn start_request_from_spec(
+    name: &str,
+    image: String,
+    memory_mib: u32,
+    spec: &mp::MachineSpec,
+) -> Result<LaunchRequest> {
+    let mut builder = LaunchRequest::builder(LifecycleMode::Persistent, image)
+        .name(name)
+        .cpus(spec.cpus)
+        .memory_mib(memory_mib)
+        .profile(spec.profile.clone());
+    if let Some(grants) = spec.grants.clone() {
+        builder = builder.grants(grants);
+    }
+    builder.build()
+}
+
 /// Build the persisted declarative spec a persistent launch writes.
 fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::MachineSpec {
     mp::MachineSpec {
@@ -394,6 +413,9 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,
         health_check: None,
+        // The permission set the launch was admitted under, so a later
+        // `start` by name re-admits under the same bounds.
+        grants: request.grants.clone(),
     }
 }
 
@@ -618,6 +640,7 @@ impl LocalBackend {
                 backend_override: request.backend.clone(),
                 volumes,
                 transient,
+                grants: request.grants.clone(),
             })
             .await?;
         preparation.commit();
@@ -735,12 +758,7 @@ impl LocalBackend {
         self.validate_sidecar_refs(name)?;
         let memory_mib =
             mvm_core::util::parse_human_size(&spec.memory).map_err(crate::local::backend_err)?;
-        let request = LaunchRequest::builder(LifecycleMode::Persistent, image)
-            .name(name)
-            .cpus(spec.cpus)
-            .memory_mib(memory_mib)
-            .profile(spec.profile.clone())
-            .build()?;
+        let request = start_request_from_spec(name, image, memory_mib, &spec)?;
         let outcome = self.attach_lease_and_boot(name, &request, false).await?;
         Ok(outcome.machine)
     }

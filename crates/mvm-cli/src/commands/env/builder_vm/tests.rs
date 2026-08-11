@@ -65,10 +65,7 @@ mod builder_backend_attempt_order_tests {
 #[cfg(test)]
 mod default_microvm_tests {
     use super::default_microvm::default_workload_kernel_source;
-    use super::{
-        KernelSource, WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
-        missing_workload_kernel_message, resolve_workload_kernel_bootstrap,
-    };
+    use super::{KernelSource, default_microvm_assets, missing_workload_kernel_message};
 
     #[test]
     fn default_microvm_assets_pins_the_five_asset_contract() {
@@ -107,52 +104,22 @@ mod default_microvm_tests {
     fn no_default_microvm_kernel_is_ever_reused_as_the_workload_kernel() {
         for variant in ["dev", "prod"] {
             let tmp = tempfile::tempdir().unwrap();
-            let cache_dir = tmp.path().to_string_lossy().to_string();
             let kernel = tmp
                 .path()
                 .join(format!("default-microvm/{variant}/vmlinux"));
             std::fs::create_dir_all(kernel.parent().unwrap()).unwrap();
             std::fs::write(&kernel, b"default-kernel").unwrap();
 
-            assert_eq!(
-                find_cached_workload_kernel(&cache_dir, "x86_64"),
-                None,
+            let resolved =
+                mvm_build::kernel_fetch::resolve_kernel(tmp.path(), "x86_64", "workload", true);
+            assert!(
+                matches!(
+                    resolved,
+                    mvm_build::kernel_fetch::KernelResolution::NeedsBuild(_)
+                ),
                 "the {variant} default-microvm kernel must not stand in for the workload kernel"
             );
         }
-    }
-
-    #[test]
-    fn prod_workload_kernel_bootstrap_downloads_when_only_dev_default_kernel_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().to_string_lossy().to_string();
-        let dev_kernel = tmp.path().join("default-microvm/dev/vmlinux");
-        std::fs::create_dir_all(dev_kernel.parent().unwrap()).unwrap();
-        std::fs::write(&dev_kernel, b"dev-kernel").unwrap();
-
-        let resolved = resolve_workload_kernel_bootstrap(&cache_dir, "x86_64", false);
-        assert_eq!(
-            resolved,
-            WorkloadKernelBootstrap::Download(format!(
-                "{cache_dir}/builder-vm/{}/kernels/workload/vmlinux",
-                "x86_64"
-            ))
-        );
-    }
-
-    #[test]
-    fn prod_workload_kernel_bootstrap_builds_locally_from_source_checkout() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().to_string_lossy().to_string();
-
-        let resolved = resolve_workload_kernel_bootstrap(&cache_dir, "x86_64", true);
-        assert_eq!(
-            resolved,
-            WorkloadKernelBootstrap::BuildLocal(format!(
-                "{cache_dir}/builder-vm/{}/kernels/workload/vmlinux",
-                "x86_64"
-            ))
-        );
     }
 
     #[test]
@@ -688,7 +655,7 @@ mod reap_orphans_tests {
 
 #[cfg(all(test, feature = "builder-vm"))]
 mod heartbeat_tests {
-    use super::format_compile_elapsed;
+    use super::{format_compile_elapsed, format_compile_start};
     use std::time::Duration;
 
     #[test]
@@ -701,5 +668,13 @@ mod heartbeat_tests {
             format_compile_elapsed(Duration::from_secs(130)),
             "still compiling… (2m10s elapsed)"
         );
+    }
+
+    #[test]
+    fn compile_start_message_avoids_a_false_fixed_duration_promise() {
+        let message = format_compile_start("workload", "aarch64");
+        assert!(message.contains("depending on the host"));
+        assert!(message.contains("reuse the persistent Nix store"));
+        assert!(!message.contains("3-10"));
     }
 }

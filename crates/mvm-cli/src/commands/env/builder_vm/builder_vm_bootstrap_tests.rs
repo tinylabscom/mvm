@@ -3,185 +3,90 @@ use super::*;
 use std::io::Write;
 
 #[test]
-fn only_the_dedicated_workload_kernel_qualifies() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cache = tmp.path().to_str().unwrap();
-    let arch = "x86_64";
-    assert_eq!(find_cached_workload_kernel(cache, arch), None);
+fn workload_config_is_the_capability_witness() {
+    let supported = "CONFIG_MD=y\nCONFIG_BLK_DEV_DM=y\nCONFIG_DM_VERITY=y\n";
+    assert_eq!(workload_config_carries_dm_verity(supported), Some(true));
 
-    let mk = |rel: &str| {
-        let p = tmp.path().join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(&p, b"vmlinux").unwrap();
-        p.to_str().unwrap().to_string()
-    };
+    let builder = "# CONFIG_MD is not set\n# CONFIG_BLK_DEV_DM is not set\n";
+    assert_eq!(workload_config_carries_dm_verity(builder), Some(false));
 
-    // The default-microvm images ship a general-purpose NixOS kernel. It used to
-    // be accepted here as a stand-in, which silently gave workloads a kernel with
-    // CONFIG_USER_NS enabled whenever the real workload kernel was not cached.
-    // Neither variant qualifies now, however convenient the reuse was.
-    mk("default-microvm/prod/vmlinux");
-    mk("default-microvm/dev/vmlinux");
+    assert_eq!(workload_config_carries_dm_verity(""), None);
     assert_eq!(
-        find_cached_workload_kernel(cache, arch),
-        None,
-        "a default-microvm kernel must never stand in for the workload kernel"
-    );
-
-    // Only the dedicated kernel resolves, so a cold cache reaches the
-    // build-or-download path instead of booting on whatever is lying around.
-    let dedicated = mk(&format!("builder-vm/{arch}/kernels/workload/vmlinux"));
-    assert_eq!(
-        find_cached_workload_kernel(cache, arch).as_deref(),
-        Some(dedicated.as_str())
+        workload_config_carries_dm_verity("not a kernel config"),
+        None
     );
 }
 
 #[test]
-fn cold_cache_downloads_instead_of_building_locally() {
+fn assert_workload_kernel_supports_verity_rejects_an_explicit_non_verity_config() {
     let tmp = tempfile::tempdir().unwrap();
-    let cache = tmp.path().to_str().unwrap();
-    let arch = "x86_64";
-    assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false),
-        WorkloadKernelBootstrap::Download(format!(
-            "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
-        ))
-    );
-}
-
-#[test]
-fn source_checkout_cold_cache_downloads_by_default() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cache = tmp.path().to_str().unwrap();
-    let arch = "aarch64";
-    assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false),
-        WorkloadKernelBootstrap::Download(format!(
-            "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
-        ))
-    );
-}
-
-#[test]
-fn explicit_source_build_request_builds_workload_kernel_locally() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cache = tmp.path().to_str().unwrap();
-    let arch = "aarch64";
-    assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, true),
-        WorkloadKernelBootstrap::BuildLocal(format!(
-            "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
-        ))
-    );
-}
-
-#[test]
-fn workload_kernel_never_reuses_the_non_verity_builder_kernel() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cache = tmp.path().to_str().unwrap();
-    let arch = "aarch64";
-
-    // A builder-image kernel on disk must NOT satisfy the workload kernel: the
-    // builder kernel force-drops device-mapper + dm-verity, but every workload
-    // boots through the verity initrd, so reusing it panics the guest at boot.
-    // It is also not a workload-kernel cache candidate.
-    let dir = tmp.path().join(format!("builder-vm/{arch}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("vmlinux"), b"vmlinux").unwrap();
-    assert!(find_cached_workload_kernel(cache, arch).is_none());
-    assert!(find_cached_workload_kernel(cache, arch).is_none());
-
-    // With no workload/default kernel cached, resolution builds it (source
-    // checkout) or downloads it (installed) — never the builder kernel, in
-    // either dev or prod.
-    let dest = format!("{cache}/builder-vm/{arch}/kernels/workload/vmlinux");
-    assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, true),
-        WorkloadKernelBootstrap::BuildLocal(dest.clone())
-    );
-    assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false),
-        WorkloadKernelBootstrap::Download(dest.clone())
-    );
-    assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false),
-        WorkloadKernelBootstrap::Download(dest)
-    );
-}
-
-#[test]
-fn kernel_carries_dm_verity_flags_only_a_readable_marker_free_kernel() {
-    // A readable kernel carrying any device-mapper/dm-verity symbol → supported.
-    let verity = b"boot Linux version 6.6.0 ... dm_table_create ... verity_ctr ...".to_vec();
-    assert_eq!(kernel_carries_dm_verity(&verity), Some(true));
-    let dm_only = b"Linux version 6.6 device-mapper: ioctl:".to_vec();
-    assert_eq!(kernel_carries_dm_verity(&dm_only), Some(true));
-
-    // A readable kernel with no dm marker at all → the builder-kernel signature.
-    // This is the only case that fails the launch guard.
-    let builder = b"Linux version 6.6.0 (nixbld) rootwait console=hvc0 target_type".to_vec();
-    assert_eq!(kernel_carries_dm_verity(&builder), Some(false));
-
-    // Not a recognizable kernel (compressed Image, truncated file, junk) →
-    // inconclusive; the guard must never reject on `None`.
-    assert_eq!(kernel_carries_dm_verity(b"\x1f\x8b\x08 gzip payload"), None);
-    assert_eq!(kernel_carries_dm_verity(b""), None);
-    assert_eq!(kernel_carries_dm_verity(b"device-mapper"), None);
-}
-
-#[test]
-fn assert_workload_kernel_supports_verity_rejects_a_marker_free_kernel() {
-    let tmp = tempfile::tempdir().unwrap();
-    // A readable kernel with no dm-verity symbol is refused with a clear message.
-    let bad = tmp.path().join("builder-vmlinux");
-    std::fs::write(&bad, b"Linux version 6.6.0 (nixbld) console=hvc0 rootwait").unwrap();
+    let bad = tmp.path().join("vmlinux");
+    std::fs::write(&bad, b"valid raw ARM64 Image without KALLSYMS strings").unwrap();
+    std::fs::write(
+        tmp.path().join("config"),
+        "# CONFIG_BLK_DEV_DM is not set\n",
+    )
+    .unwrap();
     let err = assert_workload_kernel_supports_verity(bad.to_str().unwrap()).unwrap_err();
     assert!(
-        err.to_string().contains("dm-verity"),
+        err.to_string().contains("CONFIG_DM_VERITY=y"),
         "unexpected error: {err}"
     );
-
-    // A dm-verity-capable kernel passes; an unrecognized blob passes (inconclusive).
-    let good = tmp.path().join("workload-vmlinux");
-    std::fs::write(&good, b"Linux version 6.6.0 dm_table_create verity_ctr").unwrap();
-    assert!(assert_workload_kernel_supports_verity(good.to_str().unwrap()).is_ok());
-    let opaque = tmp.path().join("compressed-image");
-    std::fs::write(&opaque, b"\x1f\x8b\x08 not a decodable kernel").unwrap();
-    assert!(assert_workload_kernel_supports_verity(opaque.to_str().unwrap()).is_ok());
 }
 
-/// The scan runs over a whole multi-megabyte kernel on every launch, so its
-/// implementation was swapped for a skip-capable search. These are the cases
-/// where a naive and a skipping search can disagree: a marker at the very end
-/// (the worst offset), a long run of near-misses that share a marker's prefix,
-/// and a needle longer than the haystack.
 #[test]
-fn kernel_marker_search_finds_markers_at_any_offset_and_rejects_near_misses() {
-    let mut trailing = b"Linux version 6.6.0 ".to_vec();
-    trailing.extend(std::iter::repeat_n(b'\0', 512 * 1024));
-    trailing.extend_from_slice(b"dm-verity");
-    assert_eq!(
-        kernel_carries_dm_verity(&trailing),
-        Some(true),
-        "a marker in the final bytes must still be found"
-    );
+fn assert_workload_kernel_supports_verity_accepts_kallsyms_free_image_with_valid_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = tmp.path().join("vmlinux");
+    std::fs::write(&kernel, b"raw ARM64 Image with no searchable dm symbols").unwrap();
+    std::fs::write(
+        tmp.path().join("config"),
+        "CONFIG_MD=y\nCONFIG_BLK_DEV_DM=y\nCONFIG_DM_VERITY=y\n",
+    )
+    .unwrap();
 
-    // Repeated partial matches of `dm_table_create` that never complete: the
-    // shape a naive search walks quadratically, and which must still answer
-    // false.
-    let mut near_miss = b"Linux version 6.6.0 ".to_vec();
-    for _ in 0..40_000 {
-        near_miss.extend_from_slice(b"dm_table_creat_");
-    }
-    assert_eq!(
-        kernel_carries_dm_verity(&near_miss),
-        Some(false),
-        "a prefix that never completes a marker is not a marker"
-    );
+    assert_workload_kernel_supports_verity(kernel.to_str().unwrap()).unwrap();
+}
 
-    // Needle longer than haystack must not panic or match.
-    assert_eq!(kernel_carries_dm_verity(b"Linux vers"), None);
+#[test]
+fn assert_workload_kernel_supports_verity_accepts_raw_image_without_optional_local_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = tmp.path().join("vmlinux");
+    std::fs::write(
+        &kernel,
+        b"published raw ARM64 Image with no KALLSYMS strings",
+    )
+    .unwrap();
+
+    assert_workload_kernel_supports_verity(kernel.to_str().unwrap()).unwrap();
+}
+
+#[test]
+fn incompatible_cached_kernel_is_fully_evicted_for_automatic_recovery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = mvm_build::kernel_fetch::cached_kernel_path(tmp.path(), "aarch64", "workload");
+    std::fs::create_dir_all(kernel.parent().unwrap()).unwrap();
+    std::fs::write(&kernel, b"builder kernel in workload slot").unwrap();
+    std::fs::write(
+        kernel.with_file_name("config"),
+        "# CONFIG_BLK_DEV_DM is not set\n# CONFIG_DM_VERITY is not set\n",
+    )
+    .unwrap();
+    mvm_build::kernel_fetch::record_kernel_digest(&kernel).unwrap();
+
+    assert!(
+        assert_workload_kernel_supports_verity(kernel.to_str().unwrap()).is_err(),
+        "the explicit non-verity config must be rejected"
+    );
+    evict_incompatible_workload_kernel(&kernel).unwrap();
+
+    assert!(!kernel.exists());
+    assert!(!mvm_build::kernel_fetch::kernel_digest_sidecar(&kernel).exists());
+    assert!(!kernel.with_file_name("config").exists());
+    assert!(matches!(
+        mvm_build::kernel_fetch::resolve_kernel(tmp.path(), "aarch64", "workload", true),
+        mvm_build::kernel_fetch::KernelResolution::NeedsBuild(_)
+    ));
 }
 
 #[test]
@@ -507,6 +412,35 @@ fn stage0_in_flight_tracks_the_lock() {
     );
 }
 
+#[test]
+fn kernel_stage0_retry_sweeps_only_matching_orphan_staging_dirs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let kernels = tmp.path().join("aarch64/kernels");
+    let final_dir = kernels.join("workload");
+    let old_a = kernels.join(".workload.stage0-123-456");
+    let old_b = kernels.join(".workload.stage0-789-012");
+    let unrelated = kernels.join(".builder.stage0-123-456");
+    let live = kernels.join("workload");
+    for dir in [&old_a, &old_b, &unrelated, &live] {
+        std::fs::create_dir_all(dir).expect("create test directory");
+        std::fs::write(dir.join("artifact"), b"bytes").expect("write test artifact");
+    }
+
+    let removed = sweep_stage0_staging_siblings(&final_dir).expect("sweep matching orphans");
+
+    assert_eq!(removed, 2);
+    assert!(!old_a.exists());
+    assert!(!old_b.exists());
+    assert!(
+        unrelated.exists(),
+        "another variant's staging belongs to its producer"
+    );
+    assert!(
+        live.exists(),
+        "the live cache directory must never be swept"
+    );
+}
+
 /// Name predicate must match both the current hidden
 /// `.<arch>.stage0-<pid>-<nonce>` form and the legacy
 /// `<arch>-staging[-...]` form, and reject everything else that
@@ -551,7 +485,7 @@ fn is_orphan_stage0_staging_dir_name_matches_known_shapes() {
 /// reported block here is always spurious. Tests that deliberately
 /// contend the lock (`sweep_skips_when_stage0_lock_is_held`) do not use
 /// these — they want the real "held" outcome.
-fn acquire_stage0_lock_uncontended(out_dir: &str) -> mvm_core::atomic_io::FileLock {
+fn acquire_stage0_lock_uncontended(out_dir: &str) -> super::stage0_cache::Stage0LockGuard {
     for attempt in 0..200u32 {
         match acquire_stage0_lock(out_dir) {
             Ok(guard) => return guard,

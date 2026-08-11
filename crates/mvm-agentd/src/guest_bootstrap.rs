@@ -24,6 +24,7 @@ pub struct EgressClientMissing;
 /// privileged: the mounts, `/run/mvm` writes and interface changes all need root.
 pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     ensure_runtime_dirs();
+    provision_workload_identity();
     mount_mediated_tools();
     provision_egress_ca();
     provision_verb_grant();
@@ -32,6 +33,31 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
         start_vsock_egress()?;
     }
     Ok(())
+}
+
+/// Give the workload a home it owns and a name for its uid.
+///
+/// Both are cosmetic-until-they-aren't: without the home the shell starts in a
+/// directory it cannot write, and without the `/etc/passwd` entry `whoami`
+/// exits nonzero and `getpwuid()` returns `NULL` to any library that asks.
+/// Neither failure is worth refusing to boot over — a read-only rootfs that
+/// takes neither write still runs the workload — so both are reported and
+/// stepped past.
+fn provision_workload_identity() {
+    if let Err(error) = crate::guest_mount::ensure_workload_home() {
+        eprintln!(
+            "mvm-guest-init: could not create the workload home ({}): {error}; falling back to {}",
+            crate::guest_mount::WORKLOAD_HOME,
+            crate::guest_mount::WORKLOAD_HOME_FALLBACK
+        );
+    }
+    if let Err(error) = crate::workload_identity::provision() {
+        eprintln!(
+            "mvm-guest-init: could not name uid {} in /etc/passwd: {error}; \
+             whoami and getpwuid will not resolve it",
+            crate::guest_mount::WORKLOAD_UID
+        );
+    }
 }
 
 fn start_vsock_egress() -> Result<(), EgressClientMissing> {
@@ -93,7 +119,24 @@ pub fn ensure_runtime_dirs() {
             eprintln!("mvm-guest-init: mkdir {path}: {e}");
         }
     }
+    // The workload runs unprivileged, so the two world-writable scratch
+    // directories have to actually be world-writable. An image that ships them
+    // already has them at 1777; one that does not (`scratch`, distroless) gets
+    // whatever `create_dir_all` chose, which is root-owned 0755 — and every
+    // tempfile the workload opens then fails with EACCES.
+    for path in ["/tmp", "/dev/shm"] {
+        if let Err(e) = fs::set_permissions(
+            path,
+            std::os::unix::fs::PermissionsExt::from_mode(SCRATCH_DIR_MODE),
+        ) {
+            eprintln!("mvm-guest-init: chmod 1777 {path}: {e}");
+        }
+    }
 }
+
+/// `drwxrwxrwt` — world-writable with the sticky bit, so one workload process
+/// cannot delete another's files.
+const SCRATCH_DIR_MODE: u32 = 0o1777;
 
 /// Deliver each mediated tool, by both routes available.
 ///

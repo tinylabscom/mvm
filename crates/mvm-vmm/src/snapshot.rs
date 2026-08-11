@@ -237,3 +237,42 @@ impl SnapshotIO for CannedIO {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canned_io_writes_payloads_and_records_the_snapshot_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = CannedIO::new(b"vmstate", b"memory").with_network_interfaces(2);
+
+        assert!(io.calls().is_empty());
+        io.create_snapshot(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join(VMSTATE_FILENAME)).unwrap(),
+            b"vmstate"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(MEM_FILENAME)).unwrap(),
+            b"memory"
+        );
+
+        io.load_snapshot_paused(dir.path()).unwrap();
+        io.load_snapshot_for_fork_paused(dir.path()).unwrap();
+        assert_eq!(io.restored_network_interface_count().unwrap(), 2);
+        io.resume().unwrap();
+        io.teardown_paused().unwrap();
+
+        assert_eq!(
+            io.calls(),
+            vec![
+                "load_paused",
+                "load_fork_paused",
+                "restored_device_model",
+                "resume",
+                "teardown_paused",
+            ]
+        );
+    }
+}

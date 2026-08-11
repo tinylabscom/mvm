@@ -51,17 +51,3 @@ Pumps one workload's output into another's stdin. Caller-driven by design, and \
 the caller is mvmd: mvm has no fleet and so nothing here declares an edge to \
 drive. Covered by its own integration tests against the real broker, reader \
 and gate."""
-
-[[control]]
-symbol = "network_policy_from_grants"
-file = "crates/mvm-contract/src/grants/projection.rs"
-dormant = true
-why = """
-Derives a workload's egress policy from its grants, and is the only function \
-permitted to — `check-single-grants-projection` fails the build on a second \
-one. Dormant because no surface authors a grant yet: the manifest, JSON, CLI \
-and library paths that would set `ExecutionPlan.grants` are not built, so \
-every plan carries `None` and the hardcoded deny-all still stands. Fails \
-closed either way — an absent grant and an empty allow-list both project to \
-deny-all. This entry is the surfaces work's done-signal: the first real \
-author gives it a caller, and the entry goes."""

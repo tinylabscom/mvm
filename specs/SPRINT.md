@@ -10,6 +10,28 @@
 
 ## Current issue delivery
 
+- [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
+      prepares both the builder VM and verified dm-verity workload kernel, so a
+      successful bootstrap does not defer an infrastructure build to the next
+      `machine run`. Kernel downloads verify before replacement, local Stage 0
+      builds validate every artifact before per-file atomic publication, and
+      verified reads reject any crash-skewed cache. Interrupted staging is swept
+      on retry while the persistent Nix store remains warm. Local capability validation
+      uses the resolved kernel config instead of searching a KALLSYMS-free raw
+      image for symbol strings. QEMU Stage 0 now has a reusable Nix-store disk,
+      an accurate guest clock, architecture-correct console wiring, and a
+      two-hour cold-build window. ARM64 workload kernels carry the console
+      drivers required by Firecracker and HVF/QEMU, while bounded OCI blob
+      redirects reach only exact trusted Docker CDN origins without forwarding
+      registry authorization. The required console dependencies move only the
+      ARM64 built-in-symbol ratchet from 944 to its measured 959; x86_64 stays
+      at 917. Formatting, workspace check, host workspace
+      all-target Clippy, the complete serialized workspace suite and doctests,
+      the exact 461-test `xtask --features man` CI lane, and all 172 BDD
+      scenarios pass. A KVM-backed ARM64 acceptance run completed cold
+      bootstrap and kernel publication, then ran Alpine twice from a fully warm
+      cache without launching Stage 0.
+
 - [~] HVF large-response integrity — **plan 315**. Restored bounded
       virtio-vsock host-to-guest credit accounting that had been removed while
       its relay-side readers remained. Every guest header refreshes the actual
@@ -27,6 +49,27 @@
       workspace all-target Clippy, the serial aggregate workspace suite, and
       the focused x86_64 Linux cross-build are green. Linux-native builder-VM
       tests and all-target Clippy remain the final platform gates.
+- [~] Issue-closeout batch — **#2165, #2321, #2323**. Workload-runner root
+      bootargs now agree with read-only block attachments across the selected
+      drivers; the substitution forward leg rejects oversized declared or
+      streamed response bodies before accumulation; and Firecracker teardown
+      uses the shared bounded poll backoff. Targeted tests and clippy pass;
+      merge and backend live evidence remain before closure.
+
+- [x] Release-artifact download failures no longer send macOS users into a
+      host-Nix setup that writes SSH credentials under `/etc/nix` and forces a
+      fresh `sudo` password prompt. Recovery guidance now matches the product
+      boundary: mvm manages its own Linux builder, release users retry or inspect
+      the versioned release assets, and source-checkout users bootstrap from the
+      in-repo builder image. A focused regression test forbids the stale
+      `sudo`, `darwin.linux-builder`, and `/etc/nix` instructions.
+
+- [x] The hostd eBPF observability-target test now uses the shared environment
+      guard for `MVM_HOME`, preventing parallel tests from observing a temporary
+      home and restoring the original value when the test completes. Admission
+      tests that read the host's configured grant ceiling now also hold that
+      guard and use an explicit isolated host configuration, so bounded-host
+      fixtures cannot leak their ceiling into parallel admission tests.
 
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
@@ -102,12 +145,14 @@
       `features/suites/s11_snapshot/hvf_save_restore.feature`; workspace
       nextest 10600 passed / 24 skipped.
 
-- [~] Open issue closeout — **plan 300**. The 22 open issues were reconciled
-      on 2026-08-08 into explicit closure gates and dependency order in
-      `specs/plans/300-open-issue-closeout.md`. #2192 is now closed as completed;
-      #2101 and #2211 require scope split or narrowing; the remaining issues
-      retain active implementation, security, live-validation, or
-      cross-repository acceptance work.
+- [~] Open issue reconciliation — **plan 300**. The 30 issues open at the
+      2026-08-10 snapshot are inventoried against `origin/main` `6a18cb740`
+      with an explicit disposition, closure gate, and dependency-ordered
+      execution phase. #2293 is closed as completed by merged PRs #2302 and
+      #2317; its remaining receipt-store performance finding stays open as
+      #2318. The other 29 issues retain concrete implementation, security,
+      rollout, live-validation, performance, governance, or cross-repository
+      acceptance work.
 - [~] Runtime hardening for production — **plan 303**. Closes gaps between the
       binary CI witnesses and the binary that ships. Landed: trapping integer
       overflow in `[profile.release]` plus a `release-witness` CI lane over the
@@ -180,9 +225,23 @@
 - [~] Security mutation-witness repair — **issue #2135**. Restored executable
       witnesses for the security-sensitive boot admission, kernel-digest,
       host-signer/grant, lease-expiry, and substitution-endpoint cleanup
-      invariants. Focused mutation runs now catch every actionable mutant in
-      those paths; the exact Linux Security workflow rerun remains the final
-      merge-and-close gate.
+      invariants. The current Security failure is also reconciled: direct tests
+      catch the actionable snapshot-I/O, no-op stage-name, torn-tail, and grant
+      parser mutants; the static gate rejects accepted misses outside the
+      pinned surface; 26 moved libkrun identities name their current file; and
+      15 obsolete misses were removed, reducing the accepted baseline from 83
+      to 68 without adding a waiver. The first exact rerun exposed six further
+      survivors: the contract's omitted resource-control default plus hostd's
+      exact broker byte limit, admitted digest equality, host CPU mechanism
+      truth table, explicit deferred-audit flush, and drop-time flush. Direct
+      witnesses now catch all six; the complete contract mutation shard and a
+      focused five-mutant hostd proof are green. Workspace all-target Clippy,
+      formatting, and the static surface gate are also green. The workspace
+      suite passed every repaired area but hit one unrelated host-agent
+      socket-bind timeout; its isolated integration rerun passed 4/4. A clean
+      exact Linux Security workflow rerun remains the final merge gate; a
+      subsequent scheduled or release run is still required before issue
+      closure.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
@@ -298,9 +357,12 @@
       dedicated dm-verity workload kernel automatically during the first
       `machine run --image`, reports the first-run cost, and caches the result;
       installed binaries download the matching hash-verified release kernel,
-      while `MVM_KERNEL_SOURCE=download|auto` remains explicit. The landing
-      page and security docs now state the warm-millisecond promise alongside
-      first-run behavior and the default-deny trust model.
+      while `MVM_KERNEL_SOURCE=download|auto` remains explicit. Admission-path
+      tests now share the process-environment guard even under the default
+      grant ceiling, preventing parallel tests from observing another test's
+      temporary host configuration. The landing page and security docs now
+      state the warm-millisecond promise alongside first-run behavior and the
+      default-deny trust model.
 
 - [~] Extract `mvm-backends` crate — **plan 298**
       (`specs/plans/298-extract-mvm-backends-crate.md`). Rebased
@@ -1804,6 +1866,18 @@ Then unify + retire the old paths:
   / 77.01 ms p99 to supervisor PID disappearance after SIGTERM; attach,
   endpoint reaping, console cleanup, state-marker removal, and force-kill
   escalation do not account for the stop latency.
+- [x] **Launch resolution without a launch (Plan 299 Phase 2, #2333).**
+  `mvmctl pool warm` could spawn nothing on any backend: it passed no launch
+  config, so the spawn built an image-less compat key and refused itself, and
+  nothing could produce a launch shape without running a launch. The four things
+  a claimable parent needs — rootfs plus verity sidecars, runtime overlay plus
+  universal initramfs, cmdline tokens, and admission — existed only inline in
+  the run path. They now compose into `crate::exec::resolve_launch`, which
+  returns a bootable `VmStartConfig` without booting; `run_inner` calls it, and
+  `pool warm --image/--cpus/--memory` resolves its parents' shape through the
+  same function, so the recorded compat key is the one a claim searches for. The
+  accepted-and-ignored `--rootfs` flag is removed. This is the resolution half
+  of Phase 2 only — the prepared-artifact manifest is still open.
 - [ ] **Prepared cold launch:** with a local, verified kernel/initramfs/artifact
   set and a new guest identity, reach authenticated guest readiness and run
   `/bin/true` in ≤200 ms p50, ≤250 ms p95, and ≤300 ms p99 on Apple Silicon
