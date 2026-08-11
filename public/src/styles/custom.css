@@ -802,3 +802,19 @@ h2.text-title {
     animation: none;
   }
 }
+
+/* Cursor-tracked radial highlight, positioned via --mx/--my set on
+   pointermove. --glow is set per-instance in GlowCard.tsx. */
+.site-glow-card__sheen {
+  background: radial-gradient(16rem circle at var(--mx, 50%) var(--my, 0%), var(--glow), transparent 65%);
+}
+
+.site-glow-card:hover {
+  border-color: color-mix(in oklab, var(--glow) 55%, var(--color-glass-border));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-glow-card__sheen {
+    display: none;
+  }
+}
