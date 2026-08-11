@@ -59,4 +59,54 @@ def greet(name: str) -> str:
     source: "examples/python/hello-app/README.md",
     code: `# expect: "hello ari"`,
   },
+  {
+    id: "sdk-python",
+    label: "Python",
+    language: "python",
+    source: "crates/mvm-sdk/sdks/python/README.md",
+    code: `import mvm as mv
+
+result = mv.Machine.run(
+    image="alpine:latest",
+    command=["uname", "-a"],
+    net=True,
+    allow_hosts=["example.com:443"],
+)
+print(result.stdout)`,
+  },
+  {
+    id: "sdk-node",
+    label: "Node.js",
+    language: "typescript",
+    source: "crates/mvm-sdk/sdks/typescript/README.md",
+    code: `import { Machine } from "@runmvm/mvm";
+
+const result = Machine.run({
+  image: "alpine:latest",
+  command: ["uname", "-a"],
+  net: true,
+  allowHosts: ["example.com:443"],
+});
+console.log(result.stdout);`,
+  },
+  {
+    id: "sdk-rust",
+    label: "Rust",
+    language: "rust",
+    source: "crates/mvm-sdk/README.md",
+    code: `use mvm_sdk::{Machine, MachineCheckArtifact, MachineRun};
+
+let result = MachineRun::builder()
+    .image("alpine")
+    .net(true)
+    .command(["uname", "-a"])
+    .run()?;`,
+  },
+  {
+    id: "cli-run",
+    label: "CLI",
+    language: "bash",
+    source: "public/src/content/docs/reference/cli-commands.md",
+    code: `mvmctl machine run --net --image <ref> -- <cmd>...`,
+  },
 ];
