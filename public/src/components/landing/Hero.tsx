@@ -7,10 +7,10 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 const lines = [
   { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
   { text: '  python -c "print(2 + 2)"', delay: 500 },
-  { text: "  4", delay: 1900 },
-  { text: "  Pulling image and preparing a private root...", delay: 2500, dim: true },
-  { text: "  Booted. Own kernel. Network: deny-all.", delay: 3800, accent: true },
-  { text: "  Warm microVM start: milliseconds.", delay: 4400, accent: true },
+  { text: "  Pulling image and preparing a private root...", delay: 1200, dim: true },
+  { text: "  Booted. Own kernel. Network: deny-all.", delay: 2500, accent: true },
+  { text: "  Warm microVM start: milliseconds.", delay: 3100, accent: true },
+  { text: "  4", delay: 4200 },
 ];
 
 function TerminalAnimation() {
