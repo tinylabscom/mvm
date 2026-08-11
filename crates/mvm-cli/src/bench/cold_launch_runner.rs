@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use super::cold_launch::{
     ArtifactDigests, ArtifactMeasurements, CacheState, ColdLaunchReport, ColdLaunchSample,
     KernelConfigMeasurement, LaunchContext, LaunchLane, build_cold_launch_report, validate_lane,
+    validate_matrix_report,
 };
 use crate::commands::vm::launch_sample::{
     ArtifactPaths, LAUNCH_SAMPLE_ENV, LaunchRootStrategy, LaunchSample, read_sample,
@@ -103,7 +104,12 @@ impl ColdLaunchBench {
                 self.kernel_config.as_deref(),
             )?);
         }
-        Ok(build_cold_launch_report(self.lane, self.warmup, raw))
+        let report = build_cold_launch_report(self.lane, self.warmup, raw);
+        if self.runs >= super::cold_launch::MIN_MATRIX_SAMPLES {
+            validate_matrix_report(&report)
+                .context("live launch report did not pass the matrix publication gate")?;
+        }
+        Ok(report)
     }
 
     /// Spawn the binary once and read back the sample it wrote.

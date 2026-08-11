@@ -662,10 +662,17 @@ optimization backend-local and the benchmark backend-neutral.
       readiness and immediately after the first guest command. Linux records
       RSS from `/proc/<pid>/statm` plus process minor/major fault deltas; macOS
       records physical footprint and explicitly leaves Linux-only fault counters
-      unavailable.
-      Launch-sample schema v4 and cold-launch schema v5 carry the evidence, and
-      the warm-lane gate rejects a sample that omits it. The real-host backend
-      matrix and canonical budget table remain before #2280 can close.
+      unavailable. Launch-sample schema v4 and cold-launch schema v5 carry the
+      evidence, and the warm-lane gate rejects a sample that omits it. The
+      real-host backend matrix and canonical budget table remain before #2280
+      can close.
+- [x] Add the report-level matrix gate. A publishable lane now requires 20
+      measured samples after exactly two discarded warm-ups, re-validates every
+      raw sample, and enforces the prepared-cold dispatch budgets of
+      200/250/300 ms at p50/p95/p99 plus the existing warm-claim 30/50 ms p50/p99
+      SLO. The report also aggregates warm-ready working set and first-command
+      growth/reclaim/fault counters; missing macOS fault counters remain absent,
+      never zero-filled.
 - [x] Add a baseline filesystem-path report at the existing pure-Rust
       materializer seam. `mvm_fs::rootfs::measure_ext4_pure` records the source
       content digest, node composition, file bytes, emitted image size/digest,
@@ -740,6 +747,14 @@ launch completion while orphan-reap and process-ownership witnesses remain
 green.
 
 ## Phase 7 — Live validation and regression gates
+
+The current macOS/HVF validation attempt is deliberately not a baseline:
+release `mvmctl` emitted schema-3 launch samples, but the transient workload
+reported `degraded: ["host_services"]`. The per-sample gate rejected those
+samples, as intended. An isolated `mvm-host-agent` diagnostic binds its signer
+and control sockets, so the remaining investigation is the detached
+registration path; no degraded timing has been copied into the canonical
+table. Firecracker evidence still must be collected in the project builder VM.
 
 - [ ] Add a native Apple Silicon/HVF live benchmark job with cached artifacts,
       no mount, mount-cache hit, and mount miss lanes.
