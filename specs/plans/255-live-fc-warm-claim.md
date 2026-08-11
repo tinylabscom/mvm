@@ -1037,37 +1037,72 @@ the full four-drive device model coming back (`kick block blk0`..`blk3` after
 captures, the checkpoint exists, and a claim now gets all the way to the reseed
 handshake that "was never exercised".
 
-**BUG-2 — pre-existing, not this branch's. Now the live blocker, exactly as
-predicted below.** The transient run path persists the
+**BUG-2 — pre-existing, not this branch's.** The transient run path persists the
 plan via `write_plan` but never mints `verb-grant.json`, so no
 `mvm.host_signer_pub` reaches the guest and the agent rejects the control
 connection with `rejecting control connection without a pinned host key`. It
 predates this branch's merge base. Track it separately; expect it to be the next
 blocker once BUG-1 is fixed.
 
-Confirmed live once BUG-1 was fixed. The claim reaches `child_forked`, the
-child resumes, and then the guest prints
+**BUG-2 is NOT what blocks the live claim** (checked 2026-08-11, **#2336**).
+Once BUG-1 was fixed the claim reaches `child_forked`, the child resumes, and
+the claim then fails closed with `forked child '<vm>' never answered the
+post-restore identity handshake`. The guest console alongside it prints
 
 ```
 mvm-guest-agent: authenticated control handshake failed: Failed to read frame length
 ```
 
-so the post-restore identity handshake is never answered and the claim fails
-closed with `forked child '<vm>' never answered the post-restore identity
-handshake`. The fail-closed posture is correct — a child that cannot prove it
-reseeded must not be admitted — but it means no warm claim can complete on
-Firecracker until this is fixed, and therefore no claimed-launch measurement
-against the cold baseline is possible yet.
+but **that line is benign readiness-probe noise, not the failure.**
+`PostRestoreSignal::probe_ready` connects to `GUEST_AGENT_PORT` and drops the
+connection without a handshake, while the guest speaks *second*
+(`secure_guest_handshake` opens with `read_frame` awaiting the host's
+`SessionHello`). So every probe — one per `POST_RESTORE_PROBE_INTERVAL`, 50 ms —
+makes the agent accept, wait, hit EOF and print exactly that.
 
-**BUG-5 — a failed claim strands the standby and orphans its VMM.** Found while
-exercising the above. When a claim fails after the child is materialized, the
-cleanup removes the preloaded child's state directory but does **not** kill its
-`firecracker` process. The pool record stays `Idle` while pointing at a child
-whose socket path no longer exists, so every subsequent claim against that
-standby fails with `resume preloaded child: Firecracker socket
-<dir>/fc.socket does not exist — VM is not running`, and a stray VMM leaks per
-attempt (observed: pid alive, `/root/.mvm/vms/vm-*` gone). A standby is
-therefore single-use even against a retryable failure.
+It also rules BUG-2 out as the cause: `handle_client` returns early with
+`rejecting control connection without a pinned host key` when
+`host_signer_key()` is `None`, and that message never appeared — the failing
+line is the one *after* it, so the host key did reach the guest.
+
+The real error is still uncaptured: `probe_ready` succeeded (no `did not become
+reachable within` bail), so the failure is inside `signal.post_restore()`, and
+the reported chain stopped at its `signaling post-restore to {vm}` context
+because the capture was grepped and truncated. Diagnosis before fix: re-run the
+claim capturing complete stderr and read the full `Caused by:` chain. Candidates
+then: the host-side `AuthenticatedSession::host` handshake over vsock state that
+did not survive the restore, or the child's vsock CID/port mapping after the
+fork.
+
+Either way no warm claim completes on Firecracker yet, so no claimed-launch
+measurement against the cold baseline is possible.
+
+**BUG-5 — a failed claim stranded the standby. FIXED (#2337).** Found while
+exercising the above, and narrower than first reported: `WarmClaimLease::drop`
+does kill the preloaded child and remove its dir. What it never did was update
+the pool record naming that child — `mark_idle` restored `Idle` and left
+`preloaded_child_vm_name` plus a live-looking `pid` pointing at the VMM it had
+just killed.
+
+That is what made a standby single-use against even a retryable failure. Every
+later claim refused with `resume preloaded child: Firecracker socket
+<dir>/fc.socket does not exist — VM is not running`, while
+`idle_count_compatible` still counted it (`is_live_or_saved` sees a non-zero
+pid) — so the pool advertised capacity it could not serve, and `warm_to_target`
+never replaced it because the count already read at target. Silent, and
+self-perpetuating.
+
+`SupervisorStandbyPool::demote_to_saved_state` now clears the child name, the
+control socket and `pid`, restoring the `pid == 0` saved-state sentinel. The
+parent and its checkpoint are healthy, so the standby survives as a saved-state
+parent and the next claim materializes a fresh child from the checkpoint —
+demote rather than remove, because preloading is an optimization over the
+checkpoint, not the standby's value.
+
+The orphaned `firecracker` originally reported alongside this is a separate,
+milder thing: the kill is best-effort and only `warn!`s, so a kill that fails
+still leaves a VMM behind. That stays best-effort by design (the caller is on
+its way out), but it is no longer silent capacity loss.
 
 **BLOCKER-3 — resolved in code; live delivery remains gated behind #1962.**
 #1959 established the host-signer public key as boot-pinned *host identity*

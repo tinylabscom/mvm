@@ -588,11 +588,12 @@ families.
       and the materialization inline.
 - [ ] Measure a claimed launch against the cold baseline. **Blocked, not
       skipped:** the pool now fills on the KVM host (`pool status` reports
-      `1 idle`) and a claim reaches the fork, but the child's guest agent fails
-      its authenticated control handshake, so the post-restore identity
-      handshake goes unanswered and the claim fails closed. That is Plan 255
-      BUG-2, pre-existing and predicted there as "the next blocker once BUG-1 is
-      fixed". Cold baseline re-measured on the same binary for when the claim
+      `1 idle`) and a claim reaches the fork, but the child never answers the
+      post-restore identity handshake and the claim fails closed — **#2336**,
+      where the root cause is still open. (An earlier note here blamed Plan 255
+      BUG-2 on the strength of a guest console line; that line turned out to be
+      readiness-probe noise and BUG-2 is ruled out — see the #2336 row in Plan
+      255.) Cold baseline re-measured on the same binary for when the claim
       lands: `backend_start` 549.8 / 564.7 / 554.4 ms, dispatch window
       551.6 / 566.8 / 556.2 ms.
 - [ ] Define a prepared-artifact manifest for the kernel, universal initramfs,

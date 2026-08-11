@@ -90,7 +90,9 @@ builds: one shared config in `nix/images/kernel/base.nix` plus a
 per-variant delta (`workload.nix` adds dm-verity; `builder.nix` adds
 the nix-build sandbox + egress-lockdown bits). Because the config is
 custom, `cache.nixos.org` has no substitute, so the first build on a
-fresh machine compiles the kernel from source (3-10 min, memory-heavy).
+fresh machine compiles the kernel from source. It can take several minutes
+depending on the host and is memory-heavy; later builds reuse the persistent
+Nix store.
 
 `mvmctl build kernel build` makes that compile explicit and one-time. Image
 backed runs from a source checkout also bootstrap this kernel automatically;

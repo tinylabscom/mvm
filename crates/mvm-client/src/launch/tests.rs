@@ -738,10 +738,33 @@ fn firecracker_admitted_boot_receives_a_concrete_kernel_path() {
     std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
     std::fs::write(&cached, b"kernel-bytes").unwrap();
 
+    // Bytes with no recorded digest are not a cache hit. This assertion is the
+    // point of the arm: Firecracker used to accept the path on `is_file()`, so
+    // this staging — identical to the two lines above — booted.
+    let err = LocalBackend::resolve_workload_kernel(&fc)
+        .expect_err("an unpinned kernel must not resolve");
+    assert!(
+        err.to_string().contains("verified workload kernel"),
+        "got: {err}"
+    );
+
+    std::fs::write(&cached, b"kernel-bytes").unwrap();
+    mvm_build::kernel_fetch::record_kernel_digest(&cached).unwrap();
     let resolved = LocalBackend::resolve_workload_kernel(&fc)
         .expect("cached kernel resolves")
         .expect("firecracker must receive a concrete kernel path");
     assert_eq!(resolved, cached);
+
+    // Identity discrepancy: a complete, readable kernel that is the wrong one.
+    // Same length, so a size check would not notice either.
+    std::fs::write(&cached, b"kernel-forged").unwrap();
+    let err = LocalBackend::resolve_workload_kernel(&fc)
+        .expect_err("a kernel that no longer matches its digest must not resolve");
+    assert!(
+        err.to_string().contains("verified workload kernel"),
+        "got: {err}"
+    );
+    assert!(!cached.exists(), "the rejected entry is evicted");
 
     // Bundled-kernel backends need no host kernel path: libkrun boots the
     // libkrunfw kernel, the hermetic mock boots nothing.

@@ -2648,7 +2648,7 @@ pub(crate) fn stage0_nix_store_image_name() -> String {
     format!("nix-store-stage0-{}.img", host_arch_tag())
 }
 
-fn prepopulate_stage0_nix_store_image(
+pub(crate) fn prepopulate_stage0_nix_store_image(
     image: &BuilderVmImage,
     store_image: &Path,
 ) -> Result<(), BuilderVmError> {
