@@ -55,14 +55,15 @@
   --glow-strength: 22%;
 
   /* Font tokens are scheme-invariant — no light-mode override needed.
-     --font-display carries every heading (landing + docs, via --sl-font
-     in custom.css) — JetBrains Mono Variable, not Inter, is the deliberate
-     choice: it's the single biggest lever in reading as technical rather
-     than generic-SaaS. Inter stays the body face (--font-body-ish usage is
-     inline `font-sans`/default; long-form paragraphs never take
-     --font-display) because mono hurts readability at paragraph length. */
+     --font-display carries every heading (landing + docs, via the explicit
+     h1-h4 rule in custom.css) — JetBrains Mono Variable, not Inter, is the
+     deliberate choice: it's the single biggest lever in reading as
+     technical rather than generic-SaaS. --font-body carries everything
+     else — prose, list text, docs body copy via --sl-font in custom.css —
+     because mono hurts readability at paragraph length. */
   --font-display: "JetBrains Mono Variable", ui-monospace, monospace;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+  --font-body: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
 
   /* Code-block palette — scheme-invariant, by design, not by omission.
      astro.config.mjs pins Expressive Code's theme to "github-dark"

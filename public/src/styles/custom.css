@@ -41,12 +41,29 @@
 
   --sl-font-system-mono: "JetBrains Mono Variable", "SF Mono", "Cascadia Code", "Fira Code",
     Consolas, monospace;
-  --sl-font: var(--font-display);
+  /* --sl-font drives Starlight's reset.css `body { font-family: ... }` —
+     the site-wide body font, landing page included (the splash page still
+     renders through Starlight's Page.astro shell). Body copy is Inter;
+     headings opt into --font-display explicitly (see the h1-h4 rule
+     below and the landing components' `font-display` utility class). */
+  --sl-font: var(--font-body);
 
-  /* Prose measure — ch tracks the active font size, so this stays ~68
-     characters per line whether html's base font-size or a user's browser
-     zoom changes, unlike a fixed rem width. */
-  --sl-content-width: 68ch;
+  /* Prose measure — ch tracks the active font size, so this stays a
+     stable character count whether html's base font-size or a user's
+     browser zoom changes, unlike a fixed rem width. 78ch in Inter (the
+     body face --sl-font now resolves to) renders ~700px at the 17px
+     root — a 65-75-character comfortable measure, versus the ~595px a
+     mono-metric 68ch was quietly collapsing to before the padding fix
+     below. */
+  --sl-content-width: 70ch;
+
+  /* Starlight's own content gutter lever (consumed directly by
+     ContentPanel.astro's `.content-panel { padding: 1.5rem
+     var(--sl-content-pad-x) }`) — one seam, not a second padding layer
+     bolted onto `main` below. 1.5rem matches the landing page's mobile
+     gutter (Section.tsx's `px-6`), so both page families share one
+     margin rhythm at narrow widths. */
+  --sl-content-pad-x: 1.5rem;
 }
 
 /*  Tell the browser the supported schemes so native form controls,
@@ -133,24 +150,44 @@ html {
   margin-block-end: 0.75rem;
 }
 
-/* Docs content — improved padding and spacing */
+/* Docs content — vertical rhythm only. Horizontal gutter is owned by
+   --sl-content-pad-x above (consumed by Starlight's own ContentPanel),
+   not duplicated here — a second padding-inline layer on `main` was
+   what threw the content column off-centre (it stacked on top of
+   ContentPanel's padding instead of replacing it). */
 [data-has-sidebar] main {
   padding-block: 2.5rem;
-  padding-inline: 2rem;
 }
 
 @media (min-width: 50em) {
   [data-has-sidebar] main {
     padding-block: 3rem;
-    padding-inline: 2.5rem;
   }
 }
 
 @media (min-width: 72em) {
   [data-has-sidebar] main {
     padding-block: 3.5rem;
-    padding-inline: 3rem;
   }
+}
+
+/* Balance the content column between the left sidebar and the right
+   table-of-contents rail. Starlight's TwoColumnContent.astro sizes
+   `.main-pane` wider than --sl-content-width by half of whatever space
+   is left over after the sidebar + content column are laid out, then
+   sets `--sl-content-margin-inline: auto 0` so that leftover collects
+   entirely on the content column's leading edge — a deliberate choice
+   when the content is meant to hug the TOC, but it reads as a
+   lopsided column here. Overriding the same custom property to `auto`
+   (both sides) splits the leftover evenly instead. This targets a
+   Starlight-exposed custom property, not a structural selector — low
+   upgrade fragility; if a future Starlight major renames
+   --sl-content-margin-inline or stops reading it in
+   TwoColumnContent.astro, this override silently becomes a no-op
+   rather than breaking, since --sl-content-pad-x still bounds the
+   column on both sides regardless. */
+[data-has-sidebar][data-has-toc] .main-pane {
+  --sl-content-margin-inline: auto;
 }
 
 /* Docs paragraphs — more breathing room */
@@ -185,6 +222,38 @@ html {
 [data-has-sidebar] main th,
 [data-has-sidebar] main td {
   border-color: var(--color-glass-border);
+}
+
+/* Docs asides (:::tip / :::note / :::caution / :::danger callouts) —
+   restrained-card treatment instead of Starlight's default full-bleed
+   category-colour fill + square corners.
+   Starlight's own per-type low/border/text-accent tints (asides.css,
+   `--sl-color-purple/blue/orange/red`) are deliberately left un-pinned
+   elsewhere in this file — they already adapt correctly per light/dark
+   scheme, verified by inspecting computed border colours in both
+   schemes, and that's still true after this change: the title text and
+   icon keep the per-type accent colour (asides.css's
+   `.starlight-aside__title` rule, untouched here), so a reader can
+   still tell a tip from a caution at a glance.
+   What isn't fine any more is the saturated `--sl-color-*-low`
+   backgrounds and the `border-inline-start` accent stripe: mvm's own
+   `--color-accent-3` (the hero boundary wall's identity colour, see
+   BoundaryDiagram.tsx) sits in the same violet hue Starlight's `tip`
+   type already used by default, so a tip box now reads as if it
+   borrowed the page's identity colour rather than Starlight's own
+   palette. Rather than re-tint `tip` to dodge the collision (more
+   palette surface area to maintain, and the other three types don't
+   collide), asides get the same quiet glass-card shell as the docs
+   table above: a 1px --color-glass-border hairline, 0.75rem radius,
+   and a low-alpha tint of the type's own accent colour instead of
+   Starlight's fixed-lightness `-low` swatch. `border` (not
+   `border-inline-start`) intentionally supersedes asides.css's colored
+   left stripe here — the title's accent colour is enough to carry the
+   per-type signal without a loud edge. */
+[data-has-sidebar] main .starlight-aside {
+  border: 1px solid var(--color-glass-border);
+  border-radius: 0.75rem;
+  background-color: color-mix(in oklab, var(--sl-color-asides-border) 7%, var(--color-surface));
 }
 
 /* Code blocks — more padding + force dark theme */
