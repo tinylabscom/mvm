@@ -1212,5 +1212,11 @@ for detailed scope and acceptance criteria.
         `grants: None`. The projection now has production callers, so its
         `dormant-controls.toml` entry is deleted. STILL OPEN: the SDK parity
         fixture
-  - [ ] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs
+  - [~] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs.
+        The CLI boot path now calls `apply_grants` (via
+        `mvm_client::enforced_grants_after_start`), records the tier per-VM,
+        emits `plan.grants_enforced` on the chain, warns when a requested bound
+        did not happen, and surfaces the achieved tier in `machine inspect`.
+        Two `dormant-controls.toml` entries keep it from going unreachable
+        again. STILL OPEN: doctor reporting, persisted-spec migration, docs
         gate, BDD suite
