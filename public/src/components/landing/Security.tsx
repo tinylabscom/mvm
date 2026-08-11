@@ -4,11 +4,11 @@ import { GlowCard } from "./primitives/GlowCard";
 import { Reveal } from "./primitives/Reveal";
 
 // Copy below is deliberately narrower than plain-language marketing prose —
-// it tracks the exact wording of the claims table in
-// specs/adrs/001-microvm-security-posture.md, which is CI-gated and
-// authoritative over any summary (including this one).
+// it tracks the exact wording of the project's gated security-claims table,
+// which is CI-enforced and authoritative over any summary (including this
+// one). No numeric claim badge is shown: the destination docs pages predate
+// this table's numbering, so a number here would resolve to nothing there.
 const CLAIMS: Array<{
-  n: number;
   title: string;
   description: string;
   witnesses: string;
@@ -16,16 +16,14 @@ const CLAIMS: Array<{
   accent: 1 | 2 | 3;
 }> = [
   {
-    n: 3,
     title: "A tampered rootfs fails to boot",
     description:
-      "On the verified-boot backends, a dm-verity sidecar and a kernel-cmdline root hash mean a flipped data block panics the kernel before userspace ever runs.",
+      "On the block-and-ext4 backends, a dm-verity sidecar and a kernel-cmdline root hash mean a flipped data block panics the kernel before userspace ever runs.",
     witnesses: "ci:verified-boot-artifacts, fn:verify_and_resume_rejects_tampered_mem",
     docHref: "security/verified-boot/",
     accent: 1,
   },
   {
-    n: 10,
     title: "No untrusted workload reaches the network unless policy admits it",
     description:
       "Network policy defaults to deny-all. An unrestricted policy is opt-in only, and choosing it emits a warning rather than silently widening the default.",
@@ -34,20 +32,18 @@ const CLAIMS: Array<{
     accent: 2,
   },
   {
-    n: 13,
     title: "No raw secret value crosses the broker channel",
     description:
       "host.secrets.v1 returns destination-bound, time-bound signed credentials only. Raw secret bytes never leave the supervisor's address space.",
     witnesses: "fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute",
-    docHref: "security/threat-model/",
+    docHref: "security/matryoshka/",
     accent: 3,
   },
   {
-    n: 15,
-    title: "A sealed production microVM has no shell, no DevOnly verbs, no PTY",
+    title: "A production-safe run cannot invoke DevOnly guest-agent verbs",
     description:
-      "The only console path is a signed-grant-gated PTY served by the guest agent, refused outright on a sealed image before any request reaches it.",
-    witnesses: "fn:console_refused_on_sealed_image, ci:guest-agent-runtime-boundary",
+      "The universal agent classifies every request and requires both the runtime profile and a signed VerbGrant before it will run a developer-only verb.",
+    witnesses: "fn:prod_safe_grant_refuses_all_dev_only_requests, ci:guest-agent-runtime-boundary",
     docHref: "security/ci-claims/",
     accent: 1,
   },
@@ -70,25 +66,21 @@ export function Security() {
         explicitly out of scope.
       </p>
       <p className="mb-12 max-w-2xl text-sm text-label">
-        See the full{" "}
+        The identifiers below each card name real tests and CI jobs, not
+        links. mvm's docs follow a{" "}
         <a
           href={`${base}security/claim-ledger/`}
           className="text-accent underline underline-offset-2 hover:text-accent/80"
         >
-          claim ledger
+          claim-safety ledger
         </a>{" "}
-        for every claim, its witnesses, and its status.
+        that governs when a claim may be described as a guarantee.
       </p>
 
       <div className="grid gap-5 sm:grid-cols-2">
         {CLAIMS.map((c, i) => (
-          <Reveal key={c.n} delay={i * 80}>
+          <Reveal key={c.title} delay={i * 80}>
             <GlowCard accent={c.accent}>
-              <div className="mb-3 flex items-center gap-2">
-                <span className="rounded border border-accent/30 bg-accent/10 px-2 py-0.5 font-mono text-[11px] text-accent">
-                  claim {c.n}
-                </span>
-              </div>
               <h3 className="mb-2 text-lg font-semibold leading-snug tracking-tight text-title">
                 {c.title}
               </h3>
