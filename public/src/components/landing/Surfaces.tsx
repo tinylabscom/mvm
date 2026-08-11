@@ -23,12 +23,12 @@ export function Surfaces() {
     <Section rule space="roomy" className="bg-raised">
       <Eyebrow>SDKs and CLI</Eyebrow>
       <h2 className="mb-4 font-display text-3xl font-bold text-title sm:text-4xl">
-        One operation, four surfaces
+        One call, four surfaces
       </h2>
       <p className="mb-12 max-w-2xl text-lg leading-relaxed text-body">
-        Booting a container image with network access and running a command
-        looks like this whether you reach for the Python SDK, the Node.js
-        SDK, the Rust SDK, or <code className="font-mono text-emphasis/90">mvmctl</code> directly.
+        Boot an image, allow a host, run a command. Same operation, same
+        result, whether it's the Python SDK, the Node.js SDK, the Rust SDK, or{" "}
+        <code className="font-mono text-emphasis/90">mvmctl</code> directly.
       </p>
 
       <Tabs defaultValue="python" className="max-w-3xl">

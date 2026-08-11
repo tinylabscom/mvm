@@ -92,88 +92,89 @@ export function Hero() {
       {/* Background glow */}
       <Bloom accents={[1, 2]} />
 
-      <div className="relative mx-auto max-w-7xl px-6 pt-28 pb-24 sm:px-8 lg:pt-40 lg:pb-32">
-        <div className="flex max-w-3xl flex-col gap-8">
-          <Reveal delay={80}>
-            <h1
-              className="font-display font-bold leading-[1.02] tracking-[-0.03em] text-title"
-              style={{ fontSize: "clamp(2.75rem, 6vw, 5rem)" }}
-            >
-              Local. A real microVM
-              <br />
-              in milliseconds.
-            </h1>
-          </Reveal>
+      <div className="relative mx-auto max-w-7xl px-6 pt-20 pb-16 sm:px-8 lg:pt-24 lg:pb-20">
+        <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center lg:gap-14">
+          <div className="flex max-w-xl flex-col gap-6">
+            <Reveal delay={80}>
+              <h1
+                className="max-w-[10.5em] font-display font-bold leading-[1.05] tracking-[-0.03em] text-title"
+                style={{ fontSize: "clamp(2.5rem, 4.5vw, 4rem)" }}
+              >
+                A real hypervisor, no daemon or SSH.
+              </h1>
+            </Reveal>
 
-          <Reveal delay={160}>
-            <p className="max-w-[46ch] text-lg leading-relaxed text-body">
-              Run untrusted code behind a real hypervisor with one command —
-              no SSH, no daemon, no container fallback.
-            </p>
-          </Reveal>
+            <Reveal delay={160}>
+              <p className="max-w-[46ch] text-lg leading-relaxed text-body">
+                One command boots a microVM with its own kernel. Network
+                access is denied by default, unless policy admits it.
+              </p>
+            </Reveal>
 
-          {/* Platform-specific install — the single install affordance in
-              the hero. */}
-          <Reveal delay={240}>
-            <Tabs defaultValue="macos" className="max-w-lg">
-              <TabsList>
-                <TabsTrigger value="macos">macOS</TabsTrigger>
-                <TabsTrigger value="linux">Linux</TabsTrigger>
-                <TabsTrigger value="windows">Windows (WSL2)</TabsTrigger>
-              </TabsList>
+            {/* Platform-specific install — the single install affordance in
+                the hero. */}
+            <Reveal delay={240}>
+              <Tabs defaultValue="macos" className="max-w-lg">
+                <TabsList>
+                  <TabsTrigger value="macos">macOS</TabsTrigger>
+                  <TabsTrigger value="linux">Linux</TabsTrigger>
+                  <TabsTrigger value="windows">Windows (WSL2)</TabsTrigger>
+                </TabsList>
 
-              <TabsContent value="macos">
-                <p className="mb-4 text-sm leading-relaxed text-body">
-                  Apple Silicon only. Runs the HVF backend on macOS 26+, libkrun on
-                  macOS 13&ndash;25.
-                </p>
-                <InstallRow command={ONE_LINER} />
-              </TabsContent>
+                <TabsContent value="macos">
+                  <p className="mb-4 text-sm leading-relaxed text-body">
+                    Apple Silicon only. Runs the HVF backend on macOS 26+, libkrun on
+                    macOS 13&ndash;25.
+                  </p>
+                  <InstallRow command={ONE_LINER} />
+                </TabsContent>
 
-              <TabsContent value="linux">
-                <p className="mb-4 text-sm leading-relaxed text-body">
-                  Tier 1 target. Needs a kernel with KVM enabled at{" "}
-                  <code className="font-mono text-emphasis/90">/dev/kvm</code>.
-                </p>
-                <InstallRow command={ONE_LINER} />
-              </TabsContent>
+                <TabsContent value="linux">
+                  <p className="mb-4 text-sm leading-relaxed text-body">
+                    Tier 1 target. Needs a kernel with KVM enabled at{" "}
+                    <code className="font-mono text-emphasis/90">/dev/kvm</code>.
+                  </p>
+                  <InstallRow command={ONE_LINER} />
+                </TabsContent>
 
-              <TabsContent value="windows">
-                <p className="mb-4 text-sm leading-relaxed text-body">
-                  Native Windows isn&apos;t a supported microVM host. Run mvm inside
-                  a WSL2 distro with nested KVM and libkrun &mdash; then follow the{" "}
-                  <a
-                    href={`${base}install/windows/`}
-                    className="text-accent underline underline-offset-2 hover:text-accent/80"
-                  >
-                    WSL2 install guide
-                  </a>
-                  .
-                </p>
-              </TabsContent>
-            </Tabs>
-          </Reveal>
+                <TabsContent value="windows">
+                  <p className="mb-4 text-sm leading-relaxed text-body">
+                    Native Windows isn&apos;t a supported microVM host. Run mvm inside
+                    a WSL2 distro with nested KVM and libkrun &mdash; then follow the{" "}
+                    <a
+                      href={`${base}install/windows/`}
+                      className="text-accent underline underline-offset-2 hover:text-accent/80"
+                    >
+                      WSL2 install guide
+                    </a>
+                    .
+                  </p>
+                </TabsContent>
+              </Tabs>
+            </Reveal>
 
-          <Reveal delay={320} className="flex flex-wrap items-center gap-5">
-            <a href={`${base}getting-started/installation/`}>
-              <Button size="lg">Get Started</Button>
-            </a>
-            <a
-              href="https://github.com/tinylabscom/mvm"
-              target="_blank"
-              rel="noopener"
-              className="text-sm text-label underline underline-offset-4 hover:text-accent"
-            >
-              View on GitHub
-            </a>
+            <Reveal delay={320} className="flex flex-wrap items-center gap-5">
+              <a href={`${base}getting-started/installation/`}>
+                <Button size="lg">Get Started</Button>
+              </a>
+              <a
+                href="https://github.com/tinylabscom/mvm"
+                target="_blank"
+                rel="noopener"
+                className="text-sm text-label underline underline-offset-4 hover:text-accent"
+              >
+                View on GitHub
+              </a>
+            </Reveal>
+          </div>
+
+          {/* Terminal — proof, brought up into the hero's right column so
+              it clears the fold instead of trailing below it. */}
+          <Reveal delay={360} className="relative">
+            <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
+            <TerminalAnimation />
           </Reveal>
         </div>
-
-        {/* Terminal — proof, below the headline, full content width. */}
-        <Reveal delay={360} className="relative mt-16">
-          <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
-          <TerminalAnimation />
-        </Reveal>
       </div>
     </section>
   );

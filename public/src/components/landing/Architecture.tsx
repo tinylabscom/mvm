@@ -36,14 +36,13 @@ export function Architecture() {
   return (
     <Section space="tight" className="border-y border-edge/30 bg-raised/50">
       <h2 className="font-display text-3xl font-bold text-title sm:text-4xl">
-        One CLI, the right backend every time
+        One CLI. The backend picked for you.
       </h2>
       <p className="mt-6 max-w-2xl text-lg leading-relaxed text-body">
-        mvm detects your OS, chip, and macOS version, then auto-selects a
-        workload backend: HVF on macOS 26+ Apple Silicon, libkrun on macOS
-        13–25, Firecracker on Linux with KVM. Every backend boots the guest
-        with a vsock device and no NIC at all — there is no SSH into a
-        workload microVM, and no host daemon you operate.
+        mvmctl reads your OS, chip, and macOS version and picks a backend:
+        HVF on macOS 26+ Apple Silicon, libkrun on macOS 13–25, Firecracker
+        on Linux with KVM. Every one of them boots the guest over vsock with
+        no NIC — no SSH path in, no host daemon to run.
       </p>
 
       <div className="mt-12 max-w-3xl space-y-6">

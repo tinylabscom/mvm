@@ -56,13 +56,12 @@ export function Security() {
     <Section rule space="tight">
       <Eyebrow>Security</Eyebrow>
       <h2 className="mb-4 font-display text-3xl font-bold text-title sm:text-4xl">
-        Claims backed by tests, not adjectives
+        Tested claims, not adjectives
       </h2>
       <p className="mb-4 max-w-2xl text-lg leading-relaxed text-body">
-        These are four of the CI-enforced security claims in mvm's threat
-        model, each with a named test or CI job as its witness. A malicious
-        host, multi-tenant guests, and hardware-backed key attestation are
-        explicitly out of scope.
+        Four of mvm's CI-enforced security claims, each backed by a named
+        test or CI job. A malicious host, multi-tenant guests, and
+        hardware-backed key attestation are explicitly out of scope.
       </p>
       <p className="mb-12 max-w-2xl text-sm text-label">
         The identifiers below each claim name real tests and CI jobs, not

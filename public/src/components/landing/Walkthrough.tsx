@@ -7,22 +7,22 @@ const STEPS = [
   {
     id: "walk-define",
     title: "Define the workload",
-    body: "A decorator marks the entrypoint. Nothing runs on your host — the file is parsed statically.",
+    body: "A decorator marks the entrypoint. mvmctl parses the file statically — none of it executes on your host.",
   },
   {
     id: "walk-build",
     title: "Build the image",
-    body: "mvmctl build compile walks the file's AST and emits a Nix flake; the actual build then runs inside the builder VM.",
+    body: "mvmctl build compile turns the file into a Nix flake. The build itself runs inside the builder VM, not on your host.",
   },
   {
     id: "walk-run",
     title: "Run it",
-    body: "The --entrypoint flag runs the built flake and dispatches the function directly, returning its encoded result.",
+    body: "mvmctl machine run --entrypoint boots the flake and calls the function directly.",
   },
   {
     id: "walk-result",
     title: "Read the result",
-    body: "The entrypoint's return value comes back as the command's output.",
+    body: "The function's return value is the command's output.",
   },
 ];
 
@@ -55,7 +55,7 @@ export function Walkthrough() {
   return (
     <Section rule space="tight">
       <h2 className="mb-16 font-display text-3xl font-bold text-title sm:text-4xl">
-        From a file to a running microVM
+        From file to running microVM
       </h2>
 
       {/* Scroll-synced layout, hidden when motion is reduced. */}
