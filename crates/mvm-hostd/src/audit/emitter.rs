@@ -970,7 +970,20 @@ impl AuditEmitter {
 /// written, fsync'd, then `rename`d over `path`. A concurrent reader sees
 /// either the old file or the complete new one, never a torn write. The
 /// temp name carries the pid so two publishers don't collide on it.
+/// [`write_atomic`], without the fsync.
+///
+/// Still atomic — the rename gives a reader either the whole old file or the
+/// whole new one. What is dropped is survival of power loss, which is the
+/// right trade only for something reconstructible from data already durable.
+pub(crate) fn write_atomic_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_inner(path, bytes, false)
+}
+
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_inner(path, bytes, true)
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
     use std::io::Write;
     let dir = path
         .parent()
@@ -988,8 +1001,10 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("creating temp file {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("writing temp file {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync temp file {}", tmp.display()))?;
+        if sync {
+            f.sync_all()
+                .with_context(|| format!("fsync temp file {}", tmp.display()))?;
+        }
         Ok(())
     })();
     if let Err(e) = write {
