@@ -293,7 +293,7 @@ async fn fetch_text(url: &str) -> Result<String> {
             .with_context(|| format!("reading local registry file {url}"));
     }
 
-    let client = reqwest::Client::builder()
+    let client = mvm_http::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let resp = client

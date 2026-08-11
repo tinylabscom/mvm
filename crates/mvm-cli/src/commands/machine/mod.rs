@@ -404,6 +404,10 @@ impl MachineRunArgs {
 
     fn into_run_args(self) -> RunArgs {
         RunArgs {
+            // Placeholder; `run_dispatch` overwrites it with the mode
+            // `preflight_network` actually settled on for this launch, which is
+            // the value that reaches the signed plan.
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             manifest: self.manifest,
             // Default off; `run_dispatch` sets it for the warm-claim-eligible
             // transient mode.

@@ -38,6 +38,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Dev-only oracle for `tests/differential.rs`, which runs one corpus through
+# both clients. It is the evidence that replacing reqwest on the egress and
+# SSRF paths preserved behaviour, so it outlives the migration deliberately.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
+] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 rustls = { workspace = true, features = ["tls12"] }
 serde_json = { workspace = true }

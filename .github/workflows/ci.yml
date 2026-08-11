@@ -212,6 +212,12 @@ jobs:
       - name: mvmctl default closure within budget
         run: cargo run -p xtask -- check-closure-budget
 
+      # Sibling to the default-closure budget: bounds what any *feature* can
+      # pull in, which is where an off-by-default tree (wasm-backend's
+      # wasmtime/cranelift family) would otherwise grow unobserved.
+      - name: no unbounded growth behind optional features
+        run: cargo run -p xtask -- check-feature-closure-budget
+
       - name: no new duplicate-major dependencies
         run: cargo run -p xtask -- check-duplicate-majors
 

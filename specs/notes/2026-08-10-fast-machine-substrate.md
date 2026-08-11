@@ -95,7 +95,8 @@ probe without a guest-readiness witness is not an optimization.
 Warm launch samples now provide the end-to-end process witness needed for this
 comparison. The workload backend resolves the VMM/supervisor PID through the
 shared running-VM trait, then samples the same process after authenticated
-readiness and immediately after the first guest command. Linux records PSS and
+readiness and immediately after the first guest command. Linux records RSS from
+`/proc/<pid>/statm` and
 minor/major page-fault deltas; macOS records physical footprint and marks those
 Linux-specific counters unavailable. Firecracker, libkrun, and HVF use the same
 schema and lane gate, which rejects missing warm evidence. Results remain
@@ -105,11 +106,10 @@ The report consumer adds the publication gate shared by all native backends:
 20 measured samples after exactly two warm-ups, per-sample contamination and
 capability validation, and the prepared-cold 200/250/300 ms p50/p95/p99 budget.
 Warm claims retain the independent 30/50 ms p50/p99 target. The report now
-summarizes ready working set, first-command working-set growth/reclaim, and
+summarizes ready resident memory, first-command resident-memory growth/reclaim, and
 fault deltas without turning an unavailable platform counter into a zero.
 These are enforcement rules; they do not turn a synthetic or degraded local
 run into native matrix evidence.
-
 ## Filesystem evaluation
 
 The current block-backed rootfs, overlay, dm-verity, and host-directory image

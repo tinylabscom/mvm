@@ -26,15 +26,15 @@ pub use mvm_core::launch_trace::LAUNCH_SAMPLE_ENV;
 
 /// Sample schema version. A consumer that reads a different version refuses
 /// the sample as incomparable rather than mis-reading it.
-pub const LAUNCH_SAMPLE_SCHEMA_VERSION: u32 = 3;
+pub const LAUNCH_SAMPLE_SCHEMA_VERSION: u32 = 4;
 
 /// Point-in-time memory counters for the host process that owns a VM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessMemorySnapshot {
-    /// Host working set in bytes. Linux records proportional set size; macOS
-    /// records the process physical footprint.
-    pub working_set_bytes: u64,
+    /// Host resident bytes. Linux records RSS; macOS records physical
+    /// footprint.
+    pub resident_bytes: u64,
     /// Process-wide minor page faults on platforms that expose the counter.
     pub minor_faults: Option<u64>,
     /// Process-wide major page faults on platforms that expose the counter.
@@ -45,10 +45,10 @@ pub struct ProcessMemorySnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessMemoryDelta {
-    /// Working-set bytes added between the two samples.
-    pub working_set_growth_bytes: u64,
-    /// Working-set bytes released between the two samples.
-    pub working_set_reclaimed_bytes: u64,
+    /// Resident bytes added between the two samples.
+    pub resident_growth_bytes: u64,
+    /// Resident bytes released between the two samples.
+    pub resident_reclaimed_bytes: u64,
     /// Minor page faults incurred between samples, when available.
     pub minor_faults: Option<u64>,
     /// Major page faults incurred between samples, when available.
@@ -60,12 +60,8 @@ impl ProcessMemoryDelta {
     #[must_use]
     pub fn between(before: ProcessMemorySnapshot, after: ProcessMemorySnapshot) -> Self {
         Self {
-            working_set_growth_bytes: after
-                .working_set_bytes
-                .saturating_sub(before.working_set_bytes),
-            working_set_reclaimed_bytes: before
-                .working_set_bytes
-                .saturating_sub(after.working_set_bytes),
+            resident_growth_bytes: after.resident_bytes.saturating_sub(before.resident_bytes),
+            resident_reclaimed_bytes: before.resident_bytes.saturating_sub(after.resident_bytes),
             minor_faults: counter_delta(before.minor_faults, after.minor_faults),
             major_faults: counter_delta(before.major_faults, after.major_faults),
         }
@@ -78,7 +74,7 @@ fn counter_delta(before: Option<u64>, after: Option<u64>) -> Option<u64> {
         .map(|(before, after)| after.saturating_sub(before))
 }
 
-/// Whole-VMM memory observed after warm readiness and after its first command.
+/// Whole-VMM resident memory observed after warm readiness and after its first command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarmFirstCommandMemory {
@@ -355,7 +351,7 @@ pub struct LaunchSample {
     pub work: LaunchWork,
     pub phases: RunPhaseTimings,
     pub sub_phases: LaunchSubTimings,
-    /// Whole-VMM warm-ready working set and first-command memory/fault delta.
+    /// Whole-VMM warm-ready resident memory and first-command fault delta.
     /// Absent for cold launches and platforms/backends without a process
     /// observation surface.
     #[serde(default)]
@@ -459,18 +455,18 @@ mod tests {
             warm_first_command_memory: Some(WarmFirstCommandMemory {
                 pid: 42,
                 ready: ProcessMemorySnapshot {
-                    working_set_bytes: 10,
+                    resident_bytes: 10,
                     minor_faults: None,
                     major_faults: None,
                 },
                 after_first_command: ProcessMemorySnapshot {
-                    working_set_bytes: 12,
+                    resident_bytes: 12,
                     minor_faults: None,
                     major_faults: None,
                 },
                 delta: ProcessMemoryDelta {
-                    working_set_growth_bytes: 2,
-                    working_set_reclaimed_bytes: 0,
+                    resident_growth_bytes: 2,
+                    resident_reclaimed_bytes: 0,
                     minor_faults: None,
                     major_faults: None,
                 },
@@ -494,20 +490,20 @@ mod tests {
     #[test]
     fn process_memory_delta_reports_growth_faults_and_unavailable_counters() {
         let before = ProcessMemorySnapshot {
-            working_set_bytes: 100,
+            resident_bytes: 100,
             minor_faults: Some(20),
             major_faults: None,
         };
         let after = ProcessMemorySnapshot {
-            working_set_bytes: 140,
+            resident_bytes: 140,
             minor_faults: Some(27),
             major_faults: None,
         };
         assert_eq!(
             ProcessMemoryDelta::between(before, after),
             ProcessMemoryDelta {
-                working_set_growth_bytes: 40,
-                working_set_reclaimed_bytes: 0,
+                resident_growth_bytes: 40,
+                resident_reclaimed_bytes: 0,
                 minor_faults: Some(7),
                 major_faults: None,
             }
@@ -517,20 +513,20 @@ mod tests {
     #[test]
     fn process_memory_delta_reports_reclamation_and_counter_reset_safely() {
         let before = ProcessMemorySnapshot {
-            working_set_bytes: 200,
+            resident_bytes: 200,
             minor_faults: Some(30),
             major_faults: Some(4),
         };
         let after = ProcessMemorySnapshot {
-            working_set_bytes: 150,
+            resident_bytes: 150,
             minor_faults: Some(2),
             major_faults: Some(6),
         };
         assert_eq!(
             ProcessMemoryDelta::between(before, after),
             ProcessMemoryDelta {
-                working_set_growth_bytes: 0,
-                working_set_reclaimed_bytes: 50,
+                resident_growth_bytes: 0,
+                resident_reclaimed_bytes: 50,
                 minor_faults: Some(0),
                 major_faults: Some(2),
             }

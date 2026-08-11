@@ -2,18 +2,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::fs;
 use std::path::Path;
-use std::sync::Once;
 use std::time::Duration;
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
-}
-
-fn install_rustls_provider() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
 }
 
 /// Initialize a project: scaffold `mvm.toml` + `flake.nix` (+ NixOS
@@ -394,7 +386,6 @@ fn local_generation_config_with_probe() -> Option<LlmGenerationConfig> {
 /// Probe each candidate base URL for an OpenAI-compatible `/v1/models`
 /// endpoint. Returns the first one that responds with 2xx within 200ms.
 fn probe_local_openai_endpoint() -> Option<String> {
-    install_rustls_provider();
     let targets_env = std::env::var("MVM_TEMPLATE_LOCAL_PROBE_TARGETS").ok();
     let owned: Vec<String> = match targets_env.as_deref() {
         Some(s) => s
@@ -408,7 +399,7 @@ fn probe_local_openai_endpoint() -> Option<String> {
             .map(|s| (*s).to_owned())
             .collect(),
     };
-    let client = reqwest::blocking::Client::builder()
+    let client = mvm_http::blocking::Client::builder()
         .timeout(Duration::from_millis(200))
         .build()
         .ok()?;
@@ -429,8 +420,7 @@ fn generate_spec_with_llm(
     preset: Option<&str>,
     prompt: &str,
 ) -> Result<ValidatedOpenAiPlan> {
-    install_rustls_provider();
-    let client = reqwest::blocking::Client::builder()
+    let client = mvm_http::blocking::Client::builder()
         .user_agent(concat!("mvmctl/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(60))
         .build()
@@ -439,10 +429,10 @@ fn generate_spec_with_llm(
     let request = build_openai_prompt_request(&config.model, name, preset, prompt);
     let mut request_builder = client
         .post(&endpoint)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json");
+        .header("accept", "application/json")
+        .header("content-type", "application/json");
     if let Some(api_key) = config.api_key.as_ref() {
-        request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+        request_builder = request_builder.bearer_auth(api_key);
     }
     let response = request_builder
         .json(&request)

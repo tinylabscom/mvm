@@ -28,9 +28,10 @@ use super::stats::percentile;
 /// Report schema version for [`ColdLaunchReport`]. Version 2 added artifact
 /// byte measurements and optional resolved kernel-config evidence; version 3
 /// adds the selected root filesystem strategy; version 4 adds whole-VMM warm
-/// working-set and first-command fault evidence. Older reports remain readable
-/// through serde defaults but are not comparable without the new substrate.
-pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 4;
+/// resident-memory and first-command fault evidence; version 5 changes Linux
+/// memory accounting from PSS to RSS. Older reports remain readable through
+/// serde defaults but are not comparable without the new substrate.
+pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 5;
 
 /// Minimum measured samples in a publishable live matrix lane.
 pub const MIN_MATRIX_SAMPLES: u32 = 20;
@@ -647,15 +648,15 @@ pub struct LaneStats {
     /// rather than from a fixed list.
     #[serde(default)]
     pub backend_phases: Vec<(String, SpanStats)>,
-    /// Whole-VMM working set at warm readiness, in bytes.
+    /// Whole-VMM resident memory at warm readiness, in bytes.
     #[serde(default)]
-    pub warm_ready_working_set_bytes: SpanStats,
-    /// Working-set growth during the first warm command, in bytes.
+    pub warm_ready_resident_bytes: SpanStats,
+    /// Resident-memory growth during the first warm command, in bytes.
     #[serde(default)]
-    pub warm_first_command_growth_bytes: SpanStats,
-    /// Working-set reclamation during the first warm command, in bytes.
+    pub warm_first_command_resident_growth_bytes: SpanStats,
+    /// Resident-memory reclamation during the first warm command, in bytes.
     #[serde(default)]
-    pub warm_first_command_reclaimed_bytes: SpanStats,
+    pub warm_first_command_resident_reclaimed_bytes: SpanStats,
     /// Minor faults during the first warm command, when the host exposes them.
     #[serde(default)]
     pub warm_first_command_minor_faults: SpanStats,
@@ -738,14 +739,14 @@ pub fn build_cold_launch_report(
                 .map(|name| ((*name).to_string(), sub(name)))
                 .collect(),
             backend_phases: backend_phase_stats(&raw),
-            warm_ready_working_set_bytes: memory_stats(&raw, |memory| {
-                memory.ready.working_set_bytes as f64
+            warm_ready_resident_bytes: memory_stats(&raw, |memory| {
+                memory.ready.resident_bytes as f64
             }),
-            warm_first_command_growth_bytes: memory_stats(&raw, |memory| {
-                memory.delta.working_set_growth_bytes as f64
+            warm_first_command_resident_growth_bytes: memory_stats(&raw, |memory| {
+                memory.delta.resident_growth_bytes as f64
             }),
-            warm_first_command_reclaimed_bytes: memory_stats(&raw, |memory| {
-                memory.delta.working_set_reclaimed_bytes as f64
+            warm_first_command_resident_reclaimed_bytes: memory_stats(&raw, |memory| {
+                memory.delta.resident_reclaimed_bytes as f64
             }),
             warm_first_command_minor_faults: memory_counter_stats(&raw, |memory| {
                 memory.delta.minor_faults
@@ -867,12 +868,12 @@ mod tests {
 
     fn warm_memory() -> WarmFirstCommandMemory {
         let ready = ProcessMemorySnapshot {
-            working_set_bytes: 10,
+            resident_bytes: 10,
             minor_faults: Some(2),
             major_faults: Some(0),
         };
         let after_first_command = ProcessMemorySnapshot {
-            working_set_bytes: 14,
+            resident_bytes: 14,
             minor_faults: Some(5),
             major_faults: Some(1),
         };
@@ -1334,10 +1335,13 @@ mod tests {
         sample.warm_first_command_memory = Some(warm_memory());
         let report = build_cold_launch_report(LaunchLane::WarmClaim, 2, vec![sample]);
 
-        assert_eq!(report.stats.warm_ready_working_set_bytes.p50, Some(10.0));
-        assert_eq!(report.stats.warm_first_command_growth_bytes.p50, Some(4.0));
+        assert_eq!(report.stats.warm_ready_resident_bytes.p50, Some(10.0));
         assert_eq!(
-            report.stats.warm_first_command_reclaimed_bytes.p50,
+            report.stats.warm_first_command_resident_growth_bytes.p50,
+            Some(4.0)
+        );
+        assert_eq!(
+            report.stats.warm_first_command_resident_reclaimed_bytes.p50,
             Some(0.0)
         );
         assert_eq!(report.stats.warm_first_command_minor_faults.p50, Some(3.0));

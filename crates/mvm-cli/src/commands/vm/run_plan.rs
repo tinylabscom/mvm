@@ -544,6 +544,7 @@ mod tests {
 
     fn base_run_args() -> RunArgs {
         RunArgs {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
             manifest: None,
             warm_pool_size: 0,
             pty: false,

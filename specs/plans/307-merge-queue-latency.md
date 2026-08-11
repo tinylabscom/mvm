@@ -1,6 +1,8 @@
 # Plan 307 — Merge-queue latency
 
-**Status: IN PROGRESS**
+**Status: COMPLETE** — all five workstreams landed. WS2 was applied by a
+maintainer on 2026-08-10 and verified against the live ruleset; the rest are
+in `main`.
 
 ## Why
 
@@ -43,23 +45,35 @@ branches, not the queue's own position/state display, which shows
       filter off the trigger into a `scope` job that always reports. This plan
       records the interaction and defers to that PR.
 
-- [ ] **WS2 — the queue merges one PR per validation cycle.**
-      The ruleset has `min_entries_to_merge: 1` with
-      `min_entries_to_merge_wait_minutes: 0`, so a batch ships the instant one
-      entry is green and never accumulates — despite `max_entries_to_merge: 5`.
-      Every PR therefore pays a full validation cycle (~30 min of CI plus two
+- [x] **WS2 — the queue merges one PR per validation cycle.**
+      The ruleset had `min_entries_to_merge: 1` with
+      `min_entries_to_merge_wait_minutes: 0`, so a batch shipped the instant one
+      entry was green and never accumulated — despite `max_entries_to_merge: 5`.
+      Every PR therefore paid a full validation cycle (~30 min of CI plus two
       kernel builds at 15–30 min each) alone.
 
-      **Not applied — needs a maintainer to run it.** This is repo
-      configuration rather than code, and the change was refused by the local
-      permission policy. The exact edit, against ruleset `17624371`
+      **Applied 2026-08-10 by a maintainer.** This is repo configuration rather
+      than code, so it could not be scripted from here — the write was refused
+      by the local permission policy. The edit, against ruleset `17624371`
       (`main merge queue`, whose only rule is `merge_queue` — required status
-      checks live in classic branch protection and are untouched):
+      checks live in classic branch protection and were untouched):
 
       ```
       min_entries_to_merge:              1 -> 3
       min_entries_to_merge_wait_minutes: 0 -> 5
       ```
+
+      Verified live afterwards: `min_entries_to_merge=3`,
+      `min_entries_to_merge_wait_minutes=5`, with `merge_method`,
+      `grouping_strategy`, `max_entries_to_build`, `max_entries_to_merge` and
+      `check_response_timeout_minutes` unchanged — the PUT replaces the whole
+      rules array, so confirming the untouched fields is part of the check. The
+      queue was observed batching five entries shortly after.
+
+      **Expect a pause, not a stall.** With a minimum of 3, a queue holding
+      fewer than that now waits up to five minutes for another entry. That
+      wait is the feature; it is also the shape a jammed queue has, so check
+      `min_entries_to_merge` before diagnosing a stall.
 
       A quiet period then costs at most five extra minutes; a busy one
       amortises one validation cycle across up to five PRs

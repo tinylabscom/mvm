@@ -147,16 +147,17 @@ pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
     parse_linux_smaps_rollup_pss_bytes(&body)
 }
 
-/// Read whole-process working-set and fault counters for one Linux VMM.
+/// Read whole-process resident memory and fault counters for one Linux VMM.
 #[cfg(target_os = "linux")]
 pub fn read_process_memory_snapshot(pid: u32) -> Result<ProcessMemorySnapshot> {
-    let working_set_bytes = read_process_footprint_bytes(pid)?;
-    let stat_path = PathBuf::from("/proc").join(pid.to_string()).join("stat");
-    let stat = std::fs::read_to_string(&stat_path)
-        .with_context(|| format!("reading {}", stat_path.display()))?;
+    let resident_bytes = mvm_agentd::worker_pool::process_rss_bytes(pid)
+        .with_context(|| format!("reading unprivileged RSS for host process {pid}"))?;
+    let path = PathBuf::from("/proc").join(pid.to_string()).join("stat");
+    let stat =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let (minor_faults, major_faults) = parse_linux_proc_stat_faults(&stat)?;
     Ok(ProcessMemorySnapshot {
-        working_set_bytes,
+        resident_bytes,
         minor_faults: Some(minor_faults),
         major_faults: Some(major_faults),
     })
@@ -185,7 +186,7 @@ pub fn read_process_footprint_bytes(pid: u32) -> Result<u64> {
 #[cfg(target_os = "macos")]
 pub fn read_process_memory_snapshot(pid: u32) -> Result<ProcessMemorySnapshot> {
     Ok(ProcessMemorySnapshot {
-        working_set_bytes: read_process_footprint_bytes(pid)?,
+        resident_bytes: read_process_footprint_bytes(pid)?,
         minor_faults: None,
         major_faults: None,
     })
@@ -253,6 +254,14 @@ Pss_Dirty:           128 kB
             err.to_string().contains("minflt"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn process_memory_reader_uses_unprivileged_rss() {
+        let sample = read_process_memory_snapshot(std::process::id()).unwrap();
+        assert!(sample.resident_bytes > 0);
+        assert!(sample.minor_faults.is_some());
     }
 
     /// Deterministic probe so the orchestration loop is testable

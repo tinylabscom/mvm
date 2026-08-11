@@ -10,7 +10,7 @@
 //!   admission rejects tag-pinned references.
 //! - **Manifest fetch.** The [`ManifestFetcher`] trait fronts the
 //!   actual registry call; [`OciManifestFetcher`] is the real impl
-//!   over the crate's internal `reqwest`-based registry client. Test code points the same impl at a
+//!   over the crate's internal `mvm-http`-based registry client. Test code points the same impl at a
 //!   hermetic localhost registry fixture
 //!   (see `tests/hermetic_registry.rs`).
 //! - **Digest verification.** Every fetched manifest's content digest
@@ -49,7 +49,7 @@ pub mod archive;
 pub mod layer;
 pub mod manifest;
 // The manifest DTOs live in `mvm-contract` so the browser slice can parse a
-// manifest without this crate's `tokio`/`reqwest`/`flate2` tree. Re-exported
+// manifest without this crate's `tokio`/`mvm-http`/`flate2` tree. Re-exported
 // under the original path so every call site here is unchanged.
 use mvm_contract::oci::manifest_types;
 pub use mvm_contract::oci::{error, reference};

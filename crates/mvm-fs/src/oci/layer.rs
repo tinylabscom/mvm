@@ -150,9 +150,9 @@ impl OciLayerFetcher {
         }
     }
 
-    /// Construct from a pre-built `reqwest::Client`. Tests use
+    /// Construct from a pre-built `mvm_http::Client`. Tests use
     /// this to point at a hermetic localhost registry fixture.
-    pub fn with_client(client: reqwest::Client, options: LayerFetchOptions) -> Self {
+    pub fn with_client(client: mvm_http::Client, options: LayerFetchOptions) -> Self {
         Self {
             client: RegistryClient::with_http_client(
                 client,
@@ -164,7 +164,7 @@ impl OciLayerFetcher {
     }
 
     pub fn with_client_and_auth(
-        client: reqwest::Client,
+        client: mvm_http::Client,
         options: LayerFetchOptions,
         auth: RegistryAuthConfig,
     ) -> Self {

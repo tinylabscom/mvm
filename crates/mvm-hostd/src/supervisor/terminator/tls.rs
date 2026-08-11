@@ -5,7 +5,7 @@
 //!   - **bound SNI** (a host the plan's secrets are allowed to reach) → terminate
 //!     TLS under a leaf minted by the per-VM name-constrained intermediate,
 //!     decrypt, substitute (the `:80` `handle_request` core), re-originate a
-//!     real upstream TLS connection (root-validated, via the reused reqwest
+//!     real upstream TLS connection (root-validated, via the reused
 //!     forwarder), stream the response back encrypted.
 //!   - **unbound SNI** → byte-splice passthrough; the terminator never decrypts,
 //!     so end-to-end TLS is preserved and the host gains zero added visibility.
@@ -173,7 +173,7 @@ impl<'a> TlsTerminationBuilder<'a> {
 /// `forward` (the upstream-https leg), and write the response back encrypted.
 ///
 /// `forward` is injected so the substitution + termination core stays testable
-/// with a mock upstream; production passes the reused reqwest forwarder. A
+/// with a mock upstream; production passes the reused forwarder. A
 /// substitution refusal closes the connection without forwarding — the same
 /// fail-closed invariant as the `:80` path.
 ///
@@ -245,14 +245,14 @@ where
 }
 
 /// Serialize a forwarded upstream response to HTTP/1.1 wire bytes for the
-/// terminated TLS stream. reqwest already decoded transfer-encoding, so we drop
+/// terminated TLS stream. the client already decoded transfer-encoding, so we drop
 /// the upstream framing headers and emit our own `Content-Length` + `close`.
 pub fn serialize_http_response(status: u16, headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(128 + body.len());
     out.extend_from_slice(format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status)).as_bytes());
     for (k, v) in headers {
         let lk = k.to_ascii_lowercase();
-        // Drop framing/hop-by-hop headers reqwest already resolved; we re-frame.
+        // Drop framing/hop-by-hop headers the client already resolved; we re-frame.
         if matches!(
             lk.as_str(),
             "transfer-encoding" | "content-length" | "connection"

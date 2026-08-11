@@ -179,7 +179,7 @@ for detailed scope and acceptance criteria.
         issues #2280 and #2281. The artifact-ledger slice of #2280 and the
         pure-Rust ext4 baseline report are landed. Whole-VMM warm-ready and
         first-command memory/fault instrumentation is also landed; its
-        native-host matrix and candidate filesystem
+        real-host matrix, canonical budget/gates, candidate filesystem
         comparison, and the adopt/decline decision remain open.
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images
@@ -1031,19 +1031,23 @@ for detailed scope and acceptance criteria.
   - [x] Phase 1 — drop rcgen's `x509-parser` feature (the ASN.1 tower and the
         closure's last `nom` 7) and replace `rayon` with an order-preserving
         scoped-thread `par_map`; closure 286 → 263, budget ratcheted
-  - [ ] Phase 2 — `mvm-http` over rustls to retire `reqwest` (−27), gated on
-        differential + fuzz coverage because it lands on the egress
-        re-origination and SSRF-hardening paths
-  - [ ] Phase 3 — the product decisions: tree-sitter grammar gating,
-        `tracing-subscriber`, `toml`, and the deferred `serde_jcs`
-  - [ ] Phase 4 — a lockfile-count ratchet, so the ~62 `wasmtime`-family
-        packages an off-by-default feature adds stay visible to `cargo deny`
+  - [x] Phase 2 — `mvm-http` over rustls retires `reqwest`; measured −20, not
+        the −27 the raw subtree suggested. Differential harness against reqwest
+        landed first and stays as a dev-dep oracle. Closure 262 → 242
+  - [ ] Phase 3 — the product decisions: `tracing-subscriber`, `toml`, and the
+        deferred `serde_jcs`. tree-sitter grammar gating is **struck** — the
+        grammars are the SDK-to-Nix translation, not a tradeable dependency
+  - [x] Phase 4 — `check-feature-closure-budget` bounds the all-features
+        closure at 468, so the ~62 `wasmtime`-family packages behind an
+        off-by-default feature stay observed. Not a lockfile count: measured,
+        that number does not move when a dependency is removed (~120 orphans)
 
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
   (`specs/plans/313-egress-token-accounting-and-compaction.md`)
-  - [ ] Phase 0 — blocking verification: does the substitution endpoint's
-        response leg stream, or does it accumulate? Request bodies are buffered
-        today, so an SSE model call may reach the guest only on completion
+  - [x] Phase 0 — verified: the substitution path buffers the whole response
+        (`resp.bytes()`), loses chunk framing, has no body cap, and kills any
+        stream held past the 30s whole-request timeout. Streaming and secret
+        substitution are today mutually exclusive
   - [ ] Phase 1 — incremental response relay with bounded per-connection
         buffering, keeping the `service_redact` seam correct across chunk
         boundaries via a bounded overlap window

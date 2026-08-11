@@ -2,7 +2,11 @@
 
 ## Status
 
-**Phases 0 and 1 COMPLETE** (2026-08-09). Shipping closure **286 → 263**
+**Phases 0, 1, and 2 COMPLETE** (2026-08-10). `reqwest` is retired; the
+shipping closure is **242**, down from 286 — a **15% cut**. Phase 3 (product
+decisions) and Phase 4 (the lockfile ratchet) remain.
+
+Earlier status, kept for the record: Phases 0 and 1 complete (2026-08-09). Shipping closure **286 → 263**
 on `x86_64-unknown-linux-gnu`; macOS `aarch64-apple-darwin` 281 → 258.
 `CLOSURE_BUDGET` ratcheted 286 → 263. Phase 2 (`mvm-http`) and Phase 3
 (product decisions) are not started.
@@ -39,7 +43,7 @@ reachable only through the off-by-default `wasm-backend` feature.
 | `rcgen` | 20 (11 from its `x509-parser` feature alone) | 1 module, `mvm-core/src/crypto/egress_ca.rs` |
 | `aes-gcm` | 10 | 2 files |
 | `tracing-subscriber` | 7 | 12 files |
-| `tree-sitter` + 4 grammars | 7 | `mvm-sdk` compile/decorator |
+| `tree-sitter` + 4 grammars | 7 | `mvm-sdk` compile/decorator — **keep**, see non-goals |
 | `toml` | 6 | 10 crates |
 | `clap` | 6 | pervasive |
 | `rayon` | 5 | 5 files |
@@ -64,6 +68,17 @@ Ruthless is not reckless. These are *not* cut, and the reasons are load-bearing:
 - **`clap`, `chrono`, `serde`, `serde_json`, `flate2`, `rand`.** Pervasive, and
   the closure cost is small relative to what re-implementing them would cost in
   correctness.
+- **`tree-sitter` + its four grammars (7 crates).** Measured and then ruled
+  out (maintainer call, 2026-08-10). These are the only C-compiling crates in
+  the closure besides `ring`/`blake3`, so gating the JS/TS grammars behind an
+  `sdk-node` feature looked attractive on build time. It is not available: the
+  grammars *are* the SDK-to-Nix translation. `decorator/{python,typescript}.rs`
+  parse the decorators, `compile/reachability.rs` and `compile/func_describe.rs`
+  scope a function entrypoint to reachable code, `compile/strip_framework.rs`
+  rewrites the source, and `addon/validator.rs` validates the Nix bodies with
+  `tree-sitter-nix`. Gating them would make a default `mvmctl` unable to compile
+  the workloads it exists to compile. Not a dependency to trade.
+
 - **`smoltcp` / `mio` / `socket2` (6 crates).** A whole userspace forwarding
   backend; on macOS it is the only one.
 - **`ring`, `rustls`, `ed25519-dalek`, `sha2`, `blake3`, `leakguard`,
@@ -217,20 +232,55 @@ plus a `cargo-fuzz` target on `parse_head`/`next_chunk` wired into
 `security.yml`, asserting never-panic plus two span invariants an out-of-range
 chunk would break.
 
-### Stage B — migration (not started)
+### Stage B — migration (COMPLETE)
 
-- [ ] Migrate in dependency order, easiest first: `mvm-cli/src/http.rs` and
-      `mvm-build/src/stage0.rs` (blocking, hash-verified downloads — a wrong
-      byte fails closed) → `mvm-cli/src/template_registry.rs` →
-      `mvm-fs/src/oci/{registry,manifest,layer}.rs` →
-      `mvm-hostd/src/supervisor/{http_forward,tools/*}.rs` **last**.
-- [ ] A blocking face, or a `block_on` shim, for the five blocking call sites.
-- [ ] Differential tests running one corpus through both clients, asserting
-      identical status/headers/body **and identical refusals**.
-- [ ] `http_hardening_loopback` and `wasm_egress_witness` green unchanged.
-- [ ] Drop `reqwest`; ratchet `CLOSURE_BUDGET` to the measured result.
+`reqwest` is gone from the product graph. Closure **262 → 242**, the projection
+hit exactly.
 
-**Phase 2 exit: 262 → 242 projected.**
+- [x] A blocking face (`mvm_http::blocking`), holding **no runtime**. An
+      earlier shape cached one per client, which made the client un-droppable
+      inside an async context — tokio panics on that, far from the cause. Each
+      `send` builds and discards a current-thread runtime after refusing
+      outright if called from within one.
+- [x] `mvm-cli`, `mvm-build`, `mvm-sdk`, `mvm-fs`, `mvm-core`.
+- [x] `mvm-hostd` — `http_hardening`, `web_fetch`, `web_search`,
+      `http_forward`, `substitution_proxy`, `terminator/tls`.
+- [x] Differential harness against `reqwest`, run before the hostd cut over.
+- [x] `reqwest` dropped from every manifest; `CLOSURE_BUDGET` ratcheted to 242.
+
+**What the differential measured.** Twelve well-formed cases agree exactly.
+Five ambiguous ones are refused here; only **two** are behavioural divergences,
+and both are cases where reqwest *resolves* a framing ambiguity:
+
+| case | reqwest | mvm-http |
+|---|---|---|
+| `0x`-prefixed chunk size | refuses | refuses |
+| `+`-prefixed Content-Length | refuses | refuses |
+| disagreeing duplicate Content-Length | refuses | refuses |
+| **Content-Length + Transfer-Encoding** | **accepts**, prefers TE | refuses |
+| **`Transfer-Encoding: gzip, chunked`** | **accepts** | refuses |
+
+The first is the textbook smuggling primitive. Resolving an ambiguity is what
+lets two hops disagree, so failing closed is the point rather than a
+regression. The harness keeps `reqwest` as a **dev-dependency** deliberately —
+it is the standing evidence, not scaffolding.
+
+**A reqwest workaround deleted, not ported.** `http_hardening` documented that
+reqwest connects on the *resolver's* port rather than the URL's and never hands
+the resolver the port — so the SSRF-filtering resolver hardcoded 443, and any
+caller forwarding elsewhere needed a second resolver-less builder plus a manual
+resolve-filter-and-pin. `mvm_http::Resolve` receives `(host, port)`, so
+`hardened_client_builder_no_dns` and `resolve_ssrf_safe_ips` are **gone**,
+`substitution_proxy`'s per-request dance collapses to one builder call, and
+`web_fetch`'s hand-rolled `PinnedDnsResolver` becomes the built-in
+`PinnedResolver`. `http_forward` also loses five
+`no_proxy`/`no_gzip`/`no_brotli`/`no_zstd`/`no_deflate` calls: mvm-http supports
+neither proxies nor compression, so explicit disabling became absence.
+
+**Witnesses.** 167 SSRF / egress / substitution / forward tests pass, including
+the loopback, RFC1918, and IMDS refusals and the unbound-destination leak gate.
+
+**Phase 2 exit: 262 → 242. Achieved.**
 
 ---
 
@@ -260,56 +310,70 @@ pinned to TLS 1.3, `redirect::Policy::none`, streaming `.chunk()` under exact
 byte caps, plus blocking and async faces. That is the whole cost, stated
 before starting rather than discovered halfway.
 
-## Phase 3 — candidates requiring a product decision
+## Phase 3 — measured and declined
 
-Not scheduled. Each needs a call that is not the implementer's to make.
+Not a backlog. Every candidate below was measured, and each is **declined** for
+the reason given. The rule this plan follows is: remove or reimplement a
+dependency only where it can actually be cut. A dependency that is load-bearing,
+or whose removal buys a single-digit crate count in exchange for behaviour users
+rely on, is not a saving — it is a regression with a smaller lockfile.
 
-- [ ] **`tree-sitter` + 4 grammars (−7 crates).** These and `ring`/`blake3` are
-      the only C-compiling crates in the closure, so they cost build time out of
-      proportion to their count. All four grammars are genuinely used: Python
-      (decorator parse, reachability, `func_describe`, `strip_framework`),
-      TypeScript/TSX + JavaScript (reachability, `func_describe`), Nix (addon
-      body validator). Gating JS/TS behind an `sdk-node` feature would cut C
-      compilation for the common Python case — but a default `mvmctl` would then
-      refuse to compile Node workloads. **Product decision.**
-- [ ] **`tracing-subscriber` (−4 measured, not −7).** Its features were
-      measured too: dropping `json` alone is −1, `env-filter` alone is −1, and
-      `fmt`+`std` only is −4. None is free — `EnvFilter::try_from_default_env`
-      backs `RUST_LOG` in the CLI, and `.json()` is what the signer and
-      substitution-endpoint daemons log through. Taking the −4 means owning
-      env-filter directive semantics and a JSON layer, and regressing a
-      `RUST_LOG` contract users rely on. Poor ratio.
+Re-open one only with a new argument, not a re-reading of the same numbers.
 
-- [ ] **The −1 tail.** `keyring`, `ext4-view`, `xattr`, `bs58`, `aho-corasick`,
-      `hex`, `ipnet`, `uuid`, `lzma-rs`, `etherparse`, `sysinfo`, `leakguard`
-      are one crate each; `which` is −3 across 37 call sites and `url` is −2.
-      `keyring` is only −1 even on macOS — `security-framework` and the
-      `core-foundation`/`objc2` set are shared with `rustls-platform-verifier`.
-      Nothing here is worth bespoke code.
-- [ ] **`toml` (−6).** Investigated: bumping 0.8 → 0.9 is roughly a wash
-      (`toml_edit` is replaced by `toml_parser` + `toml_writer`), *not* a free
-      win. The lockfile currently carries both 0.8 and 0.9 — consolidating on
-      one retires a duplicate major, which is worth doing on its own. Replacing
-      TOML wholesale is a user-facing config-format change. **Product decision.**
-- [ ] **`hickory-proto` (−3), `keyring` (−1).** Small; not worth bespoke code.
+| candidate | Δ | declined because |
+|---|---|---|
+| `tree-sitter` + 4 grammars | −7 | They *are* the SDK-to-Nix translation. See non-goals. |
+| `toml` | −6 | User-facing config format. 0.8 → 0.9 measured as a wash (`toml_edit` swaps for `toml_parser` + `toml_writer`), so there is no free version bump either. |
+| `tracing-subscriber` | −4 | `EnvFilter::try_from_default_env` backs `RUST_LOG`, and `.json()` backs the signer and substitution-endpoint logs. Taking it means owning env-filter directive semantics forever and regressing a `RUST_LOG` contract. |
+| `hickory-proto` | −3 | DNS protocol code. Not a place for bespoke parsing. |
+| `which` | −3 | 37 call sites for a PATH walk; the churn exceeds the gain. |
+| `serde_jcs` | −2 | Audit-chain signing path — a canonicalization difference breaks signature verification silently rather than loudly. |
+| `url` | −2 | Feeds the SSRF guard's host comparison. A second opinion about what the host is *is* the bug. |
+| the −1 tail | −1 each | `keyring`, `ext4-view`, `xattr`, `bs58`, `aho-corasick`, `hex`, `ipnet`, `uuid`, `lzma-rs`, `etherparse`, `sysinfo`, `leakguard`. `keyring` is only −1 even on macOS: `security-framework` and the `core-foundation`/`objc2` set are shared with `rustls-platform-verifier`. |
+
+One item here is worth doing for a reason other than crate count: the lockfile
+carries `toml` at both 0.8 and 0.9, and consolidating retires a duplicate major.
+That is hygiene for `check-duplicate-majors`, not a closure saving.
 
 ---
 
-## Phase 4 — hold the line
+## Phase 4 — hold the line (COMPLETE)
 
-The ratchet only works if it moves. Every phase above must land its
-`CLOSURE_BUDGET` reduction *in the same PR* as the cut.
+The ratchet only works if it moves, and if it measures the right thing.
 
-- [ ] Ratchet `CLOSURE_BUDGET` down at each phase exit (280 → 262 → 235).
-- [ ] Add `xtask check-lockfile-budget`: a second ratchet on total `Cargo.lock`
-      package count. The closure budget cannot see the ~62 `wasmtime` packages
-      that an off-by-default feature drags into `cargo audit` / `cargo deny`
-      scope and into `--all-features` CI builds. `wasm-backend` has an active
-      design (Plan 301) and is **not** a deletion candidate — but its cost
-      should be visible and bounded.
-- [ ] Consider moving `wasm-backend` to its own workspace member with its own
-      lockfile, so the main `Cargo.lock` stops carrying the `cranelift` family.
-      Evaluate against Plan 301's Part A before acting.
+- [x] `CLOSURE_BUDGET` ratcheted at every phase exit: 286 → 280 → 263 → 262 →
+      **242**.
+- [x] **`xtask check-feature-closure-budget`** (new): bounds the workspace's
+      all-features, no-dev closure at **468**, wired into the `Lint policy` job.
+      The default-closure gate cannot see an off-by-default feature, so
+      `wasm-backend`'s ~62-crate `wasmtime`/`cranelift` family was growing
+      unobserved — not shipped, but compiled by `--all-features` lanes and
+      scanned by `cargo deny` and `cargo audit`. A compile-time assertion pins
+      the feature budget above the default one, since the two measure nested
+      sets and an edit inverting them should not build. Both the runtime gate
+      and the const assertion were verified to fail when violated.
+- [ ] Moving `wasm-backend` to its own workspace member so the main `Cargo.lock`
+      stops carrying the `cranelift` family. Still open; evaluate against
+      Plan 301 before acting.
+
+### Why the gate is not a `Cargo.lock` count
+
+The original sketch here was "ratchet total lockfile packages". Measured, that
+does not work: Cargo retains entries for packages unreachable from any target,
+feature, or dev-dependency. This workspace's lockfile holds **672** while only
+**552** are reachable with every feature *and* all dev-dependencies enabled —
+about 120 orphans. Removing a real dependency can leave the count unchanged,
+which was confirmed by dropping one and re-resolving: 672 before, 672 after. A
+ratchet on that number would give false comfort in both directions.
+
+The resolved-graph counts do respond, and they nest cleanly:
+
+| metric | count | gate |
+|---|---|---|
+| default `mvmctl`, no-dev | 242 | `check-closure-budget` |
+| workspace, no-dev, all-features | 468 | `check-feature-closure-budget` |
+| workspace, with-dev, all-features | 552 | ungated (test-only tooling) |
+| `Cargo.lock` raw | 672 | **not a metric** — ~120 orphans |
 
 ## Expected outcome
 
@@ -319,8 +383,10 @@ The ratchet only works if it moves. Every phase above must land its
 | Phase 0 | 280 | −6 | **landed** |
 | Phase 1 | 263 | −23 | **landed** |
 | `fs2` → std locking | 262 | −24 | **landed** |
-| Phase 2 stage A | 262 | −24 | **landed** (crate only, no callers) |
-| Phase 2 stage B | ~242 | ~−44 | not started |
+| Phase 2 stage A (crate only) | 262 | −24 | **landed** |
+| Phase 2 stage B (all callers) | **242** | **−44** | **landed** |
+| Phase 3 | 242 | — | measured and **declined** |
+| Phase 4 | 242 | — | **landed** (a second ratchet, not a cut) |
 
 ## What landed (2026-08-09)
 

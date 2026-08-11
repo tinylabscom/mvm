@@ -105,10 +105,6 @@ impl ColdLaunchBench {
             )?);
         }
         let report = build_cold_launch_report(self.lane, self.warmup, raw);
-        // Small-run configurations remain available for fast hermetic tests,
-        // but every normal-sized run is a publishable matrix candidate and
-        // must pass the repeated-sample, canonical-summary, and percentile
-        // gates before it can be handed to a report consumer.
         if self.runs >= super::cold_launch::MIN_MATRIX_SAMPLES {
             validate_matrix_report(&report)
                 .context("live launch report did not pass the matrix publication gate")?;
@@ -608,12 +604,12 @@ tmpfs /tmp tmpfs rw 0 0
     fn lane_sample_preserves_warm_memory_evidence() {
         let mut sample = sample_for(148.0);
         let ready = ProcessMemorySnapshot {
-            working_set_bytes: 100,
+            resident_bytes: 100,
             minor_faults: Some(3),
             major_faults: Some(1),
         };
         let after_first_command = ProcessMemorySnapshot {
-            working_set_bytes: 120,
+            resident_bytes: 120,
             minor_faults: Some(8),
             major_faults: Some(1),
         };

@@ -53,12 +53,6 @@ fn main() -> Result<()> {
     // is gone (macOS / SIGKILL gap the spawn-side attach misses).
     mvm_hostd::parent_death::exit_when_orphaned();
 
-    // reqwest is built with rustls-no-provider; install the ring crypto provider
-    // before any tokio task creates a reqwest Client (e.g. HTTP forward/DNS-over-HTTPS).
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("ring rustls crypto provider should install once");
-
     tracing_subscriber::fmt()
         .with_target(true)
         .with_level(true)
@@ -136,13 +130,13 @@ fn main() -> Result<()> {
         .context("tokio runtime build failed")?;
 
     // One configured deadline for the forward leg AND the untrusted guest socket
-    // (terminator). The UDS/vsock path already honors this via ReqwestForwarder.
+    // (terminator). The UDS/vsock path already honors this via HardenedForwarder.
     let forward_timeout = std::time::Duration::from_secs(cfg.forward_timeout_secs);
 
     // Self-confine before serving any guest byte. The runtime's worker threads
     // are already spawned (multi-thread `build()` spawns them eagerly), and the
     // listeners are bound above — so the broad setup is done. `clone`/`clone3`
-    // stay in the allowlist anyway because tokio + reqwest spawn blocking
+    // stay in the allowlist anyway because tokio spawns blocking
     // threads lazily during serve (the vsock accept loop and the resolver run
     // on `spawn_blocking`). We confine from inside `block_on` so the policy
     // applies to the runtime thread that drives the accept loop. Fail-closed:

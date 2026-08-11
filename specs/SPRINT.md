@@ -1524,14 +1524,15 @@ Then unify + retire the old paths:
   monotonic private restore-mapping duration. The libkrun density report now
   also carries guest-agent RSS from the existing ResourceUsage RPC. The
   backend-neutral warm launch sample now records the whole VMM host process at
-  authenticated readiness and after the first command: Linux reports PSS and
+  authenticated readiness and after the first command: Linux reports RSS from
+  `/proc/<pid>/statm` and
   minor/major fault deltas, while macOS reports physical footprint with fault
   counters explicitly unavailable. Warm-lane validation refuses missing
   evidence. The real-host Firecracker/HVF matrix, canonical budget table, and
   resulting native-host gates remain open. The report-level gate now requires
   20 measured samples after two warm-ups, revalidates every raw sample, applies
   the 200/250/300 ms prepared-cold budget and the independent 30/50 ms warm
-  target, and aggregates whole-VMM working-set/fault evidence without
+  target, and aggregates whole-VMM resident-memory/fault evidence without
   zero-filling unavailable counters.
 - [x] **Filesystem-path baseline — issue #2281.**
   `mvm_fs::rootfs::measure_ext4_pure` now records a stable JSON baseline for

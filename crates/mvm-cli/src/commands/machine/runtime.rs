@@ -388,6 +388,9 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 args.manifest = Some(slot);
             }
             let mut run_args = args.into_run_args();
+            // The mode settled above, not a re-derivation: one value reaches
+            // both the transport decision and the signed plan.
+            run_args.network_mode = network_mode;
             run_args.warm_pool_size = warm_pool_size;
             use std::io::IsTerminal as _;
             run_args.stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
@@ -407,6 +410,9 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 args.manifest = Some(slot);
             }
             let mut run_args = args.into_run_args();
+            // The mode settled above, not a re-derivation: one value reaches
+            // both the transport decision and the signed plan.
+            run_args.network_mode = network_mode;
             run_args.pty = true;
             run_args.warm_pool_size = warm_pool_size;
             run_args.stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
