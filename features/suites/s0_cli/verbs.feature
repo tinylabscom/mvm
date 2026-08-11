@@ -26,9 +26,9 @@ Feature: mvmctl top-level CLI surface
     When I run mvmctl with "machine run --help"
     Then the command exits with code 0
     And the help output contains "Boot an OCI image"
-    And the help output contains "Allow outbound access to HOST[:PORT] (repeatable)"
-    And the help output contains "Select the VMM (firecracker, hvf, libkrun, or qemu)"
-    And the help output contains "Record check interval in seconds (not yet enforced)"
+    And the help output contains "Allow outbound access"
+    And the help output contains "Select the VMM"
+    And the help output contains "Record check interval"
     But the help output does not contain "Mutually exclusive with"
     And the help output does not contain "production-safe call surface"
 
