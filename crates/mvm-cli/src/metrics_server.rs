@@ -96,6 +96,13 @@ fn handle_connection(mut stream: TcpStream) {
     let _ = stream.read(&mut buf);
 
     let mut body = mvm_core::observability::metrics::global().prometheus_exposition();
+    // Empty unless this process is running with span profiling enabled, so the
+    // scrape shape is unchanged for everyone else.
+    body.push_str(
+        &mvm_core::observability::span_timing::prometheus_exposition(
+            &mvm_core::observability::span_timing::global().report(),
+        ),
+    );
     append_per_vm_scrape_files(&mut body);
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n{}",

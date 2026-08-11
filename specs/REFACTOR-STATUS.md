@@ -86,6 +86,20 @@ for detailed scope and acceptance criteria.
   - [ ] Run Linux-native workspace Clippy/tests in the project builder
         environment
 
+- [x] Plan 318 — span-timing profiling
+      (`specs/plans/318-span-timing-profiling.md`)
+  - [x] Phase 1 — `SpanTimingLayer`, bounded log-scale histogram, self-time
+        attribution, text/JSON reports, per-layer log filter so spans are
+        constructed at the CLI's default `error` verbosity
+  - [x] Phase 2 — instrument `mvm-fs` OCI/ext4 entry points and the four
+        backend `boot` paths plus HVF restore, then the launch critical path
+        in `mvm-cli` and the admission/audit/build/client entry points
+  - [x] Phase 3 — labelled prometheus export, pure per-call profile diffing in
+        `bench/span_profile.rs`, and a measured decision to keep the per-close
+        mutex (12 ns/span disabled; throughput scales up, not down, under
+        contention). Wiring the diff into a CI lane stays with Plan 311's
+        large-image work; guest-side `mvm-agentd` needs a profile egress path
+        first.
 - [x] Plan 2167 — durable agent session and event contract
       (`specs/plans/2167-agent-session-contract.md`)
   - [x] Versioned public IDs, lifecycle commands, durable/ephemeral event

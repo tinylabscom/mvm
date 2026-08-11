@@ -79,6 +79,7 @@ fn download_published_kernel(
     )
 }
 
+#[tracing::instrument(skip_all, fields(arch, source_checkout))]
 fn resolve_pinned_kernel_with<F>(
     cache_dir: &std::path::Path,
     arch: &str,

@@ -87,6 +87,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         // `# TYPE` lines for distinct metric names.
         print!("{}", global_metrics.prometheus_exposition());
         print!("{}", per_vm.prometheus_exposition());
+        // Span timings are deliberately absent here. They accumulate in the
+        // process that ran the instrumented code, and this command renders
+        // before doing any, so the series would always be empty. The scrape
+        // served by `metrics_server` carries them, because there the serving
+        // process is the one doing the work.
     }
     Ok(())
 }

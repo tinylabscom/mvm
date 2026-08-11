@@ -362,6 +362,11 @@ impl VmmDriver for HvfDriver {
         self.backend.capabilities().standby_pool
     }
 
+    #[tracing::instrument(
+        name = "hvf.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         boot_with_handoff(spec, None)
     }

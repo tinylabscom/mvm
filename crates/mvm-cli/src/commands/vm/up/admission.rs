@@ -630,6 +630,10 @@ fn sibling_deploy_boot_artifact(
 /// immutable across repeated launches. A precomputed digest is different: it
 /// is an external attestation claim, so it must be checked with an uncached
 /// read before it can influence admission. A mismatch fails closed.
+#[tracing::instrument(
+    skip_all,
+    fields(rootfs = %rootfs_path.display(), precomputed = precomputed.is_some())
+)]
 fn resolve_image_sha256(
     rootfs_path: &std::path::Path,
     precomputed: Option<String>,
@@ -2173,6 +2177,7 @@ allow_hosts = ["localhost:8443"]
 
     #[test]
     fn a_manifest_grant_reaches_the_signed_plan() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         let declared = manifest_grants(MANIFEST);
         let config = MvmConfig::default();
         let resolved = resolve_run_grants(GrantInputs {
@@ -2391,6 +2396,7 @@ allow_hosts = ["localhost:8443"]
 
     #[test]
     fn a_run_that_grants_nothing_still_admits_a_grant_free_plan() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
         // The pre-grant baseline has to stay byte-identical: an untouched
         // permission set must not become an empty-but-present one.
         let config = MvmConfig::default();

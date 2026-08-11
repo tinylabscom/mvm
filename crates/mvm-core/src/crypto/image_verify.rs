@@ -391,6 +391,7 @@ pub fn verify_artifact(path: &Path, expected: &ArtifactDigest) -> VerifyResult<(
 /// Stream a file through SHA-256 and return the lowercase hex digest.
 /// Public for callers that want to verify an artifact without the
 /// delete-on-mismatch behaviour of `verify_artifact`.
+#[tracing::instrument(name = "sha256_file.uncached", skip_all, fields(path = %path.display()))]
 pub fn sha256_file(path: &Path) -> io::Result<String> {
     use io::Read as _;
     let mut file = fs::File::open(path)?;
@@ -443,6 +444,7 @@ pub enum DigestSource {
 }
 
 /// [`sha256_file_cached`], reporting whether the sidecar served the digest.
+#[tracing::instrument(name = "sha256_file.cached", skip_all, fields(path = %path.display()))]
 pub fn sha256_file_cached_with_source(path: &Path) -> io::Result<(String, DigestSource)> {
     let meta = fs::metadata(path)?;
     let size = meta.len();

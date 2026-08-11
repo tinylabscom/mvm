@@ -214,6 +214,51 @@ The lane mirrored at `.github/workflows/ci.yml::core-demo-e2e` runs the same com
 
 The same gated convention covers `crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`.
 
+## Profiling
+
+Functions carrying `#[instrument]` are timed when `MVM_SPAN_TIMINGS` is set.
+Profiling is off otherwise — the timing layer is not installed at all.
+
+```bash
+MVM_SPAN_TIMINGS=1 mvmctl <command>              # table to stderr
+MVM_SPAN_TIMINGS=json mvmctl <command>           # JSON to stderr
+MVM_SPAN_TIMINGS=json MVM_SPAN_TIMINGS_OUT=/tmp/p.json mvmctl <command>
+MVM_SPAN_TIMINGS=1 MVM_SPAN_TIMINGS_FILTER=mvm_fs=trace mvmctl <command>
+```
+
+The report is sorted by **self time** — time inside the function excluding
+nested instrumented calls — which is the column that identifies what to
+optimize. A row with high `total` but low `self` is an orchestrator whose cost
+lives in a callee. `wall` above `total` means the span was open but not
+entered; on async code that gap is time spent awaiting something else.
+
+Percentiles come from a fixed-memory log-scale histogram and carry ~12% bucket
+error. They are a profiling signal, not an SLO measurement.
+
+Span timing is independent of `-v`: spans are measured even at the default
+quiet log filter. To add a new measurement point, put `#[instrument(skip_all)]`
+on the function. Prefer coarse entry points — recording takes a process-wide
+lock on span close, so instrumenting a per-item inner loop distorts the
+measurement it is meant to produce. Measured cost, debug build: 12 ns/span with
+profiling off, ~4 us/span with it on, and aggregate throughput rises rather
+than falls under contention (`cargo test -p mvm-core --test
+span_timing_overhead -- --nocapture`).
+
+When profiling is enabled, the served metrics endpoint also carries
+`mvm_span_calls_total`, `mvm_span_self_seconds_total`,
+`mvm_span_total_seconds_total`, and `mvm_span_max_seconds`, each labelled with
+`target` and `span`. Nothing is exported when profiling is off. This is the
+scrape endpoint only, not `mvmctl ops metrics`: a profile accumulates in the
+process that ran the instrumented code, and a short-lived CLI invocation
+renders its output before doing any work, so those series would always be
+empty there.
+
+To diff two runs rather than read two tables, `bench::span_profile` captures a
+profile from a child `mvmctl` and compares them. It gates on **per-call** self
+time, so a run with more iterations does not read as a regression, and reports
+call-count changes separately — a function called twice as often is a different
+defect from one that got slower.
+
 ## Linting and Formatting
 
 ```bash

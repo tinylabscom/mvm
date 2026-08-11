@@ -285,6 +285,11 @@ impl VmmDriver for LibkrunDriver {
         libkrun_base_bootargs(virtiofs_root, has_disk)
     }
 
+    #[tracing::instrument(
+        name = "libkrun.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         let state_dir = vm_state_dir(&spec.name);
         std::fs::create_dir_all(&state_dir)

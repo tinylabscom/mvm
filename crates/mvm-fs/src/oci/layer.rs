@@ -38,6 +38,7 @@ use std::time::Duration;
 use crate::oci::unpack::{UnpackOptions, UnpackReport, unpack_layer_with_prior_paths};
 use flate2::read::GzDecoder;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tracing::instrument;
 
 /// Marker substring stored in the `io::Error` we return from the
 /// hashing writer when the size cap fires. The retry loop checks
@@ -570,6 +571,7 @@ impl OciLayerFetcher {
 /// This is the cache-hit counterpart to
 /// [`OciLayerFetcher::fetch_and_unpack_layer`]: it avoids loading the
 /// entire compressed blob into memory just to verify and unpack it.
+#[instrument(skip_all, fields(digest = %layer.digest, media_type = %layer.media_type))]
 pub async fn verify_and_unpack_layer_file(
     layer: &LayerDescriptor,
     cache_path: &Path,

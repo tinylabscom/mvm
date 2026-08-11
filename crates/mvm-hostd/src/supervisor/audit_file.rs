@@ -446,6 +446,7 @@ pub fn verify_audit_chain(path: &Path, verifying_key: &VerifyingKey) -> Result<u
 /// Verify a chain-signed audit file and return its authenticated entries in
 /// chain order. Consumers use this when a decision depends on signed labels,
 /// rather than parsing an already-verified file a second time.
+#[tracing::instrument(skip_all, fields(path = %path.display()))]
 pub fn verify_audit_chain_entries(
     path: &Path,
     verifying_key: &VerifyingKey,

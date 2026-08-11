@@ -327,6 +327,11 @@ impl VmmDriver for QemuDriver {
         qemu_base_bootargs(virtiofs_root, has_disk)
     }
 
+    #[tracing::instrument(
+        name = "qemu.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         // QEMU has no bundled kernel (libkrun's libkrunfw is the only
         // bundled-kernel backend): a `Bundled` spec takes the same cached
