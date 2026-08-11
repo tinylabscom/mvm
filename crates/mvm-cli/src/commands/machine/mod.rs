@@ -83,13 +83,13 @@ pub(in crate::commands) enum MachineAction {
     /// Build a microVM image from a manifest or Nix flake
     #[command(display_order = 2)]
     Build(build::Args),
-    /// Create or update a persistent named machine spec without booting it
+    /// Create or update a persistent machine spec
     #[command(display_order = 3)]
     Create(MachineCreateArgs),
-    /// Boot one or more persistent named machines without running a one-shot command
+    /// Boot one or more persistent machines
     #[command(display_order = 4)]
     Start(MachineStartCmd),
-    /// Restart one or more named machines (stop if running, then start)
+    /// Restart one or more persistent machines
     #[command(display_order = 5)]
     Restart(MachineStartCmd),
     /// Stop a running VM by name, or all running VMs with --all
@@ -101,13 +101,13 @@ pub(in crate::commands) enum MachineAction {
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
-    /// List every microVM: persistent machines and running transients (alias: `ps`)
+    /// List persistent and transient microVMs
     #[command(name = "ls", visible_alias = "ps", display_order = 7)]
     Ls(MachineListArgs),
     /// Show one persistent named machine spec
     #[command(display_order = 8)]
     Inspect(MachineInspectArgs),
-    /// Attach an interactive shell/console to an already-started named machine
+    /// Open a shell in a running persistent machine
     #[command(display_order = 9)]
     Shell(MachineShellArgs),
     /// Run a command inside an already-started named machine
@@ -119,34 +119,25 @@ pub(in crate::commands) enum MachineAction {
     /// Show console logs from a running VM
     #[command(display_order = 12)]
     Logs(super::vm::logs::Args),
-    /// Interactive PTY console to a running VM (dev images only; claim-15 gated)
+    /// Open a PTY console for a development image
     #[command(display_order = 13)]
     Console(super::vm::console::Args),
-    /// Verify a portable `.mvm` artifact and preview how `machine run` would
-    /// admit it (arch, profile, seccomp, egress, volumes). Read-only: no
-    /// extraction, no boot.
+    /// Verify a portable `.mvm` artifact without booting
     #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
-    /// Render a checkpoint or image's lineage (ancestors to genesis + immediate
-    /// children), verifying each hop against the signed audit chain. Read-only:
-    /// no restore, no admission, no boot.
+    /// Show and verify checkpoint or image lineage
     #[command(display_order = 14)]
     Timeline(super::vm::checkpoint::TimelineArgs),
-    /// Restore a prior state: launch a fresh, re-admitted VM at the checkpoint or
-    /// image node the target names. Verifies the target against the signed audit
-    /// chain first and fails closed on an un-audited, tampered, or dangling
-    /// record.
+    /// Restore a verified checkpoint or image into a new VM
     #[command(display_order = 15)]
     Revert(super::vm::checkpoint::RevertArgs),
     /// Rewind one step: restore the target's parent in the lineage.
     #[command(display_order = 16)]
     Rewind(super::vm::checkpoint::RevertArgs),
-    /// Advance one step: restore a child of the target (a fork needs `--to`).
+    /// Restore a child of the target (`--to` selects a fork)
     #[command(display_order = 17)]
     Advance(super::vm::checkpoint::AdvanceArgs),
-    /// Warm-restore a vm_full checkpoint into a fresh child VM.
-    /// The child inherits the saved machine state and receives a fresh
-    /// generation token; the parent must be stopped.
+    /// Restore a full-VM checkpoint into a fresh child VM
     #[command(name = "warm-restore", display_order = 18)]
     WarmRestore(MachineWarmRestoreArgs),
     /// Advanced single-VM operations (pause, snapshot, cp, fs, …). Hidden; use `machine <verb>` directly.
@@ -376,7 +367,7 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Load entrypoint secrets from workload IR.
     #[arg(long, value_name = "PATH", requires = "entrypoint")]
     pub from_workload_ir: Option<PathBuf>,
-    /// Feed the entrypoint's stdin from PATH, or `-` to stream yours.
+    /// `-` to stream yours; otherwise read PATH.
     // Deliberately one line: this crate's help-length rule measures clap's
     // long help, which is the whole doc comment, so extended paragraphs here
     // would land in `machine run --help` and break it. The difference between

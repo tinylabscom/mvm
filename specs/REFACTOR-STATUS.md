@@ -1,15 +1,17 @@
 # Refactor status
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
-- [x] **CLI help width invariant.** Every visible and hidden command is capped
-      at 80 columns for `--help`, `-h`, and `mvmctl help <path>`; generated-tree
-      BDD coverage executes the real binary and automatically includes future
-      subcommands.
+- [x] **CLI help layout invariant.** Every visible and hidden command emits one
+      physical line per help item, strictly shorter than 80 columns, for
+      `--help`, `-h`, and `mvmctl help <path>`. The shared renderer compacts
+      long-help blocks and caps overlong summaries at 79 columns; generated-tree
+      BDD coverage executes the real binary, rejects continuation lines and
+      overlong output, and automatically includes future subcommands.
 - [~] **Issue-closeout batch — #2165, #2321, and #2323.** The workload runner
       now emits read-only root bootargs for read-only root devices, the
       credential-bearing substitution response is incrementally capped, and

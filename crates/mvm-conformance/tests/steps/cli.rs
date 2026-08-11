@@ -457,27 +457,35 @@ fn help_options_fit_within(world: &mut CliWorld, width: i64) {
     }
 }
 
-#[then(expr = "every mvmctl command and subcommand help fits within {int} columns")]
-fn every_command_help_fits_within(_world: &mut CliWorld, width: i64) {
-    for path in all_command_paths() {
-        let mut args = path.clone();
-        args.push("--help".to_string());
-        assert_help_invocation_fits(&args, width);
-    }
+#[then(
+    expr = "every mvmctl command and subcommand help item is one line shorter than {int} columns"
+)]
+fn every_command_help_item_is_one_line_shorter_than(_world: &mut CliWorld, width: i64) {
+    let violations = all_command_paths()
+        .into_iter()
+        .flat_map(|mut path| {
+            path.push("--help".to_string());
+            help_invocation_violations(&path, width, true)
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "CLI help items must each occupy one line shorter than {width} columns:\n{}",
+        violations.join("\n")
+    );
 }
 
-#[then(
-    expr = "every mvmctl command and subcommand alternative help entry point fits within {int} columns"
-)]
+#[then(expr = "every alternative CLI help item is one line shorter than {int} columns")]
 fn every_alternative_help_entry_point_fits_within(_world: &mut CliWorld, width: i64) {
     for path in all_command_paths() {
         let mut short_help_args = path.clone();
         short_help_args.push("-h".to_string());
-        assert_help_invocation_fits(&short_help_args, width);
+        assert_help_invocation_fits(&short_help_args, width, true);
 
         let mut help_subcommand_args = vec!["help".to_string()];
         help_subcommand_args.extend(path);
-        assert_help_invocation_fits(&help_subcommand_args, width);
+        assert_help_invocation_fits(&help_subcommand_args, width, true);
     }
 }
 
@@ -488,32 +496,104 @@ fn all_command_paths() -> Vec<Vec<String>> {
     command_paths
 }
 
-fn assert_help_invocation_fits(args: &[String], width: i64) {
+fn assert_help_invocation_fits(args: &[String], width: i64, require_single_line_items: bool) {
+    let violations = help_invocation_violations(args, width, require_single_line_items);
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+fn help_invocation_violations(
+    args: &[String],
+    width: i64,
+    require_single_line_items: bool,
+) -> Vec<String> {
     let invocation = format!("mvmctl {}", args.join(" "));
     let output = mvmctl_command()
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("failed to run `{invocation}`: {e}"));
-    assert!(
-        output.status.success(),
-        "`{invocation}` failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if !output.status.success() {
+        return vec![format!(
+            "`{invocation}` failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )];
+    }
 
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !help.trim().is_empty(),
-        "`{invocation}` exited successfully without printing help"
-    );
+    if help.trim().is_empty() {
+        return vec![format!(
+            "`{invocation}` exited successfully without printing help"
+        )];
+    }
+
+    let mut violations = Vec::new();
+    if require_single_line_items {
+        collect_wrapped_help_items(&invocation, &help, &mut violations);
+    }
     for (line_number, line) in help.lines().enumerate() {
         let line_width = i64::try_from(line.chars().count()).expect("line width fits in i64");
-        assert!(
-            line_width <= width,
-            "`{invocation}` line {} exceeds {width} columns ({}):\n{}",
-            line_number + 1,
-            line_width,
-            help
-        );
+        if line_width >= width {
+            violations.push(format!(
+                "`{invocation}` line {} is {line_width} columns: {line}",
+                line_number + 1
+            ));
+        }
+    }
+    violations
+}
+
+fn collect_wrapped_help_items(invocation: &str, help: &str, violations: &mut Vec<String>) {
+    #[derive(Clone, Copy)]
+    enum ItemSection {
+        Arguments,
+        Commands,
+        Options,
+    }
+
+    let command_names = all_command_paths()
+        .into_iter()
+        .filter_map(|path| path.last().cloned())
+        .collect::<Vec<_>>();
+    let mut section = None;
+
+    for (line_number, line) in help.lines().enumerate() {
+        let trimmed = line.trim();
+        match trimmed {
+            "Arguments:" => {
+                section = Some(ItemSection::Arguments);
+                continue;
+            }
+            "Commands:" => {
+                section = Some(ItemSection::Commands);
+                continue;
+            }
+            "Options:" => {
+                section = Some(ItemSection::Options);
+                continue;
+            }
+            "" => {
+                section = None;
+                continue;
+            }
+            _ => {}
+        }
+
+        let is_item = match section {
+            Some(ItemSection::Arguments) => {
+                matches!(trimmed.chars().next(), Some('<' | '['))
+            }
+            Some(ItemSection::Commands) => trimmed.split_whitespace().next().is_some_and(|word| {
+                word == "help" || command_names.iter().any(|name| name == word)
+            }),
+            Some(ItemSection::Options) => trimmed.starts_with('-'),
+            None => true,
+        };
+
+        if !is_item {
+            violations.push(format!(
+                "`{invocation}` help item wraps onto line {}: {line}",
+                line_number + 1
+            ));
+        }
     }
 }
 

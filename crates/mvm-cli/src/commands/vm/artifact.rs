@@ -232,8 +232,7 @@ pub(in crate::commands) struct ModelConfigArgs {
     /// Artifact ID (UUID) or unique prefix to look up under
     /// `~/.mvm/artifacts/<id>/`.
     pub id: String,
-    /// Backend to write config for. Currently only `firecracker` is
-    /// implemented in this slice.
+    /// `firecracker` backend (the only supported choice).
     #[arg(long, default_value = "firecracker")]
     pub backend: BackendArg,
 }

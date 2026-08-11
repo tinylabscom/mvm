@@ -17,7 +17,7 @@ Feature: mvmctl top-level CLI surface
     Then the command exits with code 0
     And the help output contains "Output format"
     And the help output contains "Builder VMM: libkrun, qemu, or hvf"
-    And the help output contains "Kernel source: compile, download, or auto"
+    And the help output contains "Kernel source: compile, download, auto"
     And the help options fit within 80 columns
     But the help output does not contain "Highest priority"
     And the help output does not contain "platform-default auto-detect"
@@ -32,8 +32,8 @@ Feature: mvmctl top-level CLI surface
     But the help output does not contain "Mutually exclusive with"
     And the help output does not contain "production-safe call surface"
 
-  Scenario: every CLI command and subcommand help fits within 80 columns
-    Then every mvmctl command and subcommand help fits within 80 columns
+  Scenario: every CLI help item is one line shorter than 80 columns
+    Then every mvmctl command and subcommand help item is one line shorter than 80 columns
 
-  Scenario: every alternative CLI help entry point fits within 80 columns
-    Then every mvmctl command and subcommand alternative help entry point fits within 80 columns
+  Scenario: every alternative CLI help entry point obeys the one-line limit
+    Then every alternative CLI help item is one line shorter than 80 columns
