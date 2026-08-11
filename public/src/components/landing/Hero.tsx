@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { Button } from "../ui/button";
+import { Bloom } from "./primitives/Bloom";
+import { Reveal } from "./primitives/Reveal";
 
 const lines = [
   { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
@@ -72,10 +74,7 @@ export function Hero() {
   return (
     <section className="relative overflow-hidden">
       {/* Background glow */}
-      <div className="pointer-events-none absolute inset-0">
-        <div className="absolute left-1/2 top-0 h-[600px] w-[900px] -translate-x-1/2 -translate-y-1/4 rounded-full bg-accent/7 blur-[120px]" />
-        <div className="absolute right-0 top-1/3 h-[400px] w-[400px] rounded-full bg-nix/5 blur-[100px]" />
-      </div>
+      <Bloom accents={[1, 2]} />
 
       <div className="relative mx-auto max-w-7xl px-6 pt-28 pb-24 sm:px-8 lg:pt-40 lg:pb-32">
         <div className="grid items-center gap-16 lg:grid-cols-2 lg:gap-20">
@@ -86,36 +85,42 @@ export function Hero() {
               <span className="text-sm font-medium text-green">v0.7 — Multi-backend VM support</span>
             </div>
 
-            <h1 className="text-4xl font-bold leading-[1.1] tracking-tight text-title sm:text-5xl xl:text-6xl">
-              Local. A real microVM
-              <br />
-              <span className="bg-linear-to-r from-accent via-nix to-accent bg-clip-text text-transparent">
-                in milliseconds.
-              </span>
-            </h1>
+            <Reveal delay={0}>
+              <h1 className="font-display text-5xl font-bold leading-[1.1] tracking-tight text-title sm:text-6xl xl:text-7xl">
+                Local. A real microVM
+                <br />
+                <span className="bg-linear-to-r from-accent via-accent-2 to-accent-3 bg-clip-text text-transparent">
+                  in milliseconds.
+                </span>
+              </h1>
+            </Reveal>
 
-            <p className="max-w-lg text-lg leading-relaxed text-body">
-              Run untrusted code behind a real hypervisor with one command. The
-              first run prepares the image and kernel; warm runs start in
-              milliseconds. No SSH. No daemon. No container fallback.
-            </p>
+            <Reveal delay={80}>
+              <p className="max-w-lg text-lg leading-relaxed text-body">
+                Run untrusted code behind a real hypervisor with one command. The
+                first run prepares the image and kernel; warm runs start in
+                milliseconds. No SSH. No daemon. No container fallback.
+              </p>
+            </Reveal>
 
             {/* Install command */}
-            <div
-              className="group flex w-full max-w-lg cursor-pointer items-center gap-3 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 backdrop-blur transition-all hover:border-accent/30"
-              onClick={copyInstall}
-              title="Click to copy"
-            >
-              <span className="text-accent/60 text-sm">$</span>
-              <code className="flex-1 text-left font-mono text-sm text-emphasis/90 overflow-x-auto">
-                {installCmd}
-              </code>
-              <span className="shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent">
-                {copied ? "Copied!" : "Copy"}
-              </span>
-            </div>
+            <Reveal delay={160}>
+              <div
+                className="group flex w-full max-w-lg cursor-pointer items-center gap-3 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 backdrop-blur transition-all hover:border-accent/30"
+                onClick={copyInstall}
+                title="Click to copy"
+              >
+                <span className="text-accent/60 text-sm">$</span>
+                <code className="flex-1 text-left font-mono text-sm text-emphasis/90 overflow-x-auto">
+                  {installCmd}
+                </code>
+                <span className="shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent">
+                  {copied ? "Copied!" : "Copy"}
+                </span>
+              </div>
+            </Reveal>
 
-            <div className="flex flex-wrap gap-3">
+            <Reveal delay={240} className="flex flex-wrap gap-3">
               <a href={`${base}getting-started/installation/`}>
                 <Button size="lg">Get Started</Button>
               </a>
@@ -128,22 +133,22 @@ export function Hero() {
                   GitHub
                 </Button>
               </a>
-            </div>
+            </Reveal>
 
             {/* Stats row */}
-            <div className="flex flex-wrap gap-8 border-t border-edge/40 pt-6">
+            <Reveal delay={320} className="flex flex-wrap gap-8 border-t border-edge/40 pt-6">
               {stats.map((s) => (
                 <div key={s.label} className="flex flex-col">
                   <span className="text-2xl font-bold text-title">{s.value}</span>
                   <span className="text-xs text-label">{s.label}</span>
                 </div>
               ))}
-            </div>
+            </Reveal>
           </div>
 
           {/* Right — terminal */}
           <div className="relative">
-            <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-accent/10 via-transparent to-nix/10 blur-xl" />
+            <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
             <TerminalAnimation />
           </div>
         </div>
