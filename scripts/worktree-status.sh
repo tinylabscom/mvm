@@ -45,6 +45,13 @@ fi
 # Snapshot the process list ONCE, up front. Grepping `ps` per worktree inside
 # the loop looks equivalent and is not: the grep's own argv contains the path it
 # is searching for, so every worktree matches itself and everything looks busy.
+#
+# The match is deliberately coarse: any process whose command line *mentions* a
+# worktree path counts as using it, including a shell that merely names it in an
+# argument. That over-protects — such a worktree reports KEEP and is never
+# offered for removal — which is the right direction for a check whose wrong
+# answer should be "left it alone". It does mean a path you just typed
+# somewhere can read as busy until that process exits.
 ps_snapshot=$(ps -eo command 2>/dev/null || true)
 
 [ "$safe_only" -eq 1 ] || printf '%-40s %-34s %-14s %s\n' WORKTREE BRANCH PR VERDICT
