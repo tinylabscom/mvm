@@ -1,45 +1,38 @@
-import {
-  BookOpen,
-  ExternalLink,
-  Github,
-  Newspaper,
-  ShieldCheck,
-} from "lucide-react";
+import { BookOpen, ExternalLink, Github, Newspaper, Rss } from "lucide-react";
 
+// Each column links to distinct destinations — an earlier draft repeated
+// "Architecture", "GitHub", and "This Week in MicroVMs" across columns.
 const linkGroups = [
   {
-    title: "Resources",
+    title: "Docs",
     links: [
-      {
-        label: "This Week in MicroVMs",
-        href: "https://this-week-in-microvms.com",
-      },
+      { label: "Quickstart", href: "/getting-started/quickstart/" },
       { label: "Nix for mvm", href: "/getting-started/nix-for-mvm/" },
       { label: "Architecture", href: "/architecture/overview/" },
-      { label: "GitHub", href: "https://github.com/tinylabscom/mvm" },
+      { label: "Nix and OCI", href: "/guides/nix-and-oci/" },
     ],
   },
   {
-    title: "Explore",
+    title: "Security",
     links: [
-      { label: "Architecture", href: "/architecture/overview/" },
-      { label: "Nix and OCI", href: "/guides/nix-and-oci/" },
       { label: "Threat model", href: "/security/threat-model/" },
       { label: "Security claims", href: "/security/claim-ledger/" },
+      { label: "Verified boot", href: "/security/verified-boot/" },
+      { label: "CI claim gates", href: "/security/ci-claims/" },
     ],
   },
   {
     title: "Community",
     links: [
-      {
-        label: "This Week in MicroVMs",
-        href: "https://this-week-in-microvms.com",
-      },
       { label: "GitHub", href: "https://github.com/tinylabscom/mvm" },
       { label: "Issues", href: "https://github.com/tinylabscom/mvm/issues" },
       {
         label: "Releases",
         href: "https://github.com/tinylabscom/mvm/releases",
+      },
+      {
+        label: "This Week in MicroVMs",
+        href: "https://this-week-in-microvms.com",
       },
     ],
   },
@@ -52,7 +45,7 @@ const socialLinks = [
   {
     label: "MicroVMs weekly",
     href: "https://this-week-in-microvms.com",
-    icon: ShieldCheck,
+    icon: Rss,
   },
 ];
 
@@ -66,7 +59,7 @@ export function Footer() {
   const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
 
   return (
-    <footer className="landing-footer border-t border-edge bg-canvas pt-16 lg:pt-20">
+    <footer className="landing-footer border-t border-glass-border/60 bg-canvas pt-16 lg:pt-20">
       <div className="landing-footer__inner mx-auto max-w-6xl px-6 pb-10 sm:px-8 lg:pb-12">
         <div className="grid gap-12 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.35fr)_repeat(3,minmax(0,1fr))] lg:gap-16">
           <div className="max-w-xs">
@@ -84,7 +77,7 @@ export function Footer() {
 
           {linkGroups.map((group) => (
             <nav key={group.title} aria-label={group.title}>
-              <h2 className="text-sm font-semibold text-title">
+              <h2 className="font-mono text-xs tracking-[0.2em] uppercase text-label">
                 {group.title}
               </h2>
               <ul className="mt-5 space-y-3">
