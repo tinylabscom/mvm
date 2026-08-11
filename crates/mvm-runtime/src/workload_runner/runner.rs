@@ -733,6 +733,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             parent_vm_name: resident_handoff.then_some(handle.id.as_str()),
             genid,
             channels: &channels,
+            // Straight off the admitted plan — the value the subset comparison
+            // above cleared. Taking it from `child_cfg` instead would take it
+            // from a start config the claim supplied, which is not what was
+            // checked.
+            cpu_grant: plan.grants.as_ref().and_then(|grants| grants.cpu),
         };
         if preloaded_child_name.is_some() {
             self.driver.resume_preloaded_child(&fork_request)?;

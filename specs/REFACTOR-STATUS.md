@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -1156,11 +1156,21 @@ for detailed scope and acceptance criteria.
         reads as schema-stale rather than tampered). BOTH restore paths check,
         through one predicate `ensure_child_grants_within_parent`: the vm_full
         fork and the warm-pool claim.
-        STILL OPEN: (a) restore does not re-apply grants through `apply_grants`;
-        (b) a warm parent seals no grant — a factory parent holds no plan or
-        `cpu_grant` by construction and one parent serves every claim, so
-        bounding a claimed child's CPU/wall clock needs a pool-level grant on
-        `StandbySpec`; its egress is already bounded (absent egress = deny-all)
+        (a) LANDED: the cleared child grant rides `RestoredChild.cpu_grant` to
+        the child's spawn, and each restorer binds it where its cold boot binds
+        `VmmSpec.cpu_grant` — HVF wraps the supervisor spawn, FC prefixes its
+        launch line, the warm claim threads `ChildForkRequest.cpu_grant`. A
+        restored child's tier now reads back `Cgroup2CpuMax`. A same-identity
+        restore and a preloaded child stay unbounded by construction: neither
+        has an admitted plan at the moment its VMM starts.
+        STILL OPEN: (b) a warm parent seals no grant — a factory parent holds no
+        plan or `cpu_grant` by construction and one parent serves every claim,
+        so bounding a claimed child's CPU/wall clock needs a pool-level grant on
+        `StandbySpec`; its egress is already bounded (absent egress = deny-all).
+        Assessed and deferred with reason: there is no pool configuration to
+        plumb from — a pool's identity is *derived* from the provisioning
+        launch, so the grant needs a declaring surface and a compat-key
+        decision before it can be plumbed anywhere
   - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
         `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
         and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,

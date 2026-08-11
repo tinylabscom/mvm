@@ -767,11 +767,12 @@ impl VmmDriver for FcDriver {
         })?;
 
         // Restore the parent's saved memory into a fresh VMM under the child's
-        // own identity. The device-model guard between load and resume refuses
-        // any snapshot carrying a network interface, so a restored child cannot
-        // reintroduce a path off the box that bypasses vsock.
+        // own identity, born inside the CPU scope its admitted plan grants. The
+        // device-model guard between load and resume refuses any snapshot
+        // carrying a network interface, so a restored child cannot reintroduce a
+        // path off the box that bypasses vsock.
         crate::fc::FcForkRestorer
-            .restore_fork(req.child_vm_name, req.child_dir)
+            .restore_fork(req.child_vm_name, req.child_dir, req.cpu_grant)
             .map_err(|e| StandbyError::ClaimFailed(format!("restore forked child: {e}")))?;
         Ok(())
     }
@@ -1880,6 +1881,7 @@ mod tests {
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &workload_channels(),
+            cpu_grant: None,
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -1904,6 +1906,7 @@ mod tests {
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &workload_channels(),
+            cpu_grant: None,
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -1938,6 +1941,7 @@ mod tests {
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &channels,
+            cpu_grant: None,
         };
 
         // The restore has no Firecracker to talk to and no device anchors to
