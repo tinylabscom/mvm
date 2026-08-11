@@ -1022,12 +1022,52 @@ already states the intent (`crates/mvm-cli/src/exec.rs`): the runtime overlay is
 "the single source of the guest agent + helpers … never silently replaced by a
 baked rootfs copy". The standby spawn is the one path that skipped it.
 
-**BUG-2 — pre-existing, not this branch's.** The transient run path persists the
+**BUG-1 is FIXED — and fixed the way this section asked for.** Plan 299
+Phase 2's launch resolution (**#2333**) made the run path's own
+`crate::exec::resolve_launch` produce a bootable `VmStartConfig` without
+booting, and `pool warm --image` now spawns its parents from that value. No
+overlay field was threaded through `StandbySpec`; the parent inherits whatever
+the workload path resolved, which is exactly the fix this section argued for.
+
+Live evidence on the KVM host (Firecracker, `alpine`): `mvmctl pool warm 1
+--image alpine` fills the pool — `pool status` reports `1 idle` with an image
+digest for the first time on any host — and the forked child's console shows
+the full four-drive device model coming back (`kick block blk0`..`blk3` after
+`load snapshot` + `Resumed`), not the bare single-`BlockDev` shape. The parent
+captures, the checkpoint exists, and a claim now gets all the way to the reseed
+handshake that "was never exercised".
+
+**BUG-2 — pre-existing, not this branch's. Now the live blocker, exactly as
+predicted below.** The transient run path persists the
 plan via `write_plan` but never mints `verb-grant.json`, so no
 `mvm.host_signer_pub` reaches the guest and the agent rejects the control
 connection with `rejecting control connection without a pinned host key`. It
 predates this branch's merge base. Track it separately; expect it to be the next
 blocker once BUG-1 is fixed.
+
+Confirmed live once BUG-1 was fixed. The claim reaches `child_forked`, the
+child resumes, and then the guest prints
+
+```
+mvm-guest-agent: authenticated control handshake failed: Failed to read frame length
+```
+
+so the post-restore identity handshake is never answered and the claim fails
+closed with `forked child '<vm>' never answered the post-restore identity
+handshake`. The fail-closed posture is correct — a child that cannot prove it
+reseeded must not be admitted — but it means no warm claim can complete on
+Firecracker until this is fixed, and therefore no claimed-launch measurement
+against the cold baseline is possible yet.
+
+**BUG-5 — a failed claim strands the standby and orphans its VMM.** Found while
+exercising the above. When a claim fails after the child is materialized, the
+cleanup removes the preloaded child's state directory but does **not** kill its
+`firecracker` process. The pool record stays `Idle` while pointing at a child
+whose socket path no longer exists, so every subsequent claim against that
+standby fails with `resume preloaded child: Firecracker socket
+<dir>/fc.socket does not exist — VM is not running`, and a stray VMM leaks per
+attempt (observed: pid alive, `/root/.mvm/vms/vm-*` gone). A standby is
+therefore single-use even against a retryable failure.
 
 **BLOCKER-3 — resolved in code; live delivery remains gated behind #1962.**
 #1959 established the host-signer public key as boot-pinned *host identity*

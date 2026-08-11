@@ -2522,7 +2522,10 @@ mod tests {
         )
         .expect("a prebuilt image resolves without a VM");
 
-        assert_eq!(resolved.start_config.rootfs_path, rootfs.display().to_string());
+        assert_eq!(
+            resolved.start_config.rootfs_path,
+            rootfs.display().to_string()
+        );
         assert_eq!(
             resolved.start_config.kernel_path.as_deref(),
             Some(kernel.display().to_string().as_str())

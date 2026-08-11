@@ -349,11 +349,13 @@ Issue #2276.
       p99 contract. Done at p50/p95/p99 on both images.
 - [x] Repeat on Firecracker/KVM. The fixes hold (both counters zero); that
       backend's remaining gap is #2292 and #2293, recorded in Plan 299 Phase 3.
-- [~] Confirm the warm lane has not regressed against Plan 265. **Not run:**
-      the standby pool is empty on this host (`pool status` reports 0 idle) and
-      `pool warm` spawns nothing today, so there is no warm claim to measure.
-      Nothing in this change touches the claim path; the check is owed once a
-      pool can be filled.
+- [~] Confirm the warm lane has not regressed against Plan 265. **Not run at
+      the time:** the standby pool was empty on this host (`pool status`
+      reported 0 idle) and `pool warm` could spawn nothing, so there was no warm
+      claim to measure. Nothing in this change touches the claim path. That
+      blocker is gone — Plan 299 Phase 2's launch resolution lets
+      `pool warm --image` fill the pool (**#2333**) — so the check is owed
+      against a filled pool.
 - [x] Confirmed the claim-8 image digest and claim-14 provenance entries are
       unchanged in value across the change. Baseline and fixed runs both record
       `image_sha256=c20b3c26ac72e7ae147045438354173c159c4dd42ab9cb09e9e335d694b5fe07`

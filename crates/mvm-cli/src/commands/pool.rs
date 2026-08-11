@@ -32,7 +32,6 @@ use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, PreloadContex
 use sha2::{Digest, Sha256};
 
 use super::Cli;
-use super::env::builder_vm::ensure_default_microvm_image;
 use super::vm::checkpoint::SignedChainAnchor;
 use super::vm::host_signer;
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
@@ -380,7 +379,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     let checkpoints = CheckpointStore::open();
     let spawn_ctx = SpawnContext {
         checkpoints: &checkpoints,
-        launch: p.launch,
+        launch: Some(p.launch),
     };
     let mut spawned = 0u32;
     let mut failed = 0u32;
@@ -2017,7 +2016,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             memory,
         } => {
             let memory_mib = match memory.as_deref() {
-                Some(raw) => crate::commands::parse_human_size(raw).context("Invalid --memory")?,
+                Some(raw) => mvm_core::util::parse_human_size(raw).context("Invalid --memory")?,
                 None => cfg.default_memory_mib,
             };
             run_warm(
