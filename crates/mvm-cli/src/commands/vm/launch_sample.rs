@@ -288,6 +288,22 @@ pub struct LaunchSubTimings {
     pub cleanup_handoff_ms: Option<f64>,
     /// Stopping the backend VM.
     pub stop_transient_ms: Option<f64>,
+    /// Reconstructing the live backend handle during stop.
+    pub stop_attach_ms: Option<f64>,
+    /// Reaping host-side endpoint and service processes during stop.
+    pub stop_endpoint_reaping_ms: Option<f64>,
+    /// Terminating the backend VM process or driver.
+    pub stop_driver_kill_ms: Option<f64>,
+    /// Stopping console streaming after backend termination.
+    pub stop_console_cleanup_ms: Option<f64>,
+    /// Issuing the supervisor termination signal, when the backend reports it.
+    pub stop_supervisor_signal_ms: Option<f64>,
+    /// Waiting for the supervisor PID to disappear, when reported.
+    pub stop_pid_disappearance_ms: Option<f64>,
+    /// Forced termination and its follow-up wait, when reported.
+    pub stop_force_kill_wait_ms: Option<f64>,
+    /// Removing the backend live-process marker, when reported.
+    pub stop_state_cleanup_ms: Option<f64>,
     /// Topping the warm pool back up toward its target.
     pub pool_replenish_ms: Option<f64>,
     /// Removing the VM state directories.
@@ -321,6 +337,14 @@ impl LaunchSubTimings {
             ("first_dispatch", self.first_dispatch_ms),
             ("cleanup_handoff", self.cleanup_handoff_ms),
             ("stop_transient", self.stop_transient_ms),
+            ("stop_attach", self.stop_attach_ms),
+            ("stop_endpoint_reaping", self.stop_endpoint_reaping_ms),
+            ("stop_driver_kill", self.stop_driver_kill_ms),
+            ("stop_console_cleanup", self.stop_console_cleanup_ms),
+            ("stop_supervisor_signal", self.stop_supervisor_signal_ms),
+            ("stop_pid_disappearance", self.stop_pid_disappearance_ms),
+            ("stop_force_kill_wait", self.stop_force_kill_wait_ms),
+            ("stop_state_cleanup", self.stop_state_cleanup_ms),
             ("pool_replenish", self.pool_replenish_ms),
             ("state_remove", self.state_remove_ms),
         ]
@@ -630,11 +654,12 @@ mod tests {
             artifact_verify_ms: Some(0.4),
             vmm_create_ms: Some(120.0),
             cleanup_handoff_ms: Some(12.75),
+            stop_supervisor_signal_ms: Some(2.0),
             ..LaunchSubTimings::default()
         };
         assert_eq!(
             some.render(),
-            "[mvm] phase-timing-detail: artifact_verify=0.4ms vmm_create=120.0ms cleanup_handoff=12.8ms"
+            "[mvm] phase-timing-detail: artifact_verify=0.4ms vmm_create=120.0ms cleanup_handoff=12.8ms stop_supervisor_signal=2.0ms"
         );
         assert_eq!(
             some.recorded(),
@@ -642,8 +667,22 @@ mod tests {
                 ("artifact_verify", 0.4),
                 ("vmm_create", 120.0),
                 ("cleanup_handoff", 12.75),
+                ("stop_supervisor_signal", 2.0),
             ]
         );
+    }
+
+    #[test]
+    fn sub_timings_accept_samples_without_new_stop_detail_fields() {
+        let old = serde_json::json!({
+            "stop_transient_ms": 12.5,
+            "state_remove_ms": 0.6
+        });
+        let parsed: LaunchSubTimings = serde_json::from_value(old).expect("legacy sample");
+        assert_eq!(parsed.stop_transient_ms, Some(12.5));
+        assert_eq!(parsed.state_remove_ms, Some(0.6));
+        assert_eq!(parsed.stop_supervisor_signal_ms, None);
+        assert_eq!(parsed.stop_pid_disappearance_ms, None);
     }
 
     #[test]

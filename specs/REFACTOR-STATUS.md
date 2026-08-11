@@ -47,6 +47,17 @@ for detailed scope and acceptance criteria.
       readiness and after the first command, including Linux fault deltas and
       macOS physical footprint. The real-host Firecracker/HVF matrix,
       canonical budget table, and gates remain open.
+- [x] **Plan 314 — event-driven process lifecycle and shutdown.** The shared
+      macOS kqueue/Linux pidfd observer drives normal HVF, Firecracker,
+      libkrun, and QEMU shutdown with bounded fallback, identity-safe final
+      verification, and fail-closed escalation. Live HVF, Firecracker,
+      libkrun, and QEMU repetition gates pass with no force-kill escalation in
+      the 1,000-cycle HVF run and no leaked backend processes, PID markers, or
+      owned sockets. Supervisor profiling found vCPU exit, not the 5 ms
+      watchdog, dominates internal HVF shutdown, so no unnecessary control
+      protocol was added. The foreground-wait audit, repository waiting-model
+      rule, complete workspace tests, formatting, checks, and Linux all-target
+      clippy are green.
 
 ## In-flight plans
 - [x] Plan 315 — Bootstrap means machine-ready
@@ -229,11 +240,15 @@ for detailed scope and acceptance criteria.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
         decomposed and the warm-pool refill removed from it: a default
         `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
-        `stop_transient` 142.9 ms, which is real cleanup. A dedicated 1,000-cycle
-        HVF run now attributes its 67.62 ms p50 / 74.97 ms p95 stop wait to
-        supervisor PID disappearance; endpoint reaping and state cleanup are
-        below 0.1 ms at p99. Follow-up: give pool maintenance to the resident
-        per-tenant daemon and make supervisor shutdown event-driven.
+        `stop_transient` 142.9 ms, which is real cleanup. The Plan 314 event
+        path then completed a native macOS 26.5.2 / arm64 1,000-cycle HVF run
+        in the Rust test profile with p50/p95/p99 stop times of
+        703.48/1,151.28/1,865.07 ms and zero SIGKILL escalations. That run is
+        a lifecycle stress baseline, not a replacement for the release
+        prepared-cold numbers above: its stop tail is dominated by detached
+        supervisor PID disappearance. Follow-up: give pool maintenance to the
+        resident per-tenant daemon and continue reducing supervisor shutdown
+        latency.
   - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)

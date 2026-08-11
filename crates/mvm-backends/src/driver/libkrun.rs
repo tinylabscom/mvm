@@ -435,22 +435,37 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn kill(&self) -> Result<()> {
-        // SIGTERM → grace → SIGKILL, the escalation LibkrunBackend::stop uses:
-        // SIGTERM gives libkrun a chance to close its virtio-blk fds, then
-        // SIGKILL if it ignores us within the grace window.
+        // Arm before SIGTERM so a short-lived supervisor cannot exit between
+        // signal delivery and observer registration.
         if let Some(pid) = crate::legacy::libkrun::read_pid(&self.pid_file)
             && crate::legacy::libkrun::pid_alive(pid)
         {
+            let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
+            // SIGTERM gives libkrun a chance to close its virtio-blk file
+            // descriptors, then SIGKILL if it ignores us within the grace
+            // window.
             crate::legacy::libkrun::send_signal(pid, libc::SIGTERM);
-            let deadline = Instant::now() + crate::legacy::libkrun::STOP_TIMEOUT;
-            while Instant::now() < deadline && crate::legacy::libkrun::pid_alive(pid) {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if crate::legacy::libkrun::pid_alive(pid) {
+            let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
+                pid,
+                Instant::now() + crate::legacy::libkrun::STOP_TIMEOUT,
+                observer.as_ref(),
+            );
+            if !exited {
                 crate::legacy::libkrun::send_signal(pid, libc::SIGKILL);
+                if !mvm_vmm::host::process_exit::wait_for_pid_exit(
+                    pid,
+                    Instant::now() + Duration::from_millis(500),
+                    observer.as_ref(),
+                ) {
+                    return Err(anyhow!(
+                        "libkrun PID {pid} could not be proven dead after SIGKILL; preserving {}",
+                        self.pid_file.display()
+                    ));
+                }
             }
         }
         let _ = std::fs::remove_file(&self.pid_file);
+        crate::legacy::libkrun::cleanup_vsock_sockets(&self.state_dir);
         Ok(())
     }
 

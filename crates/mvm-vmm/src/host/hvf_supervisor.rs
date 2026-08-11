@@ -56,6 +56,37 @@ pub struct ConsoleDataSocket {
 
 pub use crate::hvf_handoff::HvfHandoffRequest;
 
+/// Filename for the optional supervisor-internal shutdown profile.
+pub const SHUTDOWN_TIMING_FILE: &str = "shutdown-timing.json";
+
+/// Supervisor-internal shutdown spans persisted before the live PID marker is
+/// removed. Values are microseconds and contain no workload data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HvfShutdownTimingRecord {
+    /// Wire schema for strict consumers.
+    pub schema_version: u32,
+    /// From watchdog stop observation through vCPU run-loop return.
+    pub watchdog_to_vcpu_exit_micros: u64,
+    /// Watchdog thread join after vCPU return.
+    pub watchdog_join_micros: u64,
+    /// Event-driven host-I/O wake and thread join.
+    pub io_thread_join_micros: u64,
+    /// Hypervisor.framework vCPU destruction.
+    pub vcpu_destroy_micros: u64,
+    /// Hypervisor.framework VM destruction.
+    pub vm_destroy_micros: u64,
+    /// Captured console write and flush.
+    pub console_write_micros: u64,
+    /// Workload-exit marker write, or zero when no code was reported.
+    pub workload_exit_write_micros: u64,
+}
+
+/// Resolve the timing record within one canonical VM state directory.
+pub fn shutdown_timing_path(state_dir: &std::path::Path) -> PathBuf {
+    state_dir.join(SHUTDOWN_TIMING_FILE)
+}
+
 /// Everything the supervisor needs to boot one guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,6 +281,29 @@ mod tests {
         // deny_unknown_fields: a typo'd / unexpected field fails closed.
         let json = r#"{"kernel":"/k","console_log":"/c","pid_file":"/p","workload_exit":"/w","timeout_secs":1,"bogus":1}"#;
         assert!(serde_json::from_str::<HvfSupervisorConfig>(json).is_err());
+    }
+
+    #[test]
+    fn shutdown_timing_record_roundtrips_strictly() {
+        let record = HvfShutdownTimingRecord {
+            schema_version: 1,
+            watchdog_to_vcpu_exit_micros: 1,
+            watchdog_join_micros: 2,
+            io_thread_join_micros: 3,
+            vcpu_destroy_micros: 4,
+            vm_destroy_micros: 5,
+            console_write_micros: 6,
+            workload_exit_write_micros: 7,
+        };
+        let json = serde_json::to_vec(&record).expect("serialize shutdown timing");
+        assert_eq!(
+            serde_json::from_slice::<HvfShutdownTimingRecord>(&json)
+                .expect("parse shutdown timing"),
+            record
+        );
+        let mut value = serde_json::to_value(record).expect("timing value");
+        value["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HvfShutdownTimingRecord>(value).is_err());
     }
 
     #[test]

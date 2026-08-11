@@ -482,14 +482,39 @@ fn remove_pid_marker_if_matches(pid_file: &Path, pid: u32) {
 /// while `pid_file` is still trusted; this function never rereads the marker
 /// for liveness or signal delivery.
 pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -> Result<()> {
-    let outcome = escalate_kill(
-        crate::legacy::libkrun::STOP_TIMEOUT,
-        mvm_core::poll_backoff::poll_delay,
-        || crate::fc::is_firecracker_pid_running(pid),
-        |signal| fc_sudo_signal(pid, signal),
-        Instant::now,
-        std::thread::sleep,
-    )?;
+    let outcome = if let Ok(observer) =
+        mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid as libc::pid_t)
+    {
+        fc_sudo_signal(pid, FcStopSignal::Terminate);
+        let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
+            pid as libc::pid_t,
+            Instant::now() + crate::legacy::libkrun::STOP_TIMEOUT,
+            Some(&observer),
+        );
+        if exited {
+            KillOutcome::Stopped
+        } else {
+            fc_sudo_signal(pid, FcStopSignal::ForceKill);
+            if mvm_vmm::host::process_exit::wait_for_pid_exit(
+                pid as libc::pid_t,
+                Instant::now() + Duration::from_millis(500),
+                Some(&observer),
+            ) {
+                KillOutcome::Stopped
+            } else {
+                KillOutcome::StillRunning
+            }
+        }
+    } else {
+        escalate_kill(
+            crate::legacy::libkrun::STOP_TIMEOUT,
+            mvm_core::poll_backoff::poll_delay,
+            || crate::fc::is_firecracker_pid_running(pid),
+            |signal| fc_sudo_signal(pid, signal),
+            Instant::now,
+            std::thread::sleep,
+        )?
+    };
     finish_firecracker_kill(name, pid, pid_file, outcome)
 }
 
