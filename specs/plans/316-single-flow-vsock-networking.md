@@ -4,6 +4,24 @@
 
 **Proposed. No implementation has started.**
 
+## Tracking issues
+
+Umbrella: [#2368](https://github.com/tinylabscom/mvm/issues/2368).
+
+| Phase | Issue | Blocked by |
+| ----- | ----- | ---------- |
+| 0 — Ratify the invariant and freeze expansion | [#2369](https://github.com/tinylabscom/mvm/issues/2369) | — (actionable) |
+| 1 — Pin protocol, resource, and performance baselines | [#2370](https://github.com/tinylabscom/mvm/issues/2370) | #2369 |
+| 2 — Introduce the one authenticated endpoint without changing callers | [#2371](https://github.com/tinylabscom/mvm/issues/2371) | #2370 |
+| 3 — Converge egress TCP, UDP, and DNS | [#2372](https://github.com/tinylabscom/mvm/issues/2372) | #2371 |
+| 4 — Stream typed transformations over the same path | [#2373](https://github.com/tinylabscom/mvm/issues/2373) | #2372 |
+| 5 — Implement declared ingress on FlowMux | [#2374](https://github.com/tinylabscom/mvm/issues/2374) | #2373 |
+| 6 — Set the compatibility boundary without weakening isolation | [#2375](https://github.com/tinylabscom/mvm/issues/2375) | #2374 |
+| 7 — Delete L3 completely | [#2376](https://github.com/tinylabscom/mvm/issues/2376) | #2375 |
+| 8 — Make “one path” mechanically enforceable | [#2377](https://github.com/tinylabscom/mvm/issues/2377) | #2376 |
+
+Phases run strictly in order; only Phase 0 is actionable until it merges.
+
 This plan supersedes the production-path decisions in Plan 285
 (`l3-vsock`) and Plan 287 (the userspace socket datapath). It preserves the
 completed evidence from those plans as historical test and performance data,
