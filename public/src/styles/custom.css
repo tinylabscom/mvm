@@ -953,11 +953,14 @@ nav[aria-label="Main"] ul ul li {
 
   /* Failsafe: if React never hydrates (a thrown error, a slow/failed
      chunk load), .is-shown never gets added and content would stay at
-     opacity: 0 forever. Force the revealed state after a delay so a
-     hydration failure degrades to "no reveal animation", not "the page
-     never becomes readable". The delay outlasts the 600ms transition
-     above, so a successful reveal always wins this race first. */
-  html.js .site-reveal {
+     opacity: 0 forever. Landing's mount effect adds .hydrated to <html>
+     the moment the island is alive, so this only fires when that never
+     happened — not on a fixed timer, which would fire on every page
+     regardless of scroll position and permanently defeat the reveal for
+     anything below the fold. Scoped to :not(.hydrated) so a successful
+     mount removes the selector entirely and the IntersectionObserver
+     reveal above runs untouched at any scroll depth. */
+  html.js:not(.hydrated) .site-reveal {
     animation: site-reveal-failsafe 0s linear 4s forwards;
   }
   @keyframes site-reveal-failsafe {
