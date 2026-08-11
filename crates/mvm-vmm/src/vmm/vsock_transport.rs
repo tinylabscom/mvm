@@ -318,23 +318,29 @@ impl VsockTransportCore {
     }
 
     fn evict_idle_connections_at(&mut self, now: Instant) -> Vec<VsockConnectionKey> {
-        let mut expired = Vec::new();
-        self.recv_cnt.retain(|key, credit| {
-            let keep =
-                now.saturating_duration_since(credit.last_activity) < CONNECTION_IDLE_TIMEOUT;
-            if !keep {
-                expired.push(*key);
-            }
-            keep
-        });
-        self.tx_credit.retain(|key, credit| {
-            let keep =
-                now.saturating_duration_since(credit.last_activity) < CONNECTION_IDLE_TIMEOUT;
-            if !keep && !expired.contains(key) {
-                expired.push(*key);
-            }
-            keep
-        });
+        let mut latest_activity =
+            HashMap::with_capacity(self.recv_cnt.len() + self.tx_credit.len());
+        for (key, credit) in &self.recv_cnt {
+            latest_activity.insert(*key, credit.last_activity);
+        }
+        for (key, credit) in &self.tx_credit {
+            latest_activity
+                .entry(*key)
+                .and_modify(|activity| *activity = (*activity).max(credit.last_activity))
+                .or_insert(credit.last_activity);
+        }
+
+        let mut expired: Vec<_> = latest_activity
+            .into_iter()
+            .filter_map(|(key, activity)| {
+                (now.saturating_duration_since(activity) >= CONNECTION_IDLE_TIMEOUT).then_some(key)
+            })
+            .collect();
+        expired.sort_unstable_by_key(|key| (key.host_port, key.guest_port));
+        for key in &expired {
+            self.recv_cnt.remove(key);
+            self.tx_credit.remove(key);
+        }
         expired
     }
 
@@ -1066,6 +1072,43 @@ mod tests {
                 guest_port: 7,
             }]
         );
+        assert!(core.tx_credit.is_empty());
+    }
+
+    #[test]
+    fn transmit_progress_keeps_download_connection_alive_past_receive_idle_timeout() {
+        let mut core = transport();
+        let opened_at = Instant::now();
+        let mut header = VsockHdr {
+            dst_port: 9000,
+            src_port: 7,
+            buf_alloc: 64,
+            ..Default::default()
+        };
+        assert!(core.try_add_recv_at(&header, 1, opened_at));
+        assert!(core.record_tx_credit_at(&header, opened_at));
+
+        let download_active_at = opened_at + CONNECTION_IDLE_TIMEOUT + Duration::from_secs(1);
+        header.fwd_cnt = 64;
+        assert!(core.record_tx_credit_at(&header, download_active_at));
+
+        assert!(
+            core.evict_idle_connections_at(download_active_at)
+                .is_empty(),
+            "fresh transmit progress must keep the whole connection alive"
+        );
+        assert_eq!(core.recv_cnt.len(), 1);
+        assert_eq!(core.tx_credit.len(), 1);
+
+        let wholly_idle_at = download_active_at + CONNECTION_IDLE_TIMEOUT + Duration::from_secs(1);
+        assert_eq!(
+            core.evict_idle_connections_at(wholly_idle_at),
+            vec![VsockConnectionKey {
+                host_port: 9000,
+                guest_port: 7,
+            }]
+        );
+        assert!(core.recv_cnt.is_empty());
         assert!(core.tx_credit.is_empty());
     }
 

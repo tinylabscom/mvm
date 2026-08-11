@@ -27,6 +27,8 @@ host response can overrun the guest receive window.
       down, including snapshot preparation.
 - [x] Restore focused tests proving the host stops at the advertised window,
       resumes only after `OP_CREDIT_UPDATE`, and removes state on teardown.
+- [x] Treat activity in either direction as connection activity so a long
+      download survives beyond the request side's 60-second idle timeout.
 - [x] Restore a multi-megabyte deterministic relay test that proves byte-for-byte
       delivery without truncation.
 - [x] Add a live BDD scenario for the documented `python:3.12` + `pandas`
@@ -41,12 +43,14 @@ host response can overrun the guest receive window.
 
 ## Verification evidence
 
-- `cargo test -p mvm-vmm --quiet`: 445 passed.
+- `cargo test -p mvm-vmm --quiet`: 446 passed.
 - The focused credit group covers counter wrap, table bound,
-  idle eviction, teardown, first-window stop/resume, and the deterministic
-  32 MiB byte-for-byte relay. A separate token-bucket witness simulates a
-  continuous 4 GiB transfer to prove the throughput budget has no lifetime
-  download quota.
+  connection-wide idle eviction, teardown, first-window stop/resume, and the
+  deterministic 32 MiB byte-for-byte relay. A zero-wait clock witness advances
+  beyond 60 seconds and proves transmit progress keeps a download connection
+  alive while wholly idle connections are still removed. A separate
+  token-bucket witness simulates a continuous 4 GiB transfer to prove the
+  throughput budget has no lifetime download quota.
 - `cargo check --workspace`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` on macOS: passed.
 - `cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-vmm --lib

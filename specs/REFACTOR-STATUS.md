@@ -36,9 +36,10 @@ for detailed scope and acceptance criteria.
   - [x] Restore bounded guest credit recording, fail-closed unknown-credit
         behavior, protocol counter wrapping, and complete state teardown
   - [x] Prove first-window stop/resume and byte-for-byte 32 MiB delivery;
-        prove no lifetime quota over a simulated 4 GiB transfer; add the live
-        documented pandas-install scenario
-  - [x] Pass all 445 `mvm-vmm` tests, the serial aggregate workspace suite,
+        prove no lifetime quota over a simulated 4 GiB transfer; prove active
+        download credit prevents request-side idle eviction after 60 seconds;
+        add the live documented pandas-install scenario
+  - [x] Pass all 446 `mvm-vmm` tests, the serial aggregate workspace suite,
         workspace check, macOS workspace all-target Clippy, and the focused
         x86_64 Linux cross-build
   - [ ] Run Linux-native workspace Clippy/tests in the project builder

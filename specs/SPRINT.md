@@ -15,12 +15,15 @@
       its relay-side readers remained. Every guest header refreshes the actual
       `buf_alloc`/`fwd_cnt` window before dispatch; unknown credit fails closed,
       32-bit counters wrap per the protocol, and connection/device teardown,
-      idle eviction, and snapshot guards cover the new state. The focused
+      connection-wide idle eviction, and snapshot guards cover the new state.
+      Active traffic in either direction keeps the whole stream alive, so a
+      download is not reset merely because its request side has been quiet for
+      60 seconds. The focused
       suite proves stop/resume behavior and byte-for-byte delivery of a 32 MiB
       reply; a simulated continuous 4 GiB transfer proves the refillable rate
       budget is not a lifetime quota. A live BDD scenario pins the documented
       `python:3.12` pandas
-      install through PyPI. All 445 `mvm-vmm` tests, workspace check, macOS
+      install through PyPI. All 446 `mvm-vmm` tests, workspace check, macOS
       workspace all-target Clippy, the serial aggregate workspace suite, and
       the focused x86_64 Linux cross-build are green. Linux-native builder-VM
       tests and all-target Clippy remain the final platform gates.
