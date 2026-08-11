@@ -1333,8 +1333,8 @@ mod tests {
         // edit.
         let err = verify_audit_chain(&path, &verifying).expect_err("torn tail must not verify");
         assert!(
-            matches!(err, VerifyError::TruncatedTail { .. }),
-            "expected TruncatedTail, got {err:?}"
+            matches!(err, VerifyError::TruncatedTail { line: 1 }),
+            "expected TruncatedTail at the partial second record, got {err:?}"
         );
 
         // And the signer refuses to extend the chain from a partial record

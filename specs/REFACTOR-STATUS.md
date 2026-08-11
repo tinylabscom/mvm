@@ -18,6 +18,12 @@ for detailed scope and acceptance criteria.
 - [x] **Issue #2128 — kernel pin freshness.** The libkrunfw bundle and custom
       guest kernel now share the verified Linux 6.12.102 LTS source pin;
       structural parity coverage prevents the consumers from drifting apart.
+- [x] **Issue #2293 — audit-chain durability boundaries.** PR #2302 removed
+      the duplicate synthetic `plan.admitted` and bound OCI provenance to the
+      plan that boots. PR #2317 made admission the pre-action sync barrier,
+      deferred post-hoc records without changing chain content or ordering,
+      retained fail-safe sync for unknown events, and preserved torn-tail
+      detection. The separate receipt-store cost remains open as #2318.
 - [~] **Issue #2289 — kernel pin freshness follow-up.** This PR synchronizes
       the libkrunfw and custom guest kernel inputs on the verified Linux
       6.12.103 LTS source pin and updates structural parity coverage with the
@@ -96,12 +102,23 @@ for detailed scope and acceptance criteria.
 - [~] Security lane mutation-witness repair — **issue #2135**
   - [x] Add direct witnesses for the security-sensitive admission,
         verification, lease, and substitution cleanup invariants
-  - [x] Run focused mutation shards for `mvm-cli`, `mvm-core`, `mvm-agentd`,
-        `mvm-hostd`, and `mvm-vmm`
-  - [x] Pass workspace check, all-target Clippy, formatting, and the mutation
-        surface gate on the dedicated fix branch
-  - [ ] Merge the fix and rerun the exact Linux Security workflow before
-        closing the issue
+  - [x] Fail closed when an accepted miss leaves the pinned mutation surface,
+        migrate 26 libkrun identities to their current file, and remove 14
+        obsolete misses without adding a waiver (83 accepted misses to 69)
+  - [x] Catch the current actionable `mvm-vmm`, `mvm-hostd`, and `mvm-agentd`
+        mutants in focused mutation proofs
+  - [x] Pass affected-package all-target Clippy, workspace unit/integration
+        tests, the isolated `mvm-cli` doctest rerun, formatting, and the static
+        mutation surface gate on the dedicated fix branch
+  - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
+        clean scheduled or release run before closing the issue
+- [~] Plan 300 — 30-issue reconciliation and closeout
+      (`specs/plans/300-open-issue-closeout.md`)
+  - [x] Inventory all 30 issues open at the 2026-08-10 snapshot against
+        current `origin/main`, issue comments, owning plans, and workflow state
+  - [x] Close #2293 with merged implementation, CI, and KVM evidence
+  - [ ] Execute the remaining 29 closure paths in the plan's dependency order
+  - [ ] Reconcile a fresh GitHub query after every phase and at final closeout
 - [~] Runtime hardening for production — plan 303, branch
       `feat/plan-303-runtime-hardening`
   - [x] WS1 — `overflow-checks = true` in `[profile.release]`, a
@@ -252,10 +269,11 @@ for detailed scope and acceptance criteria.
         run-to-run noise where they used to differ by ~780 ms. claim-8 /
         claim-14 digests unchanged, chain still verifies. Firecracker/KVM
         repeated: the fixes hold there (both counters zero) but that backend
-        misses the contract for reasons this plan does not own — `driver_boot`
-        630.5 ms (**#2292**) and 294 ms of audit fsync in `admit` (**#2293**).
-        Outstanding: the warm-lane comparison, blocked because no standby pool
-        can be filled today.
+        misses the contract for reasons this plan does not own — residual
+        Firecracker boot work (**#2292**, **#2299**) and receipt durability on
+        the admission path (**#2318**). Audit-chain batching and duplicate
+        admission are closed under #2293. Outstanding: the warm-lane
+        comparison, blocked because no standby pool can be filled today.
 
 - [~] eBPF vsock egress telemetry spike — **issue #2211**, branch
       `feat/ebpf-vsock-egress-telemetry`
