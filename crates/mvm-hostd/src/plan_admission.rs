@@ -2107,6 +2107,7 @@ mod tests {
 
     #[test]
     fn propagates_synthesis_failures() {
+        let (_env, _home) = host_with_ceiling(Default::default());
         let dir = tempfile::tempdir().unwrap();
         let err = admit_for_run(
             &fixture_input(""), // empty vm_name fails synthesis
