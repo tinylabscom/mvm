@@ -2794,3 +2794,51 @@ Two things worth recording that the task text did not anticipate:
   every field was already `Eq`.
 
 Not done here: the SDK parity fixture (WS6) and everything in WS6b.
+
+---
+
+### Task 17: Make the wall-clock bound real, and stop encoding it twice
+
+Two defects, and they are the same defect seen from two sides.
+
+**`exec_secs` asserts an enforcement that does not exist.** Its doc comment in
+`crates/mvm-contract/src/plan/types.rs` reads "0 = unbounded (only permitted
+for sleep-waking instances; supervisor enforces)". Nothing enforces it. This
+plan's own rationale opens by indicting that exact field, so leaving it is
+not an option.
+
+**And there are now two encodings of one bound.** `--timeout` resolves to
+`WallClockGrant::Secs` (`commands/shared/grants.rs:164`), while
+`SynthesisInput.exec_timeout_secs` feeds `resources.timeouts.exec_secs`
+(`plan/synthesis.rs:282`) — and every CLI call site passes `0`, which the
+legacy encoding reads as *unbounded*. So the signed plan carries a live grant
+and a dead field describing the same thing. Two representations of one
+decision is what this plan exists to remove; we introduced a second one.
+
+**The rule:** the grant is the declaration. `exec_secs` becomes its
+projection into the plan's legacy encoding and nothing else writes it. Where
+they could disagree, admission refuses rather than picking — the same shape
+the `l3_network`/`network_mode` and Grants→`NetworkPolicy` seams already use.
+
+Mind the encoding trap in both directions: `WallClockGrant::Unbounded` and an
+*absent* grant both map to `exec_secs = 0`, but they are not the same thing to
+the ceiling — it **refuses** an explicit `Unbounded` under a bounded ceiling
+while **admitting** an absent grant. The projection is lossy in that
+direction, so the ceiling must be consulted against the grant, never against
+the reconstructed `exec_secs`.
+
+**Enforcement:** a supervisor-side timer. The kill emits to the chain-signed
+audit log, so an enforced timeout is distinguishable from a crash — a workload
+that silently disappears is its own operational problem, and an unaudited kill
+is indistinguishable from the failure mode it is meant to prevent.
+
+**Witnesses:**
+- `a_wall_clock_grant_projects_to_exec_secs` — one source, not two
+- `nothing_but_the_projection_writes_exec_secs` — a gate or a test; the point
+  is that a second writer cannot reappear
+- `an_expired_workload_is_killed_and_the_kill_is_audited` — assert the audit
+  entry, not just the exit
+- `an_unbounded_grant_and_an_absent_grant_differ_at_the_ceiling` — the lossy
+  direction
+- `a_workload_within_its_bound_is_not_killed` — the false-positive guard,
+  without which a timer that fires immediately would pass every other test
