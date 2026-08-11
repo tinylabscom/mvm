@@ -424,22 +424,26 @@ pub(crate) fn handle_console_open(
 }
 
 pub(crate) fn handle_console_close(session_id: u32) -> GuestResponse {
-    // Console sessions end when the shell exits or the host disconnects.
-    // Explicit close is a no-op if already closed.
-    if mvm_agentd::console::is_active() {
-        GuestResponse::Error {
-            message: "explicit close not yet supported — disconnect to end session".to_string(),
-        }
-    } else if let Some(exit_code) = mvm_agentd::console::completed_exit_code(session_id) {
-        GuestResponse::ConsoleExited {
+    // A session that has already finished has its exit code on record — the
+    // answer whether the shell exited on its own or a prior close ended it.
+    if let Some(exit_code) = mvm_agentd::console::completed_exit_code(session_id) {
+        return GuestResponse::ConsoleExited {
             session_id,
             exit_code,
-        }
-    } else {
-        GuestResponse::ConsoleExited {
+        };
+    }
+    // Otherwise end the session and wait for it. The host reaches here on every
+    // ordinary logout: it sends the close the instant its relay sees EOF, which
+    // is before the guest has reaped the shell, so refusing while a session was
+    // still winding down turned every clean exit into an error.
+    match mvm_agentd::console::close_active_session(mvm_agentd::console::CLOSE_SETTLE_TIMEOUT) {
+        Some(exit_code) => GuestResponse::ConsoleExited {
             session_id,
-            exit_code: 0,
-        }
+            exit_code,
+        },
+        None => GuestResponse::Error {
+            message: "console session did not terminate".to_string(),
+        },
     }
 }
 
