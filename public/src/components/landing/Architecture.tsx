@@ -46,7 +46,7 @@ const BACKENDS = [
     tagClass: "bg-nix/10 text-nix/80",
     desc: "Third-party in-process VMM via Homebrew (slp/krun/libkrun). Vsock-only egress.",
     tags: ["vsock"],
-    tier: "macOS 13–25 — default",
+    tier: "macOS 13–25 — default. Also opt-in on Linux.",
   },
   {
     name: "microvm.nix",
@@ -65,16 +65,16 @@ const BACKENDS = [
 
 export function Architecture() {
   return (
-    <Section rule className="border-y border-edge/30 bg-raised/50">
+    <Section className="border-y border-edge/30 bg-raised/50">
       <div className="relative overflow-hidden">
         <Bloom accents={[2]} />
 
         <div className="relative mb-16 text-center lg:mb-20">
-          <Eyebrow n="05" className="justify-center text-center">
+          <Eyebrow n="05" className="text-center">
             Architecture
           </Eyebrow>
           <h2 className="font-display text-3xl font-bold text-title sm:text-4xl lg:text-5xl">
-            One CLI, four backends
+            One CLI, the right backend every time
           </h2>
           <p className="mx-auto mt-6 max-w-xl text-lg leading-relaxed text-body">
             mvm detects your OS, chip, and macOS version, then picks a workload
@@ -191,7 +191,7 @@ export function Architecture() {
               {/* Drive model strip */}
               <div className="rounded-lg border border-edge/30 bg-canvas px-6 py-4">
                 <p className="mb-3 text-center text-[10px] font-medium uppercase tracking-wider text-label">
-                  Guest Drive Model
+                  Sealed-Boot Guest Drive Model
                 </p>
                 <div className="flex flex-wrap items-center justify-center gap-3">
                   {[
@@ -224,6 +224,11 @@ export function Architecture() {
                     </span>
                   ))}
                 </div>
+                <p className="mt-3 text-center text-[10px] text-label">
+                  dm-verity rootfs + runtime overlay — the production boot
+                  shape. Dev and volume-mount boots assign these devices
+                  differently.
+                </p>
               </div>
 
               {/* Network strip */}
