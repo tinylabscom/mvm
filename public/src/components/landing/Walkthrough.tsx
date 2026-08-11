@@ -3,6 +3,70 @@ import { Section } from "./primitives/Section";
 import { CodeBlock } from "../ui/code-block";
 import { SAMPLES } from "./samples";
 
+const TERMINAL_LINES = [
+  { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
+  { text: '  python -c "print(2 + 2)"', delay: 500 },
+  { text: "  Pulling image and preparing a private root...", delay: 1200, dim: true },
+  { text: "  Booted. Own kernel. Network: deny-all.", delay: 2500, accent: true },
+  { text: "  Warm microVM start: milliseconds.", delay: 3100, accent: true },
+  { text: "  4", delay: 4200 },
+];
+
+// Relocated from the hero (Plan: the boundary diagram took the identity
+// slot there) into the "Run it" step, where the command it plays out
+// actually belongs narratively.
+function TerminalAnimation() {
+  const [visibleLines, setVisibleLines] = useState(0);
+
+  useEffect(() => {
+    const timers = TERMINAL_LINES.map((line, i) =>
+      setTimeout(() => setVisibleLines(i + 1), line.delay)
+    );
+    return () => timers.forEach(clearTimeout);
+  }, []);
+
+  return (
+    <div className="w-full overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-2xl shadow-black/30">
+      <div className="flex items-center gap-2 border-b border-code-border bg-code-header px-4 py-3">
+        <span className="h-3 w-3 rounded-full bg-dot-close/80" />
+        <span className="h-3 w-3 rounded-full bg-dot-minimize/80" />
+        <span className="h-3 w-3 rounded-full bg-dot-expand/80" />
+        <span className="ml-3 text-xs text-code-text/55">terminal</span>
+      </div>
+      <div className="p-5 font-mono text-[13px] leading-relaxed sm:p-6">
+        {TERMINAL_LINES.slice(0, visibleLines).map((line, i) => (
+          <div
+            key={i}
+            className={`${
+              line.accent
+                ? "text-code-success"
+                : line.dim
+                  ? "text-code-text/55"
+                  : "text-code-text"
+            } ${line.text === "" ? "h-3" : ""}`}
+          >
+            {line.text}
+          </div>
+        ))}
+        {visibleLines < TERMINAL_LINES.length ? (
+          <span
+            className="site-terminal-cursor inline-block h-4 w-2 animate-pulse bg-accent/70"
+            aria-hidden="true"
+          />
+        ) : (
+          <div className="flex items-center gap-2 text-code-text">
+            <span className="text-accent">$</span>
+            <span
+              className="site-terminal-cursor inline-block h-4 w-2 animate-pulse bg-accent/70"
+              aria-hidden="true"
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const STEPS = [
   {
     id: "walk-define",
@@ -80,8 +144,12 @@ export function Walkthrough() {
         </div>
         <div className="hidden lg:block">
           <div className="sticky top-32">
-            {activeSample && (
-              <CodeBlock code={activeSample.code} language={activeSample.language} />
+            {STEPS[active].id === "walk-run" ? (
+              <TerminalAnimation />
+            ) : (
+              activeSample && (
+                <CodeBlock code={activeSample.code} language={activeSample.language} />
+              )
             )}
           </div>
         </div>
@@ -98,8 +166,12 @@ export function Walkthrough() {
               </h3>
               <p className="mb-1 text-lg font-semibold text-title">{s.title}</p>
               <p className="mb-4 max-w-md text-lg leading-relaxed text-body">{s.body}</p>
-              {stepSample && (
-                <CodeBlock code={stepSample.code} language={stepSample.language} />
+              {s.id === "walk-run" ? (
+                <TerminalAnimation />
+              ) : (
+                stepSample && (
+                  <CodeBlock code={stepSample.code} language={stepSample.language} />
+                )
               )}
             </div>
           );

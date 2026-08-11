@@ -928,6 +928,26 @@ nav[aria-label="Main"] ul ul li {
   }
 }
 
+/* Boundary diagram (hero): the vsock line — the one channel that crosses
+   the wall — gets a slow dash-offset pulse to read as live traffic through
+   a guarded door, not just a static connector. Stilled under reduced
+   motion like every other decorative motion on the page. */
+@keyframes site-boundary-pulse {
+  to {
+    stroke-dashoffset: -26;
+  }
+}
+
+.site-boundary-pulse {
+  animation: site-boundary-pulse 2.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-boundary-pulse {
+    animation: none;
+  }
+}
+
 /* Cursor-tracked radial highlight, positioned via --mx/--my set on
    pointermove. --glow is set per-instance in GlowCard.tsx. */
 .site-glow-card__sheen {

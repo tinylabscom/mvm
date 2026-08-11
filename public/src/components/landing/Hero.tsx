@@ -1,69 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Button } from "../ui/button";
 import { Bloom } from "./primitives/Bloom";
 import { Reveal } from "./primitives/Reveal";
+import { BoundaryDiagram } from "./BoundaryDiagram";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
-
-const lines = [
-  { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
-  { text: '  python -c "print(2 + 2)"', delay: 500 },
-  { text: "  Pulling image and preparing a private root...", delay: 1200, dim: true },
-  { text: "  Booted. Own kernel. Network: deny-all.", delay: 2500, accent: true },
-  { text: "  Warm microVM start: milliseconds.", delay: 3100, accent: true },
-  { text: "  4", delay: 4200 },
-];
-
-function TerminalAnimation() {
-  const [visibleLines, setVisibleLines] = useState(0);
-
-  useEffect(() => {
-    const timers = lines.map((line, i) =>
-      setTimeout(() => setVisibleLines(i + 1), line.delay)
-    );
-    return () => timers.forEach(clearTimeout);
-  }, []);
-
-  return (
-    <div className="w-full overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-2xl shadow-black/30">
-      <div className="flex items-center gap-2 border-b border-code-border bg-code-header px-4 py-3">
-        <span className="h-3 w-3 rounded-full bg-dot-close/80" />
-        <span className="h-3 w-3 rounded-full bg-dot-minimize/80" />
-        <span className="h-3 w-3 rounded-full bg-dot-expand/80" />
-        <span className="ml-3 text-xs text-code-text/55">terminal</span>
-      </div>
-      <div className="p-5 font-mono text-[13px] leading-relaxed sm:p-6">
-        {lines.slice(0, visibleLines).map((line, i) => (
-          <div
-            key={i}
-            className={`${
-              line.accent
-                ? "text-code-success"
-                : line.dim
-                  ? "text-code-text/55"
-                  : "text-code-text"
-            } ${line.text === "" ? "h-3" : ""}`}
-          >
-            {line.text}
-          </div>
-        ))}
-        {visibleLines < lines.length ? (
-          <span
-            className="site-terminal-cursor inline-block h-4 w-2 animate-pulse bg-accent/70"
-            aria-hidden="true"
-          />
-        ) : (
-          <div className="flex items-center gap-2 text-code-text">
-            <span className="text-accent">$</span>
-            <span
-              className="site-terminal-cursor inline-block h-4 w-2 animate-pulse bg-accent/70"
-              aria-hidden="true"
-            />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
 
 const ONE_LINER =
   "curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh";
@@ -192,11 +132,14 @@ export function Hero() {
             </Reveal>
           </div>
 
-          {/* Terminal — proof, brought up into the hero's right column so
-              it clears the fold instead of trailing below it. */}
+          {/* The boundary diagram — the hero's visual anchor. This is the
+              page's actual differentiator (own kernel, no NIC, one vsock
+              channel to a deny-all-by-default endpoint), not a generic
+              product shot, so it carries the argument as much as the
+              headline does. */}
           <Reveal delay={360} className="relative">
             <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
-            <TerminalAnimation />
+            <BoundaryDiagram />
           </Reveal>
         </div>
       </div>
