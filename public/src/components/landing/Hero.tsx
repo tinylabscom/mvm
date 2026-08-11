@@ -80,12 +80,14 @@ export function Hero() {
         <div className="grid items-center gap-16 lg:grid-cols-2 lg:gap-20">
           {/* Left — copy */}
           <div className="flex flex-col gap-8">
-            <div className="flex items-center gap-2">
-              <span className="inline-block h-2 w-2 rounded-full bg-green animate-pulse" />
-              <span className="text-sm font-medium text-green">v0.7 — Multi-backend VM support</span>
-            </div>
-
             <Reveal delay={0}>
+              <div className="flex items-center gap-2">
+                <span className="inline-block h-2 w-2 rounded-full bg-green animate-pulse" />
+                <span className="text-sm font-medium text-green">v0.7 — Multi-backend VM support</span>
+              </div>
+            </Reveal>
+
+            <Reveal delay={80}>
               <h1 className="font-display text-5xl font-bold leading-[1.1] tracking-tight text-title sm:text-6xl xl:text-7xl">
                 Local. A real microVM
                 <br />
@@ -95,7 +97,7 @@ export function Hero() {
               </h1>
             </Reveal>
 
-            <Reveal delay={80}>
+            <Reveal delay={160}>
               <p className="max-w-lg text-lg leading-relaxed text-body">
                 Run untrusted code behind a real hypervisor with one command. The
                 first run prepares the image and kernel; warm runs start in
@@ -104,7 +106,7 @@ export function Hero() {
             </Reveal>
 
             {/* Install command */}
-            <Reveal delay={160}>
+            <Reveal delay={240}>
               <div
                 className="group flex w-full max-w-lg cursor-pointer items-center gap-3 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 backdrop-blur transition-all hover:border-accent/30"
                 onClick={copyInstall}
@@ -120,7 +122,7 @@ export function Hero() {
               </div>
             </Reveal>
 
-            <Reveal delay={240} className="flex flex-wrap gap-3">
+            <Reveal delay={320} className="flex flex-wrap gap-3">
               <a href={`${base}getting-started/installation/`}>
                 <Button size="lg">Get Started</Button>
               </a>
@@ -136,7 +138,7 @@ export function Hero() {
             </Reveal>
 
             {/* Stats row */}
-            <Reveal delay={320} className="flex flex-wrap gap-8 border-t border-edge/40 pt-6">
+            <Reveal delay={400} className="flex flex-wrap gap-8 border-t border-edge/40 pt-6">
               {stats.map((s) => (
                 <div key={s.label} className="flex flex-col">
                   <span className="text-2xl font-bold text-title">{s.value}</span>
