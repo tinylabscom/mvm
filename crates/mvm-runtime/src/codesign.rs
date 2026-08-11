@@ -19,6 +19,7 @@ pub enum RequiredEntitlement {
     VirtualizationAndHypervisor,
 }
 
+#[cfg(target_os = "macos")]
 impl RequiredEntitlement {
     fn keys(self) -> &'static [&'static str] {
         match self {
@@ -59,7 +60,7 @@ pub fn entitlement_present(path: &Path, required: RequiredEntitlement) -> Option
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = path;
+        let _ = (path, required);
         None
     }
 }
