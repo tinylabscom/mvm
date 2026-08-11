@@ -124,14 +124,14 @@ export function Hero() {
                 className="max-w-[19rem] sm:max-w-[28rem] lg:max-w-xl font-display font-bold leading-[1.05] tracking-[-0.03em] text-title"
                 style={{ fontSize: "clamp(2.5rem, 4.5vw, 4rem)" }}
               >
-                A real hypervisor, no daemon or SSH.
+                Run code you don&rsquo;t trust.
               </h1>
             </Reveal>
 
             <Reveal delay={160}>
               <p className="max-w-[46ch] text-lg leading-relaxed text-body">
-                One command boots a microVM with its own kernel. Network
-                access is denied by default, unless policy admits it.
+                One command boots it in a microVM with its own kernel. No
+                daemon, no SSH, and no network until policy admits it.
               </p>
             </Reveal>
 
