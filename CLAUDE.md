@@ -290,6 +290,19 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    entries to `~/.mvm/audit/<tenant>.jsonl`; tampering breaks
    `mvm_hostd::supervisor::verify_audit_chain` (surfaced via
    `mvmctl trust audit verify`, which exits nonzero on detected drift).
+   The chain rotates into sequenced segments once the active file reaches
+   `MVM_AUDIT_SEGMENT_BYTES` (4 MiB default): `<tenant>.seg-NNNNNN.jsonl`
+   beside the live `<tenant>.jsonl`. Nothing is deleted — rotation only
+   splits. Every segment after the first opens with a signed
+   `chain.continued` record naming its predecessor and that predecessor's
+   final chain hash, so `verify_audit_chain` attests "unbroken from
+   genesis **or** from a signed handoff", and `verify_segment_set` attests
+   the set is ordered and complete: a removed segment is reported by
+   number rather than passing silently. `mvmctl doctor` checks the live
+   segment plus the handoffs and says that is what it checked;
+   `mvmctl trust audit verify` walks every retired interior. Tail
+   truncation stays undetectable, exactly as it was before rotation
+   (Plan 319).
    Workspace `cargo test` exercises rejection paths on every PR
    (plan 64 W1–W4 — `synthesize_plan`, `host_signer::load_or_init_at`,
    `admit_for_run`, `AuditEmitter`; `xtask check-no-display-on-secret-types`

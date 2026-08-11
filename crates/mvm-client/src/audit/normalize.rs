@@ -152,6 +152,34 @@ pub(crate) fn refusal_from_lifecycle(
     refusal(source, kind, line, &err.to_string())
 }
 
+/// Map a segment-set verification failure to a typed refusal.
+///
+/// A set failure is a statement about the chain as a whole rather than about
+/// one line, so most variants carry no line number. They are still
+/// [`AuditRefusalKind::ChainBroken`]: to a reader, a segment that has been
+/// removed and a link that does not join up are the same fact — the chronology
+/// cannot be trusted. A reader that filed a missing segment under "I/O
+/// problem" would carry on displaying the survivors as though they were the
+/// whole history, which is the one outcome rotation must never produce.
+pub(crate) fn refusal_from_segment_set(
+    source: &AuditSourceId,
+    err: &mvm_hostd::supervisor::SegmentSetError,
+) -> AuditSourceRefusal {
+    use mvm_hostd::supervisor::SegmentSetError as E;
+    // A per-segment failure keeps the precision the single-file verifier had:
+    // the line index is within that segment, and the set error's own message
+    // names which one.
+    if let E::Segment { source: inner, .. } = err {
+        let mapped = refusal_from_lifecycle(source, inner);
+        return refusal(source, mapped.kind, mapped.line, &err.to_string());
+    }
+    let kind = match err {
+        E::Io(_) | E::NoChain { .. } => AuditRefusalKind::Io,
+        _ => AuditRefusalKind::ChainBroken,
+    };
+    refusal(source, kind, None, &err.to_string())
+}
+
 /// Map a workload-chain verification failure to a typed refusal.
 pub(crate) fn refusal_from_workload(
     source: &AuditSourceId,

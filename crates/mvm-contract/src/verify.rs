@@ -228,12 +228,53 @@ fn signed_bytes_for(envelope: &SignedEnvelope, line: usize) -> Result<Vec<u8>, A
     Ok(bytes)
 }
 
+/// Event name of the record that opens every segment after the first.
+///
+/// Mirrors `mvm_hostd::supervisor::audit_segment::CHAIN_CONTINUED`. The two
+/// crates cannot share a constant (this one is `no_std` and sits below the
+/// host), so the value is pinned by
+/// `the_handoff_contract_matches_the_host_writer`.
+pub const CHAIN_CONTINUED: &str = "chain.continued";
+
+/// Label carrying the predecessor's final line hash inside the signed body.
+/// Mirrors `mvm_hostd::supervisor::audit_segment::LABEL_PREV_TIP`.
+pub const LABEL_PREV_TIP: &str = "chain.prev_tip";
+
+/// Label carrying this segment's sequence number.
+pub const LABEL_SEGMENT: &str = "chain.segment";
+
+/// Label carrying the sequence number of the segment this one continues.
+pub const LABEL_PREV_SEGMENT: &str = "chain.prev_segment";
+
+/// The chain hash a segment's opening entry authorizes, if it is a well-formed
+/// continuation record.
+///
+/// Still only a claim when this returns: it becomes a fact when the signature
+/// over `signed_bytes || tip` verifies. Sequence contiguity is checked here so
+/// a record cannot assert its own gap and be adopted anyway.
+fn continuation_start_hash(entry: &MirrorEntry) -> Option<[u8; 32]> {
+    if entry.event != CHAIN_CONTINUED {
+        return None;
+    }
+    let segment: u64 = entry.labels.get(LABEL_SEGMENT)?.parse().ok()?;
+    let prev: u64 = entry.labels.get(LABEL_PREV_SEGMENT)?.parse().ok()?;
+    if segment != prev + 1 {
+        return None;
+    }
+    URL_SAFE_NO_PAD
+        .decode(entry.labels.get(LABEL_PREV_TIP)?)
+        .ok()?
+        .try_into()
+        .ok()
+}
+
 pub fn verify_audit_chain_bytes(
     content: &str,
     verifying_key: &VerifyingKey,
 ) -> Result<VerifiedChain, AuditVerifyError> {
     let mut prev_hash = [0u8; 32];
     let mut entries = Vec::new();
+    let mut seen_a_line = false;
     for (idx, line) in content.lines().enumerate() {
         if line.is_empty() {
             continue;
@@ -251,8 +292,24 @@ pub fn verify_audit_chain_bytes(
             }
         })?;
         if claimed_prev.as_slice() != prev_hash.as_slice() {
-            return Err(AuditVerifyError::PrevHashMismatch { line: idx });
+            // Mirrors the host verifier's line-0 rule for rotated chains: a
+            // segment after the first opens by claiming its predecessor's final
+            // line hash rather than genesis, and that is accepted only when the
+            // *signed body* names the identical hash. The signature check below
+            // over `signed_bytes || prev_hash` is what authenticates it.
+            //
+            // This mirror is not optional politeness. The host's own Merkle
+            // root builder verifies through this function, so a host that
+            // rotated and a verifier that did not learn about handoffs would
+            // stop being able to publish a root at all.
+            let adopted = continuation_start_hash(&envelope.entry)
+                .filter(|tip| !seen_a_line && tip.as_slice() == claimed_prev.as_slice());
+            match adopted {
+                Some(tip) => prev_hash = tip,
+                None => return Err(AuditVerifyError::PrevHashMismatch { line: idx }),
+            }
         }
+        seen_a_line = true;
 
         let sig_bytes = URL_SAFE_NO_PAD.decode(&envelope.signature).map_err(|e| {
             AuditVerifyError::Malformed {
