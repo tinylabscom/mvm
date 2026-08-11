@@ -67,8 +67,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     d.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Build a gzipped tar containing `mvmctl-<target>/mvmctl` (+ an
-/// assets dir) where mvmctl is a shell stub printing a version.
+/// Build a gzipped tar containing release-shaped VM binaries and assets where
+/// mvmctl is a shell stub printing a version.
 fn make_tarball(target: &str) -> Vec<u8> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -96,6 +96,26 @@ fn make_tarball(target: &str) -> Vec<u8> {
         &ent[..],
     )
     .unwrap();
+    let supervisor_entitlements = b"<plist><key>com.apple.security.hypervisor</key></plist>\n";
+    let mut h3 = tar::Header::new_gnu();
+    h3.set_size(supervisor_entitlements.len() as u64);
+    h3.set_mode(0o644);
+    h3.set_cksum();
+    tar.append_data(
+        &mut h3,
+        format!("{dir}/assets/mvm-supervisor.entitlements"),
+        &supervisor_entitlements[..],
+    )
+    .unwrap();
+    for hostbin in ["mvm-hvf-supervisor", "mvm-libkrun-supervisor"] {
+        let bytes = hostbin.as_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, format!("{dir}/{hostbin}"), bytes)
+            .unwrap();
+    }
     let tar_bytes = tar.into_inner().unwrap();
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
     gz.write_all(&tar_bytes).unwrap();
@@ -304,5 +324,66 @@ fn install_sh_rejects_tampered_checksum() {
     assert!(
         !install_dir.path().join("mvmctl").exists(),
         "no binary on failure"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_codesigns_all_macos_vm_targets() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let target = host_target();
+    let tarball = make_tarball(target);
+    let archive = format!("mvmctl-{target}.tar.gz");
+    let checks = format!("{}  {}\n", sha256_hex(&tarball), archive);
+    let routes = vec![
+        (
+            format!("/tinylabscom/mvm/releases/download/v9.9.9/{archive}"),
+            tarball,
+        ),
+        (
+            "/tinylabscom/mvm/releases/download/v9.9.9/checksums-sha256.txt".to_string(),
+            checks.into_bytes(),
+        ),
+    ];
+    let (base, _stop) = serve(routes);
+
+    let root = tempfile::tempdir().unwrap();
+    let fake_bin = root.path().join("bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let log = root.path().join("codesign.log");
+    let codesign = fake_bin.join("codesign");
+    std::fs::write(
+        &codesign,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&codesign, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let install_dir = root.path().join("install");
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let status = Command::new("sh")
+        .arg(repo_root().join("install.sh"))
+        .env("MVM_VERSION", "v9.9.9")
+        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .env("MVM_INSTALL_DIR", &install_dir)
+        .env("MVM_SKIP_BUILDER_PREFETCH", "1")
+        .env("PATH", path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "install.sh should sign the VM targets");
+
+    let log = std::fs::read_to_string(log).unwrap();
+    assert!(log.contains("mvmctl"), "mvmctl was not codesigned: {log}");
+    assert!(
+        log.contains("mvm-hvf-supervisor"),
+        "HVF supervisor was not codesigned: {log}"
+    );
+    assert!(
+        log.contains("mvm-libkrun-supervisor"),
+        "libkrun supervisor was not codesigned: {log}"
     );
 }
