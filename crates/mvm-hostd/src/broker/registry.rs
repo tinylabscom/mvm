@@ -715,6 +715,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_dispatch_accepts_input_at_the_exact_byte_limit() {
+        let descriptor = descriptor();
+        let binding = descriptor.binding();
+        let mut registry = Registry::new();
+        registry
+            .register_capability(Arc::new(EchoHandler), descriptor)
+            .expect("register");
+        registry
+            .admit_capabilities([binding.clone()])
+            .expect("admit");
+
+        let payload = serde_json::Value::String("x".repeat(126));
+        assert_eq!(
+            serde_json::to_vec(&payload)
+                .expect("payload serializes")
+                .len(),
+            128,
+            "the fixture must sit exactly on the descriptor's input limit"
+        );
+        let invocation = CapabilityInvocation::from_payload(
+            binding,
+            AgentRequestId::parse("typed-request-boundary").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+
+        let response = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &invocation,
+                payload.clone(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("an input exactly at the limit is admitted");
+        assert_eq!(response, payload);
+    }
+
+    #[tokio::test]
+    async fn typed_dispatch_rejects_an_admitted_digest_that_differs_from_the_invocation() {
+        let descriptor = descriptor();
+        let binding = descriptor.binding();
+        let mut admitted_binding = binding.clone();
+        admitted_binding.descriptor_digest = [9; 32];
+        let mut registry = Registry::new();
+        registry
+            .register_capability(Arc::new(EchoHandler), descriptor)
+            .expect("register");
+        registry
+            .admit_capabilities([admitted_binding])
+            .expect("admit");
+        let payload = serde_json::json!({"hello": "world"});
+        let invocation = CapabilityInvocation::from_payload(
+            binding,
+            AgentRequestId::parse("typed-request-admission-digest").expect("request id"),
+            &payload,
+        )
+        .expect("invocation");
+
+        let error = registry
+            .dispatch_capability(
+                &ctx(),
+                &ServiceId::parse("host.dev.echo.v1").expect("service"),
+                "echo",
+                &invocation,
+                payload,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("the admitted digest must match the invocation binding");
+        assert_eq!(error.code, ServiceErrorCode::CapabilityBindingMismatch);
+    }
+
+    #[tokio::test]
     async fn typed_dispatch_classifies_schema_rejection_without_leaking_handler_text() {
         let descriptor = descriptor();
         let binding = descriptor.binding();

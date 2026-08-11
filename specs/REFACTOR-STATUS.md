@@ -54,13 +54,17 @@ for detailed scope and acceptance criteria.
       canonical budget table, and gates remain open.
 
 ## In-flight plans
-- [~] Plan 315 — Bootstrap means machine-ready
+- [x] Plan 315 — Bootstrap means machine-ready
       (`specs/plans/315-bootstrap-machine-readiness.md`)
   - [x] Bootstrap acquires and verifies both builder image and workload kernel
   - [x] Downloaded/local kernel publication is staged and verified reads fail closed
   - [x] Local dm-verity capability uses resolved config, not raw-image strings
-  - [~] Workspace tests expose unrelated non-deterministic `mvm-hostd` failures;
-        Linux all-target Clippy remains for CI or a supported builder entry point
+  - [x] Required ARM64 cross-backend console support is pinned to its measured
+        959-symbol budget; the unaffected x86_64 ratchet remains 917
+  - [x] Full serialized workspace tests and doctests, host all-target Clippy,
+        the 461-test `xtask --features man` CI lane, and 172 BDD scenarios pass;
+        KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0
+        reuse, and two fully warm Alpine runs complete without a second Stage 0
 
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
@@ -108,13 +112,16 @@ for detailed scope and acceptance criteria.
   - [x] Add direct witnesses for the security-sensitive admission,
         verification, lease, and substitution cleanup invariants
   - [x] Fail closed when an accepted miss leaves the pinned mutation surface,
-        migrate 26 libkrun identities to their current file, and remove 14
-        obsolete misses without adding a waiver (83 accepted misses to 69)
+        migrate 26 libkrun identities to their current file, and remove 15
+        obsolete misses without adding a waiver (83 accepted misses to 68)
   - [x] Catch the current actionable `mvm-vmm`, `mvm-hostd`, and `mvm-agentd`
         mutants in focused mutation proofs
-  - [x] Pass affected-package all-target Clippy, workspace unit/integration
-        tests, the isolated `mvm-cli` doctest rerun, formatting, and the static
-        mutation surface gate on the dedicated fix branch
+  - [x] Add the six witnesses exposed by the first exact rerun and prove the
+        complete contract shard plus the focused five-mutant hostd repair
+  - [x] Pass workspace all-target Clippy, the isolated `mvm-cli` doctest rerun,
+        formatting, and the static mutation surface gate; the workspace suite
+        passed all repaired areas before one unrelated host-agent socket-bind
+        timeout whose isolated integration rerun passed 4/4
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
 - [~] Plan 300 — 30-issue reconciliation and closeout
@@ -920,11 +927,16 @@ for detailed scope and acceptance criteria.
           miss, and eviction of **both** the record and the build directory —
           a record-only eviction would leave the poisoned tree under a name a
           later build re-adopts. Unblocks plan 279 WS1
-    - [ ] Workload/builder kernel cache: still path-trusting.
-          `verify_fetched_kernel` exists with **no production caller** —
-          neither the fetch nor the read path checks a kernel against its pin.
-          Scoped as plan 288
-          (`specs/plans/288-kernel-cache-verify-on-read.md`)
+    - [~] Workload/builder kernel cache: plan 288
+          (`specs/plans/288-kernel-cache-verify-on-read.md`). WS1–WS3 + WS5
+          landed — the fetch path verifies against the published checksum
+          manifest and records a digest sidecar, the read path verifies against
+          it and evicts the whole entry on failure, and
+          `check-verified-kernel-reads` keeps new callers on the seam. WS1's
+          `VerifiedKernel` initially reached only the arms that used it: the
+          Firecracker/qemu arm and the CLI's kernel-less-image fallback still
+          booted on presence until 2026-08-11. WS4 (shared sidecar helper with
+          the BLAKE3 artifact path) is the remainder
     - [ ] Cold-tier background scrub (recon §7.9)
   - [~] WS7 — σ/κ separation: `mvm_core::at_rest` gives the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint
@@ -1152,8 +1164,20 @@ for detailed scope and acceptance criteria.
         landing, so a bounded boot's *reported tier* is unwitnessed on hardware
   - [ ] WS5 — wasm fuel **and** epoch (fuel alone bounds nothing in a host
         call) + `StoreLimits`
-  - [ ] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
-        the restore-laundering path
+  - [~] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
+        the restore-laundering path. `grants_are_subset` in mvm-contract (CPU
+        and wall clock read absence as unbounded, egress as deny-all;
+        mismatched CPU units refused, never converted), `CheckpointMeta.grants`
+        inside the content-address so a tampered parent record cannot justify
+        a wider child (skip-serialized when absent, so an older checkpoint
+        reads as schema-stale rather than tampered). BOTH restore paths check,
+        through one predicate `ensure_child_grants_within_parent`: the vm_full
+        fork and the warm-pool claim.
+        STILL OPEN: (a) restore does not re-apply grants through `apply_grants`;
+        (b) a warm parent seals no grant — a factory parent holds no plan or
+        `cpu_grant` by construction and one parent serves every claim, so
+        bounding a claimed child's CPU/wall clock needs a pool-level grant on
+        `StandbySpec`; its egress is already bounded (absent egress = deny-all)
   - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
         `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
         and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,

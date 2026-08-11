@@ -23,7 +23,7 @@
       formatting, workspace check, all-target host Clippy, and the complete
       serial workspace test suite pass.
 
-- [~] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
+- [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
       successful bootstrap does not defer an infrastructure build to the next
       `machine run`. Kernel downloads verify before replacement, local Stage 0
@@ -31,12 +31,19 @@
       verified reads reject any crash-skewed cache. Interrupted staging is swept
       on retry while the persistent Nix store remains warm. Local capability validation
       uses the resolved kernel config instead of searching a KALLSYMS-free raw
-      image for symbol strings. Formatting, focused tests, all 172 BDD
-      scenarios, workspace check, and host workspace all-target Clippy pass.
-      Full workspace tests pass the changed crates but expose unrelated,
-      non-deterministic `mvm-hostd` shared-state/timing failures; the Linux
-      all-target Clippy rerun remains for CI or a supported builder-VM entry
-      point.
+      image for symbol strings. QEMU Stage 0 now has a reusable Nix-store disk,
+      an accurate guest clock, architecture-correct console wiring, and a
+      two-hour cold-build window. ARM64 workload kernels carry the console
+      drivers required by Firecracker and HVF/QEMU, while bounded OCI blob
+      redirects reach only exact trusted Docker CDN origins without forwarding
+      registry authorization. The required console dependencies move only the
+      ARM64 built-in-symbol ratchet from 944 to its measured 959; x86_64 stays
+      at 917. Formatting, workspace check, host workspace
+      all-target Clippy, the complete serialized workspace suite and doctests,
+      the exact 461-test `xtask --features man` CI lane, and all 172 BDD
+      scenarios pass. A KVM-backed ARM64 acceptance run completed cold
+      bootstrap and kernel publication, then ran Alpine twice from a fully warm
+      cache without launching Stage 0.
 
 - [~] HVF large-response integrity — **plan 315**. Restored bounded
       virtio-vsock host-to-guest credit accounting that had been removed while
@@ -235,11 +242,19 @@
       catch the actionable snapshot-I/O, no-op stage-name, torn-tail, and grant
       parser mutants; the static gate rejects accepted misses outside the
       pinned surface; 26 moved libkrun identities name their current file; and
-      14 obsolete misses were removed, reducing the accepted baseline from 83
-      to 69 without adding a waiver. Focused mutation proofs, affected-package
-      all-target Clippy, the workspace unit/integration suite, formatting, and
-      the static surface gate are green. The exact Linux Security workflow
-      rerun remains the final merge-and-close gate.
+      15 obsolete misses were removed, reducing the accepted baseline from 83
+      to 68 without adding a waiver. The first exact rerun exposed six further
+      survivors: the contract's omitted resource-control default plus hostd's
+      exact broker byte limit, admitted digest equality, host CPU mechanism
+      truth table, explicit deferred-audit flush, and drop-time flush. Direct
+      witnesses now catch all six; the complete contract mutation shard and a
+      focused five-mutant hostd proof are green. Workspace all-target Clippy,
+      formatting, and the static surface gate are also green. The workspace
+      suite passed every repaired area but hit one unrelated host-agent
+      socket-bind timeout; its isolated integration rerun passed 4/4. A clean
+      exact Linux Security workflow rerun remains the final merge gate; a
+      subsequent scheduled or release run is still required before issue
+      closure.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,

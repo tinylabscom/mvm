@@ -36,6 +36,7 @@ pub struct PlanFixture {
     stream_edges: Vec<mvm_contract::stream::StreamEdge>,
     stream_retention: StreamRetention,
     audit_labels: BTreeMap<String, String>,
+    grants: Option<mvm_contract::grants::Grants>,
 }
 
 impl Default for PlanFixture {
@@ -53,6 +54,7 @@ impl Default for PlanFixture {
             stream_edges: Vec::new(),
             stream_retention: StreamRetention::default(),
             audit_labels: BTreeMap::new(),
+            grants: None,
         }
     }
 }
@@ -116,6 +118,13 @@ impl PlanFixture {
         self
     }
 
+    /// The permission set this plan is admitted under. Default `None`, which a
+    /// restore reads as unbounded CPU and wall clock but deny-all egress.
+    pub fn grants(mut self, grants: Option<mvm_contract::grants::Grants>) -> Self {
+        self.grants = grants;
+        self
+    }
+
     /// Pin an explicit validity window. Without this the plan is valid from
     /// `now` to `now + 10min`.
     pub fn validity(mut self, from: DateTime<Utc>, until: DateTime<Utc>) -> Self {
@@ -127,7 +136,7 @@ impl PlanFixture {
     pub fn build(self) -> ExecutionPlan {
         let now = Utc::now();
         ExecutionPlan {
-            grants: None,
+            grants: self.grants,
             environment: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),

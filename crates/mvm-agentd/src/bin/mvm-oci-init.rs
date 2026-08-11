@@ -38,13 +38,6 @@ mod linux {
         if provision_guest_environment().is_err() {
             std::process::exit(1);
         }
-        if let Err(error) = mvm_agentd::guest_mount::ensure_workload_home() {
-            eprintln!(
-                "mvm-oci-init: failed to create workload home ({}): {error}; falling back to {}",
-                mvm_agentd::guest_mount::WORKLOAD_HOME,
-                mvm_agentd::guest_mount::WORKLOAD_HOME_FALLBACK
-            );
-        }
         if cmdline_has_flag(mvm_contract::l3::GUEST_CMDLINE_FLAG) {
             start_l3_tunnel();
         }

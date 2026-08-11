@@ -88,8 +88,9 @@ The legacy `metrics` output remains an alias of `workload-metrics`.
 
 - **compile** builds locally through the Stage 0 bootstrap. It can only build
   the **host** architecture — Stage 0 boots a host-arch VM, so it cannot
-  cross-compile. First compile is 3–10 min; later runs hit the persistent Nix
-  store. The compile path prints an elapsed-time heartbeat, and `--verbose`
+  cross-compile. The first build can take several minutes depending on the
+  host; later runs reuse the persistent Nix store. The compile path prints an
+  elapsed-time heartbeat, and `--verbose`
   streams the live `nix build` console output.
 - **download** fetches a prebuilt `vmlinux-<arch>-<variant>` from the GitHub
   release whose tag matches **this mvmctl's own version**. A given mvmctl can

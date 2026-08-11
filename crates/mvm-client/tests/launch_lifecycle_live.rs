@@ -33,6 +33,10 @@ fn live_env() -> Option<(String, String)> {
 /// (`<cache>/builder-vm/<arch>/kernels/workload/vmlinux`) when the cache is
 /// cold. An already-populated cache is left untouched — the operator's own
 /// verified kernel wins.
+///
+/// The digest sidecar is recorded the way any other producer records it: the
+/// launch path serves a cached kernel only when its bytes match a recorded
+/// digest, so a seeded-but-unpinned kernel is refused rather than booted.
 fn seed_workload_kernel_cache(kernel: &str) {
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host().to_string();
@@ -43,6 +47,8 @@ fn seed_workload_kernel_cache(kernel: &str) {
     std::fs::create_dir_all(dest.parent().expect("kernel cache dir has a parent"))
         .expect("create workload kernel cache dir");
     std::fs::copy(kernel, &dest).expect("seed MVM_E2E_KERNEL into the workload kernel cache");
+    mvm_build::kernel_fetch::record_kernel_digest(&dest)
+        .expect("record the seeded workload kernel's digest");
 }
 
 #[tokio::test]

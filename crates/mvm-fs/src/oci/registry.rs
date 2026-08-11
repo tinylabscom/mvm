@@ -1,11 +1,14 @@
 use crate::oci::OciError;
 use crate::oci::reference::ImageReference;
-use mvm_http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
+use mvm_http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE};
 use secrecy::{ExposeSecret, SecretString};
 
 const DOCKER_HUB_REGISTRY: &str = "docker.io";
 const DOCKER_HUB_LEGACY_REGISTRY: &str = "index.docker.io";
 const DOCKER_HUB_REGISTRY_API_HOST: &str = "registry-1.docker.io";
+const DOCKER_HUB_CLOUDFLARE_BLOB_HOST: &str = "production.cloudflare.docker.com";
+const DOCKER_HUB_CLOUDFRONT_BLOB_HOST: &str = "production.cloudfront.docker.com";
+const MAX_BLOB_REDIRECTS: usize = 5;
 
 #[derive(Debug, Clone, Default)]
 pub enum ClientProtocol {
@@ -103,8 +106,13 @@ impl RegistryClient {
         reference: &ImageReference,
         accept: &[&str],
     ) -> Result<RegistryResponse, OciError> {
-        self.get(reference, &manifest_path(reference), Some(accept))
-            .await
+        self.get(
+            reference,
+            &manifest_path(reference),
+            Some(accept),
+            RedirectPolicy::Refuse,
+        )
+        .await
     }
 
     pub async fn get_blob(
@@ -112,8 +120,13 @@ impl RegistryClient {
         reference: &ImageReference,
         digest: &str,
     ) -> Result<RegistryResponse, OciError> {
-        self.get(reference, &blob_path(reference, digest), None)
-            .await
+        self.get(
+            reference,
+            &blob_path(reference, digest),
+            None,
+            RedirectPolicy::Blob,
+        )
+        .await
     }
 
     async fn get(
@@ -121,6 +134,7 @@ impl RegistryClient {
         reference: &ImageReference,
         path: &str,
         accept: Option<&[&str]>,
+        redirect_policy: RedirectPolicy,
     ) -> Result<RegistryResponse, OciError> {
         let url = self.endpoint(reference, path);
         let request = self.build_request(url.clone(), accept, None);
@@ -129,7 +143,7 @@ impl RegistryClient {
             .await
             .map_err(|e| OciError::Registry(format!("GET {url}: {e}")))?;
         if response.status() != mvm_http::StatusCode::UNAUTHORIZED {
-            return self.registry_response(url, response).await;
+            return self.registry_response(url, response, redirect_policy).await;
         }
 
         let challenge = parse_auth_challenge(
@@ -144,7 +158,7 @@ impl RegistryClient {
             .send()
             .await
             .map_err(|e| OciError::Registry(format!("GET {url} after auth: {e}")))?;
-        self.registry_response(url, retry).await
+        self.registry_response(url, retry, redirect_policy).await
     }
 
     fn build_request(
@@ -173,7 +187,41 @@ impl RegistryClient {
         &self,
         url: String,
         response: mvm_http::Response,
+        redirect_policy: RedirectPolicy,
     ) -> Result<RegistryResponse, OciError> {
+        let mut current_url = mvm_http::Url::parse(&url).map_err(|e| {
+            OciError::Registry(format!("registry endpoint is not a valid URL: {e}"))
+        })?;
+        let mut response = response;
+        let mut redirect_count = 0;
+
+        while is_preserving_redirect(response.status()) {
+            if redirect_policy == RedirectPolicy::Refuse {
+                break;
+            }
+            if redirect_count == MAX_BLOB_REDIRECTS {
+                return Err(OciError::Registry(format!(
+                    "GET {} exceeded the {MAX_BLOB_REDIRECTS}-redirect OCI blob limit",
+                    display_url(&current_url)
+                )));
+            }
+            let location = response.headers().get(LOCATION).ok_or_else(|| {
+                OciError::Registry(format!(
+                    "GET {} returned a redirect without Location",
+                    display_url(&current_url)
+                ))
+            })?;
+            let next_url = validate_blob_redirect(&current_url, location)?;
+            response = self.http.get(next_url.as_str()).send().await.map_err(|e| {
+                OciError::Registry(format!(
+                    "GET redirected OCI blob from {}: {e}",
+                    display_url(&next_url)
+                ))
+            })?;
+            current_url = next_url;
+            redirect_count += 1;
+        }
+
         let status = response.status();
         if !status.is_success() {
             let body = response
@@ -181,7 +229,8 @@ impl RegistryClient {
                 .await
                 .unwrap_or_else(|_| "<body unreadable>".to_string());
             return Err(OciError::Registry(format!(
-                "GET {url} failed with {status}: {body}"
+                "GET {} failed with {status}: {body}",
+                display_url(&current_url)
             )));
         }
         let headers = response.headers().clone();
@@ -263,6 +312,77 @@ impl RegistryClient {
         };
         format!("{scheme}://{host}{path}")
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectPolicy {
+    Refuse,
+    Blob,
+}
+
+fn is_preserving_redirect(status: mvm_http::StatusCode) -> bool {
+    matches!(status.as_u16(), 307 | 308)
+}
+
+fn validate_blob_redirect(
+    current: &mvm_http::Url,
+    location: &mvm_http::header::HeaderValue,
+) -> Result<mvm_http::Url, OciError> {
+    let location = location
+        .to_str()
+        .map_err(|_| OciError::Registry("OCI blob redirect Location is not valid text".into()))?;
+    let next = current
+        .join(location)
+        .map_err(|_| OciError::Registry("OCI blob redirect Location is not a valid URL".into()))?;
+
+    if !next.username().is_empty() || next.password().is_some() || next.fragment().is_some() {
+        return Err(OciError::Registry(
+            "OCI blob redirect URL must not contain credentials or a fragment".into(),
+        ));
+    }
+    if !matches!(next.scheme(), "http" | "https") {
+        return Err(OciError::Registry(
+            "OCI blob redirect URL must use HTTP or HTTPS".into(),
+        ));
+    }
+    if current.scheme() == "https" && next.scheme() != "https" {
+        return Err(OciError::Registry(
+            "OCI blob redirect refused an HTTPS downgrade".into(),
+        ));
+    }
+    if same_origin(current, &next) || is_docker_hub_cdn_redirect(current, &next) {
+        return Ok(next);
+    }
+
+    Err(OciError::Registry(format!(
+        "OCI blob redirect from {} to an untrusted origin was refused",
+        display_url(current)
+    )))
+}
+
+fn same_origin(left: &mvm_http::Url, right: &mvm_http::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn is_docker_hub_cdn_redirect(current: &mvm_http::Url, next: &mvm_http::Url) -> bool {
+    current.scheme() == "https"
+        && current.host_str() == Some(DOCKER_HUB_REGISTRY_API_HOST)
+        && current.port_or_known_default() == Some(443)
+        && next.scheme() == "https"
+        && matches!(
+            next.host_str(),
+            Some(DOCKER_HUB_CLOUDFLARE_BLOB_HOST | DOCKER_HUB_CLOUDFRONT_BLOB_HOST)
+        )
+        && next.port_or_known_default() == Some(443)
+}
+
+fn display_url(url: &mvm_http::Url) -> String {
+    let mut safe = url.clone();
+    safe.set_query(None);
+    safe.set_fragment(None);
+    safe.to_string()
 }
 
 pub struct RegistryResponse {
@@ -410,5 +530,92 @@ mod tests {
             .expect("reference parses");
 
         assert_eq!(registry_api_host(&reference.registry), "ghcr.io");
+    }
+
+    #[test]
+    fn blob_redirect_accepts_same_origin_relative_location() {
+        let current =
+            mvm_http::Url::parse("http://127.0.0.1:5000/v2/library/alpine/blobs/sha256:abc")
+                .expect("current URL parses");
+        let location = mvm_http::header::HeaderValue::from_static("/blob-data/sha256:abc");
+
+        let next = validate_blob_redirect(&current, &location).expect("redirect is accepted");
+
+        assert_eq!(next.as_str(), "http://127.0.0.1:5000/blob-data/sha256:abc");
+    }
+
+    #[test]
+    fn blob_redirect_accepts_exact_docker_hub_cdn_origin() {
+        let current =
+            mvm_http::Url::parse("https://registry-1.docker.io/v2/library/alpine/blobs/sha256:abc")
+                .expect("current URL parses");
+        let location = mvm_http::header::HeaderValue::from_static(
+            "https://production.cloudflare.docker.com/registry-v2/blobs/data?verify=secret",
+        );
+
+        let next = validate_blob_redirect(&current, &location).expect("redirect is accepted");
+
+        assert_eq!(next.host_str(), Some("production.cloudflare.docker.com"));
+
+        let current_cdn = mvm_http::header::HeaderValue::from_static(
+            "https://production.cloudfront.docker.com/registry-v2/blobs/data?verify=secret",
+        );
+        let next = validate_blob_redirect(&current, &current_cdn).expect("current CDN is accepted");
+        assert_eq!(next.host_str(), Some("production.cloudfront.docker.com"));
+    }
+
+    #[test]
+    fn blob_redirect_rejects_untrusted_cross_origin() {
+        let current =
+            mvm_http::Url::parse("https://registry-1.docker.io/v2/library/alpine/blobs/sha256:abc")
+                .expect("current URL parses");
+        let location = mvm_http::header::HeaderValue::from_static("https://example.com/blob");
+
+        let error = validate_blob_redirect(&current, &location).unwrap_err();
+
+        assert!(error.to_string().contains("untrusted origin"));
+    }
+
+    #[test]
+    fn blob_redirect_rejects_https_downgrade() {
+        let current =
+            mvm_http::Url::parse("https://registry-1.docker.io/v2/library/alpine/blobs/sha256:abc")
+                .expect("current URL parses");
+        let location = mvm_http::header::HeaderValue::from_static(
+            "http://production.cloudflare.docker.com/blob",
+        );
+
+        let error = validate_blob_redirect(&current, &location).unwrap_err();
+
+        assert!(error.to_string().contains("HTTPS downgrade"));
+    }
+
+    #[test]
+    fn blob_redirect_rejects_credentials_and_fragments() {
+        let current = mvm_http::Url::parse("https://registry.example/v2/blobs/sha256:abc")
+            .expect("current URL parses");
+        for value in [
+            "https://user:pass@registry.example/blob",
+            "https://registry.example/blob#fragment",
+        ] {
+            let location = mvm_http::header::HeaderValue::from_str(value)
+                .expect("test redirect header is valid");
+
+            let error = validate_blob_redirect(&current, &location).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("must not contain credentials or a fragment")
+            );
+        }
+    }
+
+    #[test]
+    fn display_url_redacts_signed_query() {
+        let url =
+            mvm_http::Url::parse("https://cdn.example/blob?token=secret").expect("URL parses");
+
+        assert_eq!(display_url(&url), "https://cdn.example/blob");
     }
 }
