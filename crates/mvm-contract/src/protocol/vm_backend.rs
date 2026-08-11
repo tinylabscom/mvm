@@ -493,18 +493,8 @@ pub struct VmCapabilities {
     pub virtiofs_root: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
-    #[serde(default = "default_resource_controls")]
+    #[serde(default)]
     pub resource_controls: crate::protocol::resource_controls::ResourceControls,
-}
-
-fn default_resource_controls() -> crate::protocol::resource_controls::ResourceControls {
-    use crate::protocol::resource_controls::{CpuControl, ResourceControls, WallClockControl};
-    // The safe default is "enforces nothing", so an unset value understates
-    // rather than overstates what a backend does.
-    ResourceControls {
-        cpu: CpuControl::None,
-        wall_clock: WallClockControl::None,
-    }
 }
 
 /// The capabilities a run/plan requires from its backend.
@@ -1362,6 +1352,23 @@ impl BackendKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_resource_controls_deserialize_to_the_fail_closed_default() {
+        let mut encoded = serde_json::to_value(VmCapabilities::default())
+            .expect("default capabilities serialize");
+        encoded
+            .as_object_mut()
+            .expect("capabilities serialize as an object")
+            .remove("resource_controls");
+
+        let decoded: VmCapabilities =
+            serde_json::from_value(encoded).expect("legacy capabilities deserialize");
+        assert_eq!(
+            decoded.resource_controls,
+            crate::protocol::resource_controls::ResourceControls::default()
+        );
+    }
 
     #[test]
     fn every_label_parses_back_to_the_kind_that_rendered_it() {

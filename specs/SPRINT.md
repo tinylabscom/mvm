@@ -222,11 +222,19 @@
       catch the actionable snapshot-I/O, no-op stage-name, torn-tail, and grant
       parser mutants; the static gate rejects accepted misses outside the
       pinned surface; 26 moved libkrun identities name their current file; and
-      14 obsolete misses were removed, reducing the accepted baseline from 83
-      to 69 without adding a waiver. Focused mutation proofs, affected-package
-      all-target Clippy, the workspace unit/integration suite, formatting, and
-      the static surface gate are green. The exact Linux Security workflow
-      rerun remains the final merge-and-close gate.
+      15 obsolete misses were removed, reducing the accepted baseline from 83
+      to 68 without adding a waiver. The first exact rerun exposed six further
+      survivors: the contract's omitted resource-control default plus hostd's
+      exact broker byte limit, admitted digest equality, host CPU mechanism
+      truth table, explicit deferred-audit flush, and drop-time flush. Direct
+      witnesses now catch all six; the complete contract mutation shard and a
+      focused five-mutant hostd proof are green. Workspace all-target Clippy,
+      formatting, and the static surface gate are also green. The workspace
+      suite passed every repaired area but hit one unrelated host-agent
+      socket-bind timeout; its isolated integration rerun passed 4/4. A clean
+      exact Linux Security workflow rerun remains the final merge gate; a
+      subsequent scheduled or release run is still required before issue
+      closure.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,

@@ -100,11 +100,17 @@ mentions it.
       `mvm-agentd` mutants; accepted misses fail closed when their files leave
       the pinned surface; moved libkrun identities now name their current file;
       and obsolete accepted misses were removed, reducing the baseline from 83
-      to 69 without adding a waiver. Focused mutation proofs, affected-package
-      all-target Clippy, the workspace unit/integration suite, formatting, and
-      the static surface gate pass on the fix branch. The exact Linux Security
-      workflow and clean scheduled or release run remain the merge-and-close
-      gates.
+      to 68 without adding a waiver. The first exact rerun exposed one
+      default-equivalent contract survivor and five hostd survivors; direct
+      witnesses now cover omitted fail-closed resource controls, exact broker
+      byte limits, admitted digest equality, the host CPU mechanism truth
+      table, explicit deferred-audit flushing, and drop-time flushing. Focused
+      mutation proofs, workspace all-target Clippy, formatting, and the static
+      surface gate pass on the fix branch. The workspace suite passed every
+      repaired area but hit one unrelated host-agent socket-bind timeout; its
+      isolated integration rerun passed 4/4. A clean exact Linux Security
+      workflow and subsequent scheduled or release run remain the
+      merge-and-close gates.
 - [ ] **#2289 — finish the kernel freshness closeout.** Linux 6.12.103 and the
       verified shared hash are merged in #2301, and kernel build/freshness CI
       passed. Build the release artifacts, run the verified-boot and
