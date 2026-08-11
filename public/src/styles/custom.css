@@ -216,12 +216,27 @@ html {
 [data-has-sidebar] main table {
   border: 1px solid var(--color-glass-border);
   border-radius: 0.75rem;
+  /* `separate` (not `collapse`) is load-bearing: a collapsed table drops
+     the border-radius above entirely, which is why these corners rendered
+     square. Zero spacing keeps the cell hairlines reading as single rules. */
+  border-collapse: separate;
   border-spacing: 0;
 }
 
+/* Starlight's own cell rule zeroes padding-inline-start, so text sat flush
+   against the cell edge. Pad both sides and give rows enough vertical room
+   that a wrapped two-line cell doesn't crowd its neighbours. */
 [data-has-sidebar] main th,
 [data-has-sidebar] main td {
   border-color: var(--color-glass-border);
+  padding: 0.7rem 1rem;
+}
+
+/* With `separate`, each cell draws its own bottom rule; suppressing it on
+   the final row stops a stray hairline cutting across the rounded corners. */
+[data-has-sidebar] main tbody tr:last-child > th,
+[data-has-sidebar] main tbody tr:last-child > td {
+  border-bottom: 0;
 }
 
 /* Docs asides (:::tip / :::note / :::caution / :::danger callouts) —
