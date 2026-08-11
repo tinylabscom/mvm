@@ -1032,12 +1032,31 @@ fn prepare_guest_filesystems_for_stop(vsock_uds: &str) -> Result<()> {
     require_guest_filesystem_flush(response)
 }
 
+/// Two spans, emitted at debug, splitting teardown into the only two things it
+/// does. `stop_transient` is one opaque number to the launch sample, and the
+/// guest flush and the kill-and-wait have unrelated costs and unrelated fixes —
+/// a vsock round-trip the guest controls, versus a signal plus a host-side poll
+/// loop. Without the split, a slow teardown cannot be attributed to either.
 fn stop_after_guest_flush(
     prepare: impl FnOnce() -> Result<()>,
     terminate: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    prepare()?;
-    terminate()
+    let flush_started = Instant::now();
+    let prepared = prepare();
+    tracing::debug!(
+        ms = flush_started.elapsed().as_secs_f64() * 1000.0,
+        ok = prepared.is_ok(),
+        "fc stop: guest filesystem flush"
+    );
+    prepared?;
+
+    let terminate_started = Instant::now();
+    let terminated = terminate();
+    tracing::debug!(
+        ms = terminate_started.elapsed().as_secs_f64() * 1000.0,
+        "fc stop: signal + exit wait"
+    );
+    terminated
 }
 
 impl RunningVm for FcRunningVm {

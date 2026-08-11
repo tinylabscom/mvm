@@ -1571,13 +1571,23 @@ pub fn resolve_launch(
     // `run_supervisor` dispatch. Routing template restores through
     // admission would add an `admit_for_run` call here and a
     // `populate_audit_substrate` invocation after the struct literal.
+    // `admit_ms` is a window, not a call: it spans config assembly, admission,
+    // and the two artifact attachments. Admission instruments itself, and its
+    // spans account for roughly half the window, so the rest needs naming
+    // before any of it can be acted on.
+    let t_build = std::time::Instant::now();
     let mut start_config = build_start_config(shape, &vm_name, &image, &boot);
+    tracing::debug!(
+        ms = t_build.elapsed().as_secs_f64() * 1000.0,
+        "admit window: build_start_config"
+    );
     let mut use_snapshot = boot.use_snapshot;
 
     // Admit the transient run as a locally-signed workload. Setting
     // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
     // `network_policy` and chain-audit the run. Force cold boot when admitted —
     // snapshot restore is unavailable for workload admission.
+    let t_admission = std::time::Instant::now();
     if let Some(admit_fn) = admit
         && let Some(sub) = admit_fn(std::path::Path::new(&image.rootfs), &vm_name)?
     {
@@ -1587,9 +1597,31 @@ pub fn resolve_launch(
         start_config.config_files.extend(sub.config_files);
         use_snapshot = false;
     }
+    tracing::debug!(
+        ms = t_admission.elapsed().as_secs_f64() * 1000.0,
+        "admit window: admission"
+    );
+
+    let t_overlay = std::time::Instant::now();
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
+    tracing::debug!(
+        ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
+        "admit window: attach runtime overlay"
+    );
+
+    let t_initramfs = std::time::Instant::now();
     crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
+    tracing::debug!(
+        ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
+        "admit window: attach universal initramfs"
+    );
+
+    let t_status = std::time::Instant::now();
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
+    tracing::debug!(
+        ms = t_status.elapsed().as_secs_f64() * 1000.0,
+        "admit window: runtime source status"
+    );
     marks.admitted = marks.now();
 
     Ok(ResolvedLaunch {
