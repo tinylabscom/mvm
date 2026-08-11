@@ -1230,3 +1230,23 @@ nav[aria-label="Main"] ul ul li {
     display: flex;
   }
 }
+
+/* ── Docs sidebar scrollbar ──
+ *
+ *  The sidebar pane is the only scrollable region on a docs page, and its
+ *  scrollbar sat against the content as a permanent vertical rule. Hidden
+ *  rather than restyled: wheel, trackpad, keyboard and drag scrolling all
+ *  still work, and the group headings already signal there is more below.
+ *
+ *  Scoped to the sidebar deliberately — the document scrollbar stays, since
+ *  on a long docs page it is the reader's only cue to how far through they
+ *  are.
+ */
+[data-has-sidebar] .sidebar-pane {
+  scrollbar-width: none;
+}
+
+[data-has-sidebar] .sidebar-pane::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
