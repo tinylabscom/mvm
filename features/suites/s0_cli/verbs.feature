@@ -34,3 +34,6 @@ Feature: mvmctl top-level CLI surface
 
   Scenario: every CLI command and subcommand help fits within 80 columns
     Then every mvmctl command and subcommand help fits within 80 columns
+
+  Scenario: every alternative CLI help entry point fits within 80 columns
+    Then every mvmctl command and subcommand alternative help entry point fits within 80 columns
