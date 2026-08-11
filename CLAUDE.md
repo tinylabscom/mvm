@@ -170,9 +170,11 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ## Security model
 
-mvm makes fifteen CI-enforced security claims (numbered 1–15), plus two
-`Preview` claims: 16 (egress-substitution leak-gate, ADR-023) and 17
-(workload input plane). For both, witnesses are machine-checked but
+mvm makes fifteen CI-enforced security claims (numbered 1–15), plus three
+`Preview` claims: 16 (egress-substitution leak-gate, ADR-023), 17
+(workload input plane) and 18 (workload resource bounding — admission
+ceiling + host-wide budget + spawn-time CPU scope). For all three,
+witnesses are machine-checked but
 promotion into ADR-001's numbered prose is a pending maintainer
 decision, mirroring claim 14's path. Each one is
 backed by a test or a workflow gate. **ADR-001
@@ -181,7 +183,7 @@ for the claim numbering, threat model, and per-backend tier matrix;
 this section is the summary.
 
 **The ledger is the claims table inside ADR-001**, not a separate
-catalog file: `xtask check-claim-catalog` parses that table (rows 1–17,
+catalog file: `xtask check-claim-catalog` parses that table (rows 1–18,
 witnesses spelled `fn:<test_name>` / `ci:<job_name>`) and fails when a
 named witness stops existing. `model/claims.toml` is the parallel
 conformance ID register that `xtask check-conformance` reads. There is
@@ -455,6 +457,29 @@ length-and-hash match, not an identity, and encoding, derivation and a
 window-straddling split defeat the scan permanently. ADR-001's ledger
 carries the full limits note, marked closed or open individually; do not
 paraphrase this row as enforced without it.
+
+`Preview` claim 18 — **a workload's resource consumption is bounded at
+admission, and bound at spawn where the host has a mechanism**. Admission
+is the strong half and holds everywhere: an operator-configured
+per-workload ceiling (`max_cpu_millicores` / `max_memory_mib` /
+`max_wall_clock_secs`) plus a host-wide budget
+(`host_budget_memory_mib` / `host_budget_cpu_millicores`) that refuses a
+boot whose memory, on top of every live machine's admitted charge, would
+exceed the headroom (`crates/mvm-hostd/src/admission_budget.rs`). The
+budget counts only machines carrying a live pid marker — the same probe
+the fork path trusts, so a crashed VM cannot lock the host out — and
+counts each machine's configured maximum rather than the balloon's
+current commitment. CPU is the partial half: a granted share wraps the
+VMM spawn in a systemd transient scope and the achieved tier is read back
+off `cpu.max` and audited, on Linux with a systemd user session and
+nowhere else — macOS has no cgroup equivalent, so a CPU grant there is
+`declared` and `--prod` refuses it. Wall clock is claimed by nothing: it
+is authored, ceiling-checked, admitted and audited as a tier label, and
+no code in this tree stops a workload at its deadline. wasm fuel/epoch is
+likewise declared and unwired, and a restored or warm-claimed child is
+admission-bounded without its host-side CPU control being re-armed.
+ADR-001's ledger carries the "Preview 18 limits" note; do not paraphrase
+this row as enforced without it.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port

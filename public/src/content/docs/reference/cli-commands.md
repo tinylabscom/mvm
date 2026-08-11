@@ -617,8 +617,15 @@ deny-all.
 Every grant is bounded by the host operator's ceiling
 (`max_cpu_millicores`, `max_memory_mib`, `max_wall_clock_secs` in
 `~/.mvm/config/config.toml`), which no surface above can reach and which is
-checked before the plan is signed. Separately, `default_cpu_millicores` and
-`default_wall_clock_secs` supply defaults for dimensions nothing else named.
+checked before the plan is signed. The ceiling bounds one workload; two further
+keys bound the *sum* across the host — `host_budget_memory_mib` and
+`host_budget_cpu_millicores` refuse a boot whose figures, added to every live
+machine's admitted charge, would exceed the headroom. Both are unset by
+default. The total counts only machines whose supervisor process is actually
+alive, so a VM that crashed without cleanup cannot lock the host out, and it
+counts each machine's configured maximum rather than its current commitment,
+which the memory balloon moves at runtime. Separately, `default_cpu_millicores`
+and `default_wall_clock_secs` supply defaults for dimensions nothing else named.
 There is no host-wide egress default: one would open outbound access for every
 workload that never asked for any. Relative manifest volume host paths
 are resolved relative to the manifest file; volume validation keeps the shared

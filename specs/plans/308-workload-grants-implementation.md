@@ -2847,3 +2847,43 @@ that overstates is worse than no row.
 - `budget_counts_the_configured_maximum_not_current_usage`
 - `an_empty_host_admits_a_boot_within_headroom`
 - `xtask check-claim-catalog` passes with the new row
+
+**Status: COMPLETE.**
+
+- [x] Budget arithmetic — `crates/mvm-contract/src/grants/budget.rs`
+      (`HostBudget`, `MachineCharge`, `BudgetViolation`); pure, saturating,
+      memory-before-CPU refusal order.
+- [x] Host-side measurement — `crates/mvm-hostd/src/admission_budget.rs`.
+      Each boot writes `<vm_state_dir>/admitted-charge.json`; `committed_at`
+      sums only state dirs that pass
+      `mvm_vmm::host::process_liveness::state_dir_has_live_process` — the
+      probe `checkpoint::vm_is_running` (the fork path) already uses. The
+      charge is written once, at admission, and no runtime path rewrites it,
+      so the balloon cannot move it.
+- [x] Wired at `plan_admission::admit_for_run`, immediately after
+      `admit_grants` and still ahead of the keystore; the charge is recorded
+      in `admit_and_start` after a successful start, and a record failure
+      rolls the launch back through the shared `undo_launch` helper.
+- [x] Operator config — `host_budget_memory_mib` / `host_budget_cpu_millicores`
+      in `MvmConfig`, surfaced as `MvmConfig::host_budget()`. Unset by default.
+- [x] ADR-001 ledger row **18** (`Preview`) + the "Preview 18 limits" note +
+      `model/claims.toml` `MVM-SEC-18` + `features/suites/s28_admission_budget/`
+      + regenerated `CONFORMANCE.md`. `check-claim-catalog`,
+      `check-witness-citations`, `check-honesty`, `check-conformance`,
+      `check-no-overclaim` and the re-pinned `check-mutation-witnesses` are all
+      clean.
+
+**One deviation from the brief above, and it is the honest direction.** The
+brief said the row should state that "the wall-clock timer exists only on the
+libkrun tier". It does not exist on any tier in this tree: there is no
+supervisor timer, `EnforcedTier::SupervisorTimer` is produced by no production
+code path, and `cpu_scope::enforced_grants_for_vm` hardcodes
+`wall_clock: EnforcedTier::Declared`. A wall-clock grant is authored,
+ceiling-checked, admitted, projected and audited, and nothing stops the
+workload at the deadline — and because `ResourceControls::for_backend` declares
+`WallClockControl::SupervisorTimer` for Firecracker/libkrun/QEMU/HVF,
+`negotiate_grants` accepts such a grant and it passes the `--prod`
+enforceability gate with nothing behind it. Row 18's limit 2 says exactly that
+rather than citing a witness for a mechanism that is not there. Wiring the
+timer, and re-arming CPU on the restore and warm-claim paths (limit 4), are the
+remaining enforcement work.
