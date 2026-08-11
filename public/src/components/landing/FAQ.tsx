@@ -60,7 +60,10 @@ export function FAQ() {
         <div className="divide-y divide-edge/30 border-t border-edge/30">
           {FAQ_ITEMS.map((item, i) => (
             <Reveal key={item.q} delay={i * 40}>
-              <details className="group py-5">
+              {/* First row open by default so the section doesn't close the
+                  page on a stack of unanswered questions — and the first
+                  question is the one most readers actually arrive with. */}
+              <details className="group py-5" open={i === 0}>
                 <summary className="flex cursor-pointer list-none items-start justify-between gap-4 text-base font-semibold leading-snug text-title marker:content-none">
                   {item.q}
                   <span

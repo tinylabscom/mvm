@@ -28,7 +28,9 @@ export function CredibilityStrip() {
                   key={f.label}
                   className="flex items-baseline gap-2 font-mono text-xs lowercase"
                 >
-                  <span className="text-dim">{f.label}</span>
+                  {/* text-label, not text-dim: dim measured 2.48:1 dark / 2.01:1 light
+                      against a 4.5 requirement. */}
+                  <span className="text-label">{f.label}</span>
                   <span className="text-emphasis">{f.value}</span>
                 </li>
               ))}

@@ -44,7 +44,9 @@ export function Boundary() {
           {/* Right half: the figure. */}
           <div className="flex flex-col justify-center bg-accent-low p-8 sm:p-10 lg:p-12">
             <p className="font-display text-5xl font-bold text-title sm:text-6xl">1</p>
-            <p className="mt-2 max-w-xs text-sm leading-relaxed text-body">
+            {/* text-emphasis, not text-body: body measured 4.26:1 on the accent-low
+                fill, just under the 4.5 AA floor for this size. */}
+            <p className="mt-2 max-w-xs text-sm leading-relaxed text-emphasis">
               kernel per workload &mdash; no NIC, no shared namespace, vsock
               as the only way out.
             </p>
