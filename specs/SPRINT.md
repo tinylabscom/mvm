@@ -57,6 +57,13 @@
       in-repo builder image. A focused regression test forbids the stale
       `sudo`, `darwin.linux-builder`, and `/etc/nix` instructions.
 
+- [x] The hostd eBPF observability-target test now uses the shared environment
+      guard for `MVM_HOME`, preventing parallel tests from observing a temporary
+      home and restoring the original value when the test completes. Admission
+      tests that read the host's configured grant ceiling now also hold that
+      guard and use an explicit isolated host configuration, so bounded-host
+      fixtures cannot leak their ceiling into parallel admission tests.
+
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
       rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three
