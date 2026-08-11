@@ -1,47 +1,55 @@
-import { Card, CardHeader, CardTitle, CardDescription } from "../ui/card";
+import { GlowCard } from "./primitives/GlowCard";
+import { Eyebrow } from "./primitives/Eyebrow";
+import { Reveal } from "./primitives/Reveal";
+import { Bloom } from "./primitives/Bloom";
 
-const features = [
+const features: Array<{
+  icon: string;
+  title: string;
+  description: string;
+  accent: 1 | 2 | 3;
+}> = [
   {
     icon: "layers",
     title: "Multi-Backend",
     description:
-      "Auto-detects your platform. Firecracker on Linux, Apple Virtualization on macOS 26+, and libkrun on older macOS. No shared-kernel fallback.",
-    accent: "from-accent/20 to-accent/5",
+      "Auto-detects your platform. HVF on macOS 26+ Apple Silicon, libkrun on macOS 13–25, Firecracker on Linux KVM. No shared-kernel fallback.",
+    accent: 1,
   },
   {
     icon: "package",
     title: "Nix-Based Builds",
     description:
-      "Reproducible microVM images from Nix flakes. Cached builds — rebuilds are near-instant. Artifact sizes reported on every build.",
-    accent: "from-nix/20 to-nix/5",
+      "Reproducible microVM images from Nix flakes — the same flake always produces the same image. Builds persist to a content-addressed slot, so unchanged manifests skip the rebuild.",
+    accent: 2,
   },
   {
     icon: "blocks",
-    title: "Service Builders",
+    title: "Signed & Audited",
     description:
-      "mkPythonService, mkNodeService, mkStaticSite — high-level helpers that return { package, service, healthCheck } for composition.",
-    accent: "from-rust/20 to-rust/5",
+      "Every run admits a signed ExecutionPlan and appends a chain-signed entry to the audit log. mvmctl trust audit verify catches tampering; mvmctl doctor reports the live security posture.",
+    accent: 3,
   },
   {
     icon: "lock",
     title: "No SSH. Ever.",
     description:
       "Host-brokered control uses typed vsock or the backend equivalent. Guests do not need SSH, inbound ports, or a host daemon you operate.",
-    accent: "from-green/20 to-green/5",
+    accent: 1,
   },
   {
     icon: "zap",
-    title: "Snapshots & Templates",
+    title: "Snapshots & Manifests",
     description:
-      "Build reusable images with size tracking. Snapshot for sub-2s boot. Inspect sizes and status with template info.",
-    accent: "from-amber/20 to-amber/5",
+      "Restore a running VM from snapshot in 1–2 seconds. mvmctl manifest info inspects the current revision, slot path, and provenance for any project.",
+    accent: 2,
   },
   {
     icon: "terminal",
     title: "Developer-First",
     description:
-      "Scaffold presets for Python, Node, HTTP, and Postgres. Actionable error hints. System diagnostics via doctor.",
-    accent: "from-accent/20 to-accent/5",
+      "Scaffold presets for minimal, http, postgres, worker, and python projects. Actionable error hints. System diagnostics via doctor.",
+    accent: 3,
   },
 ];
 
@@ -80,42 +88,32 @@ const icons: Record<string, JSX.Element> = {
 
 export function Features() {
   return (
-    <section className="relative w-full px-6 py-28 sm:px-8 lg:py-36">
-      {/* Subtle grid background */}
-      <div
-        className="pointer-events-none absolute inset-0 opacity-[0.03]"
-        style={{
-          backgroundImage:
-            "linear-gradient(var(--color-accent) 1px, transparent 1px), linear-gradient(90deg, var(--color-accent) 1px, transparent 1px)",
-          backgroundSize: "60px 60px",
-        }}
-      />
+    <section className="relative w-full overflow-hidden px-6 py-28 sm:px-8 lg:py-36">
+      <Bloom accents={[2, 3]} />
 
       <div className="relative mx-auto max-w-6xl">
         <div className="mb-16 text-center lg:mb-20">
-          <p className="mb-3 text-sm font-medium uppercase tracking-widest text-accent">
-            How it works
-          </p>
+          <Eyebrow n="02" className="justify-center text-center">
+            Capabilities
+          </Eyebrow>
           <h2 className="text-3xl font-bold text-title sm:text-4xl">
             Everything you need to run microVMs
           </h2>
         </div>
 
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {features.map((f) => (
-            <Card key={f.title} className="group relative overflow-hidden">
-              {/* Gradient top edge */}
-              <div
-                className={`absolute inset-x-0 top-0 h-px bg-linear-to-r ${f.accent}`}
-              />
-              <CardHeader>
+          {features.map((f, i) => (
+            <Reveal key={f.title} delay={i * 80}>
+              <GlowCard accent={f.accent} className="group">
                 <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg border border-edge/60 bg-canvas text-accent transition-colors group-hover:border-accent/40 group-hover:bg-accent/10">
                   {icons[f.icon]}
                 </div>
-                <CardTitle>{f.title}</CardTitle>
-                <CardDescription>{f.description}</CardDescription>
-              </CardHeader>
-            </Card>
+                <h3 className="mb-2 text-lg font-semibold leading-none tracking-tight text-title">
+                  {f.title}
+                </h3>
+                <p className="text-sm leading-relaxed text-body">{f.description}</p>
+              </GlowCard>
+            </Reveal>
           ))}
         </div>
       </div>
