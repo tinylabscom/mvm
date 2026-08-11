@@ -8,6 +8,27 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 const ONE_LINER =
   "curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh";
 
+// Splits on "/" and inserts a <wbr> right after each one, so the browser's
+// only wrap opportunities inside the URL are slash boundaries — never mid
+// path-segment. Default (unmodified) overflow-wrap only breaks at existing
+// break characters, so once the wrap points are placed deliberately, no
+// segment ever splits mid-token the way the un-broken command used to
+// under the mono face (which sets ~20% wider than the sans it was tuned
+// for). Space stays a break point via normal browser behaviour.
+function withSlashBreaks(command: string) {
+  const parts = command.split("/");
+  return parts.map((part, i) => (
+    <span key={i}>
+      {part}
+      {i < parts.length - 1 && (
+        <>
+          /<wbr />
+        </>
+      )}
+    </span>
+  ));
+}
+
 function InstallRow({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -20,15 +41,18 @@ function InstallRow({ command }: { command: string }) {
   return (
     <button
       type="button"
-      className="group flex w-full items-center gap-3 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 text-left backdrop-blur transition-all hover:border-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-page"
+      className="group flex w-full flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 text-left backdrop-blur transition-all hover:border-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-page"
       onClick={copy}
       aria-label="Copy install command"
     >
       <span className="text-accent/60 text-sm">$</span>
-      <code className="flex-1 text-left font-mono text-sm text-emphasis/90 overflow-x-auto">
-        {command}
+      {/* basis-full pushes the Copy badge onto its own line on narrow
+          viewports instead of squeezing the command into a slim leftover
+          column — the command gets the row's full width to wrap into. */}
+      <code className="order-1 min-w-0 flex-1 basis-full text-sm leading-relaxed break-normal font-mono text-emphasis/90 sm:basis-auto">
+        {withSlashBreaks(command)}
       </code>
-      <span className="shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent">
+      <span className="order-2 shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent sm:ml-auto">
         {copied ? "Copied!" : "Copy"}
       </span>
     </button>

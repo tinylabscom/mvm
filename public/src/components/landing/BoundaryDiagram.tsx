@@ -28,15 +28,15 @@
 // the accessibility tree's layout at a time; both are `aria-hidden` because
 // the figure's `aria-label` is the real text alternative.
 
-const HOST_LABEL = "YOUR HOST";
+const HOST_LABEL = "your host";
 const HOST_SUB = "mvmctl · no daemon";
-const GUEST_LABEL = "GUEST";
+const GUEST_LABEL = "guest";
 const GUEST_SUB = "microVM";
 const KERNEL_LABEL = "own kernel";
 const ROOTFS_LABEL = "own root filesystem";
 const NIC_LABEL = "no network interface";
 const VSOCK_LABEL = "vsock";
-const ENDPOINT_LABEL = "SUBSTITUTION ENDPOINT";
+const ENDPOINT_LABEL = "substitution endpoint";
 const ENDPOINT_SUB = "deny-all by default";
 
 const DESCRIPTION =

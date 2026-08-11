@@ -36,13 +36,15 @@ export function Architecture() {
   return (
     <Section space="tight" className="border-y border-edge/30 bg-raised/50">
       <h2 className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
-        One CLI. The backend picked for you.
+        One Boundary. Three Backends.
       </h2>
       <p className="mt-4 max-w-2xl text-base leading-relaxed text-body">
         mvmctl reads your OS, chip, and macOS version and picks a backend:
         HVF on macOS 26+ Apple Silicon, libkrun on macOS 13–25, Firecracker
-        on Linux with KVM. Every one of them boots the guest over vsock with
-        no NIC — no SSH path in, no host daemon to run.
+        on Linux with KVM. Which VMM runs underneath isn&rsquo;t the point —
+        the point is that it doesn&rsquo;t change the guarantee. Every one of
+        them boots the guest with its own kernel, no NIC, and vsock as the
+        only way out.
       </p>
 
       <div className="mt-8 max-w-3xl space-y-6">

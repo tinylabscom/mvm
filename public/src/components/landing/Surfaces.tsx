@@ -61,13 +61,14 @@ export function Surfaces() {
     <Section rule space="roomy" className="bg-raised">
       <Eyebrow>SDKs and CLI</Eyebrow>
       <h2 className="mb-3 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
-        Three surfaces, one execution path
+        Three Ways In
       </h2>
       <p className="mb-8 max-w-2xl text-base leading-relaxed text-body">
-        A shell, a declarative SDK, or an imperative runtime SDK — pick the
-        one that fits, they all admit through the same signed{" "}
-        <code className="font-mono text-emphasis/90">mvmctl</code> path.
-        Language support differs by surface; see below.
+        You&rsquo;ve seen the boundary and watched a workload cross it.
+        Here&rsquo;s how you drive it day to day: a shell, a declarative SDK,
+        or an imperative runtime SDK — pick the one that fits, they all admit
+        through the same signed <code className="font-mono text-emphasis/90">mvmctl</code>{" "}
+        path. Language support differs by surface; see below.
       </p>
 
       <Tabs defaultValue="cli" className="max-w-3xl">

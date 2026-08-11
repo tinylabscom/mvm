@@ -56,9 +56,10 @@ export function Security() {
     <Section rule space="tight">
       <Eyebrow>Security</Eyebrow>
       <h2 className="mb-3 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
-        Tested claims, not adjectives
+        Trust The Boundary
       </h2>
       <p className="mb-4 max-w-2xl text-base leading-relaxed text-body">
+        The boundary above isn&rsquo;t a claim you have to take on faith.
         Four of mvm's CI-enforced security claims, each backed by a named
         test or CI job. A malicious host, multi-tenant guests, and
         hardware-backed key attestation are explicitly out of scope.
