@@ -58,6 +58,20 @@ def greet(name: str) -> str:
     code: `# expect: "hello ari"`,
   },
   {
+    id: "declare-typescript",
+    label: "TypeScript",
+    language: "typescript",
+    source: "crates/mvm-sdk/sdks/typescript/README.md",
+    code: `import * as mvm from "@runmvm/mvm";
+
+mvm.workload({ id: "hello" });
+
+export const greet = mvm.app({
+  image: mvm.node_image({ node: "22" }),
+  resources: mvm.resources({ cpu: 1, memory_mb: 256 }),
+})((name: string): string => \`hello \${name}\`);`,
+  },
+  {
     id: "sdk-python",
     label: "Python",
     language: "python",
