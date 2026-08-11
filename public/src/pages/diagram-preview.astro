@@ -1,0 +1,57 @@
+---
+// Unlinked scratch route for comparing the two hero-diagram concepts
+// (Plan: "hero diagram uglh/uninformative" fix) side by side, on the
+// site's real background and token system, at roughly the hero's right
+// column width. Not linked from navigation — screenshot-only, delete once
+// the maintainer picks a concept and it's wired into Hero.tsx.
+import "../../tailwind.css";
+import "../styles/custom.css";
+import { HeroStackDiagram } from "../components/landing/HeroStackDiagram";
+import { HeroNestDiagram } from "../components/landing/HeroNestDiagram";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Hero diagram concepts (preview)</title>
+  </head>
+  <body class="min-h-screen bg-canvas px-6 py-16 text-body">
+    <main class="mx-auto flex max-w-2xl flex-col gap-20">
+      <header class="flex flex-col gap-2">
+        <p class="font-mono text-sm text-label">internal preview — not linked, not shipped</p>
+        <h1 class="font-display text-2xl font-bold text-title">Hero diagram concepts</h1>
+        <p class="text-body">
+          Two replacements for the current hero diagram, for comparison. Constrained to roughly
+          the hero's right-column width.
+        </p>
+      </header>
+
+      <section class="flex flex-col gap-4">
+        <div>
+          <p class="font-mono text-xs font-semibold tracking-wide text-accent-2 uppercase">Concept A</p>
+          <h2 class="font-display text-xl font-bold text-title">Layered stack cross-section</h2>
+          <p class="mt-1 text-sm text-body">
+            Where the boundary actually sits in the stack — the guest gets its own kernel above
+            the seam, not the host's.
+          </p>
+        </div>
+        <HeroStackDiagram client:load />
+      </section>
+
+      <section class="flex flex-col gap-4">
+        <div>
+          <p class="font-mono text-xs font-semibold tracking-wide text-accent-2 uppercase">Concept B</p>
+          <h2 class="font-display text-xl font-bold text-title">Nested containment (matryoshka)</h2>
+          <p class="mt-1 text-sm text-body">
+            The matryoshka containment model — vsock is the one channel that pierces every ring.
+          </p>
+        </div>
+        <HeroNestDiagram client:load />
+      </section>
+    </main>
+  </body>
+</html>
