@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -43,13 +43,15 @@ for detailed scope and acceptance criteria.
       canonical budget table, and gates remain open.
 
 ## In-flight plans
-- [~] Plan 315 — Bootstrap means machine-ready
+- [x] Plan 315 — Bootstrap means machine-ready
       (`specs/plans/315-bootstrap-machine-readiness.md`)
   - [x] Bootstrap acquires and verifies both builder image and workload kernel
   - [x] Downloaded/local kernel publication is staged and verified reads fail closed
   - [x] Local dm-verity capability uses resolved config, not raw-image strings
-  - [~] Workspace tests expose unrelated non-deterministic `mvm-hostd` failures;
-        Linux all-target Clippy remains for CI or a supported builder entry point
+  - [x] Full serialized workspace tests and doctests, host all-target Clippy,
+        the 461-test `xtask --features man` CI lane, and 172 BDD scenarios pass;
+        KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0
+        reuse, and two fully warm Alpine runs complete without a second Stage 0
 
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)

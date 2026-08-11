@@ -10,7 +10,7 @@
 
 ## Current issue delivery
 
-- [~] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
+- [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
       successful bootstrap does not defer an infrastructure build to the next
       `machine run`. Kernel downloads verify before replacement, local Stage 0
@@ -18,12 +18,17 @@
       verified reads reject any crash-skewed cache. Interrupted staging is swept
       on retry while the persistent Nix store remains warm. Local capability validation
       uses the resolved kernel config instead of searching a KALLSYMS-free raw
-      image for symbol strings. Formatting, focused tests, all 172 BDD
-      scenarios, workspace check, and host workspace all-target Clippy pass.
-      Full workspace tests pass the changed crates but expose unrelated,
-      non-deterministic `mvm-hostd` shared-state/timing failures; the Linux
-      all-target Clippy rerun remains for CI or a supported builder-VM entry
-      point.
+      image for symbol strings. QEMU Stage 0 now has a reusable Nix-store disk,
+      an accurate guest clock, architecture-correct console wiring, and a
+      two-hour cold-build window. ARM64 workload kernels carry the console
+      drivers required by Firecracker and HVF/QEMU, while bounded OCI blob
+      redirects reach only exact trusted Docker CDN origins without forwarding
+      registry authorization. Formatting, workspace check, host workspace
+      all-target Clippy, the complete serialized workspace suite and doctests,
+      the exact 461-test `xtask --features man` CI lane, and all 172 BDD
+      scenarios pass. A KVM-backed ARM64 acceptance run completed cold
+      bootstrap and kernel publication, then ran Alpine twice from a fully warm
+      cache without launching Stage 0.
 
 - [~] HVF large-response integrity — **plan 315**. Restored bounded
       virtio-vsock host-to-guest credit accounting that had been removed while
