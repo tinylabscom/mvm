@@ -26,6 +26,13 @@ export default defineConfig({
       ],
       expressiveCode: {
         themes: ["github-dark"],
+        defaultProps: {
+          // Long shell/CLI samples were overflowing horizontally; wrap
+          // them and align wrapped continuations with the source
+          // line's indentation instead of resetting to column 1.
+          wrap: true,
+          preserveIndent: true,
+        },
         styleOverrides: {
           // A CSS var(), not a literal — Expressive Code emits this
           // straight into its generated stylesheet as --ec-brdCol, so the
