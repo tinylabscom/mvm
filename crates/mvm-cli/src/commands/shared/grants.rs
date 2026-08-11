@@ -80,6 +80,9 @@ pub(in crate::commands) fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result
     let resolved = resolve_grants(&layers);
     let provenance = *resolved.provenance();
     let plan_grants = resolved.into_plan_grants();
+    if let Some(grants) = plan_grants.as_ref() {
+        refuse_over_ceiling(grants, &provenance, inputs.config)?;
+    }
     let network_policy = enforced_network_policy(
         plan_grants.as_ref().and_then(|g| g.egress.as_ref()),
         inputs.net,
@@ -90,6 +93,35 @@ pub(in crate::commands) fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result
         network_policy,
         provenance,
     })
+}
+
+/// Refuse a resolved grant this host's ceiling will not admit, naming the
+/// surface that asked for it.
+///
+/// Admission runs the same ceiling against host config it reads itself, and
+/// that check is the authoritative one — nothing here can be skipped to get
+/// past it. What this adds is the one fact only the resolver holds: with four
+/// places a grant can come from, "this host allows at most 1000" leaves the
+/// user to guess which of them to edit, and the provenance says which.
+fn refuse_over_ceiling(
+    grants: &Grants,
+    provenance: &GrantProvenance,
+    config: &MvmConfig,
+) -> Result<()> {
+    let Err(violation) = config.grant_ceiling().admits_grants(grants) else {
+        return Ok(());
+    };
+    let source = match provenance.surface_for_dimension(violation.dimension) {
+        Some(surface) => format!(", asked for by the {} surface", surface.as_str()),
+        None => String::new(),
+    };
+    anyhow::bail!(
+        "grant exceeds this host's ceiling: {dimension} requested {requested}, host allows \
+         at most {ceiling}{source}",
+        dimension = violation.dimension,
+        requested = violation.requested,
+        ceiling = violation.ceiling,
+    )
 }
 
 /// The egress policy a run enforces.

@@ -376,6 +376,31 @@ impl LocalBackend {
     }
 }
 
+/// Rebuild the launch request for a persistent start from the stored
+/// definition.
+///
+/// Every field a start needs comes from the spec, `grants` included. A start
+/// that reassembled the request from sizing alone would let a permission set
+/// hold for the machine's first boot and lapse on every one after — deny-all
+/// for egress, and simply unbounded for CPU and wall clock. Split out from
+/// `start_persistent` so that is checkable without booting a VM.
+fn start_request_from_spec(
+    name: &str,
+    image: String,
+    memory_mib: u32,
+    spec: &mp::MachineSpec,
+) -> Result<LaunchRequest> {
+    let mut builder = LaunchRequest::builder(LifecycleMode::Persistent, image)
+        .name(name)
+        .cpus(spec.cpus)
+        .memory_mib(memory_mib)
+        .profile(spec.profile.clone());
+    if let Some(grants) = spec.grants.clone() {
+        builder = builder.grants(grants);
+    }
+    builder.build()
+}
+
 /// Build the persisted declarative spec a persistent launch writes.
 fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::MachineSpec {
     mp::MachineSpec {
@@ -743,12 +768,7 @@ impl LocalBackend {
         self.validate_sidecar_refs(name)?;
         let memory_mib =
             mvm_core::util::parse_human_size(&spec.memory).map_err(crate::local::backend_err)?;
-        let request = LaunchRequest::builder(LifecycleMode::Persistent, image)
-            .name(name)
-            .cpus(spec.cpus)
-            .memory_mib(memory_mib)
-            .profile(spec.profile.clone())
-            .build()?;
+        let request = start_request_from_spec(name, image, memory_mib, &spec)?;
         let outcome = self.attach_lease_and_boot(name, &request, false).await?;
         Ok(outcome.machine)
     }

@@ -2310,7 +2310,10 @@ allow_hosts = ["localhost:8443"]
 
         let declared = manifest_grants(MANIFEST);
         let config = mvm_core::user_config::load(None);
-        let resolved = resolve_run_grants(GrantInputs {
+        // The resolver refuses first and names the surface to go edit: with
+        // four places a grant can come from, the dimension alone is not
+        // actionable.
+        let early = resolve_run_grants(GrantInputs {
             cpu_limit_millicores: None,
             timeout_secs: None,
             allow_host: &[],
@@ -2319,7 +2322,27 @@ allow_hosts = ["localhost:8443"]
             manifest: Some(&declared),
             config: &config,
         })
-        .expect("resolving a grant is not where the ceiling applies");
+        .expect_err("the resolver refuses a grant over this host's ceiling");
+        let early = format!("{early:#}");
+        assert!(early.contains("ceiling"), "got: {early}");
+        assert!(
+            early.contains("manifest"),
+            "the refusal must name the surface that asked for it: {early}"
+        );
+
+        // Admission refuses independently, against host config it reads itself.
+        // That is the authoritative check — resolve with an unbounded config so
+        // the grant reaches it, and it must still refuse.
+        let resolved = resolve_run_grants(GrantInputs {
+            cpu_limit_millicores: None,
+            timeout_secs: None,
+            allow_host: &[],
+            net: false,
+            grants_file: None,
+            manifest: Some(&declared),
+            config: &MvmConfig::default(),
+        })
+        .expect("an unbounded config resolves the same grant");
 
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();

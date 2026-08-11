@@ -588,6 +588,15 @@ table, and the `~/.mvm/config/config.toml` defaults. Per dimension means a
 `--cpu-limit` on the command line does not discard an egress allowlist the
 manifest declared; each of CPU, wall clock, and egress is settled on its own.
 
+`machine create` is the verb that reads the `[grants]` table — from `--manifest
+<path>`, or from the `mvm.toml` / `Mvmfile.toml` in the current directory when
+`--image` is omitted. Transient `machine run` reads no project manifest at all
+(its own `--manifest` names a pre-built image, not an `mvm.toml`), so grants
+there come from `--cpu-limit`, `--timeout`, `--allow-host`, `--grants-file`, and
+the host config. That split is deliberate: discovering an `mvm.toml` from the
+working directory would let a manifest in an unrelated checkout cap a run that
+never meant to use it.
+
 ```toml
 # mvm.toml
 image = "alpine:3.20"

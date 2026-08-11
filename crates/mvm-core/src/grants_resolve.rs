@@ -72,17 +72,21 @@ pub struct GrantProvenance {
 }
 
 impl GrantProvenance {
-    /// Dimension/surface pairs that were actually authored, in a stable order.
+    /// The surface that authored the dimension a ceiling violation names.
+    ///
+    /// Takes the violation's own dotted path (`cpu.share_millicores`,
+    /// `wall_clock.secs`) rather than a bare dimension name, so a caller can
+    /// hand the refusal straight through without translating it. A path naming
+    /// something no surface authors — `memory_mib`, which is sized rather than
+    /// granted — yields `None`.
     #[must_use]
-    pub fn authored(&self) -> Vec<(&'static str, GrantSurface)> {
-        [
-            ("cpu", self.cpu),
-            ("wall_clock", self.wall_clock),
-            ("egress", self.egress),
-        ]
-        .into_iter()
-        .filter_map(|(name, surface)| surface.map(|s| (name, s)))
-        .collect()
+    pub fn surface_for_dimension(&self, dimension: &str) -> Option<GrantSurface> {
+        match dimension.split('.').next()? {
+            "cpu" => self.cpu,
+            "wall_clock" => self.wall_clock,
+            "egress" => self.egress,
+            _ => None,
+        }
     }
 }
 
@@ -266,13 +270,29 @@ mod tests {
             resolved.provenance().wall_clock,
             Some(GrantSurface::HostConfig)
         );
+        assert_eq!(resolved.provenance().egress, None);
+    }
+
+    #[test]
+    fn a_ceiling_violations_dimension_resolves_to_its_authoring_surface() {
+        // The violation's dotted path is what a refusal has in hand, so that is
+        // what the lookup has to accept.
+        let provenance = GrantProvenance {
+            cpu: Some(GrantSurface::Manifest),
+            wall_clock: Some(GrantSurface::Cli),
+            egress: None,
+        };
         assert_eq!(
-            resolved.provenance().authored(),
-            vec![
-                ("cpu", GrantSurface::Cli),
-                ("wall_clock", GrantSurface::HostConfig)
-            ]
+            provenance.surface_for_dimension("cpu.share_millicores"),
+            Some(GrantSurface::Manifest)
         );
+        assert_eq!(
+            provenance.surface_for_dimension("wall_clock.secs"),
+            Some(GrantSurface::Cli)
+        );
+        // Memory is sized, not granted, so no surface authored it.
+        assert_eq!(provenance.surface_for_dimension("memory_mib"), None);
+        assert_eq!(provenance.surface_for_dimension("egress"), None);
     }
 
     #[test]

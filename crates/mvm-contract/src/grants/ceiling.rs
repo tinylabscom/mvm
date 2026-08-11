@@ -38,8 +38,24 @@ impl GrantCeiling {
     /// fixed at VM creation rather than granted, but it still has to be
     /// bounded or a caller could reserve the entire host.
     pub fn admits(&self, grants: &Grants, memory_mib: u64) -> Result<(), CeilingViolation> {
+        // CPU first, memory second, wall clock last: when a request exceeds in
+        // more than one dimension the reported one has to be stable, or the
+        // refusal a user sees depends on evaluation order.
         self.admits_cpu(grants)?;
         self.admits_memory(memory_mib)?;
+        self.admits_wall_clock(grants)
+    }
+
+    /// Check only the dimensions a grant can author, for a caller holding the
+    /// grants but not a memory size — a surface settling what was asked for,
+    /// before anything has sized a VM.
+    ///
+    /// Not a second decision point: [`admits`](GrantCeiling::admits) is this
+    /// plus the memory check, and admission still runs the full one against
+    /// host config it reads itself. Calling this earlier buys a better message,
+    /// never a different verdict.
+    pub fn admits_grants(&self, grants: &Grants) -> Result<(), CeilingViolation> {
+        self.admits_cpu(grants)?;
         self.admits_wall_clock(grants)
     }
 
