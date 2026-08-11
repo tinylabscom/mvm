@@ -7,9 +7,10 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 const lines = [
   { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
   { text: '  python -c "print(2 + 2)"', delay: 500 },
-  { text: "  Pulling image and preparing a private root...", delay: 1200, dim: true },
-  { text: "  Booted. Own kernel. Network: deny-all.", delay: 2500, accent: true },
-  { text: "  Warm microVM start: milliseconds.", delay: 3100, accent: true },
+  { text: "  4", delay: 1900 },
+  { text: "  Pulling image and preparing a private root...", delay: 2500, dim: true },
+  { text: "  Booted. Own kernel. Network: deny-all.", delay: 3800, accent: true },
+  { text: "  Warm microVM start: milliseconds.", delay: 4400, accent: true },
 ];
 
 function TerminalAnimation() {
@@ -45,8 +46,19 @@ function TerminalAnimation() {
             {line.text}
           </div>
         ))}
-        {visibleLines < lines.length && (
-          <span className="inline-block h-4 w-2 animate-pulse bg-accent/70" />
+        {visibleLines < lines.length ? (
+          <span
+            className="site-terminal-cursor inline-block h-4 w-2 animate-pulse bg-accent/70"
+            aria-hidden="true"
+          />
+        ) : (
+          <div className="flex items-center gap-2 text-code-text">
+            <span className="text-accent">$</span>
+            <span
+              className="site-terminal-cursor inline-block h-4 w-2 animate-pulse bg-accent/70"
+              aria-hidden="true"
+            />
+          </div>
         )}
       </div>
     </div>

@@ -918,6 +918,16 @@ nav[aria-label="Main"] ul ul li {
   }
 }
 
+/* Terminal cursor block (hero animation + trailing shell prompt) blinks via
+   Tailwind's animate-pulse. Under reduced motion it stays put and visible —
+   present, just not flashing. */
+@media (prefers-reduced-motion: reduce) {
+  .site-terminal-cursor {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 /* Cursor-tracked radial highlight, positioned via --mx/--my set on
    pointermove. --glow is set per-instance in GlowCard.tsx. */
 .site-glow-card__sheen {
