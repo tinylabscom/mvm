@@ -2488,9 +2488,12 @@ mod tests {
         std::fs::write(&rootfs, b"rootfs").unwrap();
         // A production rootfs ships its dm-verity sidecar pair beside it; the
         // resolution must pick both up, since a parent booting without them
-        // boots a different shape than the launch it is meant to serve.
+        // boots a different shape than the launch it is meant to serve. The
+        // probe requires a full 64-hex roothash, so a short stand-in reads as
+        // "no sidecar" and would make this assert nothing.
+        const ROOTHASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
         std::fs::write(tmp.path().join("rootfs.verity"), b"verity").unwrap();
-        std::fs::write(tmp.path().join("rootfs.roothash"), b"deadbeef\n").unwrap();
+        std::fs::write(tmp.path().join("rootfs.roothash"), format!("{ROOTHASH}\n")).unwrap();
 
         let image = ImageSource::Prebuilt {
             kernel_path: kernel.display().to_string(),
@@ -2534,7 +2537,7 @@ mod tests {
             resolved.start_config.verity_path.is_some(),
             "the verity sidecar beside the rootfs must reach the config"
         );
-        assert_eq!(resolved.start_config.roothash.as_deref(), Some("deadbeef"));
+        assert_eq!(resolved.start_config.roothash.as_deref(), Some(ROOTHASH));
         assert_eq!(resolved.start_config.cpus, 2);
         assert_eq!(resolved.start_config.memory_mib, 1024);
         assert!(
@@ -2544,9 +2547,10 @@ mod tests {
         // No admission hook, so no workload authority is bound.
         assert!(resolved.start_config.tenant_id.is_none());
         assert!(resolved.start_config.plan_json.is_none());
-        // And nothing booted: the mock backend records every started VM.
+        // And nothing booted: starting a VM creates its state directory, so
+        // resolving one must leave none behind.
         assert!(
-            resolved.backend.list_all().unwrap_or_default().is_empty(),
+            !mvm_core::config::vm_state_dir(&resolved.start_config.name).exists(),
             "resolving a launch must not start a VM"
         );
     }

@@ -1875,7 +1875,6 @@ mod tests {
         fn warm_once(
             pool: &SupervisorStandbyPool,
             backend: &AnyBackend,
-            kernel: &std::path::Path,
             key: &std::path::Path,
             launch: &VmStartConfig,
         ) {
@@ -1893,8 +1892,8 @@ mod tests {
         }
 
         std::thread::scope(|s| {
-            let a = s.spawn(|| warm_once(&pool, &backend, &kernel, &key, &cfg));
-            let b = s.spawn(|| warm_once(&pool, &backend, &kernel, &key, &cfg));
+            let a = s.spawn(|| warm_once(&pool, &backend, &key, &cfg));
+            let b = s.spawn(|| warm_once(&pool, &backend, &key, &cfg));
             a.join().unwrap();
             b.join().unwrap();
         });
