@@ -48,6 +48,8 @@ export default defineConfig({
         Hero: "./src/overrides/Hero.astro",
         Header: "./src/overrides/Header.astro",
         MarkdownContent: "./src/overrides/MarkdownContent.astro",
+        PageTitle: "./src/overrides/PageTitle.astro",
+        Sidebar: "./src/overrides/Sidebar.astro",
       },
       // No force-theme script. Starlight's theme picker writes
       // data-theme="auto"|"light"|"dark" on <html>; tailwind.css

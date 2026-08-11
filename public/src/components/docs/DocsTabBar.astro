@@ -1,0 +1,165 @@
+---
+// Horizontal section-tab bar rendered above docs content, separate from the
+// left sidebar. Sits below the fixed Header (see Header.astro override,
+// which is the only place this component is mounted) and reserves its own
+// height via --docs-tabbar-height (custom.css), which every fixed-position
+// docs-chrome element (sidebar pane, TOC rail, mobile "On this page" bar)
+// adds to its own top offset — see custom.css's "Docs tab bar" section.
+//
+// Tabs are a curated subset of astro.config.mjs's top-level `sidebar`
+// groups (TAB_LABELS below) — not invented sections. If a label here no
+// longer matches a group in astro.config.mjs, that tab is silently
+// dropped (.filter(Boolean)), so a sidebar rename degrades to fewer tabs
+// rather than a broken link.
+// Starlight doesn't publish `SidebarEntry`/`SidebarGroup` from a public
+// subpath (only `./types` is exported, and it doesn't include the routing
+// types), so the shape is duplicated here rather than imported. This is
+// the same `{ type, label, href, entries, isCurrent }` shape Starlight's
+// own "build a custom sidebar" recipe documents — stable, but not a typed
+// contract we can lean on across a Starlight upgrade.
+interface SidebarLink {
+  type: "link";
+  label: string;
+  href: string;
+  isCurrent: boolean;
+}
+interface SidebarGroup {
+  type: "group";
+  label: string;
+  entries: SidebarEntry[];
+}
+type SidebarEntry = SidebarLink | SidebarGroup;
+
+interface Props {
+  sidebar: SidebarEntry[];
+}
+
+const { sidebar } = Astro.props;
+
+const TAB_LABELS = [
+  "Getting Started",
+  "Working in the MicroVM",
+  "Guides",
+  "Tutorials",
+  "SDK",
+  "Reference",
+  "Security",
+];
+
+function firstHref(entries: SidebarEntry[]): string | undefined {
+  for (const entry of entries) {
+    if (entry.type === "link") return entry.href;
+    const nested = firstHref(entry.entries);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+function isActive(entries: SidebarEntry[]): boolean {
+  return entries.some((entry) => (entry.type === "link" ? entry.isCurrent : isActive(entry.entries)));
+}
+
+const groups = sidebar.filter((entry): entry is SidebarGroup => entry.type === "group");
+
+const tabs = TAB_LABELS.map((label) => {
+  const group = groups.find((g) => g.label === label);
+  if (!group) return undefined;
+  return {
+    label,
+    href: firstHref(group.entries),
+    active: isActive(group.entries),
+  };
+}).filter((tab): tab is { label: string; href: string | undefined; active: boolean } => Boolean(tab));
+---
+
+{
+  tabs.length > 0 && (
+    <nav class="docs-tab-bar" aria-label="Documentation sections">
+      <ul>
+        {tabs.map((tab) => (
+          <li>
+            <a href={tab.href} aria-current={tab.active ? "true" : undefined}>
+              {tab.label}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  )
+}
+
+<script>
+  // The bar scrolls horizontally on narrow viewports (see .docs-tab-bar's
+  // overflow-x below); without this the active tab can render off-screen
+  // with no visual cue that there's more to scroll to.
+  document.querySelectorAll<HTMLElement>(".docs-tab-bar a[aria-current='true']").forEach((el) => {
+    el.scrollIntoView({ block: "nearest", inline: "center" });
+  });
+</script>
+
+
+<style>
+  .docs-tab-bar {
+    position: fixed;
+    inset-inline: 0;
+    top: var(--sl-nav-height);
+    z-index: calc(var(--sl-z-index-navbar) - 1);
+    height: var(--docs-tabbar-height);
+    background-color: color-mix(in oklab, var(--color-page) 92%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--color-glass-border);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .docs-tab-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  @media (min-width: 50rem) {
+    .docs-tab-bar {
+      inset-inline-start: var(--sl-content-inline-start, 0);
+    }
+  }
+
+  .docs-tab-bar ul {
+    display: flex;
+    align-items: stretch;
+    height: 100%;
+    list-style: none;
+    margin: 0;
+    padding-inline: var(--sl-nav-pad-x);
+    gap: 0.25rem;
+    min-width: max-content;
+  }
+
+  .docs-tab-bar a {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    padding-inline: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: var(--color-muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+  }
+
+  .docs-tab-bar a:hover {
+    color: var(--color-heading);
+  }
+
+  .docs-tab-bar a[aria-current="true"] {
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .docs-tab-bar a {
+      transition: color 0.15s, border-color 0.15s;
+    }
+  }
+</style>

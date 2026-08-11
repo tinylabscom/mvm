@@ -64,6 +64,13 @@
      gutter (Section.tsx's `px-6`), so both page families share one
      margin rhythm at narrow widths. */
   --sl-content-pad-x: 1.5rem;
+
+  /* Height of the horizontal section-tab bar (DocsTabBar.astro, mounted
+     from the Header.astro override) on docs pages. Every fixed-position
+     piece of docs chrome that anchors itself to --sl-nav-height also adds
+     this — see the "Docs tab bar" section below — so the tab bar reads as
+     a permanent second row of the header rather than overlapping content. */
+  --docs-tabbar-height: 2.75rem;
 }
 
 /*  Tell the browser the supported schemes so native form controls,
@@ -115,6 +122,48 @@ body {
   backdrop-filter: blur(12px);
   background-color: color-mix(in oklab, var(--color-page) 80%, transparent);
   border-bottom: 1px solid var(--color-glass-border);
+}
+
+/* ── Docs tab bar — reserve space for it in every fixed chrome piece ──
+ *
+ *  DocsTabBar.astro renders as `position: fixed; top: var(--sl-nav-height)`
+ *  — a second bar below the header, not part of the header's own box — so
+ *  nothing downstream of PageFrame/TwoColumnContent/MobileTableOfContents
+ *  knows to leave room for it. Each rule below re-states a Starlight
+ *  built-in's own offset formula with `+ var(--docs-tabbar-height)` added.
+ *  Structural selectors: `.main-frame` (PageFrame.astro), `.sidebar-pane`
+ *  (PageFrame.astro), `.right-sidebar` (TwoColumnContent.astro), and
+ *  `mobile-starlight-toc nav` (MobileTableOfContents.astro) — none of
+ *  these are exposed as --sl-* custom properties, so an upgrade that
+ *  renames them silently drops back to stock spacing (the tab bar would
+ *  then overlap the first line of content) rather than breaking the build.
+ */
+html[data-has-sidebar] .main-frame {
+  padding-top: calc(var(--sl-nav-height) + var(--sl-mobile-toc-height) + var(--docs-tabbar-height));
+}
+
+html[data-has-sidebar] .sidebar-pane {
+  inset-block-start: calc(var(--sl-nav-height) + var(--docs-tabbar-height));
+}
+
+@media (min-width: 72rem) {
+  html[data-has-sidebar] .right-sidebar {
+    padding-top: calc(var(--sl-nav-height) + var(--docs-tabbar-height));
+  }
+}
+
+html[data-has-sidebar] mobile-starlight-toc nav {
+  top: calc(var(--sl-nav-height) + var(--docs-tabbar-height) - 1px);
+}
+
+html[data-has-sidebar] {
+  scroll-padding-top: calc(1.5rem + var(--sl-nav-height) + var(--sl-mobile-toc-height) + var(--docs-tabbar-height));
+}
+
+@media (min-width: 72em) {
+  html[data-has-sidebar] {
+    scroll-padding-top: calc(1.5rem + var(--sl-nav-height) + var(--docs-tabbar-height));
+  }
 }
 
 /* ── Typography — slightly larger base ── */
@@ -404,6 +453,91 @@ nav[aria-label="Main"] .group-label .large {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--color-label);
+}
+
+/* ── Sidebar group icons — one per top-level group, not per item ──
+ *
+ *  Starlight's SidebarSublist.astro gives every group the same
+ *  `.group-label` markup regardless of which group it is — no per-group
+ *  class or data attribute to hook a background-image off of. Rather than
+ *  fork that component (and its collapsible-group/scroll-restore
+ *  behaviour) to add one, this keys off `:nth-child` position within the
+ *  top-level `<ul class="top-level">`, which mirrors astro.config.mjs's
+ *  `sidebar` array order 1:1 (14 groups, no bare top-level links mixed
+ *  in). Reordering, adding, or removing a top-level group in
+ *  astro.config.mjs silently shifts or drops icons rather than breaking
+ *  anything — update the `nth-child` list below to match. Icons are
+ *  monochrome outline SVGs under /public/icons/, applied as a
+ *  `mask-image` so they inherit `currentColor` in both themes.
+ */
+nav[aria-label="Main"] ul.top-level > li .group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+nav[aria-label="Main"] ul.top-level > li .group-label .large::before {
+  content: "";
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+  vertical-align: -0.1em;
+}
+
+nav[aria-label="Main"] ul.top-level > li:nth-child(1) .group-label .large::before {
+  --docs-group-icon: url("/icons/send.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(2) .group-label .large::before {
+  --docs-group-icon: url("/icons/download.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(3) .group-label .large::before {
+  --docs-group-icon: url("/icons/box.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(4) .group-label .large::before {
+  --docs-group-icon: url("/icons/book-open.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(5) .group-label .large::before {
+  --docs-group-icon: url("/icons/terminal.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(6) .group-label .large::before {
+  --docs-group-icon: url("/icons/layers.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(7) .group-label .large::before {
+  --docs-group-icon: url("/icons/compass.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(8) .group-label .large::before {
+  --docs-group-icon: url("/icons/code.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(9) .group-label .large::before {
+  --docs-group-icon: url("/icons/shield.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(10) .group-label .large::before {
+  --docs-group-icon: url("/icons/cpu.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(11) .group-label .large::before {
+  --docs-group-icon: url("/icons/folder.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(12) .group-label .large::before {
+  --docs-group-icon: url("/icons/package.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(13) .group-label .large::before {
+  --docs-group-icon: url("/icons/file-text.svg");
+}
+nav[aria-label="Main"] ul.top-level > li:nth-child(14) .group-label .large::before {
+  --docs-group-icon: url("/icons/git-branch.svg");
+}
+
+nav[aria-label="Main"] ul.top-level > li .group-label .large::before {
+  mask-image: var(--docs-group-icon);
+  -webkit-mask-image: var(--docs-group-icon);
 }
 
 /* Quiet indent rail on nested lists — Starlight already draws this line
