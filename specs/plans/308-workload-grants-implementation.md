@@ -2836,3 +2836,28 @@ asks for a bound, gets none, and is told nothing.
 - `a_degraded_boot_warns` — the silence case
 - a gate or test that `apply_grants` has a caller on the CLI boot path, so
   this cannot regress to unreachable a seventh time
+
+**Status: COMPLETE.**
+
+- [x] `mvm_client::enforced_grants_after_start` — the seam that calls
+      `VmBackend::apply_grants` from the CLI's own boot
+      (`crates/mvm-client/src/boot.rs`).
+- [x] `report_enforced_grants` fires from `start_persistent_oci_machine`
+      immediately after `start_prepared` succeeds
+      (`crates/mvm-cli/src/commands/vm/up/grants_report.rs`): reads the tier
+      back, records it per-VM, emits `plan.grants_enforced` on the chain, and
+      warns when a requested bound did not happen.
+- [x] `machine inspect` shows `cpu-limit: … (requested)` alongside
+      `enforced-cpu: <tier> (bounded|not bounded)`, and `--json` carries an
+      `enforced_grants` object. An absent record reads as unknown, not as
+      unenforced.
+- [x] `mvm_core::cpu_scope::cpu_degradation_reason` builds the operator
+      warning from `MechanismGap::describe()`; the boot still succeeds, since
+      `--prod` is where an unenforceable grant is refused.
+- [x] Regression guard: two `xtask/dormant-controls.toml` entries
+      (`report_enforced_grants`, `enforced_grants_after_start`) declared live.
+      Deleting the CLI call site turns `xtask check-dormant-controls` red —
+      verified by removing it.
+- [x] Witnesses: `a_bounded_cli_boot_emits_grants_enforced`,
+      `machine_inspect_shows_the_enforced_tier_not_only_the_request`,
+      `a_degraded_boot_warns`.
