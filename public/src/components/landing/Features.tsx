@@ -20,7 +20,7 @@ const features: Array<{
     icon: "package",
     title: "Nix-Based Builds",
     description:
-      "Reproducible microVM images from Nix flakes — the same flake always produces the same image. Builds persist to a content-addressed slot, so unchanged manifests skip the rebuild.",
+      "Reproducible microVM images from Nix flakes — the same flake always produces the same image. Builds persist to a slot keyed by the manifest path, so unchanged manifests skip the rebuild.",
     accent: 2,
   },
   {
@@ -93,7 +93,7 @@ export function Features() {
 
       <div className="relative mx-auto max-w-6xl">
         <div className="mb-16 text-center lg:mb-20">
-          <Eyebrow n="02" className="justify-center text-center">
+          <Eyebrow n="02" className="text-center">
             Capabilities
           </Eyebrow>
           <h2 className="text-3xl font-bold text-title sm:text-4xl">
