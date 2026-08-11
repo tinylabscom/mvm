@@ -42,6 +42,12 @@ pub enum ClaimRefusal {
     PlanMissing,
     #[error("plan image digest {expected} does not match parent rootfs digest {got}")]
     PlanParentMismatch { expected: String, got: String },
+    /// The claimed child asked for more than the parent it is restored from was
+    /// sealed under. Same rule and same code path as a vm_full fork's — a warm
+    /// claim restores a child out of a parent's memory just as a fork does, so
+    /// it cannot be the one restore path that skips the comparison.
+    #[error("{reason}")]
+    GrantsExceedParent { reason: String },
 }
 
 /// Name of the [`mvm_core::checkpoint::ContentBlob`] holding the parent's

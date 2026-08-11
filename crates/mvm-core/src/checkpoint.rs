@@ -236,6 +236,12 @@ pub struct CheckpointMeta {
     /// cannot redirect materialization to an unrelated staged snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// The permission set the captured VM was admitted under. Load-bearing so a
+    /// restore can bound a child against it: the digest covers this field, the
+    /// signed chain covers the digest, and a record edited to widen what the
+    /// parent held stops verifying before it can justify a wider child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<mvm_contract::grants::Grants>,
     /// Content-address of the load-bearing fields above. Required with no serde
     /// default: a record that carries no content-address cannot be
     /// lineage-verified, so a pre-lineage meta.json must fail closed rather than
@@ -262,6 +268,7 @@ impl CheckpointMeta {
             runtime_source_policy: None,
             runtime_overlay_version: None,
             snapshot_id: None,
+            grants: None,
             audit_ref: None,
         }
     }
@@ -284,6 +291,7 @@ impl CheckpointMeta {
             runtime_source_policy: &self.runtime_source_policy,
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
+            grants: &self.grants,
         }
         .digest()
     }
@@ -308,6 +316,7 @@ impl CheckpointMeta {
             .runtime_source_policy(self.runtime_source_policy)
             .runtime_overlay_version(self.runtime_overlay_version.clone())
             .snapshot_id(Some(snapshot_id.into()))
+            .grants(self.grants.clone())
             .audit_ref(self.audit_ref.clone())
             .build()
     }
@@ -346,6 +355,14 @@ struct CheckpointDigestInput<'a> {
     runtime_source_policy: &'a Option<RuntimeSourcePolicy>,
     runtime_overlay_version: &'a Option<String>,
     snapshot_id: &'a Option<String>,
+    /// Skipped when absent so a record that seals no grant hashes exactly as it
+    /// did before the field existed. Without this, every checkpoint captured
+    /// before grants were sealed would recompute to a different digest and be
+    /// reported as `meta_digest drift` — i.e. as *tampered*, when the record is
+    /// only schema-stale. The check is meant to be believed, so it must not cry
+    /// tamper over a field nobody touched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grants: &'a Option<mvm_contract::grants::Grants>,
 }
 
 impl CheckpointDigestInput<'_> {
@@ -395,6 +412,7 @@ pub struct CheckpointMetaBuilder {
     runtime_source_policy: Option<RuntimeSourcePolicy>,
     runtime_overlay_version: Option<String>,
     snapshot_id: Option<String>,
+    grants: Option<mvm_contract::grants::Grants>,
     audit_ref: Option<String>,
 }
 
@@ -433,6 +451,12 @@ impl CheckpointMetaBuilder {
         self.snapshot_id = id;
         self
     }
+    /// The permission set the captured VM was admitted under. Recorded so a
+    /// later restore can bound its child against it.
+    pub fn grants(mut self, grants: Option<mvm_contract::grants::Grants>) -> Self {
+        self.grants = grants;
+        self
+    }
     pub fn audit_ref(mut self, r: Option<String>) -> Self {
         self.audit_ref = r;
         self
@@ -454,6 +478,7 @@ impl CheckpointMetaBuilder {
             runtime_source_policy: &self.runtime_source_policy,
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
+            grants: &self.grants,
         }
         .digest();
         CheckpointMeta {
@@ -468,6 +493,7 @@ impl CheckpointMetaBuilder {
             runtime_source_policy: self.runtime_source_policy,
             runtime_overlay_version: self.runtime_overlay_version,
             snapshot_id: self.snapshot_id,
+            grants: self.grants,
             meta_digest,
             audit_ref: self.audit_ref,
         }
@@ -632,6 +658,53 @@ mod tests {
     }
 
     #[test]
+    fn the_admitted_grant_is_inside_the_content_address() {
+        // What makes the grant tamper-evident: a record edited to widen what
+        // the captured VM held stops matching its own content-address, and the
+        // signed chain records that address. Without this the grant would be
+        // free-floating metadata a restore could not safely trust.
+        let bounded =
+            CheckpointMeta::builder(CheckpointId::new("c1"), CheckpointClass::FsQuick, "vm")
+                .content(vec![blob("rootfs.ext4", "aa")])
+                .supervisor_config_digest("cfg")
+                .created_unix(7)
+                .grants(Some(mvm_contract::grants::Grants {
+                    cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1000 }),
+                    ..Default::default()
+                }))
+                .build();
+        let widened = CheckpointMeta {
+            grants: Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 64_000 }),
+                ..Default::default()
+            }),
+            ..bounded.clone()
+        };
+        assert_ne!(widened.compute_meta_digest(), widened.meta_digest);
+        assert_ne!(bounded.meta_digest, widened.compute_meta_digest());
+        // An unbounded record is likewise distinguishable from a bounded one.
+        assert_ne!(
+            bounded.meta_digest,
+            digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]).meta_digest
+        );
+    }
+
+    #[test]
+    fn sealing_no_grant_leaves_a_records_digest_where_it_was() {
+        // A record that seals no grant must hash exactly as it did before the
+        // field existed, or every checkpoint captured earlier reports as
+        // `meta_digest drift` — as tampered rather than as schema-stale. The
+        // literal is this fixture's digest read off the commit before `grants`
+        // was added, not a value re-derived from the code it is checking.
+        let m = digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]);
+        assert!(m.grants.is_none());
+        assert_eq!(
+            m.meta_digest.as_str(),
+            "sha256:47b3411659eddf390da230557216188e6fe4b56572f8f8545702fcc04a608e5b"
+        );
+    }
+
+    #[test]
     fn meta_digest_invariant_under_content_insertion_order() {
         // The blob manifest is content-addressed by name, not by the order
         // capture appended it — permuting the vec must not move the digest.
@@ -692,6 +765,7 @@ mod tests {
             cfg: String,
             policy: Option<RuntimeSourcePolicy>,
             overlay: Option<String>,
+            grants: Option<mvm_contract::grants::Grants>,
         }
         let build = |f: &Fields| {
             CheckpointMeta::builder(CheckpointId::new(f.id.clone()), f.class, f.vm.clone())
@@ -702,6 +776,7 @@ mod tests {
                 .supervisor_config_digest(f.cfg.clone())
                 .runtime_source_policy(f.policy)
                 .runtime_overlay_version(f.overlay.clone())
+                .grants(f.grants.clone())
                 .build()
                 .meta_digest
         };
@@ -716,6 +791,7 @@ mod tests {
             cfg: "cfg0".into(),
             policy: Some(RuntimeSourcePolicy::PreferOverlay),
             overlay: Some("0.1.0".into()),
+            grants: None,
         };
         let baseline = build(&base);
 
@@ -749,6 +825,12 @@ mod tests {
         let mut f = base.clone();
         f.parent = Some(parent_digest());
         assert_ne!(baseline, build(&f), "parent");
+        let mut f = base.clone();
+        f.grants = Some(mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1000 }),
+            ..Default::default()
+        });
+        assert_ne!(baseline, build(&f), "grants");
     }
 
     #[test]
