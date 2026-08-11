@@ -2866,3 +2866,57 @@ allow_hosts = ["api.example.com:443"]
         "the manifest keeps the egress dimension the CLI said nothing about"
     );
 }
+
+#[test]
+fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
+    // The receiving half of the SDK's encoding contract. `mvm-sdk`'s
+    // `grant_argv` emits exactly these flags for a CPU share, a bounded wall
+    // clock, and an egress allow-list; this asserts the CLI turns them back
+    // into the grant that produced them. A flag that did not exist, or meant
+    // something else here, would be a silently dropped grant — the SDK would
+    // emit it, the CLI would ignore it, and nothing on either side would
+    // notice.
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine:latest",
+        "--cpu-limit",
+        "1500",
+        "--timeout",
+        "600",
+        "--allow-host",
+        "api.example.com:443",
+        "--allow-host",
+        "db.internal:5432",
+    ])
+    .expect("the facade's argv parses");
+
+    let config = mvm_core::user_config::MvmConfig::default();
+    let resolved =
+        crate::commands::shared::resolve_run_grants(crate::commands::shared::GrantInputs {
+            cpu_limit_millicores: args.cpu_limit,
+            timeout_secs: args.timeout,
+            allow_host: &args.allow_host,
+            net: args.net,
+            grants_file: args.grants_file.as_deref(),
+            manifest: None,
+            config: &config,
+        })
+        .expect("resolves");
+
+    assert_eq!(
+        resolved.plan_grants,
+        Some(mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            wall_clock: Some(mvm_contract::grants::WallClockGrant::Secs {
+                secs: std::num::NonZeroU32::new(600).expect("nonzero"),
+            }),
+            egress: Some(mvm_contract::grants::EgressGrant {
+                allow: vec![
+                    mvm_core::network_policy::HostPort::new("api.example.com", 443),
+                    mvm_core::network_policy::HostPort::new("db.internal", 5432),
+                ],
+            }),
+        })
+    );
+}
