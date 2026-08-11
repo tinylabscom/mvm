@@ -160,8 +160,15 @@ function NestDiagram({
   // workload's top edge, crossing every ring's top border on the way. The
   // crossing points are computed by linearly interpolating along the same
   // line so the marker dots land exactly on it.
+  // One endpoint, used for BOTH the drawn line and the crossing-dot
+  // interpolation. These were previously different values — the line ended at
+  // the workload's vertical centre while the dots solved against its top edge
+  // — so every dot sat off the line it was meant to mark.
   const start = { x: outer.x + outer.w * 0.68, y: vsockStartY };
-  const end = { x: workloadRect.x + workloadRect.w / 2, y: workloadRect.y };
+  const end = {
+    x: workloadRect.x + workloadRect.w / 2,
+    y: workloadRect.y + workloadRect.h / 2,
+  };
   const crossings = rects.map((r) => {
     const t = (r.y - start.y) / (end.y - start.y);
     return { x: start.x + (end.x - start.x) * t, y: r.y };
@@ -212,7 +219,7 @@ function NestDiagram({
         x1={start.x}
         y1={start.y}
         x2={end.x}
-        y2={workloadRect.y + workloadRect.h / 2}
+        y2={end.y}
         stroke="var(--color-accent-2)"
         strokeWidth={FEATURE + 1}
         strokeDasharray="8 6"
@@ -301,10 +308,15 @@ function NestDiagram({
 function DesktopNest() {
   return (
     <NestDiagram
-      viewBox="0 0 540 400"
-      outer={{ x: 14, y: 40, w: 512, h: 336, rx: 20 }}
-      insetTL={28}
-      insetBR={36}
+      // insetTL has to clear a label plus its sub-label (15 + 12 units plus
+      // leading) or the ring titles collide with the ring below. The canvas
+      // grows to match: each extra unit of inset is spent three times over
+      // across the nesting, and the innermost ring still has to hold the
+      // workload block.
+      viewBox="0 0 540 480"
+      outer={{ x: 14, y: 40, w: 512, h: 416, rx: 20 }}
+      insetTL={46}
+      insetBR={30}
       workloadInsetX={20}
       workloadH={66}
       vsockStartY={18}
@@ -320,10 +332,10 @@ function DesktopNest() {
 function MobileNest() {
   return (
     <NestDiagram
-      viewBox="0 0 340 440"
-      outer={{ x: 10, y: 40, w: 320, h: 380, rx: 18 }}
-      insetTL={28}
-      insetBR={34}
+      viewBox="0 0 340 490"
+      outer={{ x: 10, y: 40, w: 320, h: 430, rx: 18 }}
+      insetTL={42}
+      insetBR={26}
       workloadInsetX={12}
       workloadH={58}
       vsockStartY={18}
