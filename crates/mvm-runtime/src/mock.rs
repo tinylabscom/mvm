@@ -483,6 +483,7 @@ mod tests {
             flake_ref: ".".to_string(),
             profile: Some("default".to_string()),
             cpus: 2,
+            cpu_grant: None,
             memory_mib: 512,
             mem_initial_mib: None,
             volumes: Vec::new(),

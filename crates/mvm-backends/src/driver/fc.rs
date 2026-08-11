@@ -22,14 +22,14 @@ use mvm_agentd::vsock::{
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
-    VmId, VmStatus,
+    ResourceControls, SnapshotCapability, StandbyError, StandbyHandle, StandbyState,
+    VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
 use crate::fc::{
     FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
-    read_firecracker_pid, start_vm_firecracker,
+    read_firecracker_pid, start_vm_firecracker_bounded,
 };
 use mvm_vmm::driver::spec::KernelImage;
 use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
@@ -568,6 +568,12 @@ impl VmmDriver for FcDriver {
             l3_vsock: true,
             balloon: true,
             fs_quick_checkpoint: false,
+            // Named explicitly, not left at the all-`None` struct-update
+            // default: on Linux a cgroup can bound any process, and
+            // Firecracker runs as a direct child of this driver — no
+            // mvm-*-supervisor binary in front of it — so the cgroup goes
+            // on that child process directly.
+            resource_controls: ResourceControls::for_backend(BackendKind::Firecracker),
             ..VmCapabilities::default()
         }
     }
@@ -815,7 +821,7 @@ impl VmmDriver for FcDriver {
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = format!("{abs_dir}/fc.socket");
         let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
-        start_vm_firecracker(&abs_dir, &socket)?;
+        start_vm_firecracker_bounded(&abs_dir, &socket, &spec.name, spec.cpu_grant.as_ref())?;
         let spawned_at = Instant::now();
         tracing::debug!(
             vm = %spec.name,
@@ -1120,6 +1126,7 @@ mod tests {
             initramfs: None,
             cmdline: String::new(),
             vcpus: 2,
+            cpu_grant: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks,

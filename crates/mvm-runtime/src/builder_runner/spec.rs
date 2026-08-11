@@ -108,6 +108,9 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         initramfs: None,
         cmdline,
         vcpus: inputs.vcpus,
+        // The builder VM is the trusted build engine, not a workload. Nothing
+        // admits it under a grant, so there is no bound to carry here.
+        cpu_grant: None,
         memory_mib: inputs.memory_mib,
         mem_initial_mib: None,
         blocks,

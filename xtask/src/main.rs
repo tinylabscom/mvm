@@ -11,6 +11,7 @@ mod build_dev_image;
 mod check_abi_layout;
 mod check_adr_coverage;
 mod check_audit_positional;
+mod check_backend_resource_controls;
 mod check_binary_size;
 mod check_build_egress_callers;
 mod check_builder_shell_job_sites;
@@ -50,6 +51,7 @@ mod check_no_string_backend_dispatch;
 mod check_no_vz;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
+mod check_single_grants_projection;
 mod check_single_home;
 mod check_stream_redaction_seam;
 mod check_test_home_isolation;
@@ -180,6 +182,14 @@ fn main() -> Result<()> {
         Some("check-two-surfaces") => {
             let workspace = workspace_root();
             check_two_surfaces::run(&workspace)
+        }
+        Some("check-single-grants-projection") => {
+            let workspace = workspace_root();
+            check_single_grants_projection::run(&workspace)
+        }
+        Some("check-backend-resource-controls") => {
+            let workspace = workspace_root();
+            check_backend_resource_controls::run(&workspace)
         }
         Some("check-no-spec-refs-in-comments") => {
             let workspace = workspace_root();
@@ -325,7 +335,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-dormant-controls, check-witness-citations, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-no-gateway-names, check-uniform-vsock-egress, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-dormant-controls, check-witness-citations, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-no-gateway-names, check-uniform-vsock-egress, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-backend-resource-controls, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {

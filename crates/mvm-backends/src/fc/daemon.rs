@@ -27,38 +27,69 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 /// Start a Firecracker daemon in a per-VM directory with its own socket.
 #[instrument(skip_all)]
 pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
-    start_vm_firecracker_inner(abs_dir, abs_socket, true)
+    start_vm_firecracker_inner(abs_dir, abs_socket, true, "")
+}
+
+/// Start a Firecracker daemon bounded by the CPU share this launch was admitted
+/// under.
+///
+/// Separate from [`start_vm_firecracker`] rather than a wider signature on it:
+/// the snapshot-restore and standby callers resume a VM whose grant is not
+/// theirs to decide, and giving them a parameter to fill would invite one of
+/// them to invent a bound the run was never admitted under.
+#[instrument(skip_all)]
+pub fn start_vm_firecracker_bounded(
+    abs_dir: &str,
+    abs_socket: &str,
+    machine_id: &str,
+    grant: Option<&mvm_contract::grants::CpuGrant>,
+) -> Result<()> {
+    let prefix = cpu_scope_prefix(machine_id, std::path::Path::new(abs_dir), grant);
+    start_vm_firecracker_inner(abs_dir, abs_socket, true, &prefix)
 }
 
 /// Start Firecracker without unlinking a mounted child vsock UDS.
 pub fn start_vm_firecracker_for_snapshot(abs_dir: &str, abs_socket: &str) -> Result<()> {
-    start_vm_firecracker_inner(abs_dir, abs_socket, false)
+    start_vm_firecracker_inner(abs_dir, abs_socket, false, "")
 }
 
-fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, clean_vsock: bool) -> Result<()> {
+/// The `systemd-run` scope prefix for the launch line, shell-quoted, or empty
+/// when nothing is to be bound.
+///
+/// Firecracker is the one per-VM process this repo starts through a shell
+/// rather than a `Command` — it is `sudo`-elevated and detaches itself with
+/// `nohup setsid` — so it needs the prefix as text. The tokens come from the
+/// same builder the `Command` path uses, so the two cannot drift into bounding
+/// different things.
+fn cpu_scope_prefix(
+    machine_id: &str,
+    state_dir: &std::path::Path,
+    grant: Option<&mvm_contract::grants::CpuGrant>,
+) -> String {
+    match mvm_core::cpu_scope::scope_prefix_for_grant(machine_id, state_dir, grant) {
+        Some(tokens) => {
+            let quoted: Vec<String> = tokens.iter().map(|t| shell_quote(t)).collect();
+            format!("{} ", quoted.join(" "))
+        }
+        None => String::new(),
+    }
+}
+
+fn start_vm_firecracker_inner(
+    abs_dir: &str,
+    abs_socket: &str,
+    clean_vsock: bool,
+    cpu_scope: &str,
+) -> Result<()> {
     ui::info("Starting Firecracker...");
-    let vsock = firecracker_vsock_uds_path(abs_dir);
-    let vsock_cleanup = if clean_vsock {
-        format!("rm -f {vsock} {abs_dir}/v.sock")
-    } else {
-        String::new()
-    };
-    run_in_vm_visible(&format!(
-        r#"
-        mkdir -p {dir}
-        sudo rm -f {socket}
-        {vsock_cleanup}
-        touch {dir}/console.log {dir}/firecracker.log
-        sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
-            </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
-            echo $! > {dir}/fc.pid'
-        "#,
-        socket = abs_socket,
-        dir = abs_dir,
-        vsock_cleanup = vsock_cleanup,
+    run_in_vm_visible(&firecracker_launch_script(
+        abs_dir,
+        abs_socket,
+        clean_vsock,
+        cpu_scope,
     ))?;
 
-    // The socket wait used to live in the heredoc above as
+    // The socket wait used to live in the launch script as
     // `for i in $(seq 1 30); do [ -S sock ] && break; sleep 0.1; done`, which
     // put a 100 ms floor under every launch — the socket normally appears in
     // single-digit milliseconds and was rounded up to the tick. Waiting here
@@ -67,6 +98,41 @@ fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, clean_vsock: bool
     wait_for_api_socket(std::path::Path::new(abs_socket), API_SOCKET_TIMEOUT)?;
     ui::info("Firecracker started.");
     Ok(())
+}
+
+/// The launch script, built rather than run.
+///
+/// Pure so a test can read back whether the CPU scope actually reached the
+/// launch line. An unwrapped Firecracker boots identically and is simply not
+/// bounded, which is precisely the failure that needs a test rather than an
+/// inspection.
+fn firecracker_launch_script(
+    abs_dir: &str,
+    abs_socket: &str,
+    clean_vsock: bool,
+    cpu_scope: &str,
+) -> String {
+    let vsock = firecracker_vsock_uds_path(abs_dir);
+    let vsock_cleanup = if clean_vsock {
+        format!("rm -f {vsock} {abs_dir}/v.sock")
+    } else {
+        String::new()
+    };
+    format!(
+        r#"
+        mkdir -p {dir}
+        sudo rm -f {socket}
+        {vsock_cleanup}
+        touch {dir}/console.log {dir}/firecracker.log
+        {cpu_scope}sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
+            </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
+            echo $! > {dir}/fc.pid'
+        "#,
+        socket = abs_socket,
+        dir = abs_dir,
+        vsock_cleanup = vsock_cleanup,
+        cpu_scope = cpu_scope,
+    )
 }
 
 /// How long to wait for Firecracker to create its API socket. The shell loop
@@ -259,5 +325,55 @@ mod tests {
         assert!(scripts[0].contains("chmod 0600"));
         assert!(scripts[0].contains("'/tmp/vm with quote'\\''/runtime/v.sock'"));
         assert!(!scripts[0].contains("chmod 0666"));
+    }
+
+    /// Firecracker is the one per-VM process started through a shell, so its
+    /// bound has to reach the launch *line* rather than a `Command`.
+    #[test]
+    fn a_granted_share_prefixes_the_firecracker_launch_line() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+
+        let prefix = cpu_scope_prefix(
+            "vm-bounded",
+            scratch.path(),
+            Some(&mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+        );
+        let script = firecracker_launch_script("/tmp/vm", "/tmp/vm/fc.socket", true, &prefix);
+
+        assert!(script.contains("CPUQuota=150%"), "{script}");
+        // The unit carries a per-boot suffix, so match the stem rather than a
+        // name that can no longer be reconstructed from the machine id.
+        assert!(script.contains("vm-bounded-"), "{script}");
+        assert!(script.contains(".scope"), "{script}");
+        // Ahead of the launch, not merely somewhere in the script: Firecracker
+        // has to be born inside the scope.
+        assert!(
+            script.contains("systemd-run"),
+            "the scope must precede the launch: {script}"
+        );
+        let scope_at = script.find("systemd-run").expect("prefix present");
+        let launch_at = script.find("sudo bash -c").expect("launch present");
+        assert!(scope_at < launch_at, "{script}");
+    }
+
+    #[test]
+    fn an_ungranted_launch_line_carries_no_scope() {
+        let script = firecracker_launch_script("/tmp/vm", "/tmp/vm/fc.socket", true, "");
+        assert!(!script.contains("systemd-run"), "{script}");
+        assert!(
+            script.contains("sudo bash -c 'nohup setsid firecracker"),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn an_unbindable_grant_leaves_the_launch_line_untouched() {
+        // No mechanism on this host, or a share too small to express: either
+        // way the boot proceeds unbounded rather than failing.
+        let scratch = tempfile::tempdir().expect("scratch");
+        assert_eq!(cpu_scope_prefix("vm-x", scratch.path(), None), "");
     }
 }

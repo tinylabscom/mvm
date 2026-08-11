@@ -215,6 +215,7 @@ fn admit_standby_parent_plan(
     mem_mib: u32,
 ) -> Result<AdmittedPlan> {
     let input = SynthesisInput {
+        grants: None,
         kernel_sha256: None,
         vm_name: &handle.id,
         tenant: Some(tenant),
@@ -254,8 +255,15 @@ fn admit_standby_parent_plan(
         l3_network: None,
     };
     let ledger = InMemoryNonceLedger::new();
-    admit_for_run(&input, &SystemClock, &ledger, None, None)
-        .context("admitting a plan for the captured standby parent")
+    admit_for_run(
+        &input,
+        &SystemClock,
+        &ledger,
+        None,
+        None,
+        mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
+    )
+    .context("admitting a plan for the captured standby parent")
 }
 
 /// Bind a freshly captured parent's checkpoint into the signed audit chain.

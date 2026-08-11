@@ -213,7 +213,16 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
         let needs_raw_ip = app.network.as_ref().is_some_and(|n| n.raw_ip_stack);
         let network_mode = crate::commands::machine::preflight_network(needs_raw_ip)?;
         let input = synthesis_input_for_app(&workload, app, network_mode)?;
-        match admit_for_run(&input, &clock, &ledger, None, None) {
+        // A recorded sandbox run is a developer artifact; nothing here is
+        // sealed, so an unenforceable grant is reported, not fatal.
+        match admit_for_run(
+            &input,
+            &clock,
+            &ledger,
+            None,
+            None,
+            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
+        ) {
             Ok(admitted) => {
                 admitted_count += 1;
                 println!(
@@ -347,6 +356,7 @@ fn synthesis_input_for_app<'a>(
     let leaked: &'static str = Box::leak(placeholder.into_boxed_str());
 
     Ok(SynthesisInput {
+        grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode,

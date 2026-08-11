@@ -168,6 +168,7 @@ pub fn admit_and_boot_local(
         .transpose()?;
 
     let synthesis = SynthesisInput {
+        grants: None,
         stream_edges: Vec::new(),
         kernel_sha256: kernel_sha.as_deref(),
         network_mode: Default::default(),
@@ -239,6 +240,7 @@ pub fn admit_and_boot_local(
             ledger: ctx.ledger,
             host_signer_keys_dir: ctx.host_signer_keys_dir,
             bundle_ctx: None,
+            variant: mvm_core::plan::Variant::Dev,
             policy_bundle: None,
             emitter: ctx.emitter,
             // The local boot path launches unsealed (`sealed: false` above)

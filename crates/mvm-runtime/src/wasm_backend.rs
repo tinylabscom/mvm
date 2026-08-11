@@ -51,8 +51,9 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StartMode,
-    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, ResourceControls,
+    SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
+    VmStartConfig, VmStatus,
 };
 use thiserror::Error;
 
@@ -323,6 +324,12 @@ impl VmBackend for WasmBackend {
             no_routable_guest_nic: true,
             snapshot_capability: SnapshotCapability::Unsupported,
             standby_pool: false,
+            // Named explicitly: wasmtime's fuel/epoch mechanisms bound this
+            // tier's CPU and wall clock, unlike the all-`None` struct-update
+            // default. `apply_grants` is not yet overridden to wire them, so
+            // its default reply still honestly reports nothing enforced —
+            // this field only declares what the mechanism *could* bound.
+            resource_controls: ResourceControls::for_backend(BackendKind::Wasm),
             ..VmCapabilities::default()
         }
     }

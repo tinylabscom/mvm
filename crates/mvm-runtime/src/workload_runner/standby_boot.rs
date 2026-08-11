@@ -130,6 +130,11 @@ pub fn factory_parent_config(
         flake_ref: _,
         profile: _,
         cpus: _,
+        // A factory parent is not the workload, so it is not what any grant was
+        // admitted for. A child is spawned under its own admitted plan and
+        // takes its bound from there; inheriting this launch's would bind a
+        // parent to a grant made for something else.
+        cpu_grant: _,
         memory_mib: _,
         ports: _,
         volumes: _,
@@ -162,6 +167,7 @@ pub fn factory_parent_config(
         rootfs_path: image.to_string(),
         kernel_path: Some(spec.kernel_path.clone()),
         cpus: u32::from(spec.vcpus),
+        cpu_grant: None,
         memory_mib: spec.mem_mib,
         virtiofs_root: virtiofs_root.clone(),
         initrd_path: initrd_path.clone(),

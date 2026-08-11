@@ -15,6 +15,7 @@ pub mod host_audit;
 pub mod host_cost;
 pub mod host_signer;
 pub mod host_time;
+pub mod resource_controls;
 pub mod routing;
 pub mod signed_config;
 pub mod signing;

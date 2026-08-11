@@ -129,6 +129,12 @@ pub struct SynthesisInput<'a> {
     /// The L3-tunnel contract, when `network_mode` selects it. Admission
     /// refuses the pair being inconsistent in either direction.
     pub l3_network: Option<L3NetworkSpec>,
+    /// What this workload asks to be permitted to consume. `None` = it
+    /// declares none. Resolved across the caller's declaration surfaces before
+    /// it gets here; admission checks it against the host's ceiling — which is
+    /// not in this struct, because the ceiling's whole purpose is to come from
+    /// somewhere the requester cannot write.
+    pub grants: Option<mvm_contract::grants::Grants>,
     /// vCPU count.
     pub cpus: u32,
     /// Memory budget in MiB.
@@ -313,6 +319,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         runtime_profile: RuntimeProfileRef(input.backend_name.to_string()),
         image,
         resources,
+        grants: input.grants.clone(),
         admission_profile,
         network_policy,
         fs_policy,
@@ -432,6 +439,7 @@ mod tests {
 
     fn input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            grants: None,
             kernel_sha256: None,
             network_mode: NetworkMode::default(),
             l3_network: None,

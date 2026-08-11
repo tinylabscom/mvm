@@ -76,6 +76,23 @@ pub struct ExecutionPlan {
 
     pub resources: Resources,
 
+    /// What this workload is permitted to consume, as admitted.
+    ///
+    /// Inside the signed payload because a grant read from anywhere else is a
+    /// grant the launcher could widen after admission checked it: the host
+    /// applies these at launch and reports which of them a mechanism actually
+    /// bounded, and both of those answers are only meaningful about a value the
+    /// signature covers. The host-side ceiling that limits what may be asked
+    /// for is deliberately *not* here — it has a different trust root and is
+    /// resolved from host configuration at admission.
+    ///
+    /// `None` (the default) means the workload declared none. Skip-serialized
+    /// when absent so a plan that declares no grant stays byte-identical to one
+    /// written before the field existed — the field is inside the content
+    /// address, so emitting `null` would move every existing plan's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<crate::grants::Grants>,
+
     /// Intent-bound profile resolved before admission. This binds the
     /// workload purpose to the concrete seccomp tier, policy refs,
     /// secret-release posture, and audit taxonomy the runtime must
@@ -297,6 +314,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
                 exec_secs: 0,
             },
         },
+        grants: None,
         admission_profile: AdmissionProfile::local_default("vm:boot", PlanSeccompTier::Standard),
         network_policy: PolicyRef("local-default".to_string()),
         network_mode: Default::default(),
@@ -378,6 +396,37 @@ mod tests {
         assert_eq!(round.services, bound.services);
         assert!(crate::plan::sdk_sidecar::sdk_sidecar_required(&round));
         assert!(!crate::plan::sdk_sidecar::sdk_sidecar_required(&plan));
+    }
+
+    #[test]
+    fn undeclared_grants_leave_the_signed_bytes_untouched() {
+        use crate::grants::{CpuGrant, Grants};
+
+        let plan = minimal_plan();
+        assert!(plan.grants.is_none(), "a plan declares no grant by default");
+
+        // The field is inside the content address, so an absent grant set must
+        // not appear at all — `null` would move the identity of every plan
+        // written before the field existed.
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            !json.contains("grants"),
+            "absent grants must be omitted, not serialized as null"
+        );
+
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("grants");
+        let back: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert!(back.grants.is_none());
+
+        let mut granted = plan.clone();
+        granted.grants = Some(Grants {
+            cpu: Some(CpuGrant::Share { millicores: 1500 }),
+            ..Grants::default()
+        });
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&granted).unwrap()).unwrap();
+        assert_eq!(round.grants, granted.grants);
     }
 
     #[test]

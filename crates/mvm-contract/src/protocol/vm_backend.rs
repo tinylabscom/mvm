@@ -491,6 +491,20 @@ pub struct VmCapabilities {
     /// non-prod, non-sealed; the virtiofs-root dev path carries a weaker
     /// integrity contract and does **not** witness the verified-boot claim.
     pub virtiofs_root: bool,
+    /// Which resource dimensions this backend can actually bound. Declared
+    /// separately from what a caller requests so a refusal can name the gap.
+    #[serde(default = "default_resource_controls")]
+    pub resource_controls: crate::protocol::resource_controls::ResourceControls,
+}
+
+fn default_resource_controls() -> crate::protocol::resource_controls::ResourceControls {
+    use crate::protocol::resource_controls::{CpuControl, ResourceControls, WallClockControl};
+    // The safe default is "enforces nothing", so an unset value understates
+    // rather than overstates what a backend does.
+    ResourceControls {
+        cpu: CpuControl::None,
+        wall_clock: WallClockControl::None,
+    }
 }
 
 /// The capabilities a run/plan requires from its backend.
@@ -1315,11 +1329,68 @@ impl BackendKind {
             Self::AppleContainer => "apple-container",
         }
     }
+
+    /// The inverse of [`as_str`](Self::as_str).
+    ///
+    /// A plan names its backend as a string, so somewhere a label has to
+    /// become a discriminant again. One parser, over the same labels `as_str`
+    /// renders, keeps that conversion from being re-guessed per call site: a
+    /// hand-rolled `match` that misspells one label resolves to the wrong tier,
+    /// and the tier is what decides which resource controls a run is measured
+    /// against.
+    ///
+    /// `None` for an unrecognised label rather than a fallback variant — what
+    /// an unknown backend means differs by caller, and a shared default is how
+    /// one caller's leniency becomes another's silent misclassification.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        let kind = match label {
+            "firecracker" => Self::Firecracker,
+            "libkrun" => Self::Libkrun,
+            "qemu" => Self::Qemu,
+            "mock" => Self::Mock,
+            "hvf" => Self::Hvf,
+            "wasm" => Self::Wasm,
+            "docker" => Self::Docker,
+            "apple-container" => Self::AppleContainer,
+            _ => return None,
+        };
+        Some(kind)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_label_parses_back_to_the_kind_that_rendered_it() {
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+            BackendKind::Docker,
+            BackendKind::AppleContainer,
+        ] {
+            assert_eq!(
+                BackendKind::from_label(kind.as_str()),
+                Some(kind),
+                "{kind:?} does not survive a label round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_label_does_not_resolve_to_some_backend() {
+        // Resolving an unknown name to a real tier would let a typo pick the
+        // resource controls a run is checked against.
+        assert_eq!(BackendKind::from_label("applecontainer"), None);
+        assert_eq!(BackendKind::from_label("Firecracker"), None);
+        assert_eq!(BackendKind::from_label(""), None);
+    }
 
     #[test]
     fn every_backend_kind_has_a_distinct_stable_label() {

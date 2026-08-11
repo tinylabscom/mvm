@@ -29,6 +29,7 @@ use tracing::warn;
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::plan::Variant;
 use mvm_core::policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
+use mvm_core::vm_backend::EnforcedGrants;
 use mvm_net::{EgressEnforcer, EgressWiring, EnforcementError};
 
 use crate::supervisor::artifact::{ArtifactCollector, NoopArtifactCollector};
@@ -199,6 +200,12 @@ pub struct Supervisor {
     /// Transient index from an execution plan to its workload key, allowing
     /// the legacy stop API to withdraw the correct workload-scoped rules.
     firewall_plan_keys: BTreeMap<PlanId, WorkloadKey>,
+    /// What actually bounded each running workload, keyed by plan.
+    ///
+    /// The backend's read-back, not the plan's request: a receipt that
+    /// reported the requested grant would assert an enforcement nobody
+    /// verified, which is the failure mode the tier enum exists to prevent.
+    enforced_grants: BTreeMap<PlanId, EnforcedGrants>,
     /// Host-side vsock egress telemetry probe manager (eBPF/procfs).
     ebpf_telemetry: crate::supervisor::ebpf_telemetry::EbpfTelemetryManager,
 }
@@ -225,6 +232,7 @@ impl Default for Supervisor {
             firewall_proxy_iface: None,
             installed_firewalls: BTreeMap::new(),
             firewall_plan_keys: BTreeMap::new(),
+            enforced_grants: BTreeMap::new(),
             ebpf_telemetry: crate::supervisor::ebpf_telemetry::EbpfTelemetryManager::new(),
         }
     }
@@ -521,6 +529,29 @@ impl Supervisor {
             return Err(SupervisorError::from(e));
         }
 
+        // Step 4.5: apply the plan's grants now that a VM exists to attach a
+        // control to, and record what came back. Unlike the telemetry attach
+        // below, this is not best-effort: a workload whose bounds could not be
+        // applied is running unbounded, so the launch is undone rather than
+        // completed with a record that says otherwise.
+        let enforced = match self.backend.apply_grants(&plan).await {
+            Ok(enforced) => enforced,
+            Err(e) => {
+                if let Err(stop_err) = self.backend.stop(&plan.plan_id).await {
+                    warn!(
+                        "stopping a VM whose grants could not be applied failed: {stop_err}; \
+                         it may still be running"
+                    );
+                }
+                self.teardown_firewall_for_plan(&plan.plan_id);
+                self.emit_audit_then_fail(&plan, "plan.rejected.grants", &e.to_string())
+                    .await?;
+                return Err(SupervisorError::from(e));
+            }
+        };
+        self.enforced_grants
+            .insert(plan.plan_id.clone(), enforced.clone());
+
         // Attach host-side egress telemetry to the running VM. This is
         // best-effort: a failure here is logged but must not fail launch,
         // because the probe is observability-only.
@@ -539,7 +570,8 @@ impl Supervisor {
             SupervisorError::from(e)
         })?;
 
-        let running_extras = deps_volume_audit_extras(plan.deps_volume.as_ref());
+        let mut running_extras = deps_volume_audit_extras(plan.deps_volume.as_ref());
+        running_extras.extend(enforced_grants_audit_extras(&enforced));
         if let Err(e) = self
             .emit_admission_audit_with_extras(&plan, "plan.running", "", running_extras)
             .await
@@ -549,6 +581,16 @@ impl Supervisor {
         }
 
         Ok(())
+    }
+
+    /// What actually bounded this plan's workload, as read back by the backend
+    /// at launch. `None` before a successful launch, and after a stop.
+    ///
+    /// Deliberately not the requested grants: a caller building a receipt gets
+    /// the tier that fired, so it cannot report a bound that was only asked for.
+    #[must_use]
+    pub fn enforced_grants(&self, plan_id: &PlanId) -> Option<&EnforcedGrants> {
+        self.enforced_grants.get(plan_id)
     }
 
     /// Re-derive the on-disk volume hash via
@@ -705,6 +747,10 @@ impl Supervisor {
             return Err(SupervisorError::from(e));
         }
 
+        // The tiers described a running workload; keeping them past the stop
+        // would let a later reader take them for a live enforcement claim.
+        self.enforced_grants.remove(plan_id);
+
         // Detach host-side egress telemetry, using the same vm_id that
         // firewall enforcement keyed on.
         if let Some(workload_key) = self.firewall_plan_keys.get(plan_id)
@@ -860,6 +906,24 @@ fn deps_volume_audit_extras(binding: Option<&DepsVolumeBinding>) -> Vec<(String,
         ],
         None => Vec::new(),
     }
+}
+
+/// Audit labels naming the mechanism that bounded each dimension.
+///
+/// The tier labels, never the requested numbers: a run that asked for 1.5 cores
+/// and got nothing must not leave a record that mentions 1.5 cores, or the
+/// audit trail asserts an enforcement that did not happen.
+fn enforced_grants_audit_extras(enforced: &EnforcedGrants) -> Vec<(String, String)> {
+    vec![
+        (
+            "grants_cpu_tier".to_string(),
+            enforced.cpu.label().to_string(),
+        ),
+        (
+            "grants_wall_clock_tier".to_string(),
+            enforced.wall_clock.label().to_string(),
+        ),
+    ]
 }
 
 /// Stable identifiers for every inspector the canonical
@@ -1106,10 +1170,16 @@ mod tests {
         prepare_calls: Mutex<Vec<PlanId>>,
         launch_calls: Mutex<Vec<PlanId>>,
         stop_calls: Mutex<Vec<PlanId>>,
+        apply_grants_calls: Mutex<Vec<PlanId>>,
         slot: mvm_runtime::base::config::VmSlot,
         prepare_should_fail: bool,
         launch_should_fail: bool,
         stop_should_fail: bool,
+        /// What this backend reports it actually bounded. A real launcher reads
+        /// this back off the live control; the mock states it so a test can pin
+        /// the difference between what was requested and what happened.
+        enforced: EnforcedGrants,
+        apply_grants_should_fail: bool,
     }
 
     impl MockBackend {
@@ -1118,10 +1188,13 @@ mod tests {
                 prepare_calls: Mutex::new(Vec::new()),
                 launch_calls: Mutex::new(Vec::new()),
                 stop_calls: Mutex::new(Vec::new()),
+                apply_grants_calls: Mutex::new(Vec::new()),
                 slot: mvm_runtime::base::config::VmSlot::new("vm1", 0),
                 prepare_should_fail: false,
                 launch_should_fail: false,
                 stop_should_fail: false,
+                enforced: EnforcedGrants::all_declared(),
+                apply_grants_should_fail: false,
             }
         }
 
@@ -1135,6 +1208,10 @@ mod tests {
 
         fn stops(&self) -> Vec<PlanId> {
             self.stop_calls.lock().unwrap().clone()
+        }
+
+        fn grant_applications(&self) -> Vec<PlanId> {
+            self.apply_grants_calls.lock().unwrap().clone()
         }
     }
 
@@ -1168,6 +1245,17 @@ mod tests {
                 return Err(BackendError::StopFailed("mock".into()));
             }
             Ok(())
+        }
+
+        async fn apply_grants(&self, plan: &ExecutionPlan) -> Result<EnforcedGrants, BackendError> {
+            self.apply_grants_calls
+                .lock()
+                .unwrap()
+                .push(plan.plan_id.clone());
+            if self.apply_grants_should_fail {
+                return Err(BackendError::LaunchFailed("mock apply_grants".into()));
+            }
+            Ok(self.enforced.clone())
         }
     }
 
@@ -1222,6 +1310,7 @@ mod tests {
 
     fn sample_plan() -> ExecutionPlan {
         let mut plan = ExecutionPlan {
+            grants: None,
             environment: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
@@ -1414,6 +1503,103 @@ mod tests {
         assert!(backend.stops().is_empty());
         assert_eq!(firewall.installs(), vec![sample_firewall_spec()]);
         assert!(firewall.teardowns().is_empty());
+    }
+
+    /// A plan asking for one and a half host cores.
+    fn plan_granting_a_cpu_share() -> ExecutionPlan {
+        let mut plan = sample_plan();
+        plan.grants = Some(mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            ..mvm_contract::grants::Grants::default()
+        });
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        plan
+    }
+
+    #[tokio::test]
+    async fn launch_records_the_enforced_tier_not_the_requested_grant() {
+        // The plan asks for a share; this backend reports it bounded CPU with a
+        // cgroup and wall clock with a timer. What the supervisor keeps, and
+        // what it writes to the audit chain, must be the second answer: a
+        // record that repeated the request would assert an enforcement no one
+        // verified.
+        let plan = plan_granting_a_cpu_share();
+        let (signed, _sk, vk) = sign_sample(&plan);
+        let backend = Arc::new(MockBackend {
+            enforced: EnforcedGrants {
+                cpu: mvm_core::vm_backend::EnforcedTier::Cgroup2CpuMax,
+                wall_clock: mvm_core::vm_backend::EnforcedTier::SupervisorTimer,
+            },
+            ..MockBackend::new()
+        });
+        let (mut s, audit) = make_supervisor_with_audit(backend.clone());
+        s.firewall = Arc::new(MockFirewall::new());
+
+        s.launch(&signed, &[("test", &vk)]).await.unwrap();
+
+        assert_eq!(
+            backend.grant_applications(),
+            vec![plan.plan_id.clone()],
+            "the plan's grants must be applied to the VM that was just started"
+        );
+        assert_eq!(
+            s.enforced_grants(&plan.plan_id),
+            Some(&EnforcedGrants {
+                cpu: mvm_core::vm_backend::EnforcedTier::Cgroup2CpuMax,
+                wall_clock: mvm_core::vm_backend::EnforcedTier::SupervisorTimer,
+            })
+        );
+
+        let running = audit
+            .entries()
+            .into_iter()
+            .find(|e| e.event == "plan.running")
+            .expect("a running entry");
+        assert_eq!(
+            running.labels.get("grants_cpu_tier").map(String::as_str),
+            Some("cgroup2:cpu.max"),
+            "the audit label names the mechanism, not the request"
+        );
+        assert_eq!(
+            running
+                .labels
+                .get("grants_wall_clock_tier")
+                .map(String::as_str),
+            Some("supervisor:timer")
+        );
+        // The number that was asked for must not appear anywhere in the record
+        // of what happened.
+        assert!(
+            !running.labels.values().any(|v| v.contains("1500")),
+            "the requested share leaked into the enforcement record: {:?}",
+            running.labels
+        );
+
+        // A stopped workload is no longer bounded by anything, so the tiers
+        // must not outlive it and be read later as a live claim.
+        s.stop(&plan.plan_id).await.unwrap();
+        assert_eq!(s.enforced_grants(&plan.plan_id), None);
+    }
+
+    #[tokio::test]
+    async fn a_backend_that_cannot_apply_grants_does_not_leave_the_vm_running() {
+        // The VM exists by this point, so "return an error" is not enough: an
+        // unbounded workload left running is exactly what the grant was for.
+        let plan = plan_granting_a_cpu_share();
+        let (signed, _sk, vk) = sign_sample(&plan);
+        let backend = Arc::new(MockBackend {
+            apply_grants_should_fail: true,
+            ..MockBackend::new()
+        });
+        let firewall = Arc::new(MockFirewall::new());
+        let mut s = make_supervisor_with_firewall(backend.clone(), firewall.clone());
+
+        let err = s.launch(&signed, &[("test", &vk)]).await.unwrap_err();
+        assert!(matches!(err, SupervisorError::Backend(_)), "{err:?}");
+        assert_eq!(s.state.current(), PlanState::Failed);
+        assert_eq!(backend.stops(), vec![plan.plan_id.clone()]);
+        assert_eq!(firewall.teardowns(), vec!["vm1".to_string()]);
+        assert_eq!(s.enforced_grants(&plan.plan_id), None);
     }
 
     #[tokio::test]

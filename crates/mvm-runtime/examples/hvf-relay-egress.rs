@@ -166,6 +166,7 @@ fn main() {
             initramfs: Some(initramfs.into()),
             cmdline: String::new(),
             vcpus: 1,
+            cpu_grant: None,
             memory_mib: 512,
             mem_initial_mib: None,
             blocks: vec![],

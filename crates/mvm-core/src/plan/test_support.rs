@@ -127,6 +127,7 @@ impl PlanFixture {
     pub fn build(self) -> ExecutionPlan {
         let now = Utc::now();
         ExecutionPlan {
+            grants: None,
             environment: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),

@@ -24,6 +24,9 @@ extern crate alloc;
 
 #[cfg(feature = "protocol")]
 pub mod entrypoint;
+/// A workload's permission set — CPU, wall clock, egress destinations.
+#[cfg(feature = "protocol")]
+pub mod grants;
 #[cfg(feature = "protocol")]
 pub mod ir;
 /// The L3-over-vsock tunnel protocol: framing, control messages, and

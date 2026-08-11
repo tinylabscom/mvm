@@ -44,8 +44,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::config::{mvm_cache_dir, vm_state_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
-    VmStartConfig, VmStatus, VmVolumeKind,
+    ResourceControls, SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId,
+    VmInfo, VmStartConfig, VmStatus, VmVolumeKind,
 };
 use thiserror::Error;
 
@@ -511,6 +511,12 @@ impl VmBackend for DockerBackend {
             no_routable_guest_nic: true,
             snapshot_capability: SnapshotCapability::Unsupported,
             standby_pool: false,
+            // Named explicitly: Docker shares the host kernel, so a cgroup
+            // here belongs to the container runtime, not mvm — but mvm holds
+            // the `docker run` child directly and times it out host-side, so
+            // the wall-clock timer is mvm's own, which the all-`None`
+            // struct-update default would understate.
+            resource_controls: ResourceControls::for_backend(BackendKind::Docker),
             ..VmCapabilities::default()
         }
     }

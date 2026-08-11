@@ -354,6 +354,7 @@ mod tests {
 
     fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
+            grants: None,
             environment: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
