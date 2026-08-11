@@ -327,9 +327,12 @@
       dedicated dm-verity workload kernel automatically during the first
       `machine run --image`, reports the first-run cost, and caches the result;
       installed binaries download the matching hash-verified release kernel,
-      while `MVM_KERNEL_SOURCE=download|auto` remains explicit. The landing
-      page and security docs now state the warm-millisecond promise alongside
-      first-run behavior and the default-deny trust model.
+      while `MVM_KERNEL_SOURCE=download|auto` remains explicit. Admission-path
+      tests now share the process-environment guard even under the default
+      grant ceiling, preventing parallel tests from observing another test's
+      temporary host configuration. The landing page and security docs now
+      state the warm-millisecond promise alongside first-run behavior and the
+      default-deny trust model.
 
 - [~] Extract `mvm-backends` crate — **plan 298**
       (`specs/plans/298-extract-mvm-backends-crate.md`). Rebased
