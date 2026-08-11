@@ -54,7 +54,8 @@ use dispatch::TopLevelCommand;
 
 use shared::{CHILD_PIDS, IN_CONSOLE_MODE, with_hints};
 
-const CLI_HELP_WIDTH: usize = 80;
+const CLI_HELP_WIDTH: usize = 79;
+const CLAP_RENDER_WIDTH: usize = 4096;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -81,7 +82,7 @@ pub(in crate::commands) struct Cli {
     )]
     pub builder: Option<String>,
 
-    /// Kernel source: compile, download, or auto
+    /// Kernel source: compile, download, auto
     #[arg(
         long,
         global = true,
@@ -296,8 +297,16 @@ fn run_command() -> Result<()> {
 
 fn constrain_help_width(command: clap::Command) -> clap::Command {
     let mut command = command
-        .term_width(CLI_HELP_WIDTH)
-        .max_term_width(CLI_HELP_WIDTH);
+        .disable_help_flag(true)
+        .arg(
+            clap::Arg::new("help")
+                .short('h')
+                .long("help")
+                .action(clap::ArgAction::HelpShort)
+                .help("Print help"),
+        )
+        .term_width(CLAP_RENDER_WIDTH)
+        .max_term_width(CLAP_RENDER_WIDTH);
     if let Some(usage) = command
         .clone()
         .render_help()
@@ -314,7 +323,7 @@ fn constrain_help_width(command: clap::Command) -> clap::Command {
 fn wrap_usage(usage: &str) -> String {
     let body = usage.strip_prefix("Usage: ").unwrap_or(usage);
     let continuation_indent = "       ";
-    let line_limit = 80 - continuation_indent.chars().count();
+    let line_limit = CLI_HELP_WIDTH - continuation_indent.chars().count();
     let mut wrapped = String::new();
     let mut line_width = 0;
 
@@ -338,9 +347,9 @@ fn wrap_usage(usage: &str) -> String {
 
 fn constrain_help_output(help: &str) -> String {
     let trailing_newline = help.ends_with('\n');
-    let mut constrained = help
-        .lines()
-        .map(|line| wrap_help_line(line, CLI_HELP_WIDTH))
+    let mut constrained = compact_help_items(help)
+        .iter()
+        .map(|line| truncate_help_line(line, CLI_HELP_WIDTH))
         .collect::<Vec<_>>()
         .join("\n");
     if trailing_newline {
@@ -349,72 +358,105 @@ fn constrain_help_output(help: &str) -> String {
     constrained
 }
 
-fn wrap_help_line(line: &str, width: usize) -> String {
+#[derive(Clone, Copy)]
+enum HelpItemSection {
+    Arguments,
+    Commands,
+    Options,
+}
+
+fn compact_help_items(help: &str) -> Vec<String> {
+    let mut compacted = Vec::new();
+    let mut section = None;
+    let mut item = None;
+    let mut pending_blank = false;
+
+    for line in help.lines() {
+        let trimmed = line.trim();
+        let heading = match trimmed {
+            "Arguments:" => Some(HelpItemSection::Arguments),
+            "Commands:" => Some(HelpItemSection::Commands),
+            "Options:" => Some(HelpItemSection::Options),
+            _ => None,
+        };
+
+        if let Some(heading) = heading {
+            flush_help_item(&mut compacted, &mut item);
+            if pending_blank && compacted.last().is_some_and(|line| !line.is_empty()) {
+                compacted.push(String::new());
+            }
+            compacted.push(line.to_owned());
+            section = Some(heading);
+            pending_blank = false;
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if section.is_some() {
+                pending_blank = true;
+            } else if compacted.last().is_some_and(|line| !line.is_empty()) {
+                compacted.push(String::new());
+            }
+            continue;
+        }
+
+        if section.is_some() && !line.starts_with(char::is_whitespace) {
+            flush_help_item(&mut compacted, &mut item);
+            if pending_blank && compacted.last().is_some_and(|line| !line.is_empty()) {
+                compacted.push(String::new());
+            }
+            compacted.push(line.to_owned());
+            section = None;
+            pending_blank = false;
+            continue;
+        }
+
+        let indentation = line
+            .chars()
+            .take_while(|character| character.is_whitespace())
+            .count();
+        let starts_item = match section {
+            Some(HelpItemSection::Arguments) => {
+                matches!(trimmed.chars().next(), Some('<' | '['))
+            }
+            Some(HelpItemSection::Commands) => indentation <= 2,
+            Some(HelpItemSection::Options) => indentation <= 6 && trimmed.starts_with('-'),
+            None => false,
+        };
+
+        if starts_item {
+            flush_help_item(&mut compacted, &mut item);
+            item = Some(line.to_owned());
+        } else if let Some(current) = item.as_mut() {
+            current.push_str("  ");
+            current.push_str(trimmed);
+        } else {
+            compacted.push(line.to_owned());
+        }
+        pending_blank = false;
+    }
+
+    flush_help_item(&mut compacted, &mut item);
+    compacted
+}
+
+fn flush_help_item(compacted: &mut Vec<String>, item: &mut Option<String>) {
+    if let Some(item) = item.take() {
+        compacted.push(item);
+    }
+}
+
+fn truncate_help_line(line: &str, width: usize) -> String {
     if line.chars().count() <= width {
         return line.to_owned();
     }
 
-    let indentation = line
+    let mut truncated = line
         .chars()
-        .take_while(|character| character.is_whitespace())
-        .count();
-    let prefix = &line[..line.len() - line.trim_start().len()];
-    let continuation = if line.trim_start().starts_with("Usage:") {
-        "       "
-    } else {
-        prefix
-    };
-    let mut current = String::new();
-    let mut current_limit = width.saturating_sub(indentation);
-    let mut wrapped = Vec::new();
-
-    for source_word in line.split_whitespace() {
-        let mut word = source_word.to_owned();
-        loop {
-            if current.is_empty() {
-                let available = current_limit.max(1);
-                let word_width = word.chars().count();
-                if word_width <= available {
-                    current = word;
-                    break;
-                }
-
-                let mut characters = word.chars();
-                current = characters.by_ref().take(available).collect();
-                wrapped.push(current);
-                current = String::new();
-                word = characters.collect();
-                current_limit = width.saturating_sub(continuation.chars().count());
-            } else {
-                let available = current_limit.saturating_sub(current.chars().count() + 1);
-                if word.chars().count() <= available {
-                    current.push(' ');
-                    current.push_str(&word);
-                    break;
-                }
-
-                wrapped.push(current);
-                current = String::new();
-                current_limit = width.saturating_sub(continuation.chars().count());
-            }
-        }
-    }
-    if !current.is_empty() {
-        wrapped.push(current);
-    }
-
-    wrapped
-        .into_iter()
-        .enumerate()
-        .map(|(index, text)| {
-            if index == 0 {
-                format!("{prefix}{text}")
-            } else {
-                format!("{continuation}{text}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .take(width.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 /// Set a process-global environment variable from the CLI.

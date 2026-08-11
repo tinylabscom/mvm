@@ -28,8 +28,8 @@ Feature: README CLI contract
     When I run mvmctl with "run --help"
     Then the command exits with code 0
     And the help output contains "--mode"
-    And the help output contains "Plan transport"
-    And the help output contains "Live transport"
+    And the help output contains "run --mode live/plan"
+    And the help output contains "SDK transport mode"
 
   Scenario: `trust audit verify` is a real command
     When I run mvmctl with "trust audit --help"

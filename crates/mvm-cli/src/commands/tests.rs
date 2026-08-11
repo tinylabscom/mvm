@@ -7,30 +7,35 @@ use clap::Parser;
 use std::path::Path;
 
 #[test]
-fn help_output_wraps_long_lines() {
+fn help_output_truncates_long_lines() {
     let help =
         "  command  A long description that must wrap before it exceeds the fixed output width";
     let wrapped = constrain_help_output(help);
 
-    assert!(
-        wrapped
-            .lines()
-            .all(|line| line.chars().count() <= CLI_HELP_WIDTH)
-    );
-    assert!(wrapped.lines().count() > 1);
-    assert!(wrapped.contains("\n  "));
+    assert_eq!(wrapped.lines().count(), 1);
+    assert_eq!(wrapped.chars().count(), CLI_HELP_WIDTH);
+    assert!(wrapped.ends_with('…'));
 }
 
 #[test]
-fn help_output_splits_unbreakable_tokens() {
+fn help_output_truncates_unbreakable_tokens() {
     let help = format!("  command  {}", "x".repeat(CLI_HELP_WIDTH * 2));
     let wrapped = constrain_help_output(&help);
 
-    assert!(
-        wrapped
-            .lines()
-            .all(|line| line.chars().count() <= CLI_HELP_WIDTH)
-    );
+    assert_eq!(wrapped.lines().count(), 1);
+    assert_eq!(wrapped.chars().count(), CLI_HELP_WIDTH);
+    assert!(wrapped.ends_with('…'));
+}
+
+#[test]
+fn help_output_compacts_each_item_onto_one_line() {
+    let help = "Arguments:\n  [ARGV]...\n          Command to run\n\nOptions:\n      --image <REF>\n          Boot an OCI image\n\n  -h, --help\n          Print help\n";
+    let compacted = constrain_help_output(help);
+
+    assert!(compacted.contains("  [ARGV]...  Command to run"));
+    assert!(compacted.contains("      --image <REF>  Boot an OCI image"));
+    assert!(compacted.contains("  -h, --help  Print help"));
+    assert!(!compacted.contains("\n          "));
 }
 
 #[test]
