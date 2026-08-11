@@ -61,6 +61,40 @@ body {
   background-color: var(--sl-color-bg);
 }
 
+/* ── Docs header — glass bar (docs pages only) ──
+ *
+ *  Starlight's own header wrapper (the `<header class="header">` rendered
+ *  by PageFrame.astro around our Header.astro override) is `position:
+ *  fixed` at the top of the viewport — in this single-header layout that
+ *  already reads as "always visible while scrolling", the same result
+ *  `position: sticky` would give. We deliberately don't flip the position
+ *  value: Starlight's TwoColumnContent/main-frame compensate for the fixed
+ *  header by reserving `padding-top: var(--sl-nav-height)`, so switching to
+ *  `sticky` (which keeps the header in normal flow) would double that gap
+ *  on every docs page. Instead we layer the glass treatment — blur, a
+ *  page-tinted translucent background, and the glass-border hairline — on
+ *  top of the existing fixed bar.
+ *
+ *  Scoped to [data-has-sidebar] (docs pages) and the `header` tag so the
+ *  splash page's own `.landing-header` (nested inside this same PageFrame
+ *  wrapper, and already sticky + blurred on its own terms) isn't
+ *  double-treated — splash pages carry no [data-has-sidebar] attribute.
+ *  Structural selector: `header.header` is Starlight's own PageFrame
+ *  element/class pairing, not a documented custom property; revisit if a
+ *  Starlight upgrade renames it.
+ *
+ *  The mobile menu toggle (`starlight-menu-button`) is a fixed-position
+ *  sibling of this header rendered later in the DOM inside `nav.sidebar`,
+ *  sharing the same --sl-z-index-navbar stacking level — later DOM order
+ *  wins ties, so it already stacks above the header and stays clickable
+ *  through the blur.
+ */
+[data-has-sidebar] header.header {
+  backdrop-filter: blur(12px);
+  background-color: color-mix(in oklab, var(--color-page) 80%, transparent);
+  border-bottom: 1px solid var(--color-glass-border);
+}
+
 /* ── Typography — slightly larger base ── */
 html {
   font-size: 17px;
@@ -226,14 +260,67 @@ html {
   --ec-brdCol: var(--color-border) !important;
 }
 
-/* Sidebar — increased spacing between items */
+/* ── Sidebar — spacing rhythm + group-label / indent-rail treatment ──
+ *
+ *  Selectors below all key off Starlight's own class/attribute names
+ *  (`nav[aria-label="Main"]`, `.group-label`, `.large`, plain nested `ul`
+ *  structure from SidebarSublist.astro) — there's no --sl-color-* custom
+ *  property for sidebar heading typography or the indent rail, so this is
+ *  a structural override. Revisit if a Starlight upgrade renames them.
+ */
 nav[aria-label="Main"] a {
   padding-block: 0.4rem;
 }
 
 nav[aria-label="Main"] summary,
 nav[aria-label="Main"] [role="group"] > :first-child {
-  padding-block: 0.5rem;
+  padding-block: 0.6rem 0.4rem;
+}
+
+/* Group headings ("Guides", "Reference", …) read as small mono caps,
+   matching the Eyebrow treatment used across the homepage. Scoped to
+   `.group-label .large` (not bare `.large`) so plain top-level link items,
+   which also carry the `.large` class, are left at their own size. */
+nav[aria-label="Main"] .group-label .large {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-label);
+}
+
+/* Quiet indent rail on nested lists — Starlight already draws this line
+   (SidebarSublist.astro's `ul ul li` rule); we only re-pin its color to
+   the role token the rest of the redesign uses for hairlines. */
+nav[aria-label="Main"] ul ul li {
+  border-inline-start-color: var(--color-edge);
+}
+
+/* ── Table of contents — label + active-item marker ──
+ *
+ *  `.right-sidebar-panel` is PageSidebar.astro's wrapper around the
+ *  desktop TOC only (the mobile TOC lives in a separate, unclassed
+ *  sibling), so this doesn't touch the mobile "On this page" popover.
+ *  Structural selectors: PageSidebar.astro's own wrapper class plus
+ *  TableOfContentsList.astro's `aria-current` attribute — no --sl-color-*
+ *  property exposes TOC heading typography or an accent-only marker.
+ */
+.right-sidebar-panel h2 {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-label);
+}
+
+/* The active heading already inherits accent text color via the
+   --sl-color-text-accent binding above; add a rail so the marker reads at
+   a glance rather than relying on color alone. */
+.right-sidebar-panel a[aria-current='true'] {
+  border-inline-start: 2px solid var(--color-accent);
+  color: var(--color-accent);
 }
 
 /* ── Splash / Landing page — full-width, no Starlight chrome ── */
