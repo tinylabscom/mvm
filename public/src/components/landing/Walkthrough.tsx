@@ -18,7 +18,7 @@ const STEPS = [
   {
     id: "walk-run",
     title: "Run it",
-    body: "The compiled flake boots as a real microVM with its own kernel, and the entrypoint is dispatched over vsock.",
+    body: "The --entrypoint flag runs the built flake and dispatches the function directly, returning its encoded result.",
   },
   {
     id: "walk-result",
