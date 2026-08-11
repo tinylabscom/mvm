@@ -130,6 +130,7 @@ impl MockBackend {
                 tag: None,
                 created_unix: mvm_core::time::now_unix_secs(),
                 quiesced: true,
+                grants: None,
             },
         )
         .map_err(|e| StandbyError::SpawnFailed(format!("capture mock standby parent: {e}")))?;

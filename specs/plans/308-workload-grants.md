@@ -1,6 +1,6 @@
 # Plan 308 — Workload grants: one declaration, per-backend enforcement
 
-**Status: IN FLIGHT — WS1, WS1b, WS2, WS3 complete; WS4 partial (CPU bound + prod gate landed, admission budget outstanding); WS5, WS5b, WS6, WS6b outstanding. No surface authors a grant yet, so the feature is inert by design until WS6.**
+**Status: IN FLIGHT — WS1, WS1b, WS2, WS3 complete; WS4 partial (CPU bound + prod gate landed, admission budget outstanding); WS5b partial (child ⊆ parent enforced and chain-anchored, `apply_grants` on restore outstanding); WS5, WS6, WS6b outstanding.**
 
 ## Why
 
@@ -321,7 +321,7 @@ cheapest and most rigorous, not the one where it is hardest.
       grant must be rejected at admission rather than accepted as partial
       enforcement.
 
-- [ ] **WS5b — Grants across snapshot, fork, and restore.**
+- [~] **WS5b — Grants across snapshot, fork, and restore.**
       Today's child-plan validation (`crates/mvm-runtime/src/checkpoint/mod.rs`)
       checks signature length, signer id, `verify_plan_id`, tenant match, and
       the validity window. It does not compare the child's resources against
@@ -333,6 +333,20 @@ cheapest and most rigorous, not the one where it is hardest.
       refuses a child whose grants are not a subset of its parent's. Same
       family as the restored-child authorization gap that disarmed the plan
       255 pool, so the two should be reviewed together.
+
+      LANDED: `mvm_contract::grants::subset::grants_are_subset` — CPU/wall
+      clock treat absence as *unbounded* (so a child dropping a bound has
+      widened), egress treats it as deny-all (so dropping it has narrowed),
+      and mismatched CPU units are refused rather than converted.
+      `CheckpointMeta.grants` is inside `CheckpointDigestInput`, so a parent
+      record edited to widen its own grant stops matching the digest the
+      signed chain recorded and is refused before the comparison runs. Capture
+      seals the VM's admitted grants; a vm_full fork checks the child plan's
+      set against the parent's in `validate_child_fork_plan` and records the
+      child's own (narrower) set; an fs_quick fork inherits the parent's.
+      STILL OPEN: restore does not re-apply the grants through `apply_grants`
+      the way a cold boot does — the child cannot be *admitted* wider, but
+      nothing re-arms the host-side control on the restored VM.
 
 - [ ] **WS6 — The four surfaces.**
       Manifest: `[grants]` table extending `ManifestMachineWorkflow`.

@@ -887,6 +887,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             tag: None,
             created_unix: mvm_core::time::now_unix_secs(),
             retain_paused: true,
+            grants: None,
         };
         let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))
             && std::env::var("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT").as_deref() == Ok("1")
@@ -3306,6 +3307,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 quiesced: true,
+                grants: None,
             },
         )
         .unwrap();

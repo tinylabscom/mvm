@@ -151,6 +151,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 quiesced: true,
+                grants: None,
             },
         )
         .unwrap()

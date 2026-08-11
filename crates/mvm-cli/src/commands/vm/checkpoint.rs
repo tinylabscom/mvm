@@ -435,6 +435,7 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
             tag,
             created_unix: now,
             quiesced: true,
+            grants: admitted_grants_for(name),
         },
     )
     .with_context(|| format!("capturing fs_quick checkpoint of {name:?}"))?;
@@ -501,6 +502,7 @@ fn capture_vm_full_for_running_vm(
         tag: args.tag,
         created_unix: args.created_unix,
         retain_paused: false,
+        grants: admitted_grants_for(args.name),
     };
     capture_vm_full(args.store, params, control.as_ref())
 }
@@ -542,6 +544,25 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// The permission set `name` was admitted under, read off its persisted plan so
+/// the checkpoint can seal it and a later restore can bound a child against it.
+///
+/// Degrades the same way [`bind_checkpoint_created`] does, and safely for the
+/// same reason: a VM with no readable plan also gets no chain-signed
+/// `checkpoint.created` entry, so the record it produces has nothing to anchor
+/// its content-address and every fork of it is refused before the grants are
+/// consulted at all.
+fn admitted_grants_for(name: &str) -> Option<mvm_contract::grants::Grants> {
+    match super::plan_persist::read_plan(name) {
+        Ok(plan) => plan.grants,
+        Err(e) => {
+            tracing::warn!(error = %e, vm = name,
+                "no persisted plan; checkpoint seals no admitted grant");
+            None
+        }
+    }
 }
 
 pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {

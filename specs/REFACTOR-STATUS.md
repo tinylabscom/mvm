@@ -1147,8 +1147,13 @@ for detailed scope and acceptance criteria.
         landing, so a bounded boot's *reported tier* is unwitnessed on hardware
   - [ ] WS5 — wasm fuel **and** epoch (fuel alone bounds nothing in a host
         call) + `StoreLimits`
-  - [ ] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
-        the restore-laundering path
+  - [~] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
+        the restore-laundering path. `grants_are_subset` in mvm-contract (CPU
+        and wall clock read absence as unbounded, egress as deny-all;
+        mismatched CPU units refused, never converted), `CheckpointMeta.grants`
+        inside the content-address so a tampered parent record cannot justify
+        a wider child, and the check wired into `validate_child_fork_plan`.
+        STILL OPEN: restore does not re-apply grants through `apply_grants`
   - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
         `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
         and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,
