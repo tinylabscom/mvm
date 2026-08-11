@@ -544,6 +544,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         created_at: None,
         last_started_at: None,
         health_check: None,
+        grants: None,
     };
     mvm_runtime::machine::persist::save_machine_spec(&spec, false).unwrap();
     let err = client
@@ -876,4 +877,119 @@ async fn lifecycle_audit_carries_no_secret_values_or_env() {
             }
         }
     }
+}
+
+// ── Grants across the library verbs ──────────────────────────────────
+//
+// The CLI half of this got the persistence right; the library half is where a
+// caller's permission set can vanish without a word. Both verbs below dropped
+// grants before these tests existed: `create_machine` never put them on the
+// request, and `start_persistent` rebuilt the request from sizing alone.
+
+fn egress_grants(host: &str, port: u16) -> mvm_contract::grants::Grants {
+    mvm_contract::grants::Grants {
+        cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+        egress: Some(mvm_contract::grants::EgressGrant {
+            allow: vec![mvm_core::policy::network_policy::HostPort::new(host, port)],
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn create_machine_persists_the_callers_grants() {
+    // `MachineSpec.grants` is the only way a library caller expresses an egress
+    // allow-list. Dropping it on the persistent verb would leave that
+    // expression with nowhere to land — silently, which is what the sibling
+    // `env` refusal in the same function exists to avoid.
+    let home = Isolated::new();
+    let client = mock_client();
+    let rootfs = home.rootfs();
+
+    let spec = mvm_core::client::dto::MachineSpec::builder("p-granted", rootfs)
+        .cpus(2)
+        .memory_mib(256)
+        .cpu_millicores(1500)
+        .allow_egress("api.example.com", 443)
+        .build();
+    client.create_machine(spec).await.expect("create");
+
+    let persisted = mp::load_machine_spec("p-granted").expect("definition persisted");
+    let grants = persisted
+        .grants
+        .expect("the caller's grants reached the persisted definition");
+    assert_eq!(
+        grants.cpu,
+        Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 })
+    );
+    assert_eq!(
+        grants.egress.expect("egress granted").allow,
+        vec![mvm_core::policy::network_policy::HostPort::new(
+            "api.example.com",
+            443
+        )]
+    );
+}
+
+#[test]
+fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
+    // A permission set that holds for the first boot and lapses on the next is
+    // the "my allowlist stopped applying" failure in its purest form: closed
+    // for egress, so nothing breaks loudly, and silent for CPU and wall clock.
+    let mut spec = mp::MachineSpec {
+        schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
+        name: "p-restart".to_string(),
+        image: Some("alpine:latest".to_string()),
+        manifest: None,
+        deployment: None,
+        resolved_digest: None,
+        runtime_pack: false,
+        net: false,
+        allow_host: vec![],
+        cpus: 2,
+        memory: "256M".to_string(),
+        mem_initial: None,
+        profile: "standard".to_string(),
+        volumes: vec![],
+        init: vec![],
+        agent_verb: vec![],
+        created_at: None,
+        last_started_at: None,
+        health_check: None,
+        grants: Some(egress_grants("api.example.com", 443)),
+    };
+
+    let request =
+        super::start_request_from_spec("p-restart", "alpine:latest".to_string(), 256, &spec)
+            .expect("the start request builds");
+    let carried = request
+        .grants
+        .as_ref()
+        .expect("the start carries the definition's grants");
+    assert_eq!(
+        carried.cpu,
+        Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 })
+    );
+
+    // The policy the boot installs is derived from exactly those grants, so
+    // asserting the projection is asserting what the gate will enforce.
+    let policy = mvm_contract::grants::projection::network_policy_from_grants(carried);
+    assert_eq!(
+        policy
+            .resolve_rules()
+            .expect("an allow-list resolves to rules"),
+        vec![mvm_core::policy::network_policy::HostPort::new(
+            "api.example.com",
+            443
+        )],
+        "a restart must not silently fall back to deny-all"
+    );
+
+    // And a definition that granted nothing stays grant-free, so the pre-grant
+    // baseline is unchanged.
+    spec.grants = None;
+    let ungranted =
+        super::start_request_from_spec("p-restart", "alpine:latest".to_string(), 256, &spec)
+            .expect("the start request builds");
+    assert_eq!(ungranted.grants, None);
 }

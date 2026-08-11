@@ -611,6 +611,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         created_at: None,
         last_started_at: None,
         health_check: None,
+        grants: None,
     }
 }
 
@@ -1483,6 +1484,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
+        grants: None,
     };
     mark_machine_started(&mut spec, "sha256:abc".to_string());
     assert_eq!(spec.resolved_digest.as_deref(), Some("sha256:abc"));
@@ -1499,6 +1501,9 @@ fn create_persists_machine_spec_under_data_dir() {
         net: true,
         allow_host: vec!["api.example.com".to_string()],
         cpus: Some(4),
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
         memory: Some("1G".to_string()),
         mem_initial: None,
         profile: Some(RunProfile::Dev),
@@ -1527,6 +1532,9 @@ fn create_auto_generates_a_name_when_omitted() {
         net: false,
         allow_host: Vec::new(),
         cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
         memory: None,
         mem_initial: None,
         profile: None,
@@ -1572,6 +1580,9 @@ volumes = ["./src:/work:rw"]
         net: false,
         allow_host: Vec::new(),
         cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
         memory: None,
         mem_initial: None,
         profile: Some(RunProfile::Dev),
@@ -1606,6 +1617,9 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
         net: false,
         allow_host: Vec::new(),
         cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
         memory: None,
         mem_initial: None,
         profile: None,
@@ -1635,6 +1649,9 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         net: false,
         allow_host: Vec::new(),
         cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
         memory: None,
         mem_initial: None,
         profile: None,
@@ -1652,6 +1669,9 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         net: false,
         allow_host: Vec::new(),
         cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
         memory: None,
         mem_initial: None,
         profile: Some(RunProfile::Standard),
@@ -1688,6 +1708,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
+        grants: None,
     };
 
     let summary = machine_start_preflight_summary(
@@ -1775,6 +1796,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
+        grants: None,
     };
 
     let summary = machine_start_preflight_summary(&spec, Some("libkrun"), None)
@@ -1798,6 +1820,9 @@ fn create_rejects_unsafe_machine_name() {
         net: false,
         allow_host: Vec::new(),
         cpus: Some(2),
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
         memory: Some("512M".to_string()),
         mem_initial: None,
         profile: Some(RunProfile::Standard),
@@ -1831,6 +1856,7 @@ fn create_refuses_overwrite_without_force() {
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
+        grants: None,
     };
     save_machine_spec(&spec, false).expect("first save");
     let err = save_machine_spec(&spec, false).expect_err("overwrite rejected");
@@ -1861,6 +1887,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
+        grants: None,
     };
     save_machine_spec(&spec, false).expect("save");
     let err = remove_machine_spec("web", false).expect_err("confirmation required");
@@ -1893,6 +1920,7 @@ fn seed_machine_spec(name: &str) {
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
+        grants: None,
     };
     save_machine_spec(&spec, false).expect("save");
 }
@@ -2331,6 +2359,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         created_at: None,
         last_started_at: None,
         health_check: None,
+        grants: None,
     }
 }
 
@@ -2649,5 +2678,245 @@ fn an_allow_host_rule_does_not_influence_the_transport() {
     assert_eq!(
         super::derive_network_mode(false),
         mvm_contract::plan::NetworkMode::HostVsockProxy
+    );
+}
+
+// ── the grant flags ───────────────────────────────────────
+
+#[test]
+fn cpus_and_cpu_limit_are_independent_controls() {
+    // Different questions: how many vCPUs the guest sees, and what share of
+    // host CPU time it may consume. Conflating them is the mistake every
+    // container runtime made once, so they must be separately settable and
+    // neither may move the other.
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine",
+        "--cpus",
+        "4",
+        "--cpu-limit",
+        "500",
+    ])
+    .expect("both flags parse together");
+    assert_eq!(args.cpus, 4);
+    assert_eq!(args.cpu_limit, Some(500));
+
+    let only_cpus = parse_run(&["run", "--image", "alpine", "--cpus", "4"]).expect("parses");
+    assert_eq!(only_cpus.cpus, 4);
+    assert_eq!(only_cpus.cpu_limit, None, "--cpus must not imply a share");
+
+    let only_limit =
+        parse_run(&["run", "--image", "alpine", "--cpu-limit", "500"]).expect("parses");
+    assert_eq!(only_limit.cpu_limit, Some(500));
+    assert_eq!(
+        only_limit.cpus, 2,
+        "--cpu-limit must not move the vCPU count off its default"
+    );
+}
+
+#[test]
+fn the_cpu_flags_help_text_tells_them_apart() {
+    // A user who cannot tell which flag caps what will reach for the wrong
+    // one, and the wrong one silently does nothing they wanted.
+    let help = {
+        let mut cmd = Cli::command();
+        cmd.find_subcommand_mut("machine")
+            .expect("machine noun")
+            .find_subcommand_mut("run")
+            .expect("run verb")
+            .render_long_help()
+            .to_string()
+    };
+    assert!(help.contains("--cpu-limit"), "help must list --cpu-limit");
+    assert!(
+        help.contains("millicores"),
+        "the share flag must name its unit: {help}"
+    );
+    assert!(
+        help.contains("vCPUs the guest sees"),
+        "the vCPU flag must say what it sets: {help}"
+    );
+}
+
+#[test]
+fn a_grants_file_is_accepted_on_run_and_create() {
+    let run = parse_run(&["run", "--image", "alpine", "--grants-file", "/tmp/g.json"])
+        .expect("run accepts --grants-file");
+    assert_eq!(run.grants_file.as_deref(), Some(Path::new("/tmp/g.json")));
+
+    let create = match parse(&[
+        "create",
+        "--image",
+        "alpine",
+        "--grants-file",
+        "/tmp/g.json",
+    ])
+    .expect("create accepts --grants-file")
+    {
+        MachineAction::Create(c) => c,
+        other => panic!("expected create action, got {other:?}"),
+    };
+    assert_eq!(
+        create.grants_file.as_deref(),
+        Some(Path::new("/tmp/g.json"))
+    );
+}
+
+#[test]
+fn a_manifest_grant_lands_on_the_created_machine_spec() {
+    // `machine create` is the verb that reads a project manifest, so it is
+    // where a `[grants]` table becomes a persisted permission set — the one a
+    // later `machine start` re-admits under.
+    let home = tempfile::tempdir().expect("scratch mvm home");
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home.path());
+
+    let project = tempfile::tempdir().expect("project dir");
+    std::fs::write(
+        project.path().join("mvm.toml"),
+        r#"
+image = "alpine:3.20"
+
+[grants]
+cpu_millicores = 1500
+allow_hosts = ["api.example.com:443"]
+"#,
+    )
+    .expect("write manifest");
+
+    let args = match parse_owned(&[
+        "create".to_string(),
+        "--name".to_string(),
+        "granted".to_string(),
+        "--manifest".to_string(),
+        project.path().display().to_string(),
+    ])
+    .expect("create parses")
+    {
+        MachineAction::Create(c) => c,
+        other => panic!("expected create action, got {other:?}"),
+    };
+    let spec = args.into_spec().expect("spec");
+    let grants = spec.grants.expect("the manifest's grants were persisted");
+    assert_eq!(
+        grants.cpu,
+        Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 })
+    );
+    assert_eq!(
+        grants.egress.expect("egress granted").allow,
+        vec![mvm_core::network_policy::HostPort::new(
+            "api.example.com",
+            443
+        )]
+    );
+}
+
+#[test]
+fn a_cli_cpu_limit_does_not_discard_the_manifests_egress_grant() {
+    // Per-dimension precedence, at the surface a user actually types. Whole
+    // object precedence would drop the allow-list silently.
+    let home = tempfile::tempdir().expect("scratch mvm home");
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home.path());
+
+    let project = tempfile::tempdir().expect("project dir");
+    std::fs::write(
+        project.path().join("mvm.toml"),
+        r#"
+image = "alpine:3.20"
+
+[grants]
+cpu_millicores = 4000
+allow_hosts = ["api.example.com:443"]
+"#,
+    )
+    .expect("write manifest");
+
+    let args = match parse_owned(&[
+        "create".to_string(),
+        "--name".to_string(),
+        "narrowed".to_string(),
+        "--manifest".to_string(),
+        project.path().display().to_string(),
+        "--cpu-limit".to_string(),
+        "500".to_string(),
+    ])
+    .expect("create parses")
+    {
+        MachineAction::Create(c) => c,
+        other => panic!("expected create action, got {other:?}"),
+    };
+    let grants = args
+        .into_spec()
+        .expect("spec")
+        .grants
+        .expect("something was granted");
+    assert_eq!(
+        grants.cpu,
+        Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+        "the CLI wins the CPU dimension"
+    );
+    assert_eq!(
+        grants.egress.expect("egress survived").allow,
+        vec![mvm_core::network_policy::HostPort::new(
+            "api.example.com",
+            443
+        )],
+        "the manifest keeps the egress dimension the CLI said nothing about"
+    );
+}
+
+#[test]
+fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
+    // The receiving half of the SDK's encoding contract. `mvm-sdk`'s
+    // `grant_argv` emits exactly these flags for a CPU share, a bounded wall
+    // clock, and an egress allow-list; this asserts the CLI turns them back
+    // into the grant that produced them. A flag that did not exist, or meant
+    // something else here, would be a silently dropped grant — the SDK would
+    // emit it, the CLI would ignore it, and nothing on either side would
+    // notice.
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine:latest",
+        "--cpu-limit",
+        "1500",
+        "--timeout",
+        "600",
+        "--allow-host",
+        "api.example.com:443",
+        "--allow-host",
+        "db.internal:5432",
+    ])
+    .expect("the facade's argv parses");
+
+    let config = mvm_core::user_config::MvmConfig::default();
+    let resolved =
+        crate::commands::shared::resolve_run_grants(crate::commands::shared::GrantInputs {
+            cpu_limit_millicores: args.cpu_limit,
+            timeout_secs: args.timeout,
+            allow_host: &args.allow_host,
+            net: args.net,
+            grants_file: args.grants_file.as_deref(),
+            manifest: None,
+            config: &config,
+        })
+        .expect("resolves");
+
+    assert_eq!(
+        resolved.plan_grants,
+        Some(mvm_contract::grants::Grants {
+            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            wall_clock: Some(mvm_contract::grants::WallClockGrant::Secs {
+                secs: std::num::NonZeroU32::new(600).expect("nonzero"),
+            }),
+            egress: Some(mvm_contract::grants::EgressGrant {
+                allow: vec![
+                    mvm_core::network_policy::HostPort::new("api.example.com", 443),
+                    mvm_core::network_policy::HostPort::new("db.internal", 5432),
+                ],
+            }),
+        })
     );
 }

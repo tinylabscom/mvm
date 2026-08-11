@@ -58,12 +58,23 @@ pub struct MachineSpec {
     pub cpus: u32,
     pub memory_mib: u32,
     pub env: Vec<(String, String)>,
+    /// What this workload is permitted to consume or reach. `None` leaves
+    /// every dimension unspecified, which each resolves its own way: no CPU
+    /// cap, no wall-clock bound, and deny-all egress.
+    ///
+    /// This is the only way a library caller expresses an egress allow-list —
+    /// there is no separate network field, because a second representation of
+    /// the same decision is a second thing that can disagree with the signed
+    /// plan. `#[serde(default)]` so a record written before grants existed
+    /// still deserializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<mvm_contract::grants::Grants>,
 }
 
 impl MachineSpec {
     /// Start building a spec. `name` and `image` are the two required fields;
-    /// everything else defaults (1 vCPU, 512 MiB, no env) and is overridable on
-    /// the returned [`MachineSpecBuilder`].
+    /// everything else defaults (1 vCPU, 512 MiB, no env, no grants) and is
+    /// overridable on the returned [`MachineSpecBuilder`].
     pub fn builder(name: impl Into<String>, image: impl Into<String>) -> MachineSpecBuilder {
         MachineSpecBuilder {
             name: name.into(),
@@ -71,6 +82,7 @@ impl MachineSpec {
             cpus: 1,
             memory_mib: 512,
             env: Vec::new(),
+            grants: mvm_contract::grants::Grants::default(),
         }
     }
 }
@@ -89,6 +101,7 @@ pub struct MachineSpecBuilder {
     cpus: u32,
     memory_mib: u32,
     env: Vec<(String, String)>,
+    grants: mvm_contract::grants::Grants,
 }
 
 impl MachineSpecBuilder {
@@ -120,6 +133,61 @@ impl MachineSpecBuilder {
         self
     }
 
+    /// Bound the workload to `millicores` thousandths of one host core.
+    ///
+    /// A share of host CPU *time*, unrelated to [`cpus`], which sets how many
+    /// vCPUs the guest sees. A workload can hold four vCPUs and be bounded to
+    /// half a core; conflating the two is the mistake every container runtime
+    /// made once.
+    ///
+    /// [`cpus`]: MachineSpecBuilder::cpus
+    #[must_use]
+    pub fn cpu_millicores(mut self, millicores: u32) -> Self {
+        self.grants.cpu = Some(mvm_contract::grants::CpuGrant::Share { millicores });
+        self
+    }
+
+    /// Bound the workload to a deterministic executed-instruction budget.
+    /// A different unit from [`cpu_millicores`], not a finer one; the later
+    /// call wins.
+    ///
+    /// [`cpu_millicores`]: MachineSpecBuilder::cpu_millicores
+    #[must_use]
+    pub fn cpu_fuel(mut self, instructions: u64) -> Self {
+        self.grants.cpu = Some(mvm_contract::grants::CpuGrant::Fuel { instructions });
+        self
+    }
+
+    /// Bound the workload's wall-clock runtime. `NonZeroU32` because zero
+    /// seconds means "no time allowed", which is not a bound anyone wants, and
+    /// the legacy encoding it resembles reads zero as *unbounded*.
+    #[must_use]
+    pub fn wall_clock_secs(mut self, secs: std::num::NonZeroU32) -> Self {
+        self.grants.wall_clock = Some(mvm_contract::grants::WallClockGrant::Secs { secs });
+        self
+    }
+
+    /// Permit outbound access to one `host:port`. Repeatable; each call
+    /// appends. Calling it at all is what lifts the workload off deny-all.
+    #[must_use]
+    pub fn allow_egress(mut self, host: impl Into<String>, port: u16) -> Self {
+        self.grants
+            .egress
+            .get_or_insert_with(Default::default)
+            .allow
+            .push(crate::policy::network_policy::HostPort::new(host, port));
+        self
+    }
+
+    /// Replace the whole permission set at once, for a caller that already has
+    /// one in hand (read from a file, received over a wire). Overwrites every
+    /// dimension the per-dimension setters above may have set.
+    #[must_use]
+    pub fn grants(mut self, grants: mvm_contract::grants::Grants) -> Self {
+        self.grants = grants;
+        self
+    }
+
     /// Finish building. Infallible — `name` and `image` were required up front.
     #[must_use]
     pub fn build(self) -> MachineSpec {
@@ -129,6 +197,10 @@ impl MachineSpecBuilder {
             cpus: self.cpus,
             memory_mib: self.memory_mib,
             env: self.env,
+            // An untouched permission set serializes as absent, so a spec that
+            // granted nothing is byte-identical to one written before grants
+            // existed.
+            grants: (self.grants != mvm_contract::grants::Grants::default()).then_some(self.grants),
         }
     }
 }
@@ -369,10 +441,60 @@ mod tests {
             cpus: 2,
             memory_mib: 512,
             env: vec![("PORT".into(), "8080".into())],
+            grants: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         let back: MachineSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, back);
+    }
+
+    #[test]
+    fn a_persisted_machine_spec_without_grants_still_loads() {
+        // Specs written before grants existed are on disk and in flight; the
+        // field has to be optional in the wire form, not merely in the type.
+        let legacy = r#"{"name":"web","image":"nginx","cpus":1,"memory_mib":512,"env":[]}"#;
+        let spec: MachineSpec = serde_json::from_str(legacy).expect("legacy spec still loads");
+        assert_eq!(spec.grants, None);
+        // And a spec that grants nothing must round-trip back to that same
+        // legacy shape, so writing one does not gratuitously change the bytes.
+        assert_eq!(serde_json::to_string(&spec).unwrap(), legacy);
+    }
+
+    #[test]
+    fn the_builder_expresses_an_egress_allow_list() {
+        // The library surface's reason to exist: before this, a caller could
+        // not ask for outbound access at all without shelling out to the CLI.
+        let spec = MachineSpec::builder("web", "nginx")
+            .cpu_millicores(1500)
+            .allow_egress("api.example.com", 443)
+            .allow_egress("db.internal", 5432)
+            .build();
+        let grants = spec.grants.expect("grants were authored");
+        assert_eq!(
+            grants.cpu,
+            Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 })
+        );
+        let allow = &grants.egress.expect("egress authored").allow;
+        assert_eq!(allow.len(), 2);
+        assert_eq!(
+            allow[0],
+            crate::policy::network_policy::HostPort::new("api.example.com", 443)
+        );
+    }
+
+    #[test]
+    fn cpus_and_cpu_millicores_are_independent_controls() {
+        // vCPU count and host CPU share are different questions; setting one
+        // must not move the other.
+        let spec = MachineSpec::builder("web", "nginx")
+            .cpus(4)
+            .cpu_millicores(500)
+            .build();
+        assert_eq!(spec.cpus, 4);
+        assert_eq!(
+            spec.grants.and_then(|g| g.cpu),
+            Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 })
+        );
     }
 
     #[test]
@@ -386,6 +508,7 @@ mod tests {
                 cpus: 1,
                 memory_mib: 512,
                 env: vec![],
+                grants: None,
             }
         );
 
@@ -421,6 +544,7 @@ mod tests {
             cpus: 2,
             memory_mib: 512,
             env: vec![("PORT".into(), "8080".into())],
+            grants: None,
         };
         assert_eq!(built, literal);
     }

@@ -42,6 +42,9 @@ pub mod egress_handler;
 /// guest.
 pub mod egress_substitution;
 pub mod exit_capture;
+/// Per-dimension resolution of a workload's grants across the CLI, a JSON
+/// grants file, the project manifest, and the operator's host config.
+pub mod grants_resolve;
 /// Shared guest loopback-egress helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
 /// Pure health-state reducer: fold probe results into a health state and

@@ -392,14 +392,21 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
     // A run that granted CPU or wall clock is the only one with anything to
     // enforce here; asking otherwise would warn on every unbounded boot.
     //
-    // `grants.egress` is deliberately outside both this gate and the ceiling.
-    // Egress is not bounded by a numeric ceiling and is not a per-backend
-    // mechanism question: it is enforced at the one substitution endpoint every
-    // workload's traffic already goes through, and the projection that would
-    // turn an egress grant into that endpoint's policy is not wired yet. Until
-    // it is, an egress grant is inert — which is closed, because the policy the
-    // endpoint installs without it is deny-all. Do not read this early return
-    // as egress having been checked.
+    // `grants.egress` is deliberately outside both this gate and the ceiling,
+    // and is enforced elsewhere rather than left unenforced. It is not bounded
+    // by a numeric ceiling, and "can this tier deliver it" is not a per-backend
+    // question for egress: every workload's traffic already leaves through the
+    // one per-VM substitution endpoint, so a granted allow-list is projected
+    // onto the policy that endpoint installs, and its gate is what admits or
+    // drops each flow.
+    //
+    // What this early return does not do is check that the projection happened.
+    // It cannot: the policy the endpoint installs rides on the launch config,
+    // not in the plan body this function reads, so keeping the two derived from
+    // one authored value is the obligation of the seam that builds both. What
+    // holds here unconditionally is the floor — an absent egress grant and an
+    // empty allow-list both project to deny-all, so a workload that granted
+    // nothing reaches nothing.
     if grants.cpu.is_none() && grants.wall_clock.is_none() {
         return Ok(());
     }

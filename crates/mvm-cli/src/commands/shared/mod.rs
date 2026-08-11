@@ -7,6 +7,7 @@ mod build_mode;
 mod drive;
 mod event;
 mod format;
+mod grants;
 mod hints;
 mod parse;
 mod resolve;
@@ -17,6 +18,7 @@ mod vsock;
 pub(super) use build_mode::BuildModeFlags;
 pub(super) use event::PhaseEvent;
 pub(super) use format::{human_age_secs, human_bytes};
+pub(in crate::commands) use grants::{GrantInputs, enforced_network_policy, resolve_run_grants};
 pub(super) use hints::with_hints;
 pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
 pub(super) use parse::{

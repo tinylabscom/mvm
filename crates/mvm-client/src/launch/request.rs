@@ -8,9 +8,10 @@
 //! Every field is validated at the client boundary, in
 //! [`LaunchRequestBuilder::build`]. Fields the in-process backend cannot
 //! honor are **refused**, never silently dropped: a command/entrypoint
-//! override, guest environment variables, and any network policy other than
-//! deny-all all fail the build with an error naming the CLI path that does
-//! support them.
+//! override, guest environment variables, and an untyped network policy other
+//! than deny-all all fail the build with an error naming what does support
+//! them. Egress is expressed as a grant, which the plan is signed over and the
+//! gate reads.
 
 use mvm_core::client::{MvmError, Result};
 
@@ -29,17 +30,21 @@ pub enum LifecycleMode {
     Persistent,
 }
 
-/// Guest network policy for the launch. The in-process backend enforces
-/// claim-10 default-deny at the shared substitution seam; it has no path
-/// that could honor an allow-list, so anything but deny-all is refused at
-/// validation rather than persisted-but-not-enforced.
+/// Untyped network policy for the launch. Superseded by the egress grant on
+/// [`LaunchRequestBuilder::allow_egress`], which is derived into the policy the
+/// gate reads and is covered by the plan's signature.
+///
+/// This one is not: it is a bare carrier travelling next to the plan rather
+/// than inside it, so an allow-list here would authorize egress that nothing
+/// signed. Anything but deny-all is refused at validation rather than
+/// persisted-but-not-enforced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum LaunchNetworkPolicy {
-    /// Deny all egress (the only policy the in-process backend admits).
+    /// Deny all egress (the only value this carrier admits).
     #[default]
     DenyAll,
     /// Named host allow-list — refused by [`LaunchRequestBuilder::build`];
-    /// use the CLI verbs, whose boot path enforces the resolved policy.
+    /// express it as an egress grant instead.
     AllowHosts(Vec<String>),
 }
 
@@ -71,6 +76,12 @@ pub struct LaunchRequest {
     pub(crate) volumes: Vec<LaunchVolumeSpec>,
     pub(crate) secret_refs: Vec<MachineSecretRef>,
     pub(crate) force: bool,
+    /// What the workload is permitted to consume or reach. Rides into the
+    /// signed plan, and its egress dimension is projected onto the launch
+    /// config the egress gate reads — so an allow-list here is authorized by
+    /// the same plan that was signed over it, rather than by a carrier
+    /// travelling alongside one.
+    pub(crate) grants: Option<mvm_contract::grants::Grants>,
 }
 
 impl LaunchRequest {
@@ -93,6 +104,7 @@ impl LaunchRequest {
             volumes: Vec::new(),
             secret_refs: Vec::new(),
             force: false,
+            grants: mvm_contract::grants::Grants::default(),
         }
     }
 
@@ -125,6 +137,7 @@ pub struct LaunchRequestBuilder {
     volumes: Vec<LaunchVolumeSpec>,
     secret_refs: Vec<MachineSecretRef>,
     force: bool,
+    grants: mvm_contract::grants::Grants,
 }
 
 impl LaunchRequestBuilder {
@@ -197,6 +210,46 @@ impl LaunchRequestBuilder {
     #[must_use]
     pub fn network(mut self, network: LaunchNetworkPolicy) -> Self {
         self.network = network;
+        self
+    }
+
+    /// Bound the workload to `millicores` thousandths of one host core — a
+    /// share of host CPU *time*, unrelated to [`cpus`], which is the vCPU count
+    /// the guest sees.
+    ///
+    /// [`cpus`]: LaunchRequestBuilder::cpus
+    #[must_use]
+    pub fn cpu_millicores(mut self, millicores: u32) -> Self {
+        self.grants.cpu = Some(mvm_contract::grants::CpuGrant::Share { millicores });
+        self
+    }
+
+    /// Bound the workload's wall-clock runtime.
+    #[must_use]
+    pub fn wall_clock_secs(mut self, secs: std::num::NonZeroU32) -> Self {
+        self.grants.wall_clock = Some(mvm_contract::grants::WallClockGrant::Secs { secs });
+        self
+    }
+
+    /// Permit outbound access to one `host:port`. Repeatable; each call
+    /// appends. Calling it at all is what lifts the workload off deny-all, and
+    /// the allow-list lands in the signed plan the gate's policy is derived
+    /// from.
+    #[must_use]
+    pub fn allow_egress(mut self, host: impl Into<String>, port: u16) -> Self {
+        self.grants
+            .egress
+            .get_or_insert_with(Default::default)
+            .allow
+            .push(mvm_core::policy::network_policy::HostPort::new(host, port));
+        self
+    }
+
+    /// Replace the whole permission set at once, for a caller that already has
+    /// one in hand. Overwrites every dimension the setters above may have set.
+    #[must_use]
+    pub fn grants(mut self, grants: mvm_contract::grants::Grants) -> Self {
+        self.grants = grants;
         self
     }
 
@@ -299,6 +352,10 @@ impl LaunchRequestBuilder {
             volumes: self.volumes,
             secret_refs: self.secret_refs,
             force: self.force,
+            // An untouched permission set stays absent, so a request that
+            // granted nothing produces exactly the plan it produced before
+            // grants were expressible.
+            grants: (self.grants != mvm_contract::grants::Grants::default()).then_some(self.grants),
         })
     }
 }

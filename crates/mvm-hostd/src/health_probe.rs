@@ -526,6 +526,7 @@ mod tests {
             created_at: None,
             last_started_at: None,
             health_check,
+            grants: None,
         }
     }
 

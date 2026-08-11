@@ -41,7 +41,8 @@ pub use mvm_core::client::mock::{self, MockBackend};
 pub use mvm_core::client::{MvmClient, MvmError, Result};
 
 pub use boot::{
-    backend_is_running, backend_stop_by_name, require_hypervisor_selectable, start_prepared,
+    backend_is_running, backend_kind_for, backend_stop_by_name, require_hypervisor_selectable,
+    start_prepared,
 };
 pub use connect::{Target, connect};
 pub use launch::{

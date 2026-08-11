@@ -35,6 +35,130 @@ fn machine_err(e: MachineError) -> MvmError {
 // `machine.rs` builders, which the cross-language conformance harness pins to
 // `tests/machine-fixtures/*.argv`. The facade delegates to them rather than
 // hand-rolling a second copy, so it can never drift from the CLI contract.
+//
+// The workload's permission set is the one thing those builders do not model:
+// they describe the cross-language `machine` verb surface, and a `Grants` is
+// not part of it. [`grant_argv`] appends it, emitting only flags the CLI
+// already parses — so the exception is where that argv is assembled, never
+// what it says.
+
+/// A permission set encoded for the command line, plus anything that has to
+/// outlive the subprocess.
+///
+/// The temp file is held rather than returned as a path because `--grants-file`
+/// is read by the child: dropping the handle before the spawn would hand the
+/// CLI a path that no longer exists.
+struct GrantArgv {
+    args: Vec<String>,
+    /// Present only when a dimension had no faithful flag.
+    grants_file: Option<tempfile::NamedTempFile>,
+}
+
+/// Encode `grants` as `mvmctl` flags.
+///
+/// Three dimensions have a flag that means exactly them, and those are emitted
+/// directly: a CPU share as `--cpu-limit <millicores>`, a bounded wall clock as
+/// `--timeout <secs>`, and each granted destination as `--allow-host
+/// <host>:<port>`, which is the spelling the CLI's own `--allow-host` parser
+/// turns back into an egress grant.
+///
+/// Three cannot be said in flags at all, and each is written verbatim to a
+/// `--grants-file` instead of being flattened into something close:
+///
+/// - A **fuel** budget is an instruction count; `--cpu-limit` is millicores.
+///   There is no conversion between them, so there is nothing to emit.
+/// - An **`Unbounded`** wall clock is not the same as omitting `--timeout`.
+///   Omitting it leaves the dimension unspecified, which a host with a
+///   `max_wall_clock_secs` ceiling admits; an explicit `Unbounded` is refused
+///   by that same ceiling. Emitting nothing would turn a refusal into a boot.
+/// - An **empty** allow-list is an explicit "no destinations", which zero
+///   `--allow-host` flags would record as "no egress grant". Both deny all
+///   traffic, so nothing opens either way, but only one of them is what the
+///   caller declared, and the signed plan should say which.
+///
+/// An egress host containing a colon takes the same route: `--allow-host`
+/// splits on the last one, so such a value would be parsed back as a different
+/// host and port than it went in as.
+fn grant_argv(grants: Option<&mvm_contract::grants::Grants>) -> Result<GrantArgv> {
+    use mvm_contract::grants::{CpuGrant, WallClockGrant};
+
+    let Some(grants) = grants else {
+        return Ok(GrantArgv {
+            args: Vec::new(),
+            grants_file: None,
+        });
+    };
+
+    let mut args = Vec::new();
+    let mut needs_file = false;
+
+    match grants.cpu {
+        None => {}
+        Some(CpuGrant::Share { millicores }) => {
+            args.push("--cpu-limit".to_string());
+            args.push(millicores.to_string());
+        }
+        Some(CpuGrant::Fuel { .. }) => needs_file = true,
+    }
+
+    match grants.wall_clock {
+        None => {}
+        Some(WallClockGrant::Secs { secs }) => {
+            args.push("--timeout".to_string());
+            args.push(secs.get().to_string());
+        }
+        Some(WallClockGrant::Unbounded) => needs_file = true,
+    }
+
+    if let Some(egress) = grants.egress.as_ref() {
+        if egress.allow.is_empty() || egress.allow.iter().any(|hp| hp.host.contains(':')) {
+            needs_file = true;
+        } else {
+            for hp in &egress.allow {
+                args.push("--allow-host".to_string());
+                args.push(format!("{}:{}", hp.host, hp.port));
+            }
+        }
+    }
+
+    if !needs_file {
+        return Ok(GrantArgv {
+            args,
+            grants_file: None,
+        });
+    }
+
+    // One encoding or the other, never a mix: the file already carries every
+    // dimension, and adding flags beside it would be two statements of one
+    // decision that a precedence rule then has to reconcile.
+    let file = write_grants_file(grants)?;
+    Ok(GrantArgv {
+        args: vec![
+            "--grants-file".to_string(),
+            file.path().to_string_lossy().into_owned(),
+        ],
+        grants_file: Some(file),
+    })
+}
+
+/// Serialize `grants` to a temp file in the exact shape `--grants-file` parses.
+fn write_grants_file(grants: &mvm_contract::grants::Grants) -> Result<tempfile::NamedTempFile> {
+    let backend_err = |reason: String| MvmError::Backend { reason };
+    let json = serde_json::to_vec(grants)
+        .map_err(|e| backend_err(format!("serializing grants for --grants-file: {e}")))?;
+    let mut file = tempfile::Builder::new()
+        .prefix("mvm-grants-")
+        .suffix(".json")
+        .tempfile()
+        .map_err(|e| backend_err(format!("creating a temp file for --grants-file: {e}")))?;
+    {
+        use std::io::Write as _;
+        file.write_all(&json)
+            .and_then(|()| file.flush())
+            .map_err(|e| backend_err(format!("writing --grants-file: {e}")))?;
+    }
+    Ok(file)
+}
 
 fn list_args() -> Result<Vec<String>> {
     MachineLs::builder()
@@ -73,7 +197,7 @@ fn exec_args(id: &MachineId, command: Vec<String>) -> Result<Vec<String>> {
 /// afterward listable/stoppable) and prints the vm_id envelope. This is a
 /// facade-internal invocation — not one of the cross-language `machine` verbs the
 /// conformance harness pins — so it is built here rather than via a shared builder.
-fn run_args(spec: &MachineSpec) -> Result<Vec<String>> {
+fn run_args(spec: &MachineSpec) -> Result<GrantArgv> {
     if spec.name.is_empty() {
         return Err(MvmError::InvalidSpec {
             reason: "name must not be empty".into(),
@@ -99,13 +223,18 @@ fn run_args(spec: &MachineSpec) -> Result<Vec<String>> {
         args.push("--env".to_string());
         args.push(format!("{k}={v}"));
     }
+    let mut grants = grant_argv(spec.grants.as_ref())?;
+    args.append(&mut grants.args);
     args.push("--up-json".to_string());
-    Ok(args)
+    Ok(GrantArgv {
+        args,
+        grants_file: grants.grants_file,
+    })
 }
 
 /// Build the argv for `machine create --name … --image …` — persists the spec
 /// without booting. Uses the shared builder so it can't drift from the CLI.
-fn create_args(spec: &MachineSpec) -> Result<Vec<String>> {
+fn create_args(spec: &MachineSpec) -> Result<GrantArgv> {
     if spec.name.is_empty() {
         return Err(MvmError::InvalidSpec {
             reason: "name must not be empty".into(),
@@ -116,12 +245,18 @@ fn create_args(spec: &MachineSpec) -> Result<Vec<String>> {
             reason: "image must not be empty".into(),
         });
     }
-    MachineCreate::builder(&spec.name)
+    let mut args = MachineCreate::builder(&spec.name)
         .image(&spec.image)
         .cpus(spec.cpus as u16)
         .memory(format!("{}M", spec.memory_mib))
         .machine_args()
-        .map_err(machine_err)
+        .map_err(machine_err)?;
+    let mut grants = grant_argv(spec.grants.as_ref())?;
+    args.append(&mut grants.args);
+    Ok(GrantArgv {
+        args,
+        grants_file: grants.grants_file,
+    })
 }
 
 fn start_args(id: &MachineId) -> Result<Vec<String>> {
@@ -310,7 +445,11 @@ impl MvmClient for SubprocessBackend {
     async fn create_machine(&self, spec: MachineSpec) -> Result<MachineState> {
         // `machine create` persists the spec without booting → stopped.
         let name = spec.name.clone();
-        self.run_cli(&create_args(&spec)?)?;
+        // `invocation` is held across the call: when the grants needed a
+        // `--grants-file`, dropping it first would delete the file the child
+        // is about to read.
+        let invocation = create_args(&spec)?;
+        self.run_cli(&invocation.args)?;
         Ok(MachineState {
             id: MachineId(name.clone()),
             name,
@@ -323,7 +462,10 @@ impl MvmClient for SubprocessBackend {
         // `machine run` does the full OCI pull + rootfs materialize + signed-plan
         // admission (claim 8) + boot; `--up-json` boots it detached and prints the
         // vm_id envelope. Shelling it keeps the CLI as the one admitted-boot path.
-        let stdout = self.run_cli(&run_args(&spec)?)?;
+        // Held across the call for the same reason as `create_machine`: a
+        // `--grants-file` path must still exist when the child opens it.
+        let invocation = run_args(&spec)?;
+        let stdout = self.run_cli(&invocation.args)?;
         let id = parse_up_json(&stdout)?;
         Ok(MachineState {
             name: id.0.clone(),
@@ -475,9 +617,10 @@ mod tests {
             cpus: 2,
             memory_mib: 512,
             env: vec![("MODE".into(), "test".into())],
+            grants: None,
         };
         assert_eq!(
-            run_args(&spec).unwrap(),
+            run_args(&spec).unwrap().args,
             vec![
                 "run",
                 "--image",
@@ -505,9 +648,10 @@ mod tests {
             cpus: 2,
             memory_mib: 512,
             env: vec![],
+            grants: None,
         };
         assert_eq!(
-            create_args(&spec).unwrap(),
+            create_args(&spec).unwrap().args,
             vec![
                 "create",
                 "--name",
@@ -538,6 +682,7 @@ mod tests {
             cpus: 1,
             memory_mib: 64,
             env: vec![],
+            grants: None,
         };
         assert!(create_args(&bad).is_err());
     }
@@ -550,6 +695,7 @@ mod tests {
             cpus: 1,
             memory_mib: 64,
             env: vec![],
+            grants: None,
         };
         assert!(matches!(
             run_args(&MachineSpec {
@@ -565,6 +711,215 @@ mod tests {
             }),
             Err(MvmError::InvalidSpec { .. })
         ));
+    }
+
+    // ── Grants on the argv ────────────────────────────────────────────
+    //
+    // This is the impl every language SDK goes through, so a grant dropped
+    // here is a grant no Python or TypeScript caller can express at all.
+
+    #[test]
+    fn a_cpu_and_egress_grant_reach_the_run_argv() {
+        let spec = MachineSpec::builder("web", "alpine:latest")
+            .cpus(2)
+            .memory_mib(512)
+            .cpu_millicores(1500)
+            .wall_clock_secs(std::num::NonZeroU32::new(600).unwrap())
+            .allow_egress("api.example.com", 443)
+            .allow_egress("db.internal", 5432)
+            .build();
+        let invocation = run_args(&spec).unwrap();
+        assert_eq!(
+            invocation.args,
+            vec![
+                "run",
+                "--image",
+                "alpine:latest",
+                "--name",
+                "web",
+                "--cpus",
+                "2",
+                "--memory",
+                "512M",
+                "--cpu-limit",
+                "1500",
+                "--timeout",
+                "600",
+                "--allow-host",
+                "api.example.com:443",
+                "--allow-host",
+                "db.internal:5432",
+                "--up-json",
+            ]
+        );
+        assert!(
+            invocation.grants_file.is_none(),
+            "every dimension had a flag; no file should have been written"
+        );
+    }
+
+    #[test]
+    fn a_cpu_and_egress_grant_reach_the_create_argv() {
+        let spec = MachineSpec::builder("web", "alpine:3.20")
+            .cpus(2)
+            .memory_mib(512)
+            .cpu_millicores(1500)
+            .allow_egress("api.example.com", 443)
+            .build();
+        assert_eq!(
+            create_args(&spec).unwrap().args,
+            vec![
+                "create",
+                "--name",
+                "web",
+                "--image",
+                "alpine:3.20",
+                "--cpus",
+                "2",
+                "--memory",
+                "512M",
+                "--cpu-limit",
+                "1500",
+                "--allow-host",
+                "api.example.com:443",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_spec_that_grants_nothing_emits_the_argv_it_always_did() {
+        // The pre-grant baseline: no flags appear for a spec with no grants,
+        // so the conformance-pinned argv is unchanged.
+        let spec = MachineSpec::builder("web", "alpine:3.20")
+            .cpus(2)
+            .memory_mib(512)
+            .build();
+        assert!(
+            !create_args(&spec)
+                .unwrap()
+                .args
+                .iter()
+                .any(|a| a.starts_with("--cpu-limit")
+                    || a.starts_with("--allow-host")
+                    || a.starts_with("--grants-file"))
+        );
+    }
+
+    #[test]
+    fn the_emitted_flags_parse_back_to_the_grant_that_produced_them() {
+        // The encoding contract. What the SDK emits and what the CLI parses are
+        // two halves of one agreement, and a mismatch between them is a
+        // silently dropped grant wearing a different hat. Asserted against the
+        // CLI's own spellings: `--cpu-limit` is millicores, `--timeout` is
+        // seconds, and `--allow-host HOST:PORT` is the egress grant.
+        let spec = MachineSpec::builder("web", "alpine:latest")
+            .cpu_millicores(1500)
+            .wall_clock_secs(std::num::NonZeroU32::new(600).unwrap())
+            .allow_egress("api.example.com", 443)
+            .build();
+        let args = run_args(&spec).unwrap().args;
+
+        let flag_value = |flag: &str| -> Option<String> {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+        };
+        assert_eq!(flag_value("--cpu-limit").as_deref(), Some("1500"));
+        assert_eq!(flag_value("--timeout").as_deref(), Some("600"));
+
+        // Every `--allow-host` value must be the `HOST:PORT` form the CLI
+        // parser splits on its last colon, and must round-trip.
+        let hosts: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i > &0 && args[i - 1] == "--allow-host")
+            .map(|(_, a)| a)
+            .collect();
+        assert_eq!(hosts.len(), 1);
+        let (host, port) = hosts[0].rsplit_once(':').expect("HOST:PORT");
+        assert_eq!(host, "api.example.com");
+        assert_eq!(port.parse::<u16>().unwrap(), 443);
+    }
+
+    #[test]
+    fn a_grant_no_flag_can_say_goes_to_a_grants_file_verbatim() {
+        // Fuel is an instruction count and `--cpu-limit` is millicores; there
+        // is no conversion, so flattening one into the other would be a
+        // different grant. The file carries it unchanged.
+        let spec = MachineSpec::builder("web", "alpine:latest")
+            .cpu_fuel(100_000)
+            .allow_egress("api.example.com", 443)
+            .build();
+        let invocation = run_args(&spec).unwrap();
+        let file = invocation
+            .grants_file
+            .as_ref()
+            .expect("an inexpressible dimension must produce a file");
+
+        // One encoding, not a mix: no per-dimension flags beside the file.
+        assert!(!invocation.args.iter().any(|a| a == "--cpu-limit"));
+        assert!(!invocation.args.iter().any(|a| a == "--allow-host"));
+        let idx = invocation
+            .args
+            .iter()
+            .position(|a| a == "--grants-file")
+            .expect("--grants-file emitted");
+        assert_eq!(
+            &invocation.args[idx + 1],
+            &file.path().display().to_string()
+        );
+
+        // And what it holds is exactly the grant, parseable by the same
+        // `deny_unknown_fields` type the CLI reads.
+        let written: mvm_contract::grants::Grants =
+            serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+        assert_eq!(written, spec.grants.unwrap());
+    }
+
+    #[test]
+    fn an_unbounded_wall_clock_is_never_encoded_as_an_absent_timeout() {
+        // Omitting `--timeout` means "unspecified", which a host with a
+        // wall-clock ceiling admits; an explicit `Unbounded` is refused by that
+        // same ceiling. Dropping it would turn a refusal into a boot.
+        let spec = MachineSpec::builder("web", "alpine:latest")
+            .grants(mvm_contract::grants::Grants {
+                wall_clock: Some(mvm_contract::grants::WallClockGrant::Unbounded),
+                ..Default::default()
+            })
+            .build();
+        let invocation = run_args(&spec).unwrap();
+        assert!(invocation.grants_file.is_some());
+        assert!(invocation.args.iter().any(|a| a == "--grants-file"));
+    }
+
+    #[test]
+    fn an_explicitly_empty_allow_list_is_not_encoded_as_no_grant_at_all() {
+        // Both deny every destination, so nothing opens either way — but only
+        // one of them is what the caller declared, and the plan records which.
+        let spec = MachineSpec::builder("web", "alpine:latest")
+            .grants(mvm_contract::grants::Grants {
+                egress: Some(mvm_contract::grants::EgressGrant { allow: vec![] }),
+                ..Default::default()
+            })
+            .build();
+        let invocation = run_args(&spec).unwrap();
+        assert!(
+            invocation.grants_file.is_some(),
+            "an empty allow-list must survive as an empty allow-list"
+        );
+    }
+
+    #[test]
+    fn a_host_carrying_a_colon_is_not_emitted_as_an_allow_host_flag() {
+        // `--allow-host` splits on the last colon, so this would come back as a
+        // different host and port than it went in as.
+        let spec = MachineSpec::builder("web", "alpine:latest")
+            .allow_egress("::1", 443)
+            .build();
+        let invocation = run_args(&spec).unwrap();
+        assert!(invocation.grants_file.is_some());
+        assert!(!invocation.args.iter().any(|a| a == "--allow-host"));
     }
 
     #[test]
@@ -607,6 +962,7 @@ mod tests {
                 cpus: 1,
                 memory_mib: 128,
                 env: vec![],
+                grants: None,
             })
             .await
             .expect("run boots");

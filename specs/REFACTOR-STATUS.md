@@ -1131,6 +1131,13 @@ for detailed scope and acceptance criteria.
         call) + `StoreLimits`
   - [ ] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
         the restore-laundering path
-  - [ ] WS6 — four surfaces: manifest, JSON, CLI, library + SDK parity fixture
+  - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
+        `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
+        and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,
+        resolved per dimension by `mvm_core::grants_resolve` and wired into the
+        real `mvmctl` admission — `admission.rs` no longer hardcodes
+        `grants: None`. The projection now has production callers, so its
+        `dormant-controls.toml` entry is deleted. STILL OPEN: the SDK parity
+        fixture
   - [ ] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs
         gate, BDD suite
