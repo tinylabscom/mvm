@@ -57,6 +57,7 @@ fn entry(seq: usize) -> AuditEntry {
 }
 
 #[tokio::test]
+#[cfg_attr(debug_assertions, ignore = "release-build performance measurement")]
 async fn full_chain_verification_cost_per_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key = signing_key();
