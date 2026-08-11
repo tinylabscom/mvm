@@ -123,12 +123,14 @@
       `features/suites/s11_snapshot/hvf_save_restore.feature`; workspace
       nextest 10600 passed / 24 skipped.
 
-- [~] Open issue closeout — **plan 300**. The 22 open issues were reconciled
-      on 2026-08-08 into explicit closure gates and dependency order in
-      `specs/plans/300-open-issue-closeout.md`. #2192 is now closed as completed;
-      #2101 and #2211 require scope split or narrowing; the remaining issues
-      retain active implementation, security, live-validation, or
-      cross-repository acceptance work.
+- [~] Open issue reconciliation — **plan 300**. The 30 issues open at the
+      2026-08-10 snapshot are inventoried against `origin/main` `6a18cb740`
+      with an explicit disposition, closure gate, and dependency-ordered
+      execution phase. #2293 is closed as completed by merged PRs #2302 and
+      #2317; its remaining receipt-store performance finding stays open as
+      #2318. The other 29 issues retain concrete implementation, security,
+      rollout, live-validation, performance, governance, or cross-repository
+      acceptance work.
 - [~] Runtime hardening for production — **plan 303**. Closes gaps between the
       binary CI witnesses and the binary that ships. Landed: trapping integer
       overflow in `[profile.release]` plus a `release-witness` CI lane over the
@@ -201,9 +203,15 @@
 - [~] Security mutation-witness repair — **issue #2135**. Restored executable
       witnesses for the security-sensitive boot admission, kernel-digest,
       host-signer/grant, lease-expiry, and substitution-endpoint cleanup
-      invariants. Focused mutation runs now catch every actionable mutant in
-      those paths; the exact Linux Security workflow rerun remains the final
-      merge-and-close gate.
+      invariants. The current Security failure is also reconciled: direct tests
+      catch the actionable snapshot-I/O, no-op stage-name, torn-tail, and grant
+      parser mutants; the static gate rejects accepted misses outside the
+      pinned surface; 26 moved libkrun identities name their current file; and
+      14 obsolete misses were removed, reducing the accepted baseline from 83
+      to 69 without adding a waiver. Focused mutation proofs, affected-package
+      all-target Clippy, the workspace unit/integration suite, formatting, and
+      the static surface gate are green. The exact Linux Security workflow
+      rerun remains the final merge-and-close gate.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,

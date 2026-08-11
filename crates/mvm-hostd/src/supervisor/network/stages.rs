@@ -770,7 +770,9 @@ mod tests {
         };
         // No binding applies → no rewrite; scan never drops. This is the
         // claim-10-safe default posture before real handlers plug in.
+        assert_eq!(NoopSubstitution.name(), "noop-substitution");
         assert_eq!(NoopSubstitution.substitute(&ctx, &pkt), None);
+        assert_eq!(NoopScan.name(), "noop-scan");
         assert_eq!(NoopScan.scan(&ctx, &pkt), ScanOutcome::Pass);
     }
 
