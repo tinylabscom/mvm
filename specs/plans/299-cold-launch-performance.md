@@ -575,6 +575,26 @@ families.
 
 ## Phase 2 — Artifact preparation outside the launch path
 
+- [x] Make launch-config resolution a step that yields a bootable
+      `VmStartConfig` without starting a VM (`crate::exec::resolve_launch`),
+      composing image-artifact resolution, the boot-strategy tier gate, the
+      start-config assembly, and admission plus the runtime-overlay and
+      universal-initramfs attach. `run_inner` calls it instead of inlining it,
+      and `pool warm --image` calls it to obtain the shape its parents mirror.
+      This was a hard prerequisite for the warm pool, not a parallel
+      optimization — **#2333**. It is the *resolution* half of this phase only:
+      the prepared-artifact manifest and the acquire/prepare split below are
+      untouched, so a `pool warm` against a cold cache still performs the pull
+      and the materialization inline.
+- [ ] Measure a claimed launch against the cold baseline. **Blocked, not
+      skipped:** the pool now fills on the KVM host (`pool status` reports
+      `1 idle`) and a claim reaches the fork, but the child's guest agent fails
+      its authenticated control handshake, so the post-restore identity
+      handshake goes unanswered and the claim fails closed. That is Plan 255
+      BUG-2, pre-existing and predicted there as "the next blocker once BUG-1 is
+      fixed". Cold baseline re-measured on the same binary for when the claim
+      lands: `backend_start` 549.8 / 564.7 / 554.4 ms, dispatch window
+      551.6 / 566.8 / 556.2 ms.
 - [ ] Define a prepared-artifact manifest for the kernel, universal initramfs,
       runtime overlay, rootfs, verity sidecars, and their compatibility
       fingerprints. Reuse existing content-addressed verification rather than

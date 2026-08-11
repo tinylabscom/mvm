@@ -638,8 +638,14 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // keyed on its fresh id (never a sibling's; the factory parent has none).
         let child_cfg = child_start_config(claim, &child, &child_rootfs_dir);
         let guards = ClaimGuards::new(&self.spawner);
+        // Gate the image the claim was admitted for, not the clone the child
+        // boots: the sidecar describes how the image was built and is not part
+        // of the captured snapshot, so it exists only beside the image.
         guards
-            .admit_overlay_contract(&child_cfg)
+            .admit_overlay_contract(
+                std::path::Path::new(&claim.rootfs_path),
+                child_cfg.runtime_source_policy,
+            )
             .map_err(|e| StandbyError::ClaimFailed(format!("overlay contract: {e}")))?;
 
         let grant_envelope = issue_child_grant(&plan, &child_cfg, ctx.grant_issuer)

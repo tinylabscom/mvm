@@ -32,7 +32,6 @@ use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, PreloadContex
 use sha2::{Digest, Sha256};
 
 use super::Cli;
-use super::env::builder_vm::ensure_default_microvm_image;
 use super::vm::checkpoint::SignedChainAnchor;
 use super::vm::host_signer;
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
@@ -153,24 +152,20 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
 /// Parameters for [`warm_to_target`] — grouped to keep the signature small.
 pub struct WarmParams<'a> {
     pub backend: &'a AnyBackend,
-    /// Registered template identity for the warm-parent set, if applicable.
-    pub template_id: Option<&'a str>,
-    pub kernel: &'a Path,
-    pub vcpus: u8,
-    pub mem_mib: u32,
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
     pub target: u32,
-    /// The launch this warm set is being spawned for, already carrying
-    /// everything the run path resolved for it — the sealed rootfs, its verity
-    /// sidecar, and the runtime overlay that holds the guest agent. A warm
-    /// parent boots the same shape, so an explicit `pool warm` always threads
-    /// the just-completed launch through here, and both the compat key's image
-    /// identity and the parent's own boot inputs come from this one value
-    /// rather than from two fields that could disagree. `pool warm` has no
-    /// launch to mirror and passes `None`; the spawn then refuses rather than
-    /// inventing a boot shape of its own.
-    pub launch: Option<&'a VmStartConfig>,
+    /// The resolved launch config the warm parents mirror, carrying everything
+    /// the run path resolves for a boot — the rootfs and its verity sidecar, the
+    /// runtime overlay that holds the guest agent, the universal initramfs, and
+    /// the cmdline-bearing policy fields.
+    ///
+    /// Every other input to the parent's shape is derived from this one value:
+    /// template, kernel, vCPUs, memory, image digest and egress enablement all
+    /// come out of [`compat_for_launch`]. They used to be separate fields, which
+    /// let a caller record a compat key describing something other than what
+    /// booted — a pool that fills and never drains, with no error anywhere.
+    pub launch: &'a VmStartConfig,
 }
 
 /// Summary returned by [`warm_to_target`].
@@ -373,29 +368,18 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     // are built by `compat_for_launch` from the same launch config. Building it
     // twice from two field sets is how the pool came to fill with parents no
     // claim could ever match.
-    let image = p.launch.map(|c| Path::new(c.rootfs_path.as_str()));
-    let want = match p.launch {
-        Some(cfg) => compat_for_launch(p.backend.as_vm_backend(), cfg)?,
-        // `pool warm` has no launch to mirror, so the target shape stands in and
-        // the standby is image-less. The spawn then refuses it — a parent with
-        // no rootfs cannot boot the shape a workload does — but the eviction
-        // sweep below still runs.
-        None => StandbyCompat {
-            template_id: p.template_id.map(str::to_string),
-            kernel_sha256: kernel_identity(p.backend.as_vm_backend(), p.kernel.to_str())?,
-            vcpus: p.vcpus,
-            mem_mib: p.mem_mib,
-            image_sha256: None,
-            vsock_egress: false,
-        },
-    };
+    let image = Path::new(p.launch.rootfs_path.as_str());
+    let kernel = Path::new(p.launch.kernel_path.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("the launch config names no kernel for its warm parents to boot")
+    })?);
+    let want = compat_for_launch(p.backend.as_vm_backend(), p.launch)?;
     let have = pool.idle_count_compatible(&want)? as u32;
     let pool_root = mvm_core::config::mvm_pool_dir()?;
     let vms_root = mvm_core::config::vms_dir();
     let checkpoints = CheckpointStore::open();
     let spawn_ctx = SpawnContext {
         checkpoints: &checkpoints,
-        launch: p.launch,
+        launch: Some(p.launch),
     };
     let mut spawned = 0u32;
     let mut failed = 0u32;
@@ -406,13 +390,13 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             pool_root: &pool_root,
             template_id: want.template_id.as_deref(),
             vms_root: &vms_root,
-            kernel: p.kernel,
+            kernel,
             kernel_sha256: &want.kernel_sha256,
             vcpus: want.vcpus,
             mem_mib: want.mem_mib,
             signer_id: p.signer_id,
             signing_key_path: p.signing_key_path,
-            image_path: image,
+            image_path: Some(image),
             image_sha256: want.image_sha256.as_deref(),
             vsock_egress: want.vsock_egress,
         })?;
@@ -423,7 +407,8 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 // buys a refusal, a quarantine and another spawn next launch.
                 let tenant = p
                     .launch
-                    .and_then(|c| c.tenant_id.as_deref())
+                    .tenant_id
+                    .as_deref()
                     .unwrap_or(STANDBY_PARENT_TENANT);
                 match audit_captured_parent(&checkpoints, &handle, p.backend.name(), tenant) {
                     Ok(()) => {
@@ -480,11 +465,11 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     // also the intended number of parents, so its per-parent memory cap gives
     // the warm set a deterministic upper bound even when older records were
     // created with a different resource shape.
-    let max_memory_mib = u64::from(p.target).saturating_mul(u64::from(p.mem_mib));
-    let evicted = pool.evict_to_memory_budget(p.template_id, max_memory_mib)?;
+    let max_memory_mib = u64::from(p.target).saturating_mul(u64::from(want.mem_mib));
+    let evicted = pool.evict_to_memory_budget(want.template_id.as_deref(), max_memory_mib)?;
     if !evicted.is_empty() {
         tracing::debug!(
-            template_id = ?p.template_id,
+            template_id = ?want.template_id,
             count = evicted.len(),
             "evicted warm parents over memory budget"
         );
@@ -1594,14 +1579,10 @@ mod tests {
             &pool,
             &WarmParams {
                 backend: &backend,
-                template_id: cfg.template_id.as_deref(),
-                kernel: &kernel,
-                vcpus: 2,
-                mem_mib: 1024,
                 signer_id: "host:test",
                 signing_key_path: &key,
                 target: 1,
-                launch: Some(&cfg),
+                launch: &cfg,
             },
         )
         .unwrap();
@@ -1631,6 +1612,84 @@ mod tests {
         other.rootfs_path = other_rootfs.display().to_string();
         let other_want = compat_for_launch(backend.as_vm_backend(), &other).unwrap();
         assert_ne!(other_want, want);
+    }
+
+    /// `pool warm` and the run path must resolve the *same* compat key for the
+    /// same image and sizing, or the verb warms parents nothing claims — which
+    /// is the failure this whole path exists to fix, and it is silent:
+    /// `StandbyHandle::is_compatible` is exact equality, so a disagreement
+    /// cold-boots every launch while the pool fills.
+    ///
+    /// Both sides go through `crate::exec::resolve_launch`, so this asserts the
+    /// composition end to end rather than comparing two locally-built keys.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn pool_warm_and_the_run_path_resolve_the_same_compat_key() {
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+
+        let image = crate::exec::ImageSource::Prebuilt {
+            kernel_path: kernel.display().to_string(),
+            rootfs_path: rootfs.display().to_string(),
+            initrd_path: None,
+            label: "fixture".into(),
+            virtiofs_oci_root: None,
+        };
+        let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
+        let shape = |name: Option<&'static str>| crate::exec::LaunchShape {
+            name,
+            image: &image,
+            cpus: 2,
+            memory_mib: 1024,
+            mem_initial_mib: None,
+            dir_shares: &[],
+            pty: false,
+            network_policy: &policy,
+            warm_pool_size: 1,
+            sdk_sidecar: None,
+            hypervisor: Some("mock"),
+        };
+        let resolve = |name| {
+            crate::exec::resolve_launch(
+                &shape(name),
+                None,
+                &mut crate::exec::LaunchResolveMarks::new(false),
+                &mut crate::commands::vm::phase_timing::LaunchSubMarks::new(false),
+            )
+            .unwrap()
+        };
+
+        // The warm side resolves ahead of any launch; the run side resolves for
+        // the launch itself. Only the VM name differs, and the compat key must
+        // not depend on it — a claimed parent runs under its own standby id.
+        let warmed = resolve(None);
+        let launched = resolve(Some("the-launch"));
+        assert_ne!(warmed.start_config.name, launched.start_config.name);
+
+        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
+        let warm_key = compat_for_launch(backend.as_vm_backend(), &warmed.start_config).unwrap();
+        let claim_key = compat_for_launch(backend.as_vm_backend(), &launched.start_config).unwrap();
+        assert_eq!(
+            warm_key, claim_key,
+            "a parent warmed for this image must be found by the launch that boots it"
+        );
+        assert!(
+            warm_key.image_sha256.is_some(),
+            "the warm key must name the rootfs, or it matches nothing"
+        );
+        assert!(
+            warm_eligible_launch(&warmed.start_config),
+            "the resolved warm shape must be one a shared parent can serve"
+        );
     }
 
     /// `claim_or_cold` must hand the runner a parent that is still claimable.
@@ -1672,14 +1731,10 @@ mod tests {
                 &pool,
                 &WarmParams {
                     backend: &backend,
-                    template_id: cfg.template_id.as_deref(),
-                    kernel: &kernel,
-                    vcpus: 2,
-                    mem_mib: 1024,
                     signer_id: "host:test",
                     signing_key_path: &key,
                     target: 1,
-                    launch: Some(&cfg),
+                    launch: &cfg,
                 },
             )
             .unwrap()
@@ -1716,8 +1771,13 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
         let kernel = tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"k").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"r").unwrap();
         let key = tmp.path().join("host-signer.ed25519");
         std::fs::write(&key, b"fake-key").unwrap();
+        let mut cfg = eligible_cfg();
+        cfg.kernel_path = Some(kernel.display().to_string());
+        cfg.rootfs_path = rootfs.display().to_string();
 
         let backend = AnyBackend::Mock(
             mvm_runtime::mock::MockBackend::new()
@@ -1728,14 +1788,10 @@ mod tests {
             &pool,
             &WarmParams {
                 backend: &backend,
-                template_id: None,
-                kernel: &kernel,
-                vcpus: 2,
-                mem_mib: 1024,
                 signer_id: "host:test",
                 signing_key_path: &key,
                 target: 2,
-                launch: None,
+                launch: &cfg,
             },
         )
         .unwrap();
@@ -1755,27 +1811,33 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
         let kernel = tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"k").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"r").unwrap();
         let key = tmp.path().join("key");
         std::fs::write(&key, b"fake-key").unwrap();
-
-        // Pre-fill the pool with 1 idle standby.
-        let mut h = idle_handle("s1", &kernel_sha256_hex(&kernel).unwrap());
-        h.kernel_sha256 = kernel_sha256_hex(&kernel).unwrap();
-        pool.record(&h).unwrap();
+        let mut cfg = eligible_cfg();
+        cfg.kernel_path = Some(kernel.display().to_string());
+        cfg.rootfs_path = rootfs.display().to_string();
 
         let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
+        // Pre-fill the pool with 1 idle standby carrying the launch's own compat
+        // key, so the warm below sees the target already met.
+        let want = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
+        let mut h = idle_handle("s1", &want.kernel_sha256);
+        h.vcpus = want.vcpus;
+        h.mem_mib = want.mem_mib;
+        h.image_sha256 = want.image_sha256.clone();
+        h.vsock_egress = want.vsock_egress;
+        pool.record(&h).unwrap();
+
         let result = warm_to_target(
             &pool,
             &WarmParams {
                 backend: &backend,
-                template_id: None,
-                kernel: &kernel,
-                vcpus: h.vcpus,
-                mem_mib: h.mem_mib,
                 signer_id: "host:test",
                 signing_key_path: &key,
                 target: 1,
-                launch: None,
+                launch: &cfg,
             },
         )
         .unwrap();
@@ -1813,7 +1875,6 @@ mod tests {
         fn warm_once(
             pool: &SupervisorStandbyPool,
             backend: &AnyBackend,
-            kernel: &std::path::Path,
             key: &std::path::Path,
             launch: &VmStartConfig,
         ) {
@@ -1821,22 +1882,18 @@ mod tests {
                 pool,
                 &WarmParams {
                     backend,
-                    template_id: None,
-                    kernel,
-                    vcpus: 2,
-                    mem_mib: 1024,
                     signer_id: "host:test",
                     signing_key_path: key,
                     target: 2,
-                    launch: Some(launch),
+                    launch,
                 },
             )
             .unwrap();
         }
 
         std::thread::scope(|s| {
-            let a = s.spawn(|| warm_once(&pool, &backend, &kernel, &key, &cfg));
-            let b = s.spawn(|| warm_once(&pool, &backend, &kernel, &key, &cfg));
+            let a = s.spawn(|| warm_once(&pool, &backend, &key, &cfg));
+            let b = s.spawn(|| warm_once(&pool, &backend, &key, &cfg));
             a.join().unwrap();
             b.join().unwrap();
         });
@@ -1862,21 +1919,29 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum PoolAction {
-    /// Sweep the standby pool toward a target count. Spawns nothing today: a
-    /// warm parent boots the shape of the launch it will serve, and this verb
-    /// warms ahead of any launch, so every spawn is refused for having no
-    /// launch to mirror and only the pool's eviction sweep runs. The pool is
-    /// populated by a run replenishing after itself, not by this verb.
-    /// Default count 1.
+    /// Sweep the standby pool toward a target count, warming parents that boot
+    /// the shape a matching launch will claim.
+    ///
+    /// The shape is resolved the same way a real launch resolves it — same
+    /// image, kernel, verity sidecars, runtime overlay and cmdline tokens — so a
+    /// later `mvmctl machine run` with the same image and sizing claims what
+    /// this spawned. A launch that differs in image, kernel, vCPUs, memory or
+    /// egress enablement is a different shape and cold-boots. Default count 1.
     Warm {
         /// How many idle standbys to warm the pool toward (default 1).
         count: Option<u32>,
-        /// Accepted but ignored: a rootfs path cannot describe a warm parent's
-        /// boot, which also needs the verity sidecar, the runtime overlay
-        /// carrying the guest agent, and the matching kernel cmdline tokens —
-        /// all of which come from a resolved launch config, not from a path.
+        /// OCI image the warmed parents boot, matching the `--image` the launch
+        /// will pass. Omit to warm the image a bare `machine run` boots.
         #[arg(long)]
-        rootfs: Option<String>,
+        image: Option<String>,
+        /// vCPUs the warmed parents boot with; must match the launch's `--cpus`
+        /// (default: the configured `default_cpus`).
+        #[arg(long)]
+        cpus: Option<u32>,
+        /// Memory the warmed parents boot with; must match the launch's
+        /// `--memory` (default: the configured `default_memory_mib`).
+        #[arg(long)]
+        memory: Option<String>,
     },
     /// Show the standby pool — recorded standbys and their idle/claimed state.
     Status {
@@ -1886,69 +1951,99 @@ pub(in crate::commands) enum PoolAction {
     },
 }
 
-/// The default launch shape the warm pool targets: default-microVM kernel + the config's
-/// default cpus/mem + the effective hypervisor. Both `pool warm` and the `up` auto-claim
-/// resolve through the same pieces so a warmed standby is claimable by a default `up`.
-struct WarmShape {
-    backend: AnyBackend,
-    kernel: std::path::PathBuf,
-    vcpus: u8,
-    mem_mib: u32,
+/// What `pool warm` warms toward, expressed as the launch it must mirror.
+struct WarmRequest {
+    image: Option<String>,
+    cpus: u32,
+    memory_mib: u32,
+    target: u32,
 }
 
-fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<WarmShape> {
-    let backend_name = super::shared::resolve_effective_hypervisor("firecracker");
-    let backend = AnyBackend::from_hypervisor(&backend_name);
-    let (default_kernel, default_rootfs) =
-        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
-            .context("resolve default-microvm kernel for the warm pool")?;
-    let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
-    // `pool warm` warms ahead of any launch, so it has no resolved launch
-    // config to mirror — and a warm parent's boot shape is the launch's, not a
-    // rootfs path on its own. `--rootfs` / `MVM_POOL_ROOTFS` remain accepted but
-    // are unused: naming a rootfs would not supply the verity sidecar, the
-    // runtime overlay, or the cmdline tokens a parent must boot with.
-    let _ = (rootfs_override, default_rootfs);
-    let kernel = std::path::PathBuf::from(default_kernel);
-    Ok(WarmShape {
-        backend,
-        kernel,
-        vcpus,
-        mem_mib: cfg.default_memory_mib,
-    })
+/// Resolve the launch shape a warm parent must boot, without booting one.
+///
+/// This is the whole point of the verb working at all: a claimable parent needs
+/// the rootfs *and* its verity sidecars, the runtime overlay carrying the guest
+/// agent, the universal initramfs, and the cmdline-bearing policy fields — none
+/// of which a rootfs path supplies, and all of which
+/// [`crate::exec::resolve_launch`] produces. Resolving through the run path's
+/// own function is what keeps the recorded compat key equal to the one a claim
+/// will search for.
+///
+/// No admission hook is passed. A factory parent carries no workload authority
+/// and `factory_parent_config` drops the tenant and plan from whatever it is
+/// handed, so admitting one here would buy a signed plan that is discarded —
+/// while giving a shared parent a workload's authority is exactly the posture
+/// the pool is built to avoid. The launch that later claims the parent supplies
+/// its own admitted plan.
+fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch> {
+    let image = super::vm::exec::resolve_launch_image_source(req.image.as_deref(), false, None)
+        .context("resolving the image the warm parents boot")?;
+    // Deny-all is the default a `machine run` resolves to, and it is the half
+    // of the policy the compat key reads: `StandbyCompat::vsock_egress` records
+    // whether the guest boots an egress client, never a destination.
+    let network_policy = mvm_core::network_policy::NetworkPolicy::default();
+    let shape = crate::exec::LaunchShape {
+        name: None,
+        image: &image,
+        cpus: req.cpus,
+        memory_mib: req.memory_mib,
+        mem_initial_mib: None,
+        dir_shares: &[],
+        pty: false,
+        network_policy: &network_policy,
+        warm_pool_size: req.target,
+        sdk_sidecar: None,
+        hypervisor: None,
+    };
+    crate::exec::resolve_launch(
+        &shape,
+        None,
+        &mut crate::exec::LaunchResolveMarks::new(false),
+        &mut crate::commands::vm::phase_timing::LaunchSubMarks::new(false),
+    )
+    .context("resolving the launch shape the warm parents mirror")
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     let pool = SupervisorStandbyPool::open()?;
     match args.action {
         PoolAction::Status { json } => run_status(&pool, json),
-        PoolAction::Warm { count, rootfs } => {
-            run_warm(&pool, cfg, count.unwrap_or(1), rootfs.as_deref())
+        PoolAction::Warm {
+            count,
+            image,
+            cpus,
+            memory,
+        } => {
+            let memory_mib = match memory.as_deref() {
+                Some(raw) => mvm_core::util::parse_human_size(raw).context("Invalid --memory")?,
+                None => cfg.default_memory_mib,
+            };
+            run_warm(
+                &pool,
+                &WarmRequest {
+                    image,
+                    cpus: cpus.unwrap_or(cfg.default_cpus),
+                    memory_mib,
+                    target: count.unwrap_or(1),
+                },
+            )
         }
     }
 }
 
-fn run_warm(
-    pool: &SupervisorStandbyPool,
-    cfg: &MvmConfig,
-    target: u32,
-    rootfs_override: Option<&str>,
-) -> Result<()> {
-    let shape = resolve_warm_shape(cfg, rootfs_override)?;
+fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
+    let target = req.target;
+    let launch = resolve_warm_launch(req)?;
     // Ensure the host signer exists — the standby re-verifies the attach plan against it.
     let signer = host_signer::load_or_init()?;
     let result = warm_to_target(
         pool,
         &WarmParams {
-            backend: &shape.backend,
-            template_id: None,
-            kernel: &shape.kernel,
-            vcpus: shape.vcpus,
-            mem_mib: shape.mem_mib,
+            backend: &launch.backend,
             signer_id: &host_signer::host_signer_id(),
             signing_key_path: &signer.secret_path,
             target,
-            launch: None,
+            launch: &launch.start_config,
         },
     )?;
     // A state-changing verb emits one audit record per attempt.
@@ -1979,8 +2074,9 @@ fn run_warm(
         ));
     }
     crate::ui::info(
-        "Note: a warm `up` claim boots through the gateway-bridge supervisor path \
-         (MVM_GATEWAY_BRIDGE=1); the default `up` cold-boots.",
+        "A launch claims one of these only if it matches on image, kernel, vCPUs, memory and \
+         egress enablement, is auto-named, and runs with a non-zero warm pool size \
+         (MVM_RESIDENCY=warm on hosts whose default is parked).",
     );
     Ok(())
 }
@@ -2004,10 +2100,8 @@ struct PoolStatusEntry {
     vcpus: u8,
     mem_mib: u32,
     /// The image half of the compat key: sha256 of the rootfs the parent
-    /// booted, recorded for every standby spawned for a real launch. Absent
-    /// only for a standby recorded without one — which is every standby today,
-    /// since no backend advertises the pool and the launch-less `pool warm`
-    /// path records nothing.
+    /// booted. Every standby carries one, since a parent is only ever spawned
+    /// for a resolved launch shape; absent marks a record predating that.
     image_sha256: Option<String>,
 }
 
