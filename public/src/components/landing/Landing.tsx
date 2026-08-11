@@ -4,6 +4,7 @@ import { Features } from "./Features";
 import { Walkthrough } from "./Walkthrough";
 import { Surfaces } from "./Surfaces";
 import { Architecture } from "./Architecture";
+import { Security } from "./Security";
 import { CodeExample } from "./CodeExample";
 import { CTABanner } from "./CTABanner";
 import { Footer } from "./Footer";
@@ -17,6 +18,7 @@ export function Landing() {
       <Walkthrough />
       <Surfaces />
       <Architecture />
+      <Security />
       <CodeExample />
       <CTABanner />
       <Footer />
