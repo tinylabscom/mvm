@@ -10,6 +10,24 @@
 
 ## Current issue delivery
 
+- [~] HVF large-response integrity — **plan 315**. Restored bounded
+      virtio-vsock host-to-guest credit accounting that had been removed while
+      its relay-side readers remained. Every guest header refreshes the actual
+      `buf_alloc`/`fwd_cnt` window before dispatch; unknown credit fails closed,
+      32-bit counters wrap per the protocol, and connection/device teardown,
+      connection-wide idle eviction, and snapshot guards cover the new state.
+      Active traffic in either direction keeps the whole stream alive, so a
+      download is not reset merely because its request side has been quiet for
+      60 seconds. The focused
+      suite proves stop/resume behavior and byte-for-byte delivery of a 32 MiB
+      reply; a simulated continuous 4 GiB transfer proves the refillable rate
+      budget is not a lifetime quota. A live BDD scenario pins the documented
+      `python:3.12` pandas
+      install through PyPI. All 446 `mvm-vmm` tests, workspace check, macOS
+      workspace all-target Clippy, the serial aggregate workspace suite, and
+      the focused x86_64 Linux cross-build are green. Linux-native builder-VM
+      tests and all-target Clippy remain the final platform gates.
+
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
       rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three
