@@ -15,6 +15,7 @@
 //! which it resolves once, from the head, and fails closed on every ambiguity
 //! that makes request smuggling possible.
 
+pub mod blocking;
 mod client;
 mod conn;
 mod error;

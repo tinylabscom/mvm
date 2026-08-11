@@ -49,6 +49,18 @@ pub enum Error {
     NotUtf8,
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    /// A non-2xx status, raised only by an explicit `error_for_status()`.
+    /// Reaching a status is not itself a failure, so nothing raises this
+    /// implicitly.
+    #[error("HTTP {status} for {url}")]
+    Status {
+        status: http::StatusCode,
+        url: String,
+    },
+    /// A blocking call was made from inside an async runtime, where blocking
+    /// the thread would deadlock the executor.
+    #[error("blocking HTTP call made from within an async runtime")]
+    BlockingInAsyncContext,
 }
 
 impl Error {
@@ -57,6 +69,14 @@ impl Error {
     /// to know a policy refused the fetch, not that "the network failed".
     pub fn is_address_refusal(&self) -> bool {
         matches!(self, Error::NoPermittedAddress(_) | Error::Dns { .. })
+    }
+
+    /// The status, when this is a status error.
+    pub fn status(&self) -> Option<http::StatusCode> {
+        match self {
+            Error::Status { status, .. } => Some(*status),
+            _ => None,
+        }
     }
 }
 

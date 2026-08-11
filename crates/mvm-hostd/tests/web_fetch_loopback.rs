@@ -11,12 +11,12 @@
 //!   than `max_bytes` errors out with [`FetchError::BodyTooLarge`].
 //! - **W3 boundary**: a response of exactly `max_bytes` succeeds.
 //!
-//! All three tests use [`ReqwestHttpFetcher::test_unsafe_no_ssrf`] to
+//! All three tests use [`HardenedHttpFetcher::test_unsafe_no_ssrf`] to
 //! bypass the W2 SSRF guard so the loopback fixture is reachable. The
 //! seam is marked `#[doc(hidden)]` and named loudly because it MUST NOT
 //! appear in production callers.
 
-use mvm_hostd::supervisor::tools::web_fetch::{FetchError, HttpFetcher, ReqwestHttpFetcher};
+use mvm_hostd::supervisor::tools::web_fetch::{FetchError, HardenedHttpFetcher, HttpFetcher};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
@@ -40,7 +40,7 @@ async fn spawn_one_shot_server(response: String) -> u16 {
 }
 
 #[tokio::test]
-async fn reqwest_does_not_auto_follow_redirects() {
+async fn the_fetcher_does_not_auto_follow_redirects() {
     let response = "HTTP/1.1 302 Found\r\n\
         Location: http://evil.example/exfil\r\n\
         Content-Length: 0\r\n\
@@ -49,7 +49,7 @@ async fn reqwest_does_not_auto_follow_redirects() {
         .to_string();
     let port = spawn_one_shot_server(response).await;
     let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-    let fetcher = ReqwestHttpFetcher::test_unsafe_no_ssrf(30);
+    let fetcher = HardenedHttpFetcher::test_unsafe_no_ssrf(30);
     let resp = HttpFetcher::fetch(&fetcher, &url, 1024)
         .await
         .expect("fetch");
@@ -75,7 +75,7 @@ async fn body_cap_is_enforced_exactly() {
     );
     let port = spawn_one_shot_server(response).await;
     let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-    let fetcher = ReqwestHttpFetcher::test_unsafe_no_ssrf(30);
+    let fetcher = HardenedHttpFetcher::test_unsafe_no_ssrf(30);
     let err = HttpFetcher::fetch(&fetcher, &url, 8).await.unwrap_err();
     assert!(
         matches!(err, FetchError::BodyTooLarge { limit: 8 }),
@@ -95,7 +95,7 @@ async fn body_at_exactly_max_bytes_succeeds() {
     );
     let port = spawn_one_shot_server(response).await;
     let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-    let fetcher = ReqwestHttpFetcher::test_unsafe_no_ssrf(30);
+    let fetcher = HardenedHttpFetcher::test_unsafe_no_ssrf(30);
     let resp = HttpFetcher::fetch(&fetcher, &url, 16)
         .await
         .expect("at-cap fetch");

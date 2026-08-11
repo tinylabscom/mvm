@@ -1013,6 +1013,10 @@ impl RunningVm for FcRunningVm {
         &self.id
     }
 
+    fn host_process_id(&self) -> Option<u32> {
+        self.pid
+    }
+
     fn wait(&self) -> Result<VmExitStatus> {
         Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
             &self.state_dir,
@@ -1563,6 +1567,18 @@ mod tests {
         });
         vm.kill().unwrap();
         assert!(!pid_file.exists(), "pid marker must be removed on kill");
+    }
+
+    #[test]
+    fn running_vm_exposes_the_captured_host_process() {
+        let vm = FcRunningVm {
+            id: VmId("measured-vm".into()),
+            state_dir: PathBuf::from("/state/measured-vm"),
+            pid_file: PathBuf::from("/state/measured-vm/fc.pid"),
+            pid: Some(4242),
+            vsock_uds: "/state/measured-vm/runtime/v.sock".into(),
+        };
+        assert_eq!(vm.host_process_id(), Some(4242));
     }
 
     #[test]

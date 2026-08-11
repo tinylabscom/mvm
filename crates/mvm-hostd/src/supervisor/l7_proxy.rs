@@ -557,7 +557,7 @@ async fn write_200_established(client: &mut TcpStream) -> std::io::Result<()> {
 
 /// Write a `403 Forbidden` with the chain's deny reason in the
 /// `X-Mvm-Egress-Reason` header. The body is plain text so curl /
-/// reqwest / etc. surface the reason to the workload.
+/// the HTTP client surfaces the reason to the workload.
 ///
 /// The reason is whatever the inspector returned; it never echoes
 /// matched body bytes (the inspectors already enforce that), but we

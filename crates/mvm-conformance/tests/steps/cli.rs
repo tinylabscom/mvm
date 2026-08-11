@@ -430,22 +430,27 @@ fn help_options_fit_within(world: &mut CliWorld, width: i64) {
     }
 }
 
-#[then(expr = "every mvmctl subcommand help fits within {int} columns")]
-fn every_subcommand_help_fits_within(_world: &mut CliWorld, width: i64) {
-    let mut command_paths = Vec::new();
-    collect_command_paths(&mvm_cli::commands::cli_command(), &[], &mut command_paths);
+#[then(expr = "every mvmctl command and subcommand help fits within {int} columns")]
+fn every_command_help_fits_within(_world: &mut CliWorld, width: i64) {
+    let command = mvm_cli::commands::cli_command();
+    let mut command_paths = vec![Vec::new()];
+    collect_command_paths(&command, &[], &mut command_paths);
 
     for path in command_paths {
+        let command_name = if path.is_empty() {
+            "mvmctl".to_string()
+        } else {
+            format!("mvmctl {}", path.join(" "))
+        };
         let mut args = path.clone();
         args.push("--help".to_string());
         let output = mvmctl_command()
             .args(&args)
             .output()
-            .unwrap_or_else(|e| panic!("failed to run `mvmctl {}`: {e}", args.join(" ")));
+            .unwrap_or_else(|e| panic!("failed to run `{command_name}`: {e}"));
         assert!(
             output.status.success(),
-            "`mvmctl {}` failed:\n{}",
-            args.join(" "),
+            "`{command_name}` failed:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
 
@@ -454,8 +459,7 @@ fn every_subcommand_help_fits_within(_world: &mut CliWorld, width: i64) {
             let line_width = i64::try_from(line.chars().count()).expect("line width fits in i64");
             assert!(
                 line_width <= width,
-                "`mvmctl {}` line {} exceeds {width} columns ({}):\n{}",
-                args.join(" "),
+                "`{command_name}` line {} exceeds {width} columns ({}):\n{}",
                 line_number + 1,
                 line_width,
                 help

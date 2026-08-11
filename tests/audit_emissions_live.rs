@@ -210,7 +210,7 @@ impl AuditSandbox {
             // the suite hermetic: no DBus, no keychain, no
             // host-state dependency.
             .env("MVM_SECRET_STORE_BACKEND", "file")
-            // The update/download verbs fetch through `reqwest`, which honours
+            // The update/download verbs fetch through `mvm-http`, which honours
             // `*_PROXY`. Tests point those at a loopback fixture, so pin
             // `no_proxy` to loopback: an inherited proxy on a dev box or CI
             // runner must never intercept the fixture request (real hosts still

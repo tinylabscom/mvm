@@ -142,10 +142,10 @@ impl OciManifestFetcher {
         }
     }
 
-    /// Construct from a pre-built `reqwest::Client`. Useful when tests
+    /// Construct from a pre-built `mvm_http::Client`. Useful when tests
     /// point the fetcher at a hermetic localhost registry without
     /// rebuilding the underlying transport.
-    pub fn with_client(client: reqwest::Client) -> Self {
+    pub fn with_client(client: mvm_http::Client) -> Self {
         Self {
             client: RegistryClient::with_http_client(
                 client,
@@ -155,7 +155,7 @@ impl OciManifestFetcher {
         }
     }
 
-    pub fn with_client_and_auth(client: reqwest::Client, auth: RegistryAuthConfig) -> Self {
+    pub fn with_client_and_auth(client: mvm_http::Client, auth: RegistryAuthConfig) -> Self {
         Self {
             client: RegistryClient::with_http_client(client, ClientConfig::default(), auth),
         }
@@ -278,7 +278,7 @@ fn declared_length_within_cap(declared: Option<u64>, cap: u64) -> Result<(), Oci
 }
 
 /// Read a response body, refusing to buffer more than `cap` bytes.
-async fn read_body_capped(mut response: reqwest::Response, cap: u64) -> Result<Vec<u8>, OciError> {
+async fn read_body_capped(mut response: mvm_http::Response, cap: u64) -> Result<Vec<u8>, OciError> {
     declared_length_within_cap(response.content_length(), cap)?;
     let mut body = CappedBody::new(cap);
     while let Some(chunk) = response

@@ -944,6 +944,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        network_mode: parent_network_mode(p.parent_checkpoint, p.store),
         tenant: &tenant,
         vm_name: p.child_vm_name,
         backend_name: &effective_hypervisor,
@@ -1138,6 +1139,32 @@ fn parent_agent_verb_override(
         .into_iter()
         .map(|v| v.as_str().to_string())
         .collect()
+}
+
+/// The transport a forked or restored child is admitted with.
+///
+/// Inherits the parent's, because a child that boots from a parent's memory
+/// and rootfs is continuing that workload rather than starting a new one: if
+/// the parent was admitted onto the raw-IP tunnel, its child is on it too.
+/// Falls back to what a fresh launch of the same shape would derive when the
+/// parent's plan cannot be read, which is the same shape `parent_plan_resources`
+/// already takes for cpus and memory.
+///
+/// Not `NetworkMode::None` on the fallback: that value means the guest has no
+/// broker at all, and claiming it for a child that is about to be given one is
+/// the defect this function exists to avoid rather than a safe default.
+fn parent_network_mode(
+    parent_checkpoint: &CheckpointId,
+    store: &CheckpointStore,
+) -> mvm_contract::plan::NetworkMode {
+    let fallback = crate::commands::machine::derive_network_mode(false);
+    let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
+        return fallback;
+    };
+    let Ok(plan) = super::plan_persist::read_plan(&parent_meta.vm_name) else {
+        return fallback;
+    };
+    plan.network_mode
 }
 
 fn parent_plan_resources(
