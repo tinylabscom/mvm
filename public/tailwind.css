@@ -49,11 +49,6 @@
   --color-gray-1: #c9d1d9;
   --color-gray-2: #b1bac4;
   --color-gray-4: #6e7681;
-  --color-code-canvas: #161b22;
-  --color-code-header: #21262d;
-  --color-code-border: #30363d;
-  --color-code-text: #e6edf3;
-  --color-code-success: var(--color-green);
 
   /* Dark glows read as light bloom; light mode dials this down to a tint
      (see --glow-strength in the light palette blocks below). */
@@ -62,6 +57,22 @@
   /* Font tokens are scheme-invariant — no light-mode override needed. */
   --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  /* Code-block palette — scheme-invariant, by design, not by omission.
+     astro.config.mjs pins Expressive Code's theme to "github-dark"
+     unconditionally, so a code frame never follows the site's light/dark
+     switch; these tokens describe that one fixed theme rather than a role
+     that varies with it. They used to be redeclared identically in both
+     light palette blocks below (plus a --color-code-success that quietly
+     diverged from the dark block's `var(--color-green)`, since light mode's
+     --color-green is a different, lighter hex than the dark-canvas-tuned
+     green this success color needs) — defining them once here removes that
+     drift risk and the token-for-token duplication. */
+  --color-code-canvas: #161b22;
+  --color-code-header: #21262d;
+  --color-code-border: #30363d;
+  --color-code-text: #e6edf3;
+  --color-code-success: #3fb950;
 }
 
 @theme inline {
@@ -122,11 +133,6 @@
     --color-gray-1: #1f2328;
     --color-gray-2: #424a53;
     --color-gray-4: #6e7681;
-    --color-code-canvas: #161b22;
-    --color-code-header: #21262d;
-    --color-code-border: #30363d;
-    --color-code-text: #e6edf3;
-    --color-code-success: #3fb950;
     --glow-strength: 7%;
   }
 
@@ -156,11 +162,6 @@
       --color-gray-1: #1f2328;
       --color-gray-2: #424a53;
       --color-gray-4: #6e7681;
-      --color-code-canvas: #161b22;
-      --color-code-header: #21262d;
-      --color-code-border: #30363d;
-      --color-code-text: #e6edf3;
-      --color-code-success: #3fb950;
       --glow-strength: 7%;
     }
   }

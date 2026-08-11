@@ -42,6 +42,11 @@
   --sl-font-system-mono: "JetBrains Mono Variable", "SF Mono", "Cascadia Code", "Fira Code",
     Consolas, monospace;
   --sl-font: var(--font-display);
+
+  /* Prose measure — ch tracks the active font size, so this stays ~68
+     characters per line whether html's base font-size or a user's browser
+     zoom changes, unlike a fixed rem width. */
+  --sl-content-width: 68ch;
 }
 
 /*  Tell the browser the supported schemes so native form controls,
@@ -100,7 +105,17 @@ html {
   font-size: 17px;
 }
 
-/* Docs content headings */
+/* Docs content headings — same display face and tightened tracking as the
+   homepage's headline treatment, so a docs h1 and a landing-page headline
+   read as the same typeface family rather than Starlight's UI default. */
+[data-has-sidebar] main h1,
+[data-has-sidebar] main h2,
+[data-has-sidebar] main h3,
+[data-has-sidebar] main h4 {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+}
+
 [data-has-sidebar] main h1 {
   font-size: 2.25rem;
   margin-block-end: 1.5rem;
@@ -153,6 +168,23 @@ html {
 [data-has-sidebar] main li {
   margin-block-end: 0.5rem;
   line-height: 1.7;
+}
+
+/* Docs tables — same glass hairline + 0.75rem radius as GlowCard, so a
+   table on a docs page reads as the same surface family as a card on the
+   homepage. Starlight's own table rule already sets `overflow: auto` (it
+   keeps wide tables horizontally scrollable on narrow viewports) — that
+   also establishes the clipping context the radius needs, so we don't
+   override it to `hidden` here. */
+[data-has-sidebar] main table {
+  border: 1px solid var(--color-glass-border);
+  border-radius: 0.75rem;
+  border-spacing: 0;
+}
+
+[data-has-sidebar] main th,
+[data-has-sidebar] main td {
+  border-color: var(--color-glass-border);
 }
 
 /* Code blocks — more padding + force dark theme */
