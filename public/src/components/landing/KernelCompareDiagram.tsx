@@ -1,10 +1,10 @@
 // The visual half of "why not a container": two small panels, same scale,
-// same stroke vocabulary as BoundaryDiagram (hairline 1.5 / feature 3),
-// so the reader recognises the wall from the hero without re-reading a
+// same stroke vocabulary as HeroStackDiagram (hairline 1.5 / feature 3),
+// so the reader recognises the seam from the hero without re-reading a
 // legend. The container panel has no wall at all — three workloads sit
 // directly on one shared kernel box, separated only by hairlines, because
 // that boundary is a namespace, not a hypervisor. The microVM panel is a
-// condensed re-statement of BoundaryDiagram's guest zone: its own kernel
+// condensed re-statement of HeroStackDiagram's guest zone: its own kernel
 // box, sealed behind the same solid accent-3 wall.
 //
 // Two <svg> trees side by side (stacked on mobile via the wrapping flex
@@ -98,7 +98,7 @@ function MicroVmPanel() {
         host
       </text>
 
-      {/* The wall — same accent-3, same solid fill, as BoundaryDiagram's
+      {/* The wall — same accent-3, same solid fill, as HeroStackDiagram's
           hero figure. Deliberately unbroken here: this panel isn't about
           the substitution endpoint, it's about the kernel boundary. */}
       <rect x="76" y="30" width="26" height="140" className="text-accent-3" fill="currentColor" />

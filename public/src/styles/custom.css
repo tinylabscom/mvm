@@ -301,8 +301,8 @@ html {
    still tell a tip from a caution at a glance.
    What isn't fine any more is the saturated `--sl-color-*-low`
    backgrounds and the `border-inline-start` accent stripe: mvm's own
-   `--color-accent-3` (the hero boundary wall's identity colour, see
-   BoundaryDiagram.tsx) sits in the same violet hue Starlight's `tip`
+   `--color-accent-3` (the hero seam's identity colour, see
+   HeroStackDiagram.tsx) sits in the same violet hue Starlight's `tip`
    type already used by default, so a tip box now reads as if it
    borrowed the page's identity colour rather than Starlight's own
    palette. Rather than re-tint `tip` to dodge the collision (more

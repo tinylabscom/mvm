@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button } from "../ui/button";
 import { Bloom } from "./primitives/Bloom";
 import { Reveal } from "./primitives/Reveal";
-import { BoundaryDiagram } from "./BoundaryDiagram";
+import { HeroStackDiagram } from "./HeroStackDiagram";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 
 const ONE_LINER =
@@ -200,7 +200,7 @@ export function Hero() {
               headline does. */}
           <Reveal delay={360} className="relative">
             <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
-            <BoundaryDiagram />
+            <HeroStackDiagram />
           </Reveal>
         </div>
       </div>

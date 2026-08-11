@@ -1,22 +1,22 @@
-// Concept A — a vertical cross-section of the real execution stack, read
-// bottom to top: your hardware -> host kernel -> hypervisor -> [the seam] ->
-// guest kernel -> guest userspace -> your workload. This is the product's
-// core claim shown positionally instead of asserted in prose: the workload
-// sits above its OWN kernel, not the host's, and there is exactly one
-// crossing point in the whole stack.
+// The hero diagram — a vertical cross-section of the real execution stack,
+// read bottom to top: your hardware -> host kernel -> hypervisor -> [the
+// seam] -> guest kernel -> guest userspace -> your workload. This is the
+// product's core claim shown positionally instead of asserted in prose: the
+// workload sits above its OWN kernel, not the host's, and there is exactly
+// one crossing point in the whole stack.
 //
-// Same three-color discipline as BoundaryDiagram: the seam owns
-// `--color-accent-3` (its own identity, distinct from the hero CTA's
-// `--color-accent`), vsock owns `--color-accent-2`. Everything else is
-// `--color-raised-2` at a fill-opacity that climbs from top (workload,
-// lightest) to bottom (hardware, densest) — the "elevation" cue asked for
-// in the brief, done with one fill and one opacity ramp rather than a
-// second palette. Hardware additionally gets a diagonal hatch overlay: the
-// only band dense enough to earn actual texture, not just weight.
+// Three-color discipline: the seam owns `--color-accent-3` (its own
+// identity, distinct from the hero CTA's `--color-accent`), vsock owns
+// `--color-accent-2`. Everything else is `--color-raised-2` at a
+// fill-opacity that climbs from top (workload, lightest) to bottom
+// (hardware, densest) — an "elevation" cue done with one fill and one
+// opacity ramp rather than a second palette. Hardware additionally gets a
+// diagonal hatch overlay: the only band dense enough to earn actual
+// texture, not just weight.
 //
-// Two <svg> trees (desktop / mobile), same convention as BoundaryDiagram,
-// sharing one JS layout table so the two can't drift out of sync with each
-// other the way two hand-duplicated coordinate sets would.
+// Two <svg> trees (desktop / mobile), sharing one JS layout table so the
+// two can't drift out of sync with each other the way two hand-duplicated
+// coordinate sets would.
 
 const HAIRLINE = 1.5;
 const FEATURE = 3;
@@ -37,8 +37,8 @@ type Band = {
 // not three unrelated ones, so the eye reads "heavier" without needing a
 // legend.
 const BANDS: Band[] = [
-  { key: "hardware", label: "your hardware", sub: "CPU · KVM / HVF", fillOpacity: 1, strokeOpacity: 1, strokeWidth: FEATURE },
-  { key: "host-kernel", label: "host kernel", sub: "shared by every guest above", fillOpacity: 0.8, strokeOpacity: 0.9, strokeWidth: 2.5 },
+  { key: "hardware", label: "your hardware", sub: "CPU · memory · disk", fillOpacity: 1, strokeOpacity: 1, strokeWidth: FEATURE },
+  { key: "host-kernel", label: "host kernel", sub: "KVM / HVF — never shared with a guest", fillOpacity: 0.8, strokeOpacity: 0.9, strokeWidth: 2.5 },
   { key: "hypervisor", label: "hypervisor", sub: "HVF · libkrun · Firecracker", fillOpacity: 0.62, strokeOpacity: 0.78, strokeWidth: 2 },
   { key: "guest-kernel", label: "guest kernel", sub: "own kernel · own rootfs · no NIC", fillOpacity: 0.4, strokeOpacity: 0.62, strokeWidth: HAIRLINE },
   { key: "guest-userspace", label: "guest userspace", sub: "your process, fully isolated", fillOpacity: 0.24, strokeOpacity: 0.48, strokeWidth: HAIRLINE },
@@ -62,7 +62,7 @@ function Hatch({ id }: { id: string }) {
   );
 }
 
-/** No-NIC glyph, matching BoundaryDiagram's mark so the two figures read as one visual family. */
+/** No-NIC glyph — marks the guest-kernel band as having no network device. */
 function NoNicGlyph({ x, y, size = 15 }: { x: number; y: number; size?: number }) {
   const s = size / 14;
   return (
@@ -194,8 +194,8 @@ function Seam({
 
   return (
     <g>
-      {/* Glow — the seam is the diagram's focal point, so it gets the same
-          soft light-spill treatment BoundaryDiagram gives its wall. */}
+      {/* Glow — the seam is the diagram's focal point, so it gets a
+          soft light-spill treatment. */}
       <rect x={x - 10} y={y - 14} width={width + 20} height={h + 28} className="text-accent-3" fill="currentColor" opacity="0.2" filter={`url(#${glowId})`} />
 
       {/* vsock — full length, drawn behind the gate so the gate visually
@@ -218,7 +218,7 @@ function Seam({
       <rect x={gateX + gateWidth} y={y} width={x + width - (gateX + gateWidth)} height={h} rx={RADIUS} className="text-accent-3" fill="currentColor" />
 
       {/* Gate — canvas background so text stays legible over the seam's
-          solid fill, exactly BoundaryDiagram's contrast solution. */}
+          solid fill. */}
       <rect x={gateX} y={y} width={gateWidth} height={h} rx={RADIUS} fill="var(--color-canvas)" stroke="var(--color-accent-3)" strokeWidth={FEATURE} />
       <text
         fill="currentColor"
