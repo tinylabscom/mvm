@@ -1337,7 +1337,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", temp.path());
+        env.isolate_mvm_home(temp.path());
 
         let vm_name = "qemu-event-stop";
         let mut child = std::process::Command::new("sleep")
