@@ -212,10 +212,9 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 /// `MVM_SKIP_HASH_VERIFY` is the documented emergency escape — never
 /// set it in CI.
 ///
-/// Gated to `builder-vm`: the only callers (`mvmctl kernel build`'s
-/// download arm + the `mvmctl bootstrap --kernel-source` path) live behind
-/// that feature.
-#[cfg(feature = "builder-vm")]
+/// Available without `builder-vm`: lean clients cannot compile kernels
+/// locally, so downloading the release-matched kernel is their supported
+/// acquisition path.
 pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<()> {
     let tag = format!("v{}", current_version());
     let asset = format!("vmlinux-{arch}-{variant}");
@@ -282,16 +281,11 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
 /// Record the fetched kernel's digest beside it so the *read* path can check
 /// it later.
 ///
-/// Gated to match `download_kernel`, its only caller. Without the gate it is
-/// dead code in every build that compiles this crate without `builder-vm` —
-/// invisible to the default workspace run, caught by the feature-matrix lanes.
-///
 /// The checksum-manifest comparison above happens once, at fetch. Nothing
 /// re-derived it afterwards, so a kernel that rotted, was truncated, or was
 /// replaced on disk was served on the strength of its filename. The staged
 /// download is renamed into place only after checksum verification, and a
 /// sidecar failure evicts it rather than leaving an unservable cache entry.
-#[cfg(feature = "builder-vm")]
 fn publish_downloaded_kernel(download: tempfile::TempPath, dest: &Path) -> Result<()> {
     download
         .persist(dest)

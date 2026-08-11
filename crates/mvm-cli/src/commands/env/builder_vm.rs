@@ -37,6 +37,7 @@ use bootstrap::{
 };
 #[cfg(all(test, feature = "builder-vm"))]
 use default_microvm::DefaultMicrovmVariant;
+#[cfg(any(feature = "builder-vm", test))]
 use default_microvm::workload_config_carries_dm_verity;
 pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
