@@ -3415,6 +3415,7 @@ dependencies = [
  "mvm-fs",
  "mvm-hostd",
  "mvm-runtime",
+ "mvm-vmm",
  "objc2-foundation",
  "predicates",
  "rand 0.8.6",

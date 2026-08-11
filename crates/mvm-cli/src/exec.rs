@@ -1762,8 +1762,12 @@ fn teardown_transient_vm(
     use crate::commands::vm::phase_timing::SubPhase;
 
     sub.start(SubPhase::StopTransient);
-    let _ = backend.stop_transient(&VmId(vm_name.to_string()));
+    let stop_timing = backend
+        .stop_transient_with_timing(&VmId(vm_name.to_string()))
+        .ok()
+        .flatten();
     sub.finish(SubPhase::StopTransient);
+    sub.record_stop_timing(stop_timing);
 
     // Refilling the pool is not this VM's cleanup: it boots a standby parent
     // for the *next* launch and holds nothing this launch owns. Doing it here

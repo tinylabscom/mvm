@@ -848,6 +848,7 @@ impl RunningVm for HvfRunningVm {
     fn kill_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
         let termination = hvf_backend::read_pid(&self.pid_file)
             .map(hvf_backend::terminate_pid_timed)
+            .transpose()?
             .unwrap_or_default();
         let cleanup_started = Instant::now();
         let _ = std::fs::remove_file(&self.pid_file);
