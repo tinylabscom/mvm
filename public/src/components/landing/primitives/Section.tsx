@@ -7,9 +7,9 @@ import { cn } from "@/lib/utils";
 // is reserved for the one full-bleed band that should read as more
 // spacious than its neighbours.
 const SPACE = {
-  tight: "py-16 lg:py-20",
-  normal: "py-24 lg:py-32",
-  roomy: "py-28 lg:py-40",
+  tight: "py-12 lg:py-16",
+  normal: "py-16 lg:py-24",
+  roomy: "py-20 lg:py-28",
 } as const;
 
 export function Section({
@@ -35,7 +35,12 @@ export function Section({
         className,
       )}
     >
-      <div className="relative mx-auto max-w-6xl">{children}</div>
+      {/* Hairline column framing — border-box sizing means the border
+          renders inset from this div's edges without shifting them, so it
+          doesn't perturb the measured left/right gutter. */}
+      <div className="relative mx-auto max-w-6xl border-x border-edge/15">
+        {children}
+      </div>
     </section>
   );
 }

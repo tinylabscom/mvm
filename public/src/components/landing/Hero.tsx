@@ -52,24 +52,51 @@ export function Hero() {
     // Bloom's `inset-0` still spans edge-to-edge: an absolutely positioned
     // descendant's containing block is the *padding* box of this element,
     // so this section's own padding doesn't inset it.
-    <section className="relative w-full overflow-hidden px-6 pt-20 pb-16 sm:px-8 lg:pt-24 lg:pb-20">
+    <section className="relative w-full overflow-hidden px-6 pt-24 pb-12 sm:px-8 sm:pt-20 lg:pt-24 lg:pb-16">
       {/* Background glow */}
       <Bloom accents={[1, 2]} />
 
-      <div className="relative mx-auto max-w-6xl">
+      <div className="relative mx-auto max-w-6xl border-x border-edge/15">
         <div className="grid grid-cols-1 gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center lg:gap-14">
           <div className="flex min-w-0 max-w-xl flex-col gap-6">
+            {/* Credibility badge row — verified facts only, checked against
+                LICENSE, Cargo.toml, and README.md. No stars/downloads/adopters. */}
+            <Reveal delay={0}>
+              <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs lowercase text-label">
+                <span>apache 2.0</span>
+                <span className="text-dim" aria-hidden="true">
+                  /
+                </span>
+                <span>macos + linux</span>
+                <span className="text-dim" aria-hidden="true">
+                  /
+                </span>
+                <a
+                  href="https://github.com/tinylabscom/mvm"
+                  target="_blank"
+                  rel="noopener"
+                  className="hover:text-accent"
+                >
+                  github.com/tinylabscom/mvm
+                </a>
+              </p>
+            </Reveal>
+
             <Reveal delay={80}>
+              {/* Mono sets ~20% wider than the Inter clamp this replaced —
+                  ceiling and max-width are both retuned for the mono
+                  metrics, not carried over from the sans-face values.
+                  Verified no overflow at 390/1024/1440 (rag.mjs). */}
               <h1
-                className="max-w-[19rem] sm:max-w-[28rem] lg:max-w-xl font-display font-bold leading-[1.05] tracking-[-0.03em] text-title"
-                style={{ fontSize: "clamp(2.5rem, 4.5vw, 4rem)" }}
+                className="max-w-[15rem] sm:max-w-[24rem] lg:max-w-lg lowercase font-display font-bold leading-[1.08] tracking-[-0.01em] text-title"
+                style={{ fontSize: "clamp(2.25rem, 4.2vw, 3.25rem)" }}
               >
-                Run code you don&rsquo;t trust.
+                Run code you don&rsquo;t <span className="text-accent-2">trust</span>.
               </h1>
             </Reveal>
 
             <Reveal delay={160}>
-              <p className="max-w-[46ch] text-lg leading-relaxed text-body">
+              <p className="max-w-[46ch] text-base leading-relaxed text-body">
                 One command boots it in a microVM with its own kernel. No
                 daemon, no SSH, and no network until policy admits it.
               </p>
@@ -117,17 +144,14 @@ export function Hero() {
               </Tabs>
             </Reveal>
 
-            <Reveal delay={320} className="flex flex-wrap items-center gap-5">
+            <Reveal delay={320} className="flex flex-wrap items-center gap-4">
               <a href={`${base}getting-started/installation/`}>
                 <Button size="lg">Get Started</Button>
               </a>
-              <a
-                href="https://github.com/tinylabscom/mvm"
-                target="_blank"
-                rel="noopener"
-                className="text-sm text-label underline underline-offset-4 hover:text-accent"
-              >
-                View on GitHub
+              <a href="https://github.com/tinylabscom/mvm" target="_blank" rel="noopener">
+                <Button size="lg" variant="outline">
+                  View on GitHub
+                </Button>
               </a>
             </Reveal>
           </div>

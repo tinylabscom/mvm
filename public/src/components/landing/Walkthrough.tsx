@@ -118,7 +118,7 @@ export function Walkthrough() {
 
   return (
     <Section rule space="tight">
-      <h2 className="mb-16 font-display text-3xl font-bold text-title sm:text-4xl">
+      <h2 className="mb-12 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
         From file to running microVM
       </h2>
 

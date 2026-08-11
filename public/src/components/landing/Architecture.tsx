@@ -35,17 +35,17 @@ const BACKENDS = [
 export function Architecture() {
   return (
     <Section space="tight" className="border-y border-edge/30 bg-raised/50">
-      <h2 className="font-display text-3xl font-bold text-title sm:text-4xl">
+      <h2 className="lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
         One CLI. The backend picked for you.
       </h2>
-      <p className="mt-6 max-w-2xl text-lg leading-relaxed text-body">
+      <p className="mt-4 max-w-2xl text-base leading-relaxed text-body">
         mvmctl reads your OS, chip, and macOS version and picks a backend:
         HVF on macOS 26+ Apple Silicon, libkrun on macOS 13–25, Firecracker
         on Linux with KVM. Every one of them boots the guest over vsock with
         no NIC — no SSH path in, no host daemon to run.
       </p>
 
-      <div className="mt-12 max-w-3xl space-y-6">
+      <div className="mt-8 max-w-3xl space-y-6">
         {/* Host layer */}
         <Reveal>
           <div className="rounded-xl border border-edge/40 p-6 sm:p-8">

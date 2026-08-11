@@ -54,8 +54,14 @@
      (see --glow-strength in the light palette blocks below). */
   --glow-strength: 22%;
 
-  /* Font tokens are scheme-invariant — no light-mode override needed. */
-  --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  /* Font tokens are scheme-invariant — no light-mode override needed.
+     --font-display carries every heading (landing + docs, via --sl-font
+     in custom.css) — JetBrains Mono Variable, not Inter, is the deliberate
+     choice: it's the single biggest lever in reading as technical rather
+     than generic-SaaS. Inter stays the body face (--font-body-ish usage is
+     inline `font-sans`/default; long-form paragraphs never take
+     --font-display) because mono hurts readability at paragraph length. */
+  --font-display: "JetBrains Mono Variable", ui-monospace, monospace;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 
   /* Code-block palette — scheme-invariant, by design, not by omission.

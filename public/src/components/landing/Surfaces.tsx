@@ -60,10 +60,10 @@ export function Surfaces() {
   return (
     <Section rule space="roomy" className="bg-raised">
       <Eyebrow>SDKs and CLI</Eyebrow>
-      <h2 className="mb-4 font-display text-3xl font-bold text-title sm:text-4xl">
+      <h2 className="mb-3 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
         Three surfaces, one execution path
       </h2>
-      <p className="mb-12 max-w-2xl text-lg leading-relaxed text-body">
+      <p className="mb-8 max-w-2xl text-base leading-relaxed text-body">
         A shell, a declarative SDK, or an imperative runtime SDK — pick the
         one that fits, they all admit through the same signed{" "}
         <code className="font-mono text-emphasis/90">mvmctl</code> path.
