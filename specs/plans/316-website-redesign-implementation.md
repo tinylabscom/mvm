@@ -100,10 +100,22 @@ be real" constraint enforceable rather than aspirational.
 
 **Interfaces:**
 - Produces: `samples.ts` exports `SAMPLES: Sample[]` where
-  `type Sample = { id: string; label: string; language: string; source: string; code: string }`.
-  `source` is a repo-relative path (e.g. `examples/python/hello-app/app.py`) or
-  the literal string `"cli-help"`. Every later task that renders code imports
-  from this module — no component contains an inline code string.
+  ```ts
+  export type Sample = {
+    id: string;
+    label: string;
+    language: string;
+    /** Repo-relative path, or the literal "cli-help". */
+    source: string;
+    /** Present iff source === "cli-help": argv after `mvmctl`. */
+    helpArgs?: string[];
+    code: string;
+  };
+  export const SAMPLES: Sample[];
+  ```
+  Every later task that renders code imports from this module — no component
+  contains an inline code string. `helpArgs` is declared here (not in Task 14)
+  so the type is stable from the start.
 
 - [ ] **Step 1: Write the failing gate**
 
@@ -118,9 +130,9 @@ import { join, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..", "..");
 const samplesPath = join(import.meta.dirname, "..", "src/components/landing/samples.ts");
-const src = readFileSync(samplesPath, "utf8");
-
-// samples.ts is plain data; evaluate it as a module to read SAMPLES.
+// samples.ts is plain data with erasable type annotations, so Node 22's
+// built-in type stripping imports it directly. If that ever breaks, the
+// fix is to strip types at read time — not to duplicate the samples.
 const { SAMPLES } = await import(samplesPath);
 
 const failures = [];
@@ -503,7 +515,9 @@ export function Bloom({
           key={a}
           className={cn(
             "site-bloom absolute rounded-full blur-[120px]",
-            i === 0 ? "left-1/2 top-0 h-[36rem] w-[52rem] -translate-x-1/2 -translate-y-1/4" : "right-0 top-1/3 h-[26rem] w-[26rem]",
+            // Centring uses left+margin, not a translate utility: the drift
+            // animation owns `transform` and would otherwise cancel it.
+            i === 0 ? "left-1/2 top-0 ml-[-26rem] mt-[-9rem] h-[36rem] w-[52rem]" : "right-0 top-1/3 h-[26rem] w-[26rem]",
           )}
           style={{ background: `var(--color-glow-${a})`, animationDelay: `${i * -8}s` }}
         />
@@ -534,10 +548,9 @@ Append to `public/src/styles/custom.css`:
 }
 ```
 
-Note the `-translate-x-1/2` utility on the first bloom and the animation's
-`transform` both target `transform`; the animation wins. Position the first
-bloom with `left`/`margin` instead of a translate utility so the centring
-survives the animation.
+The centring above deliberately uses `left-1/2` plus a negative margin rather
+than `-translate-x-1/2`: the drift keyframes animate `transform`, which would
+override a translate utility and throw the bloom off-centre.
 
 - [ ] **Step 3: Verify both motion paths**
 
