@@ -205,13 +205,16 @@ impl NetdAuditor {
     /// Cheap when the decision is a repeat and free when no recorder
     /// attached, so the drive loop can call it on every event.
     pub fn observe(&mut self, event: &GatewayEvent) {
+        self.observe_at(event, Utc::now());
+    }
+
+    fn observe_at(&mut self, event: &GatewayEvent, now: DateTime<Utc>) {
         if self.recorder.is_none() {
             return;
         }
         let Some(fact) = fact_for(event) else {
             return;
         };
-        let now = Utc::now();
         let Some(granularity) = self.admit(&fact, now) else {
             return;
         };
@@ -1056,10 +1059,11 @@ mod tests {
     fn the_class_key_space_fits_the_table_that_must_never_be_full() {
         let dir = tempfile::tempdir().unwrap();
         let (mut auditor, _key) = auditor_in(dir.path());
+        let observed_at = Utc::now();
 
         for i in 0..(DESTINATION_BUCKETS as u32) {
             let octets = std::net::Ipv4Addr::from(0x0b00_0000 + i);
-            auditor.observe(&admitted(&octets.to_string(), 443));
+            auditor.observe_at(&admitted(&octets.to_string(), 443), observed_at);
         }
         assert_eq!(
             auditor.destinations.len(),
@@ -1068,42 +1072,66 @@ mod tests {
         );
 
         for code in DENY_CODES {
-            auditor.observe(&GatewayEvent::FlowDenied {
-                reason: *code,
-                dst: None,
-                dst_port: None,
-            });
-            auditor.observe(&GatewayEvent::InboundDenied { reason: *code });
+            auditor.observe_at(
+                &GatewayEvent::FlowDenied {
+                    reason: *code,
+                    dst: None,
+                    dst_port: None,
+                },
+                observed_at,
+            );
+            auditor.observe_at(&GatewayEvent::InboundDenied { reason: *code }, observed_at);
         }
         for reason in DNS_DENY_REASONS {
-            auditor.observe(&GatewayEvent::DnsDenied {
-                name: "x.example.com".into(),
-                reason,
-            });
+            auditor.observe_at(
+                &GatewayEvent::DnsDenied {
+                    name: "x.example.com".into(),
+                    reason,
+                },
+                observed_at,
+            );
         }
-        auditor.observe(&GatewayEvent::TunnelReady {
-            session: SessionId(1),
-        });
-        auditor.observe(&admitted("203.0.113.9", 443));
-        auditor.observe(&GatewayEvent::InboundDelivered {
-            src: "203.0.113.9".parse().unwrap(),
-            bytes: 40,
-        });
-        auditor.observe(&GatewayEvent::DnsAdmitted {
-            name: "x.example.com".into(),
-            answers: 1,
-        });
-        auditor.observe(&GatewayEvent::MalformedFrame {
-            detail: "x".to_string(),
-        });
-        auditor.observe(&GatewayEvent::StaleSession);
-        auditor.observe(&GatewayEvent::QueueOverflow {
-            direction: Direction::Ingress,
-        });
-        auditor.observe(&GatewayEvent::QueueOverflow {
-            direction: Direction::Egress,
-        });
-        auditor.observe(&GatewayEvent::RateLimited);
+        auditor.observe_at(
+            &GatewayEvent::TunnelReady {
+                session: SessionId(1),
+            },
+            observed_at,
+        );
+        auditor.observe_at(&admitted("203.0.113.9", 443), observed_at);
+        auditor.observe_at(
+            &GatewayEvent::InboundDelivered {
+                src: "203.0.113.9".parse().unwrap(),
+                bytes: 40,
+            },
+            observed_at,
+        );
+        auditor.observe_at(
+            &GatewayEvent::DnsAdmitted {
+                name: "x.example.com".into(),
+                answers: 1,
+            },
+            observed_at,
+        );
+        auditor.observe_at(
+            &GatewayEvent::MalformedFrame {
+                detail: "x".to_string(),
+            },
+            observed_at,
+        );
+        auditor.observe_at(&GatewayEvent::StaleSession, observed_at);
+        auditor.observe_at(
+            &GatewayEvent::QueueOverflow {
+                direction: Direction::Ingress,
+            },
+            observed_at,
+        );
+        auditor.observe_at(
+            &GatewayEvent::QueueOverflow {
+                direction: Direction::Egress,
+            },
+            observed_at,
+        );
+        auditor.observe_at(&GatewayEvent::RateLimited, observed_at);
 
         // 23 deny codes on egress + 23 on ingress + 11 DNS refusal reasons +
         // 2 queue directions + one apiece for tunnel-ready, flow-admitted,

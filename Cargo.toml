@@ -435,6 +435,7 @@ sha2.workspace = true
 tar.workspace = true
 libkrun-sys.workspace = true
 mvm-fs.workspace = true
+mvm-vmm.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
 # `clap::Command` tree returned by `mvm_cli::commands::cli_command()`
 # to enforce that every subcommand has a declared audit posture.

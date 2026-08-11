@@ -71,6 +71,7 @@ pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const BRIDGE_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 /// SIGTERM→SIGKILL grace on `stop`.
 pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+const FORCE_KILL_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// QEMU's unprivileged user-mode network gives dev/test guests transparent
 /// TCP and UDP without requiring a host TAP device or elevated setup.
@@ -460,6 +461,7 @@ impl VmBackend for QemuBackend {
             send_signal(bpid, libc::SIGTERM);
         }
         let _ = std::fs::remove_file(state_dir.join(BRIDGE_PID_FILE));
+        cleanup_vsock_bridge_sockets(&state_dir);
 
         let pid_path = state_dir.join(QEMU_PID_FILE);
         let Some(pid) = read_pid(&pid_path) else {
@@ -475,17 +477,30 @@ impl VmBackend for QemuBackend {
             ui::info(&format!("QEMU VM '{}' was not running.", id.0));
             return Ok(());
         }
+        let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
         send_signal(pid, libc::SIGTERM);
-        let deadline = Instant::now() + STOP_TIMEOUT;
-        while Instant::now() < deadline && pid_alive(pid) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if pid_alive(pid) {
+        let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
+            pid,
+            Instant::now() + STOP_TIMEOUT,
+            observer.as_ref(),
+        );
+        if !exited {
             ui::info(&format!(
                 "QEMU VM '{}' PID {pid} ignored SIGTERM; sending SIGKILL.",
                 id.0
             ));
             send_signal(pid, libc::SIGKILL);
+            if !mvm_vmm::host::process_exit::wait_for_pid_exit(
+                pid,
+                Instant::now() + FORCE_KILL_TIMEOUT,
+                observer.as_ref(),
+            ) {
+                bail!(
+                    "QEMU VM '{}' PID {pid} could not be proven dead after SIGKILL; preserving {}",
+                    id.0,
+                    pid_path.display()
+                );
+            }
         }
         let _ = std::fs::remove_file(&pid_path);
         ui::success(&format!("QEMU VM '{}' stopped.", id.0));
@@ -876,8 +891,7 @@ pub(crate) fn spawn_vsock_bridges(
     }
     let bridge_pid_file = state_dir.join(BRIDGE_PID_FILE);
 
-    let exe =
-        std::env::current_exe().map_err(|e| anyhow!("resolve current exe for bridge: {e}"))?;
+    let exe = resolve_bridge_executable()?;
     let mut cmd = Command::new(&exe);
     cmd.arg("__qemu-vsock-bridge")
         .arg("--spec")
@@ -918,6 +932,29 @@ pub(crate) fn spawn_vsock_bridges(
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())
+}
+
+pub(crate) fn cleanup_vsock_bridge_sockets(state_dir: &Path) {
+    let spec_path = state_dir.join(BRIDGE_SPEC_FILE);
+    let Ok(json) = std::fs::read_to_string(&spec_path) else {
+        return;
+    };
+    let Ok(spec) = serde_json::from_str::<QemuBridgeSpec>(&json) else {
+        return;
+    };
+    for dial in spec.host_dials {
+        let owned_path = mvm_core::config::vm_vsock_port_socket_at(state_dir, dial.guest_port);
+        if dial.listen_uds == owned_path {
+            let _ = std::fs::remove_file(owned_path);
+        }
+    }
+}
+
+fn resolve_bridge_executable() -> Result<PathBuf> {
+    mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
+        bin: "mvmctl",
+        env_var: "MVM_QEMU_BRIDGE_PATH",
+    })
 }
 
 /// Read a [`QemuBridgeSpec`] JSON file and run the bridge — the body of the
@@ -1208,7 +1245,7 @@ pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    mvm_vmm::host::process_liveness::pid_is_alive(pid)
 }
 
 pub(crate) fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
@@ -1232,6 +1269,98 @@ mod tests {
     #[test]
     fn qemu_backend_name_is_qemu() {
         assert_eq!(QemuBackend.name(), "qemu");
+    }
+
+    #[test]
+    fn bridge_executable_honors_the_explicit_override() {
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bridge = temp.path().join("mvmctl");
+        std::fs::write(&bridge, b"bridge fixture").expect("write bridge fixture");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_QEMU_BRIDGE_PATH", &bridge);
+
+        assert_eq!(
+            resolve_bridge_executable().expect("resolve bridge override"),
+            bridge
+        );
+    }
+
+    #[test]
+    fn bridge_socket_cleanup_removes_only_derived_owned_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let owned = mvm_core::config::vm_vsock_port_socket_at(
+            temp.path(),
+            mvm_agentd::vsock::GUEST_AGENT_PORT,
+        );
+        let redirected = temp.path().join("redirected.sock");
+        let unrelated = temp.path().join("unrelated.sock");
+        std::fs::create_dir_all(owned.parent().expect("owned parent")).expect("create socket dir");
+        std::fs::write(&owned, b"owned").expect("write owned path");
+        std::fs::write(&redirected, b"redirected").expect("write redirected path");
+        std::fs::write(&unrelated, b"unrelated").expect("write unrelated path");
+        let spec = QemuBridgeSpec {
+            cid: 7,
+            watch_pid_file: temp.path().join(QEMU_PID_FILE),
+            host_dials: vec![
+                QemuBridgeHostDial {
+                    guest_port: mvm_agentd::vsock::GUEST_AGENT_PORT,
+                    listen_uds: owned.clone(),
+                },
+                QemuBridgeHostDial {
+                    guest_port: mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+                    listen_uds: redirected.clone(),
+                },
+            ],
+            guest_dials: Vec::new(),
+            exit_capture_state_dir: None,
+        };
+        std::fs::write(
+            temp.path().join(BRIDGE_SPEC_FILE),
+            serde_json::to_vec(&spec).expect("serialize bridge spec"),
+        )
+        .expect("write bridge spec");
+
+        cleanup_vsock_bridge_sockets(temp.path());
+
+        assert!(!owned.exists());
+        assert!(redirected.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn stop_reaps_a_supervisor_through_the_shared_exit_wait() {
+        let _guard = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", temp.path());
+
+        let vm_name = "qemu-event-stop";
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn supervisor fixture");
+        let pid_path = vm_state_dir(vm_name).join(QEMU_PID_FILE);
+        std::fs::create_dir_all(pid_path.parent().expect("pid parent")).expect("state dir");
+        std::fs::write(&pid_path, child.id().to_string()).expect("write pid marker");
+
+        QemuBackend
+            .stop(&VmId(vm_name.to_string()))
+            .expect("stop should prove the fixture exited");
+        let _ = child.wait();
+
+        assert!(
+            !pid_path.exists(),
+            "verified exit should remove the pid marker"
+        );
+        assert!(!pid_alive(child.id() as libc::pid_t));
     }
 
     #[test]

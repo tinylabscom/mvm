@@ -87,6 +87,18 @@
       299's release baseline; establishing that comparison is the plan's first
       phase and no percentile is published before it.
 
+- [x] Event-driven process lifecycle and shutdown — **Plan 314**. The shared
+      macOS kqueue/Linux pidfd process observer now drives normal HVF,
+      Firecracker, libkrun, and QEMU shutdown with bounded fallback, final
+      liveness verification, and fail-closed escalation. The authorized
+      1,000-cycle HVF run records zero SIGKILL escalations; 100 Firecracker
+      cycles and 25-cycle libkrun/QEMU runs leave zero processes, PID markers,
+      or owned sockets. Internal HVF profiling shows the 5 ms watchdog is not
+      the dominant span, so no new control protocol was justified. The
+      foreground-wait audit and repository event/timer/reconciliation rule are
+      complete. Formatting, workspace check, the complete workspace test
+      suite, macOS focused clippy, and Linux all-target clippy pass.
+
 - [x] README CLI/code-example contract — README shell examples and every
       declared CLI option have executable cucumber help witnesses; all 26
       fenced examples are covered by the test-owned manifest, and README
