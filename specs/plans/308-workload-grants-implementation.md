@@ -2842,3 +2842,45 @@ is indistinguishable from the failure mode it is meant to prevent.
   direction
 - `a_workload_within_its_bound_is_not_killed` — the false-positive guard,
   without which a timer that fires immediately would pass every other test
+
+**Landed:**
+- [x] `exec_secs_from_grants` in `crates/mvm-contract/src/grants/projection.rs` —
+  the sole projection.
+- [x] `SynthesisInput::exec_timeout_secs` deleted; `synthesize_plan` writes
+  `exec_secs` from the grant and nothing else writes it.
+- [x] `xtask check-single-exec-secs-writer` + a `ci.yml` step.
+- [x] `enforce_wall_clock_projection` in `plan_admission.rs` — admission refuses
+  a plan whose two encodings disagree.
+- [x] `crates/mvm-hostd/src/supervisor/wall_clock.rs` — the timer, its kill, and
+  the chain-signed `plan.wall_clock_expired` entry; armed by
+  `mvm-libkrun-supervisor`.
+- [x] `ResourceControls::for_backend` corrected: only the libkrun tier claims
+  `WallClockControl::SupervisorTimer`, because it is the only VMM tier with a
+  per-VM supervisor process of ours.
+
+**Deferred — the wall-clock timer on the remaining workload tiers:**
+
+- [ ] **HVF.** `mvm-hvf-supervisor` is a per-VM process that outlives `mvmctl`
+  and could host the timer unchanged, but it is never handed the admitted plan:
+  `HvfSupervisorConfig` carries no `plan_json`, no `audit_dir` and no
+  `signing_key_path`, and its existing `timeout_secs` is an `MVM_HVF_TIMEOUT`
+  dev backstop rather than anything grant-derived. Wiring is: add those three
+  fields to `HvfSupervisorConfig` (`crates/mvm-vmm/src/host/hvf_supervisor.rs`),
+  populate them in `relay_supervisor_config_with_handoff`
+  (`crates/mvm-backends/src/driver/hvf.rs`), and call
+  `wall_clock::arm_for_supervisor` in the bin before `boot_kernel_until`.
+  Until then HVF answers `WallClockControl::None`, so a sealed run declaring a
+  wall-clock grant is refused rather than admitted unbounded.
+- [ ] **Firecracker / QEMU.** There is no process of ours left after launch —
+  the VMM is a bare child of an `mvmctl` that exits — so a timer has nowhere to
+  live without introducing one. The candidates already in the tree are the
+  per-tenant `mvm-host-agent` daemon (resident, holds per-VM registrations, can
+  chain-sign through its signer helper: a deadline would ride on `RegisterVm`)
+  and the per-VM `mvm-substitution-endpoint` (detached, per-VM, but conditional
+  on the workload having secrets or a policy, and deliberately confined). The
+  host-agent is the better home; both are larger than this task.
+- [ ] `enforced_grants_for_vm` still reports `wall_clock: Declared` even on a
+  libkrun boot whose timer is armed, because the arming happens in another
+  process and there is nothing for `mvmctl` to read back. Understating rather
+  than overstating is the documented posture, but the read-back seam is the
+  honest fix.

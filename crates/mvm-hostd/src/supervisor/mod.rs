@@ -119,6 +119,9 @@ pub mod ssrf_guard;
 pub mod state;
 pub mod tool_gate;
 pub mod tools;
+/// The supervisor-side wall-clock timer — the mechanism behind
+/// `WallClockControl::SupervisorTimer`.
+pub mod wall_clock;
 
 pub use aggregate::{
     AuditPolicyValidationError, EgressPolicyValidationError, KNOWN_AUDIT_STREAM_SCHEMES,
