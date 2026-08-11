@@ -88,16 +88,28 @@ export function Hero() {
   const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
 
   return (
-    <section className="relative overflow-hidden">
+    // Padding lives on the section itself (not a wrapper div) so the
+    // `mx-auto max-w-6xl` div below is a *direct* child of `main section` —
+    // same shape as Section.tsx. That direct-child relationship matters:
+    // `[data-has-hero] main section > div { margin-inline: auto }` in
+    // custom.css is what actually centers these divs (Tailwind's `mx-auto`
+    // utility loses to Starlight's unlayered CSS otherwise, see that rule's
+    // comment) — one extra nesting level here previously put the centering
+    // div out of that selector's reach and silently dropped the gutter to
+    // padding-only, 74px short of every other section's at 1440px.
+    // Bloom's `inset-0` still spans edge-to-edge: an absolutely positioned
+    // descendant's containing block is the *padding* box of this element,
+    // so this section's own padding doesn't inset it.
+    <section className="relative w-full overflow-hidden px-6 pt-20 pb-16 sm:px-8 lg:pt-24 lg:pb-20">
       {/* Background glow */}
       <Bloom accents={[1, 2]} />
 
-      <div className="relative mx-auto max-w-7xl px-6 pt-20 pb-16 sm:px-8 lg:pt-24 lg:pb-20">
-        <div className="grid gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center lg:gap-14">
-          <div className="flex max-w-xl flex-col gap-6">
+      <div className="relative mx-auto max-w-6xl">
+        <div className="grid grid-cols-1 gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center lg:gap-14">
+          <div className="flex min-w-0 max-w-xl flex-col gap-6">
             <Reveal delay={80}>
               <h1
-                className="max-w-[10.5em] font-display font-bold leading-[1.05] tracking-[-0.03em] text-title"
+                className="max-w-[19rem] sm:max-w-[28rem] lg:max-w-xl font-display font-bold leading-[1.05] tracking-[-0.03em] text-title"
                 style={{ fontSize: "clamp(2.5rem, 4.5vw, 4rem)" }}
               >
                 A real hypervisor, no daemon or SSH.

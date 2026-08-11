@@ -86,7 +86,14 @@ export function Security() {
                 {c.description}
               </p>
               <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[11px] text-label/70">
-                <span className="font-mono">{c.witnesses}</span>
+                {/* Witness ids are long, underscore-joined identifiers with
+                    no natural break points; as a flex-wrap item this span's
+                    default min-width:auto lets a single long identifier
+                    overflow the row instead of wrapping onto it — break-words
+                    lets it wrap mid-token on narrow viewports instead. */}
+                <span className="min-w-0 font-mono break-words">
+                  {c.witnesses}
+                </span>
                 <a
                   href={`${base}${c.docHref}`}
                   className="font-sans text-accent underline underline-offset-2 hover:text-accent/80"
