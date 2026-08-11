@@ -1,7 +1,7 @@
 # Plan 316 — Website and docs redesign
 
-**Status: DESIGN — not yet implemented**
-**Last updated: 2026-08-10**
+**Status: IMPLEMENTATION COMPLETE — awaiting human browser verification**
+**Last updated: 2026-08-11**
 **Branch:** `feat/website-redesign`
 **Scope:** `public/` only. No Rust crate, CLI, or doc *content* changes.
 
@@ -169,18 +169,26 @@ and would be its own plan.
 
 What must pass before this is called done:
 
-- [ ] `pnpm build` in `public/` completes with no errors and no new warnings.
+- [x] `pnpm build` in `public/` completes with no errors and no new warnings
+      (Task 20 verification, 2026-08-11 — `pnpm build`, 131 pages, clean).
 - [ ] Homepage screenshotted in **dark** and **light**, both at desktop and at
-      a narrow mobile width.
+      a narrow mobile width. **Awaits human browser verification** — no agent
+      in this pass can drive a browser; see the checklist in the Task 20
+      report (`.superpowers/sdd/316-website-redesign-implementation/task-20-report.md`).
 - [ ] A representative docs page (long prose + code + table + callout)
-      screenshotted in dark and light.
+      screenshotted in dark and light. **Awaits human browser verification.**
 - [ ] `prefers-reduced-motion: reduce` pass: blooms static, no reveal
-      transitions, walkthrough degraded to the stacked fallback.
-- [ ] Keyboard traversal of the SDK tab block and the header nav.
-- [ ] No hardcoded hex outside the sanctioned terminal-dot exception —
-      grep-checked.
-- [ ] Every homepage code sample traced to a real `examples/` file or a real
-      `--help` output.
+      transitions, walkthrough degraded to the stacked fallback. **Awaits
+      human browser verification** — this is also where the JS-enabled
+      hydration check for the `html.js` reveal gate must run; see report.
+- [ ] Keyboard traversal of the SDK tab block and the header nav. **Awaits
+      human browser verification.**
+- [x] No hardcoded hex outside the sanctioned terminal-dot exception —
+      grep-checked (Task 20 verification, 2026-08-11 — `pnpm check:tokens`
+      passes).
+- [x] Every homepage code sample traced to a real `examples/` file or a real
+      `--help` output (Task 20 verification, 2026-08-11 — `pnpm check:samples`
+      reports 9/9).
 
 ## Explicitly out of scope
 

@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -38,6 +38,22 @@ for detailed scope and acceptance criteria.
       canonical budget table, and gates remain open.
 
 ## In-flight plans
+- [~] Plan 316 — website and docs redesign
+      (`specs/plans/316-website-redesign.md`)
+  - [x] Homepage sections, docs chrome, and shared primitives rebuilt onto
+        token-driven surfaces; stale Apple Virtualization / Docker-fallback /
+        nonexistent Nix service-builder claims and the third-party Google
+        Fonts CDN fetch removed from `public/src/components/`
+  - [x] Copy-to-clipboard install-command controls (Hero, Install) converted
+        from non-focusable `<div onClick>` to real `<button type="button">`
+        with an accessible name and a visible focus ring in both schemes
+  - [x] `pnpm check:tokens`, `pnpm check:samples` (9/9), and `pnpm build`
+        (131 pages) all clean; stale-claim grep sweep and doc-route/footer
+        link resolution against `dist/` both confirmed empty/OK; no
+        `public/src/content/` file touched on the branch
+  - [ ] Human browser verification: dark/light + mobile + reduced-motion
+        screenshot matrix, and full keyboard traversal — not executable by
+        an agent; checklist left for a human reviewer in the Task 20 report
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
   - [x] Restore bounded guest credit recording, fail-closed unknown-credit

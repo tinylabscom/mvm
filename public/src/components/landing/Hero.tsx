@@ -107,10 +107,11 @@ export function Hero() {
 
             {/* Install command */}
             <Reveal delay={240}>
-              <div
-                className="group flex w-full max-w-lg cursor-pointer items-center gap-3 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 backdrop-blur transition-all hover:border-accent/30"
+              <button
+                type="button"
+                className="group flex w-full max-w-lg items-center gap-3 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 text-left backdrop-blur transition-all hover:border-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-page"
                 onClick={copyInstall}
-                title="Click to copy"
+                aria-label="Copy install command"
               >
                 <span className="text-accent/60 text-sm">$</span>
                 <code className="flex-1 text-left font-mono text-sm text-emphasis/90 overflow-x-auto">
@@ -119,7 +120,7 @@ export function Hero() {
                 <span className="shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent">
                   {copied ? "Copied!" : "Copy"}
                 </span>
-              </div>
+              </button>
             </Reveal>
 
             <Reveal delay={320} className="flex flex-wrap gap-3">
