@@ -60,6 +60,11 @@ export function Footer() {
 
   return (
     <footer className="landing-footer border-t border-glass-border/60 bg-canvas pt-16 lg:pt-20">
+      <div className="landing-footer__inner mx-auto max-w-6xl px-6 sm:px-8">
+        <p className="mb-14 max-w-2xl lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl lg:mb-16">
+          no shared kernel. no exceptions.
+        </p>
+      </div>
       <div className="landing-footer__inner mx-auto max-w-6xl px-6 pb-10 sm:px-8 lg:pb-12">
         <div className="grid gap-12 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.35fr)_repeat(3,minmax(0,1fr))] lg:gap-16">
           <div className="max-w-xs">

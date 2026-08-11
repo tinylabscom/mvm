@@ -178,6 +178,19 @@ export function Hero() {
                 </Button>
               </a>
             </Reveal>
+
+            {/* Tertiary text link — the third action the reference reserves
+                for a lower-commitment path than the button pair. Ours
+                points at the CLI reference rather than anything invented. */}
+            <Reveal delay={360}>
+              <a
+                href={`${base}reference/cli-commands/`}
+                className="inline-flex items-center gap-1.5 text-sm text-label underline underline-offset-4 hover:text-accent"
+              >
+                Browse the CLI reference
+                <span aria-hidden="true">&rarr;</span>
+              </a>
+            </Reveal>
           </div>
 
           {/* The boundary diagram — the hero's visual anchor. This is the

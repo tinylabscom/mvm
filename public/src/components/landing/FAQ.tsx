@@ -45,28 +45,36 @@ const FAQ_ITEMS: Array<{ q: string; a: string }> = [
 export function FAQ() {
   return (
     <Section rule space="tight">
-      <Eyebrow>FAQ</Eyebrow>
-      <h2 className="mb-8 lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
-        Questions Worth Asking
-      </h2>
-
-      <div className="max-w-2xl divide-y divide-edge/30 border-t border-edge/30">
-        {FAQ_ITEMS.map((item, i) => (
-          <Reveal key={item.q} delay={i * 40}>
-            <details className="group py-5">
-              <summary className="flex cursor-pointer list-none items-start justify-between gap-4 text-base font-semibold leading-snug text-title marker:content-none">
-                {item.q}
-                <span
-                  className="mt-0.5 shrink-0 font-mono text-label transition-transform group-open:rotate-45"
-                  aria-hidden="true"
-                >
-                  +
-                </span>
-              </summary>
-              <p className="mt-3 max-w-xl text-sm leading-relaxed text-body">{item.a}</p>
-            </details>
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,0.6fr)_minmax(0,1.4fr)] lg:gap-16">
+        {/* Left: small label + the word. */}
+        <div className="lg:sticky lg:top-32 lg:self-start">
+          <Reveal>
+            <Eyebrow>Questions worth asking</Eyebrow>
+            <h2 className="lowercase font-display text-3xl font-bold leading-tight text-title sm:text-4xl">
+              faq
+            </h2>
           </Reveal>
-        ))}
+        </div>
+
+        {/* Right: the accordion. */}
+        <div className="divide-y divide-edge/30 border-t border-edge/30">
+          {FAQ_ITEMS.map((item, i) => (
+            <Reveal key={item.q} delay={i * 40}>
+              <details className="group py-5">
+                <summary className="flex cursor-pointer list-none items-start justify-between gap-4 text-base font-semibold leading-snug text-title marker:content-none">
+                  {item.q}
+                  <span
+                    className="mt-0.5 shrink-0 font-mono text-label transition-transform group-open:rotate-45"
+                    aria-hidden="true"
+                  >
+                    +
+                  </span>
+                </summary>
+                <p className="mt-3 max-w-xl text-sm leading-relaxed text-body">{item.a}</p>
+              </details>
+            </Reveal>
+          ))}
+        </div>
       </div>
     </Section>
   );
