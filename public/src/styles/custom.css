@@ -1,5 +1,6 @@
-/* Load JetBrains Mono for crisp monospace rendering */
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+/* Self-hosted variable fonts — no third-party CDN request at render time. */
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
 
 /*  Bind Starlight's --sl-color-* surface to our role tokens.
  *
@@ -38,8 +39,9 @@
      them to dark-only values to compensate for forcing dark globally;
      no longer needed here. */
 
-  --sl-font-system-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code",
+  --sl-font-system-mono: "JetBrains Mono Variable", "SF Mono", "Cascadia Code", "Fira Code",
     Consolas, monospace;
+  --sl-font: var(--font-display);
 }
 
 /*  Tell the browser the supported schemes so native form controls,

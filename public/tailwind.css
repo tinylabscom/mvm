@@ -58,6 +58,10 @@
   /* Dark glows read as light bloom; light mode dials this down to a tint
      (see --glow-strength in the light palette blocks below). */
   --glow-strength: 22%;
+
+  /* Font tokens are scheme-invariant — no light-mode override needed. */
+  --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 }
 
 @theme inline {
