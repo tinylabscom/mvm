@@ -66,6 +66,7 @@ mod fs_walk;
 mod gen_stubs;
 mod ir_parity;
 mod perf;
+mod rust_source;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();

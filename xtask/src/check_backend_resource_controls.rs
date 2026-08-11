@@ -29,6 +29,14 @@
 //! matching outer parens before re-splitting, recursively, so arbitrary
 //! nesting (`((BackendKind::Mock | _))`) can't hide a bare alternative
 //! either.
+//!
+//! Comments and string literals are blanked first by the shared
+//! [`crate::rust_source`] scanner. Comments alone are not enough: a guard arm
+//! like `_ if reason == "BackendKind::Mock" =>` is a bare wildcard whose
+//! pattern text names `BackendKind::` only inside a literal, and it passes a
+//! scanner that reads strings as code. The scanner is shared with
+//! `check-single-grants-projection` rather than copied — a second copy of
+//! this text handling is what produced the hole in the first place.
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -41,7 +49,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     let path = workspace.join(CONTROLS_FILE);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("reading {CONTROLS_FILE}: {e}"))?;
-    let body = strip_comments(&raw);
+    let body = crate::rust_source::blank_comments_and_strings(&raw);
 
     let fn_block = extract_marked_block(&body, FN_MARKER)
         .ok_or_else(|| anyhow::anyhow!("{CONTROLS_FILE} no longer defines for_backend"))?;
@@ -77,46 +85,6 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Drop `//` and `/* */` comments so prose that happens to mention
-/// `BackendKind::` next to a wildcard or bare-binding arm can't be mistaken
-/// for the arm naming it itself — `_ /* BackendKind::Mock */ =>` bypasses a
-/// substring check that only strips line comments.
-///
-/// Known limit: this does not understand string literals, so a `//` or `/*`
-/// inside a `"..."` would be misread as a real comment start. No arm pattern
-/// in `for_backend`'s match contains a string literal today (every
-/// alternative is a bare `BackendKind::Variant` path, `_`, or a binding), so
-/// this is latent rather than a live gap — worth fixing only if that stops
-/// being true.
-fn strip_comments(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
-    let mut chars = body.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '/' && chars.peek() == Some(&'/') {
-            for c2 in chars.by_ref() {
-                if c2 == '\n' {
-                    out.push('\n');
-                    break;
-                }
-            }
-            continue;
-        }
-        if c == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            let mut prev = '\0';
-            for c2 in chars.by_ref() {
-                if prev == '*' && c2 == '/' {
-                    break;
-                }
-                prev = c2;
-            }
-            continue;
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// A block found by locating `marker`, then the `{` that follows it: `header`
@@ -594,6 +562,52 @@ mod tests {
 "#;
         let tmp = write_controls_fixture("all-explicit", controls_body);
         run(&tmp).expect("every arm names BackendKind:: explicitly");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn a_guard_comparing_a_string_is_still_a_wildcard() {
+        // `_ if reason == "BackendKind::Mock"` is a bare wildcard: every
+        // variant reaches it. Its pattern text names BackendKind:: only
+        // inside a literal, so a scanner that reads strings as code passes it.
+        assert_arm_rejected(
+            "guard-string-compare",
+            "_ if matches!(reason, \"BackendKind::Mock\") => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },",
+        );
+    }
+
+    #[test]
+    fn a_wildcard_beside_a_stringified_variant_name_is_caught() {
+        assert_arm_rejected(
+            "stringified-variant",
+            "other => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None /* \"BackendKind::Mock\" */ },",
+        );
+    }
+
+    #[test]
+    fn a_brace_inside_a_string_does_not_end_the_match_early() {
+        // A `}` inside a literal is not a closing brace, but a scanner that
+        // reads strings as code counts it as one — which ends the match block
+        // at the first arm and leaves every arm after it, wildcard included,
+        // unread. A gate that stops reading passes everything it never saw.
+        let controls_body = r#"
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            BackendKind::Firecracker => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::None,
+                note: "}",
+            },
+            _ => Self { cpu: CpuControl::None, wall_clock: WallClockControl::None },
+        }
+    }
+"#;
+        let tmp = write_controls_fixture("brace-in-string", controls_body);
+        let err = run(&tmp).unwrap_err();
+        assert!(
+            err.to_string().contains("never"),
+            "a brace inside a literal must not hide the arms after it, got: {err}"
+        );
         cleanup(&tmp);
     }
 
