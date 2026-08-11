@@ -918,11 +918,16 @@ for detailed scope and acceptance criteria.
           miss, and eviction of **both** the record and the build directory —
           a record-only eviction would leave the poisoned tree under a name a
           later build re-adopts. Unblocks plan 279 WS1
-    - [ ] Workload/builder kernel cache: still path-trusting.
-          `verify_fetched_kernel` exists with **no production caller** —
-          neither the fetch nor the read path checks a kernel against its pin.
-          Scoped as plan 288
-          (`specs/plans/288-kernel-cache-verify-on-read.md`)
+    - [~] Workload/builder kernel cache: plan 288
+          (`specs/plans/288-kernel-cache-verify-on-read.md`). WS1–WS3 + WS5
+          landed — the fetch path verifies against the published checksum
+          manifest and records a digest sidecar, the read path verifies against
+          it and evicts the whole entry on failure, and
+          `check-verified-kernel-reads` keeps new callers on the seam. WS1's
+          `VerifiedKernel` initially reached only the arms that used it: the
+          Firecracker/qemu arm and the CLI's kernel-less-image fallback still
+          booted on presence until 2026-08-11. WS4 (shared sidecar helper with
+          the BLAKE3 artifact path) is the remainder
     - [ ] Cold-tier background scrub (recon §7.9)
   - [~] WS7 — σ/κ separation: `mvm_core::at_rest` gives the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint

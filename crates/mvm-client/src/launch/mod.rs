@@ -188,9 +188,14 @@ pub(crate) struct BootParams {
 }
 
 impl LocalBackend {
-    /// Resolve the per-backend workload kernel: HVF boots an explicit
-    /// verified arm64 kernel from the CLI-populated cache; every other
-    /// backend carries its own.
+    /// Resolve the per-backend workload kernel: every explicit-kernel backend
+    /// boots a verified kernel from the CLI-populated cache; bundled-kernel
+    /// backends carry their own.
+    ///
+    /// One arm serves all of them. Firecracker and the qemu dev tier used to
+    /// take a separate branch that accepted the cache path on `is_file()`, so
+    /// the backend that carries real workloads on Linux booted whatever sat at
+    /// the expected filename while HVF next door required a digest match.
     pub(crate) fn resolve_workload_kernel(backend: &AnyBackend) -> Result<Option<PathBuf>> {
         use mvm_core::protocol::vm_backend::BackendKind;
         let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -199,38 +204,23 @@ impl LocalBackend {
             // Bundled-kernel backends: libkrun boots the libkrunfw kernel and
             // the hermetic mock boots nothing — no host kernel path needed.
             BackendKind::Mock | BackendKind::Libkrun => Ok(None),
-            BackendKind::Hvf => {
-                match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
-                    mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-                        Ok(Some(verified.path().to_path_buf()))
-                    }
-                    _ => Err(crate::local::backend_err(format!(
-                        "hvf needs a verified workload kernel at {} — run a `mvmctl machine run` \
-                         once (or `mvmctl build kernel build`) to populate the cache",
-                        mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload")
-                            .display()
-                    ))),
+            // Cache-hit-or-error; populating the cache is a CLI concern. A hit
+            // means the bytes matched their recorded digest, and an entry that
+            // fails to verify is evicted by the resolve — so the hint below is
+            // the right next step for a rejected kernel as much as a missing
+            // one.
+            _ => match mvm_build::kernel_fetch::resolve_kernel(&cache, &arch, "workload", false) {
+                mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+                    Ok(Some(verified.path().to_path_buf()))
                 }
-            }
-            // Firecracker (and every other explicit-kernel backend, e.g. the
-            // qemu dev tier) hard-refuses a bundled-kernel spec, so resolve the
-            // same cached workload kernel the CLI's machine-run boot path
-            // supplies: `<cache>/builder-vm/<arch>/kernels/workload/vmlinux`
-            // by presence (the driver derives its own FC-loadable sibling from
-            // it). Cache-hit-or-error; populating the cache is a CLI concern.
-            _ => {
-                let path = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
-                if path.is_file() {
-                    Ok(Some(path))
-                } else {
-                    Err(crate::local::backend_err(format!(
-                        "{} needs the cached workload kernel at {} — create it once with \
-                         `mvmctl kernel build --which workload`, then retry",
-                        backend.name(),
-                        path.display()
-                    )))
-                }
-            }
+                _ => Err(crate::local::backend_err(format!(
+                    "{} needs a verified workload kernel at {} — create it once with \
+                     `mvmctl kernel build --which workload`, then retry",
+                    backend.name(),
+                    mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload")
+                        .display()
+                ))),
+            },
         }
     }
 
