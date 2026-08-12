@@ -91,6 +91,7 @@ fn apply_runtime_overlay_artifact(
 /// fields `None` and the VM boots legacy. The seeded resolve is a pure
 /// cache read — no build, no download, no `nix` — so this is safe on
 /// every host.
+#[tracing::instrument(skip_all, fields(hypervisor, arch = ?arch))]
 pub(crate) fn attach_runtime_overlay(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
@@ -329,6 +330,7 @@ pub(crate) fn universal_initramfs_available() -> bool {
     mvm_build::initramfs::resolve_or_seed_from_default_cache(&cache_root, version, arch).is_ok()
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
 ) -> Result<()> {

@@ -50,6 +50,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::Result;
+use mvm_contract::grants::{CpuGrant, Grants, WallClockGrant};
+use mvm_contract::protocol::resource_controls::EnforcedGrants;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, ResourceControls,
     SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
@@ -126,6 +128,166 @@ pub enum WasmBackendError {
 
     #[error("wasm backend volume mountpoint {guest_path:?} is denied: {reason}")]
     VolumePathDenied { guest_path: String, reason: String },
+
+    #[error(
+        "the wasm tier cannot bound a CPU share — a share is a fraction of host CPU time and \
+         this tier counts instructions; express it as fuel (a deterministic instruction budget)"
+    )]
+    CpuShareNotSupported,
+
+    #[error(
+        "a fuel grant needs a bounded wall_clock grant: fuel does not tick inside a host call, \
+         so a module parked in one would be bounded by the instruction budget by nothing"
+    )]
+    FuelWithoutWallClock,
+
+    #[error(
+        "wasm tier could not confirm {control} is live on the engine that compiled this module, \
+         so it refuses to run a workload it would have to report as bounded without evidence"
+    )]
+    ControlNotConfirmed { control: &'static str },
+
+    #[error("wasm backend has no completed run recorded for '{name}'")]
+    NoRunRecorded { name: String },
+}
+
+/// What the wasm tier will accept as a grant, refusing anything it could only
+/// half-enforce.
+///
+/// Shared by `start` (which installs the bounds) and `apply_grants` (which
+/// reports them) so the two cannot drift apart on what they admit.
+fn validate_wasm_grants(grants: &Grants) -> std::result::Result<(), WasmBackendError> {
+    // Different units, and no conversion between them exists. The capability
+    // negotiation already names fuel as the substitute; this is the same
+    // refusal at the point the control would have been installed.
+    if matches!(grants.cpu, Some(CpuGrant::Share { .. })) {
+        return Err(WasmBackendError::CpuShareNotSupported);
+    }
+    // Fuel is consumed by executed wasm instructions only. A module blocked in
+    // the `mvm:egress` host import executes none, so a fuel budget alone would
+    // let it park there forever. Epoch interruption is what preempts it, and it
+    // is driven by the wall-clock grant — so accepting fuel without one would
+    // record a bound that a hostile module trivially escapes.
+    if matches!(grants.cpu, Some(CpuGrant::Fuel { .. }))
+        && !matches!(grants.wall_clock, Some(WallClockGrant::Secs { .. }))
+    {
+        return Err(WasmBackendError::FuelWithoutWallClock);
+    }
+    Ok(())
+}
+
+/// Linear memory a wasm run may grow into when the launch config declares no
+/// memory of its own. A microVM's memory is committed at creation; a wasm
+/// memory grows on demand, so "unset" would otherwise mean "as much as the
+/// host has".
+const DEFAULT_WASM_MEMORY_MIB: u32 = 256;
+
+/// How long a single `mvm:egress` host call may block before the import gives
+/// up on the endpoint.
+///
+/// Epoch interruption cannot preempt host code — the instrumentation lives in
+/// compiled wasm — so time spent inside this import is time the wall-clock
+/// bound cannot reclaim. The timeout is what keeps a slow or hostile endpoint
+/// from stalling the tier indefinitely, and it is clamped to the run's own
+/// wall-clock grant so a 5-second run cannot be held open for 30.
+const MAX_EGRESS_CALL_SECS: u64 = 30;
+
+/// The bounds one wasm run is born inside, resolved from the admitted plan
+/// before any engine exists.
+///
+/// Every field is a bound that will be *installed*, not a request: `start`
+/// refuses the run outright rather than dropping one it cannot confirm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WasmBounds {
+    /// Executed-instruction budget, or `None` for an uncapped run.
+    pub fuel: Option<u64>,
+    /// Wall-clock ceiling in seconds, enforced by epoch interruption.
+    pub wall_clock_secs: Option<u32>,
+    /// Linear-memory ceiling in bytes. Always set: see [`DEFAULT_WASM_MEMORY_MIB`].
+    pub memory_bytes: usize,
+}
+
+impl WasmBounds {
+    /// The shape a run with no admitted grants gets: no CPU or wall-clock
+    /// bound, and the tier's default memory ceiling.
+    #[must_use]
+    pub const fn unbounded() -> Self {
+        Self {
+            fuel: None,
+            wall_clock_secs: None,
+            memory_bytes: (DEFAULT_WASM_MEMORY_MIB as usize) * 1024 * 1024,
+        }
+    }
+
+    /// The memory ceiling rounded back to whole MiB, for `VmInfo`.
+    #[must_use]
+    pub const fn memory_mib(&self) -> u32 {
+        (self.memory_bytes / (1024 * 1024)) as u32
+    }
+
+    /// How long one `mvm:egress` host call may block. Clamped to the run's own
+    /// wall-clock grant, because a host call that outlives the whole run's
+    /// budget defeats the bound it sits inside.
+    #[must_use]
+    pub fn egress_call_timeout(&self) -> std::time::Duration {
+        let secs = match self.wall_clock_secs {
+            Some(secs) => u64::from(secs).min(MAX_EGRESS_CALL_SECS),
+            None => MAX_EGRESS_CALL_SECS,
+        };
+        std::time::Duration::from_secs(secs)
+    }
+}
+
+/// One finished wasm run: how it exited, and what was confirmed to have
+/// bounded it while it did.
+#[derive(Debug, Clone)]
+pub struct CompletedRun {
+    pub exit: VmExitStatus,
+    pub enforced: EnforcedGrants,
+}
+
+/// The grants this launch was admitted under.
+///
+/// The signed plan on `plan_json` is authoritative. Without one, the only
+/// grant threaded onto a launch config is `cpu_grant` — and a CPU bound with
+/// no wall-clock companion is refused by [`validate_wasm_grants`] rather than
+/// half-applied, which is the correct outcome for a launch that reached this
+/// tier without an admitted plan behind it.
+fn wasm_grants_from_config(config: &VmStartConfig) -> Result<Grants> {
+    match config.plan_json.as_deref() {
+        Some(json) => {
+            let plan = mvm_core::plan::plan_from_admitted_json(json)
+                .map_err(|e| anyhow::anyhow!("decoding the admitted plan for its grants: {e}"))?;
+            Ok(plan.grants.unwrap_or_default())
+        }
+        None => Ok(Grants {
+            cpu: config.cpu_grant,
+            wall_clock: None,
+            egress: None,
+        }),
+    }
+}
+
+/// Turn admitted grants plus the launch config's memory declaration into the
+/// bounds the engine and store are built with.
+fn wasm_bounds_for(config: &VmStartConfig, grants: &Grants) -> WasmBounds {
+    let memory_mib = if config.memory_mib == 0 {
+        DEFAULT_WASM_MEMORY_MIB
+    } else {
+        config.memory_mib
+    };
+    WasmBounds {
+        fuel: match grants.cpu {
+            Some(CpuGrant::Fuel { instructions }) => Some(instructions),
+            // A share never reaches here: `validate_wasm_grants` refuses it.
+            Some(CpuGrant::Share { .. }) | None => None,
+        },
+        wall_clock_secs: match grants.wall_clock {
+            Some(WallClockGrant::Secs { secs }) => Some(secs.get()),
+            Some(WallClockGrant::Unbounded) | None => None,
+        },
+        memory_bytes: (memory_mib as usize) * 1024 * 1024,
+    }
 }
 
 /// Reject every launch request this tier cannot honestly satisfy before
@@ -166,9 +328,14 @@ fn reject_unsupported_start_config(
 /// There is no "running" state to observe: a module runs synchronously
 /// inside `start`, so by the time any other trait method can see it, it has
 /// already exited.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct WasmRun {
     exit: VmExitStatus,
+    /// The bounds that were installed on the store this module ran in.
+    bounds: WasmBounds,
+    /// What each control was *confirmed* to be doing on that store, read back
+    /// off the live engine at construction — never derived from the request.
+    enforced: EnforcedGrants,
 }
 
 /// Host-`wasmtime` backend. See module docs for the tier's scope and the
@@ -326,9 +493,8 @@ impl VmBackend for WasmBackend {
             standby_pool: false,
             // Named explicitly: wasmtime's fuel/epoch mechanisms bound this
             // tier's CPU and wall clock, unlike the all-`None` struct-update
-            // default. `apply_grants` is not yet overridden to wire them, so
-            // its default reply still honestly reports nothing enforced —
-            // this field only declares what the mechanism *could* bound.
+            // default. This field declares what the mechanisms *could* bound;
+            // `apply_grants` reports what one particular run confirmed.
             resource_controls: ResourceControls::for_backend(BackendKind::Wasm),
             ..VmCapabilities::default()
         }
@@ -336,6 +502,15 @@ impl VmBackend for WasmBackend {
 
     fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
         reject_unsupported_start_config(config)?;
+
+        // Admission for this tier's resource controls happens here, not in
+        // `apply_grants`. A wasm module runs to completion inside `start`, so a
+        // bound installed afterwards would bound the run that already finished
+        // by nothing. Refusals therefore have to land before the engine exists.
+        let grants = wasm_grants_from_config(config)?;
+        validate_wasm_grants(&grants)?;
+        let bounds = wasm_bounds_for(config, &grants);
+
         let state_dir = mvm_core::config::vm_state_dir(&config.name);
 
         // Resolve the environment-activation inputs BEFORE spawning
@@ -363,6 +538,7 @@ impl VmBackend for WasmBackend {
             &config.rootfs_path,
             egress_endpoint,
             Some(&activation),
+            bounds,
         );
         if spawned_endpoint.is_some() {
             // A wasm run is synchronous end-to-end inside `start` — there is
@@ -371,14 +547,44 @@ impl VmBackend for WasmBackend {
             crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &config.name);
             mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         }
-        let exit = result?;
+        let completed = result?;
 
         let mut runs = self
             .runs
             .lock()
             .map_err(|_| anyhow::anyhow!("wasm backend state mutex poisoned"))?;
-        runs.insert(config.name.clone(), WasmRun { exit });
+        runs.insert(
+            config.name.clone(),
+            WasmRun {
+                exit: completed.exit,
+                bounds,
+                enforced: completed.enforced,
+            },
+        );
         Ok(VmId(config.name.clone()))
+    }
+
+    /// Report what actually bounded this run, by reading back the controls the
+    /// store it ran in carried.
+    ///
+    /// The tier is recorded at engine construction from a live read-back —
+    /// `Store::get_fuel` for the instruction budget, and a probe that trips
+    /// epoch interruption on the very engine the module was compiled with —
+    /// never from the fact that a setter returned `Ok`.
+    ///
+    /// Called after `start` like every other backend's, but with a different
+    /// meaning: the module is already finished, so this reports a fact rather
+    /// than installing one. That is why the refusal rules also run in `start`,
+    /// where they can still stop an unenforceable launch.
+    fn apply_grants(&self, id: &VmId, grants: &Grants) -> Result<EnforcedGrants> {
+        validate_wasm_grants(grants)?;
+        let runs = self
+            .runs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("wasm backend state mutex poisoned"))?;
+        runs.get(&id.0)
+            .map(|run| run.enforced.clone())
+            .ok_or_else(|| WasmBackendError::NoRunRecorded { name: id.0.clone() }.into())
     }
 
     fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
@@ -429,14 +635,20 @@ impl VmBackend for WasmBackend {
             .lock()
             .map_err(|_| anyhow::anyhow!("wasm backend state mutex poisoned"))?;
         Ok(runs
-            .keys()
-            .map(|name| VmInfo {
+            .iter()
+            .map(|(name, run)| VmInfo {
                 id: VmId(name.clone()),
                 name: name.clone(),
                 status: VmStatus::Stopped,
                 guest_ip: None,
-                cpus: 0,
-                memory_mib: 0,
+                // A WASI instance is single-threaded by construction — one
+                // `_start` on one host thread, no vCPU to add a second to. The
+                // count is the parallelism actually in force, not a zero
+                // standing in for "this tier has no CPUs".
+                cpus: 1,
+                // The linear-memory ceiling the store's limiter enforced, which
+                // is what "how much memory could this have used" means here.
+                memory_mib: run.bounds.memory_mib(),
                 profile: None,
                 revision: None,
                 flake_ref: None,
@@ -500,12 +712,16 @@ impl VmBackend for WasmBackend {
 #[cfg(feature = "wasm-backend")]
 mod engine {
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
-    use super::WasmBackendError;
+    use super::{CompletedRun, WasmBackendError, WasmBounds};
     use crate::wasm_activation::WasmPreopenPlan;
+    use mvm_contract::protocol::resource_controls::{EnforcedGrants, EnforcedTier};
     use mvm_core::substitution_wire::{WireRequest, WireResponse};
     use mvm_core::vm_backend::VmExitStatus;
-    use wasmtime::{Caller, Engine, Extern, Linker, Memory, Module, Store};
+    use wasmtime::{Caller, Engine, Extern, Linker, Memory, Module, Store, StoreLimits};
     use wasmtime_wasi::p1::{self, WasiP1Ctx};
     use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
@@ -514,15 +730,134 @@ mod engine {
     }
 
     /// Host state carried in the wasmtime `Store` for a `WasmBackend` run:
-    /// the WASI Preview 1 context plus the one bit of state the
-    /// `mvm:egress` host-import needs. `egress_endpoint` is host-supplied
-    /// — never guest-controlled — and names the substitution-endpoint UDS
-    /// the import relays each request to. `None` until an endpoint is
-    /// spawned and wired in, in which case the import fails closed rather
-    /// than silently allowing egress.
+    /// the WASI Preview 1 context, the linear-memory limiter, and the bits of
+    /// state the `mvm:egress` host-import needs. `egress_endpoint` is
+    /// host-supplied — never guest-controlled — and names the
+    /// substitution-endpoint UDS the import relays each request to. `None`
+    /// until an endpoint is spawned and wired in, in which case the import
+    /// fails closed rather than silently allowing egress.
     pub(super) struct WasmHostState {
         wasi: WasiP1Ctx,
         egress_endpoint: Option<PathBuf>,
+        /// Bounds the linear memory a module may grow into. A wasm memory
+        /// grows on demand, so unlike a microVM it has no allocation fixed at
+        /// creation and needs a limiter consulted on every `memory.grow`.
+        limits: StoreLimits,
+        /// Ceiling on one `mvm:egress` call. Epoch interruption cannot preempt
+        /// host code, so this is the only thing bounding time spent in the
+        /// import.
+        egress_timeout: Duration,
+    }
+
+    /// How often the epoch is advanced while a bounded run is in flight.
+    ///
+    /// Epoch interruption fires when the engine's counter passes the store's
+    /// deadline, and nothing advances that counter on its own. The period sets
+    /// the granularity of the wall-clock bound: a run granted N seconds is
+    /// stopped somewhere in `[N, N + one period)`.
+    const EPOCH_TICKS_PER_SEC: u64 = 10;
+    const EPOCH_TICK: Duration = Duration::from_millis(1000 / EPOCH_TICKS_PER_SEC);
+
+    /// Advances an engine's epoch on a fixed cadence for as long as a run is in
+    /// flight, and stops on drop.
+    ///
+    /// Without this an epoch deadline is a number nothing ever reaches. Drop
+    /// rather than an explicit stop call so an early return or a trap on the
+    /// run path cannot leave the thread ticking behind it.
+    pub(super) struct EpochTicker {
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl EpochTicker {
+        fn spawn(engine: &Engine) -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let engine = engine.clone();
+            let flag = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    std::thread::sleep(EPOCH_TICK);
+                    engine.increment_epoch();
+                }
+            });
+            Self {
+                stop,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl Drop for EpochTicker {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                // Bounded by one tick period: the thread checks the flag on
+                // every wake.
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Prove epoch interruption actually preempts wasm on `engine` before a
+    /// workload is compiled on it.
+    ///
+    /// wasmtime exposes no getter for `Config::epoch_interruption` and none for
+    /// a store's epoch deadline, so the only way to know the control is live is
+    /// to trip it. A tiny loop is compiled on this very engine, given a
+    /// deadline that has already elapsed, and called: epoch checks sit on loop
+    /// back-edges, so a working control traps on the first one.
+    ///
+    /// The probe loop is finite on purpose. An engine that silently dropped the
+    /// instrumentation must return `false`, not spin — a hang here would be a
+    /// worse failure than the misreport it exists to prevent.
+    fn epoch_interruption_fires(engine: &Engine) -> bool {
+        const PROBE_WAT: &str = r#"(module (func (export "spin") (local $i i32)
+  (loop $l
+    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+    (br_if $l (i32.lt_u (local.get $i) (i32.const 1024))))))"#;
+
+        let Ok(module) = Module::new(engine, PROBE_WAT) else {
+            return false;
+        };
+        let mut store = Store::new(engine, ());
+        store.set_epoch_deadline(1);
+        // Push the engine past the deadline before entering wasm, so the trap
+        // is taken at the first check rather than after an unpredictable wait.
+        engine.increment_epoch();
+        let Ok(instance) = wasmtime::Instance::new(&mut store, &module, &[]) else {
+            return false;
+        };
+        let Ok(spin) = instance.get_typed_func::<(), ()>(&mut store, "spin") else {
+            return false;
+        };
+        spin.call(&mut store, ()).is_err()
+    }
+
+    /// Run the epoch read-back against an engine built with the control
+    /// deliberately on or off, so a test can prove the probe distinguishes the
+    /// two rather than always answering yes.
+    #[cfg(test)]
+    pub(super) fn probe_epoch_for_test(enabled: bool) -> bool {
+        let mut cfg = wasmtime::Config::new();
+        cfg.epoch_interruption(enabled);
+        let engine = Engine::new(&cfg).expect("engine config is valid either way");
+        epoch_interruption_fires(&engine)
+    }
+
+    /// Build the engine a run's module will be compiled on, turning on exactly
+    /// the controls `bounds` asks for.
+    ///
+    /// Each mechanism is enabled only when a grant needs it: fuel accounting
+    /// instruments every compiled block, so switching it on for an uncapped run
+    /// would charge that run for a bound it does not have.
+    fn wasm_engine(bounds: &WasmBounds) -> std::result::Result<Engine, WasmBackendError> {
+        let mut cfg = wasmtime::Config::new();
+        cfg.consume_fuel(bounds.fuel.is_some());
+        cfg.epoch_interruption(bounds.wall_clock_secs.is_some());
+        Engine::new(&cfg).map_err(|e| WasmBackendError::ModuleLoadFailed {
+            path: String::new(),
+            reason: format!("failed to configure the wasm engine: {e}"),
+        })
     }
 
     /// Maximum `WireRequest` JSON a guest module may hand the `mvm:egress`
@@ -621,6 +956,7 @@ mod engine {
     fn call_egress_endpoint(
         endpoint: &Path,
         req: &WireRequest,
+        timeout: Duration,
     ) -> std::result::Result<WireResponse, EgressImportError> {
         let mut stream = std::os::unix::net::UnixStream::connect(endpoint).map_err(|e| {
             tracing::warn!(
@@ -630,6 +966,19 @@ mod engine {
             );
             EgressImportError::ConnectFailed
         })?;
+        // Time inside this call is time epoch interruption cannot reclaim: the
+        // deadline check lives in compiled wasm, and this thread is in host
+        // code. Without a socket timeout a hostile or wedged endpoint parks the
+        // module here for as long as it likes, which is exactly the hole a fuel
+        // budget alone leaves open.
+        let deadline = |result: std::io::Result<()>| {
+            result.map_err(|e| {
+                tracing::warn!(error = %e, "mvm:egress: setting the endpoint call timeout failed");
+                EgressImportError::ConnectFailed
+            })
+        };
+        deadline(stream.set_read_timeout(Some(timeout)))?;
+        deadline(stream.set_write_timeout(Some(timeout)))?;
         mvm_agentd::substitution_client::relay(&mut stream, req).map_err(|e| {
             tracing::warn!(error = %e, "mvm:egress: relay to substitution endpoint failed");
             EgressImportError::RelayFailed
@@ -657,8 +1006,9 @@ mod engine {
             .egress_endpoint
             .clone()
             .ok_or(EgressImportError::NoEndpointConfigured)?;
+        let timeout = caller.data().egress_timeout;
 
-        let resp = call_egress_endpoint(&endpoint, &req)?;
+        let resp = call_egress_endpoint(&endpoint, &req, timeout)?;
         let resp_bytes =
             serde_json::to_vec(&resp).map_err(|_| EgressImportError::ResponseSerializeFailed)?;
         if resp_bytes.len() > MAX_RESPONSE_BYTES {
@@ -693,6 +1043,18 @@ mod engine {
         }
     }
 
+    /// Everything one run needs, plus the read-back of what is bounding it.
+    ///
+    /// The ticker is carried here rather than spawned at the call site so it
+    /// lives exactly as long as the store whose deadline it drives.
+    pub(super) struct WasmRuntime {
+        pub engine: Engine,
+        pub linker: Linker<WasmHostState>,
+        pub store: Store<WasmHostState>,
+        pub enforced: EnforcedGrants,
+        _ticker: Option<EpochTicker>,
+    }
+
     /// Build a fresh engine + linker wired with WASI Preview 1 and the
     /// `mvm:egress` host-import, and a `Store` carrying `egress_endpoint`
     /// as host state. The instance's filesystem and environment come
@@ -702,12 +1064,17 @@ mod engine {
     /// and the test-only [`instantiate_for_test`] go through, so the
     /// import can't drift between the production and test instantiation
     /// paths.
+    ///
+    /// `bounds` are installed here and read back before the caller gets the
+    /// store: a control that could not be confirmed live fails the whole
+    /// construction rather than downgrading into a run that would be reported
+    /// as bounded on a setter's say-so.
     fn new_engine_linker_store(
         egress_endpoint: Option<PathBuf>,
         activation: Option<&WasmPreopenPlan>,
-    ) -> std::result::Result<(Engine, Linker<WasmHostState>, Store<WasmHostState>), WasmBackendError>
-    {
-        let engine = Engine::default();
+        bounds: WasmBounds,
+    ) -> std::result::Result<WasmRuntime, WasmBackendError> {
+        let engine = wasm_engine(&bounds)?;
         let mut linker: Linker<WasmHostState> = Linker::new(&engine);
         p1::add_to_linker_sync(&mut linker, |state: &mut WasmHostState| &mut state.wasi).map_err(
             |e| WasmBackendError::ModuleLoadFailed {
@@ -755,14 +1122,61 @@ mod engine {
             }
         }
         let wasi_ctx = wasi_builder.build_p1();
-        let store = Store::new(
+        let mut store = Store::new(
             &engine,
             WasmHostState {
                 wasi: wasi_ctx,
                 egress_endpoint,
+                limits: wasmtime::StoreLimitsBuilder::new()
+                    .memory_size(bounds.memory_bytes)
+                    .build(),
+                egress_timeout: bounds.egress_call_timeout(),
             },
         );
-        Ok((engine, linker, store))
+        store.limiter(|state| &mut state.limits);
+
+        // Wall clock first: the probe advances the engine's epoch, and
+        // `set_epoch_deadline` is relative to whatever the counter reads when
+        // it is called.
+        let mut ticker = None;
+        let wall_clock = match bounds.wall_clock_secs {
+            Some(secs) => {
+                if !epoch_interruption_fires(&engine) {
+                    return Err(WasmBackendError::ControlNotConfirmed {
+                        control: "epoch interruption",
+                    });
+                }
+                store.set_epoch_deadline(u64::from(secs) * EPOCH_TICKS_PER_SEC);
+                ticker = Some(EpochTicker::spawn(&engine));
+                EnforcedTier::WasmEpoch
+            }
+            None => EnforcedTier::Declared,
+        };
+
+        let cpu = match bounds.fuel {
+            Some(instructions) => {
+                let installed = store.set_fuel(instructions).is_ok()
+                    && store.get_fuel().is_ok_and(|got| got == instructions);
+                if !installed {
+                    // `get_fuel` errors unless the engine was configured to
+                    // consume fuel, so this is a read of the live control and
+                    // not a restatement of the value just written.
+                    return Err(WasmBackendError::ControlNotConfirmed {
+                        control: "fuel accounting",
+                    });
+                }
+                EnforcedTier::WasmFuel
+            }
+            None => EnforcedTier::Declared,
+        };
+
+        Ok(WasmRuntime {
+            engine,
+            linker,
+            store,
+            enforced: EnforcedGrants { cpu, wall_clock },
+            _ticker: ticker,
+        })
     }
 
     /// Instantiate the WASI module at `path` and run its `_start` export to
@@ -778,8 +1192,15 @@ mod engine {
         path: &str,
         egress_endpoint: Option<PathBuf>,
         activation: Option<&WasmPreopenPlan>,
-    ) -> std::result::Result<VmExitStatus, WasmBackendError> {
-        let (engine, linker, mut store) = new_engine_linker_store(egress_endpoint, activation)?;
+        bounds: WasmBounds,
+    ) -> std::result::Result<CompletedRun, WasmBackendError> {
+        let WasmRuntime {
+            engine,
+            linker,
+            mut store,
+            enforced,
+            _ticker,
+        } = new_engine_linker_store(egress_endpoint, activation, bounds)?;
         let module =
             Module::from_file(&engine, path).map_err(|e| WasmBackendError::ModuleLoadFailed {
                 path: path.to_string(),
@@ -798,21 +1219,38 @@ mod engine {
                 reason: e.to_string(),
             })?;
 
-        match start.call(&mut store, ()) {
-            Ok(()) => Ok(VmExitStatus {
+        let exit = match start.call(&mut store, ()) {
+            Ok(()) => VmExitStatus {
                 code: Some(0),
                 success: true,
-            }),
+            },
             Err(err) => match err.downcast::<wasmtime_wasi::I32Exit>() {
-                Ok(exit) => Ok(VmExitStatus {
+                Ok(exit) => VmExitStatus {
                     code: Some(exit.0),
                     success: exit.0 == 0,
-                }),
-                Err(err) => Err(WasmBackendError::ModuleTrapped {
-                    path: path.to_string(),
-                    reason: err.to_string(),
-                }),
+                },
+                Err(err) => {
+                    return Err(WasmBackendError::ModuleTrapped {
+                        path: path.to_string(),
+                        reason: trap_reason(&err),
+                    });
+                }
             },
+        };
+        Ok(CompletedRun { exit, enforced })
+    }
+
+    /// Render a trap so the *reason* survives into the error message.
+    ///
+    /// wasmtime's own `Display` for an execution failure is the wasm backtrace;
+    /// the trap kind — "all fuel consumed by WebAssembly", "interrupt" — is one
+    /// level down the cause chain. Which control stopped a run is the whole
+    /// point of bounding it, so it belongs in the message rather than only in a
+    /// debug-formatted chain nobody prints.
+    fn trap_reason(err: &wasmtime::Error) -> String {
+        match err.downcast_ref::<wasmtime::Trap>() {
+            Some(trap) => format!("{trap}: {err}"),
+            None => err.to_string(),
         }
     }
 
@@ -827,8 +1265,17 @@ mod engine {
         path: &str,
         egress_endpoint: Option<PathBuf>,
         activation: Option<&WasmPreopenPlan>,
-    ) -> std::result::Result<(Store<WasmHostState>, wasmtime::Instance), WasmBackendError> {
-        let (engine, linker, mut store) = new_engine_linker_store(egress_endpoint, activation)?;
+        bounds: WasmBounds,
+    ) -> std::result::Result<InstantiatedForTest, WasmBackendError> {
+        let WasmRuntime {
+            engine,
+            linker,
+            mut store,
+            // The tier report belongs to a run; this helper deliberately calls
+            // no export, so there is nothing yet to report on.
+            enforced: _,
+            _ticker,
+        } = new_engine_linker_store(egress_endpoint, activation, bounds)?;
         let module =
             Module::from_file(&engine, path).map_err(|e| WasmBackendError::ModuleLoadFailed {
                 path: path.to_string(),
@@ -840,7 +1287,22 @@ mod engine {
                 reason: e.to_string(),
             }
         })?;
-        Ok((store, instance))
+        Ok(InstantiatedForTest {
+            store,
+            instance,
+            _ticker,
+        })
+    }
+
+    /// What [`instantiate_for_test`] hands back. The ticker rides along
+    /// because dropping it would silently stop advancing the epoch, leaving a
+    /// caller holding a wall-clock-bounded store whose deadline nothing
+    /// reaches.
+    #[cfg(test)]
+    pub(super) struct InstantiatedForTest {
+        pub store: Store<WasmHostState>,
+        pub instance: wasmtime::Instance,
+        pub _ticker: Option<EpochTicker>,
     }
 }
 
@@ -848,9 +1310,8 @@ mod engine {
 mod engine {
     use std::path::PathBuf;
 
-    use super::WasmBackendError;
+    use super::{CompletedRun, WasmBackendError, WasmBounds};
     use crate::wasm_activation::WasmPreopenPlan;
-    use mvm_core::vm_backend::VmExitStatus;
 
     pub fn is_compiled_in() -> bool {
         false
@@ -860,7 +1321,8 @@ mod engine {
         _path: &str,
         _egress_endpoint: Option<PathBuf>,
         _activation: Option<&WasmPreopenPlan>,
-    ) -> std::result::Result<VmExitStatus, WasmBackendError> {
+        _bounds: WasmBounds,
+    ) -> std::result::Result<CompletedRun, WasmBackendError> {
         Err(WasmBackendError::NotCompiledIn)
     }
 }
@@ -1110,6 +1572,194 @@ mod tests {
         }
     }
 
+    // ── resource bounds: what this tier admits, and what it installs ──
+
+    fn secs(n: u32) -> WallClockGrant {
+        WallClockGrant::Secs {
+            secs: std::num::NonZeroU32::new(n).expect("nonzero"),
+        }
+    }
+
+    /// A bounded grant set the tier accepts: fuel with the wall clock that
+    /// makes it a real bound.
+    fn bounded_grants(instructions: u64, wall_clock_secs: u32) -> Grants {
+        Grants {
+            cpu: Some(CpuGrant::Fuel { instructions }),
+            wall_clock: Some(secs(wall_clock_secs)),
+            ..Default::default()
+        }
+    }
+
+    /// Serialize an admitted plan carrying `grants`, in the bare-`ExecutionPlan`
+    /// shape `plan_from_admitted_json` accepts.
+    fn plan_json_with(grants: Grants) -> String {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.grants = Some(grants);
+        serde_json::to_string(&plan).expect("plan serializes")
+    }
+
+    #[test]
+    fn a_fuel_only_grant_is_refused() {
+        // Fuel does not tick inside a host call, so fuel without a wall-clock
+        // bound leaves a module that parks in `mvm:egress` bounded by nothing.
+        // Accepting it would be partial enforcement reported as complete.
+        let grants = Grants {
+            cpu: Some(CpuGrant::Fuel {
+                instructions: 10_000,
+            }),
+            wall_clock: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_wasm_grants(&grants),
+            Err(WasmBackendError::FuelWithoutWallClock)
+        );
+
+        let err = WasmBackend::new()
+            .apply_grants(&VmId("wasm-test".to_string()), &grants)
+            .expect_err("must refuse");
+        assert!(
+            err.to_string().contains("wall_clock"),
+            "the refusal must name the missing grant: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unbounded_wall_clock_does_not_satisfy_a_fuel_grant() {
+        // `Unbounded` is an explicit "no ceiling", so it leaves exactly the
+        // hole an absent grant does.
+        let grants = Grants {
+            cpu: Some(CpuGrant::Fuel {
+                instructions: 10_000,
+            }),
+            wall_clock: Some(WallClockGrant::Unbounded),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_wasm_grants(&grants),
+            Err(WasmBackendError::FuelWithoutWallClock)
+        );
+    }
+
+    #[test]
+    fn a_share_grant_is_refused_with_fuel_named_as_the_substitute() {
+        let grants = Grants {
+            cpu: Some(CpuGrant::Share { millicores: 1500 }),
+            ..Default::default()
+        };
+        let err = WasmBackend::new()
+            .apply_grants(&VmId("wasm-test".to_string()), &grants)
+            .expect_err("must refuse");
+        assert!(
+            err.to_string().contains("fuel"),
+            "the refusal must name the substitute: {err}"
+        );
+    }
+
+    #[test]
+    fn a_wall_clock_grant_alone_is_accepted() {
+        // Only the fuel direction is unsound. Epoch interruption bounds a run
+        // whether or not an instruction budget accompanies it.
+        let grants = Grants {
+            wall_clock: Some(secs(30)),
+            ..Default::default()
+        };
+        assert_eq!(validate_wasm_grants(&grants), Ok(()));
+    }
+
+    #[test]
+    fn apply_grants_will_not_report_a_tier_for_a_vm_that_never_ran() {
+        // The tier is a read-back off the store a module actually ran in.
+        // With no run there is nothing to read, and answering `Declared` would
+        // be indistinguishable from an unbounded run that did happen.
+        let err = WasmBackend::new()
+            .apply_grants(&VmId("never-ran".to_string()), &Grants::default())
+            .expect_err("no run, no report");
+        assert!(err.to_string().contains("no completed run recorded"));
+    }
+
+    #[test]
+    fn the_signed_plan_is_where_grants_come_from() {
+        let mut config = cfg("x", "/tmp/mod.wasm");
+        // A CPU grant threaded onto the launch config is ignored when a signed
+        // plan is present: the plan is what admission checked.
+        config.cpu_grant = Some(CpuGrant::Fuel { instructions: 7 });
+        config.plan_json = Some(plan_json_with(bounded_grants(4_242, 30)));
+
+        let grants = wasm_grants_from_config(&config).expect("decodes");
+        assert_eq!(
+            grants.cpu,
+            Some(CpuGrant::Fuel {
+                instructions: 4_242
+            })
+        );
+        assert_eq!(grants.wall_clock, Some(secs(30)));
+    }
+
+    #[test]
+    fn a_launch_with_no_signed_plan_carries_only_its_cpu_grant() {
+        // Which makes it fuel-without-wall-clock, and therefore refused —
+        // the correct outcome for a bound that reached this tier without an
+        // admission behind it.
+        let mut config = cfg("x", "/tmp/mod.wasm");
+        config.cpu_grant = Some(CpuGrant::Fuel { instructions: 7 });
+        let grants = wasm_grants_from_config(&config).expect("no plan is not an error");
+        assert_eq!(
+            validate_wasm_grants(&grants),
+            Err(WasmBackendError::FuelWithoutWallClock)
+        );
+    }
+
+    #[test]
+    fn a_launch_declaring_no_memory_still_gets_a_ceiling() {
+        // A wasm memory grows on demand: "unset" would otherwise mean "as much
+        // as the host has".
+        let config = cfg("x", "/tmp/mod.wasm");
+        assert_eq!(config.memory_mib, 0, "fixture declares no memory");
+        let bounds = wasm_bounds_for(&config, &Grants::default());
+        assert_eq!(bounds.memory_mib(), DEFAULT_WASM_MEMORY_MIB);
+        assert_eq!(bounds.fuel, None);
+        assert_eq!(bounds.wall_clock_secs, None);
+    }
+
+    #[test]
+    fn a_declared_memory_is_the_ceiling_that_gets_installed() {
+        let mut config = cfg("x", "/tmp/mod.wasm");
+        config.memory_mib = 64;
+        let bounds = wasm_bounds_for(&config, &bounded_grants(1_000, 5));
+        assert_eq!(bounds.memory_mib(), 64);
+        assert_eq!(bounds.fuel, Some(1_000));
+        assert_eq!(bounds.wall_clock_secs, Some(5));
+    }
+
+    #[test]
+    fn an_egress_call_cannot_outlive_the_runs_wall_clock_budget() {
+        // Epoch interruption cannot preempt host code, so a host call longer
+        // than the whole run's budget would defeat the bound it sits inside.
+        let config = cfg("x", "/tmp/mod.wasm");
+        let bounds = wasm_bounds_for(&config, &bounded_grants(1_000, 2));
+        assert_eq!(
+            bounds.egress_call_timeout(),
+            std::time::Duration::from_secs(2)
+        );
+
+        // An unbounded run still gets a ceiling, so a wedged endpoint cannot
+        // park the tier forever.
+        let unbounded = wasm_bounds_for(&config, &Grants::default());
+        assert_eq!(
+            unbounded.egress_call_timeout(),
+            std::time::Duration::from_secs(MAX_EGRESS_CALL_SECS)
+        );
+
+        // A generous grant is clamped to the tier's own ceiling rather than
+        // inherited verbatim.
+        let generous = wasm_bounds_for(&config, &bounded_grants(1_000, 3_600));
+        assert_eq!(
+            generous.egress_call_timeout(),
+            std::time::Duration::from_secs(MAX_EGRESS_CALL_SECS)
+        );
+    }
+
     // ── P3b.1: wasm_endpoint_plan / wasm_substitution_spawn_params ──
     // Decision + params only — no subprocess is ever spawned in this module.
 
@@ -1272,7 +1922,16 @@ mod tests {
     #[cfg(feature = "wasm-backend")]
     mod wasm_backend_engine_tests {
         use super::*;
+        use mvm_contract::protocol::resource_controls::EnforcedTier;
+        use mvm_core::substitution_wire::WireRequest;
         use std::io::Write;
+
+        /// Escape a string for embedding as a WAT string-literal data
+        /// segment: backslash and double-quote are the only two bytes WAT
+        /// string syntax requires escaped for otherwise-printable JSON text.
+        fn wat_escape(s: &str) -> String {
+            s.replace('\\', "\\\\").replace('"', "\\\"")
+        }
 
         /// Isolate MVM_HOME: every `start` materializes the activation run
         /// dir under the per-VM state dir, and these tests must not write
@@ -1386,19 +2045,24 @@ mod tests {
                     (call $proc_exit (i32.const 7))))
             "#;
             let module = wat_module(wat);
-            let exit = engine::run_module_to_completion(
+            let run = engine::run_module_to_completion(
                 module.path().to_str().unwrap(),
                 None,
                 Some(&plan),
+                WasmBounds::unbounded(),
             )
             .expect("module with the activation env must run to completion");
-            assert_eq!(exit.code, Some(0), "activation env must be visible");
+            assert_eq!(run.exit.code, Some(0), "activation env must be visible");
 
             // Without the activation plan the same module must NOT see the env.
-            let exit =
-                engine::run_module_to_completion(module.path().to_str().unwrap(), None, None)
-                    .expect("module without the activation plan must still run");
-            assert_eq!(exit.code, Some(7), "no env without the handshake");
+            let run = engine::run_module_to_completion(
+                module.path().to_str().unwrap(),
+                None,
+                None,
+                WasmBounds::unbounded(),
+            )
+            .expect("module without the activation plan must still run");
+            assert_eq!(run.exit.code, Some(7), "no env without the handshake");
         }
 
         #[test]
@@ -1425,6 +2089,261 @@ mod tests {
                 .expect("wait must return the captured exit status");
             assert_eq!(status.code, Some(7));
             assert!(!status.success);
+        }
+
+        /// A launch config carrying `grants` on a signed plan, plus whatever
+        /// memory the caller wants bounded.
+        fn bounded_cfg(
+            name: &str,
+            module_path: &str,
+            grants: Grants,
+            memory_mib: u32,
+        ) -> VmStartConfig {
+            let mut config = cfg(name, module_path);
+            config.plan_json = Some(plan_json_with(grants));
+            config.memory_mib = memory_mib;
+            config
+        }
+
+        #[test]
+        fn a_fuel_grant_halts_a_runaway_module() {
+            // An infinite loop must be stopped by the instruction budget rather
+            // than running until the test harness gives up. The wall clock is
+            // generous on purpose: if epoch were the thing that fired, the
+            // assertion below would catch it.
+            let (_env, _home, _guard) = isolated_home();
+            let module = wat_module(r#"(module (func (export "_start") (loop br 0)))"#);
+            let config = bounded_cfg(
+                "runaway",
+                module.path().to_str().unwrap(),
+                bounded_grants(10_000, 300),
+                64,
+            );
+
+            let err = WasmBackend::new()
+                .start(&config)
+                .expect_err("a runaway module must not complete");
+            // The exact trap text, not merely the word "fuel": the tier's own
+            // "could not confirm fuel accounting" refusal also contains it, and
+            // that failure must not be able to satisfy this witness.
+            assert!(
+                err.to_string().contains("all fuel consumed by WebAssembly"),
+                "expected fuel exhaustion, got: {err}"
+            );
+        }
+
+        #[test]
+        fn a_module_parked_in_a_host_call_is_stopped_by_epoch() {
+            // The joint-requirement witness. This module spends essentially all
+            // its time blocked inside `mvm:egress` against an endpoint that
+            // accepts and never answers, so it burns a handful of instructions
+            // per iteration. The fuel budget below is large enough that it can
+            // never be the thing that stops the run — only epoch interruption
+            // can, which is exactly why a fuel-only grant is refused.
+            let (_env, _home, _guard) = isolated_home();
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("blackhole.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_stop = std::sync::Arc::clone(&stop);
+            let server = std::thread::spawn(move || {
+                // Hold every accepted connection open without replying.
+                let mut held = Vec::new();
+                while !server_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((stream, _)) => held.push(stream),
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            let request_json = serde_json::to_string(&WireRequest {
+                method: "GET".into(),
+                url: "https://example.test/".into(),
+                headers: vec![],
+                body_b64: String::new(),
+            })
+            .unwrap();
+            let wat = format!(
+                r#"(module
+  (import "mvm" "egress" (func $mvm_egress (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "{escaped}")
+  (func (export "_start")
+    (loop $l
+      (drop (call $mvm_egress (i32.const 0) (i32.const {req_len}) (i32.const 4096) (i32.const 4096)))
+      (br $l))))
+"#,
+                escaped = wat_escape(&request_json),
+                req_len = request_json.len(),
+            );
+            let module = wat_module(&wat);
+
+            // One second of wall clock, which also clamps each egress call to
+            // one second, against a billion instructions of fuel.
+            let config = bounded_cfg(
+                "parked",
+                module.path().to_str().unwrap(),
+                bounded_grants(1_000_000_000, 1),
+                64,
+            );
+            let backend = WasmBackend::new().with_egress_endpoint(socket_path);
+
+            let started = std::time::Instant::now();
+            let err = backend
+                .start(&config)
+                .expect_err("a module parked in a host call must not run forever");
+            let elapsed = started.elapsed();
+
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::os::unix::net::UnixStream::connect(dir.path().join("blackhole.sock"));
+            let _ = server.join();
+
+            let message = err.to_string();
+            assert!(
+                !message.contains("fuel"),
+                "fuel must not be what stopped this run — it barely ticked: {message}"
+            );
+            // The trap text specifically. "epoch" alone would also match the
+            // tier's own "could not confirm epoch interruption" refusal, which
+            // is a different outcome and must not pass for this one.
+            assert!(
+                message.contains("interrupt"),
+                "expected an epoch interruption, got: {message}"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(60),
+                "the bound must fire promptly, took {elapsed:?}"
+            );
+        }
+
+        #[test]
+        fn store_limits_refuse_a_module_that_grows_past_its_memory_bound() {
+            // `memory.grow` returns -1 when the limiter refuses, which is the
+            // conforming wasm signal for "that allocation is not available".
+            // The module traps itself if the grow is *allowed*, so a missing
+            // limiter turns this test red rather than silently passing.
+            let (_env, _home, _guard) = isolated_home();
+            let wat = r#"(module
+  (memory (export "memory") 1)
+  (func (export "_start")
+    (if (i32.ne (memory.grow (i32.const 512)) (i32.const -1))
+      (then (unreachable)))))
+"#;
+            let module = wat_module(wat);
+
+            // 1 MiB ceiling; the module asks for 512 pages (32 MiB) on top of
+            // the one it starts with.
+            let bounded = bounded_cfg(
+                "mem-bounded",
+                module.path().to_str().unwrap(),
+                Grants::default(),
+                1,
+            );
+            let backend = WasmBackend::new();
+            let id = backend
+                .start(&bounded)
+                .expect("a refused grow is not a failure — the module handles it");
+            assert_eq!(backend.wait(&id).unwrap().code, Some(0));
+            assert_eq!(
+                backend.list().unwrap()[0].memory_mib,
+                1,
+                "the reported memory is the ceiling that was enforced"
+            );
+
+            // The control: raise the ceiling above what the module asks for and
+            // the same grow succeeds, tripping the module's own `unreachable`.
+            // This is what proves the refusal above came from the bound.
+            let roomy = bounded_cfg(
+                "mem-roomy",
+                module.path().to_str().unwrap(),
+                Grants::default(),
+                128,
+            );
+            let err = WasmBackend::new()
+                .start(&roomy)
+                .expect_err("with room to grow, the module trips its own unreachable");
+            assert!(err.to_string().contains("trapped"), "got: {err}");
+        }
+
+        #[test]
+        fn a_bounded_run_reports_the_mechanisms_that_bounded_it() {
+            let (_env, _home, _guard) = isolated_home();
+            let module = wat_module("(module (func) (export \"_start\" (func 0)))");
+            let grants = bounded_grants(1_000_000, 30);
+            let config = bounded_cfg(
+                "bounded-report",
+                module.path().to_str().unwrap(),
+                grants.clone(),
+                64,
+            );
+
+            let backend = WasmBackend::new();
+            let id = backend.start(&config).expect("bounded module runs");
+            let enforced = backend.apply_grants(&id, &grants).expect("reports");
+            assert_eq!(enforced.cpu, EnforcedTier::WasmFuel);
+            assert_eq!(enforced.wall_clock, EnforcedTier::WasmEpoch);
+            assert!(enforced.cpu.is_enforced() && enforced.wall_clock.is_enforced());
+        }
+
+        #[test]
+        fn an_unbounded_run_reports_declared_on_both_dimensions() {
+            let (_env, _home, _guard) = isolated_home();
+            let module = wat_module("(module (func) (export \"_start\" (func 0)))");
+            let config = bounded_cfg(
+                "unbounded-report",
+                module.path().to_str().unwrap(),
+                Grants::default(),
+                64,
+            );
+
+            let backend = WasmBackend::new();
+            let id = backend.start(&config).expect("unbounded module runs");
+            let enforced = backend
+                .apply_grants(&id, &Grants::default())
+                .expect("reports");
+            assert_eq!(enforced.cpu, EnforcedTier::Declared);
+            assert_eq!(enforced.wall_clock, EnforcedTier::Declared);
+        }
+
+        #[test]
+        fn a_share_grant_never_reaches_the_engine() {
+            // The refusal lands before anything is compiled, so a launch that
+            // asked for an unenforceable bound leaves no VM behind.
+            let (_env, _home, _guard) = isolated_home();
+            let module = wat_module("(module (func) (export \"_start\" (func 0)))");
+            let config = bounded_cfg(
+                "share-refused",
+                module.path().to_str().unwrap(),
+                Grants {
+                    cpu: Some(CpuGrant::Share { millicores: 1500 }),
+                    wall_clock: Some(secs(30)),
+                    ..Default::default()
+                },
+                64,
+            );
+
+            let backend = WasmBackend::new();
+            let err = backend.start(&config).expect_err("must refuse");
+            assert!(err.to_string().contains("fuel"), "got: {err}");
+            assert!(
+                backend.list().unwrap().is_empty(),
+                "a refused launch must record no run"
+            );
+        }
+
+        #[test]
+        fn epoch_interruption_is_confirmed_on_an_engine_that_has_it() {
+            // The read-back itself. An engine built without the control must
+            // fail the same probe the bounded path gates on, or the probe is
+            // asserting nothing.
+            let with_epoch = super::super::engine::probe_epoch_for_test(true);
+            let without_epoch = super::super::engine::probe_epoch_for_test(false);
+            assert!(with_epoch, "epoch interruption must be observable when on");
+            assert!(
+                !without_epoch,
+                "the probe must fail when the control is absent, or it proves nothing"
+            );
         }
 
         #[test]
@@ -1498,9 +2417,17 @@ mod tests {
   (func (export "_start")))
 "#;
             let module = wat_module(wat);
-            let (mut store, instance) =
-                engine::instantiate_for_test(module.path().to_str().unwrap(), None, Some(&plan))
-                    .expect("module with WASI imports must instantiate");
+            let engine::InstantiatedForTest {
+                mut store,
+                instance,
+                ..
+            } = engine::instantiate_for_test(
+                module.path().to_str().unwrap(),
+                None,
+                Some(&plan),
+                WasmBounds::unbounded(),
+            )
+            .expect("module with WASI imports must instantiate");
 
             let errno = |name: &str, store: &mut wasmtime::Store<engine::WasmHostState>| {
                 instance
@@ -1529,17 +2456,9 @@ mod tests {
             use super::*;
             use base64::Engine;
             use base64::engine::general_purpose::STANDARD as B64;
-            use mvm_core::substitution_wire::{WireRequest, WireResponse};
+            use mvm_core::substitution_wire::WireResponse;
             use std::os::unix::net::UnixListener;
             use std::thread;
-
-            /// Escape a string for embedding as a WAT string-literal data
-            /// segment: backslash and double-quote are the only two bytes
-            /// WAT string syntax requires escaped for otherwise-printable
-            /// JSON text.
-            fn wat_escape(s: &str) -> String {
-                s.replace('\\', "\\\\").replace('"', "\\\"")
-            }
 
             /// A fixture module that writes `request_json` into memory at
             /// offset 0, calls `mvm:egress` with it, and exports the raw
@@ -1612,10 +2531,15 @@ mod tests {
                 let module = wat_module(&wat);
 
                 let backend = WasmBackend::new().with_egress_endpoint(socket_path);
-                let (mut store, instance) = engine::instantiate_for_test(
+                let engine::InstantiatedForTest {
+                    mut store,
+                    instance,
+                    ..
+                } = engine::instantiate_for_test(
                     module.path().to_str().unwrap(),
                     backend.egress_endpoint.clone(),
                     None,
+                    WasmBounds::unbounded(),
                 )
                 .expect("module with the mvm:egress import must instantiate");
 
@@ -1657,9 +2581,17 @@ mod tests {
                 // No `with_egress_endpoint` call: the backend has nothing
                 // configured, so the import must fail closed rather than
                 // panic or trap the host.
-                let (mut store, instance) =
-                    engine::instantiate_for_test(module.path().to_str().unwrap(), None, None)
-                        .expect("module with the mvm:egress import must instantiate");
+                let engine::InstantiatedForTest {
+                    mut store,
+                    instance,
+                    ..
+                } = engine::instantiate_for_test(
+                    module.path().to_str().unwrap(),
+                    None,
+                    None,
+                    WasmBounds::unbounded(),
+                )
+                .expect("module with the mvm:egress import must instantiate");
 
                 let run_egress = instance
                     .get_typed_func::<(), i32>(&mut store, "run_egress")
@@ -1688,10 +2620,15 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let socket_path = dir.path().join("unused.sock");
 
-                let (mut store, instance) = engine::instantiate_for_test(
+                let engine::InstantiatedForTest {
+                    mut store,
+                    instance,
+                    ..
+                } = engine::instantiate_for_test(
                     module.path().to_str().unwrap(),
                     Some(socket_path),
                     None,
+                    WasmBounds::unbounded(),
                 )
                 .expect("module with the mvm:egress import must instantiate");
 

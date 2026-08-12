@@ -11,10 +11,12 @@ for detailed scope and acceptance criteria.
       progress, raised the check-response timeout from 90 to 240 minutes, and
       made timeout ejections terminal for automatic recovery at an unchanged
       commit. Required checks and exact merge-commit validation are unchanged.
-- [x] **CLI help width invariant.** Every visible and hidden command is capped
-      at 80 columns for `--help`, `-h`, and `mvmctl help <path>`; generated-tree
-      BDD coverage executes the real binary and automatically includes future
-      subcommands.
+- [x] **CLI help layout invariant.** Every visible and hidden command emits one
+      physical line per help item, strictly shorter than 80 columns, for
+      `--help`, `-h`, and `mvmctl help <path>`. The shared renderer compacts
+      long-help blocks and caps overlong summaries at 79 columns; generated-tree
+      BDD coverage executes the real binary, rejects continuation lines and
+      overlong output, and automatically includes future subcommands.
 - [~] **Issue-closeout batch — #2165, #2321, and #2323.** The workload runner
       now emits read-only root bootargs for read-only root devices, the
       credential-bearing substitution response is incrementally capped, and
@@ -52,6 +54,17 @@ for detailed scope and acceptance criteria.
       readiness and after the first command, including Linux fault deltas and
       macOS physical footprint. The real-host Firecracker/HVF matrix,
       canonical budget table, and gates remain open.
+- [x] **Plan 314 — event-driven process lifecycle and shutdown.** The shared
+      macOS kqueue/Linux pidfd observer drives normal HVF, Firecracker,
+      libkrun, and QEMU shutdown with bounded fallback, identity-safe final
+      verification, and fail-closed escalation. Live HVF, Firecracker,
+      libkrun, and QEMU repetition gates pass with no force-kill escalation in
+      the 1,000-cycle HVF run and no leaked backend processes, PID markers, or
+      owned sockets. Supervisor profiling found vCPU exit, not the 5 ms
+      watchdog, dominates internal HVF shutdown, so no unnecessary control
+      protocol was added. The foreground-wait audit, repository waiting-model
+      rule, complete workspace tests, formatting, checks, and Linux all-target
+      clippy are green.
 
 ## In-flight plans
 - [x] Plan 315 — Bootstrap means machine-ready
@@ -80,6 +93,20 @@ for detailed scope and acceptance criteria.
   - [ ] Run Linux-native workspace Clippy/tests in the project builder
         environment
 
+- [x] Plan 318 — span-timing profiling
+      (`specs/plans/318-span-timing-profiling.md`)
+  - [x] Phase 1 — `SpanTimingLayer`, bounded log-scale histogram, self-time
+        attribution, text/JSON reports, per-layer log filter so spans are
+        constructed at the CLI's default `error` verbosity
+  - [x] Phase 2 — instrument `mvm-fs` OCI/ext4 entry points and the four
+        backend `boot` paths plus HVF restore, then the launch critical path
+        in `mvm-cli` and the admission/audit/build/client entry points
+  - [x] Phase 3 — labelled prometheus export, pure per-call profile diffing in
+        `bench/span_profile.rs`, and a measured decision to keep the per-close
+        mutex (12 ns/span disabled; throughput scales up, not down, under
+        contention). Wiring the diff into a CI lane stays with Plan 311's
+        large-image work; guest-side `mvm-agentd` needs a profile egress path
+        first.
 - [x] Plan 2167 — durable agent session and event contract
       (`specs/plans/2167-agent-session-contract.md`)
   - [x] Versioned public IDs, lifecycle commands, durable/ephemeral event
@@ -234,11 +261,15 @@ for detailed scope and acceptance criteria.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
         decomposed and the warm-pool refill removed from it: a default
         `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
-        `stop_transient` 142.9 ms, which is real cleanup. A dedicated 1,000-cycle
-        HVF run now attributes its 67.62 ms p50 / 74.97 ms p95 stop wait to
-        supervisor PID disappearance; endpoint reaping and state cleanup are
-        below 0.1 ms at p99. Follow-up: give pool maintenance to the resident
-        per-tenant daemon and make supervisor shutdown event-driven.
+        `stop_transient` 142.9 ms, which is real cleanup. The Plan 314 event
+        path then completed a native macOS 26.5.2 / arm64 1,000-cycle HVF run
+        in the Rust test profile with p50/p95/p99 stop times of
+        703.48/1,151.28/1,865.07 ms and zero SIGKILL escalations. That run is
+        a lifecycle stress baseline, not a replacement for the release
+        prepared-cold numbers above: its stop tail is dominated by detached
+        supervisor PID disappearance. Follow-up: give pool maintenance to the
+        resident per-tenant daemon and continue reducing supervisor shutdown
+        latency.
   - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
@@ -1186,5 +1217,11 @@ for detailed scope and acceptance criteria.
         `grants: None`. The projection now has production callers, so its
         `dormant-controls.toml` entry is deleted. STILL OPEN: the SDK parity
         fixture
-  - [ ] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs
+  - [~] WS6b — doctor/inspect tier reporting, persisted-spec migration, docs.
+        The CLI boot path now calls `apply_grants` (via
+        `mvm_client::enforced_grants_after_start`), records the tier per-VM,
+        emits `plan.grants_enforced` on the chain, warns when a requested bound
+        did not happen, and surfaces the achieved tier in `machine inspect`.
+        Two `dormant-controls.toml` entries keep it from going unreachable
+        again. STILL OPEN: doctor reporting, persisted-spec migration, docs
         gate, BDD suite

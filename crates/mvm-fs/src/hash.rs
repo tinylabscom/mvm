@@ -11,11 +11,13 @@ use std::io;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
+use tracing::instrument;
 
 use crate::overlay::compute_file_sha256;
 
 /// Compute the content hash of `source` (a regular file or a directory).
 /// Returns the lowercase 64-hex-digit SHA-256 digest.
+#[instrument(skip_all, fields(source = %source.display()))]
 pub fn hash_source(source: &Path) -> io::Result<String> {
     let meta = fs::symlink_metadata(source)?;
     if meta.is_dir() {

@@ -38,11 +38,32 @@ fn is_transient_connect_error(err: &std::io::Error) -> bool {
             | std::io::ErrorKind::ConnectionRefused
             | std::io::ErrorKind::ConnectionReset
             | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
             | std::io::ErrorKind::NotFound
             | std::io::ErrorKind::AddrNotAvailable
             | std::io::ErrorKind::Interrupted
             | std::io::ErrorKind::UnexpectedEof
     )
+}
+
+#[cfg(test)]
+mod transient_connect_error_tests {
+    use super::is_transient_connect_error;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn broken_pipe_during_connect_handshake_is_transient() {
+        assert!(is_transient_connect_error(&Error::from(
+            ErrorKind::BrokenPipe
+        )));
+    }
+
+    #[test]
+    fn malformed_connect_ack_is_not_an_io_retry_candidate() {
+        assert!(!is_transient_connect_error(&Error::from(
+            ErrorKind::InvalidData
+        )));
+    }
 }
 
 fn should_retry_connect_error(err: &(dyn std::error::Error + 'static)) -> bool {

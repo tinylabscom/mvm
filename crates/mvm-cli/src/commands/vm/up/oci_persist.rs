@@ -320,6 +320,11 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         return Err(err);
     }
     prepared_volumes.commit();
+    // After the start, because a cgroup quota is read back off a process that
+    // does not exist until then. This is the call that puts the backend's
+    // `apply_grants` on the path `mvmctl` boots: without it the tier is
+    // computed correctly and reported to nobody.
+    super::grants_report::report_enforced_grants(&admission, backend_name, name);
     emit_launched_if(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);

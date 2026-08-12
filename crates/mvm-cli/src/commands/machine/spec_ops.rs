@@ -18,10 +18,47 @@ pub(super) fn create_machine(args: MachineCreateArgs) -> Result<()> {
     Ok(())
 }
 
+/// A machine's persisted spec plus what its last boot actually achieved.
+///
+/// The spec carries the *request* — `--cpu-limit 1500` is a number a user
+/// typed — and reporting only that is what let a genuinely unbounded run look
+/// identical to a bounded one. The achieved tier is added alongside rather than
+/// replacing it: an operator needs both to see a degradation. Absent when no
+/// boot recorded one, which is not the same answer as "unenforced".
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct MachineInspectView<'a> {
+    #[serde(flatten)]
+    pub(super) spec: &'a MachineSpec,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) enforced_grants: Option<mvm_contract::protocol::resource_controls::EnforcedGrants>,
+}
+
+/// The display line for a machine's enforced-CPU tier, or `None` when no boot
+/// has recorded one. Split out so the rendering is testable without a boot.
+pub(super) fn enforced_cpu_line(
+    enforced: Option<&mvm_contract::protocol::resource_controls::EnforcedGrants>,
+) -> Option<String> {
+    let enforced = enforced?;
+    Some(format!(
+        "enforced-cpu: {} ({})",
+        enforced.cpu.label(),
+        if enforced.cpu.is_enforced() {
+            "bounded"
+        } else {
+            "not bounded"
+        }
+    ))
+}
+
 pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
     let spec = load_machine_spec(&args.name)?;
+    let enforced = mvm_client::enforced_grants_of(&spec.name);
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&spec)?);
+        let view = MachineInspectView {
+            spec: &spec,
+            enforced_grants: enforced,
+        };
+        println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
         println!("name: {}", spec.name);
         if let Some(image) = spec.image.as_deref() {
@@ -46,6 +83,14 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
             println!("mem-initial: {mem_initial}");
         }
         println!("profile: {}", spec.profile);
+        if let Some(grants) = spec.grants.as_ref()
+            && let Some(mvm_contract::grants::CpuGrant::Share { millicores }) = grants.cpu
+        {
+            println!("cpu-limit: {millicores} millicores (requested)");
+        }
+        if let Some(line) = enforced_cpu_line(enforced.as_ref()) {
+            println!("{line}");
+        }
         if !spec.volumes.is_empty() {
             println!("volumes: {}", spec.volumes.join(","));
         }

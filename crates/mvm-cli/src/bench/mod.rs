@@ -23,6 +23,7 @@ pub mod probe;
 pub mod probes;
 pub mod regression;
 pub mod report;
+pub mod span_profile;
 pub mod stats;
 
 // `BootMarks` and the boot-timing-sidecar writer are the only bench-internal
