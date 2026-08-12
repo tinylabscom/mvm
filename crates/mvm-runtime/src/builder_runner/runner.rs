@@ -11,6 +11,7 @@ use mvm_agentd::vsock::EGRESS_PORT;
 use mvm_build::builder_disk_transport::{
     InputTree, create_output_disk, pack_input_disk, read_output_disk,
 };
+use mvm_build::builder_vm_runtime::stage_filtered_work_input;
 use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
@@ -95,7 +96,13 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         let output_dir = state_dir.join("out");
         let egress_socket = vm_vsock_port_socket_at(&state_dir, EGRESS_PORT);
 
-        // Pack {job, work, mvm-bins} onto the input disk; the guest extracts it.
+        // A source checkout's work tree may contain tens of GiB of local build
+        // state. Keep it out of the raw transport disk using the same filtering
+        // contract as the other disk-backed builder path.
+        let work_staging = stage_filtered_work_input(b.work_src)?;
+
+        // Pack {job, filtered work, mvm-bins} onto the input disk; the guest
+        // extracts it.
         pack_input_disk(
             &[
                 InputTree {
@@ -104,7 +111,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
                 },
                 InputTree {
                     name: "work",
-                    src: b.work_src,
+                    src: work_staging.path(),
                 },
                 InputTree {
                     name: "mvm-bins",
@@ -214,6 +221,12 @@ mod tests {
         }
         std::fs::write(job.join("cmd.sh"), b"#!/bin/sh\nnix build\n").unwrap();
         std::fs::write(work.join("flake.nix"), b"{}").unwrap();
+        std::fs::create_dir_all(work.join("target/debug")).unwrap();
+        std::fs::write(
+            work.join("target/debug/host-build-artifact"),
+            b"large-local-state",
+        )
+        .unwrap();
         std::fs::write(bins.join("mvm-host-vm-init"), b"ELF").unwrap();
         let kernel = tmp.path().join("Image");
         let rootfs = tmp.path().join("rootfs.ext4");
@@ -297,6 +310,18 @@ mod tests {
         // mock guest, which writes nothing).
         assert!(tmp.path().join("vms/bld-unit/input.img").exists());
         assert!(outcome.output_dir.exists());
+
+        let packed_input = tmp.path().join("packed-input");
+        mvm_build::builder_disk_transport::read_output_disk(
+            &tmp.path().join("vms/bld-unit/input.img"),
+            &packed_input,
+        )
+        .unwrap();
+        assert!(packed_input.join("work/flake.nix").exists());
+        assert!(
+            !packed_input.join("work/target").exists(),
+            "HVF input transport must exclude host target/ state"
+        );
     }
 
     #[test]

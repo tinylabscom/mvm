@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use mvm_core::network_policy::{NetworkPolicy, is_mandatory_deny};
 
-use crate::keyholder::substitution::PLACEHOLDER_PREFIX;
 use crate::supervisor::network::packet::{L4Proto, ParsedPacket};
 use crate::supervisor::network::{FlowDirection, PacketCtx};
 use crate::supervisor::pii_redactor::{PiiRedactor, REDACTION_MASK};
@@ -20,6 +19,7 @@ use crate::supervisor::secrets_scanner::SecretsScanner;
 use crate::supervisor::sensitive_detector::{
     LeakGuardCredentialDetector, SensitiveDetector, mask_matches,
 };
+use mvm_contract::substitution::SECRET_PLACEHOLDER_PREFIX;
 use mvm_core::policy::projection::{CanonicalEgress, Proto as CanonProto};
 
 /// Outcome of the scan stage. `Pass` forwards the packet; `Drop` kills the
@@ -466,7 +466,7 @@ impl ScanStage for MandatoryDenyEgressScan {
 }
 
 /// Drops any egress packet whose L4 payload contains a substitution
-/// placeholder — the host-owned [`PLACEHOLDER_PREFIX`] namespace (leak
+/// placeholder — the host-owned [`SECRET_PLACEHOLDER_PREFIX`] namespace (leak
 /// backstop). The legitimate substitution path routes
 /// placeholders to the host-local endpoint, never out the raw egress wire, so a
 /// placeholder seen here is a guest trying to smuggle the token out a side
@@ -489,7 +489,7 @@ impl ScanStage for PlaceholderLeakScan {
             FlowDirection::Egress => {}
             _ => return ScanOutcome::Pass,
         }
-        let needle = PLACEHOLDER_PREFIX.as_bytes();
+        let needle = SECRET_PLACEHOLDER_PREFIX.as_bytes();
         if pkt.l4_payload.windows(needle.len()).any(|w| w == needle) {
             ScanOutcome::Drop { by: self.name() }
         } else {

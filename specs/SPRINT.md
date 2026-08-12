@@ -173,7 +173,15 @@
       the dominant span, so no new control protocol was justified. The
       foreground-wait audit and repository event/timer/reconciliation rule are
       complete. Formatting, workspace check, the complete workspace test
-      suite, macOS focused clippy, and Linux all-target clippy pass.
+      suite, macOS focused clippy, and Linux all-target clippy pass. A
+      post-completion HVF builder fix now stages the work input through the
+      shared source filter before packing its ext4 disk, preventing host
+      `target/` and other scratch trees from inflating a small flake into a
+      multi-gigabyte guest input. The transport-boundary regression test proves
+      source files remain present while `work/target` is absent. The authorized
+      live sleeper command reduced the HVF work disk from 55.7 GB to 57.1 MiB
+      and produced a successful builder result; its subsequent workload boot
+      reached a separate guest-agent readiness timeout.
 
 - [x] README CLI/code-example contract — README shell examples and every
       declared CLI option have executable cucumber help witnesses; all 26

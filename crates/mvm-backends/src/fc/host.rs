@@ -466,6 +466,7 @@ impl FcForkRestorer {
         &self,
         child_vm_name: &str,
         child_dir: &std::path::Path,
+        cpu_grant: Option<mvm_contract::grants::CpuGrant>,
     ) -> anyhow::Result<super::io::FirecrackerIO> {
         use anyhow::Context as _;
         // FC saves memory as `memory.bin`; the snapshot loader expects
@@ -533,21 +534,46 @@ impl FcForkRestorer {
         // The load leaves vCPUs paused, so the no-NIC device-model guard runs
         // before the child executes anything. The claim resumes it only after
         // fresh host channels have been wired.
-        Ok(super::io::FirecrackerIO::new(child_dir.join("fc.socket")))
+        Ok(child_io(child_vm_name, child_dir, cpu_grant))
     }
 
     /// Load and guard a forked child without resuming it. Pool refill uses this
     /// to keep Firecracker and the restored device model outside the claim
     /// latency window.
+    ///
+    /// Unbounded by construction: a preload runs before any claim, so there is
+    /// no admitted plan yet and no grant to bind. What that costs is recorded on
+    /// `resume_preloaded_child`, which inherits this VMM rather than starting
+    /// one of its own.
     pub(crate) fn restore_fork_paused(
         &self,
         child_vm_name: &str,
         child_dir: &std::path::Path,
     ) -> anyhow::Result<()> {
-        let io = self.prepare_fork_load(child_vm_name, child_dir)?;
+        let io = self.prepare_fork_load(child_vm_name, child_dir, None)?;
         mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir)
             .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
     }
+}
+
+/// The API handle a forked child's snapshot load runs through, carrying the CPU
+/// bound its admitted plan grants so the Firecracker the load starts is born
+/// inside the scope.
+///
+/// A free function so the composition under test is the same one the restore
+/// performs: drop the grant here, or drop the bound from the launch, and
+/// `a_restored_child_is_cpu_bounded_by_its_admitted_grant` goes red.
+fn child_io(
+    child_vm_name: &str,
+    child_dir: &std::path::Path,
+    cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+) -> super::io::FirecrackerIO {
+    super::io::FirecrackerIO::new(child_dir.join("fc.socket")).bounded_by(cpu_grant.map(|grant| {
+        super::io::RestoreCpuBound {
+            machine_id: child_vm_name.to_string(),
+            grant,
+        }
+    }))
 }
 
 impl FcForkRestorer {
@@ -557,8 +583,9 @@ impl FcForkRestorer {
         &self,
         child_vm_name: &str,
         child_dir: &std::path::Path,
+        cpu_grant: Option<mvm_contract::grants::CpuGrant>,
     ) -> anyhow::Result<()> {
-        let io = self.prepare_fork_load(child_vm_name, child_dir)?;
+        let io = self.prepare_fork_load(child_vm_name, child_dir, cpu_grant)?;
         mvm_vmm::snapshot::guarded_fork_load_resume(&io, child_dir)
             .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
     }
@@ -569,6 +596,54 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
     use mvm_vmm::checkpoint::VmFullControl as _;
+
+    /// Firecracker's restore launches through a shell rather than a `Command`,
+    /// so its bound reaches the launch *line* as a prefix. This asserts the
+    /// prefix the snapshot load will actually use — the same value
+    /// `load_snapshot_inner` passes to the launcher — carries the quota.
+    #[test]
+    fn a_restored_child_is_cpu_bounded_by_its_admitted_grant() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let child_dir = scratch.path().join("child-state");
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let io = child_io(
+            "restored-child",
+            &child_dir,
+            Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+        );
+
+        // Shell-quoted, because Firecracker's launch is a script: the prefix is
+        // spliced ahead of the launch line rather than exec'd as argv.
+        let prefix = io.restore_scope_prefix(&child_dir);
+        assert!(prefix.starts_with("'systemd-run'"), "{prefix}");
+        assert!(prefix.contains("'CPUQuota=150%'"), "{prefix}");
+        assert!(prefix.trim_end().ends_with("'--'"), "{prefix}");
+    }
+
+    /// A plan granting no share leaves the launch line exactly as it was, and
+    /// records no unit — so the read-back reports `Declared` rather than
+    /// claiming a bound.
+    #[test]
+    fn a_restored_child_without_a_grant_runs_unbounded_and_says_so() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let child_dir = scratch.path().join("child-state");
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let io = child_io("restored-child", &child_dir, None);
+
+        assert_eq!(io.restore_scope_prefix(&child_dir), "");
+        assert_eq!(
+            mvm_core::cpu_scope::enforced_grants_for_vm(&child_dir).cpu,
+            mvm_contract::protocol::resource_controls::EnforcedTier::Declared
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

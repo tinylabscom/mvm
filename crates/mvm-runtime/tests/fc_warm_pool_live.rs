@@ -276,6 +276,7 @@ fn fc_warm_pool_spawn_and_claim() {
         // itself booted with. This direct witness measures the resume seam, not
         // the full runner's endpoint and broker wiring.
         channels: &[],
+        cpu_grant: None,
     });
     if let Err(ref e) = resume_result {
         eprintln!("preloaded child resume failed: {e:#}");

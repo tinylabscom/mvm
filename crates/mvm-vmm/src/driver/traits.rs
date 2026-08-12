@@ -57,6 +57,15 @@ pub struct ChildForkRequest<'a> {
     /// is free to drift, and a claimed child that dials a channel nobody bound
     /// is silently less capable than a cold-booted one.
     pub channels: &'a [VsockPort],
+    /// The CPU share the claim's admitted plan grants this child — the same
+    /// value the parent-subset comparison cleared.
+    ///
+    /// A driver that starts a fresh VMM for the child binds it on that spawn,
+    /// exactly as a cold boot binds `VmmSpec.cpu_grant`. A driver that hands
+    /// over an already-running machine (a resident parent, a preloaded child)
+    /// has no spawn left to bind and leaves the child on whatever bound that
+    /// machine was started with.
+    pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
 }
 
 /// What a driver needs to boot a warm-pool factory parent. Grouped so the seam
