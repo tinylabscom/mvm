@@ -59,7 +59,13 @@ const R_QUEUE_DRIVER_LO: u64 = 0x090;
 const R_QUEUE_DRIVER_HI: u64 = 0x094;
 const R_QUEUE_DEVICE_LO: u64 = 0x0a0;
 const R_QUEUE_DEVICE_HI: u64 = 0x0a4;
+const R_SHM_SEL: u64 = 0x0ac;
+const R_SHM_LEN_LO: u64 = 0x0b0;
+const R_SHM_LEN_HI: u64 = 0x0b4;
+const R_SHM_BASE_LO: u64 = 0x0b8;
+const R_SHM_BASE_HI: u64 = 0x0bc;
 const R_CONFIG: u64 = 0x100; // block config: capacity (u64 sectors) at +0
+const NO_SHM_REGION: u32 = u32::MAX;
 
 const MMIO_LEN: u64 = 0x200;
 const SECTOR: u64 = 512;
@@ -745,6 +751,12 @@ impl VirtioFs {
             R_QUEUE_READY => self.q().ready,
             R_INTERRUPT_STATUS => self.interrupt_status,
             R_STATUS => self.status,
+            // This queue-backed implementation has no DAX window. Virtio-MMIO
+            // represents an absent selected shared-memory region with all-one
+            // length and base registers. Returning the generic zero default
+            // makes Linux treat address 0, length 0 as a real region and reject
+            // the entire virtio-fs device before it can mount a share.
+            R_SHM_LEN_LO | R_SHM_LEN_HI | R_SHM_BASE_LO | R_SHM_BASE_HI => NO_SHM_REGION,
             o if (R_CONFIG..R_CONFIG + 40).contains(&o) => {
                 let i = (o - R_CONFIG) as usize;
                 let mut b = [0u8; 4];
@@ -780,6 +792,9 @@ impl VirtioFs {
                 }
             }
             R_INTERRUPT_ACK => self.interrupt_status &= !v,
+            // No shared-memory region exists, so every selected id resolves to
+            // the all-one sentinel returned by the read path above.
+            R_SHM_SEL => {}
             R_QUEUE_DESC_LO => {
                 let d = self.q().desc;
                 self.q_mut().desc = (d & !0xffff_ffff) | u64::from(v);
@@ -1027,6 +1042,19 @@ mod tests {
         // Reply @0x5000: fuse_out_header len@0, error@4 == 0, major @16.
         assert_eq!(fs.mem.rd_u32(0x5004) as i32, 0, "INIT must succeed");
         assert_eq!(fs.mem.rd_u32(0x5010), 7, "negotiated FUSE major version");
+    }
+
+    #[test]
+    fn fs_transport_reports_selected_shared_memory_region_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = fs_dev(dir.path());
+
+        fs.write(R_SHM_SEL, 0);
+
+        assert_eq!(fs.read(R_SHM_LEN_LO), u64::from(u32::MAX));
+        assert_eq!(fs.read(R_SHM_LEN_HI), u64::from(u32::MAX));
+        assert_eq!(fs.read(R_SHM_BASE_LO), u64::from(u32::MAX));
+        assert_eq!(fs.read(R_SHM_BASE_HI), u64::from(u32::MAX));
     }
 
     /// A block device over freshly-allocated page-aligned scratch RAM. The

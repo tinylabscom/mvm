@@ -6,6 +6,11 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Plan 322 — HVF virtio-fs shared-memory sentinel.** The queue-backed
+      virtio-fs transport returns the required all-one absent-region value from
+      its shared-memory length and base registers, so Linux no longer rejects
+      `uvol` devices as zero-length DAX windows. Unit coverage and the original
+      native-HVF Alpine directory-share command pass.
 - [x] **CLI help layout invariant.** Every visible and hidden command emits one
       physical line per help item, strictly shorter than 80 columns, for
       `--help`, `-h`, and `mvmctl help <path>`. The shared renderer compacts

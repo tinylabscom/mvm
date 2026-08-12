@@ -26,6 +26,13 @@
       global test environment races; the affected tests pass in isolation and
       serially.
 
+- [x] HVF directory-share boot regression — **plan 322**. Queue-backed
+      virtio-fs now reports the virtio-MMIO all-one sentinel for an absent DAX
+      shared-memory region instead of exposing a false zero-length window that
+      Linux rejects. The 456-test VMM suite passes, and the original Alpine
+      `machine run --mount .:/work -- ls /work` command succeeds on native HVF;
+      workspace checks, doctests, and host Clippy are green.
+
 - [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
       successful bootstrap does not defer an infrastructure build to the next
