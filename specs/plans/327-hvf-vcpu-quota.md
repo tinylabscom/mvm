@@ -66,11 +66,24 @@ what it would take instead"**.
 Write the spike as a throwaway harness, not shipped code. It exists to answer
 the three questions, and its value is the numbers.
 
-## Phase 1 — the scheduler (only if Phase 0 says proceed)
+## Phase 1 — the scheduler
 
 - [ ] A quota controller owning `(quota, period)` per VM, driving the existing
       `force_exit` seam and the `run_with_pause_hook` seam already in the run
       loop. No new hypervisor plumbing.
+- [ ] **Predictive, with debt carry-over — not polling.** The spike measured
+      polling at 1.55% of the budget at a 10 ms period and 8.57% at 1 ms *while
+      still missing by +16%*; the predictive controller hit -0.01% at 0.46%
+      cost. Without carrying debt across periods every period ran 8-33% high.
+- [ ] **Period floor of 5 ms**, and the period must exceed the slowest device
+      operation — a 1 ms device op at a 500 us period produced -11.5%
+      instantaneous error. Below 5 ms no controller design pays for itself.
+- [ ] **Three existing-code constraints**, each surfaced by the spike:
+      the HVF backend is uniprocessor, so the ceiling is 1.0 core until that
+      changes; the run-loop pause hold sleeps 1 ms, which kills 1 ms periods and
+      the 10%/90% quotas at 10 ms; and the production watchdog cancels only
+      every 5 ms, so the controller must hold the `VcpuHandle` itself rather
+      than relying on the watchdog.
 - [ ] Per-vCPU-thread accounting via Mach `thread_info`, summed per VM.
 - [ ] `ResourceControls::for_backend(Hvf)` gains a real `CpuControl`, replacing
       today's honest `None`.
