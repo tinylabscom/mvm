@@ -321,13 +321,30 @@ pub fn checkpoint_children(
 /// resources while the parent is running.
 const FORK_ALLOW_PARENT_RUNNING: bool = false;
 
-/// Stages a forked child's snapshot into position and starts the VM, given the
-/// child's VM name and its state dir (with all checkpoint blobs already cloned
-/// there). Taken as a callback so [`fork_vm_full`] is testable without a live
+/// The child a restore is about to bring up: its fresh identity, its state dir
+/// (checkpoint blobs already cloned there), and the CPU share its admitted plan
+/// was granted.
+///
+/// `cpu_grant` rides along rather than being looked up by the restorer because
+/// the value that reaches the spawn must be the one that passed
+/// [`ensure_child_grants_within_parent`] — a restorer re-reading the plan could
+/// bind a number the subset check never saw.
+pub struct RestoredChild<'a> {
+    /// Fresh, registry-unique name the restored guest runs under.
+    pub vm_name: &'a str,
+    /// The child's state dir, holding its own copies of every checkpoint blob.
+    pub state_dir: &'a Path,
+    /// The CPU share the child's admitted plan grants, or `None` for a plan
+    /// that grants none — which means unbounded, not zero.
+    pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+}
+
+/// Stages a forked child's snapshot into position and starts the VM. Taken as a
+/// callback so [`fork_vm_full`] is testable without a live
 /// hypervisor, and so the VMM-specific restorers can live in `mvm-backends`
 /// without this crate naming them: `FcForkRestorer` loads Firecracker's
 /// snapshot triple, `HvfForkRestorer` maps private RAM and restores the frame.
-pub type ForkRestore<'a> = dyn Fn(&str, &Path) -> Result<()> + 'a;
+pub type ForkRestore<'a> = dyn Fn(&RestoredChild<'_>) -> Result<()> + 'a;
 
 /// Branch a new sandbox lineage from a checkpoint: verify the source content's
 /// integrity AND its content-address against the signed audit chain, CoW-clone
@@ -454,7 +471,15 @@ pub fn fork_vm_full(
 
     validate_fork_verity_binding(&parent, &params.dest_dir)?;
 
-    restore(&params.child_vm_name, &params.dest_dir)?;
+    // The bound rides on the spawn, so the grant that just cleared the subset
+    // check is what the restorer starts the child's VMM under. Without this the
+    // check would decide only what may be *recorded* for the child, and a child
+    // admitted to 1.5 cores would restore with no quota at all.
+    restore(&RestoredChild {
+        vm_name: &params.child_vm_name,
+        state_dir: &params.dest_dir,
+        cpu_grant: child_grants.as_ref().and_then(|grants| grants.cpu),
+    })?;
 
     let child = CheckpointMeta::builder(
         params.child_id,
@@ -2374,7 +2399,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
-            &|_: &str, _: &Path| Ok(()),
+            &|_: &RestoredChild<'_>| Ok(()),
             &AgreeingAnchor,
         )
         .unwrap_err();
@@ -2391,7 +2416,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
-            &|_: &str, _: &Path| Ok(()),
+            &|_: &RestoredChild<'_>| Ok(()),
             &AgreeingAnchor,
         )
         .unwrap_err();
@@ -2544,12 +2569,14 @@ mod tests {
     #[derive(Default)]
     struct RecordedRestore {
         seen: RefCell<Option<(String, PathBuf)>>,
+        cpu_grant: RefCell<Option<mvm_contract::grants::CpuGrant>>,
     }
     impl RecordedRestore {
-        fn restore(&self) -> impl Fn(&str, &Path) -> Result<()> + '_ {
-            |child_vm_name: &str, child_dir: &Path| {
+        fn restore(&self) -> impl Fn(&RestoredChild<'_>) -> Result<()> + '_ {
+            |child: &RestoredChild<'_>| {
                 *self.seen.borrow_mut() =
-                    Some((child_vm_name.to_string(), child_dir.to_path_buf()));
+                    Some((child.vm_name.to_string(), child.state_dir.to_path_buf()));
+                *self.cpu_grant.borrow_mut() = child.cpu_grant;
                 Ok(())
             }
         }
@@ -2714,6 +2741,86 @@ mod tests {
             &restorer.restore(),
             &AgreeingAnchor,
         )
+    }
+
+    /// The subset check decides what a child may be *admitted* to; this decides
+    /// what it actually runs under. Without the hand-off the check would govern
+    /// only the lineage record, and a child admitted to 1 core would restore
+    /// with no quota at all.
+    #[test]
+    fn fork_vm_full_hands_the_admitted_child_grant_to_the_restore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint_with_grants(
+            &store,
+            tmp.path(),
+            "bound",
+            Some(mvm_contract::grants::Grants {
+                cpu: share(4000),
+                ..Default::default()
+            }),
+        );
+        let (child_plan_json, child_tenant_id) =
+            admitted_child_plan_with_grants(Some(mvm_contract::grants::Grants {
+                cpu: share(1000),
+                ..Default::default()
+            }));
+        let restorer = RecordedRestore::default();
+        fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new("bound-child"),
+                child_vm_name: "fc-childvm".into(),
+                dest_dir: tmp.path().join("bound-child-state"),
+                created_unix: 2,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restorer.restore(),
+            &AgreeingAnchor,
+        )
+        .expect("a narrowing child forks");
+
+        // The child's own grant, not the parent's wider one: handing down the
+        // parent's would bind every child to the widest set in its ancestry.
+        assert_eq!(*restorer.cpu_grant.borrow(), share(1000));
+    }
+
+    /// A child whose plan grants nothing restores unbounded rather than
+    /// inheriting a number nobody signed for it.
+    #[test]
+    fn fork_vm_full_hands_down_no_grant_when_the_child_plan_carries_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint_with_grants(
+            &store,
+            tmp.path(),
+            "ungranted",
+            // The parent grants no CPU bound either: an absent grant is
+            // unbounded, so a child dropping a parent's bound would be a
+            // widening and is refused a step earlier.
+            None,
+        );
+        let (child_plan_json, child_tenant_id) = admitted_child_plan_with_grants(None);
+        let restorer = RecordedRestore::default();
+        fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new("ungranted-child"),
+                child_vm_name: "fc-childvm".into(),
+                dest_dir: tmp.path().join("ungranted-child-state"),
+                created_unix: 2,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restorer.restore(),
+            &AgreeingAnchor,
+        )
+        .expect("a child asking for nothing forks");
+
+        assert_eq!(*restorer.cpu_grant.borrow(), None);
     }
 
     #[test]
