@@ -511,11 +511,15 @@ fn aux_bin_dir_to_apply(baked: &str, already_set: bool) -> Option<String> {
 /// itself, because host-binary extraction, builder-image resolution and the
 /// session record all live up here. Same inversion as the hvf builder ctor
 /// below.
+#[cfg(feature = "builder-vm")]
 fn register_builder_session_starter() {
     mvm_build::persistent_builder::register_session_starter(Box::new(|| {
         crate::commands::build::persistent_builder::start_session_for_contended_build()
     }));
 }
+
+#[cfg(not(feature = "builder-vm"))]
+fn register_builder_session_starter() {}
 
 fn register_inhouse_builder() {
     // Wire the HVF builder constructor so that
