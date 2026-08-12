@@ -406,6 +406,10 @@ for detailed scope and acceptance criteria.
       Tracked end to end under epic #2111, which also carries plan 285's
       deferred set. Every workstream below has its own issue; the epic
       records the ordering and the two gates that are not preference.
+      **Frozen by plan 316 Phase 0.** ADR-037 is superseded for production
+      workload networking: this datapath forwarded raw IP packets for
+      `l3-vsock`, which no longer boots. No feature work lands on its runtime
+      path; deletion is plan 316 Phase 7 (#2376).
   - [x] Phase A (WS0) — fix the two platform-neutral defects in the shipped
         `mvm-netd` drive loop that blocked this work and affected Linux
         today: a pollable descriptor out of `GuestConnection`, a
@@ -1080,8 +1084,39 @@ for detailed scope and acceptance criteria.
         chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
         (recon §7.7 → #2019)
 
+- [~] Plan 316 — Single flow-aware vsock networking path
+  (`specs/plans/316-single-flow-vsock-networking.md`, ADR-042, umbrella #2368)
+  Collapses the two production workload networking paths to one authenticated
+  FlowMux session on `GuestService::NetworkFlow` through one
+  `mvm-network-endpoint`. Supersedes the production-path decisions in plan 285
+  and plan 287; both are frozen, not yet deleted.
+  - [x] Phase 0 — ratify the invariant and freeze expansion (#2369): ADR-042
+        accepted; ADR-036 and ADR-037 marked superseded for production workload
+        networking; `specs/refactor/03-networking.md` corrected from "the raw
+        packet path is deleted" to the actual two-path state; ADR-001's tier
+        matrix and claim-10 section qualified; `xtask
+        check-l3-expansion-freeze` added as a temporary shrink-only ratchet
+        over `L3Vsock`/`raw_ip_stack`/`NetworkControl`/`NetworkData`/
+        `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
+        admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
+        a migration error naming the loopback adapters and typed connectors
+  - [ ] Phase 1 — pin protocol, resource, and performance baselines (#2370)
+  - [ ] Phase 2 — the one authenticated endpoint (#2371)
+  - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
+  - [ ] Phase 4 — stream typed transformations (#2373)
+  - [ ] Phase 5 — declared ingress on FlowMux (#2374)
+  - [ ] Phase 6 — compatibility boundary (#2375)
+  - [ ] Phase 7 — delete L3 completely (#2376)
+  - [ ] Phase 8 — make "one path" mechanically enforceable (#2377)
+
 - [~] Plan 285 — L3 TUN-over-vsock network mode
   (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)
+  **Frozen by plan 316 Phase 0.** No feature work lands on this runtime path;
+  only security fixes needed to keep the tree safe during migration may modify
+  it. ADR-036 is superseded for production workload networking, and new
+  `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused. Deletion
+  is plan 316 Phase 7 (#2376). The completed workstreams below stand as
+  historical record.
   - [x] W1–W8 — canonical `NetworkMode::L3Vsock`, the shared fuzzable wire
         protocol, the pure policy core, the guest `mvm-net-agent`, the
         machine-scoped host gateway, audit kinds, docs, and the unprivileged

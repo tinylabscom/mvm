@@ -45,6 +45,16 @@ pub enum GuestService {
     /// numeric value remains transport detail; callers still select the
     /// service by its semantic role.
     ConsoleData { port: u32 },
+    /// Job dispatch into a persistent builder VM's in-guest loop.
+    ///
+    /// Builder-tier only: the guest end is `mvm-host-vm-init`'s dispatch
+    /// listener, which exists only while a builder VM is running as a
+    /// long-lived session. A workload guest never serves this.
+    BuilderDispatch,
+    /// The resident builder daemon's typed control plane (`mvm-builderd`).
+    ///
+    /// Builder-tier only, same as [`BuilderDispatch`](Self::BuilderDispatch).
+    BuilderdControl,
 }
 
 impl GuestService {
@@ -62,6 +72,11 @@ impl GuestService {
             Self::NetworkData { queue } => mvm_contract::l3::data_port(queue),
             Self::Broker => 5300,
             Self::ConsoleData { port } => port,
+            // Pinned literals, mirroring `mvm_agentd::builder_agent`'s
+            // constants. This crate sits below `mvm-agentd` and cannot name
+            // them; the tests below pin both ends to the same numbers.
+            Self::BuilderDispatch => 21471,
+            Self::BuilderdControl => 21473,
         }
     }
 
@@ -75,7 +90,18 @@ impl GuestService {
             Self::Broker => "broker",
             Self::Substitution => "substitution",
             Self::ConsoleData { .. } => "console-data",
+            Self::BuilderDispatch => "builder-dispatch",
+            Self::BuilderdControl => "builderd-control",
         }
+    }
+
+    /// Whether this service exists only on a builder-tier guest.
+    ///
+    /// A workload guest serves none of these; a spec that names one is
+    /// describing the build engine, not a tenant workload. Backends use this
+    /// to keep the builder's control ports out of workload wiring.
+    pub fn is_builder_tier(self) -> bool {
+        matches!(self, Self::BuilderDispatch | Self::BuilderdControl)
     }
 
     /// Whether this service carries bulk packet traffic.
@@ -287,6 +313,10 @@ mod tests {
         assert_eq!(GuestService::WorkloadExit.port(), 5251);
         assert_eq!(GuestService::Substitution.port(), 5253);
         assert_eq!(GuestService::Broker.port(), 5300);
+        // Both ends of the builder control plane pin these literals: the guest
+        // side in `mvm_agentd::builder_agent`, which this crate sits below.
+        assert_eq!(GuestService::BuilderDispatch.port(), 21471);
+        assert_eq!(GuestService::BuilderdControl.port(), 21473);
         assert_eq!(
             GuestService::NetworkControl.port(),
             mvm_contract::l3::L3_CONTROL_PORT
@@ -390,6 +420,29 @@ mod tests {
             "network-data[3]"
         );
         assert_eq!(GuestService::MachineControl.to_string(), "machine-control");
+        assert_eq!(
+            GuestService::BuilderDispatch.to_string(),
+            "builder-dispatch"
+        );
+    }
+
+    #[test]
+    fn only_the_builder_control_plane_is_builder_tier() {
+        // A workload guest serves none of these; the split keeps the build
+        // engine's control ports out of workload wiring.
+        assert!(GuestService::BuilderDispatch.is_builder_tier());
+        assert!(GuestService::BuilderdControl.is_builder_tier());
+        for service in [
+            GuestService::MachineControl,
+            GuestService::NetworkControl,
+            GuestService::NetworkData { queue: 0 },
+            GuestService::WorkloadExit,
+            GuestService::Broker,
+            GuestService::Substitution,
+            GuestService::ConsoleData { port: 20001 },
+        ] {
+            assert!(!service.is_builder_tier(), "{service} is not builder-tier");
+        }
     }
 
     #[test]

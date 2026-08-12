@@ -2,7 +2,12 @@
 
 ## Status
 
-**Phase 0 in progress.**
+**Phase 0 complete (#2369). Phases 1–8 open.**
+
+ADR-042 is accepted and the raw-packet path is frozen: new
+`raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
+admission, and CLI preflight, and `xtask check-l3-expansion-freeze` holds the
+line. No FlowMux runtime exists yet.
 
 ## Tracking issues
 
@@ -161,27 +166,37 @@ the admitted launch state, never from guest bytes.
       existing `machine forward` seam. It adds no networking runtime path,
       binds host loopback explicitly, and refuses detached ownership; Phase 5
       will replace the transitional proxy with signed FlowMux ingress.
-- [ ] Add an accepted ADR that records the L4-with-selective-L7 decision, the
+- [x] Add an accepted ADR that records the L4-with-selective-L7 decision, the
       impossibility of arbitrary guest TLS plus host replacement without TLS
       interception, and the rejection of a host MITM CA as the universal path.
-- [ ] Mark ADR-036 and ADR-037 superseded for production workload networking;
+- [x] Mark ADR-036 and ADR-037 superseded for production workload networking;
       retain their measurements and historical rationale without describing
       either implementation as live.
-- [ ] Reconcile `specs/refactor/03-networking.md`, ADR-001's backend matrix and
+- [x] Reconcile `specs/refactor/03-networking.md`, ADR-001's backend matrix and
       claim-10 section, `specs/SPRINT.md`, and `specs/REFACTOR-STATUS.md` with
       the actual two-path starting state and this target invariant.
-- [ ] Add a temporary CI ratchet that forbids new non-test references to
+- [x] Add a temporary CI ratchet that forbids new non-test references to
       `L3Vsock`, `raw_ip_stack`, `NetworkControl`, `NetworkData`, `spawn_netd`,
       and `host_datapath` outside the files scheduled for deletion by this
       plan. The allowlist is an explicit file list and can only shrink.
-- [ ] Freeze Plan 285 and Plan 287: no feature work lands on their runtime path;
+- [x] Freeze Plan 285 and Plan 287: no feature work lands on their runtime path;
       only security fixes needed to keep the tree safe during migration may
       modify it.
-- [ ] In the first implementation change, make synthesis and admission reject
+- [x] In the first implementation change, make synthesis and admission reject
       `raw_ip_stack=true`/`L3Vsock` with an error naming the supported loopback
       proxy and typed-connector alternatives. Existing running VMs may drain,
       but no new production L3 workload may boot while FlowMux is built. This
       ensures the migration never operates three live production paths.
+
+**Landed as.** ADR-042 (`specs/adrs/042-single-flow-vsock-networking.md`);
+superseded-for-production markers on ADR-036 and ADR-037; a rewritten
+`specs/refactor/03-networking.md`; a qualified tier matrix and claim-10 section
+in ADR-001; `xtask check-l3-expansion-freeze`
+(`xtask/src/check_l3_expansion_freeze.rs`, wired into the CI Lint job) with a
+29-entry allowlist that fails closed on a stale entry so it can only shrink;
+and one shared refusal, `mvm_core::plan::l3_retirement`, called from
+`synthesize_plan`, `admit_for_run`, and
+`mvm_cli::commands::machine::preflight_network`.
 
 ### Phase 1 — Pin protocol, resource, and performance baselines
 

@@ -83,8 +83,8 @@ use crate::builder_vm_runtime::{
     CLOSURE_SEED_TAG, NixStoreImageLock, acquire_nix_store_image_lock,
     acquire_nix_store_image_lock_named, builder_vm_timeout, finalize_flake_job,
     finalize_install_job, read_job_result_with_diagnostics, shell_job_exit_error,
-    stage_closure_seed_dir, stage_filtered_work_input, stage_job_dir, stage_shell_job_dir,
-    supervisor_exit_error, verbose_from_env,
+    stage_closure_seed_dir, stage_filtered_work_input, stage_job_dir, stage_persistent_job_dir,
+    stage_shell_job_dir, supervisor_exit_error, verbose_from_env,
 };
 use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
@@ -4191,20 +4191,13 @@ fn path_to_str<'a>(p: &'a Path, field: &str) -> Result<&'a str, BuilderVmError> 
 // LibkrunPersistentHostVm
 // ============================================================
 
-/// Filename of the marker the host stages under `<job_dir>/` to
-/// tell `mvm-host-vm-init` to enter its dispatch loop instead of
-/// running the single-shot `cmd.sh` / `install_spec` flow. Same key
-/// as the path the guest checks.
-pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
-
-/// Filename the guest creates after binding its persistent dispatch listener.
-/// The host waits for this marker before publishing a usable session record.
-pub const DISPATCH_READY_MARKER: &str = "dispatch.ready";
-
-/// A first boot formats and seeds the persistent Nix disk before exposing
-/// the builder agent. The seed is a large closure copy, so its readiness
-/// window must cover cold disks as well as warm boots.
-const PERSISTENT_BUILDER_READY_TIMEOUT: Duration = Duration::from_secs(180);
+/// The dispatch markers and readiness window are the guest contract, shared
+/// with every backend that can host a session; they live in
+/// [`crate::builder_vm_runtime`]. Re-exported here because
+/// `mvmctl persistent-builder` already names this path.
+pub use crate::builder_vm_runtime::{
+    DISPATCH_READY_MARKER, DISPATCH_SOCK_MARKER, PERSISTENT_BUILDER_READY_TIMEOUT,
+};
 
 /// Spawn the long-lived builder VM that `mvm-host-vm-init`'s
 /// dispatch loop runs inside.
@@ -4459,31 +4452,6 @@ impl LibkrunPersistentHostVm {
             _nix_store_lock: nix_store_lock,
         })
     }
-}
-
-/// Stage `<job_dir>/<DISPATCH_SOCK_MARKER>` so the in-guest
-/// `mvm-host-vm-init` enters its dispatch loop instead of the
-/// single-shot cmd.sh / install_spec flow. The marker
-/// body is intentionally empty — its mere existence is the
-/// signal.
-#[cfg(feature = "builder-vm")]
-fn stage_persistent_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
-    std::fs::create_dir_all(job_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "creating persistent job dir {}: {e}",
-            job_dir.display()
-        ))
-    })?;
-    let marker_path = job_dir.join(DISPATCH_SOCK_MARKER);
-    let ready_path = job_dir.join(DISPATCH_READY_MARKER);
-    let _ = std::fs::remove_file(&ready_path);
-    std::fs::write(&marker_path, b"").map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "staging dispatch marker {}: {e}",
-            marker_path.display()
-        ))
-    })?;
-    Ok(())
 }
 
 /// Handle to a live persistent builder VM. Owns the supervisor

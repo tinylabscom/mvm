@@ -1,5 +1,20 @@
-//! The host-side vsock console bridge — the dev-only interactive-PTY counterpart
-//! of the [`AgentBridge`](super::agent_bridge::AgentBridge).
+//! The host-side vsock **host-dial** bridge: the relay for every channel where
+//! the guest listens and the host is the dialer. Counterpart of the
+//! [`AgentBridge`](super::agent_bridge::AgentBridge), which serves the one
+//! fixed agent port.
+//!
+//! Two kinds of stream ride it today, and the mechanism is identical for both —
+//! bind one host Unix socket per guest port, accept, open an `OP_REQUEST` to
+//! that same port, relay bytes, route replies by connection id:
+//!
+//! - **Dev console data** (`dev_console_data_ports()` = 20001..=20128), the
+//!   interactive PTY path described below.
+//! - **Builder control** (`GuestService::{BuilderDispatch, BuilderdControl}`),
+//!   the persistent builder VM's job-dispatch and daemon-control ports. A
+//!   builder-tier guest only; no workload serves them.
+//!
+//! Which ports get bound is a policy decision made above this bridge, in
+//! `host::spec_map`. This module binds exactly what it is handed.
 //!
 //! A dev-accessible guest pre-opens a range of console **data** ports
 //! (`dev_console_data_ports()` = 20001..=20128); the guest console driver binds a
@@ -11,17 +26,19 @@
 //! `OP_REQUEST`), relays host→guest PTY bytes, and writes the guest's replies back
 //! to the host socket.
 //!
-//! Unlike the agent bridge (one listener at the fixed [`GUEST_AGENT_PORT`]), the
-//! console bridge holds **many** listeners keyed by guest port, and each accepted
+//! Unlike the agent bridge (one listener at the fixed [`GUEST_AGENT_PORT`]), this
+//! bridge holds **many** listeners keyed by guest port, and each accepted
 //! connection carries the port it must be dialed on — so the device frames the
-//! real console port, not a hardwired one. Replies route by the opaque
-//! host-assigned connection id (tracked here), never by the agent's
-//! `is_agent_stream`.
+//! real port, not a hardwired one. Replies route by the opaque host-assigned
+//! connection id (tracked here), never by the agent's `is_agent_stream`.
 //!
 //! Claim 15: the bridge only ever binds listeners the supervisor handed it, and
 //! the supervisor populates the console-port list **only** for a `dev_console`
-//! machine. A sealed prod config carries none, so [`Self::bind_ports`] binds
-//! nothing and the whole console path is inert.
+//! machine. A sealed prod config carries none, so the console path is inert.
+//! Generalizing this bridge does not widen that: the console port list is still
+//! produced by `console_data_sockets`, still empty unless `dev_console` is set,
+//! and the builder ports it now also carries are builder-tier only — a workload
+//! guest, sealed or not, is handed neither list.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -42,11 +59,11 @@ const READ_CHUNK: usize = 16 * 1024;
 /// guest's well-known listener ports and the agent bridge's host-port space so a
 /// console conn id can never collide with an agent conn id (they share the device's
 /// single `handle_packet` reply-routing keyspace).
-const FIRST_CONSOLE_HOST_PORT: u32 = 2 << 20;
+const FIRST_HOST_DIAL_PORT: u32 = 2 << 20;
 
 /// One open host console connection: the accepted host socket, the guest console
 /// port it is dialed on, and whether the guest has accepted the stream yet.
-struct ConsoleConn {
+struct HostDialConn {
     stream: UnixStream,
     /// The guest console data port this stream dials (`CONSOLE_PORT_BASE + n`).
     guest_port: u32,
@@ -58,12 +75,12 @@ struct ConsoleConn {
 /// Host→guest console stream bridge for one guest: a per-guest-port set of Unix
 /// listeners plus the open host connections, each mapped to a host-assigned vsock
 /// src_port (its connection id).
-pub(crate) struct ConsoleBridge {
+pub(crate) struct HostDialBridge {
     /// Bound host listeners, keyed by the guest console data port each serves.
     /// Empty for a sealed prod config (claim 15) — the bridge then does nothing.
     listeners: HashMap<u32, UnixListener>,
     /// Open host connections keyed by the host-assigned vsock src_port (conn id).
-    conns: HashMap<u32, ConsoleConn>,
+    conns: HashMap<u32, HostDialConn>,
     /// Next host port to assign.
     next_port: u32,
     /// Open-connection count, published for the run loop heartbeat so an active
@@ -74,12 +91,12 @@ pub(crate) struct ConsoleBridge {
     host_closed: Vec<(u32, u32)>,
 }
 
-impl ConsoleBridge {
+impl HostDialBridge {
     pub fn new() -> Self {
         Self {
             listeners: HashMap::new(),
             conns: HashMap::new(),
-            next_port: FIRST_CONSOLE_HOST_PORT,
+            next_port: FIRST_HOST_DIAL_PORT,
             active: None,
             host_closed: Vec::new(),
         }
@@ -134,7 +151,7 @@ impl ConsoleBridge {
 
     /// Is `conn_id` a host-initiated console stream (so guest packets addressed to
     /// it route here, not to the agent / workload-exit / egress / capture paths)?
-    pub fn is_console_stream(&self, conn_id: u32) -> bool {
+    pub fn is_host_dial_stream(&self, conn_id: u32) -> bool {
         self.conns.contains_key(&conn_id)
     }
 
@@ -183,10 +200,10 @@ impl ConsoleBridge {
         let mut opened = Vec::with_capacity(accepted.len());
         for (guest_port, stream) in accepted {
             let conn_id = self.next_port;
-            self.next_port = self.next_port.wrapping_add(1).max(FIRST_CONSOLE_HOST_PORT);
+            self.next_port = self.next_port.wrapping_add(1).max(FIRST_HOST_DIAL_PORT);
             self.conns.insert(
                 conn_id,
-                ConsoleConn {
+                HostDialConn {
                     stream,
                     guest_port,
                     established: false,
@@ -336,7 +353,7 @@ mod tests {
         let port = 20001u32;
         let sock = dir.path().join("vsock-20001.sock");
 
-        let mut bridge = ConsoleBridge::new();
+        let mut bridge = HostDialBridge::new();
         let active = Arc::new(AtomicUsize::new(0));
         bridge.set_activity(active.clone());
         if let Err(err) = bridge.bind_ports([(port, sock.as_path())]) {
@@ -370,10 +387,10 @@ mod tests {
             "stream carries the console port it was on"
         );
         assert!(
-            conn_id >= FIRST_CONSOLE_HOST_PORT,
+            conn_id >= FIRST_HOST_DIAL_PORT,
             "console host port above the well-known + agent ranges"
         );
-        assert!(bridge.is_console_stream(conn_id));
+        assert!(bridge.is_host_dial_stream(conn_id));
         assert_eq!(active.load(Ordering::Relaxed), 1);
 
         // Before the guest accepts, request bytes stay buffered (not yet read).
@@ -415,7 +432,7 @@ mod tests {
         // Close tears the stream down and the active counter drops.
         bridge.close(conn_id);
         assert_eq!(active.load(Ordering::Relaxed), 0);
-        assert!(!bridge.is_console_stream(conn_id));
+        assert!(!bridge.is_host_dial_stream(conn_id));
     }
 
     #[test]
@@ -424,7 +441,7 @@ mod tests {
         let port = 20001u32;
         let sock = dir.path().join("vsock-20001.sock");
 
-        let mut bridge = ConsoleBridge::new();
+        let mut bridge = HostDialBridge::new();
         if let Err(err) = bridge.bind_ports([(port, sock.as_path())]) {
             if error_chain_has_permission_denied(&err) {
                 eprintln!(
@@ -462,7 +479,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("vsock-20001.sock");
         let b = dir.path().join("vsock-20002.sock");
-        let mut bridge = ConsoleBridge::new();
+        let mut bridge = HostDialBridge::new();
         if let Err(err) = bridge.bind_ports([(20001u32, a.as_path()), (20002u32, b.as_path())]) {
             if error_chain_has_permission_denied(&err) {
                 eprintln!(
@@ -505,7 +522,7 @@ mod tests {
     fn bind_ports_creates_missing_parent_dir() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("vsock").join("vsock-20001.sock");
-        let mut bridge = ConsoleBridge::new();
+        let mut bridge = HostDialBridge::new();
 
         if let Err(err) = bridge.bind_ports([(20001u32, sock.as_path())]) {
             if error_chain_has_permission_denied(&err) {
@@ -532,20 +549,20 @@ mod tests {
     /// `accept_new` is a no-op and there is nothing to reach.
     #[test]
     fn empty_port_list_binds_nothing() {
-        let mut bridge = ConsoleBridge::new();
+        let mut bridge = HostDialBridge::new();
         bridge.bind_ports([]).unwrap();
         assert!(bridge.accept_new().is_empty());
-        assert!(!bridge.is_console_stream(FIRST_CONSOLE_HOST_PORT));
+        assert!(!bridge.is_host_dial_stream(FIRST_HOST_DIAL_PORT));
     }
 
     #[test]
     fn idle_console_stream_is_surfaced_for_guest_reset() {
-        let mut bridge = ConsoleBridge::new();
+        let mut bridge = HostDialBridge::new();
         let (stream, _peer) = UnixStream::pair().unwrap();
-        let conn_id = FIRST_CONSOLE_HOST_PORT;
+        let conn_id = FIRST_HOST_DIAL_PORT;
         bridge.conns.insert(
             conn_id,
-            ConsoleConn {
+            HostDialConn {
                 stream,
                 guest_port: 20_001,
                 established: true,
@@ -556,6 +573,6 @@ mod tests {
         bridge.drain_host();
 
         assert_eq!(bridge.take_host_closed(), vec![(conn_id, 20_001)]);
-        assert!(!bridge.is_console_stream(conn_id));
+        assert!(!bridge.is_host_dial_stream(conn_id));
     }
 }
