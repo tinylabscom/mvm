@@ -24,6 +24,125 @@ pub type HostVsockStream = tokio::net::TcpStream;
 #[cfg(target_os = "linux")]
 const HOST_CID: u32 = 2;
 
+/// Which half of a spliced proxy connection an error came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyEnd {
+    /// The in-guest program using the proxy (curl, nix, …).
+    Client,
+    /// The host, over vsock.
+    Upstream,
+}
+
+impl ProxyEnd {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Upstream => "upstream",
+        }
+    }
+}
+
+/// An I/O error carrying the half it came from.
+#[derive(Debug)]
+pub struct ProxyEndError {
+    pub end: ProxyEnd,
+    kind: std::io::ErrorKind,
+}
+
+impl std::fmt::Display for ProxyEndError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.end.label(), self.kind)
+    }
+}
+
+impl std::error::Error for ProxyEndError {}
+
+/// Recover the half that failed, for callers deciding how loudly to log.
+pub fn proxy_end_of(error: &std::io::Error) -> Option<ProxyEnd> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<ProxyEndError>())
+        .map(|tagged| tagged.end)
+}
+
+/// Whether an error is a peer simply hanging up rather than a transport fault.
+pub fn is_peer_hangup(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn tag(end: ProxyEnd, error: std::io::Error) -> std::io::Error {
+    let kind = error.kind();
+    std::io::Error::new(kind, ProxyEndError { end, kind })
+}
+
+/// Stamps every I/O error from the wrapped stream with the half it belongs to.
+///
+/// `Unpin` is not a new constraint: `copy_bidirectional`, the only consumer,
+/// already requires it of both halves, so a plain `Pin::new` projection is
+/// sound and this needs no pin-projection dependency.
+struct TagEnd<T> {
+    inner: T,
+    end: ProxyEnd,
+}
+
+impl<T> TagEnd<T> {
+    fn new(inner: T, end: ProxyEnd) -> Self {
+        Self { inner, end }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for TagEnd<T> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let end = self.end;
+        std::pin::Pin::new(&mut self.inner)
+            .poll_read(cx, buf)
+            .map_err(|error| tag(end, error))
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for TagEnd<T> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let end = self.end;
+        std::pin::Pin::new(&mut self.inner)
+            .poll_write(cx, buf)
+            .map_err(|error| tag(end, error))
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let end = self.end;
+        std::pin::Pin::new(&mut self.inner)
+            .poll_flush(cx)
+            .map_err(|error| tag(end, error))
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let end = self.end;
+        std::pin::Pin::new(&mut self.inner)
+            .poll_shutdown(cx)
+            .map_err(|error| tag(end, error))
+    }
+}
+
 /// One guest-initiated session to a host AF_VSOCK port.
 pub struct HostVsockSession<U> {
     upstream: U,
@@ -55,11 +174,19 @@ where
     }
 
     /// Proxy bytes between the guest-side client and the host-side upstream.
-    pub async fn splice<C>(mut self, mut client: C) -> std::io::Result<()>
+    ///
+    /// Any error is tagged with the half that produced it. `copy_bidirectional`
+    /// collapses both directions into one opaque `io::Error`, which makes a
+    /// local client hanging up — routine, the client got what it wanted —
+    /// indistinguishable from the host resetting the egress stream, which is a
+    /// real fault. They must not read the same way in a log.
+    pub async fn splice<C>(mut self, client: C) -> std::io::Result<()>
     where
         C: AsyncRead + AsyncWrite + Unpin,
     {
-        tokio::io::copy_bidirectional(&mut client, &mut self.upstream)
+        let mut client = TagEnd::new(client, ProxyEnd::Client);
+        let mut upstream = TagEnd::new(&mut self.upstream, ProxyEnd::Upstream);
+        tokio::io::copy_bidirectional(&mut client, &mut upstream)
             .await
             .map(|_| ())
     }
@@ -115,6 +242,63 @@ pub async fn connect_host_vsock(_port: u32) -> std::io::Result<HostVsockStream> 
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn a_client_hangup_is_attributed_to_the_client_half() {
+        // The in-guest program goes away mid-transfer. Routine, and it must be
+        // distinguishable from the host resetting the stream.
+        let (client_side, client_bridge) = tokio::io::duplex(8);
+        let (upstream_bridge, mut upstream_side) = tokio::io::duplex(8);
+
+        let task = tokio::spawn(async move {
+            HostVsockSession::new(upstream_bridge)
+                .splice(client_bridge)
+                .await
+        });
+
+        drop(client_side);
+        // Push enough that the copy must write into the dropped client.
+        let _ = upstream_side.write_all(&[b'x'; 4096]).await;
+
+        let error = task.await.unwrap().expect_err("client went away");
+        assert_eq!(proxy_end_of(&error), Some(ProxyEnd::Client));
+        assert!(is_peer_hangup(&error), "kind was {:?}", error.kind());
+    }
+
+    #[tokio::test]
+    async fn a_host_reset_is_attributed_to_the_upstream_half() {
+        // The failure mode the egress-budget bug produced. This one is a fault
+        // and must stay loud.
+        let (mut client_side, client_bridge) = tokio::io::duplex(8);
+        let (upstream_bridge, upstream_side) = tokio::io::duplex(8);
+
+        let task = tokio::spawn(async move {
+            HostVsockSession::new(upstream_bridge)
+                .splice(client_bridge)
+                .await
+        });
+
+        drop(upstream_side);
+        let _ = client_side.write_all(&[b'x'; 4096]).await;
+
+        let error = task.await.unwrap().expect_err("host went away");
+        assert_eq!(proxy_end_of(&error), Some(ProxyEnd::Upstream));
+    }
+
+    #[test]
+    fn an_untagged_error_has_no_attributed_half() {
+        let plain = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "somewhere else");
+        assert_eq!(proxy_end_of(&plain), None);
+    }
+
+    #[test]
+    fn a_tagged_error_names_its_half_when_displayed() {
+        let tagged = tag(
+            ProxyEnd::Upstream,
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+        );
+        assert!(tagged.to_string().contains("upstream"), "{tagged}");
+    }
 
     #[tokio::test]
     async fn write_initial_bytes_precedes_spliced_payload() {

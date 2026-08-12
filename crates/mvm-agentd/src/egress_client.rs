@@ -833,6 +833,21 @@ fn spawn_default_dns_stub() -> Option<tokio::task::JoinHandle<()>> {
     }))
 }
 
+/// An in-guest client hanging up mid-proxy is routine — it got what it wanted,
+/// or gave up. Only a fault on the host side, or one we cannot attribute, is
+/// worth a warning; logging both alike is what made a healthy build look like a
+/// failing egress path.
+fn log_serve_failure(error: &std::io::Error) {
+    use crate::guest_vsock_session::{ProxyEnd, is_peer_hangup, proxy_end_of};
+
+    match proxy_end_of(error) {
+        Some(ProxyEnd::Client) if is_peer_hangup(error) => {
+            tracing::debug!(error = %error, "egress client disconnected");
+        }
+        _ => tracing::warn!(error = %error, "egress client connection failed"),
+    }
+}
+
 /// Bind the loopback SOCKS5 listener at `listen` and serve egress indefinitely.
 pub async fn run(listen: std::net::SocketAddr) -> std::io::Result<()> {
     let listener = TcpListener::bind(listen).await?;
@@ -848,7 +863,7 @@ pub async fn run(listen: std::net::SocketAddr) -> std::io::Result<()> {
                 tracing::debug!(%peer, "accepted egress client connection");
                 tokio::spawn(async move {
                     if let Err(e) = serve(client).await {
-                        tracing::warn!(error = %e, "egress client connection failed");
+                        log_serve_failure(&e);
                     }
                 });
             }
@@ -885,7 +900,7 @@ pub async fn run_until_shutdown(
                         tracing::debug!(%peer, "accepted egress client connection");
                         tokio::spawn(async move {
                             if let Err(e) = serve(client).await {
-                                tracing::warn!(error = %e, "egress client connection failed");
+                                log_serve_failure(&e);
                             }
                         });
                     }
