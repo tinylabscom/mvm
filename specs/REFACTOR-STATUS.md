@@ -74,6 +74,33 @@ for detailed scope and acceptance criteria.
         KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0
         reuse, and two fully warm Alpine runs complete without a second Stage 0
 
+- [~] Plan 316 — website and docs redesign
+      (`specs/plans/316-website-redesign.md`)
+  - [x] Homepage sections, docs chrome, and shared primitives rebuilt onto
+        token-driven surfaces; stale Apple Virtualization / Docker-fallback /
+        nonexistent Nix service-builder claims and the third-party Google
+        Fonts CDN fetch removed from `public/src/components/`
+  - [x] Copy-to-clipboard install-command controls (Hero, Install) converted
+        from non-focusable `<div onClick>` to real `<button type="button">`
+        with an accessible name and a visible focus ring in both schemes
+  - [x] `pnpm check:tokens`, `pnpm check:samples` (10/10), and `pnpm build`
+        (131 pages) all clean; stale-claim grep sweep and doc-route/footer
+        link resolution against `dist/` both confirmed empty/OK; no
+        `public/src/content/` file touched on the branch
+  - [x] Homepage restructured a second time after maintainer review: numbered
+        eyebrows, card grids and the multi-bloom treatment removed (uniform
+        application was what made the page read as generated); mono headings
+        with Inter body; two inline-SVG diagrams (`HeroStackDiagram`,
+        `ContainmentDiagram`) carry the visual identity
+  - [x] Browser verification now measured rather than deferred: 57/57
+        focusable elements show a focus indicator; 0 text nodes below WCAG AA
+        on landing (dark + light) and docs; reduced-motion resolves to
+        `animation-name: none`; no horizontal overflow at 390/768/1024;
+        gutters 108/34/26 across every section and the header
+  - [ ] Maintainer design review — ongoing; the remaining question is whether
+        the result reads well, which no measurement answers
+  - [ ] PR #2359 open against `main`
+
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
   - [x] Restore bounded guest credit recording, fail-closed unknown-credit

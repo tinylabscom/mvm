@@ -18,6 +18,13 @@ const navLinks = [
 ];
 ---
 
+{/* Runs before paint so html.js is present the instant the reveal CSS below
+    is evaluated — the reveal-hidden state only exists under that class, so
+    this must not be a module script (deferred) or land after this point. */}
+<script is:inline>
+  document.documentElement.classList.add("js");
+</script>
+
 {isSplash ? (
   <header class="landing-header">
     <div class="landing-header-inner">
@@ -150,19 +157,36 @@ const navLinks = [
     position: sticky;
     top: 0;
     z-index: 100;
-    width: 100%;
+    /* Starlight's own PageFrame wraps `<slot name="header">` in a `.header`
+       element with horizontal padding (--sl-nav-pad-x). Cancel it here so
+       this element spans edge-to-edge like a landing Section's outer
+       element does, then carry the gutter as this element's own padding
+       (below) instead — mirrors Section.tsx's outer-padding/inner-max-width
+       split so the two measure identically at every width. */
+    width: calc(100% + (2 * var(--sl-nav-pad-x)));
+    margin-inline: calc(-1 * var(--sl-nav-pad-x));
+    /* Same gutter scale as Section.tsx (px-6 sm:px-8). */
+    padding-inline: 1.5rem;
     border-bottom: 1px solid var(--sl-color-hairline);
     background: var(--sl-color-bg);
     backdrop-filter: blur(12px);
+  }
+
+  @media (min-width: 640px) {
+    .landing-header {
+      padding-inline: 2rem;
+    }
   }
 
   .landing-header-inner {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    /* Same max-width as Section.tsx's inner div (max-w-6xl); the gutter
+       itself is carried by .landing-header's padding above. */
     max-width: 72rem;
-    margin: 0 auto;
-    padding: 1rem 1.5rem;
+    margin-inline: auto;
+    padding-block: 1rem;
   }
 
   .landing-logo {
@@ -313,14 +337,23 @@ const navLinks = [
   .landing-mobile-nav {
     display: none;
     flex-direction: column;
-    max-width: 72rem;
-    margin: 0 auto;
+    /* Same ancestor-padding cancellation as .landing-header above — this
+       panel is a sibling of .landing-header, not a descendant, so it needs
+       its own copy of the trick to line up with it. */
+    width: calc(100% + (2 * var(--sl-nav-pad-x)));
+    margin-inline: calc(-1 * var(--sl-nav-pad-x));
     padding: 0 1.5rem 1rem;
     border-top: 1px solid var(--sl-color-hairline-light);
   }
 
   .landing-mobile-nav.is-open {
     display: flex;
+  }
+
+  @media (min-width: 640px) {
+    .landing-mobile-nav {
+      padding-inline: 2rem;
+    }
   }
 
   @media (min-width: 50em) {

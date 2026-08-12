@@ -28,8 +28,9 @@
 
 @theme {
   /* ── Base palette (dark, default) ─────────────────────────────── */
-  --color-page: #0d1117;
-  --color-surface: #161b22;
+  --color-page: #010409;
+  --color-surface: #0d1117;
+  --color-surface-2: #161b22;
   --color-border: #30363d;
   --color-heading: #e6edf3;
   --color-muted: #8b949e;
@@ -37,6 +38,8 @@
   --color-accent-hover: #79c0ff;
   --color-accent-low: #0c2d6b;
   --color-accent-high: #c8e1ff;
+  --color-accent-2: #39c5cf;
+  --color-accent-3: #a371f7;
   --color-green: #3fb950;
   --color-amber: #d29922;
   --color-rust: #dea584;
@@ -46,11 +49,37 @@
   --color-gray-1: #c9d1d9;
   --color-gray-2: #b1bac4;
   --color-gray-4: #6e7681;
+
+  /* Dark glows read as light bloom; light mode dials this down to a tint
+     (see --glow-strength in the light palette blocks below). */
+  --glow-strength: 22%;
+
+  /* Font tokens are scheme-invariant — no light-mode override needed.
+     --font-display carries every heading (landing + docs, via the explicit
+     h1-h4 rule in custom.css) — JetBrains Mono Variable, not Inter, is the
+     deliberate choice: it's the single biggest lever in reading as
+     technical rather than generic-SaaS. --font-body carries everything
+     else — prose, list text, docs body copy via --sl-font in custom.css —
+     because mono hurts readability at paragraph length. */
+  --font-display: "JetBrains Mono Variable", ui-monospace, monospace;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+  --font-body: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+
+  /* Code-block palette — scheme-invariant, by design, not by omission.
+     astro.config.mjs pins Expressive Code's theme to "github-dark"
+     unconditionally, so a code frame never follows the site's light/dark
+     switch; these tokens describe that one fixed theme rather than a role
+     that varies with it. They used to be redeclared identically in both
+     light palette blocks below (plus a --color-code-success that quietly
+     diverged from the dark block's `var(--color-green)`, since light mode's
+     --color-green is a different, lighter hex than the dark-canvas-tuned
+     green this success color needs) — defining them once here removes that
+     drift risk and the token-for-token duplication. */
   --color-code-canvas: #161b22;
   --color-code-header: #21262d;
   --color-code-border: #30363d;
   --color-code-text: #e6edf3;
-  --color-code-success: var(--color-green);
+  --color-code-success: #3fb950;
 }
 
 @theme inline {
@@ -67,7 +96,13 @@
 
   --color-canvas: var(--color-page);
   --color-raised: var(--color-surface);
+  --color-raised-2: var(--color-surface-2);
   --color-edge: var(--color-border);
+  --color-glass-border: color-mix(in oklab, var(--color-border) 70%, var(--color-heading));
+
+  --color-glow-1: color-mix(in oklab, var(--color-accent) var(--glow-strength), transparent);
+  --color-glow-2: color-mix(in oklab, var(--color-accent-2) var(--glow-strength), transparent);
+  --color-glow-3: color-mix(in oklab, var(--color-accent-3) var(--glow-strength), transparent);
 
   /* Terminal window dots — product affordance, theme-independent. */
   --color-dot-close: #ff5f57;
@@ -86,6 +121,7 @@
   [data-theme="light"] {
     --color-page: #ffffff;
     --color-surface: #f6f8fa;
+    --color-surface-2: #eaeef2;
     --color-border: #d0d7de;
     --color-heading: #1f2328;
     --color-muted: #656d76;
@@ -93,6 +129,8 @@
     --color-accent-hover: #0550ae;
     --color-accent-low: #ddf4ff;
     --color-accent-high: #0a3069;
+    --color-accent-2: #1b7c83;
+    --color-accent-3: #8250df;
     --color-green: #1a7f37;
     --color-amber: #9a6700;
     --color-rust: #b36000;
@@ -102,11 +140,7 @@
     --color-gray-1: #1f2328;
     --color-gray-2: #424a53;
     --color-gray-4: #6e7681;
-    --color-code-canvas: #161b22;
-    --color-code-header: #21262d;
-    --color-code-border: #30363d;
-    --color-code-text: #e6edf3;
-    --color-code-success: #3fb950;
+    --glow-strength: 7%;
   }
 
   /* Auto mode + OS prefers light → use the light palette. The
@@ -116,6 +150,7 @@
     :root:not([data-theme="dark"]) {
       --color-page: #ffffff;
       --color-surface: #f6f8fa;
+      --color-surface-2: #eaeef2;
       --color-border: #d0d7de;
       --color-heading: #1f2328;
       --color-muted: #656d76;
@@ -123,6 +158,8 @@
       --color-accent-hover: #0550ae;
       --color-accent-low: #ddf4ff;
       --color-accent-high: #0a3069;
+      --color-accent-2: #1b7c83;
+      --color-accent-3: #8250df;
       --color-green: #1a7f37;
       --color-amber: #9a6700;
       --color-rust: #b36000;
@@ -132,11 +169,7 @@
       --color-gray-1: #1f2328;
       --color-gray-2: #424a53;
       --color-gray-4: #6e7681;
-      --color-code-canvas: #161b22;
-      --color-code-header: #21262d;
-      --color-code-border: #30363d;
-      --color-code-text: #e6edf3;
-      --color-code-success: #3fb950;
+      --glow-strength: 7%;
     }
   }
 }
