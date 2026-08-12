@@ -468,7 +468,24 @@ mod tests {
 
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
-        assert!(test.contains("needs: [scope, test-workspace, test-linux, test-release-witness]"));
+        assert!(test.contains(
+            "needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry]"
+        ));
+
+        // Every lane the aggregate names must also be read back in the loop that
+        // compares results against the scope decision. A lane in `needs` but not
+        // in the loop is gated on nothing but its own scheduling.
+        for expected in [
+            "\"$WORKSPACE_RESULT\"",
+            "\"$LINUX_RESULT\"",
+            "\"$RELEASE_WITNESS_RESULT\"",
+            "\"$EBPF_RESULT\"",
+        ] {
+            assert!(
+                test.contains(expected),
+                "Test aggregate must compare {expected} against the scope decision"
+            );
+        }
 
         // The release-profile lane is the only one that runs with trapping
         // overflow and debug assertions off, i.e. the only one that witnesses
@@ -552,6 +569,17 @@ mod tests {
                 "{job} must skip expensive Rust work for non-code diffs"
             );
         }
+
+        // `cargo install --locked` pins the installed crate's own dependencies
+        // but not which version of that crate is installed, so an upstream
+        // release retroactively changes this lane. Now that the lane gates the
+        // merge, an unpinned install lets a publish elsewhere block the queue.
+        let ebpf = job_block(&workflow, "test-ebpf-telemetry");
+        assert!(
+            ebpf.contains("cargo +nightly install --locked --version ")
+                && ebpf.contains("bpf-linker"),
+            "eBPF lane must install a pinned bpf-linker version"
+        );
 
         let policy = job_block(&workflow, "lint-policy");
         assert!(policy.contains("needs: [scope]"));

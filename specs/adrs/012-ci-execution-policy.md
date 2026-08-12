@@ -66,6 +66,13 @@ required aggregates accept a lane only when it passed or the successful scope
 decision deliberately skipped it; scope and policy themselves must pass. Nix
 retains its own independent, fail-closed classifier.
 
+Every Rust lane must appear in an aggregate's `needs` *and* in that aggregate's
+result comparison. A lane that runs but is named by neither is a lane whose
+failure cannot block a merge — it spends runner time and gates nothing. The
+eBPF telemetry lane was in exactly that state until it was added to the `Test`
+aggregate; because it finishes well inside the workspace and Linux lanes it
+gates for free, adding no wall-clock time to a code-bearing merge group.
+
 ### The merge queue's required checks
 
 `ci.yml` and `architecture.yml` are the only two workflows that run on
