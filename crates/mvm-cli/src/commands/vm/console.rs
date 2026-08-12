@@ -291,23 +291,31 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
     // Set up SIGWINCH handler to forward terminal resizes
     let resize_sender = setup_sigwinch_handler(transport.clone(), session_id);
 
-    // Enter raw terminal mode and suppress the Ctrl-C handler so that
-    // Ctrl+C is forwarded as a raw byte (\x03) to the guest shell
-    // instead of killing mvmctl.
-    IN_CONSOLE_MODE.store(true, std::sync::atomic::Ordering::SeqCst);
-    let orig_termios = enter_raw_mode()?;
+    // Enter raw terminal mode and suppress the Ctrl-C handler so that Ctrl+C
+    // is forwarded as a raw byte (\x03) to the guest shell instead of killing
+    // mvmctl. The guard restores both pieces of process state on every return.
+    let raw_terminal = RawTerminalGuard::enter()?;
     let result = run_console_relay(data_stream);
 
     // Restore terminal and clean up
-    restore_terminal(&orig_termios);
-    IN_CONSOLE_MODE.store(false, std::sync::atomic::Ordering::SeqCst);
+    drop(raw_terminal);
     drop(resize_sender);
 
     mvm_core::audit_emit!(ConsoleSessionEnd, vm: name, "session_id={session_id}");
 
-    let exit_code = console_exit_code(&transport, session_id)?;
-    println!("\nConsole session ended.");
-    result.map(|_| exit_code)
+    match result? {
+        ConsoleRelayExit::GuestClosed => {
+            let completion = console_exit_code(&transport, session_id);
+            let machine_stopped = completion.is_err() && wait_for_console_machine_stop(name);
+            let exit_code = classify_console_completion(completion, machine_stopped)?;
+            println!("\nConsole session ended.");
+            Ok(exit_code)
+        }
+        ConsoleRelayExit::LocalEscape => {
+            println!("\nConsole session ended.");
+            Ok(0)
+        }
+    }
 }
 
 fn console_exit_code(transport: &Arc<dyn VsockTransport>, session_id: u32) -> Result<i32> {
@@ -321,6 +329,39 @@ fn console_exit_code(transport: &Arc<dyn VsockTransport>, session_id: u32) -> Re
         mvm_agentd::vsock::GuestResponse::ConsoleExited { exit_code, .. } => Ok(exit_code),
         mvm_agentd::vsock::GuestResponse::Error { message } => anyhow::bail!("{message}"),
         other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+fn wait_for_console_machine_stop(name: &str) -> bool {
+    const ATTEMPTS: usize = 40;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+
+    for attempt in 0..ATTEMPTS {
+        let still_present = mvm_client::LocalBackend::new()
+            .list_stop_targets()
+            .iter()
+            .any(|machine| machine.id.0 == name);
+        if !still_present {
+            return true;
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(RETRY_DELAY);
+        }
+    }
+    false
+}
+
+fn classify_console_completion(completion: Result<i32>, machine_stopped: bool) -> Result<i32> {
+    match completion {
+        Ok(exit_code) => Ok(exit_code),
+        Err(error) if machine_stopped => {
+            tracing::debug!(
+                error = %error,
+                "console exit-code channel closed after the machine stopped"
+            );
+            Ok(0)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -430,13 +471,77 @@ fn restore_terminal(orig: &libc::termios) {
     }
 }
 
+/// Restores the caller's terminal and Ctrl-C disposition on every return path.
+struct RawTerminalGuard {
+    original: libc::termios,
+}
+
+impl RawTerminalGuard {
+    fn enter() -> Result<Self> {
+        let original = enter_raw_mode()?;
+        IN_CONSOLE_MODE.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(Self { original })
+    }
+}
+
+impl Drop for RawTerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal(&self.original);
+        IN_CONSOLE_MODE.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleRelayExit {
+    GuestClosed,
+    LocalEscape,
+}
+
+/// Recognizes the documented SSH-style local detach without sending it through
+/// the guest channel. A leading `~` is held until the next byte so `~.` can span
+/// terminal reads; every other sequence is forwarded byte-for-byte.
+struct ConsoleEscapeFilter {
+    at_line_start: bool,
+    pending_tilde: bool,
+}
+
+impl ConsoleEscapeFilter {
+    fn new() -> Self {
+        Self {
+            at_line_start: true,
+            pending_tilde: false,
+        }
+    }
+
+    /// Append bytes for the guest to `forwarded`; return true on local detach.
+    fn filter(&mut self, input: &[u8], forwarded: &mut Vec<u8>) -> bool {
+        for &byte in input {
+            if self.pending_tilde {
+                self.pending_tilde = false;
+                if byte == b'.' {
+                    return true;
+                }
+                forwarded.push(b'~');
+                self.at_line_start = false;
+            } else if self.at_line_start && byte == b'~' {
+                self.pending_tilde = true;
+                continue;
+            }
+
+            forwarded.push(byte);
+            self.at_line_start = matches!(byte, b'\r' | b'\n');
+        }
+        false
+    }
+}
+
 /// Relay raw bytes between stdin/stdout and a vsock data stream.
 ///
 /// Exits when the guest closes the connection (e.g. `exit` or Ctrl+D
 /// in the shell) or when the user types the `~.` escape sequence
 /// (Enter, then `~.`, same as SSH).
 ///
-fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<()> {
+fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<ConsoleRelayExit> {
     use std::io::{Read, Write};
     use std::os::unix::io::AsRawFd;
 
@@ -457,8 +562,9 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<()> 
     let mut stdout = std::io::stdout();
     let mut writer = write_stream;
     let mut buf = [0u8; 4096];
+    let mut escape = ConsoleEscapeFilter::new();
 
-    loop {
+    let outcome = loop {
         let mut fds = [
             libc::pollfd {
                 fd: stdin_fd,
@@ -476,50 +582,114 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<()> 
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            break;
+            break ConsoleRelayExit::GuestClosed;
+        }
+
+        // Check input first so sustained guest output cannot defer a local
+        // escape or an interrupt byte behind terminal rendering.
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+            let mut inbuf = [0u8; 1024];
+            match std::io::stdin().read(&mut inbuf) {
+                Ok(0) => break ConsoleRelayExit::GuestClosed,
+                Ok(n) => {
+                    let mut forwarded = Vec::with_capacity(n);
+                    let detach = escape.filter(&inbuf[..n], &mut forwarded);
+                    if !forwarded.is_empty() && writer.write_all(&forwarded).is_err() {
+                        break ConsoleRelayExit::GuestClosed;
+                    }
+                    let _ = writer.flush();
+                    if detach {
+                        let _ = writer.shutdown(std::net::Shutdown::Both);
+                        break ConsoleRelayExit::LocalEscape;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => break ConsoleRelayExit::GuestClosed,
+            }
         }
 
         // vsock → stdout (guest output)
         if fds[1].revents & libc::POLLIN != 0 {
             match (&read_stream).read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => break ConsoleRelayExit::GuestClosed,
                 Ok(n) => {
                     let _ = stdout.write_all(&buf[..n]);
                     let _ = stdout.flush();
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => break,
+                Err(_) => break ConsoleRelayExit::GuestClosed,
             }
         }
         if fds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0
             && fds[1].revents & libc::POLLIN == 0
         {
-            break;
+            break ConsoleRelayExit::GuestClosed;
         }
+    };
 
-        // stdin → vsock (host input)
-        if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-            let mut inbuf = [0u8; 1024];
-            match std::io::stdin().read(&mut inbuf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if writer.write_all(&inbuf[..n]).is_err() {
-                        break;
-                    }
-                    let _ = writer.flush();
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => break,
-            }
-        }
-    }
-
-    // Restore stdin to its original blocking mode
+    // Restore stdin's original file-status flags before returning to the shell.
     unsafe {
         libc::fcntl(stdin_fd, libc::F_SETFL, orig_stdin_flags);
     }
 
-    Ok(())
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod console_relay_tests {
+    use super::*;
+
+    #[test]
+    fn local_escape_is_recognized_across_input_chunks() {
+        let mut escape = ConsoleEscapeFilter::new();
+        let mut forwarded = Vec::new();
+
+        assert!(!escape.filter(b"echo ready\r~", &mut forwarded));
+        assert!(escape.filter(b".", &mut forwarded));
+        assert_eq!(forwarded, b"echo ready\r");
+    }
+
+    #[test]
+    fn escape_like_text_away_from_a_line_boundary_is_forwarded_verbatim() {
+        let mut escape = ConsoleEscapeFilter::new();
+        let mut forwarded = Vec::new();
+
+        assert!(!escape.filter(b"printf '~.'\r", &mut forwarded));
+        assert_eq!(forwarded, b"printf '~.'\r");
+    }
+
+    #[test]
+    fn an_unrecognized_line_escape_is_forwarded_without_losing_bytes() {
+        let mut escape = ConsoleEscapeFilter::new();
+        let mut forwarded = Vec::new();
+
+        assert!(!escape.filter(b"\r~x", &mut forwarded));
+        assert_eq!(forwarded, b"\r~x");
+    }
+
+    #[test]
+    fn stopped_machine_turns_a_lost_exit_code_reply_into_a_clean_console_end() {
+        let result =
+            classify_console_completion(Err(anyhow::anyhow!("Failed to read frame length")), true);
+
+        assert_eq!(result.expect("stopped VM is a clean console end"), 0);
+    }
+
+    #[test]
+    fn running_machine_preserves_a_lost_exit_code_reply_as_an_error() {
+        let result =
+            classify_console_completion(Err(anyhow::anyhow!("Failed to read frame length")), false);
+
+        let error = result.expect_err("a live VM must not hide a control-plane failure");
+        assert!(error.to_string().contains("Failed to read frame length"));
+    }
+
+    #[test]
+    fn an_absent_machine_is_confirmed_as_stopped() {
+        assert!(wait_for_console_machine_stop(
+            "console-completion-machine-that-does-not-exist"
+        ));
+    }
 }
 
 #[cfg(test)]

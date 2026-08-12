@@ -38,6 +38,13 @@ Console behavior depends on the active backend, image mode, and launch policy:
 - Terminal resize, signal forwarding, and scrollback are backend-specific.
 - Console sessions end when the VM stops.
 
+Press `Ctrl+C` to interrupt the foreground command inside the guest. To end the
+console locally even when the guest command does not respond, press Enter and
+then type `~.`. The escape is handled by `mvmctl` and is not sent to the guest.
+Stopping the machine from another terminal also ends the attached console
+cleanly; the expected control-channel EOF during teardown is not reported as a
+protocol failure.
+
 When a backend cannot provide a console, use `mvmctl machine logs`, `mvmctl machine exec`, and
 guest readiness probes to debug the workload.
 

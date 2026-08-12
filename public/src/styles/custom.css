@@ -1,5 +1,6 @@
-/* Load JetBrains Mono for crisp monospace rendering */
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+/* Self-hosted variable fonts — no third-party CDN request at render time. */
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
 
 /*  Bind Starlight's --sl-color-* surface to our role tokens.
  *
@@ -38,8 +39,31 @@
      them to dark-only values to compensate for forcing dark globally;
      no longer needed here. */
 
-  --sl-font-system-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code",
+  --sl-font-system-mono: "JetBrains Mono Variable", "SF Mono", "Cascadia Code", "Fira Code",
     Consolas, monospace;
+  /* --sl-font drives Starlight's reset.css `body { font-family: ... }` —
+     the site-wide body font, landing page included (the splash page still
+     renders through Starlight's Page.astro shell). Body copy is Inter;
+     headings opt into --font-display explicitly (see the h1-h4 rule
+     below and the landing components' `font-display` utility class). */
+  --sl-font: var(--font-body);
+
+  /* Prose measure — ch tracks the active font size, so this stays a
+     stable character count whether html's base font-size or a user's
+     browser zoom changes, unlike a fixed rem width. 78ch in Inter (the
+     body face --sl-font now resolves to) renders ~700px at the 17px
+     root — a 65-75-character comfortable measure, versus the ~595px a
+     mono-metric 68ch was quietly collapsing to before the padding fix
+     below. */
+  --sl-content-width: 70ch;
+
+  /* Starlight's own content gutter lever (consumed directly by
+     ContentPanel.astro's `.content-panel { padding: 1.5rem
+     var(--sl-content-pad-x) }`) — one seam, not a second padding layer
+     bolted onto `main` below. 1.5rem matches the landing page's mobile
+     gutter (Section.tsx's `px-6`), so both page families share one
+     margin rhythm at narrow widths. */
+  --sl-content-pad-x: 1.5rem;
 }
 
 /*  Tell the browser the supported schemes so native form controls,
@@ -59,12 +83,64 @@ body {
   background-color: var(--sl-color-bg);
 }
 
+/* ── Docs header — glass bar (docs pages only) ──
+ *
+ *  Starlight's own header wrapper (the `<header class="header">` rendered
+ *  by PageFrame.astro around our Header.astro override) is `position:
+ *  fixed` at the top of the viewport — in this single-header layout that
+ *  already reads as "always visible while scrolling", the same result
+ *  `position: sticky` would give. We deliberately don't flip the position
+ *  value: Starlight's TwoColumnContent/main-frame compensate for the fixed
+ *  header by reserving `padding-top: var(--sl-nav-height)`, so switching to
+ *  `sticky` (which keeps the header in normal flow) would double that gap
+ *  on every docs page. Instead we layer the glass treatment — blur, a
+ *  page-tinted translucent background, and the glass-border hairline — on
+ *  top of the existing fixed bar.
+ *
+ *  Scoped to [data-has-sidebar] (docs pages) and the `header` tag so the
+ *  splash page's own `.landing-header` (nested inside this same PageFrame
+ *  wrapper, and already sticky + blurred on its own terms) isn't
+ *  double-treated — splash pages carry no [data-has-sidebar] attribute.
+ *  Structural selector: `header.header` is Starlight's own PageFrame
+ *  element/class pairing, not a documented custom property; revisit if a
+ *  Starlight upgrade renames it.
+ *
+ *  The mobile menu toggle (`starlight-menu-button`) is a fixed-position
+ *  sibling of this header rendered later in the DOM inside `nav.sidebar`,
+ *  sharing the same --sl-z-index-navbar stacking level — later DOM order
+ *  wins ties, so it already stacks above the header and stays clickable
+ *  through the blur.
+ */
+[data-has-sidebar] header.header {
+  backdrop-filter: blur(12px);
+  background-color: color-mix(in oklab, var(--color-page) 80%, transparent);
+  border-bottom: 1px solid var(--color-glass-border);
+}
+
+/*  The section tab bar that used to sit below the header is gone, and with
+ *  it the block of rules that re-stated Starlight's own fixed-chrome offset
+ *  formulas with the bar's height added. Those offsets are deliberately NOT
+ *  replaced here: Starlight's stock values for `.main-frame`,
+ *  `.sidebar-pane`, `.right-sidebar`, `mobile-starlight-toc nav` and
+ *  `scroll-padding-top` are correct again now that nothing occupies that
+ *  space. Re-adding an override would reintroduce a gap. */
+
 /* ── Typography — slightly larger base ── */
 html {
   font-size: 17px;
 }
 
-/* Docs content headings */
+/* Docs content headings — same display face and tightened tracking as the
+   homepage's headline treatment, so a docs h1 and a landing-page headline
+   read as the same typeface family rather than Starlight's UI default. */
+[data-has-sidebar] main h1,
+[data-has-sidebar] main h2,
+[data-has-sidebar] main h3,
+[data-has-sidebar] main h4 {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+}
+
 [data-has-sidebar] main h1 {
   font-size: 2.25rem;
   margin-block-end: 1.5rem;
@@ -82,24 +158,44 @@ html {
   margin-block-end: 0.75rem;
 }
 
-/* Docs content — improved padding and spacing */
+/* Docs content — vertical rhythm only. Horizontal gutter is owned by
+   --sl-content-pad-x above (consumed by Starlight's own ContentPanel),
+   not duplicated here — a second padding-inline layer on `main` was
+   what threw the content column off-centre (it stacked on top of
+   ContentPanel's padding instead of replacing it). */
 [data-has-sidebar] main {
   padding-block: 2.5rem;
-  padding-inline: 2rem;
 }
 
 @media (min-width: 50em) {
   [data-has-sidebar] main {
     padding-block: 3rem;
-    padding-inline: 2.5rem;
   }
 }
 
 @media (min-width: 72em) {
   [data-has-sidebar] main {
     padding-block: 3.5rem;
-    padding-inline: 3rem;
   }
+}
+
+/* Balance the content column between the left sidebar and the right
+   table-of-contents rail. Starlight's TwoColumnContent.astro sizes
+   `.main-pane` wider than --sl-content-width by half of whatever space
+   is left over after the sidebar + content column are laid out, then
+   sets `--sl-content-margin-inline: auto 0` so that leftover collects
+   entirely on the content column's leading edge — a deliberate choice
+   when the content is meant to hug the TOC, but it reads as a
+   lopsided column here. Overriding the same custom property to `auto`
+   (both sides) splits the leftover evenly instead. This targets a
+   Starlight-exposed custom property, not a structural selector — low
+   upgrade fragility; if a future Starlight major renames
+   --sl-content-margin-inline or stops reading it in
+   TwoColumnContent.astro, this override silently becomes a no-op
+   rather than breaking, since --sl-content-pad-x still bounds the
+   column on both sides regardless. */
+[data-has-sidebar][data-has-toc] .main-pane {
+  --sl-content-margin-inline: auto;
 }
 
 /* Docs paragraphs — more breathing room */
@@ -117,6 +213,70 @@ html {
 [data-has-sidebar] main li {
   margin-block-end: 0.5rem;
   line-height: 1.7;
+}
+
+/* Docs tables — same glass hairline + 0.75rem radius as GlowCard, so a
+   table on a docs page reads as the same surface family as a card on the
+   homepage. Starlight's own table rule already sets `overflow: auto` (it
+   keeps wide tables horizontally scrollable on narrow viewports) — that
+   also establishes the clipping context the radius needs, so we don't
+   override it to `hidden` here. */
+[data-has-sidebar] main table {
+  border: 1px solid var(--color-glass-border);
+  border-radius: 0.75rem;
+  /* `separate` (not `collapse`) is load-bearing: a collapsed table drops
+     the border-radius above entirely, which is why these corners rendered
+     square. Zero spacing keeps the cell hairlines reading as single rules. */
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+/* Starlight's own cell rule zeroes padding-inline-start, so text sat flush
+   against the cell edge. Pad both sides and give rows enough vertical room
+   that a wrapped two-line cell doesn't crowd its neighbours. */
+[data-has-sidebar] main th,
+[data-has-sidebar] main td {
+  border-color: var(--color-glass-border);
+  padding: 0.7rem 1rem;
+}
+
+/* With `separate`, each cell draws its own bottom rule; suppressing it on
+   the final row stops a stray hairline cutting across the rounded corners. */
+[data-has-sidebar] main tbody tr:last-child > th,
+[data-has-sidebar] main tbody tr:last-child > td {
+  border-bottom: 0;
+}
+
+/* Docs asides (:::tip / :::note / :::caution / :::danger callouts) —
+   restrained-card treatment instead of Starlight's default full-bleed
+   category-colour fill + square corners.
+   Starlight's own per-type low/border/text-accent tints (asides.css,
+   `--sl-color-purple/blue/orange/red`) are deliberately left un-pinned
+   elsewhere in this file — they already adapt correctly per light/dark
+   scheme, verified by inspecting computed border colours in both
+   schemes, and that's still true after this change: the title text and
+   icon keep the per-type accent colour (asides.css's
+   `.starlight-aside__title` rule, untouched here), so a reader can
+   still tell a tip from a caution at a glance.
+   What isn't fine any more is the saturated `--sl-color-*-low`
+   backgrounds and the `border-inline-start` accent stripe: mvm's own
+   `--color-accent-3` (the hero seam's identity colour, see
+   HeroStackDiagram.tsx) sits in the same violet hue Starlight's `tip`
+   type already used by default, so a tip box now reads as if it
+   borrowed the page's identity colour rather than Starlight's own
+   palette. Rather than re-tint `tip` to dodge the collision (more
+   palette surface area to maintain, and the other three types don't
+   collide), asides get the same quiet glass-card shell as the docs
+   table above: a 1px --color-glass-border hairline, 0.75rem radius,
+   and a low-alpha tint of the type's own accent colour instead of
+   Starlight's fixed-lightness `-low` swatch. `border` (not
+   `border-inline-start`) intentionally supersedes asides.css's colored
+   left stripe here — the title's accent colour is enough to carry the
+   per-type signal without a loud edge. */
+[data-has-sidebar] main .starlight-aside {
+  border: 1px solid var(--color-glass-border);
+  border-radius: 0.75rem;
+  background-color: color-mix(in oklab, var(--sl-color-asides-border) 7%, var(--color-surface));
 }
 
 /* Code blocks — more padding + force dark theme */
@@ -224,14 +384,98 @@ html {
   --ec-brdCol: var(--color-border) !important;
 }
 
-/* Sidebar — increased spacing between items */
+/* ── Sidebar — spacing rhythm + group-label / indent-rail treatment ──
+ *
+ *  Selectors below all key off Starlight's own class/attribute names
+ *  (`nav[aria-label="Main"]`, `.group-label`, `.large`, plain nested `ul`
+ *  structure from SidebarSublist.astro) — there's no --sl-color-* custom
+ *  property for sidebar heading typography or the indent rail, so this is
+ *  a structural override. Revisit if a Starlight upgrade renames them.
+ */
 nav[aria-label="Main"] a {
   padding-block: 0.4rem;
 }
 
 nav[aria-label="Main"] summary,
 nav[aria-label="Main"] [role="group"] > :first-child {
-  padding-block: 0.5rem;
+  padding-block: 0.6rem 0.4rem;
+}
+
+/* Group headings ("Guides", "Reference", …) read as small mono caps,
+   matching the Eyebrow treatment used across the homepage. Scoped to
+   `.group-label .large` (not bare `.large`) so plain top-level link items,
+   which also carry the `.large` class, are left at their own size. */
+nav[aria-label="Main"] .group-label .large {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-label);
+}
+
+/* ── Sidebar group icons — one emoji per top-level group ──
+ *
+ *  Starlight's SidebarSublist.astro gives every group the same
+ *  `.group-label` markup regardless of which group it is — no per-group
+ *  class or data attribute to hook an icon off of. A `:nth-child` scheme
+ *  keyed to position in astro.config.mjs's `sidebar` array was tried and
+ *  dropped: reordering, adding, or removing a group silently shifts every
+ *  icon after it onto the wrong heading, with nothing to catch it.
+ *
+ *  Instead, Sidebar.astro runs a small inline script that reads each
+ *  group's *label text* (e.g. "Getting Started") against a fixed emoji
+ *  map and inserts a `.sidebar-group-icon` span ahead of `.large` — a
+ *  binding keyed to the label string itself, so a reorder is a no-op and
+ *  only a renamed label needs a matching map update (a loud, visible
+ *  change, unlike a silent position shift). This block only sizes and
+ *  spaces whatever that script inserts; see Sidebar.astro for the map.
+ */
+nav[aria-label="Main"] ul.top-level > li .group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+nav[aria-label="Main"] ul.top-level > li .group-label .sidebar-group-icon {
+  flex-shrink: 0;
+  font-size: 1.05rem;
+  line-height: 1;
+  font-style: normal;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
+
+/* Quiet indent rail on nested lists — Starlight already draws this line
+   (SidebarSublist.astro's `ul ul li` rule); we only re-pin its color to
+   the role token the rest of the redesign uses for hairlines. */
+nav[aria-label="Main"] ul ul li {
+  border-inline-start-color: var(--color-edge);
+}
+
+/* ── Table of contents — label + active-item marker ──
+ *
+ *  `.right-sidebar-panel` is PageSidebar.astro's wrapper around the
+ *  desktop TOC only (the mobile TOC lives in a separate, unclassed
+ *  sibling), so this doesn't touch the mobile "On this page" popover.
+ *  Structural selectors: PageSidebar.astro's own wrapper class plus
+ *  TableOfContentsList.astro's `aria-current` attribute — no --sl-color-*
+ *  property exposes TOC heading typography or an accent-only marker.
+ */
+.right-sidebar-panel h2 {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-label);
+}
+
+/* The active heading already inherits accent text color via the
+   --sl-color-text-accent binding above; add a rail so the marker reads at
+   a glance rather than relying on color alone. */
+.right-sidebar-panel a[aria-current='true'] {
+  border-inline-start: 2px solid var(--color-accent);
+  color: var(--color-accent);
 }
 
 /* ── Splash / Landing page — full-width, no Starlight chrome ── */
@@ -284,10 +528,6 @@ nav[aria-label="Main"] [role="group"] > :first-child {
 }
 
 
-h2.text-title {
-  margin-bottom: 1.5rem;
-}
-
 /* ── Terminal dots — red/yellow/green (docs pages only) ── */
 [data-has-sidebar] .expressive-code .frame.is-terminal .header::before {
   background-color: transparent !important;
@@ -302,8 +542,8 @@ h2.text-title {
  *
  *  All alpha-tinted amber values route through the --color-amber token
  *  via color-mix(), so the breathing-glow tracks the active palette.
- *  In light mode the amber shifts darker (#9a6700) and the glow gets
- *  a darker base hue without code changes here.
+ *  In light mode --color-amber resolves to a darker shade (see tailwind.css)
+ *  and the glow gets a darker base hue without code changes here.
  */
 [data-has-sidebar] .expressive-code {
   --ec-tm-markBg: color-mix(in srgb, var(--color-amber) 14%, transparent);
@@ -778,4 +1018,152 @@ h2.text-title {
   .blog-footer nav {
     justify-content: flex-start;
   }
+}
+
+/* Background blooms drift slowly. Under reduced-motion they hold still —
+   the tint is decorative, the movement is what triggers discomfort. */
+@keyframes site-bloom-drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(4rem, -2rem, 0) scale(1.12);
+  }
+}
+
+.site-bloom {
+  animation: site-bloom-drift 28s ease-in-out infinite alternate;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-bloom {
+    animation: none;
+  }
+}
+
+/* Terminal cursor block (hero animation + trailing shell prompt) blinks via
+   Tailwind's animate-pulse. Under reduced motion it stays put and visible —
+   present, just not flashing. */
+@media (prefers-reduced-motion: reduce) {
+  .site-terminal-cursor {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* Boundary diagram (hero): the vsock line — the one channel that crosses
+   the wall — gets a slow dash-offset pulse to read as live traffic through
+   a guarded door, not just a static connector. Stilled under reduced
+   motion like every other decorative motion on the page. */
+@keyframes site-boundary-pulse {
+  to {
+    stroke-dashoffset: -26;
+  }
+}
+
+.site-boundary-pulse {
+  animation: site-boundary-pulse 2.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-boundary-pulse {
+    animation: none;
+  }
+}
+
+/* Cursor-tracked radial highlight, positioned via --mx/--my set on
+   pointermove. --glow is set per-instance in GlowCard.tsx. */
+.site-glow-card__sheen {
+  background: radial-gradient(16rem circle at var(--mx, 50%) var(--my, 0%), var(--glow), transparent 65%);
+}
+
+.site-glow-card:hover {
+  border-color: color-mix(in oklab, var(--glow) 55%, var(--color-glass-border));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .site-glow-card__sheen {
+    display: none;
+  }
+}
+
+/* Default to visible: if scripting or the observer fails, the page still
+   reads. The hidden state is only applied once JS has taken over. */
+.site-reveal {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html.js .site-reveal {
+    opacity: 0;
+    transform: translateY(0.75rem);
+    transition: opacity 600ms ease, transform 600ms ease;
+  }
+  html.js .site-reveal.is-shown {
+    opacity: 1;
+    transform: none;
+  }
+
+  /* Failsafe: if React never hydrates (a thrown error, a slow/failed
+     chunk load), .is-shown never gets added and content would stay at
+     opacity: 0 forever. Landing's mount effect adds .hydrated to <html>
+     the moment the island is alive, so this only fires when that never
+     happened — not on a fixed timer, which would fire on every page
+     regardless of scroll position and permanently defeat the reveal for
+     anything below the fold. Scoped to :not(.hydrated) so a successful
+     mount removes the selector entirely and the IntersectionObserver
+     reveal above runs untouched at any scroll depth. */
+  html.js:not(.hydrated) .site-reveal {
+    animation: site-reveal-failsafe 0s linear 4s forwards;
+  }
+  @keyframes site-reveal-failsafe {
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+
+/* Walkthrough: scroll-sync relies on motion (opacity swap + sticky scroll
+   feel) to communicate which step is active, so under reduced motion we
+   swap to the stacked layout — same content, no scroll-driven state. */
+@media (prefers-reduced-motion: reduce) {
+  .site-walk {
+    display: none;
+  }
+  .site-walk-static {
+    display: flex;
+  }
+}
+
+/* ── Docs sidebar scrollbar ──
+ *
+ *  The sidebar pane is the only scrollable region on a docs page, and its
+ *  scrollbar sat against the content as a permanent vertical rule. Thinned
+ *  to a hairline rather than hidden outright: it still reads as "there's
+ *  more below" without competing with the group headings for attention.
+ *  The thumb colour rides `--color-border`, a role token defined for both
+ *  themes, so it stays subtle in light and dark without a hardcoded hex.
+ *
+ *  Scoped to the sidebar deliberately — the document scrollbar stays as-is,
+ *  since on a long docs page it is the reader's only cue to how far through
+ *  they are.
+ */
+[data-has-sidebar] .sidebar-pane {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+[data-has-sidebar] .sidebar-pane::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+[data-has-sidebar] .sidebar-pane::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-has-sidebar] .sidebar-pane::-webkit-scrollbar-thumb {
+  background-color: var(--color-border);
+  border-radius: 999px;
 }

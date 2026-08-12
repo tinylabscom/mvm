@@ -1,151 +1,207 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Button } from "../ui/button";
+import { Bloom } from "./primitives/Bloom";
+import { Reveal } from "./primitives/Reveal";
+import { HeroStackDiagram } from "./HeroStackDiagram";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 
-const lines = [
-  { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
-  { text: '  python -c "print(2 + 2)"', delay: 500 },
-  { text: "  Pulling image and preparing a private root...", delay: 1200, dim: true },
-  { text: "  Booted. Own kernel. Network: deny-all.", delay: 2500, accent: true },
-  { text: "  Warm microVM start: milliseconds.", delay: 3100, accent: true },
-];
+const ONE_LINER =
+  "curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh";
 
-function TerminalAnimation() {
-  const [visibleLines, setVisibleLines] = useState(0);
-
-  useEffect(() => {
-    const timers = lines.map((line, i) =>
-      setTimeout(() => setVisibleLines(i + 1), line.delay)
-    );
-    return () => timers.forEach(clearTimeout);
-  }, []);
-
-  return (
-    <div className="w-full overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-2xl shadow-black/30">
-      <div className="flex items-center gap-2 border-b border-code-border bg-code-header px-4 py-3">
-        <span className="h-3 w-3 rounded-full bg-dot-close/80" />
-        <span className="h-3 w-3 rounded-full bg-dot-minimize/80" />
-        <span className="h-3 w-3 rounded-full bg-dot-expand/80" />
-        <span className="ml-3 text-xs text-code-text/55">terminal</span>
-      </div>
-      <div className="p-5 font-mono text-[13px] leading-relaxed sm:p-6">
-        {lines.slice(0, visibleLines).map((line, i) => (
-          <div
-            key={i}
-            className={`${
-              line.accent
-                ? "text-code-success"
-                : line.dim
-                  ? "text-code-text/55"
-                  : "text-code-text"
-            } ${line.text === "" ? "h-3" : ""}`}
-          >
-            {line.text}
-          </div>
-        ))}
-        {visibleLines < lines.length && (
-          <span className="inline-block h-4 w-2 animate-pulse bg-accent/70" />
-        )}
-      </div>
-    </div>
-  );
+// Splits on "/" and inserts a <wbr> right after each one, so the browser's
+// only wrap opportunities inside the URL are slash boundaries — never mid
+// path-segment. Default (unmodified) overflow-wrap only breaks at existing
+// break characters, so once the wrap points are placed deliberately, no
+// segment ever splits mid-token the way the un-broken command used to
+// under the mono face (which sets ~20% wider than the sans it was tuned
+// for). Space stays a break point via normal browser behaviour.
+function withSlashBreaks(command: string) {
+  const parts = command.split("/");
+  return parts.map((part, i) => (
+    <span key={i}>
+      {part}
+      {i < parts.length - 1 && (
+        <>
+          /<wbr />
+        </>
+      )}
+    </span>
+  ));
 }
 
-const stats = [
-  { value: "ms", label: "warm microVM starts" },
-  { value: "1", label: "kernel per workload" },
-  { value: "0", label: "SSH or daemon" },
-];
-
-export function Hero() {
-  const rawBase = import.meta.env.BASE_URL;
-  const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
+function InstallRow({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);
-  const installCmd =
-    "curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh";
 
-  function copyInstall() {
-    navigator.clipboard.writeText(installCmd);
+  function copy() {
+    navigator.clipboard.writeText(command);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
 
   return (
-    <section className="relative overflow-hidden">
+    <button
+      type="button"
+      className="group flex w-full flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 text-left backdrop-blur transition-all hover:border-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-page"
+      onClick={copy}
+      aria-label="Copy install command"
+    >
+      <span className="text-accent/60 text-sm">$</span>
+      {/* basis-full pushes the Copy badge onto its own line on narrow
+          viewports instead of squeezing the command into a slim leftover
+          column — the command gets the row's full width to wrap into. */}
+      <code className="order-1 min-w-0 flex-1 basis-full text-sm leading-relaxed break-normal font-mono text-emphasis/90 sm:basis-auto">
+        {withSlashBreaks(command)}
+      </code>
+      <span className="order-2 shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent sm:ml-auto">
+        {copied ? "Copied!" : "Copy"}
+      </span>
+    </button>
+  );
+}
+
+export function Hero() {
+  const rawBase = import.meta.env.BASE_URL;
+  const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
+
+  return (
+    // Padding lives on the section itself (not a wrapper div) so the
+    // `mx-auto max-w-6xl` div below is a *direct* child of `main section` —
+    // same shape as Section.tsx. That direct-child relationship matters:
+    // `[data-has-hero] main section > div { margin-inline: auto }` in
+    // custom.css is what actually centers these divs (Tailwind's `mx-auto`
+    // utility loses to Starlight's unlayered CSS otherwise, see that rule's
+    // comment) — one extra nesting level here previously put the centering
+    // div out of that selector's reach and silently dropped the gutter to
+    // padding-only, 74px short of every other section's at 1440px.
+    // Bloom's `inset-0` still spans edge-to-edge: an absolutely positioned
+    // descendant's containing block is the *padding* box of this element,
+    // so this section's own padding doesn't inset it.
+    <section className="relative w-full overflow-hidden px-6 pt-24 pb-12 sm:px-8 sm:pt-20 lg:pt-24 lg:pb-16">
       {/* Background glow */}
-      <div className="pointer-events-none absolute inset-0">
-        <div className="absolute left-1/2 top-0 h-[600px] w-[900px] -translate-x-1/2 -translate-y-1/4 rounded-full bg-accent/7 blur-[120px]" />
-        <div className="absolute right-0 top-1/3 h-[400px] w-[400px] rounded-full bg-nix/5 blur-[100px]" />
-      </div>
+      <Bloom accents={[1, 2]} />
 
-      <div className="relative mx-auto max-w-7xl px-6 pt-28 pb-24 sm:px-8 lg:pt-40 lg:pb-32">
-        <div className="grid items-center gap-16 lg:grid-cols-2 lg:gap-20">
-          {/* Left — copy */}
-          <div className="flex flex-col gap-8">
-            <div className="flex items-center gap-2">
-              <span className="inline-block h-2 w-2 rounded-full bg-green animate-pulse" />
-              <span className="text-sm font-medium text-green">v0.7 — Multi-backend VM support</span>
-            </div>
+      <div className="relative mx-auto max-w-6xl border-x border-edge/15">
+        <div className="grid grid-cols-1 gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center lg:gap-14">
+          <div className="flex min-w-0 max-w-xl flex-col gap-6">
+            {/* Credibility badge row — verified facts only, checked against
+                LICENSE, Cargo.toml, and README.md. No stars/downloads/adopters. */}
+            <Reveal delay={0}>
+              <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-xs lowercase text-label">
+                <span>apache 2.0</span>
+                <span className="text-dim" aria-hidden="true">
+                  /
+                </span>
+                <span>macos + linux</span>
+                <span className="text-dim" aria-hidden="true">
+                  /
+                </span>
+                <a
+                  href="https://github.com/tinylabscom/mvm"
+                  target="_blank"
+                  rel="noopener"
+                  className="hover:text-accent"
+                >
+                  github.com/tinylabscom/mvm
+                </a>
+              </p>
+            </Reveal>
 
-            <h1 className="text-4xl font-bold leading-[1.1] tracking-tight text-title sm:text-5xl xl:text-6xl">
-              Local. A real microVM
-              <br />
-              <span className="bg-linear-to-r from-accent via-nix to-accent bg-clip-text text-transparent">
-                in milliseconds.
-              </span>
-            </h1>
+            <Reveal delay={80}>
+              {/* Mono sets ~20% wider than the Inter clamp this replaced —
+                  ceiling and max-width are both retuned for the mono
+                  metrics, not carried over from the sans-face values.
+                  Verified no overflow at 390/1024/1440 (rag.mjs). */}
+              <h1
+                className="max-w-[15rem] sm:max-w-[24rem] lg:max-w-lg lowercase font-display font-bold leading-[1.08] tracking-[-0.01em] text-title"
+                style={{ fontSize: "clamp(2.25rem, 4.2vw, 3.25rem)" }}
+              >
+                Run code you don&rsquo;t <span className="text-accent-2">trust</span>.
+              </h1>
+            </Reveal>
 
-            <p className="max-w-lg text-lg leading-relaxed text-body">
-              Run untrusted code behind a real hypervisor with one command. The
-              first run prepares the image and kernel; warm runs start in
-              milliseconds. No SSH. No daemon. No container fallback.
-            </p>
+            <Reveal delay={160}>
+              <p className="max-w-[46ch] text-base leading-relaxed text-body">
+                One command boots it in a microVM with its own kernel. No
+                daemon, no SSH, and no network until policy admits it.
+              </p>
+            </Reveal>
 
-            {/* Install command */}
-            <div
-              className="group flex w-full max-w-lg cursor-pointer items-center gap-3 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 backdrop-blur transition-all hover:border-accent/30"
-              onClick={copyInstall}
-              title="Click to copy"
-            >
-              <span className="text-accent/60 text-sm">$</span>
-              <code className="flex-1 text-left font-mono text-sm text-emphasis/90 overflow-x-auto">
-                {installCmd}
-              </code>
-              <span className="shrink-0 rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent">
-                {copied ? "Copied!" : "Copy"}
-              </span>
-            </div>
+            {/* Platform-specific install — the single install affordance in
+                the hero. */}
+            <Reveal delay={240}>
+              <Tabs defaultValue="macos" className="max-w-lg">
+                <TabsList>
+                  <TabsTrigger value="macos">macOS</TabsTrigger>
+                  <TabsTrigger value="linux">Linux</TabsTrigger>
+                  <TabsTrigger value="windows">Windows (WSL2)</TabsTrigger>
+                </TabsList>
 
-            <div className="flex flex-wrap gap-3">
+                <TabsContent value="macos">
+                  <p className="mb-4 text-sm leading-relaxed text-body">
+                    Apple Silicon only. Runs the HVF backend on macOS 26+, libkrun on
+                    macOS 13&ndash;25.
+                  </p>
+                  <InstallRow command={ONE_LINER} />
+                </TabsContent>
+
+                <TabsContent value="linux">
+                  <p className="mb-4 text-sm leading-relaxed text-body">
+                    Tier 1 target. Needs a kernel with KVM enabled at{" "}
+                    <code className="font-mono text-emphasis/90">/dev/kvm</code>.
+                  </p>
+                  <InstallRow command={ONE_LINER} />
+                </TabsContent>
+
+                <TabsContent value="windows">
+                  <p className="mb-4 text-sm leading-relaxed text-body">
+                    Native Windows isn&apos;t a supported microVM host. Run mvm inside
+                    a WSL2 distro with nested KVM and libkrun &mdash; then follow the{" "}
+                    <a
+                      href={`${base}install/windows/`}
+                      className="text-accent underline underline-offset-2 hover:text-accent/80"
+                    >
+                      WSL2 install guide
+                    </a>
+                    .
+                  </p>
+                </TabsContent>
+              </Tabs>
+            </Reveal>
+
+            <Reveal delay={320} className="flex flex-wrap items-center gap-4">
               <a href={`${base}getting-started/installation/`}>
                 <Button size="lg">Get Started</Button>
               </a>
-              <a
-                href="https://github.com/tinylabscom/mvm"
-                target="_blank"
-                rel="noopener"
-              >
-                <Button variant="outline" size="lg">
-                  GitHub
+              <a href="https://github.com/tinylabscom/mvm" target="_blank" rel="noopener">
+                <Button size="lg" variant="outline">
+                  View on GitHub
                 </Button>
               </a>
-            </div>
+            </Reveal>
 
-            {/* Stats row */}
-            <div className="flex flex-wrap gap-8 border-t border-edge/40 pt-6">
-              {stats.map((s) => (
-                <div key={s.label} className="flex flex-col">
-                  <span className="text-2xl font-bold text-title">{s.value}</span>
-                  <span className="text-xs text-label">{s.label}</span>
-                </div>
-              ))}
-            </div>
+            {/* Tertiary text link — the third action the reference reserves
+                for a lower-commitment path than the button pair. Ours
+                points at the CLI reference rather than anything invented. */}
+            <Reveal delay={360}>
+              <a
+                href={`${base}reference/cli-commands/`}
+                className="inline-flex items-center gap-1.5 text-sm text-label underline underline-offset-4 hover:text-accent"
+              >
+                Browse the CLI reference
+                <span aria-hidden="true">&rarr;</span>
+              </a>
+            </Reveal>
           </div>
 
-          {/* Right — terminal */}
-          <div className="relative">
-            <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-accent/10 via-transparent to-nix/10 blur-xl" />
-            <TerminalAnimation />
-          </div>
+          {/* The boundary diagram — the hero's visual anchor. This is the
+              page's actual differentiator (own kernel, no NIC, one vsock
+              channel to a deny-all-by-default endpoint), not a generic
+              product shot, so it carries the argument as much as the
+              headline does. */}
+          <Reveal delay={360} className="relative">
+            <div className="pointer-events-none absolute -inset-4 rounded-2xl bg-linear-to-br from-glow-1 via-transparent to-glow-3 blur-xl" />
+            <HeroStackDiagram />
+          </Reveal>
         </div>
       </div>
     </section>

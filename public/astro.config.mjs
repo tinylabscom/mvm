@@ -26,8 +26,20 @@ export default defineConfig({
       ],
       expressiveCode: {
         themes: ["github-dark"],
+        defaultProps: {
+          // Long shell/CLI samples were overflowing horizontally; wrap
+          // them and align wrapped continuations with the source
+          // line's indentation instead of resetting to column 1.
+          wrap: true,
+          preserveIndent: true,
+        },
         styleOverrides: {
-          borderColor: "#30363d", // overridden by custom.css var(--color-border)
+          // A CSS var(), not a literal — Expressive Code emits this
+          // straight into its generated stylesheet as --ec-brdCol, so the
+          // browser resolves it against tailwind.css's --color-code-border
+          // at paint time. One source of truth instead of a hex here that
+          // custom.css's --ec-brdCol override then had to shadow.
+          borderColor: "var(--color-code-border)",
           borderRadius: "0.75rem",
         },
       },
@@ -36,6 +48,8 @@ export default defineConfig({
         Hero: "./src/overrides/Hero.astro",
         Header: "./src/overrides/Header.astro",
         MarkdownContent: "./src/overrides/MarkdownContent.astro",
+        PageTitle: "./src/overrides/PageTitle.astro",
+        Sidebar: "./src/overrides/Sidebar.astro",
       },
       // No force-theme script. Starlight's theme picker writes
       // data-theme="auto"|"light"|"dark" on <html>; tailwind.css
