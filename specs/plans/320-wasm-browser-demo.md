@@ -149,43 +149,236 @@ That was correct for a DTO-only increment; E1 moves a decision core, not a
 DTO, on the different rationale that the browser must run the host's gate
 rather than a copy of it.
 
-### E2 — `${NAME}` substitution
+### E2 — placeholder substitution
 
-**Status: NOT STARTED, and not yet buildable from this section.** E1 was a
-whole-file relocation, so its boundary was a `git mv`. E2 and E3 are both
-partial splits of a file that mixes the pure core with key custody / fs /
-async, which is the shape Increment 3's risk register calls out as the most
-error-prone diff in the whole inversion. Do the per-`impl` moves/stays pass
-before writing code, the way Increment 3 did for `bundle.rs` and
-`vm_backend.rs` — the prose below states the intent, not the cut line.
+**Status: NOT STARTED. Boundary mapped below; three corrections to the
+paragraph this section used to contain.**
 
-The pure resolution core teased out of
-`crates/mvm-hostd/src/keyholder/substitution.rs` (509 lines). The boundary,
-stated explicitly so the extraction is not a judgement call at implementation
-time:
+The original text read: "the pure resolution core teased out of
+`crates/mvm-hostd/src/keyholder/substitution.rs` (509 lines) … locating
+`${NAME}` placeholders in a request". Against the code, that sentence is
+wrong three times over, and each error would have cost implementation time.
 
-**Moves down** — locating `${NAME}` placeholders in a request, checking the
-name against the destination binding, and producing the substituted result from
-a supplied value. Pure functions over owned data.
+**Correction 1 — `${NAME}` is not the runtime wire form.** The token a guest
+holds is `mvm-secret-<hex>`, minted per session by
+`SubstitutionRegistry::mint` under the reserved `PLACEHOLDER_PREFIX =
+"mvm-secret-"`. `${NAME}` is an *authoring* notation that appears in the
+Workload IR and in `wasm_backend.rs`'s doc comment; nothing resolves it at
+runtime. The oracle pins this — `wasm_egress_witness.rs` asserts the
+destination sees neither the placeholder *nor* a literal `${`.
 
-**Stays in `mvm-hostd`** — key custody and the encrypted secret store, the
-outbound forward leg, sockets and files, and anything async. The browser
-supplies its own fixture values through the same function signature the host
-supplies real ones through.
+There is a third, unrelated prefix: `mvm-managed:` in
+`mvm_contract::policy::secret_binding`. Three notations, none
+interchangeable. Name the one you mean.
+
+**This is a demo-honesty issue, not only a naming one.** Pane 2 ("Module
+view — what the guest holds. Shows the placeholder, never a value") must
+render the opaque minted token. If it renders `${API_KEY}` because that
+reads better, the page is showing a form the runtime never produces, in the
+one pane whose whole job is to be what the guest actually holds.
+
+**Correction 2 — the core spans three files, not one.** The path from a
+guest's header to a credential on the wire:
+
+| Step | Location | Lines |
+|---|---|---|
+| Mint per-secret placeholders from the plan's bindings | `keyholder/admission.rs::assemble_registry` | 55–92 |
+| Walk each header, find a token, branch inject-vs-sign | `supervisor/substitution_proxy.rs::prepare_request` | 118–192 |
+| Resolve token → `SecretRef`, dispatch | `keyholder/substitution.rs` | whole file |
+| Bind-check, decrypt, replace | `keyholder/injector.rs::inject_placeholder` | 53–75 |
+
+The step the demo replays is `prepare_request` — the per-header walk.
+`substitution.rs` alone gets you the registry and none of the walk.
+
+**Correction 3 — `mint` cannot move as written.** It draws 24 bytes from
+`rand::thread_rng()`. That is the same `getrandom`-in-the-bundle problem the
+plan already decided against for the audit key. Split it: a pure
+`insert(token, secret_ref)` moves, token generation stays host-side, and the
+browser supplies a fixture token exactly as it supplies fixture values.
+
+#### Moves / stays
+
+| Item | Where | Disposition |
+|---|---|---|
+| `PLACEHOLDER_PREFIX`, `Placeholder`, `as_str` | substitution.rs 30–45 | **→P** — opaque newtype over `String` |
+| `find_placeholder` | substitution.rs 52–63 | **→P** — pure `&str` scan |
+| `SubstitutionRegistry` map + `resolve` + `host_is_bound` | substitution.rs 71–108 | **→P** — `host_matches` is already in `mvm_contract::ir` |
+| `SubstitutionRegistry::mint` | substitution.rs 83–89 | **split** — `insert(token, ref)` →P; the RNG draw stays |
+| The claim-12 bind check | injector.rs 68–70, substitution.rs 191–199, and `mvm-client/src/secret.rs` 428–431 | **→P once**, as `ir::host_is_bound`. Written three times today; landing ahead of E2 |
+| `text.replace(placeholder, value)` | injector.rs 74 | **→P** as `substitute_into(text, placeholder, value) -> String` |
+| `SubstituteError`, `SignDispatchError`, `InjectError` | 3 files | **split** — pure variants (`UnknownPlaceholder`, `DestinationNotBound`, `WrongAuthType`) →P; `Resolve(_)` stays |
+| `SecretResolver`, `LocalResolver`, `FileSecretStore` | resolver.rs, mvm-core | **stays** — key custody |
+| `Injector`'s resolve leg, `Zeroizing`/`secrecy` | injector.rs | **stays** — the browser has no value to zeroize |
+| `Signer`, `sigv4.rs`, `SigningInput` | signer.rs, sigv4.rs | **stays** — no demo fixture signs |
+| `assemble_registry` | admission.rs | **stays** — reads a `BindingStore` off the filesystem |
+| `substitution_proxy.rs` transport | proxy | **stays** — UDS/TLS/async |
+| `prepare_request`'s header walk | proxy 118–192 | **split** — pure over owned headers once the endpoint is a trait. The largest judgement call in E2; give it its own commit |
+
+`Zeroizing<String>` is the host-side return type and is meaningless in a
+browser (no `mmap`, no core dump, a GC'd heap). The moved `substitute_into`
+returns a plain `String` and the host wraps it. Do **not** pull `zeroize`
+into `mvm-contract` to preserve a signature.
+
+#### Order
+
+- [x] E2.1 — the placeholder leaf →P. Landed as
+      `mvm_contract::substitution`. The constant moved as
+      **`SECRET_PLACEHOLDER_PREFIX`**, not `PLACEHOLDER_PREFIX`: that name was
+      already taken in `mvm-contract` by `policy::secret_binding`'s
+      `"mvm-managed:"`, and a second same-named reserved prefix would have
+      recreated the very collision E3 is untangling. Hard rename, four call
+      sites, no alias. A test asserts the two constants differ and that
+      `find_placeholder` returns `None` on an `mvm-managed:` string.
+      `Placeholder::new` takes the token as given so the RNG stays host-side.
+- [~] E2.2 — de-duplicate the bind check into one fn, **before it crosses a
+      crate boundary**, so the claim-12 predicate has exactly one definition
+      at the moment it moves. **Landing separately and first**, as
+      `mvm_contract::ir::host_is_bound` — it is a standing drift hazard on a
+      security predicate whether or not the demo is ever built, so it does
+      not belong behind this plan. The survey found **three** copies, not the
+      two this section originally listed: the third is
+      `mvm-client/src/secret.rs:428`, over `SecretBindingMeta` rather than
+      `SecretRef`. Hence a free fn over `&[String]` rather than a method on
+      either type.
+- [ ] E2.3 — `SubstitutionRegistry` map/`resolve`/`host_is_bound` →P;
+      `mint` splits.
+- [ ] E2.4 — `substitute_into` →P; `Injector` calls it.
+- [ ] E2.5 — decide `prepare_request`. Own commit, own review.
 
 ### E3 — audit-entry construction and chain signing
 
-**Status: NOT STARTED.** Same planning-pass precondition as E2.
+**Status: NOT STARTED. Boundary mapped. Lower-risk than E2 on the mechanics,
+higher-risk on one decision that has to be made first.**
 
-The pure core of `crates/mvm-hostd/src/supervisor/audit_file.rs` (1,400 lines):
-building a `SignedEnvelope` (entry + canonical bytes + `prev_hash` + signature)
-and `hash_line`. `FileAuditSigner`'s filesystem, mutex and async wrapper stay
-in `mvm-hostd`.
+The writer core of `crates/mvm-hostd/src/supervisor/audit_file.rs` (1,401
+lines): building a `SignedEnvelope` (entry + canonical bytes + `prev_hash` +
+signature) and `hash_line`. `FileAuditSigner`'s filesystem, `flock`, mutexes
+and async wrapper stay in `mvm-hostd`.
 
-This one is lower-risk than its line count suggests: `mvm-contract`'s
-`verify.rs` already implements the exact inverse, and its `signed_bytes_for` is
-documented as the byte-for-byte counterpart of `audit_file.rs`'s. The chain
-semantics are already portable; only the writer half is not.
+The old text said this is "lower-risk than its line count suggests" because
+`mvm-contract`'s `verify.rs` "already implements the exact inverse". True,
+and it is precisely why E3 cannot be done as a naive move.
+
+#### The blocking decision: `mvm-contract` already has a `SignedEnvelope`
+
+`mvm_contract::verify::SignedEnvelope` exists (verify.rs 88–102) and is
+field-identical to hostd's. It carries a `MirrorEntry` — a hand-maintained
+copy of hostd's `AuditEntry` with `DateTime<Utc>` flattened to `String` and
+the newtype ids flattened to `String`, written that way because the real
+entry was not reachable from `no_std`.
+
+E3 had three options. **Decided: option A.**
+
+| Option | Consequence |
+|---|---|
+| **A. Move `AuditEntry` down, retire `MirrorEntry`, unify on one `SignedEnvelope`** — **CHOSEN** | One definition, and the pre-`canonical` byte-exactness hazard stops being a cross-crate coupling. Largest diff |
+| B. Move only the writer fns, keep both envelope types | Smallest diff. Leaves two structurally identical types in one crate, which is the drift the mirror's own doc comment warns about |
+| C. Generic `SignedEnvelope<E>` over the entry type | Avoids the collision without deciding it. Adds a type parameter to a signed wire type — most churn per unit of value |
+
+`AuditEntry`'s fields are `DateTime<Utc>`, `TenantId`, `PlanId`,
+`Option<PolicyId>`, `String`, `BTreeMap<String, String>` — chrono and all
+three id newtypes are already in `mvm-contract` from Increment 3, so the type
+is portable *today*. `MirrorEntry` exists only because nobody revisited it
+after those landed; option B would preserve a workaround whose cause is gone.
+
+The cost is honest: A is the biggest diff of the three and it touches a
+signed wire type. E3.1's frozen fixture is what makes that reversible, which
+is why it is ordered before the rename and not after.
+
+#### The name collision, to resolve before the move
+
+Two unrelated types are already called `AuditEntry`:
+
+- `mvm_contract::policy::audit::AuditEntry` — the mvmd
+  tenant/pool/instance action record (`AuditAction`, `ThreatFinding`,
+  `GateDecision`).
+- `mvm_hostd::supervisor::audit::AuditEntry` — the chain-signed plan entry
+  this section is about.
+
+They share a name and nothing else. Both would sit in `mvm-contract` under
+option A. Precedent is exact: Increment 3 hit this with two `NetworkPolicy`
+types and resolved it by hard-renaming one to `BundleNetworkPolicy`, no
+alias. Do the same, and do it **before** the move, so the rename and the
+relocation are never in one diff.
+
+#### Moves / stays
+
+| Item | Where | Disposition |
+|---|---|---|
+| `SignedEnvelope` | audit_file.rs 52–71 | **→P** — unify with `verify.rs`'s under option A |
+| `hash_line` | audit_file.rs 513–517 | **→P** — already duplicated in `verify.rs`; one definition after |
+| `signed_bytes_for` | audit_file.rs 414–436 | **→P** — ditto; the writer and verifier halves become one fn |
+| `AuditEntry` + `#[serde(deny_unknown_fields)]` | supervisor/audit.rs 33–61 | **→P** under option A, after the rename |
+| `AuditEntry::for_plan` and the other constructors | supervisor/audit.rs 63+ | **stays** — `Utc::now()`. The standard orphan-rule rewrite: type moves, clock-reading constructor becomes a `mvm-core`/`mvm-hostd` free fn |
+| Envelope construction (serialize → sign → b64 → hash) | audit_file.rs 304–318 | **→P** as a pure `seal(entry, prev_hash, &SigningKey) -> SignedEnvelope`. `ed25519_dalek::SigningKey` is already a `mvm-contract` dep |
+| `VerifyError` | audit_file.rs 384–404 | **→P minus `Io`** — merge with `AuditVerifyError`, which is the same enum plus `KeyDecode` and minus `TruncatedTail` |
+| `verify_audit_chain_entries` | audit_file.rs 450–511 | **stays** — takes a `&Path`. Its loop body is already `verify_audit_chain_bytes` in contract |
+| `FileAuditSigner`, `open`, `restore_cursor`, cursors, `pending_sync` | audit_file.rs 76–264 | **stays** — fs, mutexes, `Drop` |
+| `flock_exclusive` | audit_file.rs 378–382 | **stays** — `rustix` |
+| `SyncPolicy`, `DEFERRABLE_EVENTS`, `sync_policy_for` | audit_file.rs 98–144 | **stays** — pure, but it is an fsync-scheduling policy. A browser has no fsync; moving it would be relocation for its own sake |
+| `AuditSigner` trait | supervisor/audit.rs 286 | **stays** — `async_trait` |
+
+`TruncatedTail` is the one verifier variant with no `mvm-contract`
+counterpart, because it is a property of a file ending mid-record — the
+browser verifies a `&[u8]` it already holds whole. It stays host-side; do not
+add it to the merged enum.
+
+#### The byte-identity gate
+
+E3 touches signed bytes, which E1 did not. Increment 3's gate 6 is
+mandatory here and was not needed for E1: **freeze a signed audit chain as a
+fixture before the first commit, and assert byte-identical output after each
+step.** `verify_audit_chain` on a pre-move chain must still pass after the
+move — a chain written by yesterday's binary is evidence, and evidence that
+stops verifying because a struct moved crates is the exact failure mode the
+`canonical` field was introduced to prevent.
+
+#### Order
+
+**Re-validated against post-319 `main`.** #2379 landed on 2026-08-12 and
+restructured `audit_file.rs` (1,401 → 1,934 lines) plus two new modules,
+`audit_segment.rs` and `audit_set.rs`. The table below was re-checked
+against the merged result. Three findings:
+
+1. **`SignedEnvelope`'s shape is unchanged** — still
+   `entry`/`canonical`/`prev_hash`/`signature`, same attributes. Rotation
+   adds new *records* (`chain.sealed`, `chain.continued`), which are
+   ordinary `AuditEntry`s carrying labels, not a new envelope. Option A is
+   unaffected.
+2. **`MirrorEntry` is still field-for-field identical** to `AuditEntry` —
+   same names, same order, same `skip_serializing_if`, differing only in
+   Rust types that all serialize identically (`DateTime<Utc>`/`TenantId`/
+   `PlanId`/`PolicyId` vs `String`). Option A remains viable.
+3. **But the mirror has started accreting logic.** `verify.rs` now carries
+   `continuation_start_hash(&MirrorEntry)`. It is no longer a passive
+   mirror, which makes retiring it more urgent, not less — and makes the
+   E3.4/E3.5 diff larger than first estimated.
+
+E3.1 was unaffected and is done; the frozen fixture passes on post-319
+`main`, confirming rotation did not change whether existing logs verify.
+
+- [x] E3.0 — option A chosen.
+- [x] E3.1 — freeze the byte fixture (a signed multi-entry chain + its
+      verifying key) and assert it verifies. Landed as
+      `crates/mvm-hostd/tests/audit_chain_frozen_bytes.rs` + two fixtures:
+      the writer's exact output plus a hand-authored pre-`canonical` chain,
+      each accepted by both verifiers. Confirmed load-bearing by
+      perturbation — reordering two `AuditEntry` field declarations fails
+      the legacy chain with `SignatureInvalid { line: 0 }`.
+      Checked against #2379's branch as well: clean merge, 6/6 green, so
+      rotation does not change whether existing logs verify.
+- [~] E3.2a — **one `hash_line`.** The re-validation found it written out
+      three times byte-identically: `mvm-contract`'s `verify.rs`,
+      `audit_file.rs`, and — added by #2379 — `audit_set.rs`. It is the
+      function that *is* the chain link, so three definitions are three
+      definitions of what the chain is. Independent of every other E3 step
+      (no `AuditEntry` dependency), so it lands first and alone.
+- [ ] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
+- [ ] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
+      definition each, `mvm-hostd` calling `mvm-contract`.
+- [ ] E3.4 — `AuditEntry` →P; `for_plan` becomes a free fn.
+- [ ] E3.5 — unify `SignedEnvelope`, retire `MirrorEntry`.
+- [ ] E3.6 — `seal()` →P; `FileAuditSigner::sign_and_emit` calls it.
 
 ### Why relocate rather than reimplement
 
