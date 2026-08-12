@@ -131,6 +131,12 @@ pub struct CaptureFsQuickParams {
     /// capture is refused: an fs_quick checkpoint has no memory, so the rootfs
     /// must be in a clean, deterministic state.
     pub quiesced: bool,
+    /// The permission set the captured VM was admitted under, sealed into the
+    /// checkpoint's content-address so a restore has something to bound its
+    /// child against. `None` records no bound and therefore permits any child
+    /// CPU or wall clock — but still no egress, since an absent egress grant is
+    /// deny-all.
+    pub grants: Option<mvm_contract::grants::Grants>,
 }
 
 /// Inputs for forking a child instance from a checkpoint.
@@ -375,6 +381,10 @@ pub fn fork_checkpoint(
     .supervisor_config_digest(parent.supervisor_config_digest)
     .runtime_source_policy(parent.runtime_source_policy)
     .runtime_overlay_version(parent.runtime_overlay_version)
+    // An fs_quick branch presents no plan of its own, so the child inherits
+    // rather than restates the parent's permission set — inheritance is the
+    // only shape that cannot widen.
+    .grants(parent.grants.clone())
     .build();
     store.write_meta(&child)?;
     Ok(child)
@@ -427,7 +437,7 @@ pub fn fork_vm_full(
         );
     }
 
-    validate_child_fork_plan(&params)?;
+    let child_grants = validate_child_fork_plan(&params, parent.grants.as_ref())?;
 
     // Clone the captured triple into the child's state dir, then boot the child
     // from its OWN copies — never the parent's live blobs.
@@ -457,6 +467,10 @@ pub fn fork_vm_full(
     .supervisor_config_digest(parent.supervisor_config_digest)
     .runtime_source_policy(parent.runtime_source_policy)
     .runtime_overlay_version(parent.runtime_overlay_version)
+    // The child's OWN grants, already checked to sit inside the parent's. A
+    // grandchild is then bounded by what this restore actually got, not by the
+    // wider set its grandparent held.
+    .grants(child_grants)
     .build();
     store.write_meta(&child)?;
     Ok(child)
@@ -509,11 +523,23 @@ fn validate_fork_verity_binding(parent: &CheckpointMeta, child_dir: &Path) -> Re
     Ok(())
 }
 
-/// Validate the child admission envelope before a vm_full restore starts a VMM.
+/// Validate the child admission envelope before a vm_full restore starts a VMM,
+/// returning the permission set the child is admitted to run under.
+///
 /// The trusted-key signature check happens in the admission supervisor; this
 /// boundary still refuses missing, malformed, tenant-mismatched, stale, and
 /// incorrectly content-addressed envelopes before any child bytes are cloned.
-fn validate_child_fork_plan(params: &ForkParams) -> Result<()> {
+///
+/// It also refuses a child asking for more than `parent_grants`. Every other
+/// check here passes for a child that simply wants a bigger permission set: the
+/// child plan is separately signed and internally consistent, so without this
+/// comparison restore is a laundering path — admit tight, snapshot, restore
+/// loose. `parent_grants` comes off the parent's sealed checkpoint record,
+/// which is verified against the signed chain before this runs.
+fn validate_child_fork_plan(
+    params: &ForkParams,
+    parent_grants: Option<&mvm_contract::grants::Grants>,
+) -> Result<Option<mvm_contract::grants::Grants>> {
     let plan_json = params
         .child_plan_json
         .as_deref()
@@ -547,7 +573,37 @@ fn validate_child_fork_plan(params: &ForkParams) -> Result<()> {
         plan.valid_from <= now && now < plan.valid_until,
         "admitted child plan is outside its validity window"
     );
-    Ok(())
+    ensure_child_grants_within_parent(plan.grants.as_ref(), parent_grants)?;
+    Ok(plan.grants)
+}
+
+/// Refuse a child whose grants exceed the permission set its parent checkpoint
+/// was sealed under.
+///
+/// The one decision point for "may this child run under these grants, given the
+/// parent it came from". Both restore paths call it — the vm_full fork and the
+/// warm-pool claim — because two implementations of a rule like this drift, and
+/// a path without one is exactly the hole this exists to close.
+///
+/// Either side being `None` means `Grants::default()`, never "unchecked". That
+/// leaves CPU and wall clock open (absent means unbounded) while holding egress
+/// closed (absent means deny-all); skipping the call instead would silently open
+/// egress on the very paths that most need it shut.
+pub fn ensure_child_grants_within_parent(
+    child: Option<&mvm_contract::grants::Grants>,
+    parent: Option<&mvm_contract::grants::Grants>,
+) -> Result<()> {
+    let unbounded_cpu_deny_all_egress = mvm_contract::grants::Grants::default();
+    mvm_contract::grants::subset::grants_are_subset(
+        child.unwrap_or(&unbounded_cpu_deny_all_egress),
+        parent.unwrap_or(&unbounded_cpu_deny_all_egress),
+    )
+    .map_err(|widening| {
+        anyhow::anyhow!(
+            "admitted child plan exceeds the permission set its parent checkpoint was \
+             captured under: {widening}"
+        )
+    })
 }
 
 /// Liveness probe for a VM by name: any backend pid marker whose process still
@@ -590,6 +646,9 @@ pub struct CaptureVmFullParams {
     /// this is `false` on the CLI path. Retention still requires the backend to
     /// support it — the two must agree.
     pub retain_paused: bool,
+    /// The permission set the captured VM was admitted under. See
+    /// [`CaptureFsQuickParams::grants`].
+    pub grants: Option<mvm_contract::grants::Grants>,
 }
 
 /// Capture a running VM's consistent {rootfs, memory, machine-id} triple in one
@@ -838,6 +897,7 @@ fn capture_vm_full_inner(
         .runtime_source_policy(params.runtime_source_policy)
         .runtime_overlay_version(params.runtime_overlay_version)
         .snapshot_id(snapshot_id)
+        .grants(params.grants)
         .build();
     store.write_meta(&meta)?;
     Ok(meta)
@@ -1149,6 +1209,7 @@ pub fn capture_fs_quick(
         .supervisor_config_digest(params.supervisor_config_digest)
         .runtime_source_policy(params.runtime_source_policy)
         .runtime_overlay_version(params.runtime_overlay_version)
+        .grants(params.grants)
         .build();
     store.write_meta(&meta)?;
     Ok(meta)
@@ -1292,6 +1353,7 @@ mod tests {
             tag: None,
             created_unix: 7,
             quiesced: false,
+            grants: None,
         };
         let err = capture_fs_quick(&store, params).unwrap_err();
         assert!(err.to_string().contains("quiesced"));
@@ -1311,6 +1373,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 quiesced: true,
+                grants: None,
             },
         )
         .unwrap()
@@ -1422,6 +1485,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 quiesced: true,
+                grants: None,
             },
         )
         .unwrap()
@@ -1465,6 +1529,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 quiesced: true,
+                grants: None,
             },
         )
         .unwrap();
@@ -1626,6 +1691,7 @@ mod tests {
                 tag: None,
                 created_unix: 9,
                 retain_paused,
+                grants: None,
             },
             &ctl,
         )
@@ -1676,6 +1742,7 @@ mod tests {
                 tag: None,
                 created_unix: 9,
                 retain_paused: false,
+                grants: None,
             },
             &ctl,
         )
@@ -1728,6 +1795,7 @@ mod tests {
                 tag: None,
                 created_unix: 10,
                 retain_paused: false,
+                grants: None,
             },
             &ctl,
         )
@@ -1791,6 +1859,7 @@ mod tests {
                 tag: None,
                 created_unix: 11,
                 retain_paused: false,
+                grants: None,
             },
             &ctl,
         )
@@ -1847,6 +1916,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 retain_paused: false,
+                grants: None,
             },
             &ctl,
         )
@@ -1956,6 +2026,7 @@ mod tests {
             tag: Some("gold".into()),
             created_unix: 7,
             quiesced: true,
+            grants: None,
         };
         let meta = capture_fs_quick(&store, params).unwrap();
         let content_blob = store.content_dir(&meta.id).join("rootfs.ext4");
@@ -2139,6 +2210,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 retain_paused: false,
+                grants: None,
             },
             &ctl,
         )
@@ -2200,6 +2272,7 @@ mod tests {
                 tag: None,
                 created_unix: 2,
                 retain_paused: false,
+                grants: None,
             },
             &ctl,
         )
@@ -2403,6 +2476,15 @@ mod tests {
     /// Seeds an FC-shaped vm_full checkpoint: {rootfs.ext4, memory.bin,
     /// vmstate.bin}, no supervisor-config.json, no machine-id.
     fn seed_fc_vm_full_checkpoint(store: &CheckpointStore, tmp: &Path, id: &str) -> CheckpointMeta {
+        seed_fc_vm_full_checkpoint_with_grants(store, tmp, id, None)
+    }
+
+    fn seed_fc_vm_full_checkpoint_with_grants(
+        store: &CheckpointStore,
+        tmp: &Path,
+        id: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> CheckpointMeta {
         let rootfs = tmp.join(format!("{id}-live.ext4"));
         std::fs::write(&rootfs, b"disk").unwrap();
         let checkpoint_id = CheckpointId::new(id);
@@ -2430,6 +2512,7 @@ mod tests {
                 tag: None,
                 created_unix: 1,
                 retain_paused: false,
+                grants,
             },
             &ctl,
         )
@@ -2437,9 +2520,16 @@ mod tests {
     }
 
     fn admitted_child_plan() -> (String, String) {
+        admitted_child_plan_with_grants(None)
+    }
+
+    fn admitted_child_plan_with_grants(
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> (String, String) {
         let plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
             .workload("fc-childvm")
+            .grants(grants)
             .build();
         let signer = ed25519_dalek::SigningKey::from_bytes(&[91u8; 32]);
         let signed = mvm_core::plan::sign_plan(&plan, &signer, "test-signer");
@@ -2546,17 +2636,19 @@ mod tests {
             child_tenant_id,
         };
 
-        let err = validate_child_fork_plan(&params(
-            Some("not-json".to_string()),
-            Some("local".to_string()),
-        ))
+        let err = validate_child_fork_plan(
+            &params(Some("not-json".to_string()), Some("local".to_string())),
+            None,
+        )
         .unwrap_err();
         assert!(err.to_string().contains("decoding the admitted child"));
 
         let (valid_json, _) = admitted_child_plan();
-        let err =
-            validate_child_fork_plan(&params(Some(valid_json), Some("wrong-tenant".to_string())))
-                .unwrap_err();
+        let err = validate_child_fork_plan(
+            &params(Some(valid_json), Some("wrong-tenant".to_string())),
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("does not match"));
 
         let expired = mvm_core::plan::test_support::PlanFixture::new()
@@ -2569,12 +2661,252 @@ mod tests {
             .build();
         let signer = ed25519_dalek::SigningKey::from_bytes(&[92u8; 32]);
         let signed = mvm_core::plan::sign_plan(&expired, &signer, "test-signer");
-        let err = validate_child_fork_plan(&params(
-            Some(serde_json::to_string(&signed).unwrap()),
-            Some("local".to_string()),
-        ))
+        let err = validate_child_fork_plan(
+            &params(
+                Some(serde_json::to_string(&signed).unwrap()),
+                Some("local".to_string()),
+            ),
+            None,
+        )
         .unwrap_err();
         assert!(err.to_string().contains("outside its validity window"));
+    }
+
+    // ── restore may not launder a permission set ────────────────────────────
+
+    fn share(millicores: u32) -> Option<mvm_contract::grants::CpuGrant> {
+        Some(mvm_contract::grants::CpuGrant::Share { millicores })
+    }
+
+    fn destinations(hosts: &[(&str, u16)]) -> Option<mvm_contract::grants::EgressGrant> {
+        Some(mvm_contract::grants::EgressGrant {
+            allow: hosts
+                .iter()
+                .map(|(h, p)| mvm_core::network_policy::HostPort::new(*h, *p))
+                .collect(),
+        })
+    }
+
+    /// Fork a child carrying `child_grants` out of a parent captured under
+    /// `parent_grants`. The whole restore path runs, so a refusal here is a
+    /// refusal before any VMM starts.
+    fn fork_child_under(
+        tmp: &Path,
+        id: &str,
+        parent_grants: Option<mvm_contract::grants::Grants>,
+        child_grants: Option<mvm_contract::grants::Grants>,
+    ) -> Result<CheckpointMeta> {
+        let store = CheckpointStore::at(tmp.join(format!("{id}-store")));
+        let parent = seed_fc_vm_full_checkpoint_with_grants(&store, tmp, id, parent_grants);
+        let (child_plan_json, child_tenant_id) = admitted_child_plan_with_grants(child_grants);
+        let restorer = RecordedRestore::default();
+        fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new(format!("{id}-child")),
+                child_vm_name: "fc-childvm".into(),
+                dest_dir: tmp.join(format!("{id}-child-state")),
+                created_unix: 2,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restorer.restore(),
+            &AgreeingAnchor,
+        )
+    }
+
+    #[test]
+    fn a_restored_child_may_narrow_every_dimension_of_its_parents_grants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let child = fork_child_under(
+            tmp.path(),
+            "narrow",
+            Some(mvm_contract::grants::Grants {
+                cpu: share(4000),
+                wall_clock: Some(mvm_contract::grants::WallClockGrant::Secs {
+                    secs: std::num::NonZeroU32::new(600).unwrap(),
+                }),
+                egress: destinations(&[("api.example.com", 443), ("pypi.org", 443)]),
+            }),
+            Some(mvm_contract::grants::Grants {
+                cpu: share(1000),
+                wall_clock: Some(mvm_contract::grants::WallClockGrant::Secs {
+                    secs: std::num::NonZeroU32::new(60).unwrap(),
+                }),
+                egress: destinations(&[("api.example.com", 443)]),
+            }),
+        )
+        .expect("a narrowing child is admitted");
+        // The child records its OWN narrower set, so a grandchild is bounded by
+        // what this restore actually got rather than by the grandparent's.
+        assert_eq!(child.grants.as_ref().and_then(|g| g.cpu), share(1000));
+    }
+
+    #[test]
+    fn a_restored_child_may_not_widen_its_parents_cpu_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fork_child_under(
+            tmp.path(),
+            "widen-cpu",
+            Some(mvm_contract::grants::Grants {
+                cpu: share(1000),
+                ..Default::default()
+            }),
+            Some(mvm_contract::grants::Grants {
+                cpu: share(4000),
+                ..Default::default()
+            }),
+        )
+        .expect_err("a widening child must be refused");
+        assert!(
+            err.to_string().contains("exceeds the parent's 1000"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_restored_child_may_not_widen_its_parents_wall_clock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fork_child_under(
+            tmp.path(),
+            "widen-clock",
+            Some(mvm_contract::grants::Grants {
+                wall_clock: Some(mvm_contract::grants::WallClockGrant::Secs {
+                    secs: std::num::NonZeroU32::new(60).unwrap(),
+                }),
+                ..Default::default()
+            }),
+            Some(mvm_contract::grants::Grants {
+                wall_clock: Some(mvm_contract::grants::WallClockGrant::Unbounded),
+                ..Default::default()
+            }),
+        )
+        .expect_err("an unbounded child clock must be refused");
+        assert!(
+            err.to_string().contains("unbounded wall clock"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_restored_child_may_not_drop_a_cpu_bound_its_parent_carried() {
+        // The laundering shape that looks most innocent: the child simply
+        // declares nothing. Absent means unbounded, so this is the widest ask.
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fork_child_under(
+            tmp.path(),
+            "drop-cpu",
+            Some(mvm_contract::grants::Grants {
+                cpu: share(1000),
+                ..Default::default()
+            }),
+            None,
+        )
+        .expect_err("dropping the parent's bound must be refused");
+        assert!(
+            err.to_string().contains("drops the parent's CPU bound"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_restored_child_may_not_swap_the_unit_of_its_parents_cpu_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fork_child_under(
+            tmp.path(),
+            "unit-swap",
+            Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Fuel { instructions: 10 }),
+                ..Default::default()
+            }),
+            Some(mvm_contract::grants::Grants {
+                cpu: share(1),
+                ..Default::default()
+            }),
+        )
+        .expect_err("mismatched CPU units must be refused");
+        assert!(
+            err.to_string().contains("different units"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_restored_child_may_not_reach_a_destination_its_parent_could_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fork_child_under(
+            tmp.path(),
+            "widen-egress",
+            Some(mvm_contract::grants::Grants {
+                egress: destinations(&[("api.example.com", 443)]),
+                ..Default::default()
+            }),
+            Some(mvm_contract::grants::Grants {
+                egress: destinations(&[("api.example.com", 443), ("evil.example.com", 443)]),
+                ..Default::default()
+            }),
+        )
+        .expect_err("an unadmitted destination must be refused");
+        assert!(
+            err.to_string().contains("evil.example.com:443"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_tampered_parent_grant_record_cannot_justify_a_wider_child() {
+        // Widening the parent's sealed record on disk is the way around a
+        // subset check that trusts it. The grant is inside the record's
+        // content-address, so the edit is caught before the comparison runs.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint_with_grants(
+            &store,
+            tmp.path(),
+            "tampered",
+            Some(mvm_contract::grants::Grants {
+                cpu: share(1000),
+                ..Default::default()
+            }),
+        );
+
+        let meta_path = store.dir_for(&parent.id).join("meta.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        raw["grants"]["cpu"]["millicores"] = serde_json::json!(64_000);
+        std::fs::write(&meta_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        // The stored content-address is untouched — only the grant moved.
+        let reread = store.read_meta(&parent.id).unwrap();
+        assert_eq!(reread.meta_digest, parent.meta_digest);
+        assert_eq!(reread.grants.and_then(|g| g.cpu), share(64_000));
+
+        let (child_plan_json, child_tenant_id) =
+            admitted_child_plan_with_grants(Some(mvm_contract::grants::Grants {
+                cpu: share(64_000),
+                ..Default::default()
+            }));
+        let restorer = RecordedRestore::default();
+        let err = fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new("tampered-child"),
+                child_vm_name: "fc-childvm".into(),
+                dest_dir: tmp.path().join("tampered-child-state"),
+                created_unix: 2,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &restorer.restore(),
+            &AgreeingAnchor,
+        )
+        .expect_err("a post-seal edit of the parent's grant must be refused");
+        assert!(
+            err.to_string().contains("meta_digest drift"),
+            "unexpected error: {err}"
+        );
+        assert!(restorer.seen.borrow().is_none(), "no VMM may have started");
     }
 
     #[test]

@@ -10,7 +10,7 @@
 
 ## Current issue delivery
 
-- [~] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
+- [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
       successful bootstrap does not defer an infrastructure build to the next
       `machine run`. Kernel downloads verify before replacement, local Stage 0
@@ -18,12 +18,19 @@
       verified reads reject any crash-skewed cache. Interrupted staging is swept
       on retry while the persistent Nix store remains warm. Local capability validation
       uses the resolved kernel config instead of searching a KALLSYMS-free raw
-      image for symbol strings. Formatting, focused tests, all 172 BDD
-      scenarios, workspace check, and host workspace all-target Clippy pass.
-      Full workspace tests pass the changed crates but expose unrelated,
-      non-deterministic `mvm-hostd` shared-state/timing failures; the Linux
-      all-target Clippy rerun remains for CI or a supported builder-VM entry
-      point.
+      image for symbol strings. QEMU Stage 0 now has a reusable Nix-store disk,
+      an accurate guest clock, architecture-correct console wiring, and a
+      two-hour cold-build window. ARM64 workload kernels carry the console
+      drivers required by Firecracker and HVF/QEMU, while bounded OCI blob
+      redirects reach only exact trusted Docker CDN origins without forwarding
+      registry authorization. The required console dependencies move only the
+      ARM64 built-in-symbol ratchet from 944 to its measured 959; x86_64 stays
+      at 917. Formatting, workspace check, host workspace
+      all-target Clippy, the complete serialized workspace suite and doctests,
+      the exact 461-test `xtask --features man` CI lane, and all 172 BDD
+      scenarios pass. A KVM-backed ARM64 acceptance run completed cold
+      bootstrap and kernel publication, then ran Alpine twice from a fully warm
+      cache without launching Stage 0.
 
 - [~] HVF large-response integrity — **plan 315**. Restored bounded
       virtio-vsock host-to-guest credit accounting that had been removed while
@@ -57,6 +64,37 @@
       in-repo builder image. A focused regression test forbids the stale
       `sudo`, `darwin.linux-builder`, and `/etc/nix` instructions.
 
+- [x] The hostd eBPF observability-target test now uses the shared environment
+      guard for `MVM_HOME`, preventing parallel tests from observing a temporary
+      home and restoring the original value when the test completes. Admission
+      tests that read the host's configured grant ceiling now also hold that
+      guard and use an explicit isolated host configuration, so bounded-host
+      fixtures cannot leak their ceiling into parallel admission tests.
+
+- [x] Span-timing profiling — **plan 318**. The workspace's ~60 `#[instrument]`
+      attributes produced no timing data: no layer consumed span close events,
+      and both subscriber setups attached `EnvFilter` to the registry, so at the
+      CLI's default `error` filter the INFO spans were never constructed at all.
+      Plan 318 adds the missing consumer (a `SpanTimingLayer` over a bounded
+      log-scale histogram, reporting self time as well as inclusive total),
+      moves the log filter onto the fmt layer so spans are constructed
+      regardless of verbosity, and instruments the OCI/ext4 paths in `mvm-fs`
+      (which carried no `tracing` dependency at all) plus the four backend
+      `boot` entry points and HVF restore. Opt-in via `MVM_SPAN_TIMINGS=1|json`;
+      off by default. This is the systematic form of the ad-hoc measurement
+      behind the Plan 311 findings below.
+
+      Instrumentation then extends to the launch critical path — `mvm-cli` had
+      none at all, and it owns the orchestration upstream of where
+      `launch_trace`'s six marks begin. `sha256_file` and its cached wrapper are
+      timed separately so the re-hash below is a row in the profile rather than
+      an inference, and the `ps` process-table scan and OCI pull/layer paths are
+      named. Daemon and build entry points (`admit_for_run`, `admit_and_start`,
+      `verify_audit_chain_entries`, `pool_build_with_opts`, `build_via_vsock`,
+      `workload_build_fingerprint`, `launch_transient`) follow. Guest-side
+      `mvm-agentd` is deliberately excluded — its spans would land on the
+      guest's stderr, which needs a collection path that does not exist yet.
+
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
       rootfs is 9.9 MB, and reports the ≤200 ms p50 contract as met. Three
@@ -79,6 +117,18 @@
       Current numbers are from a debug binary and are not comparable to Plan
       299's release baseline; establishing that comparison is the plan's first
       phase and no percentile is published before it.
+
+- [x] Event-driven process lifecycle and shutdown — **Plan 314**. The shared
+      macOS kqueue/Linux pidfd process observer now drives normal HVF,
+      Firecracker, libkrun, and QEMU shutdown with bounded fallback, final
+      liveness verification, and fail-closed escalation. The authorized
+      1,000-cycle HVF run records zero SIGKILL escalations; 100 Firecracker
+      cycles and 25-cycle libkrun/QEMU runs leave zero processes, PID markers,
+      or owned sockets. Internal HVF profiling shows the 5 ms watchdog is not
+      the dominant span, so no new control protocol was justified. The
+      foreground-wait audit and repository event/timer/reconciliation rule are
+      complete. Formatting, workspace check, the complete workspace test
+      suite, macOS focused clippy, and Linux all-target clippy pass.
 
 - [x] README CLI/code-example contract — README shell examples and every
       declared CLI option have executable cucumber help witnesses; all 26
@@ -215,11 +265,19 @@
       catch the actionable snapshot-I/O, no-op stage-name, torn-tail, and grant
       parser mutants; the static gate rejects accepted misses outside the
       pinned surface; 26 moved libkrun identities name their current file; and
-      14 obsolete misses were removed, reducing the accepted baseline from 83
-      to 69 without adding a waiver. Focused mutation proofs, affected-package
-      all-target Clippy, the workspace unit/integration suite, formatting, and
-      the static surface gate are green. The exact Linux Security workflow
-      rerun remains the final merge-and-close gate.
+      15 obsolete misses were removed, reducing the accepted baseline from 83
+      to 68 without adding a waiver. The first exact rerun exposed six further
+      survivors: the contract's omitted resource-control default plus hostd's
+      exact broker byte limit, admitted digest equality, host CPU mechanism
+      truth table, explicit deferred-audit flush, and drop-time flush. Direct
+      witnesses now catch all six; the complete contract mutation shard and a
+      focused five-mutant hostd proof are green. Workspace all-target Clippy,
+      formatting, and the static surface gate are also green. The workspace
+      suite passed every repaired area but hit one unrelated host-agent
+      socket-bind timeout; its isolated integration rerun passed 4/4. A clean
+      exact Linux Security workflow rerun remains the final merge gate; a
+      subsequent scheduled or release run is still required before issue
+      closure.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,
@@ -1563,10 +1621,15 @@ Then unify + retire the old paths:
 
 **WS7 — simple CLI**
 
-- [x] Enforce an 80-column maximum across every visible and hidden command's
-      `--help`, `-h`, and `mvmctl help <path>` output. The BDD suite discovers
-      paths from the generated Clap tree and executes the real binary, so new
-      subcommands are covered automatically.
+- [x] Enforce one physical line per help item, strictly shorter than 80 columns,
+      across every visible and hidden command's `--help`, `-h`, and
+      `mvmctl help <path>` output. The shared renderer compacts long-help item
+      blocks and caps overlong summaries at 79 columns with an ellipsis. The BDD
+      suite discovers paths from the generated Clap tree, executes the real
+      binary, and rejects both continuation lines and lines at or above 80
+      columns, so new subcommands are covered automatically. Focused renderer
+      tests, both exhaustive BDD scenarios, the serial full workspace suite,
+      workspace check, formatting, and host workspace all-target Clippy pass.
 - [ ] Redesign to a small, discoverable verb set; `env` shown in `--help`.
 - [ ] Merge `setup`/`bootstrap` into one first-run `bootstrap`. Add the lifecycle verbs: **`upgrade`** (self-update `mvmctl`); **`uninstall`** (remove everything — the binary, `~/.mvm`, and installed host/guest artifacts); **`env cleanup`** (reclaim `~/.mvm` — caches + transient VM/build state, keeping config + keys); **`env reset`** (wipe `~/.mvm` back to a clean slate). These replace the fragmented `cache prune` / `pack prune` / `storage gc`. `env` becomes a visible top-level subcommand (today `hide = true`).
 - [ ] Replace the 31-arm dispatch `match` with a `Command` trait (`fn run(&self, ctx: &Cli) -> Result<()>`); one module per command; every command calls `mvm-client`.

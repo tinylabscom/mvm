@@ -13,6 +13,20 @@ use anyhow::{Context, Result};
 ///
 /// On crash or power loss, the file either has the old content or the new
 /// content — never a partial write.
+///
+/// The sync is `sync_data` (`fdatasync`), not `sync_all`. `fdatasync` still
+/// flushes the metadata a later read needs to retrieve the data — the file's
+/// size above all, which is the part that matters for a temp file this call
+/// just created — and skips the rest. On rotational storage that is the
+/// difference between one seek and two, and this is the shared write path
+/// behind the audit chain, the receipt store, and every other record mvm
+/// persists, so it is paid on the launch critical path.
+///
+/// The metadata `sync_all` additionally flushed was not buying a stronger
+/// guarantee here in any case: this function never fsyncs the *parent
+/// directory* after the rename, so the rename's own durability across a crash
+/// is unguaranteed either way. Making that stronger means adding a directory
+/// fsync, not keeping a more expensive file sync.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -26,7 +40,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     tmp.write_all(data)
         .with_context(|| format!("failed to write temp file for {}", path.display()))?;
     tmp.flush()?;
-    tmp.as_file().sync_all()?;
+    tmp.as_file().sync_data()?;
 
     tmp.persist(path)
         .with_context(|| format!("failed to persist temp file to {}", path.display()))?;

@@ -9,6 +9,7 @@
 
 use std::time::Instant;
 
+use mvm_runtime::workload_runner::StopTiming;
 use serde::{Deserialize, Serialize};
 
 use super::launch_sample::LaunchSubTimings;
@@ -156,6 +157,7 @@ pub struct LaunchSubMarks {
     first_dispatch: SpanMark,
     cleanup_handoff: SpanMark,
     stop_transient: SpanMark,
+    stop_timing: Option<StopTiming>,
     pool_replenish: SpanMark,
     state_remove: SpanMark,
 }
@@ -211,6 +213,14 @@ impl LaunchSubMarks {
         }
     }
 
+    /// Record the backend's stop sequence when the selected backend exposes
+    /// the shared workload-runner timing surface.
+    pub fn record_stop_timing(&mut self, timing: Option<StopTiming>) {
+        if self.enabled {
+            self.stop_timing = timing;
+        }
+    }
+
     /// Whether `phase` recorded a complete span.
     #[must_use]
     pub fn recorded(&self, phase: SubPhase) -> bool {
@@ -232,6 +242,34 @@ impl LaunchSubMarks {
             first_dispatch_ms: self.first_dispatch.elapsed_ms(),
             cleanup_handoff_ms: self.cleanup_handoff.elapsed_ms(),
             stop_transient_ms: self.stop_transient.elapsed_ms(),
+            stop_attach_ms: self
+                .stop_timing
+                .map(|timing| timing.attach.as_secs_f64() * 1000.0),
+            stop_endpoint_reaping_ms: self
+                .stop_timing
+                .map(|timing| timing.endpoint_reaping.as_secs_f64() * 1000.0),
+            stop_driver_kill_ms: self
+                .stop_timing
+                .map(|timing| timing.driver_kill.as_secs_f64() * 1000.0),
+            stop_console_cleanup_ms: self
+                .stop_timing
+                .map(|timing| timing.console_cleanup.as_secs_f64() * 1000.0),
+            stop_supervisor_signal_ms: self
+                .stop_timing
+                .and_then(|timing| timing.driver_detail)
+                .map(|timing| timing.supervisor_signal.as_secs_f64() * 1000.0),
+            stop_pid_disappearance_ms: self
+                .stop_timing
+                .and_then(|timing| timing.driver_detail)
+                .map(|timing| timing.pid_disappearance.as_secs_f64() * 1000.0),
+            stop_force_kill_wait_ms: self
+                .stop_timing
+                .and_then(|timing| timing.driver_detail)
+                .map(|timing| timing.force_kill_wait.as_secs_f64() * 1000.0),
+            stop_state_cleanup_ms: self
+                .stop_timing
+                .and_then(|timing| timing.driver_detail)
+                .map(|timing| timing.state_cleanup.as_secs_f64() * 1000.0),
             pool_replenish_ms: self.pool_replenish.elapsed_ms(),
             state_remove_ms: self.state_remove.elapsed_ms(),
         }
@@ -586,6 +624,34 @@ mod tests {
             ALL_SUB_PHASES.len(),
             "each phase must map to its own field: {timings:?}"
         );
+    }
+
+    #[test]
+    fn backend_stop_timing_is_projected_into_launch_sub_phases() {
+        let mut marks = LaunchSubMarks::new(true);
+        marks.record_stop_timing(Some(StopTiming {
+            attach: Duration::from_millis(1),
+            endpoint_reaping: Duration::from_millis(2),
+            driver_kill: Duration::from_millis(3),
+            console_cleanup: Duration::from_millis(4),
+            total: Duration::from_millis(10),
+            driver_detail: Some(mvm_vmm::driver::RunningVmStopTiming {
+                supervisor_signal: Duration::from_millis(5),
+                pid_disappearance: Duration::from_millis(6),
+                force_kill_wait: Duration::from_millis(7),
+                state_cleanup: Duration::from_millis(8),
+            }),
+        }));
+
+        let timings = marks.to_timings();
+        assert_eq!(timings.stop_attach_ms, Some(1.0));
+        assert_eq!(timings.stop_endpoint_reaping_ms, Some(2.0));
+        assert_eq!(timings.stop_driver_kill_ms, Some(3.0));
+        assert_eq!(timings.stop_console_cleanup_ms, Some(4.0));
+        assert_eq!(timings.stop_supervisor_signal_ms, Some(5.0));
+        assert_eq!(timings.stop_pid_disappearance_ms, Some(6.0));
+        assert_eq!(timings.stop_force_kill_wait_ms, Some(7.0));
+        assert_eq!(timings.stop_state_cleanup_ms, Some(8.0));
     }
 
     #[test]

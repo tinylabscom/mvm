@@ -20,6 +20,7 @@ pub mod hvf_supervisor;
 pub mod linux_env;
 pub mod netd_spawn;
 pub mod observability_target;
+pub mod process_exit;
 pub mod process_liveness;
 pub mod runtime_meta;
 pub mod shell;

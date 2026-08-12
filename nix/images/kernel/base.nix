@@ -169,6 +169,15 @@ let
     # neither needs nor compiles this in (keeping it off the arm64 built-in
     # symbol budget).
     "VIRTIO_MMIO_CMDLINE_DEVICES"
+  ]
+  ++ pkgs.lib.optionals (kernelArch == "arm64") [
+    # Firecracker exposes an 8250 serial device on both supported host
+    # architectures. Keep that console alongside PL011 (QEMU virt) and hvc0
+    # (libkrun) so one published arm64 workload kernel remains observable on
+    # every backend. SERIAL_OF_PLATFORM binds the DT-described UART on ARM.
+    "SERIAL_8250"
+    "SERIAL_8250_CONSOLE"
+    "SERIAL_OF_PLATFORM"
   ];
 
   # ── Base disables ──
@@ -418,10 +427,9 @@ let
     # AF_ALG userspace crypto families. Their selectors otherwise restore the
     # workload's required CGROUPS and CRYPTO_USER_API cuts.
     "SCHED_AUTOGROUP"
-    # ARM guests use PL011 early/legacy console or virtio-console. They expose
-    # no legacy 8250 UART, VGA device, error-reporting controller, or SCMI
-    # firmware transport.
-    "SERIAL_8250"
+    # ARM guests expose no VGA device, error-reporting controller, or SCMI
+    # firmware transport. PL011, virtio-console, and Firecracker's 8250 UART
+    # are retained above.
     "VGA_ARB"
     "EDAC"
     "ARM_SCMI_PROTOCOL"

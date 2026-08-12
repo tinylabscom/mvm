@@ -655,7 +655,7 @@ mod reap_orphans_tests {
 
 #[cfg(all(test, feature = "builder-vm"))]
 mod heartbeat_tests {
-    use super::format_compile_elapsed;
+    use super::{format_compile_elapsed, format_compile_start};
     use std::time::Duration;
 
     #[test]
@@ -668,5 +668,13 @@ mod heartbeat_tests {
             format_compile_elapsed(Duration::from_secs(130)),
             "still compiling… (2m10s elapsed)"
         );
+    }
+
+    #[test]
+    fn compile_start_message_avoids_a_false_fixed_duration_promise() {
+        let message = format_compile_start("workload", "aarch64");
+        assert!(message.contains("depending on the host"));
+        assert!(message.contains("reuse the persistent Nix store"));
+        assert!(!message.contains("3-10"));
     }
 }

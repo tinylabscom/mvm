@@ -12,6 +12,7 @@ use crate::policy::network_policy::HostPort;
 
 pub mod ceiling;
 pub mod projection;
+pub mod subset;
 
 /// A workload's permission set. Every field is optional: absent means
 /// "unspecified", which each dimension resolves differently — an absent

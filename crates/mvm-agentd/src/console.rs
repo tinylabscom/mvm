@@ -21,6 +21,16 @@ static COMPLETED_SESSION_ID: AtomicU32 = AtomicU32::new(0);
 static COMPLETED_EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 /// Active PTY master fd for resize support. -1 when no session is active.
 static CONSOLE_MASTER_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+/// Active session's shell pid, so an explicit close can end it. -1 when idle.
+static CONSOLE_CHILD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// How long an explicit close waits for the session to finish winding down.
+///
+/// The host sends `ConsoleClose` the instant its relay sees EOF, which the
+/// guest produces *before* it reaps the shell and joins its relay threads — so
+/// the request routinely arrives while the session is still tearing itself
+/// down. Waiting is what turns that race into the exit code the host asked for.
+pub const CLOSE_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Result of opening a console session.
 pub struct ConsoleSession {
@@ -83,6 +93,9 @@ const AF_VSOCK: i32 = 40;
 const SOCK_STREAM: i32 = 1;
 const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
 const SIGTERM: i32 = 15;
+/// Sent to an interactive shell on explicit close: a hangup is what a terminal
+/// going away looks like, so job-control shells clean up their children.
+const SIGHUP: i32 = 1;
 
 fn console_peer_is_authorized(cid: u32) -> bool {
     cid == HOST_CID
@@ -222,6 +235,12 @@ pub fn open_session(
     let shell_env = build_shell_env_with(extra_env);
     let mut envp: Vec<*const u8> = shell_env.iter().map(|c| c.as_ptr().cast::<u8>()).collect();
     envp.push(std::ptr::null());
+    // Same reason as `envp`: the child's `chdir` target has to be a NUL string
+    // allocated before the fork. Start where `$HOME` points — the workload's
+    // own writable home — rather than in root's, which the workload uid can
+    // neither write nor, on most images, read.
+    let start_dir = std::ffi::CString::new(crate::guest_mount::workload_home())
+        .unwrap_or_else(|_| c"/".to_owned());
     // SAFETY: fork() takes no arguments and has no preconditions; it returns
     // twice (0 in the child, the child pid in the parent).
     let pid = unsafe { fork() };
@@ -260,7 +279,7 @@ pub fn open_session(
             }
 
             // Start in $HOME.
-            let _ = chdir(c"/root".as_ptr().cast());
+            let _ = chdir(start_dir.as_ptr().cast());
 
             // Exec the prepared absolute command path. There is no PATH search
             // here because the post-fork child must avoid allocation.
@@ -277,6 +296,7 @@ pub fn open_session(
         close(slave_fd);
     }
     CONSOLE_MASTER_FD.store(master_fd, std::sync::atomic::Ordering::SeqCst);
+    CONSOLE_CHILD_PID.store(pid, std::sync::atomic::Ordering::SeqCst);
 
     Ok(ConsoleSession {
         session_id,
@@ -353,16 +373,18 @@ pub fn close_session(session: &ConsoleSession) -> i32 {
         close(session.master_fd);
     }
 
-    CONSOLE_MASTER_FD.store(-1, std::sync::atomic::Ordering::SeqCst);
-    CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-
     // Extract exit code
     let exit_code = if status & 0x7f == 0 {
         (status >> 8) & 0xff // normal exit
     } else {
         128 + (status & 0x7f) // signal
     };
+    // Recorded before the active flag clears, for the reason given in
+    // `run_console_relay`'s teardown.
     record_completed_session(session.session_id, exit_code);
+    CONSOLE_MASTER_FD.store(-1, std::sync::atomic::Ordering::SeqCst);
+    CONSOLE_CHILD_PID.store(-1, std::sync::atomic::Ordering::SeqCst);
+    CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
     exit_code
 }
 
@@ -571,9 +593,6 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
         waitpid(child_pid, &mut status, 0);
     }
 
-    CONSOLE_MASTER_FD.store(-1, std::sync::atomic::Ordering::SeqCst);
-    CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
-
     // Don't call close_session — we already waited and the fds are owned
     // by the File/UnixStream objects which will drop.
     let exit_code = if status & 0x7f == 0 {
@@ -581,13 +600,60 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
     } else {
         128 + (status & 0x7f)
     };
+    // Record before clearing the active flag, never after: a close waiting on
+    // that flag would otherwise read the previous session's exit code.
     record_completed_session(session.session_id, exit_code);
+    CONSOLE_MASTER_FD.store(-1, std::sync::atomic::Ordering::SeqCst);
+    CONSOLE_CHILD_PID.store(-1, std::sync::atomic::Ordering::SeqCst);
+    CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
     exit_code
 }
 
 /// Check if a console session is currently active.
 pub fn is_active() -> bool {
     CONSOLE_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Block until no session is active, or `timeout` elapses. Returns whether the
+/// session settled.
+fn wait_until_idle(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while is_active() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
+}
+
+/// End the active console session and return the shell's exit code.
+///
+/// Two callers arrive here and both must be served. The common one is a host
+/// that already saw its relay EOF and only wants the exit code — its session is
+/// mid-teardown, so the first wait is all it needs. The other is a host that
+/// wants a still-running session gone, which takes a `SIGHUP` to the shell:
+/// that closes the PTY, ends the relay, and the same teardown path records the
+/// exit code.
+///
+/// Returns `None` only if the session outlives both waits (`timeout` each),
+/// which means the relay is wedged rather than merely slow.
+pub fn close_active_session(timeout: std::time::Duration) -> Option<i32> {
+    if !wait_until_idle(timeout) {
+        let pid = CONSOLE_CHILD_PID.load(Ordering::SeqCst);
+        if pid > 0 {
+            // SAFETY: `kill` takes no pointers. `pid` is the shell forked by
+            // `open_session`; if it has already been reaped this returns ESRCH,
+            // which is exactly the case the wait below then observes.
+            unsafe {
+                kill(pid, SIGHUP);
+            }
+        }
+        if !wait_until_idle(timeout) {
+            return None;
+        }
+    }
+    Some(COMPLETED_EXIT_CODE.load(Ordering::SeqCst))
 }
 
 fn record_completed_session(session_id: u32, exit_code: i32) {
@@ -756,6 +822,77 @@ mod tests {
         );
         let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
         assert!(strs.contains(&"MVM_SESSION_TAG=abc123"));
+    }
+
+    /// The reported bug: `mvmctl machine run -it` printed
+    /// "explicit close not yet supported" on every clean logout. The host
+    /// sends its close as soon as the relay EOFs, which the guest emits
+    /// before it reaps the shell — so the close lands on a session that is
+    /// still active and must wait for it, not refuse it.
+    #[test]
+    fn close_waits_out_a_session_that_is_still_tearing_down() {
+        CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            record_completed_session(7, 42);
+            CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
+        });
+
+        assert_eq!(
+            close_active_session(std::time::Duration::from_secs(5)),
+            Some(42)
+        );
+    }
+
+    /// A wedged relay is the one case that still fails, and it fails as a
+    /// refusal rather than by blocking the agent forever.
+    #[test]
+    fn close_reports_a_session_that_never_terminates() {
+        CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
+        // No shell pid is recorded, so the SIGHUP escalation has nothing to
+        // signal and both waits lapse.
+        CONSOLE_CHILD_PID.store(-1, Ordering::SeqCst);
+
+        assert_eq!(
+            close_active_session(std::time::Duration::from_millis(50)),
+            None
+        );
+
+        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    /// An idle agent answers immediately from the recorded exit code.
+    #[test]
+    fn close_returns_the_recorded_code_when_no_session_is_active() {
+        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
+        record_completed_session(3, 130);
+
+        assert_eq!(close_active_session(CLOSE_SETTLE_TIMEOUT), Some(130));
+        assert_eq!(completed_exit_code(3), Some(130));
+        assert_eq!(
+            completed_exit_code(4),
+            None,
+            "other sessions must not match"
+        );
+    }
+
+    /// The exit code has to be on record before the active flag clears, or a
+    /// close released by that flag reads whatever the previous session left.
+    #[test]
+    fn the_exit_code_is_recorded_before_the_active_flag_clears() {
+        record_completed_session(1, 9);
+        CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
+        let observer = std::thread::spawn(|| {
+            while is_active() {
+                std::hint::spin_loop();
+            }
+            COMPLETED_EXIT_CODE.load(Ordering::SeqCst)
+        });
+
+        record_completed_session(2, 55);
+        CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
+
+        assert_eq!(observer.join().unwrap(), 55);
     }
 
     #[test]

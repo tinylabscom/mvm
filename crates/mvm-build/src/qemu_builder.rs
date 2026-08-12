@@ -25,11 +25,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError};
 #[cfg(feature = "builder-vm")]
-use crate::builder_vm_runtime::CLOSURE_SEED_TAG;
+use crate::builder_vm_runtime::{CLOSURE_SEED_TAG, acquire_nix_store_image_lock_named};
 #[cfg(feature = "builder-vm")]
 use crate::libkrun_builder::{
-    BuilderEndpointTransport, BuilderShellJob, BuilderShellResult, BuilderVsockEgressEndpoint,
-    builder_runtime_overlay_attachment, require_runtime_overlay_ext4,
+    BuilderEndpointTransport, BuilderShellJob, BuilderShellResult, BuilderVmImage,
+    BuilderVsockEgressEndpoint, DEFAULT_NIX_STORE_MIB, builder_runtime_overlay_attachment,
+    builder_vm_cache_dir, prepopulate_stage0_nix_store_image, require_runtime_overlay_ext4,
+    stage0_nix_store_image_name,
 };
 use mvm_core::config::DEFAULT_MVM_HOME_DIR_NAME;
 
@@ -94,7 +96,7 @@ impl BuilderVm for QemuBuilderVm {
 
 /// Max wall-clock for a Stage 0 QEMU run (kernel compile + downloads). Wraps
 /// the qemu child in `timeout` so a hung guest can't block forever.
-const STAGE0_TIMEOUT_SECS: u32 = 3600;
+const STAGE0_TIMEOUT_SECS: u32 = 7200;
 const QEMU_BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
 const QEMU_BUILDER_VSOCK_EGRESS_PORT_BASE: u32 = 45_253;
@@ -110,6 +112,7 @@ const QEMU_STAGE0_OUT_ARTIFACT_NAMES: &[&str] = &[
     "rootfs.ext4",
     "cmdline.txt",
     "manifest.json",
+    "mvm-kernel.config",
     "nix-stderr.log",
 ];
 
@@ -164,6 +167,17 @@ fn run_stage0_qemu(
 ) -> Result<(), BuilderVmError> {
     let qemu_bin = locate_qemu()?;
     let (kernel, initrd) = locate_host_kernel()?;
+    #[cfg(feature = "builder-vm")]
+    let nix_store_lock = {
+        let image = BuilderVmImage::new_root_dir(guest_root_dir.to_path_buf(), entry_path);
+        let lock = acquire_nix_store_image_lock_named(
+            &builder_vm_cache_dir(),
+            &stage0_nix_store_image_name(),
+            u64::from(DEFAULT_NIX_STORE_MIB),
+        )?;
+        prepopulate_stage0_nix_store_image(&image, lock.path())?;
+        lock
+    };
     let kvm = kvm_available();
     if !kvm {
         eprintln!(
@@ -213,8 +227,9 @@ fn run_stage0_qemu(
     // 2. Launch QEMU (the validated recipe), serial → console.log.
     let egress_port = allocate_qemu_builder_egress_port();
     let hostepoch = crate::builder_vm::builder_hostepoch_cmdline_token();
+    let serial_console = qemu_console_for_arch(std::env::consts::ARCH);
     let append = format!(
-        "console=ttyS0 root=/dev/vda rw init={entry_path} mvm.backend=qemu {QEMU_BUILDER_VSOCK_EGRESS_TOKEN} {QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX}{egress_port} {hostepoch} panic=-1"
+        "console={serial_console} root=/dev/vda rw init={entry_path} mvm.backend=qemu {QEMU_BUILDER_VSOCK_EGRESS_TOKEN} {QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX}{egress_port} {hostepoch} panic=-1"
     );
     let guest_cid = allocate_qemu_builder_guest_cid();
     #[cfg(feature = "builder-vm")]
@@ -224,7 +239,11 @@ fn run_stage0_qemu(
     )?;
     let mut cmd = Command::new("timeout");
     cmd.arg(STAGE0_TIMEOUT_SECS.to_string()).arg(&qemu_bin);
-    cmd.args(["-m", "8G", "-smp", "6"]);
+    let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
+    cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
+    if let Some(machine) = qemu_machine_for_arch(std::env::consts::ARCH) {
+        cmd.args(["-machine", machine]);
+    }
     if kvm {
         cmd.args(["-enable-kvm", "-cpu", "host"]);
     } else {
@@ -237,6 +256,11 @@ fn run_stage0_qemu(
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
     }
+    #[cfg(feature = "builder-vm")]
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw",
+        nix_store_lock.path().display()
+    ));
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);
@@ -268,7 +292,7 @@ fn run_stage0_qemu(
     }
     if !log.contains("stage0-init: done; halting") {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "QEMU Stage 0 did not reach a clean halt; console at {}\n{}",
+            "QEMU Stage 0 exited with {status} before reaching a clean halt; console at {}\n{}",
             console_log.display(),
             tail(&log, 20)
         )));
@@ -465,6 +489,21 @@ fn locate_qemu() -> Result<String, BuilderVmError> {
         })
 }
 
+fn qemu_machine_for_arch(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" => Some("virt"),
+        "x86_64" => None,
+        _ => None,
+    }
+}
+
+fn qemu_console_for_arch(arch: &str) -> &'static str {
+    match arch {
+        "aarch64" => "ttyAMA0",
+        _ => "ttyS0",
+    }
+}
+
 /// The running kernel's `vmlinuz` + `initrd.img` under `/boot`. The stock
 /// initramfs carries the modular virtio/ext4 drivers Stage 0 needs.
 fn locate_host_kernel() -> Result<(PathBuf, PathBuf), BuilderVmError> {
@@ -555,6 +594,14 @@ mod tests {
     #[test]
     fn qemu_stage0_extracts_manifest_sidecar() {
         assert!(QEMU_STAGE0_OUT_ARTIFACT_NAMES.contains(&"manifest.json"));
+    }
+
+    #[test]
+    fn qemu_stage0_extracts_resolved_kernel_config() {
+        assert!(
+            QEMU_STAGE0_OUT_ARTIFACT_NAMES.contains(&"mvm-kernel.config"),
+            "QEMU Stage 0 must retain the config required for verified kernel publication"
+        );
     }
 
     #[test]
@@ -676,14 +723,11 @@ fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> BuilderVmError {
 // `finalize_flake_job` reads /job/result), so `BuilderArtifacts` is
 // byte-identical regardless of which VMM ran the build.
 
-/// Guest RAM (MiB) + vCPUs for a QEMU steady-state build. Mirror the
-/// values proven on the x86_64 box for Stage 0 — same build class on the
-/// same hardware. The `memory-backend-memfd` is lazily
-/// backed, so the figure is a ceiling, not a reservation.
-#[cfg(feature = "builder-vm")]
-const QEMU_BUILD_MEMORY_MIB: u32 = 8192;
-#[cfg(feature = "builder-vm")]
-const QEMU_BUILD_VCPUS: u8 = 6;
+/// Guest RAM (MiB) + vCPUs for QEMU Stage 0 and steady-state builds. Leave
+/// enough headroom for QEMU and the Linux host on a common 8 GiB / 4-vCPU
+/// development machine.
+const QEMU_BUILD_MEMORY_MIB: u32 = 6144;
+const QEMU_BUILD_VCPUS: u8 = 4;
 
 #[cfg(not(feature = "builder-vm"))]
 fn run_build_qemu(
@@ -822,6 +866,9 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     let mut cmd = Command::new("timeout");
     cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
     cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
+    if let Some(machine) = qemu_machine_for_arch(std::env::consts::ARCH) {
+        cmd.args(["-machine", machine]);
+    }
     if kvm {
         cmd.args(["-enable-kvm", "-cpu", "host"]);
     } else {
@@ -1057,8 +1104,9 @@ fn run_build_qemu(
             })?;
     }
 
-    // 9. Build the QEMU cmdline from the image's (swap hvc0→ttyS0, force
-    //    eth0, mark the backend); `root=/dev/vda ro init=…` ride unchanged.
+    // 9. Build the QEMU cmdline from the image's (swap hvc0 for the native
+    //    QEMU serial console, force eth0, mark the backend); `root=/dev/vda ro
+    //    init=…` ride unchanged.
     // The QEMU builder is always a lean Rootfs builder, so the runtime overlay
     // is required — fail closed rather than booting a builder whose guest agent
     // can never launch (it bakes none of its guest binaries).
@@ -1088,6 +1136,9 @@ fn run_build_qemu(
     let mut cmd = Command::new("timeout");
     cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
     cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
+    if let Some(machine) = qemu_machine_for_arch(std::env::consts::ARCH) {
+        cmd.args(["-machine", machine]);
+    }
     if kvm {
         cmd.args(["-enable-kvm", "-cpu", "host"]);
     } else {
@@ -1275,11 +1326,18 @@ fn allocate_qemu_builder_egress_port() -> u32 {
 /// Idempotent: running it on its own output is a no-op.
 #[cfg(any(feature = "builder-vm", test))]
 fn qemu_build_cmdline(image_cmdline: &str, egress_port: u32) -> String {
+    qemu_build_cmdline_for_arch(image_cmdline, egress_port, std::env::consts::ARCH)
+}
+
+#[cfg(any(feature = "builder-vm", test))]
+fn qemu_build_cmdline_for_arch(image_cmdline: &str, egress_port: u32, arch: &str) -> String {
     let mut s = image_cmdline.trim().to_string();
+    let serial_console = qemu_console_for_arch(arch);
+    let serial_console_token = format!("console={serial_console}");
     if s.contains("console=hvc0") {
-        s = s.replace("console=hvc0", "console=ttyS0");
-    } else if !s.split_whitespace().any(|t| t == "console=ttyS0") {
-        s = format!("console=ttyS0 {s}");
+        s = s.replace("console=hvc0", &serial_console_token);
+    } else if !s.split_whitespace().any(|t| t == serial_console_token) {
+        s = format!("{serial_console_token} {s}");
     }
     for tok in [
         "mvm.backend=qemu",
@@ -1331,9 +1389,9 @@ mod vsock_module_tests {
     }
 
     #[test]
-    fn cmdline_swaps_hvc0_for_serial_and_adds_qemu_markers() {
+    fn x86_64_cmdline_swaps_hvc0_for_serial_and_adds_qemu_markers() {
         let img = "console=hvc0 root=/dev/vda ro rootfstype=ext4 init=/sbin/mvm-host-vm-init";
-        let out = qemu_build_cmdline(img, 45253);
+        let out = qemu_build_cmdline_for_arch(img, 45253, "x86_64");
         assert!(out.contains("console=ttyS0"), "got: {out}");
         assert!(!out.contains("hvc0"), "got: {out}");
         // init + root + ro are preserved from the image verbatim.
@@ -1371,18 +1429,51 @@ mod vsock_module_tests {
     }
 
     #[test]
-    fn cmdline_is_idempotent() {
-        let once = qemu_build_cmdline(
+    fn aarch64_qemu_stage0_selects_virt_machine() {
+        assert_eq!(qemu_machine_for_arch("aarch64"), Some("virt"));
+    }
+
+    #[test]
+    fn aarch64_qemu_uses_pl011_serial_console() {
+        let out = qemu_build_cmdline_for_arch(
             "console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init",
             45253,
+            "aarch64",
         );
-        let twice = qemu_build_cmdline(&once, 45253);
+        assert!(out.contains("console=ttyAMA0"), "got: {out}");
+        assert!(!out.contains("console=ttyS0"), "got: {out}");
+    }
+
+    #[test]
+    fn x86_64_qemu_stage0_keeps_default_machine() {
+        assert_eq!(qemu_machine_for_arch("x86_64"), None);
+    }
+
+    #[test]
+    fn qemu_builder_defaults_leave_host_headroom() {
+        assert_eq!(QEMU_BUILD_MEMORY_MIB, 6144);
+        assert_eq!(QEMU_BUILD_VCPUS, 4);
+        assert_eq!(STAGE0_TIMEOUT_SECS, 7200);
+    }
+
+    #[test]
+    fn cmdline_is_idempotent() {
+        let once = qemu_build_cmdline_for_arch(
+            "console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init",
+            45253,
+            "aarch64",
+        );
+        let twice = qemu_build_cmdline_for_arch(&once, 45253, "aarch64");
         assert_eq!(once, twice);
     }
 
     #[test]
     fn cmdline_adds_serial_when_no_console_present() {
-        let out = qemu_build_cmdline("root=/dev/vda ro init=/sbin/mvm-host-vm-init", 45253);
+        let out = qemu_build_cmdline_for_arch(
+            "root=/dev/vda ro init=/sbin/mvm-host-vm-init",
+            45253,
+            "x86_64",
+        );
         assert!(out.starts_with("console=ttyS0 "), "got: {out}");
     }
 

@@ -29,6 +29,7 @@
 
 pub mod artifact;
 pub mod audit;
+pub mod audit_checkpoint;
 pub mod audit_dedup;
 pub mod audit_file;
 pub mod audit_recorder;
@@ -135,7 +136,8 @@ pub use artifact::{
 pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
 pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
 pub use audit_file::{
-    FileAuditSigner, SignedEnvelope, VerifyError, verify_audit_chain, verify_audit_chain_entries,
+    ChainCheckpoint, FileAuditSigner, IncrementalVerification, SignedEnvelope, VerifyError,
+    verify_audit_chain, verify_audit_chain_entries, verify_audit_chain_incremental,
 };
 pub use audit_recorder::{
     EventCategory, Recorder, RecorderError, UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256,

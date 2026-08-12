@@ -200,6 +200,30 @@ impl SupervisorStandbyPool {
         self.record(&h)
     }
 
+    /// Demote a standby that has lost its preloaded child back to saved-only.
+    ///
+    /// A preloaded child is an optimization layered on the parent's checkpoint:
+    /// the record owns a paused VMM *instead of* being saved-only. When a claim
+    /// fails, its cleanup destroys that child — but the parent and its
+    /// checkpoint are still healthy, so the record must go on advertising the
+    /// parent while no longer naming a child that has been killed and whose
+    /// state dir is gone.
+    ///
+    /// Without this the record stayed `Idle` pointing at a destroyed child, so
+    /// every later claim against it failed with `Firecracker socket … does not
+    /// exist — VM is not running`, while `idle_count_compatible` still counted
+    /// it — capacity the pool advertised, could never serve, and which
+    /// `warm_to_target` therefore never replaced. Clearing `pid` restores the
+    /// `is_saved_state` sentinel so the next claim materializes a fresh child
+    /// from the checkpoint instead.
+    pub fn demote_to_saved_state(&self, id: &str) -> Result<()> {
+        let mut h = self.load(id)?;
+        h.preloaded_child_vm_name = None;
+        h.control_socket = String::new();
+        h.pid = 0;
+        self.record(&h)
+    }
+
     /// Remove a standby's dir (after claim/boot, or when reaping a dead one).
     pub fn remove(&self, id: &str) -> Result<()> {
         let dir = self.root.join(id);

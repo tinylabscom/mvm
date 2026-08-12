@@ -59,33 +59,15 @@ pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
-    // SAFETY: signal 0 probes existence/permission without delivering a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    mvm_vmm::host::process_liveness::pid_is_alive(pid)
 }
 
-fn reap_child_if_exited(pid: libc::pid_t) -> bool {
-    let mut status = 0;
-    // SAFETY: `waitpid` with WNOHANG only reaps this process's child if it has
-    // exited; for non-child PIDs it returns ECHILD and leaves the liveness check
-    // to `kill(pid, 0)`.
-    unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) == pid }
-}
-
-fn wait_for_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    let mut attempt = 0u32;
-    loop {
-        if reap_child_if_exited(pid) || !pid_alive(pid) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        // A supervisor that already exited must not be reported as taking a
-        // full tick to do it — this wait is on the teardown critical path.
-        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
-        attempt = attempt.saturating_add(1);
-    }
+fn wait_for_pid_exit(
+    pid: libc::pid_t,
+    timeout: Duration,
+    observer: Option<&mvm_vmm::host::process_exit::ProcessExitObserver>,
+) -> bool {
+    mvm_vmm::host::process_exit::wait_for_pid_exit(pid, Instant::now() + timeout, observer)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -99,11 +81,8 @@ pub(crate) struct TerminationTiming {
 /// the supervisor is still this process's child, reap it with `waitpid` so an
 /// already-exited zombie does not look alive for the full grace window.
 /// Shared by the `VmBackend` stop path and the hvf driver's `kill`.
-pub(crate) fn terminate_pid(pid: libc::pid_t) {
-    let _ = terminate_pid_timed(pid);
-}
-
-pub(crate) fn terminate_pid_timed(pid: libc::pid_t) -> TerminationTiming {
+pub(crate) fn terminate_pid_timed(pid: libc::pid_t) -> Result<TerminationTiming> {
+    let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
     let signal_started = Instant::now();
     // SAFETY: signalling a pid we recorded from our own supervisor.
     unsafe {
@@ -112,29 +91,36 @@ pub(crate) fn terminate_pid_timed(pid: libc::pid_t) -> TerminationTiming {
     let supervisor_signal = signal_started.elapsed();
 
     let wait_started = Instant::now();
-    let exited = wait_for_pid_exit(pid, Duration::from_secs(5));
+    let exited = wait_for_pid_exit(pid, Duration::from_secs(5), observer.as_ref());
     let pid_disappearance = wait_started.elapsed();
     if exited {
-        return TerminationTiming {
+        return Ok(TerminationTiming {
             supervisor_signal,
             pid_disappearance,
             force_kill_wait: Duration::ZERO,
-        };
+        });
     }
 
     let force_started = Instant::now();
-    if pid_alive(pid) {
+    let force_kill_wait = if pid_alive(pid) {
         // SAFETY: same pid.
         unsafe {
             libc::kill(pid, libc::SIGKILL);
         }
-        let _ = wait_for_pid_exit(pid, Duration::from_millis(500));
-    }
-    TerminationTiming {
+        if !wait_for_pid_exit(pid, Duration::from_millis(500), observer.as_ref()) {
+            return Err(anyhow!(
+                "hvf supervisor pid {pid} could not be proven dead after SIGKILL"
+            ));
+        }
+        force_started.elapsed()
+    } else {
+        Duration::ZERO
+    };
+    Ok(TerminationTiming {
         supervisor_signal,
         pid_disappearance,
-        force_kill_wait: force_started.elapsed(),
-    }
+        force_kill_wait,
+    })
 }
 
 /// Ask a running HVF supervisor to change its vCPU execution state.
@@ -731,7 +717,7 @@ impl VmBackend for HvfBackend {
         mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
         let pid_path = state_dir.join(PID_FILE_NAME);
         if let Some(pid) = read_pid(&pid_path) {
-            terminate_pid(pid);
+            terminate_pid_timed(pid)?;
         }
         let _ = std::fs::remove_file(&pid_path);
         Ok(())
@@ -1257,7 +1243,7 @@ mod tests {
         let pid = child.id() as libc::pid_t;
 
         let started = Instant::now();
-        terminate_pid(pid);
+        let timing = terminate_pid_timed(pid).expect("child termination should be proven");
         let elapsed = started.elapsed();
 
         let _ = child.wait();
@@ -1265,6 +1251,33 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "terminate_pid took {elapsed:?}, expected it to reap the child before the grace timeout"
         );
+        assert_eq!(timing.force_kill_wait, Duration::ZERO);
+        assert!(!pid_alive(pid));
+    }
+
+    #[test]
+    fn terminate_pid_escalates_when_sigterm_is_ignored() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; kill -STOP $$; while :; do :; done"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+
+        let mut status = 0;
+        // SAFETY: this waits for the child we just spawned and asks only for
+        // the deliberate SIGSTOP state transition.
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
+        assert_eq!(waited, pid);
+        // SAFETY: resume the same child after its SIGTERM handler is installed.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+
+        let timing = terminate_pid_timed(pid).expect("SIGKILL should prove child exit");
+
+        let _ = child.wait();
+        assert!(timing.force_kill_wait > Duration::ZERO);
         assert!(!pid_alive(pid));
     }
 

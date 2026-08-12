@@ -33,8 +33,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -51,6 +50,43 @@ pub type SharedBroker = Arc<Mutex<StreamBroker>>;
 
 /// How often the follower re-checks the file for new bytes.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// The follower's stop flag, waitable so a stop does not have to sit out the
+/// rest of the current poll interval.
+///
+/// A plain flag plus `sleep` made stopping cost whatever remained of
+/// [`POLL_INTERVAL`], which is paid on the teardown path of every workload and
+/// measured as the largest single span of a transient stop. Waiting on a
+/// condvar keeps the same idle cadence when nothing is happening while making
+/// the stop itself immediate.
+#[derive(Default)]
+struct StopSignal {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl StopSignal {
+    /// Recovered rather than propagated on poison, matching the rest of this
+    /// module: a panicking producer must not strand a follower thread that
+    /// would otherwise exit cleanly.
+    fn set(&self) {
+        *self.stopped.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.wake.notify_all();
+    }
+
+    fn is_set(&self) -> bool {
+        *self.stopped.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Idle for at most `timeout`, returning as soon as a stop lands.
+    fn wait(&self, timeout: Duration) {
+        let stopped = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
+        if *stopped {
+            return;
+        }
+        let _ = self.wake.wait_timeout(stopped, timeout);
+    }
+}
 
 /// Largest read per poll tick. Bounds one tick's memory use even after the
 /// file grew hugely while the follower was busy elsewhere; the remainder is
@@ -104,7 +140,7 @@ impl ConsoleSource {
         path: &Path,
         broker: SharedBroker,
     ) -> io::Result<ConsoleSourceHandle> {
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(StopSignal::default());
         let thread_stop = Arc::clone(&stop);
         let owned_path = path.to_path_buf();
         let thread = match builder
@@ -134,7 +170,7 @@ impl ConsoleSource {
 /// no thread behind — `stop` is the documented, join-and-confirm way to end
 /// it, not the only way it ends.
 pub struct ConsoleSourceHandle {
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopSignal>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -149,7 +185,7 @@ impl ConsoleSourceHandle {
     }
 
     fn join(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.set();
         if let Some(thread) = self.thread.take() {
             // A follower panic is not this caller's problem to propagate;
             // the thread is already gone either way once join returns.
@@ -168,22 +204,22 @@ impl Drop for ConsoleSourceHandle {
 /// chunks so a stop signal is honored within one chunk read even under a
 /// heavy backlog, then idle-poll once caught up. A stop request takes the
 /// bounded final drain on the way out rather than returning on the spot.
-fn run(path: &Path, broker: &SharedBroker, stop: &AtomicBool) {
+fn run(path: &Path, broker: &SharedBroker, stop: &StopSignal) {
     let mut state = FollowState::default();
     loop {
         while poll_once(path, &mut state, broker) {
-            if stop.load(Ordering::Relaxed) {
+            if stop.is_set() {
                 return final_drain(path, &mut state, broker);
             }
         }
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_set() {
             // Drains here too, not just out of the loop above. A caught-up
             // tick followed by a write and a stop — the exact shape of a
             // workload's last line before teardown — would otherwise exit on
             // a stop flag set after the poll that missed those bytes.
             return final_drain(path, &mut state, broker);
         }
-        std::thread::sleep(POLL_INTERVAL);
+        stop.wait(POLL_INTERVAL);
     }
 }
 

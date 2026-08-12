@@ -1,15 +1,17 @@
 # Refactor status
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
-- [x] **CLI help width invariant.** Every visible and hidden command is capped
-      at 80 columns for `--help`, `-h`, and `mvmctl help <path>`; generated-tree
-      BDD coverage executes the real binary and automatically includes future
-      subcommands.
+- [x] **CLI help layout invariant.** Every visible and hidden command emits one
+      physical line per help item, strictly shorter than 80 columns, for
+      `--help`, `-h`, and `mvmctl help <path>`. The shared renderer compacts
+      long-help blocks and caps overlong summaries at 79 columns; generated-tree
+      BDD coverage executes the real binary, rejects continuation lines and
+      overlong output, and automatically includes future subcommands.
 - [~] **Issue-closeout batch — #2165, #2321, and #2323.** The workload runner
       now emits read-only root bootargs for read-only root devices, the
       credential-bearing substitution response is incrementally capped, and
@@ -47,15 +49,30 @@ for detailed scope and acceptance criteria.
       readiness and after the first command, including Linux fault deltas and
       macOS physical footprint. The real-host Firecracker/HVF matrix,
       canonical budget table, and gates remain open.
+- [x] **Plan 314 — event-driven process lifecycle and shutdown.** The shared
+      macOS kqueue/Linux pidfd observer drives normal HVF, Firecracker,
+      libkrun, and QEMU shutdown with bounded fallback, identity-safe final
+      verification, and fail-closed escalation. Live HVF, Firecracker,
+      libkrun, and QEMU repetition gates pass with no force-kill escalation in
+      the 1,000-cycle HVF run and no leaked backend processes, PID markers, or
+      owned sockets. Supervisor profiling found vCPU exit, not the 5 ms
+      watchdog, dominates internal HVF shutdown, so no unnecessary control
+      protocol was added. The foreground-wait audit, repository waiting-model
+      rule, complete workspace tests, formatting, checks, and Linux all-target
+      clippy are green.
 
 ## In-flight plans
-- [~] Plan 315 — Bootstrap means machine-ready
+- [x] Plan 315 — Bootstrap means machine-ready
       (`specs/plans/315-bootstrap-machine-readiness.md`)
   - [x] Bootstrap acquires and verifies both builder image and workload kernel
   - [x] Downloaded/local kernel publication is staged and verified reads fail closed
   - [x] Local dm-verity capability uses resolved config, not raw-image strings
-  - [~] Workspace tests expose unrelated non-deterministic `mvm-hostd` failures;
-        Linux all-target Clippy remains for CI or a supported builder entry point
+  - [x] Required ARM64 cross-backend console support is pinned to its measured
+        959-symbol budget; the unaffected x86_64 ratchet remains 917
+  - [x] Full serialized workspace tests and doctests, host all-target Clippy,
+        the 461-test `xtask --features man` CI lane, and 172 BDD scenarios pass;
+        KVM-backed ARM64 cold bootstrap, kernel publication, persistent Stage 0
+        reuse, and two fully warm Alpine runs complete without a second Stage 0
 
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)
@@ -71,6 +88,20 @@ for detailed scope and acceptance criteria.
   - [ ] Run Linux-native workspace Clippy/tests in the project builder
         environment
 
+- [x] Plan 318 — span-timing profiling
+      (`specs/plans/318-span-timing-profiling.md`)
+  - [x] Phase 1 — `SpanTimingLayer`, bounded log-scale histogram, self-time
+        attribution, text/JSON reports, per-layer log filter so spans are
+        constructed at the CLI's default `error` verbosity
+  - [x] Phase 2 — instrument `mvm-fs` OCI/ext4 entry points and the four
+        backend `boot` paths plus HVF restore, then the launch critical path
+        in `mvm-cli` and the admission/audit/build/client entry points
+  - [x] Phase 3 — labelled prometheus export, pure per-call profile diffing in
+        `bench/span_profile.rs`, and a measured decision to keep the per-close
+        mutex (12 ns/span disabled; throughput scales up, not down, under
+        contention). Wiring the diff into a CI lane stays with Plan 311's
+        large-image work; guest-side `mvm-agentd` needs a profile egress path
+        first.
 - [x] Plan 2167 — durable agent session and event contract
       (`specs/plans/2167-agent-session-contract.md`)
   - [x] Versioned public IDs, lifecycle commands, durable/ephemeral event
@@ -103,13 +134,16 @@ for detailed scope and acceptance criteria.
   - [x] Add direct witnesses for the security-sensitive admission,
         verification, lease, and substitution cleanup invariants
   - [x] Fail closed when an accepted miss leaves the pinned mutation surface,
-        migrate 26 libkrun identities to their current file, and remove 14
-        obsolete misses without adding a waiver (83 accepted misses to 69)
+        migrate 26 libkrun identities to their current file, and remove 15
+        obsolete misses without adding a waiver (83 accepted misses to 68)
   - [x] Catch the current actionable `mvm-vmm`, `mvm-hostd`, and `mvm-agentd`
         mutants in focused mutation proofs
-  - [x] Pass affected-package all-target Clippy, workspace unit/integration
-        tests, the isolated `mvm-cli` doctest rerun, formatting, and the static
-        mutation surface gate on the dedicated fix branch
+  - [x] Add the six witnesses exposed by the first exact rerun and prove the
+        complete contract shard plus the focused five-mutant hostd repair
+  - [x] Pass workspace all-target Clippy, the isolated `mvm-cli` doctest rerun,
+        formatting, and the static mutation surface gate; the workspace suite
+        passed all repaired areas before one unrelated host-agent socket-bind
+        timeout whose isolated integration rerun passed 4/4
   - [ ] Run the exact Linux Security workflow, merge the fix, and observe a
         clean scheduled or release run before closing the issue
 - [~] Plan 300 — 30-issue reconciliation and closeout
@@ -222,11 +256,15 @@ for detailed scope and acceptance criteria.
   - [~] Phase 6 — move cleanup off the foreground critical path. Teardown
         decomposed and the warm-pool refill removed from it: a default
         `machine run` went 1366 ms -> 353.8 ms p50. Remaining teardown is
-        `stop_transient` 142.9 ms, which is real cleanup. A dedicated 1,000-cycle
-        HVF run now attributes its 67.62 ms p50 / 74.97 ms p95 stop wait to
-        supervisor PID disappearance; endpoint reaping and state cleanup are
-        below 0.1 ms at p99. Follow-up: give pool maintenance to the resident
-        per-tenant daemon and make supervisor shutdown event-driven.
+        `stop_transient` 142.9 ms, which is real cleanup. The Plan 314 event
+        path then completed a native macOS 26.5.2 / arm64 1,000-cycle HVF run
+        in the Rust test profile with p50/p95/p99 stop times of
+        703.48/1,151.28/1,865.07 ms and zero SIGKILL escalations. That run is
+        a lifecycle stress baseline, not a replacement for the release
+        prepared-cold numbers above: its stop tail is dominated by detached
+        supervisor PID disappearance. Follow-up: give pool maintenance to the
+        resident per-tenant daemon and continue reducing supervisor shutdown
+        latency.
   - [ ] Phase 7 — live validation and regression gates
   - [x] Cross-plan fast-machine-substrate contract documented in
         `specs/notes/2026-08-10-fast-machine-substrate.md` (issue #2279)
@@ -915,11 +953,16 @@ for detailed scope and acceptance criteria.
           miss, and eviction of **both** the record and the build directory —
           a record-only eviction would leave the poisoned tree under a name a
           later build re-adopts. Unblocks plan 279 WS1
-    - [ ] Workload/builder kernel cache: still path-trusting.
-          `verify_fetched_kernel` exists with **no production caller** —
-          neither the fetch nor the read path checks a kernel against its pin.
-          Scoped as plan 288
-          (`specs/plans/288-kernel-cache-verify-on-read.md`)
+    - [~] Workload/builder kernel cache: plan 288
+          (`specs/plans/288-kernel-cache-verify-on-read.md`). WS1–WS3 + WS5
+          landed — the fetch path verifies against the published checksum
+          manifest and records a digest sidecar, the read path verifies against
+          it and evicts the whole entry on failure, and
+          `check-verified-kernel-reads` keeps new callers on the seam. WS1's
+          `VerifiedKernel` initially reached only the arms that used it: the
+          Firecracker/qemu arm and the CLI's kernel-less-image fallback still
+          booted on presence until 2026-08-11. WS4 (shared sidecar helper with
+          the BLAKE3 artifact path) is the remainder
     - [ ] Cold-tier background scrub (recon §7.9)
   - [~] WS7 — σ/κ separation: `mvm_core::at_rest` gives the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint
@@ -1147,8 +1190,20 @@ for detailed scope and acceptance criteria.
         landing, so a bounded boot's *reported tier* is unwitnessed on hardware
   - [ ] WS5 — wasm fuel **and** epoch (fuel alone bounds nothing in a host
         call) + `StoreLimits`
-  - [ ] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
-        the restore-laundering path
+  - [~] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
+        the restore-laundering path. `grants_are_subset` in mvm-contract (CPU
+        and wall clock read absence as unbounded, egress as deny-all;
+        mismatched CPU units refused, never converted), `CheckpointMeta.grants`
+        inside the content-address so a tampered parent record cannot justify
+        a wider child (skip-serialized when absent, so an older checkpoint
+        reads as schema-stale rather than tampered). BOTH restore paths check,
+        through one predicate `ensure_child_grants_within_parent`: the vm_full
+        fork and the warm-pool claim.
+        STILL OPEN: (a) restore does not re-apply grants through `apply_grants`;
+        (b) a warm parent seals no grant — a factory parent holds no plan or
+        `cpu_grant` by construction and one parent serves every claim, so
+        bounding a claimed child's CPU/wall clock needs a pool-level grant on
+        `StandbySpec`; its egress is already bounded (absent egress = deny-all)
   - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
         `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
         and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,

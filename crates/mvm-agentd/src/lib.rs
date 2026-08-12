@@ -104,6 +104,9 @@ pub mod volume;
 pub mod vsock;
 pub mod worker_pool;
 pub mod worker_protocol;
+/// Names the fixed workload uid/gid in the workload rootfs account databases,
+/// so `whoami`/`id`/`getpwuid` resolve inside images mvm did not build.
+pub mod workload_identity;
 
 /// Process control RPC handler. Requests are admitted only after the guest
 /// agent's runtime profile and signed verb grant checks succeed.

@@ -3199,6 +3199,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
  "xattr",
 ]
@@ -3415,6 +3416,7 @@ dependencies = [
  "mvm-fs",
  "mvm-hostd",
  "mvm-runtime",
+ "mvm-vmm",
  "objc2-foundation",
  "predicates",
  "rand 0.8.6",
