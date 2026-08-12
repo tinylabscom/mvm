@@ -204,7 +204,7 @@ browser supplies a fixture token exactly as it supplies fixture values.
 | `find_placeholder` | substitution.rs 52–63 | **→P** — pure `&str` scan |
 | `SubstitutionRegistry` map + `resolve` + `host_is_bound` | substitution.rs 71–108 | **→P** — `host_matches` is already in `mvm_contract::ir` |
 | `SubstitutionRegistry::mint` | substitution.rs 83–89 | **split** — `insert(token, ref)` →P; the RNG draw stays |
-| The claim-12 bind check | injector.rs 68–70 **and** substitution.rs 191–199 | **→P once.** It is written twice today; move one copy, call it from both |
+| The claim-12 bind check | injector.rs 68–70, substitution.rs 191–199, and `mvm-client/src/secret.rs` 428–431 | **→P once**, as `ir::host_is_bound`. Written three times today; landing ahead of E2 |
 | `text.replace(placeholder, value)` | injector.rs 74 | **→P** as `substitute_into(text, placeholder, value) -> String` |
 | `SubstituteError`, `SignDispatchError`, `InjectError` | 3 files | **split** — pure variants (`UnknownPlaceholder`, `DestinationNotBound`, `WrongAuthType`) →P; `Resolve(_)` stays |
 | `SecretResolver`, `LocalResolver`, `FileSecretStore` | resolver.rs, mvm-core | **stays** — key custody |
@@ -223,9 +223,16 @@ into `mvm-contract` to preserve a signature.
 
 - [ ] E2.1 — `PLACEHOLDER_PREFIX` + `Placeholder` + `find_placeholder` →P.
       Leaf; nothing moves with it.
-- [ ] E2.2 — de-duplicate the bind check into one fn, **in place, before it
-      crosses a crate boundary**, so the claim-12 predicate has exactly one
-      definition at the moment it moves.
+- [~] E2.2 — de-duplicate the bind check into one fn, **before it crosses a
+      crate boundary**, so the claim-12 predicate has exactly one definition
+      at the moment it moves. **Landing separately and first**, as
+      `mvm_contract::ir::host_is_bound` — it is a standing drift hazard on a
+      security predicate whether or not the demo is ever built, so it does
+      not belong behind this plan. The survey found **three** copies, not the
+      two this section originally listed: the third is
+      `mvm-client/src/secret.rs:428`, over `SecretBindingMeta` rather than
+      `SecretRef`. Hence a free fn over `&[String]` rather than a method on
+      either type.
 - [ ] E2.3 — `SubstitutionRegistry` map/`resolve`/`host_is_bound` →P;
       `mint` splits.
 - [ ] E2.4 — `substitute_into` →P; `Injector` calls it.
@@ -253,19 +260,23 @@ copy of hostd's `AuditEntry` with `DateTime<Utc>` flattened to `String` and
 the newtype ids flattened to `String`, written that way because the real
 entry was not reachable from `no_std`.
 
-So E3 has three options, and picking one is the precondition for any code:
+E3 had three options. **Decided: option A.**
 
 | Option | Consequence |
 |---|---|
-| **A. Move `AuditEntry` down, retire `MirrorEntry`, unify on one `SignedEnvelope`** | The prize. One definition, and the pre-`canonical` byte-exactness hazard stops being a cross-crate coupling. Largest diff |
+| **A. Move `AuditEntry` down, retire `MirrorEntry`, unify on one `SignedEnvelope`** — **CHOSEN** | One definition, and the pre-`canonical` byte-exactness hazard stops being a cross-crate coupling. Largest diff |
 | B. Move only the writer fns, keep both envelope types | Smallest diff. Leaves two structurally identical types in one crate, which is the drift the mirror's own doc comment warns about |
 | C. Generic `SignedEnvelope<E>` over the entry type | Avoids the collision without deciding it. Adds a type parameter to a signed wire type — most churn per unit of value |
 
-**Recommend A.** `AuditEntry`'s fields are `DateTime<Utc>`, `TenantId`,
-`PlanId`, `Option<PolicyId>`, `String`, `BTreeMap<String, String>` — chrono
-and all three id newtypes are already in `mvm-contract` from Increment 3, so
-the type is portable *today*. `MirrorEntry` exists only because nobody
-revisited it after those landed.
+`AuditEntry`'s fields are `DateTime<Utc>`, `TenantId`, `PlanId`,
+`Option<PolicyId>`, `String`, `BTreeMap<String, String>` — chrono and all
+three id newtypes are already in `mvm-contract` from Increment 3, so the type
+is portable *today*. `MirrorEntry` exists only because nobody revisited it
+after those landed; option B would preserve a workaround whose cause is gone.
+
+The cost is honest: A is the biggest diff of the three and it touches a
+signed wire type. E3.1's frozen fixture is what makes that reversible, which
+is why it is ordered before the rename and not after.
 
 #### The name collision, to resolve before the move
 
@@ -317,14 +328,16 @@ stops verifying because a struct moved crates is the exact failure mode the
 
 #### Order
 
-- [ ] E3.0 — pick option A / B / C. Blocking.
+- [x] E3.0 — option A chosen.
 - [ ] E3.1 — freeze the byte fixture (a signed multi-entry chain + its
       verifying key) and assert it verifies. Do this first, on `main`'s
-      behaviour, so it is a real before-picture.
+      behaviour, so it is a real before-picture. Worth landing on its own
+      merits: it protects the chain from any future change, not only this
+      one.
 - [ ] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
 - [ ] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
       definition each, `mvm-hostd` calling `mvm-contract`.
-- [ ] E3.4 — `AuditEntry` →P (option A); `for_plan` becomes a free fn.
+- [ ] E3.4 — `AuditEntry` →P; `for_plan` becomes a free fn.
 - [ ] E3.5 — unify `SignedEnvelope`, retire `MirrorEntry`.
 - [ ] E3.6 — `seal()` →P; `FileAuditSigner::sign_and_emit` calls it.
 
