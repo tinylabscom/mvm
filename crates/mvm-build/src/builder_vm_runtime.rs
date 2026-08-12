@@ -39,6 +39,50 @@ pub use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 /// punishing fast machines.
 pub const DEFAULT_BUILDER_VM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// Filename of the marker the host stages under `<job_dir>/` to tell
+/// `mvm-host-vm-init` to enter its dispatch loop instead of running the
+/// single-shot `cmd.sh` / `install_spec` flow.
+///
+/// The guest hardcodes the same literal — it is a separate binary that cannot
+/// depend on this crate — so the string is pinned on both sides. Backend-
+/// agnostic: the marker is part of the guest contract, not of any one VMM.
+pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
+
+/// Filename the guest creates after binding its dispatch listener. The host
+/// waits for it before publishing a usable session record.
+pub const DISPATCH_READY_MARKER: &str = "dispatch.ready";
+
+/// How long a host waits for a persistent builder's dispatch loop to come up.
+/// A first boot formats and seeds the persistent Nix disk before exposing the
+/// listener, and that seed is a large closure copy, so the window has to cover
+/// a cold disk as well as a warm boot.
+pub const PERSISTENT_BUILDER_READY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Stage `<job_dir>/<DISPATCH_SOCK_MARKER>` so the in-guest
+/// `mvm-host-vm-init` enters its dispatch loop, and clear any stale ready
+/// marker from a previous session so the caller's readiness wait cannot
+/// observe the last boot's.
+///
+/// The marker body is intentionally empty — its existence is the signal.
+pub fn stage_persistent_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
+    std::fs::create_dir_all(job_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "creating persistent job dir {}: {e}",
+            job_dir.display()
+        ))
+    })?;
+    let marker_path = job_dir.join(DISPATCH_SOCK_MARKER);
+    let ready_path = job_dir.join(DISPATCH_READY_MARKER);
+    let _ = std::fs::remove_file(&ready_path);
+    std::fs::write(&marker_path, b"").map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "staging dispatch marker {}: {e}",
+            marker_path.display()
+        ))
+    })?;
+    Ok(())
+}
+
 /// libkrun exposes attached sparse block images 64 KiB shorter than their
 /// host-side file length. Reserve that tail when creating a new image so an
 /// ext4 filesystem formatted to the file's capacity never trips the guest's
