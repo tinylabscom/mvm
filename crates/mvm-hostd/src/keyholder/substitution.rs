@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use mvm_contract::ir::{AuthType, SecretRef, host_matches};
+use mvm_contract::ir::{AuthType, SecretRef, host_is_bound};
 use rand::RngCore;
 use zeroize::Zeroizing;
 
@@ -103,7 +103,7 @@ impl SubstitutionRegistry {
     pub fn host_is_bound(&self, host: &str) -> bool {
         self.map
             .values()
-            .any(|r| r.allowed_hosts.iter().any(|p| host_matches(p, host)))
+            .any(|r| host_is_bound(&r.allowed_hosts, host))
     }
 }
 
@@ -188,11 +188,7 @@ impl<'a> SubstitutionEndpoint<'a> {
             .registry
             .resolve(placeholder)
             .ok_or(SignDispatchError::UnknownPlaceholder)?;
-        if !secret
-            .allowed_hosts
-            .iter()
-            .any(|p| host_matches(p, destination))
-        {
+        if !host_is_bound(&secret.allowed_hosts, destination) {
             return Err(SignDispatchError::DestinationNotBound(
                 destination.to_string(),
             ));

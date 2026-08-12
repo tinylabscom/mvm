@@ -28,6 +28,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
+const EXECUTABLE_BUSY_RETRIES: usize = 3;
+const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HookExit {
     success: bool,
@@ -288,7 +291,7 @@ fn run_shutdown_hook_with_runner<R>(
 where
     R: HookRunner,
 {
-    let mut child = match runner.spawn(script_path) {
+    let mut child = match spawn_shutdown_hook(runner, script_path) {
         Ok(c) => c,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(ShutdownError::ScriptMissing {
@@ -332,6 +335,25 @@ where
                     source: e,
                 });
             }
+        }
+    }
+}
+
+fn spawn_shutdown_hook<R>(runner: &R, script_path: &Path) -> io::Result<R::Child>
+where
+    R: HookRunner,
+{
+    let mut retries = 0;
+    loop {
+        match runner.spawn(script_path) {
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy
+                    && retries < EXECUTABLE_BUSY_RETRIES =>
+            {
+                retries += 1;
+                runner.sleep(EXECUTABLE_BUSY_RETRY_DELAY);
+            }
+            result => return result,
         }
     }
 }
@@ -419,6 +441,7 @@ mod tests {
 
     struct FakeSpawnRunner {
         child: Mutex<Option<FakeChild>>,
+        spawn_errors: Mutex<VecDeque<io::ErrorKind>>,
     }
 
     impl FakeSpawnRunner {
@@ -431,9 +454,18 @@ mod tests {
             (
                 Self {
                     child: Mutex::new(Some(child)),
+                    spawn_errors: Mutex::new(VecDeque::new()),
                 },
                 state,
             )
+        }
+
+        fn with_spawn_errors(self, errors: impl IntoIterator<Item = io::ErrorKind>) -> Self {
+            *self
+                .spawn_errors
+                .lock()
+                .expect("fake spawn-error mutex poisoned") = errors.into_iter().collect();
+            self
         }
     }
 
@@ -445,6 +477,14 @@ mod tests {
         }
 
         fn spawn(&self, _script_path: &Path) -> io::Result<Self::Child> {
+            if let Some(kind) = self
+                .spawn_errors
+                .lock()
+                .expect("fake spawn-error mutex poisoned")
+                .pop_front()
+            {
+                return Err(io::Error::from(kind));
+            }
             self.child
                 .lock()
                 .expect("fake child slot mutex poisoned")
@@ -512,6 +552,50 @@ mod tests {
             &runner,
         )
         .expect("clean shutdown");
+    }
+
+    #[test]
+    fn run_shutdown_hook_retries_transient_executable_busy() {
+        let (runner, _state) = FakeSpawnRunner::new(FakeChildBehavior::ExitAfter {
+            polls: 1,
+            exit: HookExit::success(),
+        });
+        let runner = runner.with_spawn_errors([io::ErrorKind::ExecutableFileBusy]);
+
+        run_shutdown_hook_with_runner(
+            Path::new("/fake/stop.sh"),
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+            &runner,
+        )
+        .expect("transient executable-busy error should be retried");
+    }
+
+    #[test]
+    fn run_shutdown_hook_bounds_executable_busy_retries() {
+        let (runner, _state) = FakeSpawnRunner::new(FakeChildBehavior::ExitAfter {
+            polls: 1,
+            exit: HookExit::success(),
+        });
+        let runner = runner.with_spawn_errors([
+            io::ErrorKind::ExecutableFileBusy,
+            io::ErrorKind::ExecutableFileBusy,
+            io::ErrorKind::ExecutableFileBusy,
+            io::ErrorKind::ExecutableFileBusy,
+        ]);
+
+        let err = run_shutdown_hook_with_runner(
+            Path::new("/fake/stop.sh"),
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+            &runner,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ShutdownError::ExecError { source, .. }
+                if source.kind() == io::ErrorKind::ExecutableFileBusy
+        ));
     }
 
     #[test]

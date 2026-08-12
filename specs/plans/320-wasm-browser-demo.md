@@ -109,15 +109,55 @@ Its dependencies are near-entirely portable:
 | `std::net::IpAddr` | → `core::net::IpAddr`, the swap Increment 3 already made |
 | `ipnet` | supports `no_std` via `default-features = false` |
 
-Every consumer imports through the `mvm_core::ln` alias — `EgressGate`,
-`mvm-net`'s L3 admit, `mvm-hostd`'s proxy and DNS handler, `mvm-conformance` —
-roughly twenty call sites. `mvm-core` re-exports the relocated module under the
-same alias, so none of them change.
+Every consumer imports through the `mvm_core::policy::projection` path —
+`EgressGate`, `mvm-net`'s L3 admit, `mvm-hostd`'s proxy and DNS handler,
+`mvm-conformance` — roughly twenty call sites. `mvm-core` re-exports the
+relocated module under that same path, so none of them change.
 
 `projection_fs_env.rs` (567 lines, the fs/env analogue) stays in `mvm-core`.
 The demo does not need it.
 
+**Status: SHIPPED.** The relocation landed as a `git mv` plus a nine-line
+diff (the `std::net` → `core::net` swap, the `alloc` prelude, and
+`std::str::FromStr` → `core::str::FromStr`); no consumer moved.
+
+- [x] `crates/mvm-core/src/policy/projection.rs` →
+      `crates/mvm-contract/src/policy/projection.rs`, verbatim.
+- [x] `ipnet = { version = "2", default-features = false }` added to
+      `mvm-contract`. Under `no_std` its `AddrParseError` implements
+      `core::error::Error`, which is what `ProjectionError`'s `thiserror`
+      derive needs to carry it as a `source`.
+- [x] `mvm-core`'s `policy/mod.rs` re-exports the module as
+      `pub use mvm_contract::policy::projection`, alongside the existing
+      DTO-leaf module aliases. Every `mvm_core::policy::projection::X`
+      path resolves unchanged; zero call sites edited.
+- [x] `projection_fs_env.rs` stayed in `mvm-core`.
+- [x] `crates/mvm-hostd/tests/wasm_egress_witness.rs` green **unmodified**.
+
+One dependency the table above missed, resolved the same way: projection
+decides with `is_mandatory_deny` / `mandatory_deny_ranges`, which Increment
+3 left in `mvm-core`'s `network_policy.rs` logic half because they are
+`ipnet`/`std::net`-typed. Both are pure predicates over the already-relocated
+`MANDATORY_DENY_RANGES` const, so they moved down with `unmap_v4_mapped` and
+their ten tests, and `mvm-core` re-exports all three. The iptables script
+generators — the genuinely host-only half — stayed put.
+
+This supersedes
+[10-increment3-protocol-core-split.md](../refactor/10-increment3-protocol-core-split.md)'s
+`policy/` disposition table, which lists `projection.rs` as **core whole**.
+That was correct for a DTO-only increment; E1 moves a decision core, not a
+DTO, on the different rationale that the browser must run the host's gate
+rather than a copy of it.
+
 ### E2 — `${NAME}` substitution
+
+**Status: NOT STARTED, and not yet buildable from this section.** E1 was a
+whole-file relocation, so its boundary was a `git mv`. E2 and E3 are both
+partial splits of a file that mixes the pure core with key custody / fs /
+async, which is the shape Increment 3's risk register calls out as the most
+error-prone diff in the whole inversion. Do the per-`impl` moves/stays pass
+before writing code, the way Increment 3 did for `bundle.rs` and
+`vm_backend.rs` — the prose below states the intent, not the cut line.
 
 The pure resolution core teased out of
 `crates/mvm-hostd/src/keyholder/substitution.rs` (509 lines). The boundary,
@@ -134,6 +174,8 @@ supplies its own fixture values through the same function signature the host
 supplies real ones through.
 
 ### E3 — audit-entry construction and chain signing
+
+**Status: NOT STARTED.** Same planning-pass precondition as E2.
 
 The pure core of `crates/mvm-hostd/src/supervisor/audit_file.rs` (1,400 lines):
 building a `SignedEnvelope` (entry + canonical bytes + `prev_hash` + signature)
@@ -251,12 +293,19 @@ red. **It must stay green unmodified** — that is the condition for believing t
 extraction was faithful. If it needs editing, the extraction was not a
 relocation and the design is wrong.
 
-- [ ] Full `cargo nextest run --workspace` for E1's ~20 call sites.
-- [ ] The existing wasm lane (`scripts/ci-linux-coverage.sh:20,23`) already
+- [x] Full `cargo nextest run --workspace` for E1's ~20 call sites.
+      11064/11064 pass.
+- [x] The existing wasm lane (`scripts/ci-linux-coverage.sh:20,23`) already
       builds `mvm-contract` for `wasm32-unknown-unknown` and runs its tests
       under `wasm32-wasip1`. The relocated projection tests then run *under
       wasm* for free — closing plan 301 P1's "tests under wasm" gap for this
-      module as a side effect.
+      module as a side effect. **Holds:** `mvm-contract`'s wasip1 suite went
+      from 651 to 715 tests — 54 relocated projection tests plus the 10
+      mandatory-deny tests — and the pair that matters most, the
+      cross-projection consistency property and `clamp_never_widens`, now
+      decide under wasm. The same lane's `riscv32imac-unknown-none-elf`
+      lib build also stayed green, so the decision core is bare-metal clean,
+      not merely wasm clean.
 - [ ] A fixture-parity test: the three browser fixtures produce the same
       outcomes the host witness asserts.
 - [ ] `web/mvm-demo/` excluded from the workspace, as `web/audit-verify/` is.

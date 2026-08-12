@@ -771,6 +771,14 @@ where
 mod tests {
     use super::*;
 
+    static CONSOLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn console_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        CONSOLE_TEST_LOCK
+            .lock()
+            .expect("console-test mutex not poisoned")
+    }
+
     // `Winsize`'s layout is pinned by the `const _` contract next to the
     // struct: a compile-time assertion that also covers alignment and every
     // field offset, and that holds for cross-compiled targets which never
@@ -854,23 +862,24 @@ mod tests {
     /// still active and must wait for it, not refuse it.
     #[test]
     fn close_waits_out_a_session_that_is_still_tearing_down() {
+        let _guard = console_test_lock();
         CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
-        std::thread::spawn(|| {
+        let completion = std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(120));
             record_completed_session(7, 42);
             CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
         });
 
-        assert_eq!(
-            close_active_session(std::time::Duration::from_secs(5)),
-            Some(42)
-        );
+        let result = close_active_session(std::time::Duration::from_secs(5));
+        completion.join().expect("completion thread");
+        assert_eq!(result, Some(42));
     }
 
     /// A wedged relay is the one case that still fails, and it fails as a
     /// refusal rather than by blocking the agent forever.
     #[test]
     fn close_reports_a_session_that_never_terminates() {
+        let _guard = console_test_lock();
         CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
         // No shell pid is recorded, so the SIGHUP escalation has nothing to
         // signal and both waits lapse.
@@ -887,6 +896,7 @@ mod tests {
     /// An idle agent answers immediately from the recorded exit code.
     #[test]
     fn close_returns_the_recorded_code_when_no_session_is_active() {
+        let _guard = console_test_lock();
         CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
         record_completed_session(3, 130);
 
@@ -903,6 +913,7 @@ mod tests {
     /// close released by that flag reads whatever the previous session left.
     #[test]
     fn the_exit_code_is_recorded_before_the_active_flag_clears() {
+        let _guard = console_test_lock();
         record_completed_session(1, 9);
         CONSOLE_ACTIVE.store(true, Ordering::SeqCst);
         let observer = std::thread::spawn(|| {
@@ -943,6 +954,7 @@ mod tests {
 
     #[test]
     fn open_session_rejects_invalid_argv_before_marking_active() {
+        let _guard = console_test_lock();
         CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
         let err = match open_session(80, 24, &[], &["sh".to_string()]) {
             Ok(_) => panic!("relative command should be rejected before PTY allocation"),
@@ -977,8 +989,7 @@ mod tests {
 
     #[test]
     fn test_is_active_default() {
-        // Reset state for test (note: tests run in parallel, so this
-        // tests the initial value only in isolation)
+        let _guard = console_test_lock();
         CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
         assert!(!is_active());
     }

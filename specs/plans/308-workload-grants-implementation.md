@@ -2797,6 +2797,96 @@ Not done here: the SDK parity fixture (WS6) and everything in WS6b.
 
 ---
 
+### Task 17: Make the wall-clock bound real, and stop encoding it twice
+
+Two defects, and they are the same defect seen from two sides.
+
+**`exec_secs` asserts an enforcement that does not exist.** Its doc comment in
+`crates/mvm-contract/src/plan/types.rs` reads "0 = unbounded (only permitted
+for sleep-waking instances; supervisor enforces)". Nothing enforces it. This
+plan's own rationale opens by indicting that exact field, so leaving it is
+not an option.
+
+**And there are now two encodings of one bound.** `--timeout` resolves to
+`WallClockGrant::Secs` (`commands/shared/grants.rs:164`), while
+`SynthesisInput.exec_timeout_secs` feeds `resources.timeouts.exec_secs`
+(`plan/synthesis.rs:282`) — and every CLI call site passes `0`, which the
+legacy encoding reads as *unbounded*. So the signed plan carries a live grant
+and a dead field describing the same thing. Two representations of one
+decision is what this plan exists to remove; we introduced a second one.
+
+**The rule:** the grant is the declaration. `exec_secs` becomes its
+projection into the plan's legacy encoding and nothing else writes it. Where
+they could disagree, admission refuses rather than picking — the same shape
+the `l3_network`/`network_mode` and Grants→`NetworkPolicy` seams already use.
+
+Mind the encoding trap in both directions: `WallClockGrant::Unbounded` and an
+*absent* grant both map to `exec_secs = 0`, but they are not the same thing to
+the ceiling — it **refuses** an explicit `Unbounded` under a bounded ceiling
+while **admitting** an absent grant. The projection is lossy in that
+direction, so the ceiling must be consulted against the grant, never against
+the reconstructed `exec_secs`.
+
+**Enforcement:** a supervisor-side timer. The kill emits to the chain-signed
+audit log, so an enforced timeout is distinguishable from a crash — a workload
+that silently disappears is its own operational problem, and an unaudited kill
+is indistinguishable from the failure mode it is meant to prevent.
+
+**Witnesses:**
+- `a_wall_clock_grant_projects_to_exec_secs` — one source, not two
+- `nothing_but_the_projection_writes_exec_secs` — a gate or a test; the point
+  is that a second writer cannot reappear
+- `an_expired_workload_is_killed_and_the_kill_is_audited` — assert the audit
+  entry, not just the exit
+- `an_unbounded_grant_and_an_absent_grant_differ_at_the_ceiling` — the lossy
+  direction
+- `a_workload_within_its_bound_is_not_killed` — the false-positive guard,
+  without which a timer that fires immediately would pass every other test
+
+**Landed:**
+- [x] `exec_secs_from_grants` in `crates/mvm-contract/src/grants/projection.rs` —
+  the sole projection.
+- [x] `SynthesisInput::exec_timeout_secs` deleted; `synthesize_plan` writes
+  `exec_secs` from the grant and nothing else writes it.
+- [x] `xtask check-single-exec-secs-writer` + a `ci.yml` step.
+- [x] `enforce_wall_clock_projection` in `plan_admission.rs` — admission refuses
+  a plan whose two encodings disagree.
+- [x] `crates/mvm-hostd/src/supervisor/wall_clock.rs` — the timer, its kill, and
+  the chain-signed `plan.wall_clock_expired` entry; armed by
+  `mvm-libkrun-supervisor`.
+- [x] `ResourceControls::for_backend` corrected: only the libkrun tier claims
+  `WallClockControl::SupervisorTimer`, because it is the only VMM tier with a
+  per-VM supervisor process of ours.
+
+**Deferred — the wall-clock timer on the remaining workload tiers:**
+
+- [ ] **HVF.** `mvm-hvf-supervisor` is a per-VM process that outlives `mvmctl`
+  and could host the timer unchanged, but it is never handed the admitted plan:
+  `HvfSupervisorConfig` carries no `plan_json`, no `audit_dir` and no
+  `signing_key_path`, and its existing `timeout_secs` is an `MVM_HVF_TIMEOUT`
+  dev backstop rather than anything grant-derived. Wiring is: add those three
+  fields to `HvfSupervisorConfig` (`crates/mvm-vmm/src/host/hvf_supervisor.rs`),
+  populate them in `relay_supervisor_config_with_handoff`
+  (`crates/mvm-backends/src/driver/hvf.rs`), and call
+  `wall_clock::arm_for_supervisor` in the bin before `boot_kernel_until`.
+  Until then HVF answers `WallClockControl::None`, so a sealed run declaring a
+  wall-clock grant is refused rather than admitted unbounded.
+- [ ] **Firecracker / QEMU.** There is no process of ours left after launch —
+  the VMM is a bare child of an `mvmctl` that exits — so a timer has nowhere to
+  live without introducing one. The candidates already in the tree are the
+  per-tenant `mvm-host-agent` daemon (resident, holds per-VM registrations, can
+  chain-sign through its signer helper: a deadline would ride on `RegisterVm`)
+  and the per-VM `mvm-substitution-endpoint` (detached, per-VM, but conditional
+  on the workload having secrets or a policy, and deliberately confined). The
+  host-agent is the better home; both are larger than this task.
+- [ ] `enforced_grants_for_vm` still reports `wall_clock: Declared` even on a
+  libkrun boot whose timer is armed, because the arming happens in another
+  process and there is nothing for `mvmctl` to read back. Understating rather
+  than overstating is the documented posture, but the read-back seam is the
+  honest fix.
+
+---
+
 ### Task 18: Report the tier on the path a user actually boots
 
 **Found by live measurement on real hardware, not by any test or review.**
@@ -2861,3 +2951,52 @@ asks for a bound, gets none, and is told nothing.
 - [x] Witnesses: `a_bounded_cli_boot_emits_grants_enforced`,
       `machine_inspect_shows_the_enforced_tier_not_only_the_request`,
       `a_degraded_boot_warns`.
+
+### Task 21: Close the deferred gate gaps and one false documented claim
+
+Three items carried in the ledger through this plan, plus one found while
+verifying them.
+
+**(a) The projection gate misses a trailing `where` clause.** `xtask
+check-single-grants-projection` splits a signature on its last `->`, so
+`fn f<T>(t: T) -> NetworkPolicy where T: Into<Grants>` puts `Grants` in the
+*return* half and is not flagged — a real second projection that the gate
+passes. rustfmt commonly relocates `where` after the return type, so this is
+an ordinary shape, not a contrived one. Strip a trailing `where` clause from
+the flattened signature before splitting.
+
+**(b) Both gates are blind to string literals.** `check-single-grants-projection`
+strips `//` comments and `check-backend-resource-controls` strips `//` and
+`/* */`, but neither understands strings, so a literal containing the matched
+tokens can produce a false positive — and in the resource-controls gate, a
+guard arm like `_ if reason == "BackendKind::Mock" =>` is a bare wildcard that
+*passes*. Both gates already document this as a known limit. Factor one shared
+comment-and-string-aware scanner in `xtask` and have both use it, rather than
+a third copy of near-identical text handling.
+
+**(c) `CLAUDE.md` asserts a removal that did not happen, and cites a gate that
+says the opposite.** Line 14 reads: "… its `--hypervisor` value is gone, as is
+the `apple-container` backend. `xtask check-no-vz` fails the build if either
+returns."
+
+Both halves are false. `BackendKind::AppleContainer` exists today, renders as
+`"apple-container"`, and is parsed back from that string. And
+`check_no_vz.rs`'s own header says it enforces that *Virtualization.framework*
+is not linked while explicitly permitting the Apple Container backend, which
+"boots Apple's prebuilt container kernel … on the in-house HVF VMM".
+
+This is the precise disease this repo's ledger discipline exists to prevent:
+prose claiming a CI-enforced fact that CI does not enforce and that is not
+true. Correct the sentence to say what the gate actually forbids, and say what
+`apple-container` actually is. Do not "fix" it by deleting the backend.
+
+**(d) While in `CLAUDE.md`, check its per-backend claims against the code** —
+the same file has a security-model section describing enforcement tiers, and
+this plan changed which tiers can bound what. Correct anything that no longer
+holds; leave anything you cannot verify alone and say so.
+
+**Witnesses:**
+- `a_where_clause_after_the_return_type_is_still_caught`
+- `a_signature_inside_a_string_literal_is_not_flagged` (both gates)
+- `a_guard_comparing_a_string_is_still_a_wildcard` (resource-controls gate)
+- each gate proven red against its new shape, then green after
