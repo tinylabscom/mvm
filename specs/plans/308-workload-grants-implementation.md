@@ -3042,6 +3042,50 @@ enforceability gate with nothing behind it. Row 18's limit 2 says exactly that
 rather than citing a witness for a mechanism that is not there. Wiring the
 timer, and re-arming CPU on the restore and warm-claim paths (limit 4), are the
 remaining enforcement work.
+---
+
+### Task 20: Close the two WS5b enforcement gaps
+
+Both were declared honestly rather than hidden, and both mean a bound that
+exists on paper does not exist in the kernel.
+
+**(a) Restore does not re-arm the host-side control.** A restored child cannot
+be *admitted* wider than its parent — that check landed — but nothing applies
+the CPU quota to the restored VM. So a child whose sealed plan grants 1.5
+cores runs unbounded, and its receipt has no enforced tier to report. The bound
+is a ledger entry.
+
+The likely shape of the fix is not a new re-arm step. `VmmSpec.cpu_grant`
+already exists and is bound at spawn via `bind_cpu_grant`, so the child's
+admitted grant should reach the child's launch config the same way a cold
+boot's does — one path, not two. Verify that before building anything: if the
+fork genuinely constructs its child's config somewhere that cannot see the
+admitted grant, say where and what would have to move.
+
+**(b) A warm parent seals no grant**, so it bounds a claimed child's egress
+(absent egress is deny-all) but not CPU or wall clock. This is *not* an
+oversight in the capture, and do not "fix" it by sealing the mirrored launch's
+grant: `factory_parent_config` deliberately drops `plan_json`, `tenant_id` and
+`cpu_grant` so a parent cannot carry authority admitted for another workload,
+and one parent serves every later claim — sealing the provisioning workload's
+grant would bound unrelated claims to a stranger's number.
+
+The parent needs a grant *of its own*: a bound on `StandbySpec`, plumbed from
+pool configuration and sealed at capture, against which every claim is then
+checked. Assess whether that plumbing is tractable here. If it is, build it.
+If it needs pool-configuration design that does not exist yet, say so
+precisely and leave (b) declared — a second honest deferral is a better
+outcome than a rushed pool API.
+
+Note no production code constructs a `StandbyClaim` today, so (b) is currently
+unreachable in production; that lowers its urgency but does not make it wrong.
+
+**Witnesses:**
+- `a_restored_child_is_cpu_bounded_by_its_admitted_grant` — assert the bound is
+  in effect on the restored VM, not that a field was copied
+- `a_restored_child_reports_its_enforced_tier`
+- `a_restored_child_without_a_grant_runs_unbounded_and_says_so`
+- for (b) if built: `a_claimed_child_is_bounded_by_the_pool_grant`
 ### Task 21: Close the deferred gate gaps and one false documented claim
 
 Three items carried in the ledger through this plan, plus one found while

@@ -76,3 +76,6 @@ __pycache__/
 # Corpora are NOT ignored — the seed inputs are hand-written and committed.
 **/fuzz/target/
 **/fuzz-*/target/
+
+.ruff_cache
+.venv/

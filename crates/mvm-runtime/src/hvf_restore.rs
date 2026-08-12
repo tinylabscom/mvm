@@ -26,12 +26,13 @@ pub use mvm_backends::driver::hvf_restore::{
 pub struct HvfForkRestorer;
 
 impl HvfForkRestorer {
-    pub fn restore_fork(&self, child_vm_name: &str, child_dir: &Path) -> Result<()> {
+    pub fn restore_fork(&self, child: &crate::checkpoint::RestoredChild<'_>) -> Result<()> {
         restore_hvf_vm(&HvfRestoreRequest {
-            vm_name: child_vm_name,
-            state_dir: child_dir,
+            vm_name: child.vm_name,
+            state_dir: child.state_dir,
+            cpu_grant: child.cpu_grant,
         })
-        .with_context(|| format!("HVF warm-restore for forked child '{child_vm_name}'"))?;
+        .with_context(|| format!("HVF warm-restore for forked child '{}'", child.vm_name))?;
         Ok(())
     }
 }
@@ -64,6 +65,11 @@ impl crate::checkpoint::VmFullRestore for HvfVmFullRestore {
         restore_hvf_vm(&HvfRestoreRequest {
             vm_name: target_vm,
             state_dir: &state_dir,
+            // A same-identity resume admits no plan of its own — it is the VM
+            // that was already admitted, coming back — so there is no grant here
+            // to bind. Inventing one from the checkpoint record would be a bound
+            // nobody signed for this run.
+            cpu_grant: None,
         })
         .with_context(|| format!("HVF restore of '{target_vm}'"))?;
         Ok(())
