@@ -111,6 +111,14 @@ every check that only needs the live chain. Deleting a retired segment stays
 possible, but it is an explicit operator action, never automatic, and never a
 side effect of rotation.
 
+**What shipped is narrower than that sentence, and #2390 tracks the rest.**
+There is no verb for the explicit operator action: pruning today means `rm`,
+which leaves the chain reporting `TruncatedFront` or `MissingSegment` forever
+with no supported way to record that the removal was deliberate. Detection is
+correct and tested; accountability is missing. Since that makes pruning strictly
+worse than not pruning, keep-everything is currently the only reachable state
+rather than a chosen one.
+
 **Sweep scope, also decided on the issue: retired segments stay in scope.** They
 are named `<tenant>.seg-<NNNNNN>.jsonl`, so `is_host_lifecycle_chain` already
 admits them with no change. This is the opposite of the `.forked-` quarantine
