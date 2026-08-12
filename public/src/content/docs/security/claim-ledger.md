@@ -48,5 +48,5 @@ Examples of safer wording:
 Tutorials and SDK pages should link to at least one of:
 
 - [Sandbox parity status](/security/sandbox-parity-status/)
-- [Seven CI claims](/security/ci-claims/)
+- [CI-enforced security claims](/security/ci-claims/)
 - [Threat model](/security/threat-model/)
