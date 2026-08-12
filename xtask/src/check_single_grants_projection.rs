@@ -28,8 +28,18 @@
 //! signature past its width limit, which puts the parameters and the return
 //! type on different lines — the single most likely shape a real second
 //! projection would actually take, and invisible to a line-based check.
-//! Comments are stripped first so prose quoting a signature is not mistaken
-//! for one.
+//! Comments *and string literals* are blanked first, by the shared
+//! [`crate::rust_source`] scanner, so neither prose quoting a signature nor a
+//! signature embedded in a `"…"` (a test fixture, an error message, a codegen
+//! template) is mistaken for a declaration.
+//!
+//! A trailing `where` clause is moved back onto the parameter side before the
+//! signature is split on its return arrow. rustfmt routinely relocates bounds
+//! there, and `fn f<T>(t: T) -> NetworkPolicy where T: Into<Grants>` puts the
+//! `Grants` to the *right* of the last `->` — a real second projection that a
+//! naive split waves through. Re-attaching rather than discarding is what
+//! makes it catchable: a bound is part of what the function takes, so
+//! dropping the clause would hide the same signature for the opposite reason.
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -64,16 +74,11 @@ pub fn run(workspace: &Path) -> Result<()> {
             if rel == PROJECTION_FILE {
                 return;
             }
-            // The return-type arrow is matched with `rsplit_once` (last
-            // occurrence, not first): a parameter of type `impl Fn() -> T`
-            // carries its own `->` before the real one, and taking the first
-            // occurrence would split there instead of at the signature's
-            // actual return type.
-            for signature in fn_signatures(&strip_line_comments(body)) {
-                let Some((params, ret)) = signature.rsplit_once("->") else {
+            for signature in fn_signatures(&crate::rust_source::blank_comments_and_strings(body)) {
+                let Some(Split { inputs, ret }) = split_at_return_arrow(&signature) else {
                     continue;
                 };
-                if params.contains("Grants") && ret.contains("NetworkPolicy") {
+                if inputs.contains("Grants") && ret.contains("NetworkPolicy") {
                     offenders.push(format!("{rel}: {}", signature.trim()));
                     break;
                 }
@@ -91,17 +96,75 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Drop `//`-style comments so prose quoting a signature is not read as one.
-/// Block comments are left alone: a `/* */` containing a full signature is
-/// rare enough that the false positive is cheaper than a comment parser.
-fn strip_line_comments(body: &str) -> String {
-    body.lines()
-        .map(|line| match line.find("//") {
-            Some(i) => &line[..i],
-            None => line,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// A signature cut into what it takes and what it returns.
+struct Split<'a> {
+    /// Everything the function accepts: its parameter list *and* its `where`
+    /// clause, which is where a bound-spelled parameter type lives.
+    inputs: String,
+    /// The return type alone.
+    ret: &'a str,
+}
+
+/// Cut a flattened signature at its return arrow.
+///
+/// Two things make this more than a `rsplit_once("->")`.
+///
+/// The arrow is matched at its *last* occurrence, not its first: a parameter
+/// of type `impl Fn() -> T` carries its own `->` ahead of the real one.
+///
+/// And the `where` clause is moved back onto the input side rather than left
+/// where it sits. A bound is part of what a function accepts, but it is
+/// written after the return type, so `fn f<T>(t: T) -> NetworkPolicy where T:
+/// Into<Grants>` puts its `Grants` to the right of the last arrow. Dropping
+/// the clause instead of re-attaching it would be just as wrong in the other
+/// direction — the mention would vanish and the projection would go unseen.
+fn split_at_return_arrow(signature: &str) -> Option<Split<'_>> {
+    let (head, where_clause) = match where_clause_start(signature) {
+        Some(i) => (&signature[..i], &signature[i..]),
+        None => (signature, ""),
+    };
+    let (params, ret) = head.rsplit_once("->")?;
+    Some(Split {
+        inputs: format!("{params} {where_clause}"),
+        ret,
+    })
+}
+
+/// The byte offset of a signature's trailing `where` clause, if it has one.
+///
+/// The keyword is only recognised as a whole word at bracket depth zero, so
+/// an identifier that merely contains the letters (`somewhere`) never splits
+/// a signature in the wrong place.
+fn where_clause_start(signature: &str) -> Option<usize> {
+    let bytes = signature.as_bytes();
+    let mut depth = 0i32;
+    for (i, b) in bytes.iter().enumerate() {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'w' if depth == 0 && is_where_keyword_at(signature, i) => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the `where` keyword starts at byte `i`, bounded by non-identifier
+/// bytes on both sides.
+fn is_where_keyword_at(signature: &str, i: usize) -> bool {
+    if !signature[i..].starts_with("where") {
+        return false;
+    }
+    let bytes = signature.as_bytes();
+    let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+    let after_ok = bytes
+        .get(i + "where".len())
+        .is_none_or(|b| !is_ident_byte(*b));
+    before_ok && after_ok
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Every function signature in `body`, each flattened to one line.
@@ -244,6 +307,98 @@ mod tests {
             "/// Calls `fn helper(grants: &Grants) -> NetworkPolicy` internally.\npub fn helper() {}\n",
         );
         run(&tmp).expect("a doc comment quoting a signature is not a second projection");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_where_clause_after_the_return_type_is_still_caught() {
+        // rustfmt puts bounds after the return type, which moves `Grants` to
+        // the right of the last `->`. Splitting the raw signature there reads
+        // this as "returns NetworkPolicy, takes no Grants" and passes it.
+        let tmp = fixture_with_offender(
+            "where-clause",
+            "pub fn policy_for<T>(t: T) -> NetworkPolicy\nwhere\n    T: Into<Grants>,\n{\n    unimplemented!()\n}\n",
+        );
+        let err = run(&tmp).unwrap_err();
+        assert!(
+            err.to_string().contains("crates/mvm-core/src/lib.rs"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_where_clause_on_one_line_is_still_caught() {
+        let tmp = fixture_with_offender(
+            "where-clause-inline",
+            "pub fn policy_for<T>(t: T) -> NetworkPolicy where T: Into<Grants> { unimplemented!() }",
+        );
+        let err = run(&tmp).unwrap_err();
+        assert!(
+            err.to_string().contains("crates/mvm-core/src/lib.rs"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_identifier_containing_where_does_not_truncate_a_signature() {
+        // `somewhere` must not be read as the `where` keyword: truncating
+        // there would drop the return type and silently stop flagging.
+        let tmp = fixture_with_offender(
+            "somewhere-param",
+            "pub fn policy_for(somewhere: &Grants) -> NetworkPolicy { unimplemented!() }",
+        );
+        let err = run(&tmp).unwrap_err();
+        assert!(
+            err.to_string().contains("crates/mvm-core/src/lib.rs"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_signature_inside_a_string_literal_is_not_flagged() {
+        // A fixture, an error message, or a codegen template quoting the
+        // projection's signature is not a second projection.
+        let tmp = fixture_with_offender(
+            "string-literal",
+            "pub const FIXTURE: &str = \"pub fn policy_for(g: &Grants) -> NetworkPolicy { todo!() }\";\n",
+        );
+        run(&tmp).expect("a signature inside a string literal is not a second projection");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_signature_inside_a_raw_string_literal_is_not_flagged() {
+        let tmp = fixture_with_offender(
+            "raw-string-literal",
+            "pub const FIXTURE: &str = r#\"fn policy_for(g: &Grants) -> NetworkPolicy {}\"#;\n",
+        );
+        run(&tmp).expect("a signature inside a raw string literal is not a second projection");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_signature_inside_a_block_comment_is_not_flagged() {
+        let tmp = fixture_with_offender(
+            "block-comment",
+            "/* fn policy_for(g: &Grants) -> NetworkPolicy {} */\npub fn helper() {}\n",
+        );
+        run(&tmp).expect("a signature inside a block comment is not a second projection");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_lifetime_before_a_real_offender_does_not_hide_it() {
+        // A `'a` misread as an unterminated char literal would blank the rest
+        // of the file, and every offender after it would vanish.
+        let tmp = fixture_with_offender(
+            "lifetime-then-offender",
+            "pub fn first<'a>(s: &'a str) -> &'a str { s }\npub fn second(g: &Grants) -> NetworkPolicy { unimplemented!() }\n",
+        );
+        let err = run(&tmp).unwrap_err();
+        assert!(err.to_string().contains("fn second"), "{err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
