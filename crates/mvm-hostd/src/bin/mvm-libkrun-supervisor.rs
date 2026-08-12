@@ -220,6 +220,27 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
         "dispatch_route",
         route.to_string(),
     );
+
+    // The wall-clock bound the plan was admitted under. This process owns the
+    // guest for its whole life — `krun_start_enter` blocks below and libkrun
+    // exits the process when the guest powers off — so a timer here is the one
+    // that can still fire when `mvmctl` is long gone. Held to the end of the
+    // scope: dropping the guard stands the timer down.
+    let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
+        mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
+            plan_json: cfg.plan_json.as_ref(),
+            audit_dir: cfg.audit_dir.as_deref(),
+            signing_key_path: cfg.signing_key_path.as_deref(),
+            vm_state_dir: std::path::Path::new(&cfg.vm_state_dir),
+        },
+    ) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("supervisor: refusing to boot a bounded workload it cannot audit: {e}");
+            return ExitCode::from(7);
+        }
+    };
+
     let outcome = run_legacy(&cfg);
 
     match outcome {

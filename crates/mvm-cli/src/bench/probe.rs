@@ -80,7 +80,6 @@ pub fn admit_probe_plan(
         mem_mib: u64::from(PROBE_MEM_MIB),
         disk_mib: 0,
         boot_timeout_secs: 60,
-        exec_timeout_secs: 0,
         destroy_on_exit: true,
         bundle_pin: None,
         deps_volume: None,

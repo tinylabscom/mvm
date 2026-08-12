@@ -380,7 +380,6 @@ fn synthesis_input_for_app<'a>(
         mem_mib: app.resources.memory_mb.max(64) as u64,
         disk_mib: app.resources.rootfs_size_mb as u64,
         boot_timeout_secs: 60,
-        exec_timeout_secs: 0,
         destroy_on_exit: true,
         bundle_pin: None,
         // Plan-mode synthesis does not run the install pipeline; it
