@@ -16,7 +16,7 @@ use mvm_core::checkpoint::{
 };
 use mvm_runtime::checkpoint::{CheckpointChainAnchor, CheckpointStore, RestoreParams};
 use mvm_runtime::hvf_restore::{HvfRestoreRequest, hvf_child_restore_config};
-use mvm_vmm::host::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
+use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig};
 
 use crate::world::CliWorld;
 
@@ -84,7 +84,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         substitution_socket: Some(PathBuf::from("/parent/state/substitution.sock")),
         egress_relay_socket: Some(PathBuf::from("/parent/state/egress.sock")),
         broker_socket: Some(PathBuf::from("/parent/state/broker.sock")),
-        console_data_sockets: vec![ConsoleDataSocket {
+        console_data_sockets: vec![HostDialSocket {
             guest_port: 20001,
             host_socket: PathBuf::from("/parent/state/vsock/vsock-20001.sock"),
         }],

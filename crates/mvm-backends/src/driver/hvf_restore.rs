@@ -171,6 +171,8 @@ pub fn hvf_child_restore_config(
         egress_relay_socket: None,
         broker_socket: None,
         console_data_sockets: Vec::new(),
+        // A restored child is a workload fork, never the build engine.
+        builder_control_sockets: Vec::new(),
         // The live-handoff control socket is a privileged path onto a resident
         // parent. A restored child is not a standby factory and must never
         // serve it.
@@ -283,7 +285,8 @@ mod tests {
             substitution_socket: Some(PathBuf::from("/parent/substitution.sock")),
             egress_relay_socket: Some(PathBuf::from("/parent/egress.sock")),
             broker_socket: Some(PathBuf::from("/parent/broker.sock")),
-            console_data_sockets: vec![mvm_vmm::host::hvf_supervisor::ConsoleDataSocket {
+            builder_control_sockets: vec![],
+            console_data_sockets: vec![mvm_vmm::host::hvf_supervisor::HostDialSocket {
                 guest_port: 20001,
                 host_socket: PathBuf::from("/parent/vsock/vsock-20001.sock"),
             }],

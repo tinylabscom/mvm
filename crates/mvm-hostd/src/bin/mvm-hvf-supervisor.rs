@@ -311,6 +311,11 @@ fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|c| (c.guest_port, c.host_socket.clone()))
                     .collect(),
+                builder_control_sockets: cfg
+                    .builder_control_sockets
+                    .iter()
+                    .map(|c| (c.guest_port, c.host_socket.clone()))
+                    .collect(),
                 cmdline: cfg.cmdline.clone(),
                 mem_mib: cfg.memory_mib,
                 // Dev hook: `MVM_HVF_VIRTIOFS_ROOT=<dir>` boots a virtiofs root without

@@ -87,6 +87,9 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         broker_socket: None,
         // The rootfs-inject helper VM has no egress tunnel.
         console_data_sockets: vec![],
+        // The rootfs patcher runs an initramfs to completion; it serves no
+        // dispatch loop.
+        builder_control_sockets: vec![],
         handoff_socket: None,
         handoff_root: None,
         handoff_verify_key: None,

@@ -201,6 +201,11 @@ pub struct HostChannels {
     /// data port the interactive PTY may reach. Populated only for a `dev_console`
     /// machine; empty for a sealed prod config, so nothing is bound (claim 15).
     pub console_data_sockets: Vec<(u32, PathBuf)>,
+    /// Builder-tier control listeners: job dispatch and the resident daemon's
+    /// typed channel, for a persistent builder VM. Empty for every workload.
+    /// Rides the same host-dial bridge as the console ports — the guest listens,
+    /// the host dials — and the two ranges never overlap.
+    pub builder_control_sockets: Vec<(u32, PathBuf)>,
     /// Full kernel cmdline. `None` ⇒ the built-in [`default_bootargs`] (workload
     /// default: `init=/init`). A caller that boots an image expecting a different
     /// PID 1 — e.g. the builder rootfs, whose init is the static
@@ -584,6 +589,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 egress_relay: channels.egress_relay,
                 broker_socket: channels.broker_socket,
                 console_data_sockets: channels.console_data_sockets,
+                builder_control_sockets: channels.builder_control_sockets,
                 virtiofs_root: channels.virtiofs_root,
                 virtiofs_shares: channels.virtiofs_shares,
                 pause_state: channels.pause_state,
@@ -639,6 +645,7 @@ struct RunInputs {
     /// Dev-only host console listeners (one `(guest_port, host_socket)` per console
     /// data port). Empty for a sealed prod config — nothing bound (claim 15).
     console_data_sockets: Vec<(u32, PathBuf)>,
+    builder_control_sockets: Vec<(u32, PathBuf)>,
     /// When set, serve this host dir to the guest as a read-only virtiofs root.
     virtiofs_root: Option<PathBuf>,
     virtiofs_shares: Vec<(String, PathBuf)>,
@@ -672,6 +679,7 @@ unsafe fn run(
         egress_relay,
         broker_socket,
         console_data_sockets,
+        builder_control_sockets,
         virtiofs_root,
         virtiofs_shares,
         pause_state,
@@ -905,13 +913,22 @@ unsafe fn run(
             // `dev_console` machine; a sealed prod config carries none, so nothing
             // is bound (claim 15). Shares the heartbeat counter so an open console
             // stream keeps the loop waking an idle guest.
-            if !console_data_sockets.is_empty() {
-                v.set_console_activity(egress_active.clone());
-                let ports = console_data_sockets
+            // Builder control ports ride the same bridge, and a persistent
+            // builder has no console, so bind whichever list is populated.
+            // They cannot both be: one is dev-console policy, the other
+            // builder-tier policy.
+            let host_dial_sockets: Vec<(u32, PathBuf)> = console_data_sockets
+                .iter()
+                .chain(builder_control_sockets.iter())
+                .cloned()
+                .collect();
+            if !host_dial_sockets.is_empty() {
+                v.set_host_dial_activity(egress_active.clone());
+                let ports = host_dial_sockets
                     .iter()
                     .map(|(port, path)| (*port, path.as_path()));
-                if let Err(e) = v.set_console_sockets(ports) {
-                    eprintln!("mvm-hvf: console socket bind failed: {e}");
+                if let Err(e) = v.set_host_dial_sockets(ports) {
+                    eprintln!("mvm-hvf: host-dial socket bind failed: {e}");
                 }
             }
             if v.set_handoff_control(
@@ -973,7 +990,7 @@ unsafe fn run(
                 v.set_agent_activity(egress_active.clone());
                 v.set_substitution_activity(egress_active.clone());
                 v.set_broker_activity(egress_active.clone());
-                v.set_console_activity(egress_active.clone());
+                v.set_host_dial_activity(egress_active.clone());
                 let bindings = crate::vmm::vsock::VsockHostBindings {
                     agent_socket: agent_socket.clone(),
                     substitution_endpoint: egress_relay
