@@ -197,6 +197,12 @@ jobs:
       - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
         run: cargo run -p xtask -- check-uniform-vsock-egress
 
+      # A wall-clock bound is declared once, as a grant. `exec_secs` is that
+      # grant's projection into the plan's older encoding; a second writer is a
+      # second declaration of one decision, and the two can disagree.
+      - name: one writer of exec_secs (the wall-clock grant's projection)
+        run: cargo run -p xtask -- check-single-exec-secs-writer
+
       - name: one stream redaction seam (every StreamBroker is built over the curated ruleset)
         run: cargo run -p xtask -- check-stream-redaction-seam
 

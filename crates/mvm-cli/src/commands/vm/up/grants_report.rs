@@ -121,7 +121,7 @@ mod tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name,
-            backend_name: "firecracker",
+            backend_name: "libkrun",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
@@ -146,7 +146,7 @@ mod tests {
             grants,
             // The gate measures a declared bound against a real tier's
             // mechanisms; admitting without one refuses rather than guessing.
-            backend_kind: Some(mvm_core::protocol::vm_backend::BackendKind::Firecracker),
+            backend_kind: Some(mvm_core::protocol::vm_backend::BackendKind::Libkrun),
             entrypoint: ResolvedEntrypoint::unresolved("this test resolves no entrypoint"),
         })
         .expect("admission succeeds");
@@ -163,11 +163,10 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
 
-        // A wall-clock bound rather than a CPU share, because the admission
-        // gate refuses a grant the resolved tier has no mechanism for and no
-        // tier has a cgroup on macOS. The wiring under test is the same either
-        // way, and this makes the witness a witness on every host rather than
-        // only on Linux.
+        // A libkrun wall-clock bound rather than a CPU share: its supervisor
+        // timer exists on every supported host, while cgroup shares are
+        // Linux-only. The fixture therefore exercises a genuinely enforceable
+        // grant on both Linux and macOS.
         let grants = mvm_contract::grants::Grants {
             wall_clock: Some(mvm_contract::grants::WallClockGrant::Secs {
                 secs: std::num::NonZeroU32::new(30).expect("nonzero"),
@@ -177,7 +176,7 @@ mod tests {
         let (ctx, _keys, audit_dir) = admitted_with_grants("vm-grants-enforced", Some(grants));
         assert!(ctx.is_some(), "the fixture must actually admit");
 
-        let enforced = report_enforced_grants(&ctx, "firecracker", "vm-grants-enforced");
+        let enforced = report_enforced_grants(&ctx, "libkrun", "vm-grants-enforced");
 
         let chain = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
             .expect("the chain file exists");

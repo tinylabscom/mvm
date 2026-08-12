@@ -230,7 +230,6 @@ fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
         mem_mib: 256,
         disk_mib: 0,
         boot_timeout_secs: 30,
-        exec_timeout_secs: 0,
         destroy_on_exit: true,
         bundle_pin: None,
         deps_volume: None,
