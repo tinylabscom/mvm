@@ -225,8 +225,11 @@ thiserror = "2"
 toml = "0.8"
 
 # CLI
+# `error-context` is what makes a parse error name the offending argument;
+# without it clap prints only the error kind ("unexpected argument found").
 clap = { version = "4", default-features = false, features = [
     "derive",
+    "error-context",
     "help",
     "std",
     "usage",

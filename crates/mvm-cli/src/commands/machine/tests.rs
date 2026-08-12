@@ -251,6 +251,38 @@ fn run_parses_image_and_trailing_argv() {
 }
 
 #[test]
+fn run_rejects_an_unknown_flag_before_the_argv_separator() {
+    // Swallowing it into argv ships the typo to the guest shell, which answers
+    // with something like `exec: illegal option --` instead of naming the flag.
+    let err = parse_run(&[
+        "run",
+        "--image",
+        "alpine",
+        "--nonexistent",
+        "8080:80",
+        "--",
+        "uname",
+        "-a",
+    ])
+    .expect_err("unknown flag must not be swallowed into argv");
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn exec_rejects_an_unknown_flag_before_the_argv_separator() {
+    let err = parse(&["exec", "web", "--nonexistent", "--", "uname", "-a"])
+        .expect_err("unknown flag must not be swallowed into argv");
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn run_keeps_hyphenated_argv_after_the_separator() {
+    let args = parse_run(&["run", "--image", "alpine", "--", "uname", "-a", "--all"])
+        .expect("hyphenated argv after `--` stays argv");
+    assert_eq!(args.argv, vec!["uname", "-a", "--all"]);
+}
+
+#[test]
 fn run_parses_hypervisor_flag_and_forwards_to_run_args() {
     let args = parse_run(&[
         "run",
@@ -2680,16 +2712,11 @@ fn machine_run_exposes_no_network_mode_selector() {
             "machine run must not expose a networking transport selector, found {id:?}"
         );
     }
-    // `argv` is a trailing var-arg, so a stray `--network-mode` is not
-    // rejected — it is collected as workload arguments. What matters is
-    // that it configures nothing: the transport is derived either way.
-    let args = parse_run(&["run", "--image", "alpine", "--network-mode", "l3-vsock"])
-        .expect("trailing args parse as workload argv");
-    assert!(
-        args.argv.iter().any(|a| a == "--network-mode"),
-        "a stray flag must land in the workload's argv, not configure mvm: {:?}",
-        args.argv
-    );
+    // A stray `--network-mode` configures nothing: it is not an mvm flag, and
+    // it is refused rather than smuggled into the workload's argv.
+    let err = parse_run(&["run", "--image", "alpine", "--network-mode", "l3-vsock"])
+        .expect_err("a transport selector must not parse");
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
 /// The default is the socket-aware transport — the stronger posture, and
