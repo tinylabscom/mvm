@@ -202,6 +202,21 @@ impl VsockHandlerRegistry {
             .set_endpoint(path);
     }
 
+    /// Lift the egress byte rate for a trusted-builder VM. Both ports keep
+    /// sharing one budget, so the concurrency cap is unchanged.
+    pub(crate) fn set_egress_unmetered(&mut self) {
+        let budget = EgressBudget::unmetered();
+        for port in [
+            mvm_agentd::vsock::EGRESS_PORT,
+            mvm_agentd::vsock::BROKER_PORT,
+        ] {
+            self.guest_handler_mut::<StreamRelayHandler>(port)
+                .expect("relay handler present")
+                .bridge
+                .set_budget(budget.clone());
+        }
+    }
+
     pub(crate) fn set_substitution_activity(
         &mut self,
         counter: Arc<std::sync::atomic::AtomicUsize>,

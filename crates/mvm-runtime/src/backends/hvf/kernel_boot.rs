@@ -193,6 +193,9 @@ pub struct HostChannels {
     /// endpoint gates (claim-10) and substitutes secrets. `None` ⇒ egress fails
     /// closed at the bridge (an hvf VM must always carry a relay socket).
     pub egress_relay: Option<PathBuf>,
+    /// Trusted-builder tier: relay egress without the per-workload byte-rate
+    /// cap. False for every workload.
+    pub egress_unmetered: bool,
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
     /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
@@ -582,6 +585,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
+                egress_unmetered: channels.egress_unmetered,
                 broker_socket: channels.broker_socket,
                 console_data_sockets: channels.console_data_sockets,
                 virtiofs_root: channels.virtiofs_root,
@@ -633,6 +637,8 @@ struct RunInputs {
     /// Per-VM egress bridge UDS. When set, `EGRESS_PORT` relays here — the
     /// endpoint is the sole gate + substituter.
     egress_relay: Option<PathBuf>,
+    /// Trusted-builder tier: relay egress without the per-workload byte-rate cap.
+    egress_unmetered: bool,
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
@@ -670,6 +676,7 @@ unsafe fn run(
         agent_socket,
         substitution_socket,
         egress_relay,
+        egress_unmetered,
         broker_socket,
         console_data_sockets,
         virtiofs_root,
@@ -890,6 +897,9 @@ unsafe fn run(
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);
             }
+            if egress_unmetered {
+                v.set_egress_unmetered();
+            }
             // Host-services broker (BROKER_PORT): a pure relay to the per-VM broker
             // UDS the host-agent daemon bound, so a guest `host.audit.v1` call
             // reaches the broker. Shares the heartbeat counter so an in-flight
@@ -984,6 +994,9 @@ unsafe fn run(
                 };
                 v.rebind_host_channels(&bindings, Arc::new(GicSpi))
                     .map_err(|_| HvfError::SnapshotState("restore channel rebind failed"))?;
+                if egress_unmetered {
+                    v.set_egress_unmetered();
+                }
             }
         }
 

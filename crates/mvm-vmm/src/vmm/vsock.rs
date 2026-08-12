@@ -207,6 +207,10 @@ impl VsockShared {
         self.handlers.set_substitution_endpoint(path);
     }
 
+    pub fn set_egress_unmetered(&mut self) {
+        self.handlers.set_egress_unmetered();
+    }
+
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_substitution_activity(counter);
     }
@@ -372,6 +376,11 @@ impl VirtioVsock {
 
     pub fn set_substitution_endpoint(&mut self, path: &std::path::Path) {
         self.lock().set_substitution_endpoint(path);
+        self.notify_io();
+    }
+
+    pub fn set_egress_unmetered(&mut self) {
+        self.lock().set_egress_unmetered();
         self.notify_io();
     }
 

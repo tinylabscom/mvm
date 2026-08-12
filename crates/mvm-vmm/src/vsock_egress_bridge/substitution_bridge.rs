@@ -49,11 +49,20 @@ pub(crate) struct EndpointRelayDrain {
     pub closed: Vec<u32>,
 }
 
+/// How long to sleep between refill checks while an established stream waits
+/// for byte tokens.
+const BUDGET_REFILL_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// Shared per-workload egress budget. The egress and broker ports use one
 /// instance so a workload cannot multiply its allowance by opening both paths.
 #[derive(Clone)]
 pub(crate) struct EgressBudget {
     state: Arc<Mutex<EgressBudgetState>>,
+    /// Trusted-builder tier: the concurrency cap still applies, but the byte
+    /// rate does not. A builder VM carries no untrusted workload and pulls
+    /// multi-gigabyte substituter closures, so metering it throttles builds to
+    /// a fraction of the host link for no security gain.
+    metered: bool,
 }
 
 struct EgressBudgetState {
@@ -68,13 +77,49 @@ impl EgressBudget {
     }
 
     fn new_at(now: Instant) -> Self {
+        Self::at(now, true)
+    }
+
+    /// A budget that caps concurrent streams but not throughput.
+    pub(crate) fn unmetered() -> Self {
+        Self::unmetered_at(Instant::now())
+    }
+
+    fn unmetered_at(now: Instant) -> Self {
+        Self::at(now, false)
+    }
+
+    fn at(now: Instant, metered: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(EgressBudgetState {
                 active_streams: 0,
                 byte_tokens: EGRESS_BURST_BYTES,
                 last_refill: now,
             })),
+            metered,
         }
+    }
+
+    /// Acquire `bytes` tokens, waiting for the bucket to refill if it is dry.
+    ///
+    /// Returns false only when `bytes` exceeds the burst ceiling — a payload no
+    /// amount of waiting can admit. Everything else eventually succeeds, because
+    /// tokens refill monotonically at a fixed rate.
+    ///
+    /// Throttling must never tear down an established stream: the host→guest
+    /// drain already backpressures this way, and resetting the guest→host side
+    /// instead killed in-flight TLS transfers mid-download.
+    fn consume_waiting(&self, bytes: usize) -> bool {
+        if !self.metered {
+            return true;
+        }
+        if u64::try_from(bytes).unwrap_or(u64::MAX) > EGRESS_BURST_BYTES {
+            return false;
+        }
+        while !self.try_consume(bytes) {
+            std::thread::sleep(BUDGET_REFILL_POLL);
+        }
+        true
     }
 
     fn try_reserve_stream(&self) -> bool {
@@ -96,6 +141,9 @@ impl EgressBudget {
     }
 
     fn try_consume_at(&self, bytes: usize, now: Instant) -> bool {
+        if !self.metered {
+            return true;
+        }
         let mut state = self.state.lock().expect("egress budget mutex poisoned");
         refill_tokens(&mut state, now);
 
@@ -110,6 +158,9 @@ impl EgressBudget {
     /// Reserve up to `max` bytes for a non-blocking read. The caller must
     /// refund bytes it reserved but did not receive from the socket.
     fn reserve_read(&self, max: usize, now: Instant) -> usize {
+        if !self.metered {
+            return max;
+        }
         let mut state = self.state.lock().expect("egress budget mutex poisoned");
         refill_tokens(&mut state, now);
         let max = u64::try_from(max).unwrap_or(u64::MAX);
@@ -208,6 +259,12 @@ impl SubstitutionBridge {
         self.endpoint = Some(path.to_path_buf());
     }
 
+    /// Swap the shared budget. Called during device setup, before any stream
+    /// exists, so no in-flight reservation is stranded.
+    pub(crate) fn set_budget(&mut self, budget: EgressBudget) {
+        self.budget = budget;
+    }
+
     /// Share the open-connection counter with the run loop heartbeat.
     pub fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
         self.active = Some(counter);
@@ -264,7 +321,7 @@ impl SubstitutionBridge {
 impl GuestEndpointRelay for SubstitutionBridge {
     fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction {
         if let Some(conn) = self.conns.get_mut(&conn_id) {
-            if !self.budget.try_consume(payload.len()) {
+            if !self.budget.consume_waiting(payload.len()) {
                 return EndpointRelayAction::Refused;
             }
             write_nonblocking(&mut conn.stream, payload);
@@ -284,7 +341,7 @@ impl GuestEndpointRelay for SubstitutionBridge {
         match UnixStream::connect(&path) {
             Ok(stream) => {
                 let _ = stream.set_nonblocking(true);
-                if !self.budget.try_consume(payload.len()) {
+                if !self.budget.consume_waiting(payload.len()) {
                     self.budget.release_stream();
                     return EndpointRelayAction::Refused;
                 }
@@ -588,6 +645,75 @@ mod tests {
         assert_eq!(expired, vec![7]);
         assert!(!b.is_active());
         assert_eq!(active.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_established_stream_is_throttled_not_reset_when_the_budget_is_dry() {
+        let sock =
+            std::env::temp_dir().join(format!("mvm-egress-throttle-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = bind_unix_listener(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink);
+            sink.len()
+        });
+
+        let mut bridge = SubstitutionBridge::new();
+        bridge.set_endpoint(&sock);
+        assert_eq!(
+            bridge.relay_guest_bytes(7, b"open"),
+            EndpointRelayAction::Relayed
+        );
+
+        // Drain every token, then keep writing on the already-open stream. A
+        // rate-limited stream must survive: resetting it here is what tore down
+        // nix's in-flight TLS downloads mid-transfer.
+        while bridge.budget.try_consume(64 * 1024) {}
+        for _ in 0..4 {
+            assert_eq!(
+                bridge.relay_guest_bytes(7, &[b'x'; 1024]),
+                EndpointRelayAction::Relayed,
+                "an open stream must backpressure, never reset"
+            );
+        }
+
+        bridge.close_connection(7);
+        drop(bridge);
+        assert_eq!(server.join().unwrap(), 4 + 4 * 1024);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn a_payload_larger_than_the_burst_ceiling_is_refused() {
+        // No amount of waiting admits this one, so it must fail closed rather
+        // than spin forever.
+        let budget = EgressBudget::new();
+        let oversized = usize::try_from(EGRESS_BURST_BYTES).unwrap() + 1;
+        assert!(!budget.consume_waiting(oversized));
+    }
+
+    #[test]
+    fn an_unmetered_budget_ignores_the_byte_rate() {
+        let now = Instant::now();
+        let budget = EgressBudget::unmetered_at(now);
+        let ten_mib = 10 * 1024 * 1024;
+        for _ in 0..64 {
+            assert!(budget.try_consume_at(ten_mib, now));
+        }
+        assert!(budget.consume_waiting(ten_mib));
+    }
+
+    #[test]
+    fn an_unmetered_budget_still_caps_concurrent_streams() {
+        // Lifting the byte rate for a trusted builder must not lift the host-fd
+        // guard.
+        let budget = EgressBudget::unmetered();
+        for _ in 0..MAX_EGRESS_STREAMS {
+            assert!(budget.try_reserve_stream());
+        }
+        assert!(!budget.try_reserve_stream());
     }
 
     #[test]
