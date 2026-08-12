@@ -245,6 +245,11 @@ pub fn admit_for_run(
     // admitted under an id that genuinely addresses its content.
     verify_plan_id(&verified).context("plan_id content-address check")?;
 
+    // The retired raw-packet transport, checked again on the verified plan and
+    // not only in synthesis: admission is what a plan built elsewhere reaches,
+    // and the refusal has to hold for those too.
+    mvm_core::plan::refuse_retired_l3(&verified.network_mode, verified.l3_network.is_some())?;
+
     // Validity window — refuses plans whose now() is outside
     // [valid_from, valid_until). For freshly-synthesized plans this
     // can only fire if the host's clock changed during signing or if

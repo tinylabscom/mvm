@@ -258,21 +258,30 @@ backend falls below Tier 1.
 | QEMU (Linux KVM/TCG) | ✅ KVM where available | ⚠️ larger device-model TCB | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — a `mvm`-only Linux dev/test substrate, opt-in only, never reachable from the fleet orchestrator. It carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path. This carve-out is type-enforced: a `WorkloadBackend` marker trait gates the admitted workload-launch path, and QEMU does not implement it, so it cannot reach that path regardless of prose. The test-only mock backend does implement the marker — it is a hermetic lifecycle test double that carries no real workload, so permitting it costs nothing. |
 | `wasm-sandbox` (browser / WASI preview) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale.** No KVM, no real kernel, no TAP/virtio/vsock. Asserts none of the numbered claims and declares its own non-virtualization honestly; fails closed on any kernel/TAP/vsock request. Opt-in only; auto-detection never selects it. It is safe *because* it is single-principal — a developer's own code in their own browser sandbox, where the "malicious guest" adversary class does not apply — not because it holds any isolation claim. Promotion to a real, claim-bearing microVM re-materializes the workload from recorded intent through the audited build and admission pipeline; nothing produced in this claims-free tier carries authority into a claim-bearing one. |
 
+**Matrix scope — networking.** Every "no guest network interface" statement in
+the rows above describes the default socket-aware vsock path, which is the
+only path a new workload can now take. It does not describe the frozen
+`l3-vsock` mode, where the guest holds an `mvm0` TUN by design; see
+"The `l3-vsock` second path, and its retirement" below. A run's tier is
+otherwise unaffected by this: `l3-vsock` never changed a backend's isolation
+tier, only which policy implementation decided its egress.
+
 **Tier discipline.** Tier 1 is the production default and the only tier
 that carries every numbered claim. Tier 2 backends hold every claim
 except claim 3, which is scoped to the block+ext4 backends. There is no
 Tier 3: a shared-kernel container runtime holds none of the L1–L3
 isolation claims, so mvm ships no container-based backend at any tier.
 
-**Claim-10 coverage.** Claim 10's default-deny egress is enforced at **one**
-seam for every backend that runs an untrusted workload: the per-VM
-substitution endpoint reached over vsock, whose shared `EgressGate` is the
-sole decision point. There is no host-side network chokepoint to enforce at,
-because a workload guest has no network interface at all — Firecracker omits
-`/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect`, and the
-HVF device model has no net device. Egress leaves a guest only over vsock, to
-a host-side endpoint the host itself originates the outbound connection from,
-which is what makes admission, substitution and the audit record possible.
+**Claim-10 coverage.** On the default socket-aware path, claim 10's
+default-deny egress is enforced at **one** seam for every backend that runs an
+untrusted workload: the per-VM substitution endpoint reached over vsock, whose
+shared `EgressGate` is the sole decision point. There is no host-side network
+chokepoint to enforce at, because such a workload guest has no network
+interface at all — Firecracker omits `/network-interfaces`, libkrun pins
+`NetworkingMode::VsockDirect`, and the HVF device model has no net device.
+Egress leaves the guest only over vsock, to a host-side endpoint the host
+itself originates the outbound connection from, which is what makes admission,
+substitution and the audit record possible.
 
 Two gates keep that true rather than aspirational. `xtask
 check-uniform-vsock-egress` pins Firecracker, libkrun and HVF to a single
@@ -281,6 +290,31 @@ gate or revert to a raw backend. `xtask check-vsock-only-egress` fails closed
 if `virtio_net`, a tap, or a userspace-gateway token appears on a workload
 path. QEMU is intentionally excluded, for the reason given in the tier matrix
 above.
+
+**The `l3-vsock` second path, and its retirement.** ADR-036 added an opt-in
+compatibility mode (`raw_ip_stack=true`, `NetworkMode::L3Vsock`) in which the
+guest *does* get an IP stack, on an `mvm0` TUN, and tunnels raw IP packets to
+a host forwarder; ADR-037 added a second forwarder for it. On that path the
+guest originates connections, so the decision point is the L3 admitter and the
+forwarder's policy — not the `EgressGate` above — and host-side substitution
+and redaction cannot apply at all. Claim 10 held on that path through its own
+admitter, but through a *second* implementation, which is a weaker property
+than the "one decision point" this section asserts for the default path.
+
+ADR-042 retires it. `raw_ip_stack=true` / `NetworkMode::L3Vsock` is now
+refused at synthesis and admission with a migration error; already-running VMs
+drain, and no new production L3 workload boots. `xtask
+check-l3-expansion-freeze` is a temporary shrink-only ratchet holding that
+line until Plan 316 Phase 7 deletes the path and Phase 8 replaces
+`check-uniform-vsock-egress`, `check-vsock-only-egress`, and the ratchet with
+`check-single-network-path` plus a socket-owner gate. Until that lands, read
+claim 10 as: one decision point on the only path a new workload can take, and
+a frozen second implementation with no new entrants.
+
+*Corrected 2026-08-11.* This section, and `specs/refactor/03-networking.md`,
+both asserted that a workload guest has no network interface at all, with no
+qualifier. That was written before `l3-vsock` shipped and was not revisited
+when it did. The paragraphs above restore the qualifier.
 
 *Corrected 2026-08-02.* This section previously described enforcement as
 "Firecracker via nftables default-deny on the TAP, and libkrun via the
