@@ -567,6 +567,115 @@ impl FileAuditSigner {
             .map(|_| ())
     }
 
+    /// Delete segments `1..=through` after recording the removal in the chain.
+    ///
+    /// The order is the whole design: **verify, then record, then delete.**
+    ///
+    /// Verifying first is not politeness. Pruning a chain that is already
+    /// broken would destroy the evidence of whatever broke it, and it would do
+    /// so under the banner of routine maintenance — so a set that does not
+    /// verify is refused before anything is unlinked.
+    ///
+    /// Recording before deleting is what makes a crash safe in the right
+    /// direction. If the process dies between the two, the chain carries a
+    /// prune record for segments that are still on disk: the record is then
+    /// simply unused, because the front is still genesis and nothing needs
+    /// explaining. The opposite order would leave files deleted with no record,
+    /// which is indistinguishable from tampering and unrecoverable.
+    ///
+    /// Only a prefix may be pruned. That leaves exactly one boundary between
+    /// what was removed and what survives, and it is the one boundary the
+    /// surviving chain can still corroborate.
+    pub fn prune_through(
+        &self,
+        tenant: &mvm_core::plan::TenantId,
+        through: u64,
+    ) -> Result<crate::supervisor::audit_segment::Pruned, AuditError> {
+        let active = self.tenant_path(&tenant.0);
+        let base = Self::segment_base(&active);
+        let dir = active
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let _lock = Self::acquire_lock(&active)?;
+
+        let vk = self.signing_key.verifying_key();
+        let verified =
+            crate::supervisor::audit_set::verify_segment_set(&dir, &base, &vk).map_err(|e| {
+                AuditError::Io(format!(
+                    "refusing to prune a chain that does not verify: {e}. Pruning a broken \
+                 chain would delete the evidence of whatever broke it"
+                ))
+            })?;
+
+        // Already-pruned prefixes are not re-prunable, and the range must start
+        // where the surviving history starts.
+        let floor = verified.pruned.map_or(1, |p| p.through + 1);
+        let sealed: Vec<&crate::supervisor::audit_set::SegmentReport> =
+            verified.segments.iter().filter(|s| !s.active).collect();
+
+        if through < floor {
+            return Err(AuditError::Io(format!(
+                "segments through {through} are already pruned; the surviving chain starts \
+                 at segment {floor}"
+            )));
+        }
+        let Some(last_kept) = verified.segments.iter().find(|s| s.seq > through) else {
+            return Err(AuditError::Io(format!(
+                "pruning through segment {through} would leave no chain behind; at least \
+                 the active segment must survive"
+            )));
+        };
+        let _ = last_kept;
+        // Every segment in the range must actually be here, or the "prefix"
+        // being claimed is not the prefix being deleted.
+        for seq in floor..=through {
+            if !sealed.iter().any(|s| s.seq == seq) {
+                return Err(AuditError::Io(format!(
+                    "segment {seq} is in the range being pruned but is not on disk; \
+                     refusing to describe a removal that does not match the files"
+                )));
+            }
+        }
+
+        // The tip of the highest segment being removed is the one fact the
+        // surviving successor independently attests, so it is what the record
+        // has to carry.
+        let top = dir.join(mvm_core::config::audit_segment_file_name(&base, through));
+        let content = std::fs::read_to_string(&top).map_err(|e| AuditError::Io(e.to_string()))?;
+        let last = content
+            .lines()
+            .rfind(|l| !l.is_empty())
+            .ok_or_else(|| AuditError::Io(format!("{} is empty", top.display())))?;
+        let entries: u64 = verified
+            .segments
+            .iter()
+            .filter(|s| s.seq <= through && !s.active)
+            .filter_map(|s| s.entries)
+            .sum::<usize>() as u64;
+
+        let pruned = crate::supervisor::audit_segment::Pruned {
+            through,
+            tip: hash_line(last.as_bytes()),
+            entries,
+        };
+        let entry = self.handoff_entry(
+            tenant,
+            crate::supervisor::audit_segment::CHAIN_PRUNED,
+            crate::supervisor::audit_segment::pruned_labels(&pruned),
+        );
+        // Barrier: the record must be durable before the files it explains stop
+        // existing.
+        let prev = self.restore_cursor(&active)?;
+        self.write_signed(&active, &entry, prev, SyncPolicy::Barrier)?;
+
+        for seq in floor..=through {
+            let path = dir.join(mvm_core::config::audit_segment_file_name(&base, seq));
+            std::fs::remove_file(&path).map_err(|e| AuditError::Io(e.to_string()))?;
+        }
+        Ok(pruned)
+    }
+
     /// Finish an interrupted rotation.
     ///
     /// A crash between the rename and the continuation write leaves a sealed
