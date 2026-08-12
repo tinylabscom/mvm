@@ -41,7 +41,7 @@ mod image_lock;
 
 pub use image_lock::{
     DEFAULT_LOCK_WAIT, LOCK_WAIT_ENV, LockWait, NixStoreImageLock, acquire_nix_store_image_lock,
-    acquire_nix_store_image_lock_named,
+    acquire_nix_store_image_lock_named, nix_store_image_is_contended,
 };
 pub(crate) use image_lock::{
     acquire_sidecar_lock_within, pid_alive, sidecar_lock_path, sparse_create_image,

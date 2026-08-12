@@ -269,6 +269,7 @@ fn run_command() -> Result<()> {
     };
     apply_startup_env(&cli);
     register_inhouse_builder();
+    register_builder_session_starter();
     register_stream_plane();
     configure_runtime_logging(&cli);
 
@@ -502,6 +503,18 @@ fn aux_bin_dir_to_apply(baked: &str, already_set: bool) -> Option<String> {
         return None;
     }
     Some(baked.to_string())
+}
+
+/// Let a build start a persistent builder when it finds the store image busy.
+///
+/// `mvm-build` decides *when* sharing beats queueing; it cannot start a session
+/// itself, because host-binary extraction, builder-image resolution and the
+/// session record all live up here. Same inversion as the hvf builder ctor
+/// below.
+fn register_builder_session_starter() {
+    mvm_build::persistent_builder::register_session_starter(Box::new(|| {
+        crate::commands::build::persistent_builder::start_session_for_contended_build()
+    }));
 }
 
 fn register_inhouse_builder() {
