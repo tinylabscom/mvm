@@ -20,15 +20,15 @@
 //!   (`mvm-cli/src/bench/probe.rs`, `examples/hvf-backend-*.rs`). QEMU's
 //!   legacy shell in particular attaches a real `virtio-net-pci` slirp NIC on
 //!   purpose — QEMU is a Tier-2 dev/test backend never used by `mvmd`, and
-//!   ADR-001 deliberately does not wire claim-10 egress enforcement into it.
+//!   claim-10 egress enforcement is deliberately not wired into it.
 //! * `crates/mvm-backends/src/fc/snapshot.rs` — parses Firecracker's
 //!   `network-interfaces` snapshot field *in order to assert it is empty*
 //!   (`assert_vsock_only_device_model`). Guarding this file would flag its
 //!   own fail-closed check and its negative-path tests as violations.
 //!
-//! `crates/mvm-backends/src/driver/qemu.rs` is excluded for the same
-//! ADR-001 reason as the legacy QEMU shell above: QEMU is dev/test-only and
-//! out of the claim-10 workload tier.
+//! `crates/mvm-backends/src/driver/qemu.rs` is excluded for the same reason
+//! as the legacy QEMU shell above: QEMU is dev/test-only and out of the
+//! claim-10 workload tier.
 
 use anyhow::{Result, bail};
 use regex::Regex;
