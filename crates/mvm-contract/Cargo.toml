@@ -22,6 +22,11 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 # `DateTime<Utc>` fields byte-identical across the move.
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"], optional = true }
 ed25519-dalek = { version = "3", default-features = false }
+# The egress-projection core decides over CIDRs. `default-features = false`
+# drops ipnet's `std` feature, under which its `AddrParseError` implements
+# `core::error::Error` instead — which is what the projection's `thiserror`
+# derive needs to carry it as an error `source` under `no_std`.
+ipnet = { version = "2", default-features = false }
 # Only under the `schema` feature (IR JSON-Schema codegen for
 # `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins). schemars 0.8's
 # derive macro emits `std::`-rooted paths unconditionally, so it can't

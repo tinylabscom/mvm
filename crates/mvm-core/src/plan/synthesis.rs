@@ -144,8 +144,6 @@ pub struct SynthesisInput<'a> {
     pub disk_mib: u64,
     /// Boot-timeout seconds. Conservative default 60s on capable hosts.
     pub boot_timeout_secs: u32,
-    /// Exec-timeout seconds. 0 = unbounded.
-    pub exec_timeout_secs: u32,
     /// Whether the post-run lifecycle should destroy the VM on exit.
     /// True for one-shot CLI workloads; false for daemon-shape services.
     pub destroy_on_exit: bool,
@@ -279,7 +277,16 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         disk_mib: input.disk_mib,
         timeouts: TimeoutSpec {
             boot_secs: input.boot_timeout_secs.max(1),
-            exec_secs: input.exec_timeout_secs,
+            // The wall-clock bound has one author — the grant. This is its
+            // projection into the plan's older encoding, and the only write of
+            // the field anywhere; admission refuses a plan whose two encodings
+            // disagree rather than choosing between them.
+            exec_secs: mvm_contract::grants::projection::exec_secs_from_grants(
+                input
+                    .grants
+                    .as_ref()
+                    .unwrap_or(&mvm_contract::grants::Grants::default()),
+            ),
         },
     };
 
@@ -462,7 +469,6 @@ mod tests {
             mem_mib: 512,
             disk_mib: 0,
             boot_timeout_secs: 60,
-            exec_timeout_secs: 0,
             destroy_on_exit: false,
             bundle_pin: None,
             deps_volume: None,
@@ -483,7 +489,12 @@ mod tests {
         inp.cpus = 4;
         inp.mem_mib = 2048;
         inp.boot_timeout_secs = 120;
-        inp.exec_timeout_secs = 600;
+        inp.grants = Some(mvm_contract::grants::Grants {
+            wall_clock: Some(mvm_contract::grants::WallClockGrant::Secs {
+                secs: core::num::NonZeroU32::new(600).expect("nonzero"),
+            }),
+            ..Default::default()
+        });
         let plan = synthesize_plan(&inp).unwrap();
         assert_eq!(plan.resources.cpus, 4);
         assert_eq!(plan.resources.mem_mib, 2048);

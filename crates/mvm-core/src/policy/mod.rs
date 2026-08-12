@@ -15,19 +15,19 @@ pub mod security_profile;
 // Tenant policy bundles — authoring, resolution, signing, TOML loading.
 // Folded in from the former `mvm-policy` crate. mvmd consumes the
 // resolver + bundle types via the facade.
-pub mod projection;
 pub mod projection_fs_env;
 pub mod resolver;
 pub mod signing;
 pub mod toml_loader;
 
 // `security`, `reversible_replacement`, `policies`, `redaction`, and
-// `bundle` are pure-DTO leaves that now live in `mvm-contract`; re-exported
+// `bundle` are pure-DTO leaves that now live in `mvm-contract`, and
+// `projection` is the pure egress-decision core alongside them; re-exported
 // here as module aliases so every existing
-// `crate::policy::{security,reversible_replacement,policies,redaction,bundle}::X`
+// `crate::policy::{security,reversible_replacement,policies,redaction,bundle,projection}::X`
 // path keeps resolving unchanged.
 pub use mvm_contract::policy::{
-    approval, bundle, policies, redaction, reversible_replacement, security,
+    approval, bundle, policies, projection, redaction, reversible_replacement, security,
 };
 
 pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};

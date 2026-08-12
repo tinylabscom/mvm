@@ -6,6 +6,7 @@
 //!
 //! - `cmd.sh` emission (Flake jobs) and `install_spec.json` staging
 //!   (Install jobs)
+//! - Filtered staging for disk-transport `/work` inputs
 //! - `/job/result` JSON parsing
 //! - Per-variant artifact finalisation (rootfs path resolution,
 //!   revision hash extraction, install-volume sidecar discovery)
@@ -717,6 +718,30 @@ pub fn stage_shell_job_dir(job_dir: &Path, script: &str) -> Result<(), BuilderVm
         BuilderVmError::ExtractionFailed(format!("writing {}: {e}", cmd_path.display()))
     })?;
     Ok(())
+}
+
+/// Stage a filtered copy of `src` for a disk-transport `/work` input.
+///
+/// A source checkout can carry `target/`, `.worktrees/`, `.git/`, and other
+/// build or VCS scratch measured in tens of GiB. Raw-disk builder transports
+/// must not archive that host-local state into the guest. Reuse the same
+/// exclusion contract as the staged mvm-workspace snapshot so all disk-backed
+/// builders pack only source inputs.
+///
+/// The returned temporary directory owns the staged tree and must remain alive
+/// until the caller finishes packing its transport disk.
+pub fn stage_filtered_work_input(src: &Path) -> Result<tempfile::TempDir, BuilderVmError> {
+    let staged = tempfile::TempDir::new().map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("creating filtered work staging dir: {e}"))
+    })?;
+    copy_dir_filtered(src, staged.path()).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "staging filtered work input {} -> {}: {e}",
+            src.display(),
+            staged.path().display()
+        ))
+    })?;
+    Ok(staged)
 }
 
 /// Filename of the install report `mvm-host-vm-init` writes into
