@@ -6,6 +6,10 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Foreground `machine run` port forwarding.** Repeatable
+      `--port HOST:GUEST` promotes a run to a persistent machine, delegates to
+      the existing forwarding lifecycle, binds loopback rather than socat's
+      wildcard default, and refuses detached or competing attached ownership.
 - [x] **CLI help layout invariant.** Every visible and hidden command emits one
       physical line per help item, strictly shorter than 80 columns, for
       `--help`, `-h`, and `mvmctl help <path>`. The shared renderer compacts
