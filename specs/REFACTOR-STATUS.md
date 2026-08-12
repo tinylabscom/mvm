@@ -62,6 +62,18 @@ for detailed scope and acceptance criteria.
       clippy are green.
 
 ## In-flight plans
+- [~] Plan 323 — Concurrent builds through one builder VM
+      (`specs/plans/323-concurrent-builds-one-builder-vm.md`)
+  - [x] Phase 1 — a contended Nix-store image lock queues (naming the holding
+        pid and command) instead of failing the second build outright;
+        `MVM_BUILDER_LOCK_WAIT_SECS` bounds the wait and `0` restores
+        fail-fast for CI
+  - [ ] Phase 2 — an HVF persistent builder, so the multiplexing path exists
+        on the macOS 26+ default backend
+  - [ ] Phase 3 — adopt (or start) a persistent builder on contention so
+        concurrent builds share one VM instead of queueing
+  - [ ] Phase 4 — troubleshooting + CLI-reference documentation
+
 - [x] Plan 315 — Bootstrap means machine-ready
       (`specs/plans/315-bootstrap-machine-readiness.md`)
   - [x] Bootstrap acquires and verifies both builder image and workload kernel
