@@ -96,15 +96,44 @@ base image. This is the workstream that actually delivers "never".
 
 ### WS-D — establish the mechanism, then keep it fixed
 
-- [ ] Reproduce: kill a builder VM mid-write and check whether the store
+- [x] Reproduce: kill a builder VM mid-write and check whether the store
       mounts clean afterwards.
-- [ ] If `kill -9` alone does not corrupt, find what did — a second writer, an
-      I/O error path, or a host-level event — and record it here.
-- [ ] Regression coverage for whatever WS-D establishes.
+
+**`kill -9` does not corrupt the store.** Measured 2026-08-12 against a
+pre-WS-A binary, so the result describes the original code:
+
+| step | `s_state` |
+| --- | --- |
+| baseline | `0x0001` VALID_FS, no ERROR_FS |
+| after `kill -9` mid-write (8 sustained write ticks observed) | `0x0001` unchanged |
+| after remount + a full successful build | `0x0001` unchanged |
+
+The build following the kill completed normally. This matches the analysis
+above: the writes were already in host page cache, which the kernel owns and
+which outlives the process.
+
+So **the premise that a killed builder VM caused the observed corruption is
+refuted.** Something else did.
+
+- [ ] Find what did. Two candidates, in order of suspicion:
+      1. **Two writers on the same image.** This is the shape that produces
+         `deleted inode referenced` after a successful journal replay: two
+         mounts disagreeing about metadata, not one mount losing writes. Plan
+         324 / #2416 is reworking store-lock ownership precisely because the
+         lock did not cover the whole window a VM is alive; that gap and this
+         corruption are consistent with each other.
+      2. A host-level event (panic / power loss) losing page cache. WS-A
+         closes this one regardless.
+- [ ] Regression coverage for whatever this establishes.
 
 ## Sequencing
 
 WS-A is independent and lands first. WS-B is independent of WS-A and can land
-in parallel. WS-C depends on neither but is the largest change and should
-follow WS-D's findings, so the design answers the real failure mode rather
-than the assumed one.
+in parallel.
+
+WS-C should now be re-scoped before it is built. WS-D refuted the failure mode
+WS-C was conceived to prevent: a CoW overlay protects the base image from a
+*build that dies*, and a build that dies turns out not to damage it. If the
+real mechanism is concurrent writers, the fix is single-writer enforcement
+(#2416's territory), and a CoW overlay would add a large amount of machinery
+against a threat that is not the one we have. Settle WS-D's open item first.
