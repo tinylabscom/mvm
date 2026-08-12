@@ -419,11 +419,8 @@ fn vsock_egress_requested_from_cmdline(cmdline: &str) -> bool {
 /// non-positive values so a malformed token can't wind the clock backwards.
 #[cfg(any(target_os = "linux", test))]
 fn hostepoch_from_cmdline(cmdline: &str) -> Option<i64> {
-    cmdline
-        .split_whitespace()
-        .find_map(|tok| tok.strip_prefix("mvm.hostepoch="))
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|secs| *secs > 0)
+    mvm_vmm::host::boot_config::builder_hostepoch_from_cmdline(cmdline)
+        .and_then(|seconds| seconds.try_into().ok())
 }
 
 #[cfg(any(target_os = "linux", test))]

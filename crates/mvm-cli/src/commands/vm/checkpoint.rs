@@ -435,6 +435,7 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
             tag,
             created_unix: now,
             quiesced: true,
+            grants: admitted_grants_for(name)?,
         },
     )
     .with_context(|| format!("capturing fs_quick checkpoint of {name:?}"))?;
@@ -501,6 +502,7 @@ fn capture_vm_full_for_running_vm(
         tag: args.tag,
         created_unix: args.created_unix,
         retain_paused: false,
+        grants: admitted_grants_for(args.name)?,
     };
     capture_vm_full(args.store, params, control.as_ref())
 }
@@ -542,6 +544,34 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// The permission set `name` was admitted under, read off its persisted plan so
+/// the checkpoint can seal it and a later restore can bound a child against it.
+///
+/// Degrades the same way [`bind_checkpoint_created`] does, and safely for the
+/// same reason: a VM with no readable plan also gets no chain-signed
+/// `checkpoint.created` entry, so the record it produces has nothing to anchor
+/// its content-address and every fork of it is refused before the grants are
+/// consulted at all.
+fn admitted_grants_for(name: &str) -> Result<Option<mvm_contract::grants::Grants>> {
+    let path = super::plan_persist::plan_path(name)?;
+    // A VM that never had a plan legitimately has no grant to seal, and that is
+    // the only tolerated absence. Every other failure — a corrupt plan, one at
+    // loose permissions, one that will not parse — is refused rather than
+    // resolved to `None`, because `None` is not "unknown" here: for CPU and wall
+    // clock it means *unbounded*, so swallowing the error would widen the record
+    // silently and hand every child restored from it that widening.
+    if !path.exists() {
+        return Ok(None);
+    }
+    let plan = super::plan_persist::read_plan_at(&path).with_context(|| {
+        format!(
+            "reading {name}'s admitted plan to seal its grants into the checkpoint; \
+             refusing to seal a checkpoint whose permission set cannot be determined"
+        )
+    })?;
+    Ok(plan.grants)
 }
 
 pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {

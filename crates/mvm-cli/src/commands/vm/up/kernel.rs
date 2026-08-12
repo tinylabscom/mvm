@@ -5,12 +5,17 @@
 /// Kernel-less images (mkGuest ships no kernel) boot fine on libkrun,
 /// which materializes its own bundled kernel and ignores this path. The
 /// out-of-process backends (hvf and firecracker) need a real kernel file;
-/// fall back to the cached builder-VM kernel — the same kernel the builder
+/// fall back to the cached workload kernel — the same kernel the builder
 /// and dev VMs boot — rather than handing them a missing path.
 ///
 /// Firecracker's direct/manifest boot path already performs this same
 /// fallback; without it here the flake path would refuse a kernel-less
 /// mkGuest workload that the manifest path boots fine.
+///
+/// The fallback goes through `resolve_kernel`, so it is a verified cache hit
+/// rather than a filename that happens to exist. This path used to format the
+/// cache location itself and accept it on `exists()`, which meant a workload
+/// whose image shipped no kernel got the weakest check of any boot route.
 pub(in crate::commands::vm) fn resolve_workload_kernel(
     vmlinux_path: &str,
     hypervisor: &str,
@@ -23,22 +28,19 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
     if !matches!(hypervisor, "hvf" | "firecracker") {
         return Ok(vmlinux_path.to_string());
     }
-    let arch = if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "x86_64"
-    };
-    let fallback = format!(
-        "{}/builder-vm/{arch}/kernels/workload/vmlinux",
-        mvm_core::config::mvm_cache_dir()
-    );
-    if std::path::Path::new(&fallback).exists() {
-        return Ok(fallback);
+    let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = mvm_core::arch::GuestArch::host().to_string();
+    let fallback = mvm_build::kernel_fetch::cached_kernel_path(&cache_dir, &arch, "workload");
+    if let mvm_build::kernel_fetch::KernelResolution::Cached(verified) =
+        mvm_build::kernel_fetch::resolve_kernel(&cache_dir, &arch, "workload", false)
+    {
+        return Ok(verified.path().display().to_string());
     }
     anyhow::bail!(
         "image has no kernel ({vmlinux_path} missing) and the {hypervisor} backend \
-         needs one; the builder-VM kernel fallback at {fallback} is also absent — \
-         run `mvmctl kernel build --which workload` once to populate it"
+         needs one; no verified workload kernel is cached at {} — \
+         run `mvmctl kernel build --which workload` once to populate it",
+        fallback.display()
     )
 }
 
@@ -77,6 +79,7 @@ fn download_published_kernel(
     )
 }
 
+#[tracing::instrument(skip_all, fields(arch, source_checkout))]
 fn resolve_pinned_kernel_with<F>(
     cache_dir: &std::path::Path,
     arch: &str,
@@ -154,56 +157,82 @@ mod resolve_workload_kernel_tests {
         assert_eq!(result, "/nonexistent/vmlinux");
     }
 
+    /// Stage a workload kernel in the cache under `MVM_HOME`, optionally
+    /// recording the digest sidecar a verified read requires.
+    fn stage_cached_workload_kernel(
+        home: &std::path::Path,
+        bytes: &[u8],
+        pin: bool,
+    ) -> std::path::PathBuf {
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let kernel =
+            mvm_build::kernel_fetch::cached_kernel_path(&home.join("cache"), &arch, "workload");
+        std::fs::create_dir_all(kernel.parent().unwrap()).unwrap();
+        std::fs::write(&kernel, bytes).unwrap();
+        if pin {
+            mvm_build::kernel_fetch::record_kernel_digest(&kernel).unwrap();
+        }
+        kernel
+    }
+
     #[test]
-    fn hvf_missing_kernel_falls_back_to_builder_vm_cache() {
+    fn hvf_missing_kernel_falls_back_to_cached_workload_kernel() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        let arch = if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "x86_64"
-        };
-        let fallback_dir = tmp
-            .path()
-            .join("cache")
-            .join("builder-vm")
-            .join(arch)
-            .join("kernels")
-            .join("workload");
-        std::fs::create_dir_all(&fallback_dir).unwrap();
-        let fallback = fallback_dir.join("vmlinux");
-        std::fs::write(&fallback, b"builder-kernel").unwrap();
         env.set("MVM_HOME", tmp.path());
+        let fallback = stage_cached_workload_kernel(tmp.path(), b"builder-kernel", true);
         let result = resolve_workload_kernel("/nonexistent/vmlinux", "hvf").unwrap();
         assert_eq!(result, fallback.to_str().unwrap());
     }
 
     #[test]
-    fn firecracker_missing_kernel_falls_back_to_builder_vm_cache() {
-        // The firecracker flake path must reuse the cached builder-VM
-        // kernel for a kernel-less mkGuest workload, exactly as the
-        // firecracker manifest path does — otherwise a `sleeper`-style
-        // image (no emitted vmlinux) can't boot under firecracker.
+    fn firecracker_missing_kernel_falls_back_to_cached_workload_kernel() {
+        // The firecracker flake path must reuse the cached workload kernel
+        // for a kernel-less mkGuest workload, exactly as the firecracker
+        // manifest path does — otherwise a `sleeper`-style image (no emitted
+        // vmlinux) can't boot under firecracker.
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        let arch = if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "x86_64"
-        };
-        let fallback_dir = tmp
-            .path()
-            .join("cache")
-            .join("builder-vm")
-            .join(arch)
-            .join("kernels")
-            .join("workload");
-        std::fs::create_dir_all(&fallback_dir).unwrap();
-        let fallback = fallback_dir.join("vmlinux");
-        std::fs::write(&fallback, b"builder-kernel").unwrap();
         env.set("MVM_HOME", tmp.path());
+        let fallback = stage_cached_workload_kernel(tmp.path(), b"builder-kernel", true);
         let result = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap();
         assert_eq!(result, fallback.to_str().unwrap());
+    }
+
+    #[test]
+    fn an_unpinned_fallback_kernel_is_refused() {
+        // The behaviour this replaces: the kernel-less-image route formatted
+        // the cache path itself and booted whatever sat there. Both tests
+        // above passed without a digest before this change.
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        let kernel = stage_cached_workload_kernel(tmp.path(), b"builder-kernel", false);
+        let err = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap_err();
+        assert!(
+            err.to_string().contains("no verified workload kernel"),
+            "expected the verification refusal, got: {err}"
+        );
+        assert!(
+            !kernel.exists(),
+            "an unpinned kernel is evicted, not left to be re-adopted"
+        );
+    }
+
+    #[test]
+    fn a_tampered_fallback_kernel_is_refused() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        let kernel = stage_cached_workload_kernel(tmp.path(), b"the real kernel", true);
+        // Same length, so a size check would not notice.
+        std::fs::write(&kernel, b"the fake kernel").unwrap();
+        let err = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap_err();
+        assert!(
+            err.to_string().contains("no verified workload kernel"),
+            "expected the verification refusal, got: {err}"
+        );
+        assert!(!kernel.exists(), "rejected kernel removed");
     }
 
     #[test]

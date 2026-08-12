@@ -294,8 +294,8 @@ mod tests {
         UdsGuestChannelProvider::hvf_at(home._dir.path())
     }
 
-    fn bound_listener_for_test() -> (Box<dyn GuestListener>, PathBuf) {
-        let provider = UdsGuestChannelProvider::per_vm_dir("libkrun");
+    fn bound_listener_for_test(home: &HomeGuard) -> (Box<dyn GuestListener>, PathBuf) {
+        let provider = per_vm_provider(home);
         let instance = instance();
         let listener = provider
             .bind_service(&instance, GuestService::NetworkControl)
@@ -356,8 +356,8 @@ mod tests {
 
     #[test]
     fn an_accepted_uds_connection_exposes_its_pollable_descriptor() {
-        let _home = HomeGuard::new();
-        let (mut listener, path) = bound_listener_for_test();
+        let home = HomeGuard::new();
+        let (mut listener, path) = bound_listener_for_test(&home);
         let _client = std::thread::spawn(move || UnixStream::connect(&path).expect("connect"));
         let conn = listener.accept().expect("accept");
         assert!(

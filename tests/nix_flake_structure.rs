@@ -766,18 +766,28 @@ fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
 }
 
 #[test]
-fn shared_kernel_base_forces_hvc0_console_support() {
+fn shared_kernel_base_forces_backend_console_support() {
     let path = nix_dir().join("images").join("kernel").join("base.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/images/kernel/base.nix must be present: {e}"));
 
-    assert!(
-        content.contains("\"VIRTIO_CONSOLE\"") && content.contains("\"HVC_DRIVER\""),
-        "the shared microVM kernel base must force both VIRTIO_CONSOLE and \
-         HVC_DRIVER when libkrun workloads boot with `console=hvc0`; \
-         otherwise the kernel can boot silently even though the backend \
-         wires a virtio-console."
-    );
+    let enables = content
+        .split_once("baseEnables =")
+        .and_then(|(_, tail)| tail.split_once("requiredDisables ="))
+        .map(|(enables, _)| enables)
+        .expect("base kernel enables precede required disables");
+    for symbol in [
+        "VIRTIO_CONSOLE",
+        "HVC_DRIVER",
+        "SERIAL_8250",
+        "SERIAL_8250_CONSOLE",
+        "SERIAL_OF_PLATFORM",
+    ] {
+        assert!(
+            enables.contains(&format!("\"{symbol}\"")),
+            "the shared microVM kernel base must force CONFIG_{symbol} for a supported backend console"
+        );
+    }
 }
 
 #[test]
@@ -820,7 +830,6 @@ fn shared_kernel_base_enforces_audited_subsystem_removals() {
         "ACPI_PROCESSOR",
         "X86_PLATFORM_DEVICES",
         "ARM_SCMI_PROTOCOL",
-        "SERIAL_8250",
     ] {
         assert!(
             required.contains(&format!("\"{symbol}\"")),

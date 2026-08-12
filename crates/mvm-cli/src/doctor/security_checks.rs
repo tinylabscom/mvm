@@ -34,6 +34,13 @@ pub(crate) struct AuditChainScan {
     /// Set when the sweep could not run at all (no host signer key yet, or the
     /// audit directory is unreadable). Distinct from "found nothing broken".
     pub(crate) not_assessed: Option<String>,
+    /// Chains verified by resuming from a checkpoint rather than from genesis.
+    ///
+    /// Tracked so the check can say what it actually did. A resumed walk takes
+    /// the prefix on a stored value's word instead of re-deriving it from the
+    /// all-zero anchor, so it is not the same statement as a full verification
+    /// and must not be reported as one.
+    pub(crate) resumed: usize,
 }
 
 /// Verification status of the chain-signed audit log.
@@ -88,8 +95,23 @@ fn scan_audit_chains() -> AuditChainScan {
         if !mvm_core::config::is_host_lifecycle_chain(&path) {
             continue;
         }
-        match mvm_hostd::supervisor::verify_audit_chain(&path, &signer.verifying) {
-            Ok(_) => scan.verified += 1,
+        // Routine health check: resume from a checkpoint when one is
+        // available. `mvmctl trust audit verify` deliberately keeps the
+        // genesis-anchored walk — full re-derivation is what that command is
+        // for, and it is claim 8's witness.
+        let checkpoint = mvm_hostd::supervisor::audit_checkpoint::load(&path);
+        match mvm_hostd::supervisor::verify_audit_chain_incremental(
+            &path,
+            &signer.verifying,
+            checkpoint.as_ref(),
+        ) {
+            Ok(outcome) => {
+                scan.verified += 1;
+                if !outcome.walked_from_genesis {
+                    scan.resumed += 1;
+                }
+                mvm_hostd::supervisor::audit_checkpoint::store(&path, &outcome.checkpoint);
+            }
             Err(e) => scan
                 .broken
                 .push((path.display().to_string(), format!("{e:#}"))),
@@ -139,9 +161,17 @@ fn audit_chain_check_from_scan(scan: &AuditChainScan) -> Check {
         name,
         category,
         ok: true,
-        info: match scan.verified {
-            0 => "no host-lifecycle chains yet".to_string(),
-            n => format!("{n} chain(s) verify against the host signer"),
+        info: match (scan.verified, scan.resumed) {
+            (0, _) => "no host-lifecycle chains yet".to_string(),
+            (n, 0) => format!("{n} chain(s) verify against the host signer"),
+            // Naming the resumed chains keeps this from reading as a
+            // full-chain statement. A resumed walk re-derived only the entries
+            // appended since the last run; `mvmctl trust audit verify` is the
+            // genesis-anchored check.
+            (n, r) => format!(
+                "{n} chain(s) verify against the host signer ({r} verified incrementally since \
+                 the last run; `mvmctl trust audit verify` re-checks from the first entry)"
+            ),
         },
     }
 }
@@ -783,6 +813,41 @@ mod tests {
     /// informational line. It used to surface only as an unrelated verb
     /// refusing a record, which reads as a problem with that record.
     #[test]
+    fn a_fully_walked_scan_does_not_mention_incremental_verification() {
+        let scan = AuditChainScan {
+            verified: 3,
+            broken: vec![],
+            not_assessed: None,
+            resumed: 0,
+        };
+        let info = audit_chain_check_from_scan(&scan).info;
+        assert!(info.contains("3 chain(s) verify"), "{info}");
+        assert!(
+            !info.contains("incrementally"),
+            "a genesis-anchored sweep should not qualify itself: {info}"
+        );
+    }
+
+    #[test]
+    fn a_resumed_scan_says_so_rather_than_claiming_a_full_walk() {
+        // The check must not report a resumed walk as a full-chain guarantee:
+        // the prefix was taken on a stored checkpoint's word, not re-derived
+        // from the genesis anchor.
+        let scan = AuditChainScan {
+            verified: 3,
+            broken: vec![],
+            not_assessed: None,
+            resumed: 2,
+        };
+        let info = audit_chain_check_from_scan(&scan).info;
+        assert!(info.contains("2 verified incrementally"), "{info}");
+        assert!(
+            info.contains("trust audit verify"),
+            "it must point at the genesis-anchored check: {info}"
+        );
+    }
+
+    #[test]
     fn a_broken_chain_fails_the_check_and_names_the_file() {
         let scan = AuditChainScan {
             verified: 2,
@@ -791,6 +856,7 @@ mod tests {
                 "prev_hash mismatch at line 3".into(),
             )],
             not_assessed: None,
+            resumed: 0,
         };
         let c = audit_chain_check_from_scan(&scan);
         assert!(!c.ok, "a broken chain is a posture failure: {}", c.info);
@@ -812,6 +878,7 @@ mod tests {
             verified: 0,
             broken: vec![("local.jsonl".into(), "bad signature".into())],
             not_assessed: None,
+            resumed: 0,
         };
         let info = audit_chain_check_from_scan(&scan).info;
         assert!(info.contains("Quarantine"), "{info}");
@@ -871,6 +938,7 @@ mod tests {
             verified: 0,
             broken: vec![("local.jsonl".into(), "bad signature".into())],
             not_assessed: Some("partial sweep".into()),
+            resumed: 0,
         };
         assert!(!audit_chain_check_from_scan(&scan).ok);
     }

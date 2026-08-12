@@ -209,6 +209,7 @@ pub(super) fn pull_image_with_trust(
     pull_image_ref(cache_root, image_ref, reference, prod)
 }
 
+#[tracing::instrument(skip_all, fields(reference = supplied_reference, prod))]
 fn pull_image_ref(
     cache_root: &Path,
     image_ref: ImageReference,
@@ -423,6 +424,7 @@ fn manifest_config_descriptor(manifest_bytes: &[u8]) -> Result<Option<LayerDescr
     }))
 }
 
+#[tracing::instrument(skip_all, fields(digest = %layer.digest, size = layer.size))]
 fn fetch_or_unpack_layer(
     cache_root: &Path,
     runtime: &tokio::runtime::Runtime,

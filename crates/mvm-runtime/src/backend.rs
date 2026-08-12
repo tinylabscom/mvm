@@ -976,6 +976,16 @@ impl AnyBackend {
         self.inner().stop_transient(id)
     }
 
+    /// Stop a transient VM and return runner teardown timings when the
+    /// selected backend exposes the shared workload-runner lifecycle.
+    ///
+    /// The transient backend hook currently has no backend-specific
+    /// overrides, so this follows the same stop operation while preserving
+    /// the timing detail for launch diagnostics.
+    pub fn stop_transient_with_timing(&self, id: &VmId) -> Result<Option<StopTiming>> {
+        self.stop_with_timing(id)
+    }
+
     /// Block until a VM exits and return its captured exit status.
     /// Delegates to the inner backend; only libkrun (and mock)
     /// implement a real wait surface — other backends return a clear

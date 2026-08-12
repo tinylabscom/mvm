@@ -2,7 +2,7 @@
 
 ## Status
 
-**Implementation complete; repository-wide verification exceptions documented.** Opened 2026-08-10 after
+**COMPLETE.** Opened 2026-08-10 after
 an explicit `mvmctl bootstrap` prepared the builder VM but left the workload
 kernel absent, causing the next `machine run --image` to launch Stage 0. The
 interrupted repair then exposed a second defect: Stage 0 copied the resolved Nix
@@ -39,18 +39,27 @@ store remains reusable.
 - [x] Track in-process Stage 0 ownership for truthful Ctrl-C messaging, retain
       the persistent Nix store, and sweep only matching orphan staging
       directories under the shared Stage 0 lock on retry.
+- [x] Give QEMU Stage 0 a persistent Nix-store disk, synchronize its guest
+      clock before TLS/Nix access, use the correct architecture console, and
+      allow a real cold kernel compile to run for up to two hours with honest
+      first-build messaging.
+- [x] Keep the ARM64 workload kernel bootable across Firecracker, HVF/QEMU,
+      and libkrun by building in both 8250 and PL011/HVC console support. Pin
+      its measured built-in-symbol ratchet at 959 while leaving x86_64 at 917.
+- [x] Follow only bounded, HTTPS OCI blob redirects to the exact trusted Docker
+      CDN origins, stripping registry authorization at the origin boundary and
+      refusing redirects for manifests.
 - [x] Cover bootstrap ordering/failure, verified resolution, incompatible-cache
       eviction, KALLSYMS-free acceptance, config rejection, atomic publication,
       interrupted-staging cleanup, buffered symlink copy, and Ctrl-C messaging.
-- [ ] Close repository-wide verification exceptions. Formatting, focused tests,
-      `cargo check --workspace`, host `cargo clippy --workspace --all-targets --
-      -D warnings`, and all 172 BDD scenarios pass. The full workspace test run
-      passes the changed crates but remains red in untouched `mvm-hostd`
-      shared-state/timing tests; isolated reruns produce a different telemetry
-      failure and a hanging UDS test. The Linux all-target Clippy rerun remains
-      for CI or a supported builder-VM execution entry point; the shipped
-      builder is headless and this macOS session must not run Linux tooling
-      outside it.
+- [x] Close repository-wide verification. Formatting, focused tests, `cargo
+      check --workspace`, host `cargo clippy --workspace --all-targets -- -D
+      warnings`, the complete serialized workspace suite including doctests,
+      the exact 461-test `xtask --features man` CI lane, and all 172 BDD
+      scenarios pass. A KVM-backed ARM64 acceptance run completed a cold
+      bootstrap, reused the persistent Stage 0 Nix store, rebuilt and published
+      the workload kernel with dm-verity plus 8250 console support, and then ran
+      Alpine twice from the fully warm cache without launching Stage 0.
 
 ## Security properties
 
