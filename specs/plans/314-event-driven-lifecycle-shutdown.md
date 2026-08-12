@@ -407,6 +407,21 @@ CPU regression, so Phase 5 deliberately makes no mechanical async conversion.
 - [x] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` when an
       implementation phase lands, not merely when this design is created.
 
+## Post-completion builder regression
+
+- [x] Diagnose the HVF builder's missing-result failure as an oversized work
+      disk: the raw source checkout included host `target/` output and expanded
+      to a 55.7 GB guest input for a roughly 40 MB staged flake.
+- [x] Move filtered work staging into the shared builder runtime and route both
+      libkrun and HVF input preparation through that seam.
+- [x] Exercise the actual HVF ext4 packing boundary and prove `work/flake.nix`
+      is retained while `work/target` is excluded.
+- [x] Run the authorized live sleeper command from the fix worktree: its HVF
+      input disk is 57.1 MiB instead of 55.7 GB, and the guest writes a builder
+      result with exit code zero. The later workload boot reaches a separate
+      guest-agent readiness timeout rather than the original missing-result
+      failure.
+
 ## Resume instructions
 
 Plan 314 is complete. Implementation, the complete workspace suite, macOS and

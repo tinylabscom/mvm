@@ -18,7 +18,10 @@
 //!
 //! [`EffectivePolicy`]: crate::policy::resolver::EffectivePolicy
 
-use std::net::IpAddr;
+use core::net::IpAddr;
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use ipnet::IpNet;
 use thiserror::Error;
@@ -37,7 +40,7 @@ pub enum Proto {
     Udp,
 }
 
-impl std::str::FromStr for Proto {
+impl core::str::FromStr for Proto {
     type Err = ProjectionError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -52,7 +55,7 @@ impl std::str::FromStr for Proto {
 }
 
 impl Proto {
-    /// Named alias for [`std::str::FromStr`] used by the lowering code.
+    /// Named alias for [`core::str::FromStr`] used by the lowering code.
     pub fn parse(s: &str) -> Result<Self, ProjectionError> {
         s.parse()
     }

@@ -394,6 +394,8 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
     let undeclared = Grants::default();
     let grants = plan.grants.as_ref().unwrap_or(&undeclared);
 
+    enforce_wall_clock_projection(plan, grants)?;
+
     // Memory is checked even when nothing was granted: it is fixed at VM
     // creation rather than requested, and an unbounded one reserves the host.
     ceiling
@@ -409,6 +411,31 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
         })?;
 
     enforceability_gate(grants, plan, posture)
+}
+
+/// Refuse a plan whose two encodings of one wall-clock bound disagree.
+///
+/// `resources.timeouts.exec_secs` is the projection of `grants.wall_clock`, and
+/// synthesis is the only thing that writes it. A signed plan reaching admission
+/// with the two out of step was not produced by that path, and there is no
+/// right answer to pick between them: enforcing the grant ignores a signed
+/// field, enforcing the field ignores what the ceiling was applied to. Refusing
+/// is the only choice that cannot silently run a workload under a bound nobody
+/// authored — the same posture the `network_mode` / `l3_network` pair takes.
+///
+/// The comparison runs against the projection, never against the grant
+/// directly, because the projection is lossy: an absent grant and an explicit
+/// `Unbounded` both encode as `0`, and only the ceiling distinguishes them.
+fn enforce_wall_clock_projection(plan: &ExecutionPlan, grants: &Grants) -> Result<()> {
+    let projected = mvm_contract::grants::projection::exec_secs_from_grants(grants);
+    let carried = plan.resources.timeouts.exec_secs;
+    if projected != carried {
+        anyhow::bail!(
+            "plan carries exec_secs {carried} but its wall-clock grant projects to \
+             {projected}; refusing to choose between two encodings of one bound"
+        );
+    }
+    Ok(())
 }
 
 /// Refuse (prod) or warn (dev) when the backend this run boots on has no
@@ -1442,7 +1469,6 @@ mod tests {
             mem_mib: 256,
             disk_mib: 0,
             boot_timeout_secs: 30,
-            exec_timeout_secs: 0,
             destroy_on_exit: true,
             bundle_pin: None,
             deps_volume: None,

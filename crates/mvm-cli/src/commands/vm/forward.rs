@@ -41,7 +41,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// Each `port_spec` is either `GUEST_PORT` (binds to same local port) or
 /// `LOCAL_PORT:GUEST_PORT`.  Multiple ports are forwarded concurrently —
 /// background children handle all but the last, and Ctrl-C kills the group.
-pub(super) fn forward_ports(name: &str, port_specs: &[String]) -> Result<()> {
+pub(in crate::commands) fn forward_ports(name: &str, port_specs: &[String]) -> Result<()> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     // Verify the VM is actually running.
     let _abs_dir = resolve_running_vm(name)?;
@@ -92,7 +92,7 @@ pub(super) fn forward_ports(name: &str, port_specs: &[String]) -> Result<()> {
     let mut children: Vec<std::process::Child> = Vec::new();
     for &(local_port, guest_port) in &parsed {
         let child = std::process::Command::new("socat")
-            .arg(format!("TCP-LISTEN:{},fork,reuseaddr", local_port))
+            .arg(socat_listen_arg(local_port))
             .arg(format!("TCP:{}:{}", guest_ip, guest_port))
             .spawn()
             .context("Failed to start socat. Install it with: sudo apt install socat")?;
@@ -115,4 +115,24 @@ pub(super) fn forward_ports(name: &str, port_specs: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build the host listener argument. Forwarding is a local-development
+/// surface, so it binds loopback explicitly rather than exposing the guest on
+/// every host interface through socat's wildcard default.
+fn socat_listen_arg(local_port: u16) -> String {
+    format!("TCP-LISTEN:{local_port},fork,reuseaddr,bind=127.0.0.1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::socat_listen_arg;
+
+    #[test]
+    fn forwarding_listener_is_loopback_only() {
+        assert_eq!(
+            socat_listen_arg(8080),
+            "TCP-LISTEN:8080,fork,reuseaddr,bind=127.0.0.1"
+        );
+    }
 }

@@ -50,6 +50,21 @@ use mvm_core::plan::ExecutionPlan;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Wire-stable event name and label keys for the wall-clock enforcement entry.
+/// Shared so the supervisor that emits it and any reader asserting on it cannot
+/// drift on a string.
+pub mod wall_clock_audit {
+    /// Emitted when a supervisor timer killed a workload at its deadline.
+    pub const EXPIRED_EVENT: &str = "plan.wall_clock_expired";
+    /// Label: the bound that was enforced, in seconds.
+    pub const LABEL_BOUND_SECS: &str = "wall_clock_secs";
+    /// Label: wall-clock seconds actually elapsed when the timer fired.
+    pub const LABEL_ELAPSED_SECS: &str = "elapsed_secs";
+    /// Label: which mechanism killed it, so the entry names a fact rather than
+    /// leaving the reader to infer one.
+    pub const LABEL_ENFORCED_BY: &str = "enforced_by";
+}
+
 /// Wire-stable event names and label keys for the checkpoint audit entries.
 /// Shared so the emitter (writer) and the lineage chain-anchor (reader) can't
 /// drift on a string — a drift there would silently defeat chain-anchored
@@ -464,6 +479,38 @@ impl AuditEmitter {
                 (
                     "grants_wall_clock_tier".to_string(),
                     enforced.wall_clock.label().to_string(),
+                ),
+            ],
+        )
+    }
+
+    /// Emit `plan.wall_clock_expired` — records that a supervisor timer fired
+    /// and killed this workload for outrunning its wall-clock grant.
+    ///
+    /// The kill is only half the enforcement. A workload that vanishes at its
+    /// deadline with nothing in the chain is indistinguishable from one that
+    /// crashed there, so an operator could not tell a bound that fired from a
+    /// bug — and a bound nobody can observe firing is a declaration again. The
+    /// entry carries the bound that was enforced and the elapsed time at the
+    /// kill, so the two readings can be compared.
+    pub fn emit_wall_clock_expired(&self, plan: &ExecutionPlan, elapsed_secs: u64) -> Result<()> {
+        self.emit(
+            plan,
+            wall_clock_audit::EXPIRED_EVENT,
+            [
+                (
+                    wall_clock_audit::LABEL_BOUND_SECS.to_string(),
+                    plan.resources.timeouts.exec_secs.to_string(),
+                ),
+                (
+                    wall_clock_audit::LABEL_ELAPSED_SECS.to_string(),
+                    elapsed_secs.to_string(),
+                ),
+                (
+                    wall_clock_audit::LABEL_ENFORCED_BY.to_string(),
+                    mvm_contract::protocol::resource_controls::EnforcedTier::SupervisorTimer
+                        .label()
+                        .to_string(),
                 ),
             ],
         )
