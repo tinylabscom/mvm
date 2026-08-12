@@ -48,6 +48,65 @@ pub enum ClaimRefusal {
     /// it cannot be the one restore path that skips the comparison.
     #[error("{reason}")]
     GrantsExceedParent { reason: String },
+    /// The claimed child asked for more than this host's operator-configured
+    /// ceiling allows. Separate from [`Self::GrantsExceedParent`] because the
+    /// two bound against different things and the operator's next move differs:
+    /// a widening over the parent means the claim asked for more than the
+    /// snapshot it restores from held, while this means the claim asked for
+    /// more than the host permits anyone.
+    #[error(
+        "this host's grant ceiling bounds {dimension} at {ceiling}, and the claimed child's \
+         admitted plan asks for {requested}; a warm pool parent deliberately carries no grant \
+         of its own, so a claimed child is bound by the host-wide ceiling"
+    )]
+    GrantsExceedHostCeiling {
+        dimension: &'static str,
+        requested: u64,
+        ceiling: u64,
+    },
+}
+
+/// Refuse a claimed child whose admitted plan asks for more than this host's
+/// configured grant ceiling.
+///
+/// This is the warm pool's whole CPU bound, and it is deliberately the weakest
+/// one available. A standby parent is shared by every later claim, so it is
+/// built carrying no grant at all — sealing one workload's grant onto it would
+/// bind every unrelated later claim to a stranger's number. That leaves the
+/// parent-subset comparison with nothing to bind against, so the bound falls
+/// back to the host ceiling: a host-wide maximum every cold boot already
+/// clears, *not* a pool-specific grant. A claim within the ceiling is admitted
+/// regardless of what any other claim on the same pool asked for. This is
+/// strictly better than the unbounded claim it replaces, and no tighter.
+///
+/// Checked after pool matching rather than folded into the compatibility key.
+/// Folding it in would fragment the pool per distinct grant value — a
+/// 1500-millicore claim could not reuse a parent warmed beside a 2000-millicore
+/// one — and the hit rate is the point of the pool. The cost is that a claim
+/// can match a parent and then be refused, which is why the refusal names both
+/// the ceiling and the request.
+///
+/// Only the dimensions a grant can author are checked. The child's memory is
+/// the parent's — fixed when the parent booted, part of the pool's own
+/// compatibility key, and unchangeable at claim time — so a memory check here
+/// has nothing to refuse that pool matching did not already settle.
+pub fn ensure_child_grants_within_host_ceiling(
+    child: Option<&mvm_contract::grants::Grants>,
+    ceiling: &mvm_contract::grants::ceiling::GrantCeiling,
+) -> Result<(), ClaimRefusal> {
+    // An absent grant set means here what it means to the parent-subset
+    // comparison: unbounded CPU and wall clock, deny-all egress. A ceiling
+    // still has something to say about that — an operator who bounded wall
+    // clock refuses an unbounded request rather than clamping it — so the
+    // absent case goes through the same check rather than short-circuiting.
+    let unbounded_cpu_deny_all_egress = mvm_contract::grants::Grants::default();
+    ceiling
+        .admits_grants(child.unwrap_or(&unbounded_cpu_deny_all_egress))
+        .map_err(|violation| ClaimRefusal::GrantsExceedHostCeiling {
+            dimension: violation.dimension,
+            requested: violation.requested,
+            ceiling: violation.ceiling,
+        })
 }
 
 /// Name of the [`mvm_core::checkpoint::ContentBlob`] holding the parent's

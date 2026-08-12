@@ -311,8 +311,10 @@ statement = "A workload's resource consumption is bounded at admission — per w
 # tier is read back and audited, while macOS has no cgroup equivalent and gets
 # `declared`. Wall clock has no mechanism at all — it is authored,
 # ceiling-checked, admitted and audited, and nothing stops the workload; wasm
-# fuel/epoch is likewise declared but unwired; and a restored or warm-claimed
-# child is admission-bounded without its host-side CPU control being re-armed.
+# fuel/epoch is likewise declared but unwired; and a warm-claimed child is
+# bounded at admission by the host-wide ceiling — the weakest bound available,
+# since a shared standby parent carries no grant of its own — with its
+# host-side CPU control re-armed on only one of the three claim paths.
 # The limits are stated in full, marked open or closed individually, in the
 # ADR-001 ledger's "Preview 18 limits" note; do not read this row as enforced
 # without it.
@@ -333,4 +335,9 @@ witnesses = [
     "fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain",
     "fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload",
     "fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota",
+    "fn:a_restored_child_is_cpu_bounded_by_its_admitted_grant",
+    "fn:a_claimed_child_over_the_host_ceiling_is_refused",
+    "fn:a_claimed_child_within_the_ceiling_is_admitted",
+    "fn:the_refusal_names_the_ceiling_and_the_request",
+    "fn:pool_matching_is_unchanged_by_the_bound",
 ]
