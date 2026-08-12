@@ -38,6 +38,14 @@
       Linux rejects. The 456-test VMM suite passes, and the original Alpine
       `machine run --mount .:/work -- ls /work` command succeeds on native HVF;
       workspace checks, doctests, and host Clippy are green.
+- [x] Merge-group CI scoping — **plan 322**. A fail-closed SHA-range
+      classifier keeps the full Rust matrix for behavior-changing diffs and
+      manual runs, while prose/site-only pull requests and merge groups avoid
+      six cold Rust jobs. Policy and the independently scoped required Nix
+      check remain unconditional authorities for their own input surfaces.
+      Workflow syntax, formatting, workspace compilation, all-target Clippy,
+      and all 499 `xtask` tests pass; the sole transient workspace-suite
+      host-restart failure passed on its exact isolated rerun.
 
 - [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
