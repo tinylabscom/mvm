@@ -19,6 +19,12 @@ The three honesty levels (R2):
 | --- | --- | --- | --- |
 | `MVM-SEC-08` | `build` | Every workload runs from a signed, audited ExecutionPlan | `fn:synthesize_plan`, `fn:admit_for_run`, `fn:verify_audit_chain`, `fn:frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts`, `fn:no_std_verifier_accepts_the_same_corpus_the_host_verifier_does` |
 
+## admission_budget
+
+| ID | Level | Statement | Witnesses |
+| --- | --- | --- | --- |
+| `MVM-SEC-18` | `build` | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | `fn:a_boot_past_the_headroom_is_refused`, `fn:budget_ignores_dead_machines`, `fn:budget_counts_the_configured_maximum_not_current_usage`, `fn:an_empty_host_admits_a_boot_within_headroom`, `fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`, `fn:a_fuel_grant_contributes_no_cpu_share`, `fn:a_live_machine_with_no_charge_record_is_not_counted`, `fn:admission_refuses_a_grant_over_the_ceiling`, `fn:the_ceiling_bounds_memory_even_though_no_one_granted_it`, `fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu`, `fn:the_libkrun_tier_cannot_bound_cpu_off_linux`, `fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present`, `fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error`, `fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain`, `fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload`, `fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota` |
+
 ## agent_surface
 
 | ID | Level | Statement | Witnesses |

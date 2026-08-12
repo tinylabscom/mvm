@@ -11,6 +11,11 @@ for detailed scope and acceptance criteria.
       all three SDKs, shared fixtures, BDD scenarios, recovery guidance, and
       website docs agree on that single public command shape. Host and Linux
       gates, including the complete workspace suite and doctests, pass.
+- [x] **Plan 322 — HVF virtio-fs shared-memory sentinel.** The queue-backed
+      virtio-fs transport returns the required all-one absent-region value from
+      its shared-memory length and base registers, so Linux no longer rejects
+      `uvol` devices as zero-length DAX windows. Unit coverage and the original
+      native-HVF Alpine directory-share command pass.
 - [x] **Plan 316 — merge-queue forward progress.** Reduced live speculative
       build concurrency from four to two, restored immediate single-entry
       progress, raised the check-response timeout from 90 to 240 minutes, and
@@ -1331,9 +1336,24 @@ for detailed scope and acceptance criteria.
         free: systemd registers the scope before exec'ing the payload). Per-boot
         unique unit name, recorded in the VM state dir so the read-back can
         still resolve it. Prod gate consults host mechanism availability, not
-        just backend kind. STILL OPEN: `exec_secs` enforcement and the
-        admission budget; and the live measurement predates the read-back
-        landing, so a bounded boot's *reported tier* is unwitnessed on hardware
+        just backend kind. STILL OPEN: `exec_secs` enforcement; and the live
+        measurement predates the read-back landing, so a bounded boot's
+        *reported tier* is unwitnessed on hardware
+  - [x] WS4b — the host admission budget: `HostBudget`/`MachineCharge` in
+        `mvm-contract`, measured in `mvm-hostd/src/admission_budget.rs` and
+        checked in `admit_for_run`. Counts only machines with a live pid marker
+        (the fork path's own probe, so a crashed VM cannot lock the host out)
+        and each machine's configured maximum rather than the balloon's current
+        commitment. Operator keys `host_budget_memory_mib` /
+        `host_budget_cpu_millicores`
+  - [x] WS7 — the ADR-001 claim row: ledger row **18** at `Preview`, with a
+        "Preview 18 limits" note stating that CPU is declared-only off Linux,
+        that wall clock has **no mechanism at all** in this tree (so a
+        `WallClockGrant` passes the `--prod` enforceability gate with nothing
+        behind it), that wasm fuel/epoch is declared and unwired, and that a
+        restored or warm-claimed child is admission-bounded without its
+        host-side CPU control being re-armed. `MVM-SEC-18` in
+        `model/claims.toml`; every cited witness verified to exist
   - [ ] WS5 — wasm fuel **and** epoch (fuel alone bounds nothing in a host
         call) + `StoreLimits`
   - [~] WS5b — grants across snapshot/fork/restore; child ⊆ parent, closing
