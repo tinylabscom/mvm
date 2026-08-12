@@ -657,15 +657,18 @@ for detailed scope and acceptance criteria.
         `keyholder/{admission,substitution,injector}.rs` +
         `supervisor/substitution_proxy.rs`, not one 509-line file; and
         `mint`'s `rand::thread_rng` draw has to split out. The claim-12 bind
-        check is written twice today and must be de-duplicated in place
-        before it crosses a crate boundary.
-  - [~] E3 audit writer core — moves/stays pass **done**, blocked on one
-        decision (E3.0). `mvm-contract`'s `verify.rs` already carries a
-        field-identical `SignedEnvelope` over a hand-maintained
-        `MirrorEntry`, so E3 must unify rather than add a second. The
-        recommended option — move the real `AuditEntry` down, retire the
-        mirror — is viable because chrono and the id newtypes landed in
-        Increment 3. Needs the hard-rename treatment Increment 3 gave
+        check is written **three** times today (the third is
+        `mvm-client/src/secret.rs`, over `SecretBindingMeta`) and is being
+        de-duplicated ahead of E2 as `mvm_contract::ir::host_is_bound` — a
+        standing drift hazard on a security predicate does not belong behind
+        this plan.
+  - [~] E3 audit writer core — moves/stays pass **done**, E3.0 decided
+        (**option A**), code not started. `mvm-contract`'s `verify.rs`
+        already carries a field-identical `SignedEnvelope` over a
+        hand-maintained `MirrorEntry`, so E3 unifies with it rather than
+        adding a second: move the real `AuditEntry` down and retire the
+        mirror, which chrono and the id newtypes landing in Increment 3
+        already made possible. Needs the hard-rename treatment Increment 3 gave
         `BundleNetworkPolicy`: two unrelated `AuditEntry` types would
         otherwise collide in one crate. Unlike E1, E3 touches signed bytes,
         so Increment 3's frozen-byte-fixture gate is mandatory.
