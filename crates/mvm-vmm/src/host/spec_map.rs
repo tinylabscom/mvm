@@ -279,6 +279,28 @@ pub fn console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<(u32, Pa
         .collect()
 }
 
+/// Build the per-port (port, host-UDS) list for a persistent builder VM's
+/// control plane: job dispatch and the resident daemon's typed channel. Same
+/// shape and socket convention as [`console_data_sockets`], and the same
+/// fail-closed default — a non-builder VM gets an empty list, so no workload
+/// can be handed a listener on the build engine's ports.
+///
+/// The guest end of both exists only while `mvm-host-vm-init` is running its
+/// dispatch loop, which happens only for a builder VM started as a long-lived
+/// session.
+pub fn builder_control_sockets(state_dir: &Path, builder_tier: bool) -> Vec<(u32, PathBuf)> {
+    if !builder_tier {
+        return Vec::new();
+    }
+    [
+        GuestService::BuilderDispatch.port(),
+        GuestService::BuilderdControl.port(),
+    ]
+    .into_iter()
+    .map(|port| (port, vm_hvf_vsock_port_socket_at(state_dir, port)))
+    .collect()
+}
+
 /// Everything the workload role resolves before it can build a `VmmSpec`: the
 /// admitted config, the host sockets its vsock channels bind to, the assembled
 /// kernel cmdline, and the write-only console capture path.
@@ -947,6 +969,49 @@ mod tests {
     }
 
     // --- console_data_sockets / dev_console gating ---
+
+    #[test]
+    fn builder_control_sockets_are_empty_for_a_non_builder_vm() {
+        // Fail closed: only the build engine gets listeners on its control
+        // ports. A workload is handed none, sealed or not.
+        assert!(builder_control_sockets(Path::new("/state/w"), false).is_empty());
+    }
+
+    #[test]
+    fn builder_control_sockets_cover_dispatch_and_daemon_control() {
+        let state_dir = Path::new("/state/builder");
+        let sockets = builder_control_sockets(state_dir, true);
+
+        let ports: Vec<u32> = sockets.iter().map(|(port, _)| *port).collect();
+        assert_eq!(
+            ports,
+            vec![
+                GuestService::BuilderDispatch.port(),
+                GuestService::BuilderdControl.port()
+            ]
+        );
+        for (port, path) in &sockets {
+            assert_eq!(
+                path,
+                &mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, *port),
+                "path must follow the shared HVF-socket helper"
+            );
+        }
+    }
+
+    #[test]
+    fn builder_control_sockets_never_collide_with_console_ports() {
+        // Both lists feed one bridge keyed by guest port, so an overlap would
+        // have one silently displace the other.
+        let builder = builder_control_sockets(Path::new("/state/b"), true);
+        let console = console_data_sockets(Path::new("/state/b"), true);
+        for (port, _) in &builder {
+            assert!(
+                !console.iter().any(|(c, _)| c == port),
+                "builder port {port} overlaps the console data range"
+            );
+        }
+    }
 
     #[test]
     fn console_data_sockets_returns_empty_when_dev_console_is_false() {
