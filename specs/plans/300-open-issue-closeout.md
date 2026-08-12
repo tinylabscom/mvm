@@ -108,9 +108,18 @@ mentions it.
       mutation proofs, workspace all-target Clippy, formatting, and the static
       surface gate pass on the fix branch. The workspace suite passed every
       repaired area but hit one unrelated host-agent socket-bind timeout; its
-      isolated integration rerun passed 4/4. A clean exact Linux Security
-      workflow and subsequent scheduled or release run remain the
-      merge-and-close gates.
+      isolated integration rerun passed 4/4. Exact Security run 31516221103
+      passed every mutation and security job, then twice exposed a Linux
+      `ETXTBSY` race while spawning freshly published shutdown-hook fixtures.
+      The lifecycle runner now retries that transient spawn error with a
+      bounded delay, with success-after-retry and retry-exhaustion witnesses;
+      workspace all-target Clippy passes. The workspace suite passed the
+      repaired area but one parallel CLI test observed another test's temporary
+      host CPU ceiling; its exact isolated rerun passed. The next exact run
+      exposed the guest-console tests sharing process-global session state;
+      those stateful tests now share one lock and join their completion thread,
+      with 20/20 parallel stress passes. A clean exact Linux Security workflow
+      and subsequent scheduled or release run remain the merge-and-close gates.
 - [ ] **#2289 — finish the kernel freshness closeout.** Linux 6.12.103 and the
       verified shared hash are merged in #2301, and kernel build/freshness CI
       passed. Build the release artifacts, run the verified-boot and

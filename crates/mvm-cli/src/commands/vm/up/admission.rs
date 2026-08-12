@@ -384,7 +384,6 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         mem_mib: p.mem_mib,
         disk_mib: 0,
         boot_timeout_secs: 60,
-        exec_timeout_secs: 0,
         destroy_on_exit: true,
         bundle_pin: bundle_pin.clone(),
         deps_volume: p.deps_volume.clone(),

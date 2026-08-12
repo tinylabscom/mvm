@@ -202,7 +202,6 @@ pub fn admit_and_boot_local(
         mem_mib: u64::from(req.mem_mib),
         disk_mib: 0,
         boot_timeout_secs: 60,
-        exec_timeout_secs: 0,
         // A persistent local machine outlives the admitting call; a transient
         // run-to-completion workload records the teardown intent.
         destroy_on_exit: req.destroy_on_exit,
