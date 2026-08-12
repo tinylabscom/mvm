@@ -63,7 +63,12 @@ for detailed scope and acceptance criteria.
       watchdog, dominates internal HVF shutdown, so no unnecessary control
       protocol was added. The foreground-wait audit, repository waiting-model
       rule, complete workspace tests, formatting, checks, and Linux all-target
-      clippy are green.
+      clippy are green. The post-completion HVF builder regression is also
+      closed: work inputs now use the shared filtered staging seam before ext4
+      packing, and a transport-boundary test proves source is retained while
+      host `target/` scratch output is excluded. An authorized live sleeper
+      build packed 57.1 MiB instead of 55.7 GB and returned builder exit code
+      zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
 - [x] Plan 322 — Scope merge-group Rust CI to behavior-changing diffs
