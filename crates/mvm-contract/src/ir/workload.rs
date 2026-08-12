@@ -552,6 +552,23 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
+/// Whether `destination` is bound by an `allowed_hosts` set — the claim-12
+/// predicate every path must decide identically.
+///
+/// A free function over the host list rather than a method, because the two
+/// types that carry one (`SecretRef` here, `SecretBindingMeta` in
+/// `mvm-hostd`) live in different crates and neither can grow an inherent
+/// method on the other. An empty set binds nothing, which is what makes an
+/// unbound secret fail closed.
+///
+/// Every enforcement point calls this. It is deliberately the only place the
+/// quantifier over `allowed_hosts` is written: a second copy is a second
+/// thing to keep in step, and the two would only be discovered to disagree by
+/// a destination reaching a secret it should not have.
+pub fn host_is_bound(allowed_hosts: &[String], destination: &str) -> bool {
+    allowed_hosts.iter().any(|p| host_matches(p, destination))
+}
+
 // allow(secret-debug): metadata-only — variants carry the env-var name
 // or filesystem path the secret will be delivered at, not the secret
 // itself. The actual material is resolved at admission time.
@@ -910,5 +927,27 @@ mod tests {
         // …but NOT the apex, and the leading dot guards a registrable lookalike.
         assert!(!host_matches("*.example.com", "example.com"));
         assert!(!host_matches("*.example.com", "evilexample.com"));
+    }
+
+    #[test]
+    fn an_empty_allowed_hosts_set_binds_no_destination() {
+        // The fail-closed end of claim 12: a secret that declares no
+        // destinations is reachable from none, rather than from all. An
+        // `any()` over an empty iterator is false, so this holds by
+        // construction — pinned because the opposite default is the kind of
+        // thing a "helpful" refactor introduces.
+        assert!(!host_is_bound(&[], "api.openai.com"));
+        assert!(!host_is_bound(&[], ""));
+    }
+
+    #[test]
+    fn host_is_bound_admits_only_a_listed_or_wildcarded_destination() {
+        let allowed = ["api.openai.com".to_string(), "*.example.com".to_string()];
+        assert!(host_is_bound(&allowed, "api.openai.com"));
+        assert!(host_is_bound(&allowed, "sub.example.com"));
+        // Unlisted host, the wildcard's apex, and a registrable lookalike.
+        assert!(!host_is_bound(&allowed, "evil.example.org"));
+        assert!(!host_is_bound(&allowed, "example.com"));
+        assert!(!host_is_bound(&allowed, "evilexample.com"));
     }
 }

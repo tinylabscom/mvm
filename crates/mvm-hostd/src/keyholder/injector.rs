@@ -10,7 +10,7 @@
 //! claim 12: the destination allow-list is checked **before** the value is
 //! resolved, so an out-of-policy request never triggers a decrypt.
 
-use mvm_contract::ir::{AuthType, SecretRef, host_matches};
+use mvm_contract::ir::{AuthType, SecretRef, host_is_bound};
 use secrecy::ExposeSecret;
 use zeroize::Zeroizing;
 
@@ -63,7 +63,7 @@ impl<'a> Injector<'a> {
             AuthType::Bearer | AuthType::Basic => {}
             other => return Err(InjectError::WrongAuthType(other)),
         }
-        if !r.allowed_hosts.iter().any(|p| host_matches(p, destination)) {
+        if !host_is_bound(&r.allowed_hosts, destination) {
             return Err(InjectError::DestinationNotBound(destination.to_string()));
         }
         let value = self.resolver.resolve(r)?;
