@@ -1,0 +1,70 @@
+---
+// Override Starlight's PageTitle: an eyebrow (current sidebar group) above
+// the stock <h1>, and the frontmatter `description` rendered as a subtitle
+// beneath it. Wraps the Default rather than reimplementing it so the h1's
+// id/anchor behaviour stays exactly Starlight's own.
+import Default from "@astrojs/starlight/components/PageTitle.astro";
+
+// Starlight doesn't export this shape from the package, so it's declared
+// locally to type the sidebar entries this component walks.
+interface SidebarLink {
+  type: "link";
+  label: string;
+  href: string;
+  isCurrent: boolean;
+}
+interface SidebarGroup {
+  type: "group";
+  label: string;
+  entries: SidebarEntry[];
+}
+type SidebarEntry = SidebarLink | SidebarGroup;
+
+const { starlightRoute } = Astro.locals;
+const description = starlightRoute.entry.data.description;
+
+function activeGroupLabel(entries: SidebarEntry[]): string | undefined {
+  for (const entry of entries) {
+    if (entry.type !== "group") continue;
+    const hasCurrentLink = entry.entries.some(
+      (child) => child.type === "link" && child.isCurrent
+    );
+    if (hasCurrentLink) return entry.label;
+    const nested = activeGroupLabel(entry.entries);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+// Fall back to the URL's first path segment if no sidebar group contains
+// the current page (matches pattern 3's fallback instruction) — this only
+// fires for a page that exists outside the configured sidebar entirely.
+const eyebrow =
+  activeGroupLabel(starlightRoute.sidebar) ??
+  Astro.url.pathname.replace(/^\/+|\/+$/g, "").split("/")[0];
+---
+
+{eyebrow && <p class="docs-eyebrow">{eyebrow}</p>}
+<Default />
+{description && <p class="docs-description">{description}</p>}
+
+<style>
+  .docs-eyebrow {
+    margin-block-end: 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-accent);
+  }
+
+  .docs-description {
+    margin-block-start: -0.75rem;
+    margin-block-end: 1.5rem;
+    font-size: 1.05rem;
+    line-height: 1.6;
+    color: var(--color-muted);
+    max-width: 65ch;
+  }
+</style>
