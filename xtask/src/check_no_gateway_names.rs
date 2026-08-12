@@ -37,13 +37,19 @@ const ALLOWED_IN_CONTEXT: &[&str] = &["hetzner-rvproxy"];
 /// Paths the gate does not read.
 ///
 /// The first two are the gates themselves — a lint that forbids a token has
-/// to name it. The rest are dated, point-in-time records: research notes and
-/// archived sprint/backlog documents describe what was true when they were
-/// written, and rewriting them would falsify the record rather than clean it.
-/// Live documentation is *not* exempt.
+/// to name it, and so does a plan whose whole point is to forbid it: an
+/// invariant reading "no guest NIC, host bridge, TAP, slirp, or userspace
+/// network gateway" cannot be written without spelling the gateways out, and
+/// a plan is an execution record that ends up under the already-exempt
+/// `specs/backlog/` anyway. The rest are dated, point-in-time records:
+/// research notes and archived sprint/backlog documents describe what was true
+/// when they were written, and rewriting them would falsify the record rather
+/// than clean it. Live documentation — including every ADR and everything
+/// under `public/` — is *not* exempt.
 const EXEMPT: &[&str] = &[
     "xtask/src/check_no_gateway_names.rs",
     "xtask/src/check_vsock_only_egress.rs",
+    "specs/plans/",
     "specs/notes/",
     "specs/research/",
     "specs/backlog/",

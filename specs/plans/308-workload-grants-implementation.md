@@ -2906,3 +2906,51 @@ unreachable in production; that lowers its urgency but does not make it wrong.
 - `a_restored_child_reports_its_enforced_tier`
 - `a_restored_child_without_a_grant_runs_unbounded_and_says_so`
 - for (b) if built: `a_claimed_child_is_bounded_by_the_pool_grant`
+### Task 21: Close the deferred gate gaps and one false documented claim
+
+Three items carried in the ledger through this plan, plus one found while
+verifying them.
+
+**(a) The projection gate misses a trailing `where` clause.** `xtask
+check-single-grants-projection` splits a signature on its last `->`, so
+`fn f<T>(t: T) -> NetworkPolicy where T: Into<Grants>` puts `Grants` in the
+*return* half and is not flagged — a real second projection that the gate
+passes. rustfmt commonly relocates `where` after the return type, so this is
+an ordinary shape, not a contrived one. Strip a trailing `where` clause from
+the flattened signature before splitting.
+
+**(b) Both gates are blind to string literals.** `check-single-grants-projection`
+strips `//` comments and `check-backend-resource-controls` strips `//` and
+`/* */`, but neither understands strings, so a literal containing the matched
+tokens can produce a false positive — and in the resource-controls gate, a
+guard arm like `_ if reason == "BackendKind::Mock" =>` is a bare wildcard that
+*passes*. Both gates already document this as a known limit. Factor one shared
+comment-and-string-aware scanner in `xtask` and have both use it, rather than
+a third copy of near-identical text handling.
+
+**(c) `CLAUDE.md` asserts a removal that did not happen, and cites a gate that
+says the opposite.** Line 14 reads: "… its `--hypervisor` value is gone, as is
+the `apple-container` backend. `xtask check-no-vz` fails the build if either
+returns."
+
+Both halves are false. `BackendKind::AppleContainer` exists today, renders as
+`"apple-container"`, and is parsed back from that string. And
+`check_no_vz.rs`'s own header says it enforces that *Virtualization.framework*
+is not linked while explicitly permitting the Apple Container backend, which
+"boots Apple's prebuilt container kernel … on the in-house HVF VMM".
+
+This is the precise disease this repo's ledger discipline exists to prevent:
+prose claiming a CI-enforced fact that CI does not enforce and that is not
+true. Correct the sentence to say what the gate actually forbids, and say what
+`apple-container` actually is. Do not "fix" it by deleting the backend.
+
+**(d) While in `CLAUDE.md`, check its per-backend claims against the code** —
+the same file has a security-model section describing enforcement tiers, and
+this plan changed which tiers can bound what. Correct anything that no longer
+holds; leave anything you cannot verify alone and say so.
+
+**Witnesses:**
+- `a_where_clause_after_the_return_type_is_still_caught`
+- `a_signature_inside_a_string_literal_is_not_flagged` (both gates)
+- `a_guard_comparing_a_string_is_still_a_wildcard` (resource-controls gate)
+- each gate proven red against its new shape, then green after
