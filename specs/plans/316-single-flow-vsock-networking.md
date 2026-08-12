@@ -2,7 +2,9 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phases 1–8 open.**
+**Phase 0 complete (#2369). Phase 1 in progress (#2370): the wire contract
+and its fuzz harnesses have landed; `NetworkLimits`, the session extraction,
+and the performance baselines remain.**
 
 ADR-042 is accepted and the raw-packet path is frozen: new
 `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
@@ -200,13 +202,13 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
 
 ### Phase 1 — Pin protocol, resource, and performance baselines
 
-- [ ] Add `mvm-contract::protocol::network_flow` with the version-1 frame header,
+- [x] Add `mvm-contract::protocol::network_flow` with the version-1 frame header,
       opcodes, strict state-independent decoding, and the exact limits above.
-- [ ] Add roundtrip tests for every frame, default/value tests, unknown
+- [x] Add roundtrip tests for every frame, default/value tests, unknown
       opcode/flag/version rejection, truncated header/body rejection, cap-before-
       allocation, invalid stream IDs, oversized DNS/head/datagram rejection,
       and cross-endian golden byte fixtures.
-- [ ] Add a state-machine validator that rejects data-before-open, duplicate
+- [x] Add a state-machine validator that rejects data-before-open, duplicate
       open/close, credit overflow, stream-ID parity violations, reuse after
       reset, and host-initiated opens not backed by a declared listener.
 - [ ] Move `max_flows` and the other endpoint resource ceilings out of
@@ -214,7 +216,7 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
       before any FlowMux runtime consumes them. Defaults preserve the current
       4,096-flow ceiling; serde omits default values so existing signed-plan
       bytes remain stable until the intentional plan-version migration.
-- [ ] Add `fuzz_network_flow_decode` and `fuzz_network_flow_state`; seed them
+- [x] Add `fuzz_network_flow_decode` and `fuzz_network_flow_state`; seed them
       with every valid frame class plus malformed length and transition cases.
 - [ ] Extract the existing authenticated-session handshake and encrypted frame
       machinery into a transport-independent unit shared by control RPC and
@@ -231,6 +233,18 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
       `specs/benchmarks/network/` with the source commit and command embedded in
       the JSON. The harness refuses to compare different hosts, architectures,
       profiles, or payload/concurrency matrices.
+
+**Landed so far (Phase 1).** `mvm-contract::protocol::network_flow` —
+`limits` (the ceilings, including `MAX_FLOW_CREDIT_BYTES` derived from them so
+the endpoint memory bound cannot drift), `opcode` (all 27 v1 opcodes, their
+classes, their permitted sender, and the confirmation relation), `frame` (the
+20-byte fixed header, state-independent decode, cap-before-allocate, golden
+byte fixtures), and `state` (the session and per-stream machine). 87 unit tests.
+`crates/mvm-contract/fuzz` carries `fuzz_network_flow_decode` and
+`fuzz_network_flow_state` with 95 committed seeds; both are wired into
+`security.yml`'s fuzz lane. The header's length field is a `u32`, not the
+tunnel's `u16`: 64 KiB is one past what a `u16` expresses, and a cap the field
+cannot represent is not really enforced at the parse boundary.
 
 ### Phase 2 — Introduce the one authenticated endpoint without changing callers
 
