@@ -1021,7 +1021,6 @@ mod tests {
             mem_mib: 512,
             disk_mib: 0,
             boot_timeout_secs: 60,
-            exec_timeout_secs: 0,
             destroy_on_exit: false,
             bundle_pin: None,
             deps_volume: None,

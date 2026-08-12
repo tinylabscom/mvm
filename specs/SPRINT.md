@@ -10,6 +10,12 @@
 
 ## Current issue delivery
 
+- [x] `machine run --port HOST:GUEST` now boots a persistent machine and owns
+      repeatable loopback-only forwards in the foreground, reusing the existing
+      `machine forward` lifecycle. Invalid mappings and detached ownership fail
+      before boot; parser, lifecycle-resolution, listener-bind, and hermetic BDD
+      coverage pin the contract; all 174 BDD scenarios pass.
+
 - [x] Long-running interactive consoles no longer lose their input relay after
       15 minutes without keyboard activity. Guest output can continue
       indefinitely while later `Ctrl+C` bytes still reach the PTY foreground
@@ -25,6 +31,15 @@
       cross-build pass. The default parallel workspace run exposes unrelated
       global test environment races; the affected tests pass in isolation and
       serially.
+
+- [x] Merge-group CI scoping — **plan 322**. A fail-closed SHA-range
+      classifier keeps the full Rust matrix for behavior-changing diffs and
+      manual runs, while prose/site-only pull requests and merge groups avoid
+      six cold Rust jobs. Policy and the independently scoped required Nix
+      check remain unconditional authorities for their own input surfaces.
+      Workflow syntax, formatting, workspace compilation, all-target Clippy,
+      and all 499 `xtask` tests pass; the sole transient workspace-suite
+      host-restart failure passed on its exact isolated rerun.
 
 - [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
@@ -144,7 +159,15 @@
       the dominant span, so no new control protocol was justified. The
       foreground-wait audit and repository event/timer/reconciliation rule are
       complete. Formatting, workspace check, the complete workspace test
-      suite, macOS focused clippy, and Linux all-target clippy pass.
+      suite, macOS focused clippy, and Linux all-target clippy pass. A
+      post-completion HVF builder fix now stages the work input through the
+      shared source filter before packing its ext4 disk, preventing host
+      `target/` and other scratch trees from inflating a small flake into a
+      multi-gigabyte guest input. The transport-boundary regression test proves
+      source files remain present while `work/target` is absent. The authorized
+      live sleeper command reduced the HVF work disk from 55.7 GB to 57.1 MiB
+      and produced a successful builder result; its subsequent workload boot
+      reached a separate guest-agent readiness timeout.
 
 - [x] README CLI/code-example contract — README shell examples and every
       declared CLI option have executable cucumber help witnesses; all 26

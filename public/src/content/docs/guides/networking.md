@@ -56,14 +56,25 @@ incoming connections require explicit forwarding, and ICMP support is limited.
 
 ## Port Forwarding
 
-`machine run` does not publish ports directly. Boot a named machine, then map
-guest ports to the host with `machine forward`:
+To forward ports for an already-running machine, boot it with a name and then
+map guest ports to the host with `machine forward`:
 
 ```bash
 mvmctl machine run --flake . --name my-vm -d
 mvmctl machine forward my-vm -p 8080:8080
 mvmctl machine forward my-vm -p 3000:3000 -p 8080:8080   # multiple ports
 ```
+
+For a one-command foreground workflow, `machine run --port` boots a persistent
+machine and owns the loopback forwards until Ctrl-C:
+
+```bash
+mvmctl machine run --flake . --name my-vm --port 8080:8080
+mvmctl machine run --flake . --name my-vm -p 3000:3000 -p 8080:8080
+```
+
+`--port` cannot be combined with `--detach`: the attached CLI owns the
+forwarding processes. For a detached machine, run `machine forward` separately.
 
 ## vsock Communication
 

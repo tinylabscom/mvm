@@ -43,7 +43,10 @@ impl CpuControl {
 pub enum WallClockControl {
     /// No wall-clock bound is available on this tier.
     None,
-    /// A host-side timer owned by the supervisor.
+    /// A host-side timer owned by the per-VM supervisor process, which outlives
+    /// the CLI invocation and owns the VMM for the workload's whole life.
+    /// Answerable only by a tier that *has* such a process — a timer in a
+    /// process that exits at launch cannot fire.
     SupervisorTimer,
     /// wasmtime epoch interruption, which preempts a module that a fuel
     /// budget alone would never stop.
@@ -65,17 +68,19 @@ impl ResourceControls {
     #[must_use]
     pub const fn for_backend(kind: BackendKind) -> Self {
         match kind {
-            // A cgroup can bound any Linux process, so on Linux these tiers
-            // carry a real CPU quota. libkrun is *not* Linux-only — it is the
-            // macOS 13-25 workload default — and macOS has no cgroup, so the
-            // answer has to depend on the host rather than the kind alone.
-            // Declaring `CgroupShare` on a Mac would let a share grant be
-            // accepted and then fail at apply time, which is precisely the
-            // overstatement the macOS arm below exists to avoid.
-            //
+            // libkrun is *not* Linux-only — it is the macOS 13-25 workload
+            // default — and macOS has no cgroup, so the CPU answer depends on
+            // the host rather than the kind alone. Declaring `CgroupShare` on a
+            // Mac would let a share grant be accepted and then fail at apply
+            // time, the overstatement the macOS arm below exists to avoid.
             // `cfg!` is the right test because mvm runs on the host it was
             // built for; there is no cross-host execution to disagree with it.
-            BackendKind::Firecracker | BackendKind::Libkrun | BackendKind::Qemu => Self {
+            //
+            // It is also the one VMM tier with a per-VM supervisor process of
+            // ours: `mvm-libkrun-supervisor` blocks in the VMM run loop for the
+            // workload's whole life, which is what a timer needs in order to be
+            // able to fire at all.
+            BackendKind::Libkrun => Self {
                 cpu: if cfg!(target_os = "linux") {
                     CpuControl::CgroupShare
                 } else {
@@ -83,10 +88,28 @@ impl ResourceControls {
                 },
                 wall_clock: WallClockControl::SupervisorTimer,
             },
+            // A cgroup can bound any Linux process, so on Linux these tiers
+            // carry a real CPU quota. Their wall clock is a different story:
+            // the VMM is a bare child of a `mvmctl` that exits at launch, so
+            // there is no process of ours left to hold a deadline. Answering
+            // `SupervisorTimer` here would be the same overstatement the macOS
+            // CPU arm below exists to avoid — a bound accepted at admission and
+            // enforced by nothing.
+            BackendKind::Firecracker | BackendKind::Qemu => Self {
+                cpu: if cfg!(target_os = "linux") {
+                    CpuControl::CgroupShare
+                } else {
+                    CpuControl::None
+                },
+                wall_clock: WallClockControl::None,
+            },
             // macOS has no cgroup equivalent; thread QoS is priority, not quota.
+            // `mvm-hvf-supervisor` is a per-VM process and could host a timer,
+            // but it is not handed the admitted plan, so it has no bound to
+            // enforce and this stays honest until it is.
             BackendKind::Hvf | BackendKind::AppleContainer => Self {
                 cpu: CpuControl::None,
-                wall_clock: WallClockControl::SupervisorTimer,
+                wall_clock: WallClockControl::None,
             },
             // Fuel bounds instructions; epoch preempts a module parked in a
             // host call, which fuel alone would never stop.
@@ -95,10 +118,11 @@ impl ResourceControls {
                 wall_clock: WallClockControl::WasmEpoch,
             },
             // Shares the host kernel; a cgroup here is the container runtime's
-            // to own, not ours.
+            // to own, not ours. Nor is there a supervisor process of ours to
+            // hold a deadline.
             BackendKind::Docker => Self {
                 cpu: CpuControl::None,
-                wall_clock: WallClockControl::SupervisorTimer,
+                wall_clock: WallClockControl::None,
             },
             BackendKind::Mock => Self {
                 cpu: CpuControl::None,
@@ -211,7 +235,33 @@ mod tests {
         // not a quota, so claiming it would overstate the enforcement.
         let c = ResourceControls::for_backend(BackendKind::Hvf);
         assert_eq!(c.cpu, CpuControl::None);
-        assert_eq!(c.wall_clock, WallClockControl::SupervisorTimer);
+    }
+
+    /// Only a tier with a per-VM supervisor process of ours may claim a
+    /// supervisor timer. A timer needs a process that outlives the CLI, and on
+    /// every other VMM tier the VMM is a bare child of an `mvmctl` that has
+    /// already exited — so the answer there is `None`, not a bound that would
+    /// be admitted and never fire.
+    #[test]
+    fn only_a_tier_with_a_live_supervisor_claims_a_supervisor_timer() {
+        assert_eq!(
+            ResourceControls::for_backend(BackendKind::Libkrun).wall_clock,
+            WallClockControl::SupervisorTimer
+        );
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Qemu,
+            BackendKind::Hvf,
+            BackendKind::AppleContainer,
+            BackendKind::Docker,
+            BackendKind::Mock,
+        ] {
+            assert_eq!(
+                ResourceControls::for_backend(kind).wall_clock,
+                WallClockControl::None,
+                "{kind:?} has no supervisor process to hold a deadline"
+            );
+        }
     }
 
     #[test]
