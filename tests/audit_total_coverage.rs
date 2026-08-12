@@ -407,6 +407,11 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("publish-root", AuditPosture::ReadOnly),
     ("prove", AuditPosture::ReadOnly),
     ("verify-inclusion", AuditPosture::ReadOnly),
+    // The only verb under `audit` that writes to the chain rather than reading
+    // it: a prune appends a signed `chain.pruned` record before deleting the
+    // segments it names. Emitting is the whole point — a deletion with no entry
+    // behind it is indistinguishable from tampering.
+    ("prune", AuditPosture::Emits("chain.pruned")),
     ("receipts", AuditPosture::DelegatesToSub(RECEIPTS_SUB)),
     ("transcript", AuditPosture::DelegatesToSub(TRANSCRIPT_SUB)),
 ];
@@ -713,6 +718,9 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",
+        // Plan-326 chain-structure event: `trust audit prune` records the
+        // removal in the chain before deleting the segments it names.
+        "chain.pruned",
         // Top-level command audit envelopes.
         "cmd.deploy",
         // Image time-travel restore marker.

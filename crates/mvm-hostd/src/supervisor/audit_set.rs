@@ -28,7 +28,7 @@ use mvm_contract::verify::hash_line;
 
 use crate::supervisor::audit_file::{SignedEnvelope, VerifyError, verify_chain_bytes};
 use crate::supervisor::audit_segment::{
-    Continuation, Sealed, continuation_from_entry, sealed_from_entry,
+    Continuation, Pruned, Sealed, continuation_from_entry, pruned_from_entry, sealed_from_entry,
 };
 
 /// What went wrong across the set, as opposed to within one file.
@@ -102,6 +102,28 @@ pub enum SegmentSetError {
         /// Its path.
         path: String,
     },
+    /// A prune record exists but the surviving chain does not corroborate it.
+    ///
+    /// This is the variant that stops "it was intentional" from being a way to
+    /// launder an edit: the record is signed, but it may only claim a prune the
+    /// surviving successor's handoff already independently attests.
+    #[error(
+        "segment {seq} continues segment {missing} ending {expected_tip}, but the \
+         prune record claims to have removed through segment {claimed_through} \
+         ending {claimed_tip}: the surviving chain does not corroborate it"
+    )]
+    UncorroboratedPrune {
+        /// The lowest surviving segment.
+        seq: u64,
+        /// The predecessor it names.
+        missing: u64,
+        /// The tip that predecessor must have had, hex.
+        expected_tip: String,
+        /// What the prune record claims it removed through.
+        claimed_through: u64,
+        /// The tip the prune record claims, hex.
+        claimed_tip: String,
+    },
     #[error(
         "the chain begins at segment {seq}, which continues segment {missing}: \
          the earliest history has been removed"
@@ -135,6 +157,38 @@ pub struct SegmentReport {
     /// (a sealed segment under [`verify_segment_topology`]), so a caller can
     /// never report an interior it did not walk as though it had.
     pub entries: Option<usize>,
+}
+
+/// What a whole-set verification established.
+///
+/// A set verdict rather than a bare list of segments, because after pruning
+/// "verified" is no longer a single bit. A pruned chain is intact *and* shorter
+/// than its own history, and a caller that could only say "verified" would be
+/// reporting green for a log with a hole in it — the exact quiet downgrade
+/// rotation was designed to avoid.
+#[derive(Debug, Clone)]
+pub struct SetVerification {
+    /// Per-segment results, oldest first.
+    pub segments: Vec<SegmentReport>,
+    /// Set when a prefix of the chain was deliberately pruned and the surviving
+    /// chain corroborates it. `None` means the set runs unbroken from genesis.
+    pub pruned: Option<Pruned>,
+}
+
+impl SetVerification {
+    /// Entries verified across the segments actually walked.
+    #[must_use]
+    pub fn verified_entries(&self) -> usize {
+        self.segments.iter().filter_map(|s| s.entries).sum()
+    }
+
+    /// Whether any history is missing. Kept as a method rather than left to
+    /// each caller to re-derive from `pruned`, because "is this a full-history
+    /// statement" is exactly the question a caller must not get wrong.
+    #[must_use]
+    pub fn has_gap(&self) -> bool {
+        self.pruned.is_some()
+    }
 }
 
 /// One segment as located on disk, before anything has been read from it.
@@ -384,18 +438,54 @@ fn check_boundary(
 
 /// The lowest segment present must either be the genesis segment or be honest
 /// that it is not the beginning.
-fn check_front(first: &Located, ends: &Ends) -> Result<(), SegmentSetError> {
+///
+/// A non-genesis front is *reported*, not refused, because it has two very
+/// different causes: history someone removed, and history the operator pruned
+/// on purpose. Telling them apart needs the prune record, which lives further
+/// along the chain, so the verdict is deferred to [`adjudicate`] once the
+/// walk has something to check it against.
+fn check_front(first: &Located, ends: &Ends) -> Result<Option<Continuation>, SegmentSetError> {
     match continuation_from_entry(&ends.first.entry) {
-        Some(cont) => Err(SegmentSetError::TruncatedFront {
-            seq: first.seq,
-            missing: cont.prev_segment,
-        }),
-        None if first.seq == 1 => Ok(()),
+        Some(cont) => Ok(Some(cont)),
+        None if first.seq == 1 => Ok(None),
         None => Err(SegmentSetError::MissingHandoff {
             seq: first.seq,
             path: first.path.display().to_string(),
         }),
     }
+}
+
+/// Decide whether a non-genesis front is explained by `claim`.
+///
+/// The corroboration rule is the whole security argument. A prune record is
+/// signed, so a non-key-holder cannot mint one — but a signed record that could
+/// say anything would let the key holder relabel an *edit* as a prune. So the
+/// record may only claim what the surviving chain independently attests: the
+/// lowest surviving segment's handoff already names its predecessor's sequence
+/// number and final hash, and the record has to match both. A prune record that
+/// reaches past that boundary, or names a different tip, is refused.
+///
+/// What this does not corroborate, said plainly: only the *upper* boundary of
+/// the pruned range is cross-checked. Segments below it are attested by the
+/// signed record alone, because the handoffs that would have pinned them went
+/// away with the segments themselves. That is why a prune must be a prefix —
+/// one boundary, one check — and why the entry count it reports is the
+/// record's word rather than a derived fact.
+fn check_prune_claim(
+    lowest_seq: u64,
+    front: Continuation,
+    claim: Pruned,
+) -> Result<Pruned, SegmentSetError> {
+    if claim.through != front.prev_segment || claim.tip != front.prev_tip {
+        return Err(SegmentSetError::UncorroboratedPrune {
+            seq: lowest_seq,
+            missing: front.prev_segment,
+            expected_tip: hex(&front.prev_tip),
+            claimed_through: claim.through,
+            claimed_tip: hex(&claim.tip),
+        });
+    }
+    Ok(claim)
 }
 
 /// Verify the *structure* of the whole set without walking any interior.
@@ -416,8 +506,13 @@ pub fn verify_segment_topology(
     dir: &Path,
     base: &str,
     vk: &VerifyingKey,
-) -> Result<Vec<SegmentReport>, SegmentSetError> {
-    walk(dir, base, vk, false).map(reports_of)
+) -> Result<SetVerification, SegmentSetError> {
+    let walked = walk(dir, base, vk, false)?;
+    let pruned = adjudicate(&walked, vk)?;
+    Ok(SetVerification {
+        segments: reports_of(walked.contents),
+        pruned,
+    })
 }
 
 fn reports_of(segments: Vec<SegmentContent>) -> Vec<SegmentReport> {
@@ -444,7 +539,10 @@ pub fn verify_segment_entries(
     base: &str,
     vk: &VerifyingKey,
 ) -> Result<Vec<crate::supervisor::audit::AuditEntry>, SegmentSetError> {
-    Ok(walk(dir, base, vk, true)?
+    let walked = walk(dir, base, vk, true)?;
+    adjudicate(&walked, vk)?;
+    Ok(walked
+        .contents
         .into_iter()
         .flat_map(|s| s.entries.unwrap_or_default())
         .collect())
@@ -455,8 +553,13 @@ pub fn verify_segment_set(
     dir: &Path,
     base: &str,
     vk: &VerifyingKey,
-) -> Result<Vec<SegmentReport>, SegmentSetError> {
-    walk(dir, base, vk, true).map(reports_of)
+) -> Result<SetVerification, SegmentSetError> {
+    let walked = walk(dir, base, vk, true)?;
+    let pruned = adjudicate(&walked, vk)?;
+    Ok(SetVerification {
+        segments: reports_of(walked.contents),
+        pruned,
+    })
 }
 
 /// Verify every segment end to end and hand back the verified bytes, in chain
@@ -471,7 +574,18 @@ pub fn read_verified_set(
     base: &str,
     vk: &VerifyingKey,
 ) -> Result<Vec<SegmentContent>, SegmentSetError> {
-    walk(dir, base, vk, true)
+    let walked = walk(dir, base, vk, true)?;
+    adjudicate(&walked, vk)?;
+    Ok(walked.contents)
+}
+
+/// A completed walk: the segments read, and the front gap still to adjudicate.
+struct Walked {
+    contents: Vec<SegmentContent>,
+    /// The lowest surviving segment's handoff, when it is not the genesis
+    /// segment. Someone still has to decide whether that is a prune or a
+    /// truncation.
+    front: Option<(u64, Continuation)>,
 }
 
 fn walk(
@@ -479,10 +593,11 @@ fn walk(
     base: &str,
     vk: &VerifyingKey,
     interiors: bool,
-) -> Result<Vec<SegmentContent>, SegmentSetError> {
+) -> Result<Walked, SegmentSetError> {
     let located = locate(dir, base)?;
     let mut contents = Vec::with_capacity(located.len());
     let mut prev: Option<(u64, Sealed, [u8; 32])> = None;
+    let mut front: Option<(u64, Continuation)> = None;
 
     for (idx, seg) in located.iter().enumerate() {
         // One read per segment. Every check below — boundaries, interior walk,
@@ -535,7 +650,14 @@ fn walk(
         let ends = read_ends(&seg.path, &content, seg.seq)?;
 
         if idx == 0 {
-            check_front(seg, &ends)?;
+            front = check_front(seg, &ends)?.map(|cont| (seg.seq, cont));
+            // The opening handoff of a pruned chain is still a signed line, and
+            // an unchecked one would let the claimed predecessor tip be edited
+            // freely — which is precisely the value `check_prune_claim` compares
+            // the prune record against.
+            if front.is_some() {
+                verify_line(&ends.first, vk, seg.seq, &seg.path)?;
+            }
         } else {
             let (prev_seq, prev_sealed, prev_tip) = prev.take().expect("set after first segment");
             // A gap in the sequence is reported against what the successor
@@ -588,5 +710,55 @@ fn walk(
             entries,
         });
     }
-    Ok(contents)
+    Ok(Walked { contents, front })
+}
+
+/// Resolve a walk's front gap into a set verdict.
+///
+/// The prune record is written to the active segment, but it does not stay
+/// there: once enough is appended, that segment is sealed and the record moves
+/// into it. So the search runs over the whole surviving set, newest first —
+/// each prune restates the entire pruned prefix, so the newest record is the
+/// authoritative one and the search can stop at the first segment carrying any.
+///
+/// Interiors that the walk did not already read are read here. That only
+/// happens on a chain that actually has a gap, and it stops as soon as the
+/// record is found, so the common un-pruned case stays `O(segments)` — but on a
+/// pruned chain the cheap topology check is no longer strictly cheap, and that
+/// is the honest cost of not requiring the record to sit in a fixed place.
+fn adjudicate(walked: &Walked, vk: &VerifyingKey) -> Result<Option<Pruned>, SegmentSetError> {
+    let Some((lowest_seq, front)) = walked.front else {
+        return Ok(None);
+    };
+    for seg in walked.contents.iter().rev() {
+        let found = match &seg.entries {
+            Some(entries) => newest_prune(entries),
+            None => {
+                let walked_seg = verify_chain_bytes(&seg.content, vk).map_err(|source| {
+                    SegmentSetError::Segment {
+                        seq: seg.seq,
+                        path: seg.path.display().to_string(),
+                        source,
+                    }
+                })?;
+                newest_prune(&walked_seg.entries)
+            }
+        };
+        if let Some(claim) = found {
+            return check_prune_claim(lowest_seq, front, claim).map(Some);
+        }
+    }
+    Err(SegmentSetError::TruncatedFront {
+        seq: lowest_seq,
+        missing: front.prev_segment,
+    })
+}
+
+/// The prune record with the largest range in one segment. A segment can carry
+/// more than one if the chain was pruned twice without rotating in between.
+fn newest_prune(entries: &[crate::supervisor::audit::AuditEntry]) -> Option<Pruned> {
+    entries
+        .iter()
+        .filter_map(pruned_from_entry)
+        .max_by_key(|p| p.through)
 }

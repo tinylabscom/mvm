@@ -17,7 +17,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-08` | `build` | Every workload runs from a signed, audited ExecutionPlan | `fn:synthesize_plan`, `fn:admit_for_run`, `fn:verify_audit_chain`, `fn:frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts`, `fn:no_std_verifier_accepts_the_same_corpus_the_host_verifier_does`, `fn:naively_dropping_old_entries_fails_verification_at_line_zero`, `fn:a_spliced_segment_is_refused`, `fn:a_missing_segment_is_named_not_silently_skipped`, `fn:an_interrupted_rotation_continues_history_instead_of_restarting_it` |
+| `MVM-SEC-08` | `build` | Every workload runs from a signed, audited ExecutionPlan | `fn:synthesize_plan`, `fn:admit_for_run`, `fn:verify_audit_chain`, `fn:frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts`, `fn:no_std_verifier_accepts_the_same_corpus_the_host_verifier_does`, `fn:naively_dropping_old_entries_fails_verification_at_line_zero`, `fn:a_prune_record_that_over_claims_is_refused`, `fn:the_same_deletion_without_a_record_is_still_refused`, `fn:pruning_a_broken_chain_is_refused_before_anything_is_deleted`, `fn:a_spliced_segment_is_refused`, `fn:a_missing_segment_is_named_not_silently_skipped`, `fn:an_interrupted_rotation_continues_history_instead_of_restarting_it` |
 
 ## admission_budget
 
