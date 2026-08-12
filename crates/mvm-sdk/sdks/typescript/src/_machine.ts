@@ -187,7 +187,7 @@ export function machineCreateArgv(options: MachineCreateOptions): string[] {
   if (options.image !== undefined && options.manifest !== undefined) {
     throw new TypeError("Machine.create accepts image OR manifest, not both");
   }
-  const argv = ["create", "--name", name];
+  const argv = ["create", name];
   if (options.image !== undefined) argv.push("--image", requireString(options.image, "image"));
   if (options.manifest !== undefined) {
     argv.push("--manifest", requireString(options.manifest, "manifest"));

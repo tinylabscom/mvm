@@ -232,7 +232,7 @@ fn run_args(spec: &MachineSpec) -> Result<GrantArgv> {
     })
 }
 
-/// Build the argv for `machine create --name … --image …` — persists the spec
+/// Build the argv for `machine create <name> --image …` — persists the spec
 /// without booting. Uses the shared builder so it can't drift from the CLI.
 fn create_args(spec: &MachineSpec) -> Result<GrantArgv> {
     if spec.name.is_empty() {
@@ -654,7 +654,6 @@ mod tests {
             create_args(&spec).unwrap().args,
             vec![
                 "create",
-                "--name",
                 "web",
                 "--image",
                 "alpine:3.20",
@@ -770,7 +769,6 @@ mod tests {
             create_args(&spec).unwrap().args,
             vec![
                 "create",
-                "--name",
                 "web",
                 "--image",
                 "alpine:3.20",

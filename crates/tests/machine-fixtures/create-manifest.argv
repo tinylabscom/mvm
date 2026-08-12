@@ -1,5 +1,4 @@
 create
---name
 web
 --manifest
 mvm.toml

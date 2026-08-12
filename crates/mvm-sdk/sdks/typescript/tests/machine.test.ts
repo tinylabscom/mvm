@@ -239,7 +239,7 @@ describe("Machine persistent lifecycle", () => {
     machine.stop();
 
     const text = readFixtureLog().join("\n");
-    expect(text).toContain("machine:create --name devbox --manifest mvm.toml --profile dev --force");
+    expect(text).toContain("machine:create devbox --manifest mvm.toml --profile dev --force");
     expect(text).toContain("machine:start devbox --dry-run");
     expect(text).toContain("machine:exec devbox --force -- echo hi");
     expect(text).toContain("machine:shell devbox --force");

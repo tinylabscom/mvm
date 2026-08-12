@@ -60,7 +60,7 @@ Feature: Encrypted block volume lifecycle and attachment
   @live
   Scenario: a failed persistent start releases its volume attachment lease
     Given an isolated mvm home
-    When I run mvmctl in the isolated mvm home with "machine create --name bdd-failed-volume --image alpine"
+    When I run mvmctl in the isolated mvm home with "machine create bdd-failed-volume --image alpine"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"
     Then the command exits with code 0
@@ -76,7 +76,7 @@ Feature: Encrypted block volume lifecycle and attachment
   Scenario: a writable block volume persists guest bytes across restart
     Given an isolated mvm home
     And a cached live workload kernel
-    When I run mvmctl in the isolated mvm home with "machine create --name bdd-persistent-volume --image alpine"
+    When I run mvmctl in the isolated mvm home with "machine create bdd-persistent-volume --image alpine"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"
     Then the command exits with code 0
@@ -104,7 +104,7 @@ Feature: Encrypted block volume lifecycle and attachment
   Scenario: a read-only block attachment refuses a guest write
     Given an isolated mvm home
     And a cached live workload kernel
-    When I run mvmctl in the isolated mvm home with "machine create --name bdd-readonly-volume --image alpine"
+    When I run mvmctl in the isolated mvm home with "machine create bdd-readonly-volume --image alpine"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"
     Then the command exits with code 0

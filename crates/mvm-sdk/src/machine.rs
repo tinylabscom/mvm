@@ -389,7 +389,7 @@ impl MachineRunBuilder {
 pub struct MachineCreate;
 
 impl MachineCreate {
-    /// Start building a `mvmctl machine create --name <name>` invocation.
+    /// Start building a `mvmctl machine create <name>` invocation.
     pub fn builder(name: impl Into<String>) -> MachineCreateBuilder {
         MachineCreateBuilder::new(name.into())
     }
@@ -569,7 +569,7 @@ impl MachineCreateBuilder {
         }
         validate_strings(&self.allow_hosts, "--allow-host")?;
 
-        let mut args = vec!["create".to_string(), "--name".to_string(), name];
+        let mut args = vec!["create".to_string(), name];
         append_optional(&mut args, "--image", self.image.as_deref())?;
         append_optional(&mut args, "--manifest", self.manifest.as_deref())?;
         if self.net {

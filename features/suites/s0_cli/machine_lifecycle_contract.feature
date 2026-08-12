@@ -7,7 +7,7 @@ Feature: machine lifecycle request contract
 
   Scenario: creating a machine records it without booting a guest
     Given an isolated mvm home
-    When I run mvmctl in the isolated mvm home with "machine create --name bdd-lifecycle --image alpine"
+    When I run mvmctl in the isolated mvm home with "machine create bdd-lifecycle --image alpine"
     Then the command exits with code 0
     And the output contains "created machine bdd-lifecycle"
     When I run mvmctl in the isolated mvm home with "machine ls"
@@ -20,7 +20,7 @@ Feature: machine lifecycle request contract
 
   Scenario: removing a machine drops it from the listing
     Given an isolated mvm home
-    When I run mvmctl in the isolated mvm home with "machine create --name bdd-removable --image alpine"
+    When I run mvmctl in the isolated mvm home with "machine create bdd-removable --image alpine"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine rm --yes bdd-removable"
     Then the command exits with code 0
@@ -32,7 +32,7 @@ Feature: machine lifecycle request contract
   # identity, so it is validated rather than sanitised — silently rewriting a
   # name would make the record disagree with what was asked for.
   Scenario: a machine name outside the allowed alphabet is refused
-    When I run mvmctl with "machine create --name Bad_Name --image alpine" and an isolated mvm home
+    When I run mvmctl with "machine create Bad_Name --image alpine" and an isolated mvm home
     Then the command exits with code 1
     And the error output contains "lowercase alphanumeric + hyphens"
 
@@ -48,4 +48,4 @@ Feature: machine lifecycle request contract
     When I run mvmctl with "machine exec ghost -- /bin/true" and an isolated mvm home
     Then the command exits with code 1
     And the error output contains "does not exist"
-    And the error output contains "machine create --name ghost"
+    And the error output contains "machine create ghost"

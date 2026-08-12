@@ -124,7 +124,7 @@ pub fn load_machine_spec(name: &str) -> Result<MachineSpec> {
         bail!(
             "machine {name:?} does not exist. \
              Run `mvmctl machine ls` to list machines, \
-             or `mvmctl machine create --name {name} --image <ref>` to create one."
+             or `mvmctl machine create {name} --image <ref>` to create one."
         );
     }
     load_machine_spec_from_path(&path)

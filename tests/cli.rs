@@ -3,6 +3,35 @@
 use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
+/// The README's persistent-machine form uses a positional name. Creating the
+/// spec is host-only and must succeed without booting or contacting a VM.
+#[test]
+fn machine_create_readme_form_persists_the_named_spec() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args([
+            "machine", "create", "web", "--image", "nginx", "--cpus", "2", "--memory", "512M",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "README machine create command must succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let spec: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("machine create --json emits a machine spec");
+    assert_eq!(spec["name"], "web");
+    assert_eq!(spec["image"], "nginx");
+    assert_eq!(spec["cpus"], 2);
+    assert_eq!(spec["memory"], "512M");
+}
+
 /// Regression guard on how `machine run` takes stdin.
 ///
 /// This previously asserted `--stdin` must never appear, because piped stdin

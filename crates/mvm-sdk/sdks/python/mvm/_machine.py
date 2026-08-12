@@ -179,7 +179,7 @@ def _machine_create_argv(
     name = _require_non_empty_str(name, "name")
     if image is not None and manifest is not None:
         raise ValueError("Machine.create accepts image OR manifest, not both")
-    argv = ["create", "--name", name]
+    argv = ["create", name]
     if image is not None:
         argv.extend(["--image", _require_non_empty_str(image, "image")])
     if manifest is not None:

@@ -257,7 +257,7 @@ def test_machine_persistent_lifecycle_shells_to_cli(tmp_path: Path) -> None:
 
     text = "\n".join(_records(record))
     assert "verb=create" in text
-    assert "--name devbox --manifest mvm.toml --profile dev --force" in text
+    assert "args=devbox --manifest mvm.toml --profile dev --force" in text
     assert "verb=start" in text
     assert "devbox --dry-run" in text
     assert "verb=exec" in text

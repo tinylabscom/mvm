@@ -6,6 +6,11 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Plan 322 — persistent-machine README contract.** `machine create`
+      accepts the optional machine name positionally, and real-binary coverage,
+      all three SDKs, shared fixtures, BDD scenarios, recovery guidance, and
+      website docs agree on that single public command shape. Host and Linux
+      gates, including the complete workspace suite and doctests, pass.
 - [x] **Issue #2365 / Plan 319 — audit-log rotation.** The chain-signed audit
       log now rotates into sequenced segments at 4 MiB instead of growing
       forever. Rotation is an authenticated handoff, not a truncation: each new
