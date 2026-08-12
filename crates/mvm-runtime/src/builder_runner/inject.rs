@@ -56,6 +56,8 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
 
     let console_log = req.work_dir.join("inject-console.log");
     let cfg = HvfSupervisorConfig {
+        // Irrelevant here: this helper VM carries no egress relay at all.
+        trusted_builder_egress: false,
         kernel: req.kernel.to_path_buf(),
         // Default cmdline runs the initramfs /init (the patcher); the default RAM
         // is plenty for a mount + copy.
@@ -87,6 +89,9 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         broker_socket: None,
         // The rootfs-inject helper VM has no egress tunnel.
         console_data_sockets: vec![],
+        // The rootfs patcher runs an initramfs to completion; it serves no
+        // dispatch loop.
+        builder_control_sockets: vec![],
         handoff_socket: None,
         handoff_root: None,
         handoff_verify_key: None,

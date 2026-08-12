@@ -27,7 +27,7 @@ use mvm_core::vm_backend::{
     VmStatus,
 };
 use mvm_vmm::host::hvf_supervisor::{
-    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
+    HostDialSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
 };
 
 use mvm_vmm::host::cmdline;
@@ -44,10 +44,10 @@ const PAUSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Raw HVF (`Hypervisor.framework`) backend. macOS / Apple-silicon only.
 pub struct HvfBackend;
 
-fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<ConsoleDataSocket> {
+fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<HostDialSocket> {
     mvm_vmm::host::spec_map::console_data_sockets(state_dir, dev_console)
         .into_iter()
-        .map(|(guest_port, host_socket)| ConsoleDataSocket {
+        .map(|(guest_port, host_socket)| HostDialSocket {
             guest_port,
             host_socket,
         })
@@ -553,6 +553,8 @@ impl VmBackend for HvfBackend {
         let broker_listen_socket = mvm_core::config::vm_hvf_broker_socket(&config.name);
 
         let cfg = HvfSupervisorConfig {
+            // A workload is always metered.
+            trusted_builder_egress: false,
             kernel: PathBuf::from(kernel),
             // Thread a full cmdline only when we need extra workload tokens;
             // otherwise keep the supervisor default (`init=/init`).
@@ -591,6 +593,9 @@ impl VmBackend for HvfBackend {
             egress_relay_socket,
             broker_socket: Some(broker_listen_socket.clone()),
             console_data_sockets,
+            // The legacy start path serves workloads only; a persistent builder
+            // comes up through the driver seam with its ports named in the spec.
+            builder_control_sockets: Vec::new(),
             handoff_socket: None,
             handoff_root: None,
             handoff_verify_key: None,

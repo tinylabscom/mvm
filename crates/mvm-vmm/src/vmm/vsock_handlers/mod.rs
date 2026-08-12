@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
 use super::agent_bridge::AgentBridge;
-use super::console_bridge::ConsoleBridge;
+use super::host_dial_bridge::HostDialBridge;
 use super::substitution_bridge::{
     EgressBudget, EndpointRelayAction, GuestEndpointRelay, READ_CHUNK, SubstitutionBridge,
 };
@@ -172,7 +172,7 @@ impl VsockHandlerRegistry {
 
         let host_initiated: Vec<Box<dyn HostInitiatedHandler>> = vec![
             Box::new(AgentVsockHandler::new()),
-            Box::new(ConsoleVsockHandler::new()),
+            Box::new(HostDialVsockHandler::new()),
         ];
 
         Self {
@@ -202,6 +202,21 @@ impl VsockHandlerRegistry {
             .set_endpoint(path);
     }
 
+    /// Drop the workload egress ceilings for a trusted-builder VM. Both ports
+    /// keep sharing one budget.
+    pub(crate) fn set_trusted_builder_egress(&mut self) {
+        let budget = EgressBudget::trusted_builder();
+        for port in [
+            mvm_agentd::vsock::EGRESS_PORT,
+            mvm_agentd::vsock::BROKER_PORT,
+        ] {
+            self.guest_handler_mut::<StreamRelayHandler>(port)
+                .expect("relay handler present")
+                .bridge
+                .set_budget(budget.clone());
+        }
+    }
+
     pub(crate) fn set_substitution_activity(
         &mut self,
         counter: Arc<std::sync::atomic::AtomicUsize>,
@@ -226,18 +241,18 @@ impl VsockHandlerRegistry {
             .set_activity(counter);
     }
 
-    pub(crate) fn set_console_sockets<'a>(
+    pub(crate) fn set_host_dial_sockets<'a>(
         &mut self,
         ports: impl IntoIterator<Item = (u32, &'a Path)>,
     ) -> std::io::Result<()> {
-        self.host_handler_mut::<ConsoleVsockHandler>()
+        self.host_handler_mut::<HostDialVsockHandler>()
             .expect("console handler present")
             .bridge
             .bind_ports(ports)
     }
 
-    pub(crate) fn set_console_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.host_handler_mut::<ConsoleVsockHandler>()
+    pub(crate) fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.host_handler_mut::<HostDialVsockHandler>()
             .expect("console handler present")
             .bridge
             .set_activity(counter);
@@ -331,11 +346,11 @@ impl VsockHandlerRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) fn is_console_stream(&mut self, conn_id: u32) -> bool {
-        self.host_handler_mut::<ConsoleVsockHandler>()
+    pub(crate) fn is_host_dial_stream(&mut self, conn_id: u32) -> bool {
+        self.host_handler_mut::<HostDialVsockHandler>()
             .expect("console handler present")
             .bridge
-            .is_console_stream(conn_id)
+            .is_host_dial_stream(conn_id)
     }
 
     fn guest_handler_mut<T: Any>(&mut self, port: u32) -> Option<&mut T> {
@@ -634,19 +649,19 @@ impl HostInitiatedHandler for AgentVsockHandler {
     }
 }
 
-struct ConsoleVsockHandler {
-    bridge: ConsoleBridge,
+struct HostDialVsockHandler {
+    bridge: HostDialBridge,
 }
 
-impl ConsoleVsockHandler {
+impl HostDialVsockHandler {
     fn new() -> Self {
         Self {
-            bridge: ConsoleBridge::new(),
+            bridge: HostDialBridge::new(),
         }
     }
 }
 
-impl HostInitiatedHandler for ConsoleVsockHandler {
+impl HostInitiatedHandler for HostDialVsockHandler {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -656,7 +671,7 @@ impl HostInitiatedHandler for ConsoleVsockHandler {
     }
 
     fn accepts_stream(&self, conn_id: u32) -> bool {
-        self.bridge.is_console_stream(conn_id)
+        self.bridge.is_host_dial_stream(conn_id)
     }
 
     fn on_packet(&mut self, ctx: &mut VsockHandlerContext<'_>, hdr: VsockHdr, payload: &[u8]) {

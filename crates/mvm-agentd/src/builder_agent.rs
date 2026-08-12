@@ -250,6 +250,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn builder_control_port_literals_match_the_typed_services() {
+        // `mvm_net::GuestService::{BuilderDispatch, BuilderdControl}` pin the
+        // same two literals. That crate sits below this one and cannot name
+        // these constants, so the pin lives on both sides; divergence would
+        // route a dispatch at a port nothing is listening on.
+        assert_eq!(BUILDER_DISPATCH_PORT, 21471);
+        assert_eq!(BUILDERD_CONTROL_PORT, 21473);
+    }
+
+    #[test]
     fn workload_forward_port_literal_is_21472() {
         // Pin the host-side port; the guest hardcodes the same literal
         // (it can't depend on this crate). Divergence breaks the hop.

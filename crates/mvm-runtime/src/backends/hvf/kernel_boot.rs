@@ -193,6 +193,9 @@ pub struct HostChannels {
     /// endpoint gates (claim-10) and substitutes secrets. `None` ⇒ egress fails
     /// closed at the bridge (an hvf VM must always carry a relay socket).
     pub egress_relay: Option<PathBuf>,
+    /// Trusted-builder tier: relay egress without the per-workload byte-rate
+    /// cap. False for every workload.
+    pub trusted_builder_egress: bool,
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
     /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
@@ -201,6 +204,11 @@ pub struct HostChannels {
     /// data port the interactive PTY may reach. Populated only for a `dev_console`
     /// machine; empty for a sealed prod config, so nothing is bound (claim 15).
     pub console_data_sockets: Vec<(u32, PathBuf)>,
+    /// Builder-tier control listeners: job dispatch and the resident daemon's
+    /// typed channel, for a persistent builder VM. Empty for every workload.
+    /// Rides the same host-dial bridge as the console ports — the guest listens,
+    /// the host dials — and the two ranges never overlap.
+    pub builder_control_sockets: Vec<(u32, PathBuf)>,
     /// Full kernel cmdline. `None` ⇒ the built-in [`default_bootargs`] (workload
     /// default: `init=/init`). A caller that boots an image expecting a different
     /// PID 1 — e.g. the builder rootfs, whose init is the static
@@ -582,8 +590,10 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
+                trusted_builder_egress: channels.trusted_builder_egress,
                 broker_socket: channels.broker_socket,
                 console_data_sockets: channels.console_data_sockets,
+                builder_control_sockets: channels.builder_control_sockets,
                 virtiofs_root: channels.virtiofs_root,
                 virtiofs_shares: channels.virtiofs_shares,
                 pause_state: channels.pause_state,
@@ -633,12 +643,15 @@ struct RunInputs {
     /// Per-VM egress bridge UDS. When set, `EGRESS_PORT` relays here — the
     /// endpoint is the sole gate + substituter.
     egress_relay: Option<PathBuf>,
+    /// Trusted-builder tier: relay egress without the per-workload byte-rate cap.
+    trusted_builder_egress: bool,
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
     /// Dev-only host console listeners (one `(guest_port, host_socket)` per console
     /// data port). Empty for a sealed prod config — nothing bound (claim 15).
     console_data_sockets: Vec<(u32, PathBuf)>,
+    builder_control_sockets: Vec<(u32, PathBuf)>,
     /// When set, serve this host dir to the guest as a read-only virtiofs root.
     virtiofs_root: Option<PathBuf>,
     virtiofs_shares: Vec<(String, PathBuf)>,
@@ -670,8 +683,10 @@ unsafe fn run(
         agent_socket,
         substitution_socket,
         egress_relay,
+        trusted_builder_egress,
         broker_socket,
         console_data_sockets,
+        builder_control_sockets,
         virtiofs_root,
         virtiofs_shares,
         pause_state,
@@ -890,6 +905,9 @@ unsafe fn run(
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);
             }
+            if trusted_builder_egress {
+                v.set_trusted_builder_egress();
+            }
             // Host-services broker (BROKER_PORT): a pure relay to the per-VM broker
             // UDS the host-agent daemon bound, so a guest `host.audit.v1` call
             // reaches the broker. Shares the heartbeat counter so an in-flight
@@ -905,13 +923,22 @@ unsafe fn run(
             // `dev_console` machine; a sealed prod config carries none, so nothing
             // is bound (claim 15). Shares the heartbeat counter so an open console
             // stream keeps the loop waking an idle guest.
-            if !console_data_sockets.is_empty() {
-                v.set_console_activity(egress_active.clone());
-                let ports = console_data_sockets
+            // Builder control ports ride the same bridge, and a persistent
+            // builder has no console, so bind whichever list is populated.
+            // They cannot both be: one is dev-console policy, the other
+            // builder-tier policy.
+            let host_dial_sockets: Vec<(u32, PathBuf)> = console_data_sockets
+                .iter()
+                .chain(builder_control_sockets.iter())
+                .cloned()
+                .collect();
+            if !host_dial_sockets.is_empty() {
+                v.set_host_dial_activity(egress_active.clone());
+                let ports = host_dial_sockets
                     .iter()
                     .map(|(port, path)| (*port, path.as_path()));
-                if let Err(e) = v.set_console_sockets(ports) {
-                    eprintln!("mvm-hvf: console socket bind failed: {e}");
+                if let Err(e) = v.set_host_dial_sockets(ports) {
+                    eprintln!("mvm-hvf: host-dial socket bind failed: {e}");
                 }
             }
             if v.set_handoff_control(
@@ -973,7 +1000,7 @@ unsafe fn run(
                 v.set_agent_activity(egress_active.clone());
                 v.set_substitution_activity(egress_active.clone());
                 v.set_broker_activity(egress_active.clone());
-                v.set_console_activity(egress_active.clone());
+                v.set_host_dial_activity(egress_active.clone());
                 let bindings = crate::vmm::vsock::VsockHostBindings {
                     agent_socket: agent_socket.clone(),
                     substitution_endpoint: egress_relay
@@ -984,6 +1011,9 @@ unsafe fn run(
                 };
                 v.rebind_host_channels(&bindings, Arc::new(GicSpi))
                     .map_err(|_| HvfError::SnapshotState("restore channel rebind failed"))?;
+                if trusted_builder_egress {
+                    v.set_trusted_builder_egress();
+                }
             }
         }
 

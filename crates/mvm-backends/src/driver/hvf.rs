@@ -22,7 +22,7 @@ use mvm_core::vm_backend::{
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_supervisor::{
-    ConsoleDataSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
+    HostDialSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
 };
 use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
@@ -178,7 +178,20 @@ fn relay_supervisor_config_with_handoff(
         .filter(|p| {
             matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port))
         })
-        .map(|p| ConsoleDataSocket {
+        .map(|p| HostDialSocket {
+            guest_port: p.port(),
+            host_socket: p.host_uds.clone(),
+        })
+        .collect();
+
+    // Builder-tier control ports, by the same rule: present only when the spec
+    // names them, which only a persistent builder VM's spec does. A workload
+    // spec carries none, so this is empty for every tenant guest.
+    let builder_control_sockets = spec
+        .vsock
+        .iter()
+        .filter(|p| p.service.is_builder_tier())
+        .map(|p| HostDialSocket {
             guest_port: p.port(),
             host_socket: p.host_uds.clone(),
         })
@@ -205,6 +218,7 @@ fn relay_supervisor_config_with_handoff(
             })
             .collect(),
         vsock: true,
+        trusted_builder_egress: spec.trusted_builder,
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),
         workload_exit: paths.workload_exit.clone(),
@@ -228,6 +242,7 @@ fn relay_supervisor_config_with_handoff(
         // daemon). Absent for a builder/dev VM, which runs no admitted workload.
         broker_socket: spec.host_socket_for_service(GuestService::Broker),
         console_data_sockets,
+        builder_control_sockets,
         handoff_socket: handoff.map(|value| value.socket.clone()),
         handoff_root: handoff.map(|value| value.root.clone()),
         handoff_verify_key: handoff.map(|value| value.verify_key.clone()),
@@ -1192,6 +1207,28 @@ mod tests {
     }
 
     #[test]
+    fn only_a_trusted_builder_relays_trusted_builder_egress() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                agent_port("/run/agent.sock"),
+                egress_port("/run/egress.sock"),
+            ],
+            vec![],
+        );
+
+        let workload = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(
+            !workload.trusted_builder_egress,
+            "a workload must stay rate-limited"
+        );
+
+        spec.trusted_builder = true;
+        let builder = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(builder.trusted_builder_egress);
+    }
+
+    #[test]
     fn relay_config_without_egress_port_is_explicit_deny_all() {
         // No EGRESS_PORT is the explicit deny-all shape: the guest has no
         // host-side egress listener to reach, so it cannot acquire a path off
@@ -1389,6 +1426,58 @@ mod tests {
         );
         let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
         assert!(cfg.console_data_sockets.is_empty());
+        // The same spec must not acquire builder control ports either.
+        assert!(cfg.builder_control_sockets.is_empty());
+    }
+
+    fn builder_dispatch_port(uds: &str) -> VsockPort {
+        VsockPort {
+            service: GuestService::BuilderDispatch,
+            host_uds: uds.into(),
+            direction: VsockDirection::HostDials,
+        }
+    }
+
+    #[test]
+    fn relay_config_copies_builder_ports_into_builder_control_sockets() {
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                builder_dispatch_port("/run/vsock-21471.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+
+        assert_eq!(cfg.builder_control_sockets.len(), 1);
+        assert_eq!(
+            cfg.builder_control_sockets[0].guest_port,
+            GuestService::BuilderDispatch.port()
+        );
+        assert_eq!(
+            cfg.builder_control_sockets[0].host_socket,
+            PathBuf::from("/run/vsock-21471.sock")
+        );
+        // A builder port is not a console port; the two lists stay disjoint.
+        assert!(cfg.console_data_sockets.is_empty());
+    }
+
+    #[test]
+    fn a_workload_spec_never_yields_builder_control_sockets() {
+        // The security-relevant direction: only a spec that names a
+        // builder-tier service gets a listener on the build engine's ports.
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+                broker_port("/run/broker.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(cfg.builder_control_sockets.is_empty());
     }
 
     /// Same contract as every other driver: the bound rides on the spawn.

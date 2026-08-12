@@ -207,6 +207,10 @@ impl VsockShared {
         self.handlers.set_substitution_endpoint(path);
     }
 
+    pub fn set_trusted_builder_egress(&mut self) {
+        self.handlers.set_trusted_builder_egress();
+    }
+
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_substitution_activity(counter);
     }
@@ -223,15 +227,15 @@ impl VsockShared {
         self.lifecycle.exit_stop = Some(self.handlers.capture_workload_exit(stop));
     }
 
-    pub fn set_console_sockets<'a>(
+    pub fn set_host_dial_sockets<'a>(
         &mut self,
         ports: impl IntoIterator<Item = (u32, &'a std::path::Path)>,
     ) -> std::io::Result<()> {
-        self.handlers.set_console_sockets(ports)
+        self.handlers.set_host_dial_sockets(ports)
     }
 
-    pub fn set_console_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.handlers.set_console_activity(counter);
+    pub fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.handlers.set_host_dial_activity(counter);
     }
 
     pub fn read(&self, offset: u64) -> u64 {
@@ -375,6 +379,11 @@ impl VirtioVsock {
         self.notify_io();
     }
 
+    pub fn set_trusted_builder_egress(&mut self) {
+        self.lock().set_trusted_builder_egress();
+        self.notify_io();
+    }
+
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_substitution_activity(counter);
         self.notify_io();
@@ -395,17 +404,17 @@ impl VirtioVsock {
         self.notify_io();
     }
 
-    pub fn set_console_sockets<'a>(
+    pub fn set_host_dial_sockets<'a>(
         &mut self,
         ports: impl IntoIterator<Item = (u32, &'a std::path::Path)>,
     ) -> std::io::Result<()> {
-        let result = self.lock().set_console_sockets(ports);
+        let result = self.lock().set_host_dial_sockets(ports);
         self.notify_io();
         result
     }
 
-    pub fn set_console_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.lock().set_console_activity(counter);
+    pub fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.lock().set_host_dial_activity(counter);
         self.notify_io();
     }
 
@@ -432,7 +441,7 @@ impl VirtioVsock {
                 self.set_broker_endpoint(path);
             }
             if !bindings.console_sockets.is_empty() {
-                self.set_console_sockets(
+                self.set_host_dial_sockets(
                     bindings
                         .console_sockets
                         .iter()
@@ -1784,7 +1793,7 @@ mod tests {
         let port = 20005u32;
         let sock = dir.path().join("vsock-20005.sock");
         let mut d = dev();
-        if let Err(err) = d.set_console_sockets([(port, sock.as_path())]) {
+        if let Err(err) = d.set_host_dial_sockets([(port, sock.as_path())]) {
             if error_chain_has_permission_denied(&err) {
                 eprintln!(
                     "skipping test: sandbox denied console socket setup at {}: {err}",
@@ -1822,7 +1831,7 @@ mod tests {
         assert_eq!(hdr.src_cid, HOST_CID);
         assert_eq!(hdr.dst_cid, GUEST_CID);
         let conn_id = hdr.src_port;
-        assert!(d.handlers.is_console_stream(conn_id));
+        assert!(d.handlers.is_host_dial_stream(conn_id));
         assert!(!d.handlers.is_agent_stream(conn_id));
 
         let accept = VsockHdr {
@@ -1880,7 +1889,7 @@ mod tests {
     #[test]
     fn empty_console_sockets_bind_nothing() {
         let mut d = dev();
-        d.set_console_sockets([]).unwrap();
+        d.set_host_dial_sockets([]).unwrap();
         assert!(!d.service_host_io());
         assert!(d.transport.pending_rx.is_empty());
     }

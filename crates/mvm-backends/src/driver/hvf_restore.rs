@@ -149,6 +149,8 @@ pub fn hvf_child_restore_config(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(HvfSupervisorConfig {
+        // Same tier as the parent it forked from.
+        trusted_builder_egress: parent.trusted_builder_egress,
         kernel: parent.kernel.clone(),
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
@@ -175,6 +177,8 @@ pub fn hvf_child_restore_config(
         egress_relay_socket: None,
         broker_socket: None,
         console_data_sockets: Vec::new(),
+        // A restored child is a workload fork, never the build engine.
+        builder_control_sockets: Vec::new(),
         // The live-handoff control socket is a privileged path onto a resident
         // parent. A restored child is not a standby factory and must never
         // serve it.
@@ -282,6 +286,7 @@ mod tests {
 
     fn parent_config(state: &Path, disks: Vec<HvfDisk>) -> HvfSupervisorConfig {
         HvfSupervisorConfig {
+            trusted_builder_egress: false,
             kernel: state.join("Image"),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
@@ -304,7 +309,8 @@ mod tests {
             substitution_socket: Some(PathBuf::from("/parent/substitution.sock")),
             egress_relay_socket: Some(PathBuf::from("/parent/egress.sock")),
             broker_socket: Some(PathBuf::from("/parent/broker.sock")),
-            console_data_sockets: vec![mvm_vmm::host::hvf_supervisor::ConsoleDataSocket {
+            builder_control_sockets: vec![],
+            console_data_sockets: vec![mvm_vmm::host::hvf_supervisor::HostDialSocket {
                 guest_port: 20001,
                 host_socket: PathBuf::from("/parent/vsock/vsock-20001.sock"),
             }],
