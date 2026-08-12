@@ -305,6 +305,7 @@ fn main() -> anyhow::Result<()> {
                 agent_socket: cfg.agent_socket.clone(),
                 substitution_socket: cfg.substitution_socket.clone(),
                 egress_relay: cfg.egress_relay_socket.clone(),
+                trusted_builder_egress: cfg.trusted_builder_egress,
                 broker_socket: cfg.broker_socket.clone(),
                 console_data_sockets: cfg
                     .console_data_sockets

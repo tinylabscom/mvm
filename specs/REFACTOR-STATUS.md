@@ -11,6 +11,11 @@ for detailed scope and acceptance criteria.
       its shared-memory length and base registers, so Linux no longer rejects
       `uvol` devices as zero-length DAX windows. Unit coverage and the original
       native-HVF Alpine directory-share command pass.
+- [x] **Plan 316 — merge-queue forward progress.** Reduced live speculative
+      build concurrency from four to two, restored immediate single-entry
+      progress, raised the check-response timeout from 90 to 240 minutes, and
+      made timeout ejections terminal for automatic recovery at an unchanged
+      commit. Required checks and exact merge-commit validation are unchanged.
 - [x] **Foreground `machine run` port forwarding.** Repeatable
       `--port HOST:GUEST` promotes a run to a persistent machine, delegates to
       the existing forwarding lifecycle, binds loopback rather than socat's
@@ -68,7 +73,12 @@ for detailed scope and acceptance criteria.
       watchdog, dominates internal HVF shutdown, so no unnecessary control
       protocol was added. The foreground-wait audit, repository waiting-model
       rule, complete workspace tests, formatting, checks, and Linux all-target
-      clippy are green.
+      clippy are green. The post-completion HVF builder regression is also
+      closed: work inputs now use the shared filtered staging seam before ext4
+      packing, and a transport-boundary test proves source is retained while
+      host `target/` scratch output is excluded. An authorized live sleeper
+      build packed 57.1 MiB instead of 55.7 GB and returned builder exit code
+      zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
 - [x] Plan 322 — Scope merge-group Rust CI to behavior-changing diffs
@@ -1288,11 +1298,21 @@ for detailed scope and acceptance criteria.
         reads as schema-stale rather than tampered). BOTH restore paths check,
         through one predicate `ensure_child_grants_within_parent`: the vm_full
         fork and the warm-pool claim.
-        STILL OPEN: (a) restore does not re-apply grants through `apply_grants`;
-        (b) a warm parent seals no grant — a factory parent holds no plan or
-        `cpu_grant` by construction and one parent serves every claim, so
-        bounding a claimed child's CPU/wall clock needs a pool-level grant on
-        `StandbySpec`; its egress is already bounded (absent egress = deny-all)
+        (a) LANDED: the cleared child grant rides `RestoredChild.cpu_grant` to
+        the child's spawn, and each restorer binds it where its cold boot binds
+        `VmmSpec.cpu_grant` — HVF wraps the supervisor spawn, FC prefixes its
+        launch line, the warm claim threads `ChildForkRequest.cpu_grant`. A
+        restored child's tier now reads back `Cgroup2CpuMax`. A same-identity
+        restore and a preloaded child stay unbounded by construction: neither
+        has an admitted plan at the moment its VMM starts.
+        STILL OPEN: (b) a warm parent seals no grant — a factory parent holds no
+        plan or `cpu_grant` by construction and one parent serves every claim,
+        so bounding a claimed child's CPU/wall clock needs a pool-level grant on
+        `StandbySpec`; its egress is already bounded (absent egress = deny-all).
+        Assessed and deferred with reason: there is no pool configuration to
+        plumb from — a pool's identity is *derived* from the provisioning
+        launch, so the grant needs a declaring surface and a compat-key
+        decision before it can be plumbed anywhere
   - [~] WS6 — four surfaces: manifest `[grants]`, `--grants-file` JSON,
         `--cpu-limit` CLI flag (`--timeout` supplies the wall-clock dimension),
         and `grants` on the `MachineSpec` DTO + `LaunchRequest` builder,

@@ -6,9 +6,11 @@ name: Merge queue auto-requeue
 # of keeping queue latency predictable.
 #
 # Most ejections are transient: a flaky test in the queue run, or the entry
-# being invalidated because something ahead of it merged. Those deserve an
-# automatic retry. A genuine merge conflict does not — it needs a human to
-# rebase — so this refuses to requeue one and says so on the PR instead.
+# being invalidated because something ahead of it merged. Those deserve one
+# bounded automatic retry. A timeout does not: retrying the same commit under
+# the same capacity pressure creates a self-sustaining outage in which no PR
+# can reach the front. Timeout ejections release the queue and require a new
+# commit or an explicit human decision before they can consume another cycle.
 #
 # `pull_request_target` runs with a write token against the BASE ref. This
 # workflow never checks out the PR's code and only makes API calls, so nothing
@@ -44,6 +46,30 @@ jobs:
           MAX_ATTEMPTS: "2"
         run: |
           set -euo pipefail
+
+          owner=${REPO%%/*}
+          name=${REPO#*/}
+          # The GraphQL variables are expanded by GitHub, not by the shell.
+          # shellcheck disable=SC2016
+          dequeue_reason=$(gh api graphql \
+            -F owner="${owner}" \
+            -F name="${name}" \
+            -F number="${PR}" \
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){timelineItems(last:20,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{... on RemovedFromMergeQueueEvent{reason}}}}}}' \
+            --jq '.data.repository.pullRequest.timelineItems.nodes[-1].reason')
+          if [ -z "${dequeue_reason}" ] || [ "${dequeue_reason}" = "null" ]; then
+            echo "::error::Could not resolve the latest dequeue reason; refusing to guess."
+            exit 1
+          fi
+          echo "PR #${PR}: dequeued reason=${dequeue_reason}"
+
+          if [ "${dequeue_reason}" = "checks_timed_out" ]; then
+            echo "::warning::Queue checks timed out; not automatically requeuing the unchanged commit."
+            gh pr comment "${PR}" --repo "${REPO}" --body \
+              "Queue validation timed out. This unchanged commit is **not automatically requeuing**: retrying it under the same capacity pressure would block every PR behind it. Re-enable auto-merge after the queue has capacity or after pushing a new commit." \
+              || true
+            exit 0
+          fi
 
           state=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.state')
           merged=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.merged')

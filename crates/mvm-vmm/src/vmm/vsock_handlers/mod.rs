@@ -202,6 +202,21 @@ impl VsockHandlerRegistry {
             .set_endpoint(path);
     }
 
+    /// Drop the workload egress ceilings for a trusted-builder VM. Both ports
+    /// keep sharing one budget.
+    pub(crate) fn set_trusted_builder_egress(&mut self) {
+        let budget = EgressBudget::trusted_builder();
+        for port in [
+            mvm_agentd::vsock::EGRESS_PORT,
+            mvm_agentd::vsock::BROKER_PORT,
+        ] {
+            self.guest_handler_mut::<StreamRelayHandler>(port)
+                .expect("relay handler present")
+                .bridge
+                .set_budget(budget.clone());
+        }
+    }
+
     pub(crate) fn set_substitution_activity(
         &mut self,
         counter: Arc<std::sync::atomic::AtomicUsize>,

@@ -49,11 +49,53 @@ pub(crate) struct EndpointRelayDrain {
     pub closed: Vec<u32>,
 }
 
-/// Shared per-workload egress budget. The egress and broker ports use one
-/// instance so a workload cannot multiply its allowance by opening both paths.
+/// How long to sleep between refill checks while an established stream waits
+/// for byte tokens.
+const BUDGET_REFILL_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Host-side resource ceilings applied to one VM's relayed egress. `None` on any
+/// field means that ceiling does not apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EgressLimits {
+    /// Sustained byte rate, refilled continuously.
+    pub bytes_per_second: Option<u64>,
+    /// Concurrent relayed streams.
+    pub max_streams: Option<usize>,
+    /// Evict a relayed stream after this long with no traffic.
+    pub idle_timeout: Option<std::time::Duration>,
+}
+
+impl EgressLimits {
+    /// An untrusted workload: every ceiling applies.
+    pub(crate) const fn workload() -> Self {
+        Self {
+            bytes_per_second: Some(EGRESS_BYTES_PER_SECOND),
+            max_streams: Some(MAX_EGRESS_STREAMS),
+            idle_timeout: Some(CONNECTION_IDLE_TIMEOUT),
+        }
+    }
+
+    /// A trusted builder VM: it builds nix templates, reports stdout/stderr, and
+    /// exits. It carries no untrusted workload, so none of the workload ceilings
+    /// apply — each one only breaks builds. The rate cap throttles
+    /// multi-gigabyte substituter pulls; the stream cap refuses connections once
+    /// nix parallelizes past it; the idle timeout drops keep-alive connections
+    /// while a derivation compiles.
+    pub(crate) const fn trusted_builder() -> Self {
+        Self {
+            bytes_per_second: None,
+            max_streams: None,
+            idle_timeout: None,
+        }
+    }
+}
+
+/// Shared per-VM egress budget. The egress and broker ports use one instance so
+/// a workload cannot multiply its allowance by opening both paths.
 #[derive(Clone)]
 pub(crate) struct EgressBudget {
     state: Arc<Mutex<EgressBudgetState>>,
+    limits: EgressLimits,
 }
 
 struct EgressBudgetState {
@@ -68,18 +110,61 @@ impl EgressBudget {
     }
 
     fn new_at(now: Instant) -> Self {
+        Self::at(now, EgressLimits::workload())
+    }
+
+    /// A budget carrying no workload ceiling — see [`EgressLimits::trusted_builder`].
+    pub(crate) fn trusted_builder() -> Self {
+        Self::trusted_builder_at(Instant::now())
+    }
+
+    fn trusted_builder_at(now: Instant) -> Self {
+        Self::at(now, EgressLimits::trusted_builder())
+    }
+
+    fn at(now: Instant, limits: EgressLimits) -> Self {
         Self {
             state: Arc::new(Mutex::new(EgressBudgetState {
                 active_streams: 0,
                 byte_tokens: EGRESS_BURST_BYTES,
                 last_refill: now,
             })),
+            limits,
         }
+    }
+
+    /// How long a relayed stream may sit idle before eviction.
+    fn idle_timeout(&self) -> Option<std::time::Duration> {
+        self.limits.idle_timeout
+    }
+
+    /// Acquire `bytes` tokens, waiting for the bucket to refill if it is dry.
+    ///
+    /// Returns false only when `bytes` exceeds the burst ceiling — a payload no
+    /// amount of waiting can admit. Everything else eventually succeeds, because
+    /// tokens refill monotonically at a fixed rate.
+    ///
+    /// Throttling must never tear down an established stream: the host→guest
+    /// drain already backpressures this way, and resetting the guest→host side
+    /// instead killed in-flight TLS transfers mid-download.
+    fn consume_waiting(&self, bytes: usize) -> bool {
+        if self.limits.bytes_per_second.is_none() {
+            return true;
+        }
+        if u64::try_from(bytes).unwrap_or(u64::MAX) > EGRESS_BURST_BYTES {
+            return false;
+        }
+        while !self.try_consume(bytes) {
+            std::thread::sleep(BUDGET_REFILL_POLL);
+        }
+        true
     }
 
     fn try_reserve_stream(&self) -> bool {
         let mut state = self.state.lock().expect("egress budget mutex poisoned");
-        if state.active_streams >= MAX_EGRESS_STREAMS {
+        if let Some(max) = self.limits.max_streams
+            && state.active_streams >= max
+        {
             return false;
         }
         state.active_streams += 1;
@@ -96,8 +181,11 @@ impl EgressBudget {
     }
 
     fn try_consume_at(&self, bytes: usize, now: Instant) -> bool {
+        let Some(rate) = self.limits.bytes_per_second else {
+            return true;
+        };
         let mut state = self.state.lock().expect("egress budget mutex poisoned");
-        refill_tokens(&mut state, now);
+        refill_tokens(&mut state, rate, now);
 
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
         if bytes > state.byte_tokens {
@@ -110,8 +198,11 @@ impl EgressBudget {
     /// Reserve up to `max` bytes for a non-blocking read. The caller must
     /// refund bytes it reserved but did not receive from the socket.
     fn reserve_read(&self, max: usize, now: Instant) -> usize {
+        let Some(rate) = self.limits.bytes_per_second else {
+            return max;
+        };
         let mut state = self.state.lock().expect("egress budget mutex poisoned");
-        refill_tokens(&mut state, now);
+        refill_tokens(&mut state, rate, now);
         let max = u64::try_from(max).unwrap_or(u64::MAX);
         let reserved = state.byte_tokens.min(max);
         state.byte_tokens -= reserved;
@@ -128,9 +219,9 @@ impl EgressBudget {
     }
 }
 
-fn refill_tokens(state: &mut EgressBudgetState, now: Instant) {
+fn refill_tokens(state: &mut EgressBudgetState, rate: u64, now: Instant) {
     let elapsed_nanos = now.saturating_duration_since(state.last_refill).as_nanos();
-    let refill = elapsed_nanos.saturating_mul(u128::from(EGRESS_BYTES_PER_SECOND)) / 1_000_000_000;
+    let refill = elapsed_nanos.saturating_mul(u128::from(rate)) / 1_000_000_000;
     let refill = u64::try_from(refill).unwrap_or(u64::MAX);
     state.byte_tokens = state
         .byte_tokens
@@ -208,6 +299,12 @@ impl SubstitutionBridge {
         self.endpoint = Some(path.to_path_buf());
     }
 
+    /// Swap the shared budget. Called during device setup, before any stream
+    /// exists, so no in-flight reservation is stranded.
+    pub(crate) fn set_budget(&mut self, budget: EgressBudget) {
+        self.budget = budget;
+    }
+
     /// Share the open-connection counter with the run loop heartbeat.
     pub fn set_activity(&mut self, counter: Arc<AtomicUsize>) {
         self.active = Some(counter);
@@ -228,9 +325,12 @@ impl SubstitutionBridge {
     }
 
     fn evict_idle_at(&mut self, now: Instant) -> Vec<u32> {
+        let Some(idle_timeout) = self.budget.idle_timeout() else {
+            return Vec::new();
+        };
         let mut expired = Vec::new();
         self.conns.retain(|conn_id, conn| {
-            let keep = now.saturating_duration_since(conn.last_activity) < CONNECTION_IDLE_TIMEOUT;
+            let keep = now.saturating_duration_since(conn.last_activity) < idle_timeout;
             if !keep {
                 expired.push(*conn_id);
             }
@@ -264,7 +364,7 @@ impl SubstitutionBridge {
 impl GuestEndpointRelay for SubstitutionBridge {
     fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction {
         if let Some(conn) = self.conns.get_mut(&conn_id) {
-            if !self.budget.try_consume(payload.len()) {
+            if !self.budget.consume_waiting(payload.len()) {
                 return EndpointRelayAction::Refused;
             }
             write_nonblocking(&mut conn.stream, payload);
@@ -284,7 +384,7 @@ impl GuestEndpointRelay for SubstitutionBridge {
         match UnixStream::connect(&path) {
             Ok(stream) => {
                 let _ = stream.set_nonblocking(true);
-                if !self.budget.try_consume(payload.len()) {
+                if !self.budget.consume_waiting(payload.len()) {
                     self.budget.release_stream();
                     return EndpointRelayAction::Refused;
                 }
@@ -588,6 +688,94 @@ mod tests {
         assert_eq!(expired, vec![7]);
         assert!(!b.is_active());
         assert_eq!(active.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_established_stream_is_throttled_not_reset_when_the_budget_is_dry() {
+        let sock =
+            std::env::temp_dir().join(format!("mvm-egress-throttle-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = bind_unix_listener(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink);
+            sink.len()
+        });
+
+        let mut bridge = SubstitutionBridge::new();
+        bridge.set_endpoint(&sock);
+        assert_eq!(
+            bridge.relay_guest_bytes(7, b"open"),
+            EndpointRelayAction::Relayed
+        );
+
+        // Drain every token, then keep writing on the already-open stream. A
+        // rate-limited stream must survive: resetting it here is what tore down
+        // nix's in-flight TLS downloads mid-transfer.
+        while bridge.budget.try_consume(64 * 1024) {}
+        for _ in 0..4 {
+            assert_eq!(
+                bridge.relay_guest_bytes(7, &[b'x'; 1024]),
+                EndpointRelayAction::Relayed,
+                "an open stream must backpressure, never reset"
+            );
+        }
+
+        bridge.close_connection(7);
+        drop(bridge);
+        assert_eq!(server.join().unwrap(), 4 + 4 * 1024);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn a_payload_larger_than_the_burst_ceiling_is_refused() {
+        // No amount of waiting admits this one, so it must fail closed rather
+        // than spin forever.
+        let budget = EgressBudget::new();
+        let oversized = usize::try_from(EGRESS_BURST_BYTES).unwrap() + 1;
+        assert!(!budget.consume_waiting(oversized));
+    }
+
+    #[test]
+    fn a_trusted_builder_budget_ignores_the_byte_rate() {
+        let now = Instant::now();
+        let budget = EgressBudget::trusted_builder_at(now);
+        let ten_mib = 10 * 1024 * 1024;
+        for _ in 0..64 {
+            assert!(budget.try_consume_at(ten_mib, now));
+        }
+        assert!(budget.consume_waiting(ten_mib));
+        // Even a payload past the workload burst ceiling, which a metered
+        // budget refuses outright.
+        assert!(budget.consume_waiting(usize::try_from(EGRESS_BURST_BYTES).unwrap() + 1));
+    }
+
+    #[test]
+    fn a_trusted_builder_budget_does_not_cap_concurrent_streams() {
+        // nix parallelizes downloads well past the workload ceiling; refusing
+        // there resets the connection.
+        let budget = EgressBudget::trusted_builder();
+        for _ in 0..(MAX_EGRESS_STREAMS * 4) {
+            assert!(budget.try_reserve_stream());
+        }
+    }
+
+    #[test]
+    fn a_trusted_builder_stream_is_never_evicted_for_being_idle() {
+        // A connection kept open while a derivation compiles must survive.
+        let mut bridge = SubstitutionBridge::with_budget(EgressBudget::trusted_builder());
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        bridge.conns.insert(
+            7,
+            EndpointConn {
+                stream,
+                last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(600),
+            },
+        );
+
+        assert!(bridge.evict_idle_at(Instant::now()).is_empty());
+        assert!(bridge.conns.contains_key(&7));
     }
 
     #[test]

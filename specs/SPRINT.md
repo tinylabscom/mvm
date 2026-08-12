@@ -10,6 +10,18 @@
 
 ## Current issue delivery
 
+- [x] Merge-queue forward progress — **plan 316**. A twelve-entry queue stopped
+      landing changes when four speculative merge groups saturated runner
+      admission, successful checks reported after the 90-minute queue timeout,
+      and the automatic recovery workflow requeued the unchanged timed-out
+      commits. The live ruleset now limits speculation to two entries, permits
+      immediate one-entry progress, and allows 240 minutes for check response.
+      The trusted-base recovery workflow reads the authoritative dequeue reason
+      and refuses to automatically requeue `checks_timed_out`, so capacity
+      pressure can delay or eject one PR but cannot make that PR indefinitely
+      block every entry behind it. Workflow syntax, focused regression tests,
+      formatting, workspace check, all-target host Clippy, and the complete
+      serial workspace test suite pass.
 - [x] `machine run --port HOST:GUEST` now boots a persistent machine and owns
       repeatable loopback-only forwards in the foreground, reusing the existing
       `machine forward` lifecycle. Invalid mappings and detached ownership fail
@@ -165,7 +177,15 @@
       the dominant span, so no new control protocol was justified. The
       foreground-wait audit and repository event/timer/reconciliation rule are
       complete. Formatting, workspace check, the complete workspace test
-      suite, macOS focused clippy, and Linux all-target clippy pass.
+      suite, macOS focused clippy, and Linux all-target clippy pass. A
+      post-completion HVF builder fix now stages the work input through the
+      shared source filter before packing its ext4 disk, preventing host
+      `target/` and other scratch trees from inflating a small flake into a
+      multi-gigabyte guest input. The transport-boundary regression test proves
+      source files remain present while `work/target` is absent. The authorized
+      live sleeper command reduced the HVF work disk from 55.7 GB to 57.1 MiB
+      and produced a successful builder result; its subsequent workload boot
+      reached a separate guest-agent readiness timeout.
 
 - [x] README CLI/code-example contract — README shell examples and every
       declared CLI option have executable cucumber help witnesses; all 26
@@ -769,6 +789,9 @@ updates only its own entry below.
       names and exact-merge-commit validation remain intact. Plan 281 records
       the measured 38m26s p50 / 2h14m03s p95 queue latency. The live ruleset is
       now set to build concurrency 3, group wait 0, and timeout 90 minutes.
+      Plan 316 supersedes those capacity settings after a later timeout loop:
+      build concurrency 2, minimum batch 1 with no wait, and timeout 240
+      minutes.
 
 - [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
       basename deny-list over the whole workspace root to an allow-list of the

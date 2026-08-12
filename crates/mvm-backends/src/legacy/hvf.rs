@@ -553,6 +553,8 @@ impl VmBackend for HvfBackend {
         let broker_listen_socket = mvm_core::config::vm_hvf_broker_socket(&config.name);
 
         let cfg = HvfSupervisorConfig {
+            // A workload is always metered.
+            trusted_builder_egress: false,
             kernel: PathBuf::from(kernel),
             // Thread a full cmdline only when we need extra workload tokens;
             // otherwise keep the supervisor default (`init=/init`).

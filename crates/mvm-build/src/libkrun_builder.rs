@@ -83,8 +83,8 @@ use crate::builder_vm_runtime::{
     CLOSURE_SEED_TAG, NixStoreImageLock, acquire_nix_store_image_lock,
     acquire_nix_store_image_lock_named, builder_vm_timeout, finalize_flake_job,
     finalize_install_job, read_job_result_with_diagnostics, shell_job_exit_error,
-    stage_closure_seed_dir, stage_job_dir, stage_shell_job_dir, supervisor_exit_error,
-    verbose_from_env,
+    stage_closure_seed_dir, stage_filtered_work_input, stage_job_dir, stage_shell_job_dir,
+    supervisor_exit_error, verbose_from_env,
 };
 use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
@@ -579,32 +579,6 @@ fn prepare_builder_transport_disks(
         ))
     })?;
     Ok((input_disk, output_disk))
-}
-
-/// Stage a filtered copy of `src` for the disk-transport `work` input.
-///
-/// On a source checkout, `src` (`BuilderMounts::flake_src` /
-/// `BuilderShellJob::work_dir`) can be the repo root, which carries
-/// `target/`, `.worktrees/`, `.git/`, and other build/VCS scratch —
-/// tens of GB that the guest's RAM-capped extraction tmpfs can't
-/// absorb. Reuses the same `WORKSPACE_SNAPSHOT_SKIP` exclusion the
-/// mvm-workspace snapshot (`stage_job_dir`'s `mvm-src` staging) already
-/// applies, rather than forking a second skip list.
-///
-/// Returns the `TempDir` holding the filtered copy; callers must keep
-/// it alive until the disk-transport pack that reads it completes.
-fn stage_filtered_work_input(src: &Path) -> Result<tempfile::TempDir, BuilderVmError> {
-    let staged = tempfile::TempDir::new().map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("creating filtered work staging dir: {e}"))
-    })?;
-    crate::builder_vm_runtime::copy_dir_filtered(src, staged.path()).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "staging filtered work input {} -> {}: {e}",
-            src.display(),
-            staged.path().display()
-        ))
-    })?;
-    Ok(staged)
 }
 
 fn extract_builder_transport_output(
