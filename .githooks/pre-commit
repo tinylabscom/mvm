@@ -11,9 +11,15 @@
 #   1. Skip entirely if the staged set is empty.
 #   2. Run cargo fmt --all if any Rust files are staged (auto-fixes,
 #      re-stages).
-#   3. Run cargo clippy --workspace --all-targets -- -D warnings if
-#      any Rust files are staged. Set MVM_SKIP_CLIPPY=1 to bypass when
-#      iterating fast (CI still gates the merge).
+#   3. Run cargo clippy --all-targets -- -D warnings if any Rust files
+#      are staged, scoped to the packages that own them when every one
+#      of those packages is a leaf (nothing in the workspace depends on
+#      it) and no manifest changed; otherwise across --workspace. A leaf
+#      cannot break another crate's compilation, so the narrow run checks
+#      the same code as the wide one at a fraction of the cost — which
+#      matters because --all-targets pulls in ~85 integration-test
+#      binaries and every dev-dependency. Set MVM_SKIP_CLIPPY=1 to bypass
+#      entirely when iterating fast (CI still gates the merge).
 #   4. For every staged *.nix file, run `nix fmt` from inside that
 #      file's directory (auto-fixes, re-stages) — IF the nix CLI is
 #      available. Otherwise skip silently.
@@ -30,6 +36,52 @@
 #   just ci
 
 set -e
+
+# Print the package name owning $1, by walking up to the nearest Cargo.toml
+# and reading its `name =`. Empty output means "no owning package" — the
+# caller treats that as a reason to widen back to --workspace.
+owning_package() {
+    dir="$(dirname "$1")"
+    while [ "$dir" != "." ] && [ "$dir" != "/" ]; do
+        if [ -f "$dir/Cargo.toml" ]; then
+            sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' \
+                "$dir/Cargo.toml" | head -1
+            return
+        fi
+        dir="$(dirname "$dir")"
+    done
+    if [ -f "Cargo.toml" ]; then
+        sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' Cargo.toml | head -1
+    fi
+}
+
+# True when no other manifest in the tree declares $1 as a dependency.
+#
+# This is the whole basis for narrowing clippy's scope: changing a crate
+# nothing depends on cannot break another crate's compilation, so checking
+# that crate alone loses no coverage versus --workspace. Changing a crate
+# someone *does* depend on can break a dependent that clippy would then never
+# look at, so those keep the full-workspace run.
+#
+# Matching is on a dependency key at the start of a line (`foo = ` or
+# `foo.workspace = `). A `members = [ "xtask" ]` entry is quoted and a comment
+# is prefixed, so neither is mistaken for a dependency. The root manifest's
+# `[workspace.dependencies]` block does match, which deliberately errs toward
+# calling a crate non-leaf: the cost is a wider check, not a missed one.
+is_leaf_package() {
+    pkg="$1"
+    for manifest in Cargo.toml crates/*/Cargo.toml crates/*/*/Cargo.toml xtask/Cargo.toml; do
+        [ -f "$manifest" ] || continue
+        # Skip the crate's own manifest — it names itself in `[package]`.
+        if [ "$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$manifest" | head -1)" = "$pkg" ]; then
+            continue
+        fi
+        if grep -qE "^${pkg}(\.workspace)?[[:space:]]*=" "$manifest"; then
+            return 1
+        fi
+    done
+    return 0
+}
 
 # Bail out early if nothing is staged.
 if git diff --cached --quiet; then
@@ -74,8 +126,67 @@ if [ "$has_rust" -eq 1 ]; then
     if [ "${MVM_SKIP_CLIPPY:-0}" = "1" ]; then
         echo "pre-commit: cargo clippy SKIPPED (MVM_SKIP_CLIPPY=1)"
     else
-        echo "pre-commit: cargo clippy --workspace --all-targets -- -D warnings"
-        if ! cargo clippy --workspace --all-targets -- -D warnings; then
+        # Decide the scope. `--workspace --all-targets` builds every crate plus
+        # every integration-test binary and dev-dependency in the tree, which on
+        # a cold target dir is tens of minutes — badly out of proportion to a
+        # commit that touches one leaf crate. Narrow to the touched packages
+        # when doing so provably checks the same code (see is_leaf_package),
+        # and keep the full run in every case where it might not.
+        scope_args="--workspace"
+        scope_label="--workspace"
+        scope_reason="a staged crate has dependents"
+
+        # A manifest, lockfile or cargo/toolchain config change can alter
+        # features or dependency versions for crates far from the diff, so
+        # those always widen back to the whole workspace.
+        if printf '%s\n' "$staged" | grep -qE '(^|/)(Cargo\.toml|Cargo\.lock)$|^\.cargo/|^rust-toolchain'; then
+            scope_reason="a manifest, lockfile or cargo config is staged"
+        else
+            pkgs=""
+            unresolved=0
+            while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                pkg="$(owning_package "$f")"
+                if [ -z "$pkg" ]; then
+                    unresolved=1
+                    break
+                fi
+                case " $pkgs " in
+                    *" $pkg "*) ;;
+                    *) pkgs="$pkgs $pkg" ;;
+                esac
+            done <<< "$staged_rust"
+
+            if [ "$unresolved" -eq 1 ]; then
+                scope_reason="a staged Rust file belongs to no package"
+            else
+                all_leaf=1
+                for pkg in $pkgs; do
+                    if ! is_leaf_package "$pkg"; then
+                        all_leaf=0
+                        scope_reason="$pkg has dependents in this workspace"
+                        break
+                    fi
+                done
+                if [ "$all_leaf" -eq 1 ]; then
+                    scope_args=""
+                    for pkg in $pkgs; do
+                        scope_args="$scope_args -p $pkg"
+                    done
+                    scope_label="${scope_args# }"
+                    echo "pre-commit: clippy scoped to$scope_args (nothing depends on these)"
+                fi
+            fi
+        fi
+
+        if [ "$scope_label" = "--workspace" ]; then
+            echo "pre-commit: clippy covering the whole workspace — $scope_reason"
+        fi
+
+        echo "pre-commit: cargo clippy $scope_label --all-targets -- -D warnings"
+        # Unquoted on purpose: $scope_args is a list of flags we built.
+        # shellcheck disable=SC2086
+        if ! cargo clippy $scope_args --all-targets -- -D warnings; then
             echo
             echo "  clippy failed. CI gates on the same '-D warnings' rule, so"
             echo "  this commit will fail on push. Re-run with MVM_SKIP_CLIPPY=1"
