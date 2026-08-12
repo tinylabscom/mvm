@@ -468,7 +468,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-linux, test-release-witness]
+    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -479,6 +479,7 @@ jobs:
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
+          EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
         run: |
           set -euo pipefail
           if [ "$SCOPE_RESULT" != success ]; then
@@ -490,7 +491,7 @@ jobs:
             false) required=skipped ;;
             *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
           esac
-          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT"; do
+          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1

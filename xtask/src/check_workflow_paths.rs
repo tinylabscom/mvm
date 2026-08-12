@@ -468,7 +468,24 @@ mod tests {
 
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
-        assert!(test.contains("needs: [scope, test-workspace, test-linux, test-release-witness]"));
+        assert!(test.contains(
+            "needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry]"
+        ));
+
+        // Every lane the aggregate names must also be read back in the loop that
+        // compares results against the scope decision. A lane in `needs` but not
+        // in the loop is gated on nothing but its own scheduling.
+        for expected in [
+            "\"$WORKSPACE_RESULT\"",
+            "\"$LINUX_RESULT\"",
+            "\"$RELEASE_WITNESS_RESULT\"",
+            "\"$EBPF_RESULT\"",
+        ] {
+            assert!(
+                test.contains(expected),
+                "Test aggregate must compare {expected} against the scope decision"
+            );
+        }
 
         // The release-profile lane is the only one that runs with trapping
         // overflow and debug assertions off, i.e. the only one that witnesses
