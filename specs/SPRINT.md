@@ -26,6 +26,18 @@
       global test environment races; the affected tests pass in isolation and
       serially.
 
+- [~] Persistent-machine README contract — **plan 322**. `machine create` now
+      accepts the optional machine name positionally, matching every other
+      lifecycle verb and the README's copy-paste workflow. Real-binary parser
+      and persistence coverage locks the public command shape, while Rust,
+      Python, and TypeScript SDK argv builders, shared fixtures, BDD scenarios,
+      recovery guidance, and website docs all emit the same canonical form.
+      Formatting, workspace check, host all-target Clippy, serialized workspace
+      unit and integration tests, all three SDK suites, 173 BDD scenarios, and
+      the 131-page docs build pass. Linux-native Clippy remains a pre-merge gate;
+      the existing default-feature `mvm-cli` doctest target still fails to
+      resolve its cfg-gated dependencies after all workspace tests pass.
+
 - [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
       successful bootstrap does not defer an infrastructure build to the next

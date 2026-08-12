@@ -1167,7 +1167,6 @@ fn python_typescript_machine_create_manifest_fixture_reaches_cli_unknown_key_gat
 fn create_parses_persistent_spec_flags() {
     let action = parse(&[
         "create",
-        "--name",
         "web",
         "--image",
         "ghcr.io/acme/web:latest",
@@ -1198,6 +1197,52 @@ fn create_parses_persistent_spec_flags() {
         }
         other => panic!("expected create action, got {other:?}"),
     }
+}
+
+#[test]
+fn readme_persistent_machine_workflow_parses() {
+    let create = parse(&[
+        "create", "web", "--image", "nginx", "--cpus", "2", "--memory", "512M",
+    ])
+    .expect("README machine create command parses");
+    let MachineAction::Create(create) = create else {
+        panic!("expected create action");
+    };
+    assert_eq!(create.name.as_deref(), Some("web"));
+
+    assert!(matches!(
+        parse(&["start", "web"]).expect("README machine start command parses"),
+        MachineAction::Start(_)
+    ));
+    assert!(matches!(
+        parse(&["exec", "web", "--", "nginx", "-v"]).expect("README machine exec command parses"),
+        MachineAction::Exec(_)
+    ));
+    assert!(matches!(
+        parse(&["logs", "web"]).expect("README machine logs command parses"),
+        MachineAction::Logs(_)
+    ));
+    assert!(matches!(
+        parse(&["reconfigure", "web", "--memory", "1G"])
+            .expect("README machine reconfigure command parses"),
+        MachineAction::Reconfigure(_)
+    ));
+    assert!(matches!(
+        parse(&["stop", "web"]).expect("README machine stop command parses"),
+        MachineAction::Stop(_)
+    ));
+    assert!(matches!(
+        parse(&["rm", "web"]).expect("README machine rm command parses"),
+        MachineAction::Rm(_)
+    ));
+    assert!(matches!(
+        parse(&["ls"]).expect("README machine ls command parses"),
+        MachineAction::Ls(_)
+    ));
+    assert!(matches!(
+        parse(&["inspect", "web"]).expect("README machine inspect command parses"),
+        MachineAction::Inspect(_)
+    ));
 }
 
 #[test]
@@ -2045,10 +2090,8 @@ fn top_level_cli_routes_machine_run() {
 
 #[test]
 fn top_level_cli_routes_machine_create() {
-    let cli = Cli::try_parse_from([
-        "mvmctl", "machine", "create", "--name", "web", "--image", "alpine",
-    ])
-    .expect("top-level parse");
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "create", "web", "--image", "alpine"])
+        .expect("top-level parse");
     match cli.command {
         Commands::Machine(args) => match args.action {
             MachineAction::Create(create) => {
@@ -2787,7 +2830,6 @@ allow_hosts = ["api.example.com:443"]
 
     let args = match parse_owned(&[
         "create".to_string(),
-        "--name".to_string(),
         "granted".to_string(),
         "--manifest".to_string(),
         project.path().display().to_string(),
@@ -2835,7 +2877,6 @@ allow_hosts = ["api.example.com:443"]
 
     let args = match parse_owned(&[
         "create".to_string(),
-        "--name".to_string(),
         "narrowed".to_string(),
         "--manifest".to_string(),
         project.path().display().to_string(),

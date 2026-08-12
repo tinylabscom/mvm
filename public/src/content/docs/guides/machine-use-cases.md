@@ -18,8 +18,8 @@ boundary only when a workflow actually needs Linux build or evaluation work.
 | Sandbox untrusted code | `mvmctl machine run --image alpine -- <cmd>` | Fresh transient microVM, command output, teardown on exit. |
 | Run a command in an OCI image | `mvmctl machine run --image ghcr.io/org/app:tag -- <cmd>` | OCI provenance, cache reuse, admission, receipts, and audit. |
 | Use a local image archive | `mvmctl machine run --image-archive ./image.tar -- <cmd>` | Offline-friendly image input through the same hardened unpack/admission path. |
-| Keep a dev machine around | `mvmctl machine create --name dev --image alpine` | Durable spec plus `start`, `exec`, `shell`, `stop`, `inspect`, and `rm`. |
-| Declare a repeatable machine | `mvmctl machine create --manifest ./mvm.toml --name dev` | TOML-backed image, sizing, network, volume, and dev-init settings. |
+| Keep a dev machine around | `mvmctl machine create dev --image alpine` | Durable spec plus `start`, `exec`, `shell`, `stop`, `inspect`, and `rm`. |
+| Declare a repeatable machine | `mvmctl machine create dev --manifest ./mvm.toml` | TOML-backed image, sizing, network, volume, and dev-init settings. |
 | Verify a portable artifact | `mvmctl machine check-artifact ./app.mvm --key ./publisher.pub` | Signature, hash, format, and host-architecture verification before admission. |
 
 Portable artifact creation and `machine run <artifact>` are still preview
@@ -54,7 +54,7 @@ Use digest-pinned image references for production or repeatable environments.
 Use named machines when you want state across starts:
 
 ```bash
-mvmctl machine create --name alpine-dev --image alpine:3.20 --net
+mvmctl machine create alpine-dev --image alpine:3.20 --net
 mvmctl machine start alpine-dev
 mvmctl machine exec alpine-dev -- apk add jq
 mvmctl machine shell alpine-dev
@@ -79,7 +79,7 @@ allow_hosts = ["registry.npmjs.org"]
 ```
 
 ```bash
-mvmctl machine create --name js-dev --manifest ./mvm.toml
+mvmctl machine create js-dev --manifest ./mvm.toml
 mvmctl machine start js-dev
 ```
 
@@ -93,4 +93,3 @@ unsupported, backend-specific, or future work. Read
 [Machine limitations](/guides/machine-limitations/) before depending on network
 protocol behavior, volume shapes, macOS signing or entitlement behavior, GPU availability,
 or host/guest architecture support.
-

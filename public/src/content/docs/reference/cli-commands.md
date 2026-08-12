@@ -432,11 +432,11 @@ guest, on any tier.
 | `mvmctl machine run --name <name> --image <ref> -- <cmd>` | Boot a named foreground transient machine, run `<cmd>`, tear down |
 | `mvmctl machine run -it --image <ref> -- <cmd>` | Run `<cmd>` attached to a PTY, return its exit code, tear down |
 | `mvmctl machine run -it --name <name> --image <ref> -- <cmd>` | Same, with a stable transient VM name while it runs |
-| `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
-| `mvmctl machine create --name <name> --manifest <path>` | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml` |
-| `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
-| `mvmctl machine create --name <name> --manifest <path>` | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec |
-| `mvmctl machine create --name <name> --image <ref> --force` | Overwrite an existing named machine spec |
+| `mvmctl machine create <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
+| `mvmctl machine create <name> --manifest <path>` | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml` |
+| `mvmctl machine create <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
+| `mvmctl machine create <name> --manifest <path>` | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec |
+| `mvmctl machine create <name> --image <ref> --force` | Overwrite an existing named machine spec |
 | `mvmctl machine start <name>...` | Boot one or more persisted named machines through the admitted OCI-backed start path (`--receipt`/`--json`/`--dry-run` are single-machine) |
 | `mvmctl machine start <name> --dry-run` | Validate and explain the effective machine-start policy without booting a VM |
 | `mvmctl machine start <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |

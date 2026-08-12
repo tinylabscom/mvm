@@ -139,7 +139,6 @@ fn machine_create_shells_through_mvmctl_machine() {
         [
             "machine",
             "create",
-            "--name",
             "devbox",
             "--manifest",
             "mvm.toml",

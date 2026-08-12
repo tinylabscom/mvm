@@ -34,7 +34,7 @@
 //!   path key)
 //! - `mvmctl config set <key> <value>` → `ConfigChange`
 //! - `mvmctl config show` → **no** audit entry
-//! - `mvmctl machine create --name <name> --image <ref>` → `ConfigChange`
+//! - `mvmctl machine create <name> --image <ref>` → `ConfigChange`
 //! - `mvmctl machine rm <name> --yes` → `ConfigChange`
 //! - `mvmctl cleanup --keep 5` → `SlotPrune`
 //!   (`source=cleanup removed=N`; the VM-dependent Step 1 / Step 3
@@ -945,7 +945,6 @@ fn machine_create_emits_config_change_audit_entry() {
         .args([
             "machine",
             "create",
-            "--name",
             "web",
             "--image",
             "ghcr.io/example/web:latest",
@@ -985,7 +984,6 @@ fn machine_rm_emits_config_change_audit_entry() {
         .args([
             "machine",
             "create",
-            "--name",
             "web",
             "--image",
             "ghcr.io/example/web:latest",

@@ -746,7 +746,7 @@ fn machine_run_spec(
 pub(in crate::commands) struct MachineCreateArgs {
     /// Persistent machine name (auto-generated and printed if omitted).
     /// Lowercase alphanumeric plus hyphens.
-    #[arg(long)]
+    #[arg(value_name = "NAME")]
     pub name: Option<String>,
     /// Image-backed machine manifest (`mvm.toml`, its directory, or
     /// `Mvmfile.toml`) to source defaults from. If omitted and `--image` is not
@@ -1053,7 +1053,7 @@ struct MachineManifestSource {
 
 impl MachineCreateArgs {
     fn into_spec(self) -> Result<MachineSpec> {
-        // Auto-generate a name when `--name` is omitted, mirroring `machine run
+        // Auto-generate a name when `NAME` is omitted, mirroring `machine run
         // -d` (`create_machine` prints the chosen name).
         let name = match self.name {
             Some(name) => {

@@ -172,7 +172,7 @@ mvmctl machine run --image alpine -it -- /bin/sh  # boot + drop into shell
 `machine run -it` boots a fresh transient microVM and is foreground-only
 — exiting the shell tears the VM down, the same as any other transient
 `machine run`. For a shell you can leave running and re-enter later, use
-a persistent machine instead: `mvmctl machine create --name devbox
+a persistent machine instead: `mvmctl machine create devbox
 --image alpine`, then `mvmctl machine start devbox` and `mvmctl machine
 shell devbox`.
 

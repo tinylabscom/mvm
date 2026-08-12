@@ -73,7 +73,7 @@ memory_mib = 1024
 Then:
 
 ```sh
-mvmctl machine create --name my-app-dev   # reads mvm.toml (profile = "dev") from cwd
+mvmctl machine create my-app-dev          # reads mvm.toml (profile = "dev") from cwd
 mvmctl machine start my-app-dev           # builds the .dev output, boots it
 mvmctl machine console my-app-dev         # attach the interactive shell
 # Ctrl-D / exit detaches — the machine and any background services keep running.

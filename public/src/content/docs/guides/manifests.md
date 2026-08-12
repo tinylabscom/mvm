@@ -99,7 +99,7 @@ volumes = ["./workspace:/work:ro"]
 ```
 
 ```bash
-mvmctl machine create --name alpine-dev --manifest ./mvm.toml
+mvmctl machine create alpine-dev --manifest ./mvm.toml
 mvmctl machine start alpine-dev
 ```
 

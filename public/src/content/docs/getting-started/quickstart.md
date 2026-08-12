@@ -35,7 +35,7 @@ capability, read [Machine limitations](/guides/machine-limitations/).
 For a named machine that survives across starts:
 
 ```bash
-mvmctl machine create --name alpine-dev --image alpine
+mvmctl machine create alpine-dev --image alpine
 mvmctl machine start alpine-dev
 mvmctl machine exec alpine-dev -- uname -a
 mvmctl machine stop alpine-dev
@@ -135,7 +135,7 @@ mem = "512M"
 ```
 
 ```bash
-mvmctl machine create --name alpine-dev --manifest ./mvm.toml
+mvmctl machine create alpine-dev --manifest ./mvm.toml
 ```
 
 ## 6. Image Catalog
