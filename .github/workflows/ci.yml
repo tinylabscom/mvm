@@ -28,8 +28,78 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # Classify the exact commit range once, before allocating expensive runners.
+  # Pull-request and merge-group events expose different SHA fields, so keeping
+  # this in one fail-closed job prevents lane-specific path filters drifting.
+  scope:
+    name: CI scope
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.validate.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          set_all() {
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          }
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            set_all
+            echo "manual dispatch — running every lane"
+            exit 0
+          fi
+
+          case "$EVENT" in
+            merge_group)  BASE="$MG_BASE"; HEAD="$MG_HEAD" ;;
+            pull_request) BASE="$PR_BASE"; HEAD="$PR_HEAD" ;;
+            *) echo "::error::unhandled event $EVENT" >&2; exit 1 ;;
+          esac
+
+          CHANGED_FILE=$(mktemp)
+          trap 'rm -f "$CHANGED_FILE"' EXIT
+          if ! git diff --name-only -z "$BASE" "$HEAD" > "$CHANGED_FILE" 2>/dev/null; then
+            set_all
+            echo "could not diff $BASE..$HEAD — running every lane to stay safe"
+            exit 0
+          fi
+
+          # Anything that can change a compiled target, generated artifact, or
+          # the commands used by a Rust lane keeps the full compiler/test
+          # matrix. Prose, site assets, and process-only specs do not.
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/ci\.yml$|nix/packaging/release/verify-release-assets[^/]*\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate classification
+        id: validate
+        env:
+          CODE: ${{ steps.decide.outputs.code }}
+        run: |
+          set -euo pipefail
+          case "$CODE" in
+            true|false) echo "code=$CODE" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::invalid or missing code scope: $CODE" >&2; exit 1 ;;
+          esac
+
   lint-core:
     name: Lint core (fmt + clippy)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -75,6 +145,7 @@ jobs:
 
   lint-policy:
     name: Lint policy
+    needs: [scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -288,6 +359,8 @@ jobs:
 
   lint-features:
     name: Lint feature coverage
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -348,20 +421,31 @@ jobs:
   lint:
     name: Lint (fmt + clippy + policy)
     if: ${{ always() }}
-    needs: [lint-core, lint-policy, lint-features]
+    needs: [scope, lint-core, lint-policy, lint-features]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every lint lane to pass
         env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          SCOPE_CODE: ${{ needs.scope.outputs.code }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
           FEATURES_RESULT: ${{ needs.lint-features.result }}
         run: |
           set -euo pipefail
-          for result in "$CORE_RESULT" "$POLICY_RESULT" "$FEATURES_RESULT"; do
-            if [ "$result" != success ]; then
-              echo "A lint lane did not pass: $result"
+          if [ "$SCOPE_RESULT" != success ] || [ "$POLICY_RESULT" != success ]; then
+            echo "CI scope or policy did not pass: scope=$SCOPE_RESULT policy=$POLICY_RESULT"
+            exit 1
+          fi
+          case "$SCOPE_CODE" in
+            true) required=success ;;
+            false) required=skipped ;;
+            *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
+          esac
+          for result in "$CORE_RESULT" "$FEATURES_RESULT"; do
+            if [ "$result" != "$required" ]; then
+              echo "A lint lane did not match scope $SCOPE_CODE: $result"
               exit 1
             fi
           done
@@ -369,26 +453,39 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [test-workspace, test-linux, test-release-witness]
+    needs: [scope, test-workspace, test-linux, test-release-witness]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every test lane to pass
         env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          SCOPE_CODE: ${{ needs.scope.outputs.code }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
         run: |
           set -euo pipefail
+          if [ "$SCOPE_RESULT" != success ]; then
+            echo "CI scope did not pass: $SCOPE_RESULT"
+            exit 1
+          fi
+          case "$SCOPE_CODE" in
+            true) required=success ;;
+            false) required=skipped ;;
+            *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
+          esac
           for result in "$WORKSPACE_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT"; do
-            if [ "$result" != success ]; then
-              echo "A test lane did not pass: $result"
+            if [ "$result" != "$required" ]; then
+              echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
             fi
           done
 
   test-workspace:
     name: Test workspace
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -444,6 +541,8 @@ jobs:
 
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -489,6 +588,8 @@ jobs:
 
   test-linux:
     name: Test Linux and conformance
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -531,6 +632,8 @@ jobs:
 
   test-ebpf-telemetry:
     name: Test eBPF telemetry load/attach
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
