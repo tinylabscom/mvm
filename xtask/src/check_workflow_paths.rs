@@ -434,7 +434,7 @@ mod tests {
         let workflow = ci_workflow();
         let lint = job_block(&workflow, "lint");
         assert!(lint.contains("name: Lint (fmt + clippy + policy)"));
-        assert!(lint.contains("needs: [lint-core, lint-policy, lint-features]"));
+        assert!(lint.contains("needs: [scope, lint-core, lint-policy, lint-features]"));
 
         for unexpected in [
             "cargo nextest run --workspace --features test-support",
@@ -468,7 +468,7 @@ mod tests {
 
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
-        assert!(test.contains("needs: [test-workspace, test-linux, test-release-witness]"));
+        assert!(test.contains("needs: [scope, test-workspace, test-linux, test-release-witness]"));
 
         // The release-profile lane is the only one that runs with trapping
         // overflow and debug assertions off, i.e. the only one that witnesses
@@ -509,6 +509,63 @@ mod tests {
             assert!(
                 linux_coverage.contains(expected),
                 "Linux coverage script must contain {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_group_ci_skips_rust_work_for_non_code_diffs_without_losing_gates() {
+        let workflow = ci_workflow();
+        let scope = job_block(&workflow, "scope");
+        for expected in [
+            "MG_BASE: ${{ github.event.merge_group.base_sha }}",
+            "MG_HEAD: ${{ github.event.merge_group.head_sha }}",
+            "PR_BASE: ${{ github.event.pull_request.base.sha }}",
+            "PR_HEAD: ${{ github.event.pull_request.head.sha }}",
+            "git diff --name-only -z",
+            "grep -zE",
+            "could not diff $BASE..$HEAD — running every lane to stay safe",
+            "invalid or missing code scope",
+            "code=true",
+        ] {
+            assert!(
+                scope.contains(expected),
+                "CI scope must contain fail-closed classifier fragment {expected:?}"
+            );
+        }
+
+        for job in [
+            "lint-core",
+            "lint-features",
+            "test-workspace",
+            "test-release-witness",
+            "test-linux",
+            "test-ebpf-telemetry",
+        ] {
+            let block = job_block(&workflow, job);
+            assert!(
+                block.contains("needs: [scope]"),
+                "{job} must depend on CI scope"
+            );
+            assert!(
+                block.contains("if: needs.scope.outputs.code == 'true'"),
+                "{job} must skip expensive Rust work for non-code diffs"
+            );
+        }
+
+        let policy = job_block(&workflow, "lint-policy");
+        assert!(policy.contains("needs: [scope]"));
+        assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
+
+        for aggregate in ["lint", "test"] {
+            let block = job_block(&workflow, aggregate);
+            assert!(block.contains("needs.scope.result"));
+            assert!(block.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
+            assert!(
+                block.contains("true) required=success")
+                    && block.contains("false) required=skipped")
+                    && block.contains(r#"if [ "$result" != "$required" ]"#),
+                "{aggregate} must require success or skip exactly as scope decided"
             );
         }
     }

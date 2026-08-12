@@ -145,6 +145,7 @@ fn rewrite_for_child(world: &mut CliWorld) {
         &HvfRestoreRequest {
             vm_name: "restored-child",
             state_dir: &dir,
+            cpu_grant: None,
         },
     )
     .expect("rewrite the captured config for a restored child");
