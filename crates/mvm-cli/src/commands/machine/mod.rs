@@ -309,6 +309,15 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Keep the machine running and return.
     #[arg(short = 'd', long)]
     pub detach: bool,
+    /// Forward HOST:GUEST (or PORT) while attached.
+    #[arg(
+        short,
+        long,
+        value_name = "HOST_PORT:GUEST_PORT",
+        value_parser = super::shared::clap_port_spec,
+        conflicts_with_all = ["detach", "up_json", "json", "tty", "interactive", "entrypoint"]
+    )]
+    pub port: Vec<String>,
     /// Return machine startup details as JSON.
     #[arg(long = "up-json")]
     pub up_json: bool,
@@ -454,17 +463,27 @@ impl MachineRunArgs {
         self.tty || self.interactive
     }
 
-    /// `-d`/`--detach`, `--up-json`, `--ttl`, or a declared `--healthcheck`
+    /// `-d`/`--detach`, `--up-json`, `--ttl`, a declared `--healthcheck`, or
+    /// an attached port forward
     /// makes the machine survive the command. `--tty`/`--name` are deliberately
     /// not consulted — persistence, interactivity, and identity are independent
     /// axes.
     fn persistent(&self) -> bool {
-        self.detach || self.up_json || self.ttl.is_some() || self.healthcheck.is_some()
+        self.detach
+            || self.up_json
+            || self.ttl.is_some()
+            || self.healthcheck.is_some()
+            || !self.port.is_empty()
     }
 
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
     /// need an image source and an argv; persistent runs just boot and return.
     fn resolve_mode(&self) -> Result<MachineRunMode> {
+        if !self.port.is_empty() && !self.argv.is_empty() {
+            bail!(
+                "`machine run --port` cannot also run an ad-hoc command; start the service from the image or manifest, or forward it afterward with `machine forward`"
+            );
+        }
         let mode = match (self.interactive(), self.persistent()) {
             (true, true) => bail!(
                 "`machine run -it` is foreground-only; use `machine exec <name> -it -- <cmd>` for an interactive command in a long-lived machine"
@@ -1566,6 +1585,7 @@ fn run_args_for_image_revert(
             kernel_pin: None,
             argv: Vec::new(),
             host_service: Vec::new(),
+            port: Vec::new(),
         },
         source,
     )

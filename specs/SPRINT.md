@@ -10,6 +10,12 @@
 
 ## Current issue delivery
 
+- [x] `machine run --port HOST:GUEST` now boots a persistent machine and owns
+      repeatable loopback-only forwards in the foreground, reusing the existing
+      `machine forward` lifecycle. Invalid mappings and detached ownership fail
+      before boot; parser, lifecycle-resolution, listener-bind, and hermetic BDD
+      coverage pin the contract; all 174 BDD scenarios pass.
+
 - [x] Long-running interactive consoles no longer lose their input relay after
       15 minutes without keyboard activity. Guest output can continue
       indefinitely while later `Ctrl+C` bytes still reach the PTY foreground
