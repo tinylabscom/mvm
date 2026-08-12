@@ -677,8 +677,14 @@ jobs:
         with:
           key: ebpf
 
+      # Pinned deliberately. `--locked` only honors the crate's own bundled
+      # lockfile; it does not pin which version gets installed, so an upstream
+      # release silently changes this lane's toolchain. 0.11.0 did exactly that
+      # on 2026-08-12, requiring an LLVM newer than the runner image ships and
+      # breaking the build script. This version must move together with the
+      # `aya` version in Cargo.lock.
       - name: Install bpf-linker
-        run: cargo +nightly install --locked bpf-linker
+        run: cargo +nightly install --locked --version 0.10.4 bpf-linker
 
       - name: Install just
         uses: taiki-e/install-action@v2

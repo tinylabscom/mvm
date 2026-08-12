@@ -570,6 +570,17 @@ mod tests {
             );
         }
 
+        // `cargo install --locked` pins the installed crate's own dependencies
+        // but not which version of that crate is installed, so an upstream
+        // release retroactively changes this lane. Now that the lane gates the
+        // merge, an unpinned install lets a publish elsewhere block the queue.
+        let ebpf = job_block(&workflow, "test-ebpf-telemetry");
+        assert!(
+            ebpf.contains("cargo +nightly install --locked --version ")
+                && ebpf.contains("bpf-linker"),
+            "eBPF lane must install a pinned bpf-linker version"
+        );
+
         let policy = job_block(&workflow, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
         assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
