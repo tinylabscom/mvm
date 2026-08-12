@@ -71,6 +71,10 @@ for detailed scope and acceptance criteria.
       clippy are green.
 
 ## In-flight plans
+- [x] Plan 322 — Scope merge-group Rust CI to behavior-changing diffs
+      (`specs/plans/322-merge-group-ci-scope.md`)
+  - [x] Fail-closed path classification preserves required aggregates while
+        prose/site-only diffs avoid six cold Rust jobs; validation is complete.
 - [x] Plan 315 — Bootstrap means machine-ready
       (`specs/plans/315-bootstrap-machine-readiness.md`)
   - [x] Bootstrap acquires and verifies both builder image and workload kernel

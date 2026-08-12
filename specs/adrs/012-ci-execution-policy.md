@@ -56,6 +56,16 @@ The feature lanes retain the existing targeted package coverage, and the
 Linux-only filesystem/no-std/BDD commands live in one script rather than being
 duplicated between workflows.
 
+A fail-closed scope job compares the exact pull-request or merge-group base and
+head SHAs before allocating Rust runners. Diffs that cannot change compiled or
+generated behavior skip compiler lint, feature coverage, workspace tests,
+release-profile witnesses, Linux/conformance coverage, and eBPF coverage.
+Policy still runs for every diff because prose and claims are part of its input
+surface. Manual dispatch and an unresolvable diff run the complete matrix. The
+required aggregates accept a lane only when it passed or the successful scope
+decision deliberately skipped it; scope and policy themselves must pass. Nix
+retains its own independent, fail-closed classifier.
+
 ### The merge queue's required checks
 
 `ci.yml` and `architecture.yml` are the only two workflows that run on

@@ -42,6 +42,14 @@
       complete CI workspace suite and doctests, Linux/conformance, feature and
       release-profile coverage, all three SDK suites, 173 BDD scenarios, and
       the 131-page docs build pass.
+- [x] Merge-group CI scoping — **plan 322**. A fail-closed SHA-range
+      classifier keeps the full Rust matrix for behavior-changing diffs and
+      manual runs, while prose/site-only pull requests and merge groups avoid
+      six cold Rust jobs. Policy and the independently scoped required Nix
+      check remain unconditional authorities for their own input surfaces.
+      Workflow syntax, formatting, workspace compilation, all-target Clippy,
+      and all 499 `xtask` tests pass; the sole transient workspace-suite
+      host-restart failure passed on its exact isolated rerun.
 
 - [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
