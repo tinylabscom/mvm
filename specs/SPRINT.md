@@ -44,6 +44,12 @@
       global test environment races; the affected tests pass in isolation and
       serially.
 
+- [x] HVF directory-share boot regression — **plan 322**. Queue-backed
+      virtio-fs now reports the virtio-MMIO all-one sentinel for an absent DAX
+      shared-memory region instead of exposing a false zero-length window that
+      Linux rejects. The 456-test VMM suite passes, and the original Alpine
+      `machine run --mount .:/work -- ls /work` command succeeds on native HVF;
+      workspace checks, doctests, and host Clippy are green.
 - [x] Merge-group CI scoping — **plan 322**. A fail-closed SHA-range
       classifier keeps the full Rust matrix for behavior-changing diffs and
       manual runs, while prose/site-only pull requests and merge groups avoid
