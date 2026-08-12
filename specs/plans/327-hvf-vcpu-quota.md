@@ -1,6 +1,12 @@
 # Plan 327 — A CPU quota for the HVF tier, enforced in our own run loop
 
-**Status: OPEN — Phase 0 (spike) blocks everything else**
+**Status: OPEN — Phase 0 COMPLETE (verdict: Phase 1 proceeds); Phases 1+ open**
+
+Phase 0 results: [`327-hvf-quota-spike-findings.md`](327-hvf-quota-spike-findings.md).
+Measured 0.5000 cores against a 0.5000 target (-0.01 %) over 60 s at a 10 ms
+period, through the real HVF vCPU and the real run loop, with the controller
+costing 0.46 % of the budget it enforces. The mechanism bounds; the constraints
+Phase 1 must build inside are in that document.
 
 ## Why
 
