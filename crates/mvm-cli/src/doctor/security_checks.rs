@@ -41,6 +41,10 @@ pub(crate) struct AuditChainScan {
     /// all-zero anchor, so it is not the same statement as a full verification
     /// and must not be reported as one.
     pub(crate) resumed: usize,
+    /// Retired segments whose handoffs were checked but whose interiors were
+    /// not walked. Reported for the same reason as `resumed`: the check cannot
+    /// be allowed to read as having attested more than it did.
+    pub(crate) sealed_segments: usize,
 }
 
 /// Verification status of the chain-signed audit log.
@@ -89,19 +93,66 @@ fn scan_audit_chains() -> AuditChainScan {
         Err(e) => return not_assessed(format!("reading {}: {e}", dir.display())),
     };
 
-    let mut scan = AuditChainScan::default();
+    // One entry per *chain*, not per file. A rotated chain is several files,
+    // and verifying each in isolation would both re-walk history that cannot
+    // change and — the part that matters — never notice that one of them is
+    // missing, because each survivor verifies perfectly on its own.
+    let mut bases: Vec<String> = Vec::new();
     for entry in read_dir.flatten() {
         let path = entry.path();
         if !mvm_core::config::is_host_lifecycle_chain(&path) {
             continue;
         }
-        // Routine health check: resume from a checkpoint when one is
-        // available. `mvmctl trust audit verify` deliberately keeps the
-        // genesis-anchored walk — full re-derivation is what that command is
-        // for, and it is claim 8's witness.
-        let checkpoint = mvm_hostd::supervisor::audit_checkpoint::load(&path);
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Folds a retired segment onto the chain it was split off from, so a
+        // rotated chain is swept once rather than once per file. Sweeping per
+        // file would also never notice a *missing* segment, because each
+        // survivor verifies perfectly on its own.
+        if let Some(base) = mvm_core::config::lifecycle_chain_base(name)
+            && !bases.iter().any(|b| b == base)
+        {
+            bases.push(base.to_string());
+        }
+    }
+    bases.sort();
+
+    let mut scan = AuditChainScan::default();
+    for base in &bases {
+        let active = dir.join(format!("{base}.jsonl"));
+        // Two halves, deliberately kept apart because they attest different
+        // things and are reported separately.
+        //
+        // First the structure across segments: every handoff's signature and
+        // every claimed predecessor hash, at O(segments) rather than O(entire
+        // history). This is what catches a segment that was removed.
+        let reports =
+            match mvm_hostd::supervisor::verify_segment_topology(&dir, base, &signer.verifying) {
+                Ok(reports) => reports,
+                Err(e) => {
+                    scan.broken
+                        .push((active.display().to_string(), format!("{e:#}")));
+                    continue;
+                }
+            };
+        scan.sealed_segments += reports.iter().filter(|r| !r.active).count();
+
+        // Then the live segment's contents, resuming from a checkpoint when one
+        // is available. `mvmctl trust audit verify` deliberately keeps the
+        // genesis-anchored walk over every segment — full re-derivation is what
+        // that command is for, and it is claim 8's witness.
+        //
+        // A chain whose active file is absent is mid-rotation: the sealed set
+        // was just checked and the continuation has not landed yet. There is
+        // nothing live to walk and nothing wrong.
+        if !active.exists() {
+            scan.verified += 1;
+            continue;
+        }
+        let checkpoint = mvm_hostd::supervisor::audit_checkpoint::load(&active);
         match mvm_hostd::supervisor::verify_audit_chain_incremental(
-            &path,
+            &active,
             &signer.verifying,
             checkpoint.as_ref(),
         ) {
@@ -110,11 +161,11 @@ fn scan_audit_chains() -> AuditChainScan {
                 if !outcome.walked_from_genesis {
                     scan.resumed += 1;
                 }
-                mvm_hostd::supervisor::audit_checkpoint::store(&path, &outcome.checkpoint);
+                mvm_hostd::supervisor::audit_checkpoint::store(&active, &outcome.checkpoint);
             }
             Err(e) => scan
                 .broken
-                .push((path.display().to_string(), format!("{e:#}"))),
+                .push((active.display().to_string(), format!("{e:#}"))),
         }
     }
     scan.broken.sort();
@@ -161,17 +212,32 @@ fn audit_chain_check_from_scan(scan: &AuditChainScan) -> Check {
         name,
         category,
         ok: true,
-        info: match (scan.verified, scan.resumed) {
-            (0, _) => "no host-lifecycle chains yet".to_string(),
-            (n, 0) => format!("{n} chain(s) verify against the host signer"),
-            // Naming the resumed chains keeps this from reading as a
-            // full-chain statement. A resumed walk re-derived only the entries
-            // appended since the last run; `mvmctl trust audit verify` is the
-            // genesis-anchored check.
-            (n, r) => format!(
-                "{n} chain(s) verify against the host signer ({r} verified incrementally since \
-                 the last run; `mvmctl trust audit verify` re-checks from the first entry)"
-            ),
+        info: match (scan.verified, scan.resumed, scan.sealed_segments) {
+            (0, _, _) => "no host-lifecycle chains yet".to_string(),
+            (n, 0, 0) => format!("{n} chain(s) verify against the host signer"),
+            // Both reductions are named. Neither is a full-history statement:
+            // a resumed walk re-derived only the entries appended since the
+            // last run, and a retired interior was not re-read at all — only
+            // the handoff into and out of it. `mvmctl trust audit verify` is
+            // the check that walks every segment from the first entry, and an
+            // operator has to be able to tell which answer they are holding.
+            (n, r, sealed) => {
+                let mut caveats = Vec::new();
+                if r > 0 {
+                    caveats.push(format!("{r} verified incrementally since the last run"));
+                }
+                if sealed > 0 {
+                    caveats.push(format!(
+                        "{sealed} retired segment(s) checked at their handoffs only, \
+                         interiors not re-walked"
+                    ));
+                }
+                format!(
+                    "{n} chain(s) verify against the host signer ({}; `mvmctl trust audit \
+                     verify` re-checks every segment from the first entry)",
+                    caveats.join("; ")
+                )
+            }
         },
     }
 }
@@ -819,6 +885,7 @@ mod tests {
             broken: vec![],
             not_assessed: None,
             resumed: 0,
+            sealed_segments: 0,
         };
         let info = audit_chain_check_from_scan(&scan).info;
         assert!(info.contains("3 chain(s) verify"), "{info}");
@@ -838,6 +905,7 @@ mod tests {
             broken: vec![],
             not_assessed: None,
             resumed: 2,
+            sealed_segments: 0,
         };
         let info = audit_chain_check_from_scan(&scan).info;
         assert!(info.contains("2 verified incrementally"), "{info}");
@@ -857,6 +925,7 @@ mod tests {
             )],
             not_assessed: None,
             resumed: 0,
+            sealed_segments: 0,
         };
         let c = audit_chain_check_from_scan(&scan);
         assert!(!c.ok, "a broken chain is a posture failure: {}", c.info);
@@ -879,6 +948,7 @@ mod tests {
             broken: vec![("local.jsonl".into(), "bad signature".into())],
             not_assessed: None,
             resumed: 0,
+            sealed_segments: 0,
         };
         let info = audit_chain_check_from_scan(&scan).info;
         assert!(info.contains("Quarantine"), "{info}");
@@ -930,6 +1000,41 @@ mod tests {
         );
     }
 
+    /// Once a chain has retired segments, the passing message has to say the
+    /// retired interiors were not re-walked. "3 chain(s) verify" on its own
+    /// would claim a full-history attestation the cheap check never performed.
+    #[test]
+    fn a_passing_scan_with_segments_says_what_it_did_not_re_walk() {
+        let scan = AuditChainScan {
+            verified: 1,
+            sealed_segments: 4,
+            ..Default::default()
+        };
+        let info = audit_chain_check_from_scan(&scan).info;
+        assert!(info.contains("4 retired segment(s)"), "{info}");
+        assert!(info.contains("handoffs only"), "{info}");
+        assert!(info.contains("interiors not re-walked"), "{info}");
+        assert!(
+            info.contains("trust audit verify"),
+            "must point at the verb that does walk them: {info}"
+        );
+    }
+
+    /// The two reductions are independent, and a message naming only one would
+    /// let the other pass as a full-history statement.
+    #[test]
+    fn a_scan_that_both_resumed_and_skipped_interiors_names_both() {
+        let scan = AuditChainScan {
+            verified: 2,
+            resumed: 1,
+            sealed_segments: 3,
+            ..Default::default()
+        };
+        let info = audit_chain_check_from_scan(&scan).info;
+        assert!(info.contains("1 verified incrementally"), "{info}");
+        assert!(info.contains("3 retired segment(s)"), "{info}");
+    }
+
     /// A broken chain outranks an un-assessable one: the finding that needs
     /// action must not be masked by the reason the sweep was incomplete.
     #[test]
@@ -939,6 +1044,7 @@ mod tests {
             broken: vec![("local.jsonl".into(), "bad signature".into())],
             not_assessed: Some("partial sweep".into()),
             resumed: 0,
+            sealed_segments: 0,
         };
         assert!(!audit_chain_check_from_scan(&scan).ok);
     }

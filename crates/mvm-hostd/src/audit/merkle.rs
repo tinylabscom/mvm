@@ -45,23 +45,46 @@ use mvm_contract::verify::verify_audit_chain_bytes;
 /// selector against the identical leaf set the root and proofs are built
 /// over (a single reader, so indices can't drift).
 pub fn read_leaves(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Result<Vec<String>> {
-    let path = emitter::audit_path_for_tenant(audit_dir, tenant);
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading audit chain {}", path.display()))?;
-    // Byte-equivalent to the file-reading `verify_audit_chain` (CI-pinned by
-    // `mvm_verify_matches_supervisor_chain`), run over the buffer we then split
-    // into leaves — one read, one source of truth.
-    verify_audit_chain_bytes(&content, vk).map_err(|e| {
-        anyhow::anyhow!(
-            "refusing to build a Merkle root over an unverified audit chain at {}: {e}",
-            path.display()
-        )
-    })?;
-    Ok(content
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
+    // Spans the whole segment set, oldest first, not just the active segment.
+    //
+    // A root over the active segment alone would be a root that silently
+    // attests less than it used to the first time a host rotates — the same
+    // tree_size arithmetic, a quietly smaller log underneath it, and every
+    // previously issued inclusion proof pointing at leaf indices that no longer
+    // mean what they meant. Spanning the set keeps leaf indices globally
+    // ordered across rotations, which is the property those proofs rest on.
+    //
+    // `read_verified_set` verifies each segment *and* the handoffs between
+    // them, from the same buffers it returns, so the fail-closed policy now
+    // covers "a segment was removed" as well as "a line was edited".
+    match crate::supervisor::audit_set::read_verified_set(audit_dir, tenant, vk) {
+        Ok(segments) => Ok(segments
+            .iter()
+            .flat_map(|s| s.lines().into_iter().map(str::to_string))
+            .collect()),
+        // An un-rotated host has no segment set to speak of; fall back to the
+        // single-file read so a chain that never rotated behaves exactly as it
+        // did before, including its error text.
+        Err(crate::supervisor::audit_set::SegmentSetError::NoChain { .. }) => {
+            let path = emitter::audit_path_for_tenant(audit_dir, tenant);
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading audit chain {}", path.display()))?;
+            verify_audit_chain_bytes(&content, vk).map_err(|e| {
+                anyhow::anyhow!(
+                    "refusing to build a Merkle root over an unverified audit chain at {}: {e}",
+                    path.display()
+                )
+            })?;
+            Ok(content
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect())
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "refusing to build a Merkle root over an unverified audit chain for {tenant}: {e}"
+        )),
+    }
 }
 
 /// Build the Merkle root over `tenant`'s audit chain in `audit_dir`,

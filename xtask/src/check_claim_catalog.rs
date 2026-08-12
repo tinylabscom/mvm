@@ -243,8 +243,20 @@ fn model_claim_witnesses(model_toml: &str, id: &str) -> Option<Vec<String>> {
     let scope = &rest[..scope_end];
     let list_start = scope.find("witnesses = [")? + "witnesses = [".len();
     let list_end = list_start + scope[list_start..].find(']')?;
+    // Strip `#` comments before splitting on commas.
+    //
+    // A comma inside a comment otherwise splits the list in the wrong place and
+    // glues the comment's tail onto the next witness, so that one witness stops
+    // matching — reported as "the model does not list it" while it is sitting
+    // in the file, three lines below. The message names the wrong file, which
+    // is the expensive part.
+    let uncommented = scope[list_start..list_end]
+        .lines()
+        .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(
-        scope[list_start..list_end]
+        uncommented
             .split(',')
             .map(|t| t.trim().trim_matches('"').to_string())
             .filter(|t| !t.is_empty())
@@ -416,6 +428,35 @@ witnesses = ["fn:belongs_to_two"]
 mod tests {
     use super::*;
     use crate::claims_ledger::{extract_ledger_section, parse_rows};
+
+    /// A comment inside the witness list must not eat the witness after it.
+    ///
+    /// Splitting the array on commas without stripping `#` comments glues a
+    /// comment's tail onto the following entry, so that witness silently stops
+    /// matching and the gate reports the model as missing something the model
+    /// plainly contains. The error names the wrong file, so the reader goes
+    /// looking in the ADR.
+    #[test]
+    fn a_comment_containing_a_comma_does_not_swallow_the_next_witness() {
+        let model = "\
+[[claim]]
+id = \"MVM-SEC-08\"
+witnesses = [
+    \"fn:first\",
+    # A comment with a comma, which used to split the list right here.
+    \"fn:second\",
+    \"fn:third\",
+]
+
+[[claim]]
+id = \"MVM-SEC-09\"
+witnesses = [\"fn:other\"]
+";
+        let ws = model_claim_witnesses(model, "MVM-SEC-08").expect("claim 8 present");
+        assert_eq!(ws, vec!["fn:first", "fn:second", "fn:third"]);
+        // And the scope stop still holds: claim 8 must not borrow claim 9's.
+        assert!(!ws.contains(&"fn:other".to_string()));
+    }
 
     #[test]
     fn structural_flags_noncontiguous_and_bad_status() {
