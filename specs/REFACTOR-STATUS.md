@@ -730,6 +730,12 @@ for detailed scope and acceptance criteria.
       identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
       Sequencing: the landing teaser must be built against PR #2359's redesigned
       landing page, not the current one.
+  - [x] E2.1 — the placeholder leaf relocated as
+        `mvm_contract::substitution`; the constant hard-renamed to
+        `SECRET_PLACEHOLDER_PREFIX` to avoid colliding with
+        `policy::secret_binding`'s existing `PLACEHOLDER_PREFIX`
+        (`"mvm-managed:"`). Minting stays host-side to keep `getrandom` out
+        of the browser bundle.
   - [x] E1 — `projection.rs` relocated to `mvm-contract` verbatim; the
         `mvm_core::policy::projection` module re-export kept all ~20 call sites
         unchanged and `wasm_egress_witness.rs` green **unmodified**. The
@@ -751,11 +757,15 @@ for detailed scope and acceptance criteria.
         de-duplicated ahead of E2 as `mvm_contract::ir::host_is_bound` — a
         standing drift hazard on a security predicate does not belong behind
         this plan.
-  - [~] E3 audit writer core — moves/stays pass **done**, E3.0 decided
-        (**option A**), E3.1 (frozen byte fixture) shipped, remaining code
-        **blocked on #2379** (audit-log rotation), which restructures the two
-        files E3 unifies; re-validate the moves/stays table against the
-        post-319 `audit_file.rs` before writing E3.2+. `mvm-contract`'s `verify.rs`
+  - [~] E3 audit writer core — moves/stays pass **done and re-validated
+        against post-319 `main`**, E3.0 decided (**option A**), E3.1 (frozen
+        byte fixture) shipped and green after #2379. `SignedEnvelope`'s shape
+        and `MirrorEntry`'s field-identity both survived the rotation work, so
+        option A stands; but the mirror now carries
+        `continuation_start_hash`, so retiring it is more urgent and the
+        E3.4/E3.5 diff is larger than first estimated. Next step is E3.2a —
+        collapsing three byte-identical `hash_line` definitions (#2379 added
+        the third) into one. `mvm-contract`'s `verify.rs`
         already carries a field-identical `SignedEnvelope` over a
         hand-maintained `MirrorEntry`, so E3 unifies with it rather than
         adding a second: move the real `AuditEntry` down and retire the

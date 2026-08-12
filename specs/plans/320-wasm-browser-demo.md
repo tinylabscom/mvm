@@ -221,8 +221,15 @@ into `mvm-contract` to preserve a signature.
 
 #### Order
 
-- [ ] E2.1 — `PLACEHOLDER_PREFIX` + `Placeholder` + `find_placeholder` →P.
-      Leaf; nothing moves with it.
+- [x] E2.1 — the placeholder leaf →P. Landed as
+      `mvm_contract::substitution`. The constant moved as
+      **`SECRET_PLACEHOLDER_PREFIX`**, not `PLACEHOLDER_PREFIX`: that name was
+      already taken in `mvm-contract` by `policy::secret_binding`'s
+      `"mvm-managed:"`, and a second same-named reserved prefix would have
+      recreated the very collision E3 is untangling. Hard rename, four call
+      sites, no alias. A test asserts the two constants differ and that
+      `find_placeholder` returns `None` on an `mvm-managed:` string.
+      `Placeholder::new` takes the token as given so the RNG stays host-side.
 - [~] E2.2 — de-duplicate the bind check into one fn, **before it crosses a
       crate boundary**, so the claim-12 predicate has exactly one definition
       at the moment it moves. **Landing separately and first**, as
@@ -328,12 +335,27 @@ stops verifying because a struct moved crates is the exact failure mode the
 
 #### Order
 
-**Blocked on plan 319.** [#2379](https://github.com/tinylabscom/mvm/pull/2379)
-(audit-log rotation) restructures `audit_file.rs` and touches
-`mvm-contract`'s `verify.rs` — the two files E3 unifies. The moves/stays
-table below was mapped against `audit_file.rs` as it stands on `main`, so
-**re-validate it against the post-319 file before writing any E3 code.**
-E3.1 is unaffected and already done.
+**Re-validated against post-319 `main`.** #2379 landed on 2026-08-12 and
+restructured `audit_file.rs` (1,401 → 1,934 lines) plus two new modules,
+`audit_segment.rs` and `audit_set.rs`. The table below was re-checked
+against the merged result. Three findings:
+
+1. **`SignedEnvelope`'s shape is unchanged** — still
+   `entry`/`canonical`/`prev_hash`/`signature`, same attributes. Rotation
+   adds new *records* (`chain.sealed`, `chain.continued`), which are
+   ordinary `AuditEntry`s carrying labels, not a new envelope. Option A is
+   unaffected.
+2. **`MirrorEntry` is still field-for-field identical** to `AuditEntry` —
+   same names, same order, same `skip_serializing_if`, differing only in
+   Rust types that all serialize identically (`DateTime<Utc>`/`TenantId`/
+   `PlanId`/`PolicyId` vs `String`). Option A remains viable.
+3. **But the mirror has started accreting logic.** `verify.rs` now carries
+   `continuation_start_hash(&MirrorEntry)`. It is no longer a passive
+   mirror, which makes retiring it more urgent, not less — and makes the
+   E3.4/E3.5 diff larger than first estimated.
+
+E3.1 was unaffected and is done; the frozen fixture passes on post-319
+`main`, confirming rotation did not change whether existing logs verify.
 
 - [x] E3.0 — option A chosen.
 - [x] E3.1 — freeze the byte fixture (a signed multi-entry chain + its
@@ -345,8 +367,13 @@ E3.1 is unaffected and already done.
       the legacy chain with `SignatureInvalid { line: 0 }`.
       Checked against #2379's branch as well: clean merge, 6/6 green, so
       rotation does not change whether existing logs verify.
-- [ ] E3.2 — hard-rename one of the two `AuditEntry`s. No alias. **Gated on
-      #2379 landing**, then on the re-validation above.
+- [~] E3.2a — **one `hash_line`.** The re-validation found it written out
+      three times byte-identically: `mvm-contract`'s `verify.rs`,
+      `audit_file.rs`, and — added by #2379 — `audit_set.rs`. It is the
+      function that *is* the chain link, so three definitions are three
+      definitions of what the chain is. Independent of every other E3 step
+      (no `AuditEntry` dependency), so it lands first and alone.
+- [ ] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
 - [ ] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
       definition each, `mvm-hostd` calling `mvm-contract`.
 - [ ] E3.4 — `AuditEntry` →P; `for_plan` becomes a free fn.
