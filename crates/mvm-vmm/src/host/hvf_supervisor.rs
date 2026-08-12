@@ -126,7 +126,7 @@ pub struct HvfSupervisorConfig {
     /// A builder carries no untrusted workload and pulls multi-gigabyte
     /// substituter closures. Defaults false so a workload stays metered.
     #[serde(default)]
-    pub egress_unmetered: bool,
+    pub trusted_builder_egress: bool,
     /// Where to write the captured guest console.
     pub console_log: PathBuf,
     /// Where to write this process's PID once booting starts (the backend polls
@@ -229,7 +229,7 @@ mod tests {
             virtiofs_root: None,
             virtiofs_shares: vec![],
             vsock: true,
-            egress_unmetered: false,
+            trusted_builder_egress: false,
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
             workload_exit: "/state/workload.exit".into(),
@@ -323,7 +323,7 @@ mod tests {
             virtiofs_root: None,
             virtiofs_shares: vec![],
             vsock: true,
-            egress_unmetered: false,
+            trusted_builder_egress: false,
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
             workload_exit: "/state/workload.exit".into(),

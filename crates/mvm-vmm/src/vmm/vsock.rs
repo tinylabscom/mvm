@@ -207,8 +207,8 @@ impl VsockShared {
         self.handlers.set_substitution_endpoint(path);
     }
 
-    pub fn set_egress_unmetered(&mut self) {
-        self.handlers.set_egress_unmetered();
+    pub fn set_trusted_builder_egress(&mut self) {
+        self.handlers.set_trusted_builder_egress();
     }
 
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
@@ -379,8 +379,8 @@ impl VirtioVsock {
         self.notify_io();
     }
 
-    pub fn set_egress_unmetered(&mut self) {
-        self.lock().set_egress_unmetered();
+    pub fn set_trusted_builder_egress(&mut self) {
+        self.lock().set_trusted_builder_egress();
         self.notify_io();
     }
 

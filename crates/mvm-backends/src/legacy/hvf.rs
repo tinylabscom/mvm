@@ -554,7 +554,7 @@ impl VmBackend for HvfBackend {
 
         let cfg = HvfSupervisorConfig {
             // A workload is always metered.
-            egress_unmetered: false,
+            trusted_builder_egress: false,
             kernel: PathBuf::from(kernel),
             // Thread a full cmdline only when we need extra workload tokens;
             // otherwise keep the supervisor default (`init=/init`).

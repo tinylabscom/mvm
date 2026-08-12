@@ -202,10 +202,10 @@ impl VsockHandlerRegistry {
             .set_endpoint(path);
     }
 
-    /// Lift the egress byte rate for a trusted-builder VM. Both ports keep
-    /// sharing one budget, so the concurrency cap is unchanged.
-    pub(crate) fn set_egress_unmetered(&mut self) {
-        let budget = EgressBudget::unmetered();
+    /// Drop the workload egress ceilings for a trusted-builder VM. Both ports
+    /// keep sharing one budget.
+    pub(crate) fn set_trusted_builder_egress(&mut self) {
+        let budget = EgressBudget::trusted_builder();
         for port in [
             mvm_agentd::vsock::EGRESS_PORT,
             mvm_agentd::vsock::BROKER_PORT,

@@ -205,7 +205,7 @@ fn relay_supervisor_config_with_handoff(
             })
             .collect(),
         vsock: true,
-        egress_unmetered: spec.trusted_builder,
+        trusted_builder_egress: spec.trusted_builder,
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),
         workload_exit: paths.workload_exit.clone(),
@@ -1193,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_trusted_builder_relays_egress_unmetered() {
+    fn only_a_trusted_builder_relays_trusted_builder_egress() {
         let mut spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![
@@ -1205,13 +1205,13 @@ mod tests {
 
         let workload = relay_supervisor_config(&spec, &sample_paths()).unwrap();
         assert!(
-            !workload.egress_unmetered,
+            !workload.trusted_builder_egress,
             "a workload must stay rate-limited"
         );
 
         spec.trusted_builder = true;
         let builder = relay_supervisor_config(&spec, &sample_paths()).unwrap();
-        assert!(builder.egress_unmetered);
+        assert!(builder.trusted_builder_egress);
     }
 
     #[test]

@@ -146,7 +146,7 @@ pub fn hvf_child_restore_config(
 
     Ok(HvfSupervisorConfig {
         // Same tier as the parent it forked from.
-        egress_unmetered: parent.egress_unmetered,
+        trusted_builder_egress: parent.trusted_builder_egress,
         kernel: parent.kernel.clone(),
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
@@ -263,7 +263,7 @@ mod tests {
 
     fn parent_config(state: &Path, disks: Vec<HvfDisk>) -> HvfSupervisorConfig {
         HvfSupervisorConfig {
-            egress_unmetered: false,
+            trusted_builder_egress: false,
             kernel: state.join("Image"),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
