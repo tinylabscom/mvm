@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::policy::network_policy::HostPort;
 
+pub mod budget;
 pub mod ceiling;
 pub mod projection;
 pub mod subset;

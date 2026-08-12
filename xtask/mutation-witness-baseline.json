@@ -120,10 +120,31 @@
       ]
     },
     {
+      "path": "crates/mvm-contract/src/protocol/capability_negotiation.rs",
+      "package": "mvm-contract",
+      "claims": [
+        18
+      ]
+    },
+    {
+      "path": "crates/mvm-contract/src/protocol/resource_controls.rs",
+      "package": "mvm-contract",
+      "claims": [
+        18
+      ]
+    },
+    {
       "path": "crates/mvm-contract/src/protocol/vm_backend.rs",
       "package": "mvm-contract",
       "claims": [
         13
+      ]
+    },
+    {
+      "path": "crates/mvm-core/src/cpu_scope.rs",
+      "package": "mvm-core",
+      "claims": [
+        18
       ]
     },
     {
@@ -148,6 +169,13 @@
       ]
     },
     {
+      "path": "crates/mvm-hostd/src/admission_budget.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        18
+      ]
+    },
+    {
       "path": "crates/mvm-hostd/src/broker/registry.rs",
       "package": "mvm-hostd",
       "claims": [
@@ -166,7 +194,8 @@
       "package": "mvm-hostd",
       "claims": [
         1,
-        8
+        8,
+        18
       ]
     },
     {
