@@ -665,7 +665,7 @@ for detailed scope and acceptance criteria.
 - [~] Plan 320 — A live wasm sandbox demo on the website
       (`specs/plans/320-wasm-browser-demo.md`) — E1 shipped, E2/E3 and the demo
       itself not started. Browser-engine sandbox at `/demo` + landing teaser; relocates the
-      egress decision (`projection.rs`), `${NAME}` substitution, and audit-entry
+      egress decision (`projection.rs`), placeholder substitution, and audit-entry
       construction/chain-signing into `mvm-contract` so host and browser run
       identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
       Sequencing: the landing teaser must be built against PR #2359's redesigned
@@ -679,9 +679,26 @@ for detailed scope and acceptance criteria.
         54 projection tests plus 10 mandatory-deny tests now run under
         `wasm32-wasip1` (651 → 715), closing plan 301 P1's "tests under wasm"
         gap for this module.
-  - [ ] E2 substitution core; E3 audit writer core. Both are partial splits of
-        a custody/fs/async-bearing file, so each needs a moves/stays pass
-        before code. Oracle: `wasm_egress_witness.rs` must stay green
+  - [~] E2 substitution core — moves/stays pass **done**, code not started
+        (E2.1–E2.5 in the plan). The pass corrected the design on three
+        points: the runtime placeholder is `mvm-secret-<hex>`, not `${NAME}`
+        (which also constrains what demo pane 2 may render); the core spans
+        `keyholder/{admission,substitution,injector}.rs` +
+        `supervisor/substitution_proxy.rs`, not one 509-line file; and
+        `mint`'s `rand::thread_rng` draw has to split out. The claim-12 bind
+        check is written twice today and must be de-duplicated in place
+        before it crosses a crate boundary.
+  - [~] E3 audit writer core — moves/stays pass **done**, blocked on one
+        decision (E3.0). `mvm-contract`'s `verify.rs` already carries a
+        field-identical `SignedEnvelope` over a hand-maintained
+        `MirrorEntry`, so E3 must unify rather than add a second. The
+        recommended option — move the real `AuditEntry` down, retire the
+        mirror — is viable because chrono and the id newtypes landed in
+        Increment 3. Needs the hard-rename treatment Increment 3 gave
+        `BundleNetworkPolicy`: two unrelated `AuditEntry` types would
+        otherwise collide in one crate. Unlike E1, E3 touches signed bytes,
+        so Increment 3's frozen-byte-fixture gate is mandatory.
+  - [ ] Oracle for both: `wasm_egress_witness.rs` must stay green
         **unmodified**.
   - [ ] `web/mvm-demo/` wasm-bindgen crate, workspace-excluded; Worker + thin
         proxy; three curated fixtures (allowed / denied / unbound); tamper
