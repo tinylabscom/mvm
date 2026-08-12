@@ -3174,3 +3174,16 @@ the invariant stayed implicit.
 - making its `start` bypass the runner trips the gate
 - an egress-spawn token in `apple_container_backend.rs` trips the gate
 - the gate stays green on the real tree
+
+**Resolved while pinning (a):** `warm_start` passes `config` through without
+`config_with_kernel`, unlike `start` and `start_with_mode`. That looked like an
+inconsistency but is correct: `VmBackend::warm_start` is documented to fail
+closed and "never a silent cold boot", so it either restores a snapshot — where
+the kernel already lives in the restored guest memory — or errors. There is no
+kernel to substitute on a restore path.
+
+**Also fixed:** the round-1 matcher was per-line, so it never found the real
+`start_with_mode`, which rustfmt wraps across two lines. It failed closed rather
+than passing green, but the matcher now squeezes whitespace and the fixture
+carries a wrapped body so the regression is caught in unit tests. This is the
+third gate in this plan to be tripped by rustfmt wrapping a signature.
