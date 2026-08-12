@@ -156,6 +156,13 @@ pub(super) fn format_compile_elapsed(elapsed: std::time::Duration) -> String {
     format!("still compiling… ({}m{:02}s elapsed)", secs / 60, secs % 60)
 }
 
+#[cfg(feature = "builder-vm")]
+pub(super) fn format_compile_start(label: &str, arch: &str) -> String {
+    format!(
+        "Compiling {label} kernel ({arch}) via Stage 0 — the first build can take several minutes depending on the host; later runs reuse the persistent Nix store."
+    )
+}
+
 /// `mvmctl kernel build --source compile`: compile a single kernel attr
 /// through the Stage 0 nix-seed bootstrap and land its `vmlinux` in the
 /// per-arch builder-VM cache. Returns the cached kernel path.
@@ -229,11 +236,7 @@ pub(crate) fn build_kernel_via_stage0(
     std::fs::write(staging_dir.join("stage0-build.conf"), conf)
         .with_context(|| format!("writing stage0-build.conf in {}", staging_dir.display()))?;
 
-    ui::info(&format!(
-        "Compiling {} kernel ({arch}) via Stage 0 — first build is slow \
-         (3-10 min); later runs hit the nix store cache.",
-        variant.label()
-    ));
+    ui::info(&format_compile_start(variant.label(), arch));
 
     {
         use mvm_build::builder_backend_select as bbs;

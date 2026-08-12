@@ -1,6 +1,6 @@
 # Plan 308 — Workload grants: one declaration, per-backend enforcement
 
-**Status: IN FLIGHT — WS1, WS1b, WS2, WS3 complete; WS4 partial (CPU bound + prod gate landed, admission budget outstanding); WS5, WS5b, WS6, WS6b outstanding. No surface authors a grant yet, so the feature is inert by design until WS6.**
+**Status: IN FLIGHT — WS1, WS1b, WS2, WS3 complete; WS4 partial (CPU bound + prod gate landed, admission budget outstanding); WS5b partial (child ⊆ parent enforced and chain-anchored, `apply_grants` on restore outstanding); WS5, WS6, WS6b outstanding.**
 
 ## Why
 
@@ -321,7 +321,7 @@ cheapest and most rigorous, not the one where it is hardest.
       grant must be rejected at admission rather than accepted as partial
       enforcement.
 
-- [ ] **WS5b — Grants across snapshot, fork, and restore.**
+- [~] **WS5b — Grants across snapshot, fork, and restore.**
       Today's child-plan validation (`crates/mvm-runtime/src/checkpoint/mod.rs`)
       checks signature length, signer id, `verify_plan_id`, tenant match, and
       the validity window. It does not compare the child's resources against
@@ -333,6 +333,40 @@ cheapest and most rigorous, not the one where it is hardest.
       refuses a child whose grants are not a subset of its parent's. Same
       family as the restored-child authorization gap that disarmed the plan
       255 pool, so the two should be reviewed together.
+
+      LANDED: `mvm_contract::grants::subset::grants_are_subset` — CPU/wall
+      clock treat absence as *unbounded* (so a child dropping a bound has
+      widened), egress treats it as deny-all (so dropping it has narrowed),
+      and mismatched CPU units are refused rather than converted.
+      `CheckpointMeta.grants` is inside `CheckpointDigestInput`, so a parent
+      record edited to widen its own grant stops matching the digest the
+      signed chain recorded and is refused before the comparison runs (a
+      record sealing no grant is skip-serialized, so an older checkpoint keeps
+      its exact digest and reads as schema-stale rather than as tampered).
+      Capture seals the VM's admitted grants. **Both** restore paths run the
+      comparison through one predicate,
+      `checkpoint::ensure_child_grants_within_parent`: the vm_full fork in
+      `validate_child_fork_plan`, which records the child's own (narrower) set,
+      and the warm-pool claim in `claim_standby`, beside `bind_plan_to_parent`
+      and before the child has an identity or a byte. An fs_quick fork presents
+      no plan and inherits.
+
+      STILL OPEN, two gaps, both real:
+      (a) Restore does not re-apply the grants through `apply_grants` the way a
+      cold boot does — a child cannot be *admitted* wider, but nothing re-arms
+      the host-side control on the restored VM.
+      (b) A warm parent seals no grant, so it bounds a claimed child's egress
+      (absent egress is deny-all) but not its CPU or wall clock. Not an
+      oversight in the capture: a factory parent holds no plan, tenant or
+      `cpu_grant` by construction — `factory_parent_config` drops each so a
+      parent cannot carry authority admitted for some other workload — and one
+      parent serves every later claim, so sealing the provisioning workload's
+      grant would bound unrelated claims to a stranger's number. For the parent
+      to bound those dimensions the *pool* needs a grant of its own: a bound on
+      `StandbySpec`, plumbed from pool configuration and sealed at capture.
+      Until then a warm child's CPU and wall clock are bounded only by the host
+      `GrantCeiling` its own plan was admitted against. Belongs with the rest of
+      the warm-pool arming work.
 
 - [ ] **WS6 — The four surfaces.**
       Manifest: `[grants]` table extending `ManifestMachineWorkflow`.

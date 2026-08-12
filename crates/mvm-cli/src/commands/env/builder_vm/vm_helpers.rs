@@ -360,6 +360,7 @@ pub(super) struct ProcSnapshot {
 }
 
 impl ProcSnapshot {
+    #[tracing::instrument(name = "proc_snapshot.capture", skip_all)]
     fn capture() -> Self {
         // Reported here rather than at the callers: this is the function that
         // pays for the snapshot, and a caller that forgot to report would make

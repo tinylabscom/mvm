@@ -66,6 +66,7 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
             tag: None,
             created_unix: 1,
             quiesced: true,
+            grants: None,
         },
     )
     .expect("capture the clean parent checkpoint");

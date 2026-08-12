@@ -51,3 +51,25 @@ Pumps one workload's output into another's stdin. Caller-driven by design, and \
 the caller is mvmd: mvm has no fleet and so nothing here declares an edge to \
 drive. Covered by its own integration tests against the real broker, reader \
 and gate."""
+
+[[control]]
+symbol = "report_enforced_grants"
+file = "crates/mvm-cli/src/commands/vm/up/grants_report.rs"
+dormant = false
+why = """
+Records what actually bounded a boot: the read-back tier, the \
+`plan.grants_enforced` chain entry, and the operator warning when a requested \
+bound did not happen. It shipped with no caller on the path `mvmctl` boots — \
+correct, tested, and reachable by nothing — so a genuinely bounded run was \
+indistinguishable from an unbounded one. Losing its caller in the CLI start \
+path puts it straight back there."""
+
+[[control]]
+symbol = "enforced_grants_after_start"
+file = "crates/mvm-client/src/boot.rs"
+dormant = false
+why = """
+The seam that calls `VmBackend::apply_grants` from the CLI's own boot. The \
+backend read-back and the audit entry both existed already; the missing link \
+was this one, and the whole defect was that nothing outside the supervisor's \
+launch path — which no `mvmctl` invocation reaches — ever asked."""

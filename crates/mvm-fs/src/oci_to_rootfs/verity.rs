@@ -39,6 +39,7 @@
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::ext4::MaterializedRootfs;
 use std::path::{Path, PathBuf};
+use tracing::instrument;
 
 /// `data-block-size` pinned to 4096 bytes. Must match the
 /// workload ext4 block size the run path materializes; otherwise
@@ -148,6 +149,7 @@ pub struct VeritySealedRootfs {
 /// Linux-only at runtime; non-Linux hosts return
 /// [`OciUnpackError::HostUnsupported`]. The CLI orchestrator
 /// routes the macOS path through the libkrun builder VM.
+#[instrument(skip_all, fields(rootfs = %rootfs.path.display()))]
 pub fn seal_with_verity(
     rootfs: &MaterializedRootfs,
     options: &VeritysetupOptions,

@@ -23,6 +23,8 @@ row below records a defect that was planted to prove the gate fires.
 | --- | --- | --- |
 | `check-build-egress-callers` | Add a `NetworkPolicy::trusted_build_egress()` call to `workload_runner/runner.rs` — the shape of a future workload path reaching the unrestricted-egress constructor and turning off claim 10's default-deny | yes — named the file and line, refused |
 | `check-build-egress-callers` (vacuity) | Point the gate at a tree with no allow-listed call site, i.e. the state it would reach if the constructor were renamed and the gate silently stopped checking anything | yes — refused rather than passing empty |
+| `check-verified-kernel-reads` | Add a boot path that takes `cached_kernel_path` and accepts it on `is_file()` — the shape of the Firecracker arm and the kernel-less-image fallback that both booted an unverified kernel | yes — named the file and line, refused |
+| `check-verified-kernel-reads` (vacuity) | Point the gate at a tree where no file pairs the location helper with `resolve_kernel`, i.e. the state it would reach if either were renamed | yes — refused rather than passing empty |
 | `check-conformance` (R1) | Edit `CONFORMANCE.md` so it disagrees with `model/claims.toml` | yes |
 | `check-honesty` (R2) | Add "MVM-SEC-07 proves cargo deps are audited" to `README.md` | yes |
 | `meta` (R3) | Register `MVM-SEC-99` with no scenario, or remove a scenario's ID tag | yes |

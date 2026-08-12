@@ -56,6 +56,7 @@ pub fn pool_build(
 }
 
 /// Build artifacts for a pool with optional resource overrides.
+#[tracing::instrument(skip_all, fields(tenant_id, pool_id))]
 pub fn pool_build_with_opts(
     env: &dyn BuildEnvironment,
     tenant_id: &str,

@@ -308,6 +308,56 @@ impl HermeticRegistry {
         digest
     }
 
+    /// Serve an authenticated blob route that redirects to an unauthenticated
+    /// same-origin object route. This proves clients strip registry credentials
+    /// before following a blob redirect.
+    pub async fn register_redirected_bearer_blob(
+        &self,
+        repository: &str,
+        media_type: &str,
+        bytes: &[u8],
+        token: &str,
+    ) -> String {
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        let redirected_path = format!("/redirected/blobs/{digest}");
+        self.server.register(
+            Route::exact(
+                "GET",
+                format!("/v2/{repository}/blobs/{digest}"),
+                Responder::Static(
+                    TestResponse::builder(307)
+                        .header("Location", redirected_path.clone())
+                        .build(),
+                ),
+            )
+            .with_bearer_auth(token),
+        );
+        self.server.register(Route::exact(
+            "GET",
+            redirected_path,
+            Responder::Static(
+                TestResponse::builder(200)
+                    .header("Content-Type", media_type)
+                    .body_bytes(bytes.to_vec())
+                    .build(),
+            ),
+        ));
+        digest
+    }
+
+    /// Serve a blob route that redirects to itself indefinitely. Clients must
+    /// stop at their redirect bound instead of looping forever.
+    pub async fn register_blob_redirect_loop(&self, repository: &str, bytes: &[u8]) -> String {
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        let path = format!("/v2/{repository}/blobs/{digest}");
+        self.server.register(Route::exact(
+            "GET",
+            path.clone(),
+            Responder::Static(TestResponse::builder(307).header("Location", path).build()),
+        ));
+        digest
+    }
+
     /// Serve a *tampered* blob: the path is the legitimate digest
     /// (so the caller's request reaches us) but the response body
     /// is different bytes (so digest verification fails).

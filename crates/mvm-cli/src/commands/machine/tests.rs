@@ -2920,3 +2920,67 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
         })
     );
 }
+
+// ── machine inspect: request vs achieved ─────────────────────────
+//
+// A live measurement found `machine inspect` reporting only the requested
+// grant on a boot whose CPU was genuinely bounded. A request and an
+// enforcement are indistinguishable in a spec file and only one of them is a
+// security property, so showing the request alone is the exact confusion the
+// read-back exists to prevent.
+
+#[test]
+fn machine_inspect_shows_the_enforced_tier_not_only_the_request() {
+    let _state = IsolatedMachineState::new();
+    let mut spec = spec_fixture("vm-inspect-tier");
+    spec.grants = Some(mvm_contract::grants::Grants {
+        cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+        ..Default::default()
+    });
+    mvm_client::record_enforced_grants(
+        &spec.name,
+        &mvm_contract::protocol::resource_controls::EnforcedGrants {
+            cpu: mvm_contract::protocol::resource_controls::EnforcedTier::Cgroup2CpuMax,
+            wall_clock: mvm_contract::protocol::resource_controls::EnforcedTier::Declared,
+        },
+    );
+
+    let enforced = mvm_client::enforced_grants_of(&spec.name);
+    let json = serde_json::to_string_pretty(&super::spec_ops::MachineInspectView {
+        spec: &spec,
+        enforced_grants: enforced.clone(),
+    })
+    .expect("view serializes");
+    assert!(
+        json.contains("\"enforced_grants\""),
+        "inspect --json must carry the achieved tier: {json}"
+    );
+    assert!(
+        json.contains("cgroup2_cpu_max"),
+        "the achieved tier must be the one recorded at boot: {json}"
+    );
+    assert!(
+        json.contains("1500"),
+        "the request must survive alongside it — an operator needs both: {json}"
+    );
+
+    let line = super::spec_ops::enforced_cpu_line(enforced.as_ref()).expect("a recorded tier");
+    assert!(line.contains("cgroup2:cpu.max"), "{line}");
+    assert!(line.contains("bounded"), "{line}");
+}
+
+/// A machine whose boot degraded must read as degraded, not as silent.
+#[test]
+fn machine_inspect_marks_an_unenforced_tier_as_not_bounded() {
+    let enforced = mvm_contract::protocol::resource_controls::EnforcedGrants::all_declared();
+    let line = super::spec_ops::enforced_cpu_line(Some(&enforced)).expect("a recorded tier");
+    assert!(line.contains("not bounded"), "{line}");
+}
+
+/// No boot, no claim. An absent record is "unknown", which is a different
+/// answer from "measured and found unenforced"; inventing the latter would
+/// assert something about a run that never happened.
+#[test]
+fn machine_inspect_says_nothing_when_no_boot_recorded_a_tier() {
+    assert_eq!(super::spec_ops::enforced_cpu_line(None), None);
+}

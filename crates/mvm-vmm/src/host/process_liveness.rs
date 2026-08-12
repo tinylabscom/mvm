@@ -12,7 +12,16 @@ const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid", "qemu.pid"
 /// owned by another uid (notably root-owned Firecracker); only `ESRCH` means
 /// the process is absent. The cheap half of the live-vs-orphan discrimination
 /// (see module docs); the heavier argv/ppid sweep stays in `cache prune`.
-fn pid_is_alive(pid: i32) -> bool {
+/// Whether a process ID currently identifies a live or permission-protected
+/// process.
+pub fn pid_is_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    if macos_process_is_zombie(pid) {
+        return false;
+    }
     // SAFETY: kill with signal 0 performs only a permission/existence
     // check and never delivers a signal.
     let result = unsafe { libc::kill(pid, 0) };
@@ -24,6 +33,27 @@ fn pid_is_alive(pid: i32) -> bool {
 
 fn kill_zero_reports_alive(result: i32, error: Option<i32>) -> bool {
     result == 0 || error == Some(libc::EPERM)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_is_zombie(pid: i32) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: `proc_pidinfo` fills the initialized buffer when the returned
+    // byte count matches its size. The PID was validated by the caller.
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+        )
+    };
+    if bytes != std::mem::size_of::<libc::proc_bsdinfo>() as i32 {
+        return false;
+    }
+    // SAFETY: The size check above proves that the kernel populated `info`.
+    unsafe { info.assume_init().pbi_status == libc::SZOMB }
 }
 
 fn read_pid_file(path: &Path) -> Option<i32> {

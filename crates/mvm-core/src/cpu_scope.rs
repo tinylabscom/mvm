@@ -116,6 +116,42 @@ pub fn mechanism_gap() -> Option<MechanismGap> {
     None
 }
 
+/// The operator-facing sentence for a boot that asked for a CPU bound and did
+/// not get one, or `None` when there is nothing to say.
+///
+/// Degrading is deliberate: a dev run on a host with no user session bus still
+/// boots. Degrading *silently* is not — a user who asked for 1.5 cores, got the
+/// whole machine, and was told nothing has no way to learn the difference, and
+/// the shape of host that degrades (a non-interactive `ssh host mvmctl …`, a CI
+/// runner, a `nohup`'d process) is the common one.
+///
+/// Pure, with the host probe left to the caller, so both gap messages are
+/// exercisable from a host that has neither gap.
+///
+/// A [`CpuGrant::Fuel`] request is not a degradation here: an instruction
+/// budget is wasmtime's unit, and a cgroup scope has no conversion for it.
+#[must_use]
+pub fn cpu_degradation_reason(
+    requested: Option<&CpuGrant>,
+    enforced: EnforcedTier,
+    gap: Option<MechanismGap>,
+) -> Option<String> {
+    if enforced.is_enforced() {
+        return None;
+    }
+    let CpuGrant::Share { millicores } = requested? else {
+        return None;
+    };
+    let why = match gap {
+        Some(gap) => gap.describe(),
+        None => "this backend has no CPU quota mechanism",
+    };
+    Some(format!(
+        "CPU grant of {millicores} millicores was NOT enforced: {why}. \
+         This workload is running unbounded."
+    ))
+}
+
 /// A scope id may contain only characters that cannot change the meaning of a
 /// unit name or a cgroup path. The machine id is validated upstream; this is
 /// the second gate, and the only source a scope name is ever built from.
@@ -888,6 +924,89 @@ mod tests {
             PathBuf::from("/bin/false"),
         );
         assert_eq!(probe.tier_for_vm(state.path()), EnforcedTier::Declared);
+    }
+
+    /// The silence case, and the whole reason the reason-builder exists: a
+    /// share was asked for, nothing bounded it, and the operator is told which
+    /// half of the mechanism was missing.
+    #[test]
+    fn a_degraded_share_names_the_missing_mechanism() {
+        let reason = cpu_degradation_reason(
+            Some(&CpuGrant::Share { millicores: 1500 }),
+            EnforcedTier::Declared,
+            Some(MechanismGap::NoUserSessionBus),
+        )
+        .expect("an unenforced share must say so");
+        assert!(reason.contains("1500"), "{reason}");
+        assert!(reason.contains("NOT enforced"), "{reason}");
+        assert!(
+            reason.contains(MechanismGap::NoUserSessionBus.describe()),
+            "the operator must be told which mechanism was missing: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_degraded_share_without_systemd_run_names_that_gap_instead() {
+        let reason = cpu_degradation_reason(
+            Some(&CpuGrant::Share { millicores: 500 }),
+            EnforcedTier::Declared,
+            Some(MechanismGap::SystemdRunMissing),
+        )
+        .expect("an unenforced share must say so");
+        assert!(reason.contains("systemd-run"), "{reason}");
+    }
+
+    /// A host with no gap at all still owes an explanation when the tier came
+    /// back unenforced — the backend simply has no quota mechanism.
+    #[test]
+    fn an_unenforced_share_on_a_host_with_no_gap_still_warns() {
+        let reason = cpu_degradation_reason(
+            Some(&CpuGrant::Share { millicores: 250 }),
+            EnforcedTier::Declared,
+            None,
+        )
+        .expect("an unenforced share must say so");
+        assert!(reason.contains("no CPU quota mechanism"), "{reason}");
+    }
+
+    #[test]
+    fn an_enforced_share_says_nothing() {
+        assert_eq!(
+            cpu_degradation_reason(
+                Some(&CpuGrant::Share { millicores: 1500 }),
+                EnforcedTier::Cgroup2CpuMax,
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_run_that_asked_for_no_bound_says_nothing() {
+        assert_eq!(
+            cpu_degradation_reason(
+                None,
+                EnforcedTier::Declared,
+                Some(MechanismGap::SystemdRunMissing)
+            ),
+            None
+        );
+    }
+
+    /// Fuel is wasmtime's unit. A scope that cannot serve it is not degrading;
+    /// warning here would train an operator to ignore the message.
+    #[test]
+    fn a_fuel_budget_is_not_a_scope_degradation() {
+        assert_eq!(
+            cpu_degradation_reason(
+                Some(&CpuGrant::Fuel {
+                    instructions: 1_000
+                }),
+                EnforcedTier::Declared,
+                None,
+            ),
+            None
+        );
     }
 
     #[test]

@@ -186,6 +186,7 @@ use entries::{
     unpack_hardlink_entry, unpack_regular_entry, unpack_symlink_entry,
 };
 use fs_ops::{Rooted, parent_chain_has_symlink};
+use tracing::instrument;
 use whiteout::{WhiteoutKind, classify_whiteout};
 use xattr::{XattrWarningReason, collect_entry_xattrs};
 
@@ -573,6 +574,10 @@ pub fn unpack_layer<R: Read>(
 /// from earlier layers without giving up the `O_EXCL` / `O_NOFOLLOW`
 /// first-creation safety for paths that are genuinely new. Same-layer
 /// duplicates remain refused.
+#[instrument(
+    skip_all,
+    fields(output_root = %output_root.display(), prior_paths = prior_layer_paths.len())
+)]
 pub fn unpack_layer_with_prior_paths<R: Read>(
     layer_tar: R,
     output_root: &Path,

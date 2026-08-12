@@ -12,6 +12,7 @@ fn builder_agent_port() -> u32 {
         .unwrap_or(mvm_agentd::builder_agent::BUILDER_AGENT_PORT)
 }
 
+#[tracing::instrument(skip_all, fields(flake_ref, attr))]
 pub fn build_via_vsock(
     vsock_uds: &str,
     flake_ref: &str,

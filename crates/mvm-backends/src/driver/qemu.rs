@@ -327,6 +327,11 @@ impl VmmDriver for QemuDriver {
         qemu_base_bootargs(virtiofs_root, has_disk)
     }
 
+    #[tracing::instrument(
+        name = "qemu.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         // QEMU has no bundled kernel (libkrun's libkrunfw is the only
         // bundled-kernel backend): a `Bundled` spec takes the same cached
@@ -493,20 +498,35 @@ impl RunningVm for QemuRunningVm {
             qemu::send_signal(bridge_pid, libc::SIGTERM);
         }
         let _ = std::fs::remove_file(self.state_dir.join(qemu::BRIDGE_PID_FILE));
+        qemu::cleanup_vsock_bridge_sockets(&self.state_dir);
 
-        // SIGTERM → grace → SIGKILL, the escalation the raw stop path uses:
-        // SIGTERM gives qemu a chance to close its virtio-blk fds, then
-        // SIGKILL if it ignores us within the grace window.
+        // Arm before SIGTERM so a short-lived QEMU process cannot exit between
+        // signal delivery and observer registration.
         if let Some(pid) = qemu::read_pid(&self.pid_file)
             && qemu::pid_alive(pid)
         {
+            let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
+            // SIGTERM gives QEMU a chance to close its virtio-blk file
+            // descriptors, then SIGKILL if it ignores us within the grace
+            // window.
             qemu::send_signal(pid, libc::SIGTERM);
-            let deadline = Instant::now() + qemu::STOP_TIMEOUT;
-            while Instant::now() < deadline && qemu::pid_alive(pid) {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if qemu::pid_alive(pid) {
+            let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
+                pid,
+                Instant::now() + qemu::STOP_TIMEOUT,
+                observer.as_ref(),
+            );
+            if !exited {
                 qemu::send_signal(pid, libc::SIGKILL);
+                if !mvm_vmm::host::process_exit::wait_for_pid_exit(
+                    pid,
+                    Instant::now() + Duration::from_millis(500),
+                    observer.as_ref(),
+                ) {
+                    return Err(anyhow!(
+                        "QEMU PID {pid} could not be proven dead after SIGKILL; preserving {}",
+                        self.pid_file.display()
+                    ));
+                }
             }
         }
         let _ = std::fs::remove_file(&self.pid_file);

@@ -50,8 +50,13 @@ use std::path::Path;
 /// has one point-to-point link and no tunnel endpoint to encapsulate toward.
 /// The v6 IPsec families remain in the required-disable set, so XFRM is not
 /// absorbed into this budget. These values are measured from resolved configs
-/// on the native CI architectures — x86_64 measures 917, confirmed by CI.
-const BUDGET_AARCH64: usize = 944;
+/// on the native CI architectures.
+///
+/// ARM64 then rose by 15 when the shared workload kernel gained the 8250 and
+/// device-tree serial support required by Firecracker while retaining the
+/// PL011 and HVC consoles used by the other supported backends. Its resolved
+/// config measures 959 built-ins. The x86_64 config is unchanged at 917.
+const BUDGET_AARCH64: usize = 959;
 const BUDGET_X86_64: usize = 917;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
@@ -156,5 +161,11 @@ mod tests {
             budget_for_path("/tmp/some.config"),
             BUDGET_AARCH64.max(BUDGET_X86_64)
         );
+    }
+
+    #[test]
+    fn architecture_budgets_are_pinned_to_resolved_counts() {
+        assert_eq!(BUDGET_AARCH64, 959);
+        assert_eq!(BUDGET_X86_64, 917);
     }
 }

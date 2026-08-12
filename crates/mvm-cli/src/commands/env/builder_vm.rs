@@ -51,12 +51,12 @@ use image_ops::validate_dev_image_artifacts;
 #[cfg(feature = "builder-vm")]
 use image_ops::verify_stage0_rootfs_has_init;
 pub(crate) use kernel::KernelSource;
-#[cfg(all(test, feature = "builder-vm"))]
-use kernel::format_compile_elapsed;
 #[cfg(feature = "builder-vm")]
 pub(crate) use kernel::resolve_kernel_source;
 #[cfg(feature = "builder-vm")]
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
+#[cfg(all(test, feature = "builder-vm"))]
+use kernel::{format_compile_elapsed, format_compile_start};
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
 #[cfg(any(

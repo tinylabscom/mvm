@@ -362,6 +362,11 @@ impl VmmDriver for HvfDriver {
         self.backend.capabilities().standby_pool
     }
 
+    #[tracing::instrument(
+        name = "hvf.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         boot_with_handoff(spec, None)
     }
@@ -848,6 +853,7 @@ impl RunningVm for HvfRunningVm {
     fn kill_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
         let termination = hvf_backend::read_pid(&self.pid_file)
             .map(hvf_backend::terminate_pid_timed)
+            .transpose()?
             .unwrap_or_default();
         let cleanup_started = Instant::now();
         let _ = std::fs::remove_file(&self.pid_file);
