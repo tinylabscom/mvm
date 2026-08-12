@@ -53,6 +53,7 @@ mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
 mod check_single_grants_projection;
 mod check_single_home;
+mod check_sprint_append;
 mod check_stream_redaction_seam;
 mod check_test_home_isolation;
 mod check_trust_gradient;
@@ -68,6 +69,7 @@ mod gen_stubs;
 mod ir_parity;
 mod perf;
 mod rust_source;
+mod sprint;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -241,6 +243,14 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_claim_catalog::run(&workspace)
         }
+        Some("check-sprint-append") => {
+            let workspace = workspace_root();
+            check_sprint_append::run(&workspace)
+        }
+        Some("sprint") => {
+            let workspace = workspace_root();
+            sprint::run(&workspace)
+        }
         Some("check-mutation-witnesses") => {
             let workspace = workspace_root();
             // Default is the cheap surface pin, so the PR lint lane can
@@ -341,7 +351,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-dormant-controls, check-witness-citations, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-no-gateway-names, check-uniform-vsock-egress, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-backend-resource-controls, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-no-gateway-names, check-uniform-vsock-egress, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-backend-resource-controls, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -436,6 +446,12 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-claim-catalog                    Verify the claims ledger embedded in specs/adrs/001-microvm-security-posture.md — witnesses still exist in the tree"
+            );
+            eprintln!(
+                "  check-sprint-append                    specs/SPRINT.md's delivery archive stays frozen — new entries go in specs/sprint/delivery/"
+            );
+            eprintln!(
+                "  sprint                                 Render specs/sprint/delivery/ as one document, newest first"
             );
             eprintln!(
                 "  check-witness-citations                Prose that names a witness must name one that exists"

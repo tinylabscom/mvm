@@ -161,6 +161,9 @@ jobs:
       - name: Conformance claim catalog
         run: cargo run -p xtask -- check-claim-catalog
 
+      - name: Sprint delivery log stays one-file-per-entry
+        run: cargo run -p xtask -- check-sprint-append
+
       - name: Claim mutation surface is pinned
         run: cargo run -p xtask -- check-mutation-witnesses
 

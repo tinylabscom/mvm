@@ -558,12 +558,24 @@ macOS / Linux Host
 - Active sprint spec: `specs/SPRINT.md`
 - Completed sprints archived to: `specs/backlog/` (e.g. `specs/backlog/01-foundation.md`)
 - When a sprint is completed, rename `specs/SPRINT.md` to `specs/backlog/<NN>-<name>.md` and create a new `specs/SPRINT.md` for the next sprint
-- **Keep `specs/SPRINT.md` current as you work.** After completing any phase, task,
-  or sub-task, reflect it in the active sprint spec in the SAME change: check off
-  items (`- [x]`), update status labels (e.g. `**Status: COMPLETE**`), and add new
-  test counts or notes. The sprint spec must always match what is actually
-  implemented — see AGENTS.md §"Definition of Done" items 5–7, which bind
-  `specs/SPRINT.md`, the plan checkboxes, and `specs/REFACTOR-STATUS.md` together.
+- **Record what you delivered in its own file: `specs/sprint/delivery/<issue>-<slug>.md`.**
+  Do **not** append to `specs/SPRINT.md` — its delivery section is a closed
+  archive and `xtask check-sprint-append` fails if it grows. One append point
+  shared by every concurrent session conflicted on essentially every rebase, and
+  because a rebase forces a full re-gate, a paragraph of prose cost the other
+  sessions ~20 minutes of re-proving code that had not changed. Separate files
+  cannot collide. Read them together with `cargo run -p xtask -- sprint`.
+- **Keep the rest of `specs/SPRINT.md` current as you work.** After completing any
+  phase, task, or sub-task, reflect it in the active sprint spec in the SAME
+  change: check off items (`- [x]`), update status labels (e.g.
+  `**Status: COMPLETE**`), and add new test counts or notes. The sprint spec must
+  always match what is actually implemented — see AGENTS.md §"Definition of Done"
+  items 5–7, which bind the sprint spec, the plan checkboxes, and
+  `specs/REFACTOR-STATUS.md` together.
+- **Resolve a conflict in any of these by keeping BOTH sides.** Never take one
+  side wholesale: upstream may have *rewritten* an entry your branch also edited,
+  so `--ours`/`--theirs` silently drops someone's work. Verify after resolving
+  that both entries are still present.
 
 ## Refactor status
 

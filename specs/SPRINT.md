@@ -8,7 +8,15 @@
 > The current tree is treated as a **disposable v1**. This sprint restructures it completely.
 > **No legacy paths, no compatibility shims, no aliases.** Hard renames only.
 
-## Current issue delivery
+## Delivered (archive — closed to new entries)
+
+> **Do not append here.** A new delivery entry goes in its own file under
+> `specs/sprint/delivery/`. This section was a single append point that every
+> concurrent session wrote to, so it conflicted on essentially every rebase and
+> cost the other sessions a full re-gate of code that had not changed — see
+> `specs/sprint/delivery/README.md` and issue #2353. `xtask check-sprint-append`
+> fails if this list grows.
+
 
 - [x] Long-running interactive consoles no longer lose their input relay after
       15 minutes without keyboard activity. Guest output can continue
