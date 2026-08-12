@@ -1,7 +1,14 @@
 # ADR-037 — The userspace socket datapath
 
-**Status: Accepted**
+**Status: Superseded for production workload networking by ADR-042
+(2026-08-11).**
 **Date: 2026-08-02**
+**Superseded by: ADR-042 (one flow-aware vsock networking path). This ADR's
+datapath forwarded raw IP packets for `l3-vsock`, which is leaving the
+production workload path along with the mode itself. Its unprivileged-
+forwarding analysis and its performance measurements remain accurate history;
+its `UserspaceSocketDatapath` is not a live production transport. The staged
+removal is `specs/plans/316-single-flow-vsock-networking.md`.**
 **Supersedes: ADR-036 §"macOS (Apple Silicon)" in part — that section
 staged `MacosUserspaceGateway` as a capability declaration plus a refusal
 and left the translator undesigned. This ADR designs it, and widens it

@@ -1276,6 +1276,79 @@ mod admit_plan_tests {
     /// the ordinary ones that derive `HostVsockProxy` and get a broker stood up
     /// for them. The value is inside the signature, so the record was
     /// confidently wrong rather than merely absent.
+    /// Admit a plan carrying `mode`, with everything else held constant.
+    ///
+    /// Shared by the record-the-transport test and the retired-transport
+    /// refusal so the two differ only in the mode they pass.
+    fn admit_with_mode(
+        mode: mvm_contract::plan::NetworkMode,
+        keys_dir: &std::path::Path,
+        audit_dir: &std::path::Path,
+        rootfs: &std::path::Path,
+        ledger: &InMemoryNonceLedger,
+    ) -> Result<Option<AdmissionContext>> {
+        admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mode,
+            grants: None,
+            backend_kind: None,
+            tenant: "local",
+            vm_name: "vm-transport",
+            backend_name: "firecracker",
+            rootfs_path: rootfs,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger,
+            keys_dir: Some(keys_dir),
+            audit_dir: Some(audit_dir),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: false,
+            services: Vec::new(),
+            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                "test",
+            ),
+        })
+    }
+
+    /// The retired in-guest IP stack does not boot, and says why.
+    ///
+    /// The refusal is the thing that keeps the migration to a single
+    /// networking path from ever running three live production paths at once,
+    /// so it is asserted on the message an operator actually reads — naming
+    /// both replacements — not merely on `is_err()`.
+    #[test]
+    fn a_launch_asking_for_the_retired_ip_stack_is_refused() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"transport");
+        let ledger = InMemoryNonceLedger::new();
+
+        let err = admit_with_mode(
+            mvm_contract::plan::NetworkMode::L3Vsock,
+            keys_dir.path(),
+            audit_dir.path(),
+            &rootfs,
+            &ledger,
+        )
+        .expect_err("the retired transport must not admit");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("has been retired"), "{msg}");
+        assert!(msg.contains("loopback adapters"), "{msg}");
+        assert!(msg.contains("typed SDK connector"), "{msg}");
+    }
+
     #[test]
     fn the_admitted_plan_records_the_transport_the_launch_derived() {
         let keys_dir = tempfile::tempdir().unwrap();
@@ -1285,7 +1358,6 @@ mod admit_plan_tests {
 
         for mode in [
             mvm_contract::plan::NetworkMode::HostVsockProxy,
-            mvm_contract::plan::NetworkMode::L3Vsock,
             mvm_contract::plan::NetworkMode::None,
         ] {
             let ledger = InMemoryNonceLedger::new();

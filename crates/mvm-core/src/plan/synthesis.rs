@@ -227,6 +227,11 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     let nonce = fresh_nonce();
     let now = Utc::now();
 
+    // Refuse the retired raw-packet transport before anything else is derived,
+    // so the operator gets the migration error rather than a plan that would
+    // fail later at a transport they never named.
+    crate::plan::refuse_retired_l3(&input.network_mode, input.l3_network.is_some())?;
+
     let tenant_str = input.tenant.unwrap_or(DEFAULT_TENANT);
     if tenant_str.is_empty() {
         anyhow::bail!("tenant must not be empty");
