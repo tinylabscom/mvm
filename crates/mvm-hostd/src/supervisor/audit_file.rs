@@ -44,8 +44,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+use mvm_contract::verify::hash_line;
 
 use crate::supervisor::audit::{AuditEntry, AuditError, AuditSigner};
 
@@ -947,12 +948,6 @@ fn verify_line(
         .map_err(|_| VerifyError::SignatureInvalid { line: idx })?;
     entries.push(envelope.entry);
     Ok(hash_line(line.as_bytes()))
-}
-
-fn hash_line(bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher.finalize().into()
 }
 
 /// How far a chain has already been verified, so a later run can resume.
