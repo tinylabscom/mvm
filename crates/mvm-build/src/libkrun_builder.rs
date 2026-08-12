@@ -80,11 +80,11 @@ use crate::builder_vm::{
 // `shell_single_quote_escape` are imported only inside the test
 // module below.
 use crate::builder_vm_runtime::{
-    CLOSURE_SEED_TAG, NixStoreImageLock, acquire_nix_store_image_lock,
-    acquire_nix_store_image_lock_named, builder_vm_timeout, finalize_flake_job,
-    finalize_install_job, read_job_result_with_diagnostics, shell_job_exit_error,
-    stage_closure_seed_dir, stage_filtered_work_input, stage_job_dir, stage_persistent_job_dir,
-    stage_shell_job_dir, supervisor_exit_error, verbose_from_env,
+    CLOSURE_SEED_TAG, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
+    builder_vm_timeout, ensure_nix_store_image_unlocked, finalize_flake_job, finalize_install_job,
+    read_job_result_with_diagnostics, shell_job_exit_error, stage_closure_seed_dir,
+    stage_filtered_work_input, stage_job_dir, stage_persistent_job_dir, stage_shell_job_dir,
+    supervisor_exit_error, verbose_from_env,
 };
 use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
@@ -949,6 +949,7 @@ impl LibkrunBuilderVm {
             network_policy: None,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            exclusive_image_lock: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -1132,6 +1133,7 @@ impl LibkrunBuilderVm {
             network_policy: None,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            exclusive_image_lock: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -1646,6 +1648,7 @@ impl BuilderVm for LibkrunBuilderVm {
             network_policy: None,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            exclusive_image_lock: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -1884,6 +1887,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             network_policy: None,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            exclusive_image_lock: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -4305,12 +4309,13 @@ impl LibkrunPersistentHostVm {
             Some(image) => image.clone(),
             None => ensure_builder_vm_image()?,
         };
-        // Acquire the cross-process flock on the nix-store image
-        // for the persistent VM's lifetime. Concurrent
-        // `mvmctl deps install` while a dev session's persistent VM
-        // is up would otherwise corrupt the shared ext4. Held inside
-        // the handle; released on drop / kill / wait_for_shutdown.
-        let nix_store_lock = acquire_nix_store_image_lock(
+        // Materialize the store image but do NOT lock it here. The supervisor
+        // takes the lock (`exclusive_image_lock` below) and holds it for its
+        // whole life, which is the VM's life. Locking here instead would tie
+        // the flock to this process, and the caller that starts a session
+        // exits immediately afterwards — releasing the lock out from under a
+        // VM that is still writing the image.
+        let nix_store = ensure_nix_store_image_unlocked(
             &builder_vm_cache_dir(),
             host_arch_tag(),
             u64::from(self.nix_store_mib),
@@ -4351,7 +4356,7 @@ impl LibkrunPersistentHostVm {
             .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
             .add_disk(
                 "nix-store",
-                path_to_str(nix_store_lock.path(), "nix_store_img")?,
+                path_to_str(nix_store.path(), "nix_store_img")?,
                 false,
             )
             // Left on virtio-fs deliberately, unlike Stage 0's `/work`
@@ -4420,6 +4425,10 @@ impl LibkrunPersistentHostVm {
             network_policy: None,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            // The supervisor holds this for its whole life. This process starts
+            // the session and exits, so a lock taken here would not survive to
+            // protect the running VM.
+            exclusive_image_lock: Some(nix_store.lock_path().to_path_buf()),
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -4449,7 +4458,6 @@ impl LibkrunPersistentHostVm {
             session_id,
             supervisor: Some(child),
             egress_endpoint,
-            _nix_store_lock: nix_store_lock,
         })
     }
 }
@@ -4468,13 +4476,6 @@ pub struct PersistentVmHandle {
     /// `None` after [`Self::wait_for_shutdown`] consumes it.
     supervisor: Option<std::process::Child>,
     egress_endpoint: Option<BuilderVsockEgressEndpoint>,
-    /// Held to keep the cross-process flock on the shared
-    /// nix-store image alive for the VM's lifetime. Drops
-    /// (releasing the lock) when the handle drops, after
-    /// `wait_for_shutdown`, or after `kill`. Underscore-prefixed
-    /// because the type is opaque to consumers — it exists for
-    /// its `Drop` side-effect.
-    _nix_store_lock: NixStoreImageLock,
 }
 
 #[cfg(feature = "builder-vm")]

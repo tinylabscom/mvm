@@ -162,12 +162,58 @@ fn apply_egress_relay_override(cfg: &mut SupervisorConfig) {
     }
 }
 
+/// Take the exclusive store-image lock this config names, if any, and return
+/// the guard whose lifetime is the lock's.
+///
+/// Only the persistent builder sets it: that VM outlives the command that
+/// started it, so the lock has to be held by this process rather than by a CLI
+/// that is about to exit. Every one-shot path leaves it `None` and keeps the
+/// caller-held arrangement, which is correct there.
+///
+/// Failure is fatal. The guest is about to attach that image read-write, and
+/// booting it while another VM holds the lock is the filesystem corruption the
+/// lock exists to prevent.
+fn hold_exclusive_image_lock(cfg: &SupervisorConfig) -> Result<Option<std::fs::File>, ExitCode> {
+    let Some(lock_path) = cfg.exclusive_image_lock.as_ref() else {
+        return Ok(None);
+    };
+    match mvm_build::builder_vm_runtime::hold_image_lock(
+        lock_path,
+        mvm_build::builder_vm_runtime::LockWait::from_env(),
+    ) {
+        Ok(file) => {
+            append_supervisor_breadcrumb(
+                std::path::Path::new(&cfg.vm_state_dir),
+                "image_lock",
+                format!("held {}", lock_path.display()),
+            );
+            Ok(Some(file))
+        }
+        Err(e) => {
+            eprintln!(
+                "error: mvm-libkrun-supervisor refusing to boot without the \
+                 exclusive store-image lock at {}: {e}",
+                lock_path.display()
+            );
+            Err(ExitCode::from(3))
+        }
+    }
+}
+
 /// Shared tail: given a finalized `SupervisorConfig` (from the legacy stdin
 /// decode OR a verified prelaunch attach), bind the workload-exit control
 /// listener and route to the bridge/legacy boot path. Extracted so both
 /// entrypoints run identical post-config logic.
 fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     apply_egress_relay_override(&mut cfg);
+
+    // Named binding, not `_`: `let _ = ...` would drop the file here and
+    // silently unlock the image while the VM runs. This guard has to live as
+    // long as this function, which is as long as the VM.
+    let _image_lock = match hold_exclusive_image_lock(&cfg) {
+        Ok(guard) => guard,
+        Err(code) => return code,
+    };
 
     append_supervisor_breadcrumb(
         std::path::Path::new(&cfg.vm_state_dir),
@@ -397,7 +443,9 @@ fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, det
 
 #[cfg(test)]
 mod tests {
-    use super::{append_supervisor_breadcrumb, apply_egress_relay_override};
+    use super::{
+        append_supervisor_breadcrumb, apply_egress_relay_override, hold_exclusive_image_lock,
+    };
     use libkrun_sys::{BridgeRestartPolicy, KrunContext, NetworkingMode, SupervisorConfig};
 
     fn sample_cfg(networking: NetworkingMode, tenant_id: Option<&str>) -> SupervisorConfig {
@@ -418,7 +466,64 @@ mod tests {
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            exclusive_image_lock: None,
         }
+    }
+
+    #[test]
+    fn an_unset_image_lock_takes_nothing() {
+        // Every one-shot path leaves it None: the caller outlives the VM, so
+        // caller-held is already correct and the supervisor must not contend
+        // for a lock the caller is holding.
+        let cfg = sample_cfg(NetworkingMode::VsockDirect, None);
+        let guard = hold_exclusive_image_lock(&cfg).expect("no lock named, no failure");
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    fn a_named_image_lock_is_held_for_the_supervisors_life() {
+        // The persistent-builder property: this process takes the lock, and
+        // nothing else can while it runs.
+        let scratch = tempfile::TempDir::new().expect("scratch");
+        let lock_path = scratch.path().join("nix-store-aarch64.img.lock");
+        let mut cfg = sample_cfg(NetworkingMode::VsockDirect, None);
+        cfg.exclusive_image_lock = Some(lock_path.clone());
+
+        let guard = hold_exclusive_image_lock(&cfg)
+            .expect("the lock is free")
+            .expect("a named lock yields a guard");
+        assert!(
+            mvm_build::builder_vm_runtime::hold_image_lock(
+                &lock_path,
+                mvm_build::builder_vm_runtime::LockWait::none()
+            )
+            .is_err(),
+            "the supervisor's guard must exclude every other holder"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn a_contended_image_lock_refuses_to_boot() {
+        // Booting anyway would attach the image read-write behind another VM
+        // that is already writing it — the corruption the lock exists to stop.
+        let scratch = tempfile::TempDir::new().expect("scratch");
+        let lock_path = scratch.path().join("nix-store-aarch64.img.lock");
+        let held = mvm_build::builder_vm_runtime::hold_image_lock(
+            &lock_path,
+            mvm_build::builder_vm_runtime::LockWait::none(),
+        )
+        .expect("pre-hold the lock");
+
+        let mut cfg = sample_cfg(NetworkingMode::VsockDirect, None);
+        cfg.exclusive_image_lock = Some(lock_path);
+        // Under cfg(test) the wait budget is fail-fast, so this returns rather
+        // than queueing for the hour a real supervisor would wait.
+        assert!(
+            hold_exclusive_image_lock(&cfg).is_err(),
+            "a supervisor that cannot take the lock must refuse to boot"
+        );
+        drop(held);
     }
 
     #[test]

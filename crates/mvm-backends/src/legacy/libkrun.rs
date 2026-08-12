@@ -624,6 +624,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
             mvm_vmm::host::egress_redirect::terminator_port_for_vm_name(&config.name),
         ),
         egress_relay_socket: None,
+        exclusive_image_lock: None,
     })
 }
 
@@ -2245,6 +2246,7 @@ mod tests {
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            exclusive_image_lock: None,
         };
         let json = serde_json::to_string(&cfg).expect("serialize");
         persist_supervisor_config_dump(dir.path(), &json).expect("persist supervisor config");

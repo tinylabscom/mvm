@@ -197,6 +197,18 @@ pub struct HvfSupervisorConfig {
     /// a guest that isn't the build engine serves neither port.
     #[serde(default)]
     pub builder_control_sockets: Vec<HostDialSocket>,
+    /// Sidecar lock this supervisor must hold for its whole life, conferring
+    /// the exclusive right to write the store image its guest attaches.
+    ///
+    /// Set only by the persistent builder, whose VM outlives the command that
+    /// started it. An `flock` dies with the process holding it, so a
+    /// CLI-held lock would be released the moment that command exits, leaving
+    /// a running VM writing an image another builder is free to attach.
+    /// Holding it here ties the lock to the process whose lifetime matches the
+    /// VM's. `None` keeps the caller-held arrangement every one-shot path uses,
+    /// which is correct there because the caller outlives the VM.
+    #[serde(default)]
+    pub exclusive_image_lock: Option<PathBuf>,
     /// Fixed supervisor-owned control socket for a live standby handoff.
     /// `None` disables this privileged path for ordinary VMs.
     #[serde(default)]
@@ -252,6 +264,7 @@ mod tests {
             broker_socket: Some("/state/hvf-broker.sock".into()),
             console_data_sockets: vec![],
             builder_control_sockets: vec![],
+            exclusive_image_lock: None,
             handoff_socket: Some("/state/handoff.sock".into()),
             handoff_root: Some("/state/vms".into()),
             handoff_verify_key: Some("11".repeat(32)),
@@ -346,6 +359,7 @@ mod tests {
             egress_relay_socket: None,
             broker_socket: None,
             builder_control_sockets: vec![],
+            exclusive_image_lock: None,
             console_data_sockets: vec![
                 HostDialSocket {
                     guest_port: 20001,

@@ -153,6 +153,21 @@ pub struct SupervisorConfig {
     /// the derived path unchanged; no current caller populates this.
     #[serde(default)]
     pub egress_relay_socket: Option<std::path::PathBuf>,
+
+    /// Sidecar lock this supervisor must hold for its whole life, conferring
+    /// the exclusive right to write the store image its guest attaches.
+    ///
+    /// Set only by the persistent builder, and for a specific reason: that VM
+    /// outlives the command that started it, and an `flock` dies with the
+    /// process holding it. A CLI-held lock would be released the moment
+    /// `persistent-builder start` exits, leaving a running VM writing an image
+    /// another builder is free to attach. Holding it here ties the lock to the
+    /// process whose lifetime actually matches the VM's.
+    ///
+    /// `None` — every one-shot path — keeps the caller-held arrangement, which
+    /// is already correct there because the caller outlives the VM.
+    #[serde(default)]
+    pub exclusive_image_lock: Option<std::path::PathBuf>,
 }
 
 impl SupervisorConfig {
@@ -381,6 +396,9 @@ impl SupervisorConfig {
             bridge_restart_policy: base.bridge_restart_policy,
             transparent_terminator_port: attach.transparent_terminator_port,
             egress_relay_socket: None,
+            // A warm-claimed standby is a workload, never the build engine, so
+            // it owns no store image and takes no image lock.
+            exclusive_image_lock: None,
         })
     }
 }
@@ -633,6 +651,7 @@ mod tests {
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            exclusive_image_lock: None,
         }
     }
 
@@ -757,6 +776,7 @@ mod tests {
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
             egress_relay_socket: None,
+            exclusive_image_lock: None,
         };
         let json = serde_json::to_string(&cfg_pre_w6a).unwrap();
         let parsed: SupervisorConfig =

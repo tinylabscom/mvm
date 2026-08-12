@@ -323,13 +323,13 @@ fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<Sessi
 
 /// Intentionally LEAK the libkrun handle so the supervisor child stays running
 /// after this process exits. `stop` reattaches via the PID in the session
-/// record. The held `_nix_store_lock` inside the handle goes away when this
-/// process exits, but the kernel-level flock follows the fd, which the
-/// supervisor's parent (now PID 1 after we exit) doesn't own — so the lock is
-/// released on our exit. That's a known gap: between this exit and the
-/// supervisor exit, another `mvmctl deps install` can take the lock. The
-/// session record acts as a soft mutex (start refuses if one exists).
-/// Hardening to keep the kernel lock alive across CLI invocations is a follow-up.
+/// record.
+///
+/// The handle carries no store lock to lose: the supervisor takes that lock
+/// itself and holds it for as long as it runs, which is as long as the VM. An
+/// earlier arrangement locked the image here, and the kernel released it the
+/// moment this process exited — leaving a live VM writing an image any other
+/// builder was free to attach.
 fn leak_handle(handle: PersistentVmHandle) {
     std::mem::forget(handle);
 }

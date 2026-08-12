@@ -92,6 +92,9 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         // The rootfs patcher runs an initramfs to completion; it serves no
         // dispatch loop.
         builder_control_sockets: vec![],
+        // The patcher runs an initramfs to completion against a work dir, not
+        // the shared store.
+        exclusive_image_lock: None,
         handoff_socket: None,
         handoff_root: None,
         handoff_verify_key: None,
