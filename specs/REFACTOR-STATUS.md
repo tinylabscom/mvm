@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -147,7 +147,18 @@ for detailed scope and acceptance criteria.
         gutters 108/34/26 across every section and the header
   - [ ] Maintainer design review — ongoing; the remaining question is whether
         the result reads well, which no measurement answers
-  - [ ] PR #2359 open against `main`
+  - [x] PR #2359 merged to `main`
+  - [x] Implementation plan reconciled against what shipped: five tasks named
+        components that were never created, because the mid-flight review
+        restructured the page, and two stated goals (the scroll-synced code
+        walkthrough and the SDK/CLI tab block as its own section) were dropped
+        by that review. Mapping recorded in the plan's status header; the step
+        checkboxes were never ticked during execution and are not a record of
+        what happened
+  - [x] Docs security pages carried a "seven claims" framing predating most of
+        ADR-001's ledger (#2398); `ci-claims.md` now mirrors the full table and
+        `matryoshka.md` separates layer-defending from backend-independent
+        claims
 
 - [~] Plan 315 — HVF virtio-vsock transmit-credit regression
       (`specs/plans/315-hvf-vsock-credit-regression.md`)

@@ -3137,6 +3137,56 @@ holds; leave anything you cannot verify alone and say so.
 
 ---
 
+### Task 22: Pin AppleContainer's transitive egress coverage
+
+`check-uniform-vsock-egress` locks Firecracker, libkrun and HVF onto the one
+launch seam that spawns the per-VM substitution endpoint — the sole claim-10
+egress gate. It never mentions `AppleContainer`, which **is** a workload
+backend: `as_workload_backend` returns `Some` for it, so it carries untrusted
+workloads through the admitted funnel.
+
+Investigated before changing anything, and the coverage turns out to be real:
+`AppleContainerBackend` holds an `HvfRunner`, `start` delegates to
+`self.runner.start(&self.config_with_kernel(config)?)` substituting only the
+kernel path, and the file spawns no endpoint of its own. So it reaches the
+endpoint spawner through the runner the gate already locks.
+
+**The defect is that this is an unchecked invariant, not a hole.** Nothing
+stops a future edit from giving `AppleContainerBackend` its own field in place
+of the runner, or making `start` spawn directly — and the gate would stay
+green while a second egress seam appeared on a workload-bearing tier. The
+gate's header also implies the tier is out of scope by omission, which is how
+the invariant stayed implicit.
+
+**The work:**
+- Assert `AppleContainerBackend` holds an `HvfRunner` and that its `start`
+  delegates to it, so the transitive coverage cannot silently break.
+- Extend Assertion B's guarded set to `apple_container_backend.rs`, so an
+  egress-spawn token appearing there trips the gate the same way it would in a
+  driver.
+- Correct the header: name AppleContainer as covered *transitively* and say
+  why, rather than leaving it unmentioned. State plainly that Wasm, Qemu and
+  Docker are barred from the funnel (`as_workload_backend` returns `None`),
+  which is a different thing from being an unconverged workload.
+
+**Witnesses — each proven red before green:**
+- swapping `AppleContainerBackend`'s runner field for a raw backend trips the gate
+- making its `start` bypass the runner trips the gate
+- an egress-spawn token in `apple_container_backend.rs` trips the gate
+- the gate stays green on the real tree
+
+**Resolved while pinning (a):** `warm_start` passes `config` through without
+`config_with_kernel`, unlike `start` and `start_with_mode`. That looked like an
+inconsistency but is correct: `VmBackend::warm_start` is documented to fail
+closed and "never a silent cold boot", so it either restores a snapshot — where
+the kernel already lives in the restored guest memory — or errors. There is no
+kernel to substitute on a restore path.
+
+**Also fixed:** the round-1 matcher was per-line, so it never found the real
+`start_with_mode`, which rustfmt wraps across two lines. It failed closed rather
+than passing green, but the matcher now squeezes whitespace and the fixture
+carries a wrapped body so the regression is caught in unit tests. This is the
+third gate in this plan to be tripped by rustfmt wrapping a signature.
 ### Task 23: Bound a warm-claimed child by the host ceiling
 
 The last open enforcement gap in claim 18. A warm-claimed child is bounded by
