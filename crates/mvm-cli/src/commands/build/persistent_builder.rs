@@ -178,27 +178,24 @@ pub fn run(_cli: &Cli, args: Args) -> Result<()> {
     }
 }
 
-/// Which persistent builder backend `start` brings up. libkrun exposes a
-/// persistent host VM with a dispatch contract (`HostVmRequest` over the
-/// per-VM dispatch socket) that keeps the session record and `submit`/`stop`
-/// backend-agnostic.
+/// Which persistent builder backend `start` brings up. Both expose the same
+/// dispatch contract (`HostVmRequest` over the per-VM dispatch socket), which
+/// is what keeps the session record and `submit` / `stop` backend-agnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PersistentBackend {
     Libkrun,
+    Hvf,
 }
 
 /// Resolve the explicit backend selection (`--builder`, folded into
 /// `MVM_BUILDER_BACKEND` at startup, or the env var directly) to the persistent
 /// host VM to spawn. An unset selection keeps libkrun — the verb's default,
-/// independent of the platform auto-detect. hvf and QEMU have no persistent
-/// host VM, so they fail closed with guidance.
+/// independent of the platform auto-detect. QEMU has no persistent host VM, so
+/// it fails closed with guidance.
 fn persistent_backend(explicit: Option<BuilderBackendChoice>) -> Result<PersistentBackend> {
     match explicit {
         None | Some(BuilderBackendChoice::Libkrun) => Ok(PersistentBackend::Libkrun),
-        Some(BuilderBackendChoice::Hvf) => bail!(
-            "`mvmctl persistent-builder start` does not yet have an hvf persistent builder; \
-             pass `--builder libkrun` to use the libkrun persistent builder instead."
-        ),
+        Some(BuilderBackendChoice::Hvf) => Ok(PersistentBackend::Hvf),
         Some(BuilderBackendChoice::Qemu) => bail!(
             "`mvmctl persistent-builder start` has no QEMU persistent builder \
              (QEMU is a one-shot dev/test backend). Use `--builder libkrun` \
@@ -226,6 +223,7 @@ fn run_start(args: StartArgs) -> Result<()> {
 
     let record = match backend {
         PersistentBackend::Libkrun => start_libkrun_persistent(workspace, args.memory_mib)?,
+        PersistentBackend::Hvf => start_hvf_persistent(workspace, args.memory_mib)?,
     };
     write_session_record(&record)?;
 
@@ -235,8 +233,11 @@ fn run_start(args: StartArgs) -> Result<()> {
     Ok(())
 }
 
-/// Spawn the libkrun persistent builder and build its session record.
-fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
+/// Extract the host-vm binaries a persistent builder serves at `/mvm-bins`,
+/// and make the directory traversable by the guest's virtio-fs view of it.
+/// Shared by both backends: the payload and the mode requirement are the same
+/// whichever VMM serves the share.
+fn ensure_persistent_host_bins() -> Result<PathBuf> {
     let host_bin_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
     let host_bin_dir = crate::host_binaries::extract::ensure_extracted(&host_bin_cache)
         .context("extracting host-vm binaries for persistent builder")?;
@@ -251,6 +252,57 @@ fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<Sessi
                 )
             })?;
     }
+    Ok(host_bin_dir)
+}
+
+/// Spawn the HVF persistent builder and build its session record.
+///
+/// Same store-lock caveat as [`leak_handle`]: this process exits so the VM
+/// outlives it, and the flock goes with it. The session record is the soft
+/// mutex until the lock moves into the supervisor, which is the only place it
+/// can outlive this command.
+fn start_hvf_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
+    let host_bin_dir = ensure_persistent_host_bins()?;
+    let (kernel, rootfs, _closure_nar) =
+        crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("resolving the hvf builder image for the persistent builder")?;
+
+    let session_id = format!("{:x}", current_unix_secs());
+    let vm = mvm_runtime::builder_runner::HvfPersistentHostVm::new(
+        kernel,
+        rootfs,
+        &workspace,
+        host_bin_dir,
+    )
+    .with_resources(DEFAULT_PERSISTENT_VCPUS, memory_mib);
+    let session = vm
+        .start(&session_id)
+        .context("spawning persistent builder VM (HvfPersistentHostVm::start)")?;
+
+    let record = SessionRecord {
+        session_id: session.session_id().to_string(),
+        dispatch_socket_path: session.dispatch_socket_path(),
+        job_dir: session.job_dir().to_path_buf(),
+        workspace_root: workspace,
+        supervisor_pid: session
+            .supervisor_pid()
+            .unwrap_or_else(|| read_supervisor_pid(session.state_dir())),
+        last_activity_unix_secs: Some(current_unix_secs()),
+    };
+    // Same reason as the libkrun path: the supervisor must outlive this
+    // command, so the handle is leaked rather than dropped.
+    std::mem::forget(session);
+    Ok(record)
+}
+
+/// vCPUs for a persistent builder session. Matches the one-shot builder's
+/// default; `nix build` parallelizes at the derivation level.
+const DEFAULT_PERSISTENT_VCPUS: u32 = 4;
+
+/// Spawn the libkrun persistent builder and build its session record.
+fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
+    let host_bin_dir = ensure_persistent_host_bins()?;
     let vm = LibkrunPersistentHostVm::new(&workspace)
         .with_memory_mib(memory_mib)
         .with_host_bin_dir(host_bin_dir);
@@ -725,11 +777,13 @@ mod tests {
     }
 
     #[test]
-    fn persistent_backend_rejects_hvf_with_guidance() {
-        let err = persistent_backend(Some(BuilderBackendChoice::Hvf)).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("hvf"), "{msg}");
-        assert!(msg.contains("libkrun"), "{msg}");
+    fn persistent_backend_selects_hvf_when_asked_for_it() {
+        // hvf is the macOS 26+ auto-detect default, so refusing it here left
+        // the whole persistent-builder path unreachable on that tier.
+        assert_eq!(
+            persistent_backend(Some(BuilderBackendChoice::Hvf)).unwrap(),
+            PersistentBackend::Hvf
+        );
     }
 
     #[test]
