@@ -444,7 +444,6 @@ pub(in crate::commands) fn build_event_plan(
         mem_mib: 64,
         disk_mib: 0,
         boot_timeout_secs: 1,
-        exec_timeout_secs: 0,
         destroy_on_exit: true,
         bundle_pin: None,
         deps_volume: None,

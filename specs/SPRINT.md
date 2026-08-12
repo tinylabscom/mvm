@@ -24,6 +24,11 @@
       `mvmctl trust audit verify` walks every retired interior. Retention is
       keep-everything by maintainer decision — rotation only splits, deletion
       stays an explicit operator action. ADR-001 rows 8 and 14 amended.
+- [x] `machine run --port HOST:GUEST` now boots a persistent machine and owns
+      repeatable loopback-only forwards in the foreground, reusing the existing
+      `machine forward` lifecycle. Invalid mappings and detached ownership fail
+      before boot; parser, lifecycle-resolution, listener-bind, and hermetic BDD
+      coverage pin the contract; all 174 BDD scenarios pass.
 
 - [x] Long-running interactive consoles no longer lose their input relay after
       15 minutes without keyboard activity. Guest output can continue
@@ -40,6 +45,15 @@
       cross-build pass. The default parallel workspace run exposes unrelated
       global test environment races; the affected tests pass in isolation and
       serially.
+
+- [x] Merge-group CI scoping — **plan 322**. A fail-closed SHA-range
+      classifier keeps the full Rust matrix for behavior-changing diffs and
+      manual runs, while prose/site-only pull requests and merge groups avoid
+      six cold Rust jobs. Policy and the independently scoped required Nix
+      check remain unconditional authorities for their own input surfaces.
+      Workflow syntax, formatting, workspace compilation, all-target Clippy,
+      and all 499 `xtask` tests pass; the sole transient workspace-suite
+      host-restart failure passed on its exact isolated rerun.
 
 - [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
@@ -305,10 +319,19 @@
       focused five-mutant hostd proof are green. Workspace all-target Clippy,
       formatting, and the static surface gate are also green. The workspace
       suite passed every repaired area but hit one unrelated host-agent
-      socket-bind timeout; its isolated integration rerun passed 4/4. A clean
-      exact Linux Security workflow rerun remains the final merge gate; a
-      subsequent scheduled or release run is still required before issue
-      closure.
+      socket-bind timeout; its isolated integration rerun passed 4/4. Exact
+      Security run 31516221103 passed every mutation and security job, then
+      twice hit Linux `ETXTBSY` while spawning freshly published shutdown-hook
+      fixtures. The lifecycle runner now retries that transient error with a
+      bounded delay, witnessed for recovery and retry exhaustion; workspace
+      all-target Clippy passes. The workspace suite passed the repaired area but
+      one parallel CLI test observed another test's temporary host CPU ceiling;
+      its exact isolated rerun passed. The next exact run exposed guest-console
+      tests sharing process-global session state; the stateful tests now share
+      one lock and join their completion thread, with 20/20 parallel stress
+      passes. A clean exact Linux Security workflow rerun remains the final
+      merge gate; a subsequent scheduled or release run is still required
+      before issue closure.
 
 - [x] `mvmctl deps capture` — **plan 291 WS3**. Reseals a sandbox-captured
       dependency tree with fresh audit sidecars, updates the lockfile index,

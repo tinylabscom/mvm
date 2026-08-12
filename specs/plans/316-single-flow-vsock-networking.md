@@ -2,7 +2,7 @@
 
 ## Status
 
-**Proposed. No implementation has started.**
+**Phase 0 in progress.**
 
 ## Tracking issues
 
@@ -157,6 +157,10 @@ the admitted launch state, never from guest bytes.
 
 ### Phase 0 — Ratify the invariant and freeze expansion
 
+- [x] Add `machine run --port HOST:GUEST` as a foreground convenience over the
+      existing `machine forward` seam. It adds no networking runtime path,
+      binds host loopback explicitly, and refuses detached ownership; Phase 5
+      will replace the transitional proxy with signed FlowMux ingress.
 - [ ] Add an accepted ADR that records the L4-with-selective-L7 decision, the
       impossibility of arbitrary guest TLS plus host replacement without TLS
       interception, and the rejection of a host MITM CA as the universal path.

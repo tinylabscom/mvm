@@ -1,16 +1,17 @@
-//! Egress-policy logic — iptables script generation and the
-//! `ipnet`/`std::net` mandatory-deny enforcement.
+//! Egress-policy logic — iptables script generation.
 //!
 //! The DTO half (`HostPort`, `NetworkPreset`, `EgressMode`,
 //! `NetworkPolicy`, the `BANNED_SSH_PORT`/`MANDATORY_DENY_RANGES`
-//! consts, `is_banned_ssh_port`, and every pure constructor/accessor)
-//! lives in `mvm_contract::policy::network_policy` and is re-exported
-//! below so every existing `crate::policy::network_policy::X` /
-//! `mvm_core::policy::network_policy::X` path keeps resolving unchanged.
+//! consts, `is_banned_ssh_port`, every pure constructor/accessor, and
+//! the `ipnet`-typed mandatory-deny predicates the egress projection
+//! decides with) lives in `mvm_contract::policy::network_policy` and is
+//! re-exported below so every existing `crate::policy::network_policy::X`
+//! / `mvm_core::policy::network_policy::X` path keeps resolving unchanged.
 
 pub use mvm_contract::policy::network_policy::{
     BANNED_SSH_PORT, EgressMode, HostPort, MANDATORY_DENY_RANGES, NetworkPolicy,
-    NetworkPolicyParseError, NetworkPreset, is_banned_ssh_port,
+    NetworkPolicyParseError, NetworkPreset, is_banned_ssh_port, is_mandatory_deny,
+    mandatory_deny_ranges, unmap_v4_mapped,
 };
 
 const SSH_BANNER_HEX_PREFIX: &str = "|5353482d|";
@@ -96,70 +97,6 @@ pub fn iptables_cleanup_script(
         br = bridge_dev,
         ip = guest_ip,
     ))
-}
-
-// ============================================================================
-// Mandatory deny ranges
-// ============================================================================
-
-/// Parse [`MANDATORY_DENY_RANGES`] into typed [`ipnet::IpNet`]s.
-/// Done at call time (no `lazy_static` / `OnceLock`) — the list
-/// is small (<10 entries) and parse cost is dominated by the
-/// `Vec` allocation. A malformed entry is a programmer bug, not
-/// a runtime failure; the `mandatory_deny_ranges_const_parses`
-/// test catches typos before they ship.
-///
-/// Note: panics if any entry fails to parse. The single test
-/// guards the const, so a panic here can only happen if a future
-/// edit slips both the const review and CI — caller doesn't need
-/// to handle the error path.
-pub fn mandatory_deny_ranges() -> Vec<ipnet::IpNet> {
-    MANDATORY_DENY_RANGES
-        .iter()
-        .map(|s| {
-            s.parse().unwrap_or_else(|_| {
-                panic!("MANDATORY_DENY_RANGES contains invalid CIDR {s:?} — fix the const")
-            })
-        })
-        .collect()
-}
-
-/// Returns `true` if `ip` falls within any of the mandatory
-/// deny ranges. The defense-in-depth check every egress
-/// enforcer (iptables setup, `CanonicalEgress::permits`, the L7
-/// proxy) should run *before* consulting the user's allow-list — a
-/// hit here means the destination is forbidden full stop, no matter
-/// how permissive the allow-list is.
-///
-/// Allocates a small `Vec` per call today; the call site is
-/// admission-path or per-flow, neither of which is hot enough to
-/// justify cached parsing. A perf-sensitive consumer can hoist
-/// [`mandatory_deny_ranges`] outside its loop.
-pub fn is_mandatory_deny(ip: std::net::IpAddr) -> bool {
-    let ip = unmap_v4_mapped(ip);
-    mandatory_deny_ranges().iter().any(|net| net.contains(&ip))
-}
-
-/// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its embedded
-/// IPv4 address, leaving every other address unchanged.
-///
-/// A dual-stack socket (the Linux default, without `IPV6_V6ONLY`) connecting
-/// to the mapped form is routed by the kernel to the embedded IPv4
-/// destination, so an egress range check that inspects the IPv6 form sees an
-/// opaque address and misses IPv4-only deny ranges — a `::ffff:169.254.169.254`
-/// would otherwise slip past the metadata deny. Normalizing here forces the
-/// check onto the address the kernel will actually reach. `::1`, `::`,
-/// `fe80::/10` and `fc00::/7` are not mapped forms, so they stay IPv6 and are
-/// classified by the IPv6 rules.
-#[must_use]
-pub fn unmap_v4_mapped(ip: std::net::IpAddr) -> std::net::IpAddr {
-    match ip {
-        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => std::net::IpAddr::V4(v4),
-            None => std::net::IpAddr::V6(v6),
-        },
-        std::net::IpAddr::V4(_) => ip,
-    }
 }
 
 /// Emit the iptables shell fragment that drops outbound from
@@ -305,169 +242,6 @@ mod tests {
         let policy = NetworkPolicy::deny_all();
         let script = iptables_cleanup_script(&policy, "br-mvm", "172.16.0.2").unwrap();
         assert!(script.contains("iptables -D FORWARD"));
-    }
-
-    // =====================================================================
-    // Mandatory deny ranges
-    // =====================================================================
-
-    /// Every entry in [`MANDATORY_DENY_RANGES`] must parse cleanly.
-    /// A typo here panics every consumer at runtime — catch it at
-    /// build time instead.
-    #[test]
-    fn mandatory_deny_ranges_const_parses() {
-        // `mandatory_deny_ranges()` itself panics on a parse
-        // failure, so calling it inside the test surfaces a typo
-        // as a test failure rather than a release-time panic.
-        let nets = mandatory_deny_ranges();
-        assert_eq!(
-            nets.len(),
-            MANDATORY_DENY_RANGES.len(),
-            "every constant entry should produce one IpNet"
-        );
-    }
-
-    /// The cloud metadata endpoint is the highest-stakes single
-    /// IP in the list. Asserting it directly (not just via the
-    /// containing `/16`) keeps the test loud if a future edit
-    /// removes the specific `/32` entry.
-    #[test]
-    fn cloud_metadata_endpoint_is_denied() {
-        let metadata: std::net::IpAddr = "169.254.169.254".parse().unwrap();
-        assert!(
-            is_mandatory_deny(metadata),
-            "AWS/GCP/Azure IMDS at 169.254.169.254 must be in the default-deny set"
-        );
-    }
-
-    #[test]
-    fn link_local_ipv4_is_denied() {
-        // Other points within the /16 must also fall in the deny
-        // set (the metadata `/32` is a subset of this `/16`).
-        for addr in ["169.254.0.1", "169.254.42.42", "169.254.255.254"] {
-            let ip: std::net::IpAddr = addr.parse().unwrap();
-            assert!(
-                is_mandatory_deny(ip),
-                "link-local IPv4 {addr} must be denied"
-            );
-        }
-    }
-
-    #[test]
-    fn link_local_ipv6_is_denied() {
-        for addr in ["fe80::1", "fe80::abcd:ef12:3456:7890"] {
-            let ip: std::net::IpAddr = addr.parse().unwrap();
-            assert!(
-                is_mandatory_deny(ip),
-                "link-local IPv6 {addr} must be denied"
-            );
-        }
-    }
-
-    #[test]
-    fn cgnat_range_is_denied() {
-        // 100.64.0.0/10 = 100.64.0.0 through 100.127.255.255.
-        for addr in ["100.64.0.1", "100.127.255.254"] {
-            let ip: std::net::IpAddr = addr.parse().unwrap();
-            assert!(is_mandatory_deny(ip), "CGNAT {addr} must be denied");
-        }
-        // Just outside the CGNAT range must NOT be denied.
-        let outside: std::net::IpAddr = "100.63.255.255".parse().unwrap();
-        assert!(
-            !is_mandatory_deny(outside),
-            "100.63.255.255 is one below CGNAT and should NOT be denied"
-        );
-        let above: std::net::IpAddr = "100.128.0.0".parse().unwrap();
-        assert!(
-            !is_mandatory_deny(above),
-            "100.128.0.0 is one above CGNAT and should NOT be denied"
-        );
-    }
-
-    #[test]
-    fn host_loopback_v4_and_v6_are_denied() {
-        let v4: std::net::IpAddr = "127.0.0.1".parse().unwrap();
-        let v6: std::net::IpAddr = "::1".parse().unwrap();
-        assert!(is_mandatory_deny(v4), "127.0.0.1 must be denied");
-        assert!(is_mandatory_deny(v6), "::1 must be denied");
-        // Anywhere inside 127.0.0.0/8 must be denied too.
-        let nested: std::net::IpAddr = "127.42.99.7".parse().unwrap();
-        assert!(is_mandatory_deny(nested), "127.42.99.7 must be denied");
-    }
-
-    #[test]
-    fn ipv4_mapped_forms_do_not_bypass_mandatory_deny() {
-        // The IPv4-only deny ranges must still catch the IPv4-mapped IPv6
-        // spelling — a dual-stack connect to `::ffff:a.b.c.d` reaches `a.b.c.d`.
-        for addr in [
-            "::ffff:169.254.169.254", // metadata
-            "::ffff:127.0.0.1",       // loopback
-            "::ffff:100.64.0.1",      // CGNAT
-        ] {
-            let ip: std::net::IpAddr = addr.parse().unwrap();
-            assert!(is_mandatory_deny(ip), "mapped {addr} must be denied");
-        }
-        // A mapped *public* address is not mandatory-deny.
-        let public: std::net::IpAddr = "::ffff:93.184.216.34".parse().unwrap();
-        assert!(
-            !is_mandatory_deny(public),
-            "mapped public must not be denied"
-        );
-    }
-
-    /// Legitimate public IPs must pass through cleanly so a
-    /// future regression that overzealously expands the deny
-    /// set (e.g. blocking all RFC1918) surfaces here.
-    #[test]
-    fn legitimate_public_ips_are_not_denied() {
-        let cases = [
-            "8.8.8.8",              // Google DNS
-            "1.1.1.1",              // Cloudflare DNS
-            "104.16.0.1",           // arbitrary Cloudflare anycast
-            "2001:4860:4860::8888", // Google DNS IPv6
-            "2606:4700:4700::1111", // Cloudflare DNS IPv6
-        ];
-        for addr in cases {
-            let ip: std::net::IpAddr = addr.parse().unwrap();
-            assert!(
-                !is_mandatory_deny(ip),
-                "{addr} must NOT be denied (legitimate public dest)"
-            );
-        }
-    }
-
-    /// RFC1918 ranges are deliberately NOT in the default-deny
-    /// set — corporate VPNs, home labs, and k8s pod networks live
-    /// here and breaking them would be a UX regression. If a
-    /// future edit accidentally adds RFC1918 to the const, this
-    /// test fails loudly and the maintainer reads the comment
-    /// above MANDATORY_DENY_RANGES that says why.
-    #[test]
-    fn rfc1918_is_not_in_default_deny() {
-        let cases = ["10.0.0.1", "172.16.0.1", "192.168.1.1"];
-        for addr in cases {
-            let ip: std::net::IpAddr = addr.parse().unwrap();
-            assert!(
-                !is_mandatory_deny(ip),
-                "{addr} is RFC1918 — must NOT be in default-deny (legitimate corp/VPN use)"
-            );
-        }
-    }
-
-    /// The first entry in the list is the cloud metadata `/32`.
-    /// Pinning the order matters: a maintainer scanning the
-    /// const should hit the most consequential entry first and
-    /// think twice before removing it. If a future PR rearranges
-    /// the entries, this assertion forces a conscious decision
-    /// rather than a silent reordering.
-    #[test]
-    fn cloud_metadata_is_first_entry_in_const() {
-        assert_eq!(
-            MANDATORY_DENY_RANGES[0], "169.254.169.254/32",
-            "cloud metadata /32 should be the first entry — it's the most \
-             consequential single address and a maintainer scanning the \
-             list should see it before anything else"
-        );
     }
 
     // =====================================================================
