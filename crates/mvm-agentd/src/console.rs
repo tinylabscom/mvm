@@ -9,7 +9,7 @@
 //! authenticated vsock protocol).
 
 use std::io::{Read, Write};
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::vsock::{CONSOLE_PORT_BASE, HOST_CID};
@@ -509,9 +509,12 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
         return close_session(session);
     };
 
-    // Set read timeout for idle detection (15 minutes)
-    let idle_timeout = std::time::Duration::from_secs(15 * 60);
-    let _ = vsock_read.set_read_timeout(Some(idle_timeout));
+    // Output-only programs remain interactive: a lack of keyboard input must
+    // never silently retire the only thread capable of forwarding Ctrl-C.
+    if let Err(error) = configure_console_input(&vsock_read) {
+        eprintln!("console: failed to configure input stream: {error}");
+        return close_session(session);
+    }
 
     // SAFETY: `master_fd` is the PTY master from openpty; we transfer sole
     // ownership of it to this File.
@@ -522,38 +525,30 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
         return close_session(session);
     };
 
-    let done = std::sync::Arc::new(AtomicBool::new(false));
-    let done2 = done.clone();
-
     // vsock → PTY (host input → shell)
-    // Idle timeout: if no input for 15 minutes, the read times out and we close.
     let h1 = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match vsock_read.read(&mut buf) {
-                Ok(0) => {
-                    done2.store(true, Ordering::SeqCst);
-                    break;
-                }
-                Err(ref e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    eprintln!("console: idle timeout reached, closing session");
-                    done2.store(true, Ordering::SeqCst);
-                    break;
-                }
-                Err(_) => {
-                    done2.store(true, Ordering::SeqCst);
-                    break;
-                }
+                Ok(0) => break,
+                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
                 Ok(n) => {
                     if pty_write.write_all(&buf[..n]).is_err() {
-                        done2.store(true, Ordering::SeqCst);
                         break;
                     }
                 }
             }
+        }
+
+        // A host disconnect or local escape ends the console session. Terminate
+        // the PTY foreground process group so the output pump cannot remain
+        // blocked forever on a command such as `top`.
+        terminate_console_processes(child_pid, pty_write.as_raw_fd());
+        // SAFETY: `conn_fd` is the socket underlying `vsock_read`; shutdown
+        // wakes the cloned writer without taking ownership from either thread.
+        unsafe {
+            shutdown(conn_fd, SHUT_RDWR);
         }
     });
 
@@ -607,6 +602,34 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
     CONSOLE_CHILD_PID.store(-1, std::sync::atomic::Ordering::SeqCst);
     CONSOLE_ACTIVE.store(false, Ordering::SeqCst);
     exit_code
+}
+
+fn configure_console_input(stream: &std::os::unix::net::UnixStream) -> std::io::Result<()> {
+    stream.set_read_timeout(None)
+}
+
+fn terminate_console_processes(child_pid: i32, pty_fd: RawFd) {
+    // The interactive shell may have placed its current job in a distinct
+    // foreground process group. Signal that group first, then the shell/session
+    // leader itself. ESRCH is expected when either already exited.
+    let foreground = unsafe { libc::tcgetpgrp(pty_fd) };
+    for target in console_signal_targets(child_pid, foreground)
+        .into_iter()
+        .flatten()
+    {
+        // SAFETY: a negative target addresses the PTY foreground process group;
+        // a positive target is the child created for this console session.
+        unsafe {
+            kill(target, SIGTERM);
+        }
+    }
+}
+
+fn console_signal_targets(child_pid: i32, foreground: i32) -> [Option<i32>; 2] {
+    [
+        (foreground > 0).then(|| -foreground),
+        (foreground != child_pid).then_some(child_pid),
+    ]
 }
 
 /// Check if a console session is currently active.
@@ -1018,6 +1041,41 @@ mod tests {
             libc::WEXITSTATUS(status),
             0,
             "child could not open /dev/tty — no controlling terminal acquired"
+        );
+    }
+
+    #[test]
+    fn console_input_has_no_one_way_idle_timeout() {
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(1)))
+            .expect("install test timeout");
+
+        configure_console_input(&stream).expect("configure console input");
+
+        assert_eq!(
+            stream.read_timeout().expect("read timeout"),
+            None,
+            "guest output may keep a console useful indefinitely, so host input must not expire"
+        );
+    }
+
+    #[test]
+    fn console_disconnect_targets_the_foreground_job_and_session_leader() {
+        assert_eq!(
+            console_signal_targets(42, 77),
+            [Some(-77), Some(42)],
+            "an interactive foreground job may be in a different process group"
+        );
+        assert_eq!(
+            console_signal_targets(42, 42),
+            [Some(-42), None],
+            "the process group signal already includes its leader"
+        );
+        assert_eq!(
+            console_signal_targets(42, -1),
+            [None, Some(42)],
+            "fall back to the session child when the PTY has no foreground group"
         );
     }
 }

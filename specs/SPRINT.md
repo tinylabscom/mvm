@@ -10,6 +10,22 @@
 
 ## Current issue delivery
 
+- [x] Long-running interactive consoles no longer lose their input relay after
+      15 minutes without keyboard activity. Guest output can continue
+      indefinitely while later `Ctrl+C` bytes still reach the PTY foreground
+      job; host disconnect closes both relay directions and terminates the PTY
+      process group; and the documented line-start `~.` escape now provides a
+      host-local exit path. A concurrent `machine stop` is distinguished from a
+      live-VM control failure, so its expected exit-code-channel EOF ends the
+      attached console cleanly without hiding real framing errors. The
+      raw-terminal state is restored through an RAII guard. Focused console
+      regressions, the full serial workspace suite
+      (including 631 `mvm-agentd` and 1,661 `mvm-cli` library tests), workspace
+      check, macOS workspace all-target Clippy, and the aarch64 Linux guest-agent
+      cross-build pass. The default parallel workspace run exposes unrelated
+      global test environment races; the affected tests pass in isolation and
+      serially.
+
 - [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
       successful bootstrap does not defer an infrastructure build to the next
