@@ -32,7 +32,8 @@ use super::oci_types::OciImageConfig;
 /// cached runtime-lean rootfs entries otherwise panic after the verity handoff.
 /// Epoch 7 adds the allowed top-level block-volume mount roots to sealed OCI
 /// images; an older read-only image cannot create those mountpoints at boot.
-const OCI_RUNTIME_EPOCH: u32 = 7;
+/// Epoch 8 invalidates roots that may contain a stale cross-worktree `/init`.
+const OCI_RUNTIME_EPOCH: u32 = 8;
 
 /// Identity of the legacy guest runtime injected from the invoking source
 /// checkout. Cheap and build-free so it can gate the cache-hit path without

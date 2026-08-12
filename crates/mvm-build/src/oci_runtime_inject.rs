@@ -13,6 +13,7 @@
 //! - `/usr/lib/mvm/wrappers/oci-entrypoint` plus `/etc/mvm/entrypoint`
 //!   when the OCI config declares Entrypoint/Cmd.
 //! - `/mvm/runtime`, the shared runtime overlay mount point.
+//! - `/mvm/sdk`, the reserved read-only SDK sidecar mount point.
 //! - `/etc/mvm/{name,variant}` and, for sealed boots,
 //!   `/etc/mvm/verb-trust.json`.
 //! - For rootfs-only launch shapes, baked guest binaries under
@@ -109,6 +110,7 @@ pub fn inject_mvm_runtime(
         ("data", 0o755),
         ("work", 0o755),
         ("mvm/runtime", 0o755),
+        ("mvm/sdk", 0o755),
         ("usr/lib/mvm/wrappers", 0o755),
     ] {
         ensure_dir(rootfs_dir, rel, mode)?;
@@ -319,6 +321,10 @@ mod tests {
         assert_eq!(written_entrypoint, entrypoint);
         assert!(injected.runtime_mount_point.is_dir());
         assert!(root.join("mvm/runtime").is_dir());
+        assert!(
+            root.join("mvm/sdk").is_dir(),
+            "the sealed root must carry the reserved SDK mountpoint"
+        );
         for rel in [
             "proc", "sys", "dev/pts", "dev/shm", "run", "tmp", "mnt", "data", "work",
         ] {

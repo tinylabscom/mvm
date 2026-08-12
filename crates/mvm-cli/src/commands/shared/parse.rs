@@ -214,11 +214,15 @@ pub fn parse_dir_share_spec(spec: &str) -> Result<DirShareSpec> {
             host_dir,
             guest_mount,
             read_only,
-        } => Ok(DirShareSpec {
-            host_dir,
-            guest_mount,
-            read_only,
-        }),
+        } => {
+            validate_guest_mount(&guest_mount)
+                .map_err(|error| anyhow::anyhow!("invalid mount '{spec}': {error}"))?;
+            Ok(DirShareSpec {
+                host_dir,
+                guest_mount,
+                read_only,
+            })
+        }
         VolumeSpec::Disk { .. } => anyhow::bail!(
             "mount '{spec}' includes a disk size; transient machine run accepts only live host-directory shares"
         ),
@@ -499,6 +503,19 @@ mod volume_spec_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn transient_dir_share_rejects_a_guest_path_outside_the_mount_allow_list() {
+        let error = parse_dir_share_spec("/host/wheels:/wheels:ro")
+            .expect_err("/wheels is outside the guest mount allow-list")
+            .to_string();
+
+        assert!(error.contains("invalid mount"), "unexpected error: {error}");
+        assert!(
+            error.contains("user volumes may only mount under /data, /work, /mnt"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
