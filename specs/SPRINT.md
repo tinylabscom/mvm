@@ -18,12 +18,6 @@
 > fails if this list grows.
 
 
-- [x] `machine run --port HOST:GUEST` now boots a persistent machine and owns
-      repeatable loopback-only forwards in the foreground, reusing the existing
-      `machine forward` lifecycle. Invalid mappings and detached ownership fail
-      before boot; parser, lifecycle-resolution, listener-bind, and hermetic BDD
-      coverage pin the contract; all 174 BDD scenarios pass.
-
 - [x] Long-running interactive consoles no longer lose their input relay after
       15 minutes without keyboard activity. Guest output can continue
       indefinitely while later `Ctrl+C` bytes still reach the PTY foreground
@@ -39,15 +33,6 @@
       cross-build pass. The default parallel workspace run exposes unrelated
       global test environment races; the affected tests pass in isolation and
       serially.
-
-- [x] Merge-group CI scoping — **plan 322**. A fail-closed SHA-range
-      classifier keeps the full Rust matrix for behavior-changing diffs and
-      manual runs, while prose/site-only pull requests and merge groups avoid
-      six cold Rust jobs. Policy and the independently scoped required Nix
-      check remain unconditional authorities for their own input surfaces.
-      Workflow syntax, formatting, workspace compilation, all-target Clippy,
-      and all 499 `xtask` tests pass; the sole transient workspace-suite
-      host-restart failure passed on its exact isolated rerun.
 
 - [x] Bootstrap machine readiness — **plan 315**. `mvmctl bootstrap` now
       prepares both the builder VM and verified dm-verity workload kernel, so a
