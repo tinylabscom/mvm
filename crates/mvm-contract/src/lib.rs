@@ -50,6 +50,11 @@ pub mod policy;
 pub mod protocol;
 #[cfg(feature = "protocol")]
 pub mod stream;
+/// The guest-side placeholder token a secret-bearing request carries: its
+/// reserved namespace, its opaque newtype, and the header scan. Minting and
+/// custody stay host-side.
+#[cfg(feature = "protocol")]
+pub mod substitution;
 #[cfg(feature = "protocol")]
 pub mod verify;
 
