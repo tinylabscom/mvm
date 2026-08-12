@@ -752,7 +752,10 @@ for detailed scope and acceptance criteria.
         standing drift hazard on a security predicate does not belong behind
         this plan.
   - [~] E3 audit writer core — moves/stays pass **done**, E3.0 decided
-        (**option A**), code not started. `mvm-contract`'s `verify.rs`
+        (**option A**), E3.1 (frozen byte fixture) shipped, remaining code
+        **blocked on #2379** (audit-log rotation), which restructures the two
+        files E3 unifies; re-validate the moves/stays table against the
+        post-319 `audit_file.rs` before writing E3.2+. `mvm-contract`'s `verify.rs`
         already carries a field-identical `SignedEnvelope` over a
         hand-maintained `MirrorEntry`, so E3 unifies with it rather than
         adding a second: move the real `AuditEntry` down and retire the

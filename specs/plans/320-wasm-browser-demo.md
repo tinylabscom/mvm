@@ -328,13 +328,25 @@ stops verifying because a struct moved crates is the exact failure mode the
 
 #### Order
 
+**Blocked on plan 319.** [#2379](https://github.com/tinylabscom/mvm/pull/2379)
+(audit-log rotation) restructures `audit_file.rs` and touches
+`mvm-contract`'s `verify.rs` — the two files E3 unifies. The moves/stays
+table below was mapped against `audit_file.rs` as it stands on `main`, so
+**re-validate it against the post-319 file before writing any E3 code.**
+E3.1 is unaffected and already done.
+
 - [x] E3.0 — option A chosen.
-- [ ] E3.1 — freeze the byte fixture (a signed multi-entry chain + its
-      verifying key) and assert it verifies. Do this first, on `main`'s
-      behaviour, so it is a real before-picture. Worth landing on its own
-      merits: it protects the chain from any future change, not only this
-      one.
-- [ ] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
+- [x] E3.1 — freeze the byte fixture (a signed multi-entry chain + its
+      verifying key) and assert it verifies. Landed as
+      `crates/mvm-hostd/tests/audit_chain_frozen_bytes.rs` + two fixtures:
+      the writer's exact output plus a hand-authored pre-`canonical` chain,
+      each accepted by both verifiers. Confirmed load-bearing by
+      perturbation — reordering two `AuditEntry` field declarations fails
+      the legacy chain with `SignatureInvalid { line: 0 }`.
+      Checked against #2379's branch as well: clean merge, 6/6 green, so
+      rotation does not change whether existing logs verify.
+- [ ] E3.2 — hard-rename one of the two `AuditEntry`s. No alias. **Gated on
+      #2379 landing**, then on the re-validation above.
 - [ ] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
       definition each, `mvm-hostd` calling `mvm-contract`.
 - [ ] E3.4 — `AuditEntry` →P; `for_plan` becomes a free fn.
