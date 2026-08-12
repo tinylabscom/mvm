@@ -11,6 +11,10 @@ for detailed scope and acceptance criteria.
       its shared-memory length and base registers, so Linux no longer rejects
       `uvol` devices as zero-length DAX windows. Unit coverage and the original
       native-HVF Alpine directory-share command pass.
+- [x] **Foreground `machine run` port forwarding.** Repeatable
+      `--port HOST:GUEST` promotes a run to a persistent machine, delegates to
+      the existing forwarding lifecycle, binds loopback rather than socat's
+      wildcard default, and refuses detached or competing attached ownership.
 - [x] **CLI help layout invariant.** Every visible and hidden command emits one
       physical line per help item, strictly shorter than 80 columns, for
       `--help`, `-h`, and `mvmctl help <path>`. The shared renderer compacts
