@@ -611,6 +611,54 @@ pub fn clear_builder_store(dry_run: bool) -> std::io::Result<BuilderStoreRepair>
     clear_builder_store_at(&builder_vm_cache_dir(), dry_run)
 }
 
+/// The architecture tag used in cached builder artifact filenames
+/// (`nix-store-<arch>.img`).
+///
+/// Lives here rather than in `libkrun_builder` because that module is gated
+/// behind the `builder-vm` feature, and store recovery must work without it.
+pub fn host_arch_tag() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
+}
+
+/// Remove only the persistent Nix store image for `arch`, leaving the builder
+/// kernel/rootfs, the Stage 0 seed, and the job dirs in place.
+///
+/// The narrow counterpart to [`clear_builder_store`]. When the store image
+/// itself is the damaged piece — the kernel recorded ext4 errors on it — there
+/// is no reason to also discard tens of gigabytes of intact, expensive-to-
+/// rebuild builder images. The next build recreates the store from the seed.
+pub fn clear_builder_store_image(dry_run: bool) -> std::io::Result<BuilderStoreRepair> {
+    clear_builder_store_image_at(&builder_vm_cache_dir(), host_arch_tag(), dry_run)
+}
+
+/// [`clear_builder_store_image`] with an explicit dir — the unit-testable core.
+pub fn clear_builder_store_image_at(
+    dir: &std::path::Path,
+    arch: &str,
+    dry_run: bool,
+) -> std::io::Result<BuilderStoreRepair> {
+    let image = dir.join(format!("nix-store-{arch}.img"));
+    let existed = image.exists();
+    let bytes_freed = if existed {
+        std::fs::metadata(&image).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
+    if existed && !dry_run {
+        std::fs::remove_file(&image)?;
+    }
+    Ok(BuilderStoreRepair {
+        path: image.display().to_string(),
+        existed,
+        bytes_freed,
+        dry_run,
+    })
+}
+
 /// [`clear_builder_store`] with an explicit dir — the unit-testable core.
 pub fn clear_builder_store_at(
     dir: &std::path::Path,
@@ -1155,6 +1203,51 @@ mod tests {
         assert!(done.existed && !done.dry_run);
         assert_eq!(done.bytes_freed, 4196);
         assert!(!store.exists(), "repair must remove the store dir");
+    }
+
+    #[test]
+    fn clearing_only_the_store_image_keeps_the_expensive_builder_artifacts() {
+        // The whole point: a damaged store image must not cost the intact
+        // stage0 seed and builder images alongside it.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("builder-vm");
+        std::fs::create_dir_all(store.join("hvf")).unwrap();
+        std::fs::write(store.join("nix-store-aarch64.img"), vec![0u8; 4096]).unwrap();
+        std::fs::write(store.join("nix-store-stage0-aarch64.img"), vec![0u8; 512]).unwrap();
+        std::fs::write(store.join("hvf/rootfs.ext4"), vec![0u8; 256]).unwrap();
+
+        let dry = clear_builder_store_image_at(&store, "aarch64", true).unwrap();
+        assert!(dry.existed && dry.dry_run);
+        assert_eq!(dry.bytes_freed, 4096);
+        assert!(
+            store.join("nix-store-aarch64.img").exists(),
+            "dry-run must not delete"
+        );
+
+        let done = clear_builder_store_image_at(&store, "aarch64", false).unwrap();
+        assert!(done.existed && !done.dry_run);
+        assert_eq!(done.bytes_freed, 4096);
+        assert!(
+            !store.join("nix-store-aarch64.img").exists(),
+            "the damaged image goes"
+        );
+        assert!(
+            store.join("nix-store-stage0-aarch64.img").exists(),
+            "the stage0 seed must survive"
+        );
+        assert!(
+            store.join("hvf/rootfs.ext4").exists(),
+            "builder images must survive"
+        );
+    }
+
+    #[test]
+    fn clearing_a_store_image_that_is_absent_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("builder-vm");
+        std::fs::create_dir_all(&store).unwrap();
+        let r = clear_builder_store_image_at(&store, "aarch64", false).unwrap();
+        assert!(!r.existed && r.bytes_freed == 0);
     }
 
     #[test]

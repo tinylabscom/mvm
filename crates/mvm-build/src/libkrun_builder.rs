@@ -2175,11 +2175,7 @@ fn krun_context_for_image(
 /// ARM Linux, `x86_64` everywhere else. The builder-vm flake
 /// emits both per release.
 pub(crate) fn host_arch_tag() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "x86_64"
-    }
+    crate::builder_vm::host_arch_tag()
 }
 
 /// `~/.mvm/cache/builder-vm/`. Wrapper around
