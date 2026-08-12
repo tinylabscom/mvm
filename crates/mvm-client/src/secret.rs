@@ -42,7 +42,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use mvm_contract::ir::host_matches;
+use mvm_contract::ir::host_is_bound;
 use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore};
 use serde::Serialize;
@@ -424,11 +424,7 @@ impl SecretService {
             };
             validate_binding_meta(&r.tenant, &r.name, &meta)?;
             for destination in &r.destinations {
-                if !meta
-                    .allowed_hosts
-                    .iter()
-                    .any(|p| host_matches(p, destination))
-                {
+                if !host_is_bound(&meta.allowed_hosts, destination) {
                     return Err(SecretServiceError::UnauthorizedDestination {
                         tenant: r.tenant.clone(),
                         name: r.name.clone(),

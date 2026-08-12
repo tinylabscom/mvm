@@ -31,5 +31,5 @@ pub use workload::{
     Image, InProcessMode, JsonSchemaShape, MaterializedFile, Mount, MountMode, MountSource,
     Network, NetworkDns, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool,
     Resources, SecretMount, SecretRef, Sigv4Params, Source, Volume, WarmProcessConfig, Workload,
-    host_matches,
+    host_is_bound, host_matches,
 };
