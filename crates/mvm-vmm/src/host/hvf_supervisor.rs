@@ -42,15 +42,16 @@ pub struct HvfVirtioFsShare {
     pub tag: String,
 }
 
-/// A host UDS that the supervisor binds on behalf of one guest vsock data port,
-/// allowing the console driver to connect and exchange PTY data with the guest.
-/// Populated only when `dev_console` is true; a sealed prod config carries none.
+/// A host UDS the supervisor binds on behalf of one guest vsock port the guest
+/// listens on and the host dials — a console data stream or a builder control
+/// channel. Which ports appear is a policy decision made by the caller;
+/// see `host::spec_map`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ConsoleDataSocket {
-    /// The vsock port the guest console session is listening on.
+pub struct HostDialSocket {
+    /// The vsock port the guest is listening on.
     pub guest_port: u32,
-    /// Host UDS path the supervisor binds so the console driver can connect.
+    /// Host UDS path the supervisor binds so a host client can connect.
     pub host_socket: PathBuf,
 }
 
@@ -190,7 +191,12 @@ pub struct HvfSupervisorConfig {
     /// console driver may connect to. Empty for sealed prod configs (claim 15).
     /// Populated by the driver when `VmStartConfig.dev_console` is true.
     #[serde(default)]
-    pub console_data_sockets: Vec<ConsoleDataSocket>,
+    pub console_data_sockets: Vec<HostDialSocket>,
+    /// Builder-tier control sockets: job dispatch and the resident daemon's
+    /// typed channel, for a persistent builder VM. Empty for every workload —
+    /// a guest that isn't the build engine serves neither port.
+    #[serde(default)]
+    pub builder_control_sockets: Vec<HostDialSocket>,
     /// Fixed supervisor-owned control socket for a live standby handoff.
     /// `None` disables this privileged path for ordinary VMs.
     #[serde(default)]
@@ -245,6 +251,7 @@ mod tests {
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
             broker_socket: Some("/state/hvf-broker.sock".into()),
             console_data_sockets: vec![],
+            builder_control_sockets: vec![],
             handoff_socket: Some("/state/handoff.sock".into()),
             handoff_root: Some("/state/vms".into()),
             handoff_verify_key: Some("11".repeat(32)),
@@ -338,12 +345,13 @@ mod tests {
             substitution_socket: None,
             egress_relay_socket: None,
             broker_socket: None,
+            builder_control_sockets: vec![],
             console_data_sockets: vec![
-                ConsoleDataSocket {
+                HostDialSocket {
                     guest_port: 20001,
                     host_socket: "/state/vsock/vsock-20001.sock".into(),
                 },
-                ConsoleDataSocket {
+                HostDialSocket {
                     guest_port: 20002,
                     host_socket: "/state/vsock/vsock-20002.sock".into(),
                 },

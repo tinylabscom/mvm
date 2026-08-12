@@ -228,9 +228,17 @@ pub(in crate::commands) fn check_host_can_serve(
 }
 
 /// Settle and validate the networking configuration before anything boots.
+///
+/// A workload declaring `raw_ip_stack` is refused here, at the declaration it
+/// wrote, rather than deeper down at a transport it never named: the in-guest
+/// IP stack has been retired, and the refusal names the loopback adapters and
+/// typed connectors that replace it. Everything below this point still
+/// resolves the tunnel for a VM that is already running, which is what lets
+/// those drain instead of being killed mid-flight.
 pub(in crate::commands) fn preflight_network(
     needs_raw_ip_stack: bool,
 ) -> anyhow::Result<mvm_contract::plan::NetworkMode> {
+    mvm_core::plan::refuse_raw_ip_stack(needs_raw_ip_stack)?;
     let mode = derive_network_mode(needs_raw_ip_stack);
     check_host_can_serve(mode)?;
     Ok(mode)

@@ -1,7 +1,16 @@
 # ADR-036 — L3 TUN-over-vsock, an opt-in compatibility network mode
 
-**Status: Accepted**
+**Status: Superseded for production workload networking by ADR-042
+(2026-08-11).**
 **Date: 2026-07-31**
+**Superseded by: ADR-042 (one flow-aware vsock networking path). The
+`l3-vsock` mode this ADR introduced is leaving the production workload path;
+new `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused. The
+measurements, threat analysis, and compatibility-wall reasoning below remain
+accurate history, and are why ADR-042 states an explicit compatibility
+ceiling rather than pretending the wall does not exist. Nothing below
+describes a live production transport. The staged removal is
+`specs/plans/316-single-flow-vsock-networking.md`.**
 **Supersedes: nothing. Complements ADR-003 (cross-platform backends),
 ADR-014 (signed/audited execution plans), ADR-020 (host-services broker),
 ADR-023 (secrets subsystem / egress substitution), plan 278 (transparent

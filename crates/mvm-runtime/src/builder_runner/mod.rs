@@ -5,11 +5,16 @@
 //! `runner` owns the disk prep + VM lifecycle.
 
 pub mod hvf_builder;
+pub mod hvf_persistent;
 pub mod inject;
 pub mod runner;
 pub mod spec;
 
 pub use hvf_builder::HvfBuilderVm;
+pub use hvf_persistent::{HvfPersistentHostVm, PersistentHvfSession};
 pub use inject::{InjectRequest, default_inject_work_dir, inject_host_binaries};
 pub use runner::{BuilderBuild, BuilderOutcome, BuilderRunner};
-pub use spec::{BUILDER_CMDLINE, BuilderSpecInputs, builder_spec};
+pub use spec::{
+    BUILDER_CMDLINE, BuilderSpecInputs, PERSISTENT_BUILDER_CMDLINE, PersistentBuilderSpecInputs,
+    builder_spec, persistent_builder_spec,
+};

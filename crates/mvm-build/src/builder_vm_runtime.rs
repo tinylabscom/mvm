@@ -34,11 +34,68 @@ use serde::Deserialize;
 use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderVmError, VmBackendForBuilder};
 pub use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 
+/// Sparse allocation + cross-process locking for the persistent block
+/// images a builder VM attaches. Re-exported below so callers keep
+/// naming `builder_vm_runtime::acquire_nix_store_image_lock`.
+mod image_lock;
+
+pub use image_lock::{
+    DEFAULT_LOCK_WAIT, LOCK_WAIT_ENV, LockWait, NixStoreImageLock, acquire_nix_store_image_lock,
+    acquire_nix_store_image_lock_named,
+};
+pub(crate) use image_lock::{
+    acquire_sidecar_lock_within, pid_alive, sidecar_lock_path, sparse_create_image,
+};
+
 /// Wall-clock timeout for a builder VM run when the operator hasn't
 /// overridden it. 30 minutes covers a cold-cache `nix build` of the
 /// project's heaviest derivations on a fresh CI runner without
 /// punishing fast machines.
 pub const DEFAULT_BUILDER_VM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Filename of the marker the host stages under `<job_dir>/` to tell
+/// `mvm-host-vm-init` to enter its dispatch loop instead of running the
+/// single-shot `cmd.sh` / `install_spec` flow.
+///
+/// The guest hardcodes the same literal — it is a separate binary that cannot
+/// depend on this crate — so the string is pinned on both sides. Backend-
+/// agnostic: the marker is part of the guest contract, not of any one VMM.
+pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
+
+/// Filename the guest creates after binding its dispatch listener. The host
+/// waits for it before publishing a usable session record.
+pub const DISPATCH_READY_MARKER: &str = "dispatch.ready";
+
+/// How long a host waits for a persistent builder's dispatch loop to come up.
+/// A first boot formats and seeds the persistent Nix disk before exposing the
+/// listener, and that seed is a large closure copy, so the window has to cover
+/// a cold disk as well as a warm boot.
+pub const PERSISTENT_BUILDER_READY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Stage `<job_dir>/<DISPATCH_SOCK_MARKER>` so the in-guest
+/// `mvm-host-vm-init` enters its dispatch loop, and clear any stale ready
+/// marker from a previous session so the caller's readiness wait cannot
+/// observe the last boot's.
+///
+/// The marker body is intentionally empty — its existence is the signal.
+pub fn stage_persistent_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
+    std::fs::create_dir_all(job_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "creating persistent job dir {}: {e}",
+            job_dir.display()
+        ))
+    })?;
+    let marker_path = job_dir.join(DISPATCH_SOCK_MARKER);
+    let ready_path = job_dir.join(DISPATCH_READY_MARKER);
+    let _ = std::fs::remove_file(&ready_path);
+    std::fs::write(&marker_path, b"").map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "staging dispatch marker {}: {e}",
+            marker_path.display()
+        ))
+    })?;
+    Ok(())
+}
 
 /// libkrun exposes attached sparse block images 64 KiB shorter than their
 /// host-side file length. Reserve that tail when creating a new image so an
@@ -1175,213 +1232,6 @@ pub fn finalize_install_job(artifact_out: &Path) -> Result<BuilderArtifacts, Bui
     })
 }
 
-/// Host-side exclusive lock guarding the persistent `/nix-store` sparse
-/// image.
-///
-/// The builder VM attaches the image as a writable virtio-blk device;
-/// the guest's `mvm-host-vm-init` mounts it as ext4 at `/nix-store`.
-/// Two independent guests mounting the same ext4 image read-write can
-/// corrupt the filesystem, so the host holds an exclusive `flock` for
-/// the full VM lifetime.
-///
-/// The lock lives on a **sidecar** `<image>.lock` file, NOT on the
-/// image fd itself. The macOS hypervisor takes its own exclusive lock on
-/// the disk image when the VM starts; if the host also held an `flock` on
-/// the image it would collide ("The storage device attachment is
-/// invalid"). libkrun doesn't lock the image, so it was unaffected — the
-/// sidecar split keeps the cross-process serialisation while letting the
-/// hypervisor open the image exclusively. The host holds no fd on the
-/// image.
-///
-/// `_file: std::fs::File` is **load-bearing** — it's the sidecar lock
-/// handle; dropping the guard releases the lock. Callers must keep the
-/// guard alive until the supervisor exits and all artifact reads are
-/// done. Called out explicitly because an underscore-prefixed field
-/// reads as inert; it isn't.
-///
-/// Hypervisor-agnostic: both libkrun and HVF attach the same image
-/// path as a virtio-blk device. Migrated from `libkrun_builder.rs`.
-#[derive(Debug)]
-pub struct NixStoreImageLock {
-    path: PathBuf,
-    _file: std::fs::File,
-}
-
-impl NixStoreImageLock {
-    /// Path to the image file. Callers pass this into the hypervisor as
-    /// the `virtio-blk` device backing. (The lock is on `<path>.lock`.)
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-/// Sidecar lock path for an image: `<image>.lock` (appended, not an
-/// extension swap, so `foo.img` → `foo.img.lock`). Ends in `.lock` so
-/// it never matches `cache info`'s `nix-store-*.img` glob.
-pub(crate) fn sidecar_lock_path(image: &Path) -> PathBuf {
-    let mut s = image.as_os_str().to_os_string();
-    s.push(".lock");
-    PathBuf::from(s)
-}
-
-/// Sparse-allocate `path` to `size_bytes` minus the libkrun tail reserve if
-/// it's missing or empty,
-/// then close the fd. The filesystem records the size without
-/// allocating blocks until something writes them (APFS + ext4), so a
-/// multi-GiB cap costs ~nothing until used. An existing non-empty file
-/// is left untouched so a warm store / volume survives across runs.
-///
-/// The fd is dropped before returning — deliberately. The host must
-/// hold no open handle on the image so the hypervisor (HVF) can
-/// open it exclusively; serialisation lives on the sidecar lock.
-pub(crate) fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmError> {
-    let existed_before_open = path.exists();
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|e| BuilderVmError::ExtractionFailed(format!("open {}: {e}", path.display())))?;
-
-    let len = file
-        .metadata()
-        .map_err(|e| BuilderVmError::ExtractionFailed(format!("metadata {}: {e}", path.display())))?
-        .len();
-    if len == 0 {
-        let image_bytes = size_bytes
-            .checked_sub(LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES)
-            .ok_or_else(|| {
-                BuilderVmError::ExtractionFailed(format!(
-                    "image size {size_bytes} is too small for the libkrun block-device reserve"
-                ))
-            })?;
-        file.set_len(image_bytes).map_err(|e| {
-            if !existed_before_open {
-                let _ = std::fs::remove_file(path);
-            }
-            BuilderVmError::ExtractionFailed(format!(
-                "set_len({image_bytes}) on {}: {e}",
-                path.display()
-            ))
-        })?;
-    }
-
-    let len = file
-        .metadata()
-        .map_err(|e| BuilderVmError::ExtractionFailed(format!("metadata {}: {e}", path.display())))?
-        .len();
-    if len == 0 {
-        if !existed_before_open {
-            let _ = std::fs::remove_file(path);
-        }
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "image {} stayed empty after sparse allocation",
-            path.display()
-        )));
-    }
-
-    Ok(())
-}
-
-/// Open (creating if needed) the sidecar lock file at `lock_path` and
-/// take an exclusive `flock`. The lock — never the image — is what
-/// serialises concurrent writers, so the image carries no host-side
-/// lock and the hypervisor can open it exclusively (required for
-/// HVF; harmless for libkrun). Returns the locked handle; dropping it
-/// releases the lock.
-pub(crate) fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, BuilderVmError> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("open lock {}: {e}", lock_path.display()))
-        })?;
-
-    file.try_lock().map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "image {} is already attached by another builder VM process; \
-             wait for the running `mvmctl build` / `mvmctl deps install` to finish and retry: {e}",
-            lock_path.display()
-        ))
-    })?;
-
-    Ok(file)
-}
-
-/// Find or create the persistent `<builder_cache_dir>/nix-store-<arch>.img`
-/// sparse image and hold an exclusive host-side lock on it.
-///
-/// `builder_cache_dir` is the host-side root the builder VM uses for
-/// shared state — callers compute this themselves (typically
-/// `~/.mvm/cache/builder-vm/`) so the helper stays free of
-/// `mvm_core::config` lookups. The directory is created if missing.
-///
-/// `arch` only appears in the filename (`nix-store-<arch>.img`) so
-/// multi-arch hosts can keep one image per arch in the same cache.
-///
-/// `size_mib` is the sparse cap — the file consumes only the bytes
-/// the in-VM ext4 actually writes. Caller-controlled because dev
-/// hosts may want a smaller cap than CI runners.
-///
-/// Returns a [`NixStoreImageLock`] guard. Dropping it releases the
-/// lock — see the type docs.
-pub fn acquire_nix_store_image_lock(
-    builder_cache_dir: &Path,
-    arch: &str,
-    size_mib: u64,
-) -> Result<NixStoreImageLock, BuilderVmError> {
-    acquire_nix_store_image_lock_named(
-        builder_cache_dir,
-        &format!("nix-store-{arch}.img"),
-        size_mib,
-    )
-}
-
-/// Like [`acquire_nix_store_image_lock`] but the image filename is
-/// supplied verbatim instead of derived as `nix-store-<arch>.img`.
-///
-/// Stage 0 (the builder-VM *image* build) uses this to key a dedicated
-/// `nix-store-stage0-<arch>.img` separate from the steady-state
-/// builder's `nix-store-<arch>.img`. Two reasons for the split: the
-/// flock would otherwise serialize the builder VM bootstrap against any
-/// concurrent `mvmctl build` in another session, and the bootstrap's
-/// kernel/Rust-toolchain closure has no reason to share a store with
-/// user-workload builds. Both images live in the same cache dir and
-/// match `cache info`'s `nix-store-*.img` sparse-footprint report.
-pub fn acquire_nix_store_image_lock_named(
-    builder_cache_dir: &Path,
-    file_name: &str,
-    size_mib: u64,
-) -> Result<NixStoreImageLock, BuilderVmError> {
-    std::fs::create_dir_all(builder_cache_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "creating builder cache dir {}: {e}",
-            builder_cache_dir.display()
-        ))
-    })?;
-    let path = builder_cache_dir.join(file_name);
-
-    let size_bytes = size_mib.checked_mul(1024 * 1024).ok_or_else(|| {
-        BuilderVmError::ExtractionFailed(format!(
-            "nix-store size_mib overflowed multiplying to bytes: {size_mib}"
-        ))
-    })?;
-
-    // Take the sidecar lock first so a losing concurrent writer fails
-    // before touching the image. The lock is on `<image>.lock`, never
-    // the image fd — HVF needs to open the image exclusively at
-    // start (see [`NixStoreImageLock`] docs).
-    let lock = acquire_sidecar_lock(&sidecar_lock_path(&path))?;
-    sparse_create_image(&path, size_bytes)?;
-
-    Ok(NixStoreImageLock { path, _file: lock })
-}
-
 /// Format the [`BuilderVmError`] returned when the supervisor exited
 /// non-zero before the guest had a chance to write `/job/result`.
 /// Names `vm_state_dir` so the operator can grep the console log
@@ -1947,264 +1797,6 @@ mod tests {
             BuilderVmError::ExtractionFailed(msg) => assert!(msg.contains("parsing"), "got {msg}"),
             other => panic!("wrong variant: {other:?}"),
         }
-    }
-
-    // -----------------------------------------------------------------
-    // Tests migrated from libkrun_builder.rs alongside NixStoreImageLock
-    // and acquire_nix_store_image_lock. The new signature takes the
-    // cache dir as a &Path arg,
-    // so the cache-env override hack from the old tests is gone — each
-    // test passes a fresh TempDir path directly and runs without
-    // process-wide env mutation.
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn acquire_nix_store_image_lock_creates_sparse_file_once() {
-        // Sparse file allocates the logical size but consumes ~no disk
-        // blocks. `set_len` is what asks the FS to record the size. A
-        // later acquisition finds the existing file and returns its
-        // path without retouching.
-        let scratch = tempfile::TempDir::new().unwrap();
-        let cache_dir = scratch.path().join("builder-vm");
-        let guard = acquire_nix_store_image_lock(&cache_dir, "x86_64", 256).unwrap();
-        let path = guard.path().to_path_buf();
-        assert!(path.is_file());
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            256 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES
-        );
-        drop(guard);
-        // Second acquisition is idempotent.
-        let guard2 = acquire_nix_store_image_lock(&cache_dir, "x86_64", 256).unwrap();
-        let path2 = guard2.path().to_path_buf();
-        assert_eq!(path, path2);
-        drop(guard2);
-    }
-
-    #[test]
-    fn acquire_nix_store_image_lock_refuses_concurrent_writer() {
-        let scratch = tempfile::TempDir::new().unwrap();
-        let cache_dir = scratch.path().join("builder-vm");
-
-        let first = acquire_nix_store_image_lock(&cache_dir, "x86_64", 256).unwrap();
-        let err = acquire_nix_store_image_lock(&cache_dir, "x86_64", 256).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("already attached by another builder VM process"),
-            "unexpected error: {msg}"
-        );
-        drop(first);
-
-        acquire_nix_store_image_lock(&cache_dir, "x86_64", 256)
-            .expect("lock should be available after first guard drops");
-    }
-
-    #[test]
-    fn acquire_nix_store_image_lock_filename_carries_arch() {
-        // Multi-arch hosts can keep one image per arch in the same
-        // cache. Pin the filename convention so a future refactor that
-        // collapses the arch out of the path doesn't silently break it.
-        let scratch = tempfile::TempDir::new().unwrap();
-        let cache_dir = scratch.path().join("builder-vm");
-        let guard = acquire_nix_store_image_lock(&cache_dir, "aarch64", 64).unwrap();
-        assert_eq!(
-            guard.path().file_name().and_then(|s| s.to_str()),
-            Some("nix-store-aarch64.img")
-        );
-    }
-
-    /// `try_lock` can report `WouldBlock` on a fresh, uncontended path under
-    /// heavy parallel test load. The retry predates the move off `fs2`, and
-    /// nothing here proves the platform `flock` is innocent, so it stays.
-    /// Production must NOT retry — there a refusal is a real concurrent
-    /// holder — but a test that expects the lock to be FREE absorbs it.
-    fn acquire_named_or_retry(
-        cache_dir: &Path,
-        file_name: &str,
-        size_mib: u64,
-    ) -> NixStoreImageLock {
-        let mut last = String::new();
-        for _ in 0..40 {
-            match acquire_nix_store_image_lock_named(cache_dir, file_name, size_mib) {
-                Ok(g) => return g,
-                Err(e) => {
-                    last = format!("{e}");
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-            }
-        }
-        panic!("acquire {file_name} never succeeded (last: {last})");
-    }
-
-    #[test]
-    fn acquire_nix_store_image_lock_named_uses_supplied_filename() {
-        // The named variant backs Stage 0's dedicated store image. It
-        // must use the filename verbatim, not re-derive `nix-store-<arch>`.
-        let scratch = tempfile::TempDir::new().unwrap();
-        let cache_dir = scratch.path().join("builder-vm");
-        let guard = acquire_named_or_retry(&cache_dir, "nix-store-stage0-aarch64.img", 64);
-        assert_eq!(
-            guard.path().file_name().and_then(|s| s.to_str()),
-            Some("nix-store-stage0-aarch64.img")
-        );
-        // Matches `cache info`'s `nix-store-*.img` sparse report glob.
-        let n = guard.path().file_name().unwrap().to_string_lossy();
-        assert!(n.starts_with("nix-store-") && n.ends_with(".img"));
-    }
-
-    #[test]
-    fn stage0_and_builder_store_locks_do_not_collide() {
-        // The whole point of the split: a Stage 0 bootstrap and a
-        // steady-state builder build can hold their store locks at the
-        // same time because they key different image files. If they
-        // shared a filename, the second acquire would fail the flock.
-        let scratch = tempfile::TempDir::new().unwrap();
-        let cache_dir = scratch.path().join("builder-vm");
-        let builder = acquire_named_or_retry(&cache_dir, "nix-store-aarch64.img", 64);
-        let stage0 = acquire_named_or_retry(&cache_dir, "nix-store-stage0-aarch64.img", 64);
-        assert_ne!(builder.path(), stage0.path());
-    }
-
-    #[test]
-    fn acquire_nix_store_image_lock_creates_missing_cache_dir() {
-        // `create_dir_all` is part of the contract — callers pass the
-        // computed `~/.mvm/cache/builder-vm/` path and expect it to be
-        // created on demand.
-        let scratch = tempfile::TempDir::new().unwrap();
-        let cache_dir = scratch.path().join("not").join("yet").join("created");
-        let guard = acquire_nix_store_image_lock(&cache_dir, "x86_64", 16).unwrap();
-        assert!(guard.path().is_file());
-        assert!(cache_dir.is_dir());
-    }
-
-    /// The load-bearing property of the sidecar-lock fix: while the
-    /// guard is held, the host holds NO lock on the image file itself,
-    /// so a hypervisor (HVF) can open it exclusively at start. We
-    /// prove it by opening the image from a second fd in-process and
-    /// taking our own exclusive `flock` — which would fail if the guard
-    /// still locked the image. The lock lives on `<image>.lock` instead.
-    #[test]
-    fn nix_store_lock_does_not_lock_the_image_itself() {
-        let scratch = tempfile::TempDir::new().unwrap();
-        let cache_dir = scratch.path().join("builder-vm");
-        let guard = acquire_named_or_retry(&cache_dir, "nix-store-aarch64.img", 64);
-
-        // Sidecar lock file exists next to the image.
-        let sidecar = sidecar_lock_path(guard.path());
-        assert!(
-            sidecar.is_file(),
-            "sidecar lock {} should exist",
-            sidecar.display()
-        );
-        assert!(sidecar.to_string_lossy().ends_with(".img.lock"));
-
-        // A second handle on the IMAGE can take an exclusive flock —
-        // proving the guard didn't lock the image. Retry to absorb a
-        // spurious `WouldBlock` on a fresh path under parallel test load.
-        let img = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(guard.path())
-            .expect("open image");
-        let mut locked = false;
-        for _ in 0..40 {
-            if img.try_lock().is_ok() {
-                locked = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        assert!(locked, "image file must NOT be locked by the guard");
-        drop(guard);
-    }
-
-    /// Spurious-`WouldBlock` retry wrapper for a RW volume image the test
-    /// expects to be FREE (mirrors `acquire_named_or_retry`).
-    fn ensure_vol_rw_or_retry(path: &Path, size_bytes: u64) -> VolumeImageLock {
-        let mut last = String::new();
-        for _ in 0..40 {
-            match ensure_persistent_volume_image(path, size_bytes, false) {
-                Ok(g) => return g,
-                Err(e) => {
-                    last = format!("{e}");
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-            }
-        }
-        panic!("ensure volume never succeeded (last: {last})");
-    }
-
-    #[test]
-    fn ensure_persistent_volume_image_sparse_creates_and_is_idempotent() {
-        let scratch = tempfile::TempDir::new().unwrap();
-        let img = scratch.path().join("vols").join("data.img");
-        let guard = ensure_vol_rw_or_retry(&img, 32 * 1024 * 1024);
-        assert!(img.is_file(), "parent dir + sparse image created");
-        assert_eq!(
-            std::fs::metadata(&img).unwrap().len(),
-            32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES
-        );
-        let mut file = std::fs::File::open(&img).unwrap();
-        use std::io::{Read as _, Seek as _};
-        file.seek(std::io::SeekFrom::Start(1024 + 56)).unwrap();
-        let mut magic = [0u8; 2];
-        file.read_exact(&mut magic).unwrap();
-        assert_eq!(u16::from_le_bytes(magic), 0xef53, "new volume is ext4");
-        drop(guard);
-        // Second call leaves the existing (non-empty) image untouched —
-        // a warm volume's data must survive. Pass a different size to
-        // prove we don't resize an existing image.
-        let guard2 = ensure_vol_rw_or_retry(&img, 8 * 1024 * 1024);
-        assert_eq!(
-            std::fs::metadata(&img).unwrap().len(),
-            32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES,
-            "existing volume must not be resized"
-        );
-        drop(guard2);
-    }
-
-    #[test]
-    fn ensure_persistent_volume_image_rw_refuses_concurrent() {
-        let scratch = tempfile::TempDir::new().unwrap();
-        let img = scratch.path().join("data.img");
-        let first = ensure_vol_rw_or_retry(&img, 16 * 1024 * 1024);
-        let err = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, false).unwrap_err();
-        assert!(
-            format!("{err}").contains("already attached by another builder VM process"),
-            "unexpected error: {err}"
-        );
-        drop(first);
-        ensure_vol_rw_or_retry(&img, 16 * 1024 * 1024);
-    }
-
-    #[test]
-    fn ensure_persistent_volume_image_refuses_existing_non_ext4_data() {
-        let scratch = tempfile::TempDir::new().unwrap();
-        let img = scratch.path().join("not-ext4.img");
-        std::fs::write(&img, vec![0xa5; 4096]).unwrap();
-
-        let err = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, true).unwrap_err();
-        assert!(err.to_string().contains("not a valid ext4 filesystem"));
-    }
-
-    #[test]
-    fn ensure_persistent_volume_image_ro_allows_concurrent_and_takes_no_lock() {
-        let scratch = tempfile::TempDir::new().unwrap();
-        let img = scratch.path().join("ro.img");
-        // Seed the image directly (no RW guard, so no sidecar is created)
-        // — isolates the "RO takes no lock" assertion below.
-        let mut f = std::fs::File::create(&img).unwrap();
-        let image_bytes = 16 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES;
-        f.set_len(image_bytes).unwrap();
-        mvm_fs::ext4::mkfs::format_empty_ext4(&mut f, image_bytes).unwrap();
-        drop(f);
-        // Two concurrent RO guards coexist (read-only = no exclusive lock).
-        let a = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, true).unwrap();
-        let b = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, true).unwrap();
-        assert_eq!(a.path(), b.path());
-        // No sidecar lock file is created for a read-only volume.
-        assert!(!sidecar_lock_path(&img).exists());
-        drop((a, b));
     }
 
     // -----------------------------------------------------------------

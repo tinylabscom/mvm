@@ -262,6 +262,12 @@ jobs:
       - name: no reference to a removed userspace network gateway
         run: cargo run -p xtask -- check-no-gateway-names
 
+      # Temporary, shrink-only ratchet: the raw-packet workload networking path
+      # is frozen while the single flow-aware vsock path is built. Deleted with
+      # its last allowlist entry.
+      - name: l3 expansion freeze (no new raw-packet networking references)
+        run: cargo run -p xtask -- check-l3-expansion-freeze
+
       - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
         run: cargo run -p xtask -- check-uniform-vsock-egress
 
