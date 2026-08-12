@@ -104,8 +104,12 @@ impl CheckpointStore {
 
     pub fn remove(&self, id: &CheckpointId) -> Result<()> {
         let dir = self.dir_for(id);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("removing {}", dir.display()));
+            }
         }
         Ok(())
     }
@@ -1292,6 +1296,7 @@ mod tests {
         store.write_meta(&meta("a", None, None)).unwrap();
         store.write_meta(&meta("b", None, None)).unwrap();
         assert_eq!(store.list().unwrap().len(), 2);
+        store.remove(&CheckpointId::new("a")).unwrap();
         store.remove(&CheckpointId::new("a")).unwrap();
         assert_eq!(store.list().unwrap().len(), 1);
     }
