@@ -88,6 +88,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
             guest_port: 20001,
             host_socket: PathBuf::from("/parent/state/vsock/vsock-20001.sock"),
         }],
+        builder_control_sockets: Vec::new(),
         handoff_socket: Some(PathBuf::from("/parent/state/hvf-handoff.sock")),
         handoff_root: Some(PathBuf::from("/parent/vms")),
         handoff_verify_key: Some("ab".repeat(32)),
