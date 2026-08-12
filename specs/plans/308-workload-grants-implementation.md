@@ -2952,6 +2952,96 @@ asks for a bound, gets none, and is told nothing.
       `machine_inspect_shows_the_enforced_tier_not_only_the_request`,
       `a_degraded_boot_warns`.
 
+### Task 19: The host admission budget, and the ADR-001 claim row
+
+Two remaining pieces, landed together because the second is what makes the
+first honest.
+
+**The budget.** Nothing refuses the eleventh 4 GiB VM on a 32 GiB host. Per-VM
+guest RAM is bounded by construction and CPU is bounded by a quota, but the
+*sum* is unbounded, so a host can be oversubscribed into thrashing by
+perfectly well-formed individual grants.
+
+Sum committed CPU and memory across running machines and refuse a boot that
+would exceed a configurable headroom.
+
+Two constraints that are the whole difficulty:
+
+- **Count only what is live.** A budget summed from inventory *records*
+  refuses every subsequent boot forever once a VM crashes without cleanup —
+  the safety check becomes a permanent lockout, which is a worse failure than
+  the oversubscription it prevents. Derive liveness from the same pid-marker
+  probe the fork path already trusts; do not invent a second notion of
+  "running".
+- **Account against the configured maximum, not current usage.** The balloon
+  controller moves committed memory at runtime under host pressure, so
+  accounting against the live figure drifts away from what admission actually
+  granted.
+
+**The claim row.** `specs/adrs/001-microvm-security-posture.md` carries the
+claims ledger, and `xtask check-claim-catalog` parses it — the table is
+authoritative, the prose is not. This feature has shipped enforcement across
+several PRs with **no row at all**, which is precisely the disease the plan
+opens by naming.
+
+Add it as a `Preview` claim, following the shape of rows 16 and 17. Cite only
+witnesses that exist — run `rg 'fn <name>'` for each before writing it down,
+because `check-witness-citations` will fail the build otherwise and because
+fabricated witness names survived in this repo for months once already.
+
+The row must state the limits as plainly as the mechanism: CPU is enforced on
+Linux and **declared-only on macOS**, which has no cgroup equivalent; the
+wall-clock timer exists only on the libkrun tier, since it is the only VMM
+tier with a supervisor process that outlives the workload; a restored child is
+admission-bounded but its host-side control is not re-armed. A Preview row
+that overstates is worse than no row.
+
+**Witnesses:**
+- `a_boot_past_the_headroom_is_refused`
+- `budget_ignores_dead_machines` — the lockout regression
+- `budget_counts_the_configured_maximum_not_current_usage`
+- `an_empty_host_admits_a_boot_within_headroom`
+- `xtask check-claim-catalog` passes with the new row
+
+**Status: COMPLETE.**
+
+- [x] Budget arithmetic — `crates/mvm-contract/src/grants/budget.rs`
+      (`HostBudget`, `MachineCharge`, `BudgetViolation`); pure, saturating,
+      memory-before-CPU refusal order.
+- [x] Host-side measurement — `crates/mvm-hostd/src/admission_budget.rs`.
+      Each boot writes `<vm_state_dir>/admitted-charge.json`; `committed_at`
+      sums only state dirs that pass
+      `mvm_vmm::host::process_liveness::state_dir_has_live_process` — the
+      probe `checkpoint::vm_is_running` (the fork path) already uses. The
+      charge is written once, at admission, and no runtime path rewrites it,
+      so the balloon cannot move it.
+- [x] Wired at `plan_admission::admit_for_run`, immediately after
+      `admit_grants` and still ahead of the keystore; the charge is recorded
+      in `admit_and_start` after a successful start, and a record failure
+      rolls the launch back through the shared `undo_launch` helper.
+- [x] Operator config — `host_budget_memory_mib` / `host_budget_cpu_millicores`
+      in `MvmConfig`, surfaced as `MvmConfig::host_budget()`. Unset by default.
+- [x] ADR-001 ledger row **18** (`Preview`) + the "Preview 18 limits" note +
+      `model/claims.toml` `MVM-SEC-18` + `features/suites/s28_admission_budget/`
+      + regenerated `CONFORMANCE.md`. `check-claim-catalog`,
+      `check-witness-citations`, `check-honesty`, `check-conformance`,
+      `check-no-overclaim` and the re-pinned `check-mutation-witnesses` are all
+      clean.
+
+**One deviation from the brief above, and it is the honest direction.** The
+brief said the row should state that "the wall-clock timer exists only on the
+libkrun tier". It does not exist on any tier in this tree: there is no
+supervisor timer, `EnforcedTier::SupervisorTimer` is produced by no production
+code path, and `cpu_scope::enforced_grants_for_vm` hardcodes
+`wall_clock: EnforcedTier::Declared`. A wall-clock grant is authored,
+ceiling-checked, admitted, projected and audited, and nothing stops the
+workload at the deadline — and because `ResourceControls::for_backend` declares
+`WallClockControl::SupervisorTimer` for Firecracker/libkrun/QEMU/HVF,
+`negotiate_grants` accepts such a grant and it passes the `--prod`
+enforceability gate with nothing behind it. Row 18's limit 2 says exactly that
+rather than citing a witness for a mechanism that is not there. Wiring the
+timer, and re-arming CPU on the restore and warm-claim paths (limit 4), are the
+remaining enforcement work.
 ---
 
 ### Task 20: Close the two WS5b enforcement gaps

@@ -65,6 +65,20 @@ pub struct MvmConfig {
     /// read as "no time allowed": zero is not expressible as a wall-clock
     /// grant, and the legacy encoding it resembles means unbounded.
     pub default_wall_clock_secs: Option<u32>,
+    /// Host-wide headroom for guest RAM, in MiB: the sum across every live
+    /// machine plus a pending boot may not exceed it. `None` = unbounded.
+    ///
+    /// Distinct from `max_memory_mib`, which bounds one workload. Ten boots
+    /// that each clear the per-workload ceiling can still exhaust the host,
+    /// and only this key refuses the eleventh.
+    pub host_budget_memory_mib: Option<u64>,
+    /// Host-wide headroom for granted CPU share, in thousandths of one host
+    /// core. `None` = unbounded.
+    ///
+    /// Sums only *granted* shares: a workload that declared no CPU grant is
+    /// uncapped and contributes nothing, so this bounds the total of what was
+    /// promised rather than the total of what can be consumed.
+    pub host_budget_cpu_millicores: Option<u32>,
 }
 
 impl MvmConfig {
@@ -79,6 +93,21 @@ impl MvmConfig {
             max_cpu_millicores: self.max_cpu_millicores,
             max_memory_mib: self.max_memory_mib,
             max_wall_clock_secs: self.max_wall_clock_secs,
+        }
+    }
+
+    /// The host's headroom: what every live workload plus a pending boot may
+    /// consume in total.
+    ///
+    /// Read at admission from the same operator config as the per-workload
+    /// ceiling, and never from a plan. The two answer different questions —
+    /// the ceiling bounds one workload, this bounds the sum — and a host can
+    /// meaningfully configure either without the other.
+    #[must_use]
+    pub fn host_budget(&self) -> mvm_contract::grants::budget::HostBudget {
+        mvm_contract::grants::budget::HostBudget {
+            max_total_memory_mib: self.host_budget_memory_mib,
+            max_total_cpu_millicores: self.host_budget_cpu_millicores,
         }
     }
 
@@ -140,6 +169,12 @@ impl Default for MvmConfig {
             // with a number nobody chose.
             default_cpu_millicores: None,
             default_wall_clock_secs: None,
+            // Unset for the same reason as the per-workload ceilings: a
+            // headroom figure invented here would be a fraction of a host size
+            // this code cannot see, and would refuse legitimate local runs on
+            // a large machine while under-protecting a small one.
+            host_budget_memory_mib: None,
+            host_budget_cpu_millicores: None,
         }
     }
 }

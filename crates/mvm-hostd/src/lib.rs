@@ -23,6 +23,7 @@
 //!   config parsing, the prelaunched-standby attach-verify, and the
 //!   workload-exit control listener.
 
+pub mod admission_budget;
 pub mod audit;
 pub mod audit_signer;
 pub mod broker;
