@@ -72,12 +72,19 @@ const SECTOR: u64 = 512;
 
 const VIRTIO_BLK_T_IN: u32 = 0; // read
 const VIRTIO_BLK_T_OUT: u32 = 1; // write
+const VIRTIO_BLK_T_FLUSH: u32 = 4; // flush the write-back cache
 const VIRTIO_BLK_S_OK: u8 = 0;
 const VIRTIO_BLK_S_IOERR: u8 = 1;
 /// virtio-blk feature bit 5 (low feature word): the device is read-only. Offered
 /// for a read-only backing so the guest mounts it `ro`; writes are also rejected
 /// at the device (below), so RO is hypervisor-enforced, not guest-honour-system.
 const VIRTIO_BLK_F_RO: u32 = 1 << 5;
+/// virtio-blk feature bit 9 (low feature word): the device honours
+/// `VIRTIO_BLK_T_FLUSH`. Offered for every writable backing. Without it the
+/// guest is entitled to assume a completed write is already durable and never
+/// issues a barrier, so ext4's journal ordering rests on an assumption nothing
+/// enforces — and a host that dies with dirty page cache loses the filesystem.
+const VIRTIO_BLK_F_FLUSH: u32 = 1 << 9;
 
 /// Backing store for a virtio-blk device.
 ///
@@ -118,6 +125,22 @@ impl DiskImage {
         match self {
             Self::Mem(v) => v.len() as u64,
             Self::File { len, .. } => *len,
+        }
+    }
+
+    /// Force everything written so far to stable storage. A RAM-backed or
+    /// read-only image has nothing to push, so it succeeds trivially.
+    ///
+    /// `sync_data` rather than `sync_all`: the guest filesystem's consistency
+    /// depends on its own bytes reaching the disk, not on the host's metadata
+    /// for a file whose length never changes.
+    fn flush(&mut self) -> bool {
+        match self {
+            Self::Mem(_) => true,
+            Self::File {
+                read_only: true, ..
+            } => true,
+            Self::File { file, .. } => file.sync_data().is_ok(),
         }
     }
 
@@ -277,10 +300,11 @@ impl VirtioBlk {
             R_DEVICE_ID => VIRTIO_ID_BLOCK,
             R_VENDOR_ID => VIRTIO_VENDOR,
             // High word (bit 32): VIRTIO_F_VERSION_1. Low word: VIRTIO_BLK_F_RO
-            // for a read-only backing (else no low-word features).
+            // for a read-only backing, which takes no writes and so has nothing
+            // to flush; VIRTIO_BLK_F_FLUSH for a writable one.
             R_DEVICE_FEATURES if self.device_features_sel == 1 => 1,
             R_DEVICE_FEATURES if self.disk.read_only() => VIRTIO_BLK_F_RO,
-            R_DEVICE_FEATURES => 0,
+            R_DEVICE_FEATURES => VIRTIO_BLK_F_FLUSH,
             R_QUEUE_NUM_MAX => super::QUEUE_SIZE_MAX,
             R_QUEUE_READY => self.queue_ready,
             R_INTERRUPT_STATUS => self.interrupt_status,
@@ -465,7 +489,15 @@ impl VirtioBlk {
             io_ok &= self.transfer(req_type, sector, addr, len, &mut written);
             sector += u64::from(len) / SECTOR;
         }
-        let ok = io_ok && matches!(req_type, VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT);
+        // A flush carries no data descriptors, so it is serviced here rather
+        // than in `transfer`.
+        let flushed = req_type != VIRTIO_BLK_T_FLUSH || self.disk.flush();
+        let ok = io_ok
+            && flushed
+            && matches!(
+                req_type,
+                VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT | VIRTIO_BLK_T_FLUSH
+            );
         if let Some(s) = status_addr {
             self.wr_u8(
                 s,
@@ -1099,7 +1131,8 @@ mod tests {
     fn offers_version_1_feature_in_high_word() {
         let mut d = dev(vec![0u8; 4096]);
         d.write(R_DEVICE_FEATURES_SEL, 0);
-        assert_eq!(d.read(R_DEVICE_FEATURES) as u32, 0);
+        // Writable, so the low word carries FLUSH.
+        assert_eq!(d.read(R_DEVICE_FEATURES) as u32, VIRTIO_BLK_F_FLUSH);
         d.write(R_DEVICE_FEATURES_SEL, 1);
         assert_eq!(d.read(R_DEVICE_FEATURES) as u32, 1); // VIRTIO_F_VERSION_1 (bit 32)
     }
@@ -1217,6 +1250,48 @@ mod tests {
     }
 
     #[test]
+    fn a_writable_backing_offers_the_flush_feature_bit() {
+        // Without this bit the guest never issues a barrier, because it is
+        // entitled to treat a completed write as already durable.
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(512).unwrap();
+        let mut d = blk_dev(DiskImage::open(f.path(), false).unwrap());
+        d.write(R_DEVICE_FEATURES_SEL, 0);
+        assert_eq!(
+            d.read(R_DEVICE_FEATURES) as u32 & VIRTIO_BLK_F_FLUSH,
+            VIRTIO_BLK_F_FLUSH
+        );
+    }
+
+    #[test]
+    fn a_read_only_backing_does_not_offer_flush() {
+        // It takes no writes, so it has nothing to push.
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(512).unwrap();
+        let mut d = blk_dev(DiskImage::open(f.path(), true).unwrap());
+        d.write(R_DEVICE_FEATURES_SEL, 0);
+        assert_eq!(d.read(R_DEVICE_FEATURES) as u32 & VIRTIO_BLK_F_FLUSH, 0);
+    }
+
+    #[test]
+    fn flushing_a_writable_file_succeeds() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(512).unwrap();
+        let mut d = DiskImage::open(f.path(), false).unwrap();
+        assert!(d.write_at(0, b"durable"));
+        assert!(d.flush(), "a writable backing must be able to sync");
+        assert_eq!(&std::fs::read(f.path()).unwrap()[..7], b"durable");
+    }
+
+    #[test]
+    fn flushing_a_read_only_or_ram_backing_is_a_no_op_that_succeeds() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        f.as_file().set_len(512).unwrap();
+        assert!(DiskImage::open(f.path(), true).unwrap().flush());
+        assert!(DiskImage::mem(vec![0u8; 512]).flush());
+    }
+
+    #[test]
     fn read_only_backing_offers_the_ro_feature_bit() {
         let f = tempfile::NamedTempFile::new().unwrap();
         f.as_file().set_len(512).unwrap();
@@ -1226,10 +1301,11 @@ mod tests {
         assert_eq!(d.read(R_DEVICE_FEATURES) as u32, VIRTIO_BLK_F_RO);
         d.write(R_DEVICE_FEATURES_SEL, 1);
         assert_eq!(d.read(R_DEVICE_FEATURES) as u32, 1);
-        // A writable (mem) backing offers no low-word features.
+        // A writable backing offers FLUSH instead, so the guest can force its
+        // journal to stable storage.
         let mut w = dev(vec![0u8; 512]);
         w.write(R_DEVICE_FEATURES_SEL, 0);
-        assert_eq!(w.read(R_DEVICE_FEATURES) as u32, 0);
+        assert_eq!(w.read(R_DEVICE_FEATURES) as u32, VIRTIO_BLK_F_FLUSH);
     }
 
     /// Queue sizes a hostile guest can program that are illegal geometry: zero,
@@ -1361,6 +1437,16 @@ mod tests {
             2 => vec![
                 ("read-no-payload", vec![read(0, &[])]),
                 ("write-no-payload", vec![write(1, &[])]),
+                // A flush is header + status by definition: it carries no data.
+                (
+                    "flush",
+                    vec![BlkChain {
+                        req_type: VIRTIO_BLK_T_FLUSH,
+                        sector: 0,
+                        data: Vec::new(),
+                        status: true,
+                    }],
+                ),
                 (
                     "two-header-only-chains",
                     vec![
@@ -1569,7 +1655,13 @@ mod tests {
                 break;
             }
         }
-        let ok = io_ok && matches!(req_type, VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT);
+        let flushed = req_type != VIRTIO_BLK_T_FLUSH || d.disk.flush();
+        let ok = io_ok
+            && flushed
+            && matches!(
+                req_type,
+                VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT | VIRTIO_BLK_T_FLUSH
+            );
         if let Some(s) = status_addr {
             d.wr_u8(
                 s,
@@ -1582,6 +1674,31 @@ mod tests {
             written += 1;
         }
         written
+    }
+
+    #[test]
+    fn a_flush_request_is_acknowledged_not_refused() {
+        // Absolute, not differential: the reference walk mirrors production, so
+        // only a concrete status byte proves a flush is actually honoured.
+        // Before FLUSH support this returned VIRTIO_BLK_S_IOERR, and ext4 reads
+        // a failed barrier as disk failure.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(4096).unwrap();
+        let mut d = blk_dev(DiskImage::open(file.path(), false).unwrap());
+
+        let chains = vec![BlkChain {
+            req_type: VIRTIO_BLK_T_FLUSH,
+            sector: 0,
+            data: Vec::new(),
+            status: true,
+        }];
+        let (avail, _used) = program_blk_queue(&mut d, 2, &chains);
+        d.mem.wr_u16(avail + 2, 1);
+        assert!(d.process_queue(), "the flush chain must be consumed");
+
+        // Descriptor 1 is the status byte; descriptor 0 is the request header.
+        let status_addr = d.rd_u64(BLK_BASE + 0x1000 + 16);
+        assert_eq!(d.mem.read_bytes(status_addr, 1)[0], VIRTIO_BLK_S_OK);
     }
 
     #[test]
