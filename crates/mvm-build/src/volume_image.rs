@@ -4,7 +4,9 @@ use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 
 use crate::builder_vm::BuilderVmError;
-use crate::builder_vm_runtime::{acquire_sidecar_lock, sidecar_lock_path, sparse_create_image};
+use crate::builder_vm_runtime::{
+    LockWait, acquire_sidecar_lock_within, sidecar_lock_path, sparse_create_image,
+};
 
 /// Host-side guard for a custom persistent disk-image volume.
 ///
@@ -33,6 +35,18 @@ pub fn ensure_persistent_volume_image(
     host_path: &Path,
     size_bytes: u64,
     read_only: bool,
+) -> Result<VolumeImageLock, BuilderVmError> {
+    ensure_persistent_volume_image_within(host_path, size_bytes, read_only, LockWait::from_env())
+}
+
+/// [`ensure_persistent_volume_image`] with an explicit wait budget for
+/// the read-write sidecar lock. Test-facing seam — see
+/// [`acquire_sidecar_lock_within`].
+pub(crate) fn ensure_persistent_volume_image_within(
+    host_path: &Path,
+    size_bytes: u64,
+    read_only: bool,
+    wait: LockWait,
 ) -> Result<VolumeImageLock, BuilderVmError> {
     if let Some(parent) = host_path.parent()
         && !parent.as_os_str().is_empty()
@@ -64,7 +78,10 @@ pub fn ensure_persistent_volume_image(
     let lock = if read_only {
         None
     } else {
-        Some(acquire_sidecar_lock(&sidecar_lock_path(host_path))?)
+        Some(acquire_sidecar_lock_within(
+            &sidecar_lock_path(host_path),
+            wait,
+        )?)
     };
     Ok(VolumeImageLock {
         path: host_path.to_path_buf(),

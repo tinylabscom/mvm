@@ -6,6 +6,11 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Plan 316 — merge-queue forward progress.** Reduced live speculative
+      build concurrency from four to two, restored immediate single-entry
+      progress, raised the check-response timeout from 90 to 240 minutes, and
+      made timeout ejections terminal for automatic recovery at an unchanged
+      commit. Required checks and exact merge-commit validation are unchanged.
 - [x] **Foreground `machine run` port forwarding.** Repeatable
       `--port HOST:GUEST` promotes a run to a persistent machine, delegates to
       the existing forwarding lifecycle, binds loopback rather than socat's
@@ -71,6 +76,18 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+- [~] Plan 323 — Concurrent builds through one builder VM
+      (`specs/plans/323-concurrent-builds-one-builder-vm.md`)
+  - [x] Phase 1 — a contended Nix-store image lock queues (naming the holding
+        pid and command) instead of failing the second build outright;
+        `MVM_BUILDER_LOCK_WAIT_SECS` bounds the wait and `0` restores
+        fail-fast for CI
+  - [ ] Phase 2 — an HVF persistent builder, so the multiplexing path exists
+        on the macOS 26+ default backend
+  - [ ] Phase 3 — adopt (or start) a persistent builder on contention so
+        concurrent builds share one VM instead of queueing
+  - [ ] Phase 4 — troubleshooting + CLI-reference documentation
+
 - [x] Plan 322 — Scope merge-group Rust CI to behavior-changing diffs
       (`specs/plans/322-merge-group-ci-scope.md`)
   - [x] Fail-closed path classification preserves required aggregates while

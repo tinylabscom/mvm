@@ -17,7 +17,6 @@
 > `specs/sprint/delivery/README.md` and issue #2353. `xtask check-sprint-append`
 > fails if this list grows.
 
-
 - [x] Long-running interactive consoles no longer lose their input relay after
       15 minutes without keyboard activity. Guest output can continue
       indefinitely while later `Ctrl+C` bytes still reach the PTY foreground
@@ -764,6 +763,9 @@ updates only its own entry below.
       names and exact-merge-commit validation remain intact. Plan 281 records
       the measured 38m26s p50 / 2h14m03s p95 queue latency. The live ruleset is
       now set to build concurrency 3, group wait 0, and timeout 90 minutes.
+      Plan 316 supersedes those capacity settings after a later timeout loop:
+      build concurrency 2, minimum batch 1 with no wait, and timeout 240
+      minutes.
 
 - [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
       basename deny-list over the whole workspace root to an allow-list of the

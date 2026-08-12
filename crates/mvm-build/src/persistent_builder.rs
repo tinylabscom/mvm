@@ -828,16 +828,7 @@ pub fn current_unix_secs() -> u64 {
 
 /// `kill(pid, 0)` — checks the process exists without signalling.
 fn supervisor_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        rc == 0
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    crate::builder_vm_runtime::pid_alive(pid)
 }
 
 /// Sidecar filename inside `<job_dir>/<job_id>/out/` carrying the
