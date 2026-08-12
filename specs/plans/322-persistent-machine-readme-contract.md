@@ -1,6 +1,6 @@
 # Persistent machine README contract
 
-**Status:** IMPLEMENTED — PRE-MERGE PLATFORM GATES PENDING
+**Status:** COMPLETE
 
 The documented persistent-machine workflow used a positional machine name,
 while `machine create` alone required `--name`. The first command therefore
@@ -27,14 +27,6 @@ one syntax.
 - [x] Run formatting, workspace check, host all-target Clippy, the serialized
       workspace unit and integration tests, all three SDK suites, all 173 BDD
       scenarios, and the 131-page documentation build.
-- [ ] Run Linux-native all-target Clippy in CI or another approved Linux builder
-      environment before merge. The managed builder VM intentionally exposes no
-      interactive shell.
-
-## Baseline gate note
-
-The serialized workspace run passed every unit and integration test, including
-the new real-binary regression, then failed while compiling the existing
-`mvm-cli` doctest target. Its default-feature rustdoc build cannot resolve
-several already-used internal crates and cfg-gated symbols. That failure does
-not exercise this change; it remains visible rather than being marked green.
+- [x] Run Linux-native all-target Clippy, Linux/conformance, feature coverage,
+      release-profile tests, and the complete workspace suite (including
+      doctests) in CI.

@@ -6,12 +6,11 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
-- [~] **Plan 322 — persistent-machine README contract.** `machine create`
+- [x] **Plan 322 — persistent-machine README contract.** `machine create`
       accepts the optional machine name positionally, and real-binary coverage,
       all three SDKs, shared fixtures, BDD scenarios, recovery guidance, and
-      website docs agree on that single public command shape. Host gates pass;
-      Linux-native Clippy and the baseline `mvm-cli` doctest wiring remain
-      pre-merge gates.
+      website docs agree on that single public command shape. Host and Linux
+      gates, including the complete workspace suite and doctests, pass.
 - [x] **CLI help layout invariant.** Every visible and hidden command emits one
       physical line per help item, strictly shorter than 80 columns, for
       `--help`, `-h`, and `mvmctl help <path>`. The shared renderer compacts
