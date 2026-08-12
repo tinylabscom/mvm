@@ -9,9 +9,26 @@
 //! derivations on its own, so one session serves several builds at once off a
 //! single warm store.
 //!
-//! The store lock is held for the session's lifetime and released when the
-//! handle is killed or waited on, which is what keeps the "one writer" rule
-//! intact while the VM is up.
+//! # The store lock does not outlive the starting process
+//!
+//! [`PersistentHvfSession`] holds the store lock for as long as the *object*
+//! lives, which covers a caller that starts a session and stays up. It does
+//! **not** cover `mvmctl persistent-builder start`, which leaks its handle and
+//! exits so the VM outlives it: an `flock` belongs to the open file
+//! description, that description belongs to the exiting `mvmctl` process, and
+//! the kernel drops the lock at exit. The VM then keeps writing an unlocked
+//! store image.
+//!
+//! This is the same gap the libkrun persistent builder documents on
+//! `leak_handle`, and the same mitigation applies — the session record acts as
+//! a soft mutex, since `start` refuses when one already exists. It is a soft
+//! mutex and not a lock: nothing stops a one-shot builder from taking the image
+//! while a session owns it.
+//!
+//! The fix is to move ownership to the process that owns the VM — pass the
+//! locked descriptor to the supervisor, since an `flock` survives as long as
+//! any descriptor for that open file description does — rather than to widen
+//! the guard here, which cannot help once its process is gone.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -109,9 +126,10 @@ impl HvfPersistentHostVm {
             );
         }
 
-        // Hold the store lock for the whole session: this VM is the one writer
-        // for as long as it is up, which is exactly what lets other builds
-        // dispatch into it rather than fight it for the image.
+        // Take the store lock before booting: while this process lives, this VM
+        // is the one writer, which is what lets other builds dispatch into it
+        // rather than fight it for the image. A caller that exits and leaves
+        // the VM running loses the lock with its process — see the module docs.
         let nix_store_lock = acquire_nix_store_image_lock(
             &builder_vm_cache_dir(),
             std::env::consts::ARCH,
@@ -170,9 +188,10 @@ fn socket_for(state_dir: &Path, service: GuestService) -> PathBuf {
 
 /// A live persistent builder session.
 ///
-/// Holds the Nix store lock for as long as it exists: dropping, killing, or
-/// waiting on the session releases it, and only then may another builder VM
-/// attach the image.
+/// Holds the Nix store lock for as long as **this object** exists: dropping,
+/// killing, or waiting on the session releases it. That is not the same as the
+/// VM's lifetime — see the module docs on why a leaked handle in an exiting
+/// process leaves the VM running against an unlocked store image.
 pub struct PersistentHvfSession {
     session_id: String,
     state_dir: PathBuf,
