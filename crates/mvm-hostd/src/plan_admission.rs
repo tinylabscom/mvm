@@ -225,6 +225,13 @@ pub fn admit_for_run(
     // to anything downstream that only checks the signature.
     admit_grants(&plan, &host_grant_ceiling(), posture)?;
 
+    // The ceiling above bounds this one workload; the budget bounds the sum of
+    // every live one. Both sit in the pre-keystore window for the same reason,
+    // and both read host config rather than the plan. The total is measured
+    // over live machines only — counting records instead would turn a single
+    // crashed VM into a permanent refusal of every later boot.
+    admit_within_host_budget(&plan)?;
+
     // Load or generate the host signer. load_or_init refuses
     // loose perms; that error propagates verbatim.
     let signer = match host_signer_keys_dir {
@@ -244,6 +251,11 @@ pub fn admit_for_run(
     // refuse a plan whose stored id doesn't match, so a run is only ever
     // admitted under an id that genuinely addresses its content.
     verify_plan_id(&verified).context("plan_id content-address check")?;
+
+    // The retired raw-packet transport, checked again on the verified plan and
+    // not only in synthesis: admission is what a plan built elsewhere reaches,
+    // and the refusal has to hold for those too.
+    mvm_core::plan::refuse_retired_l3(&verified.network_mode, verified.l3_network.is_some())?;
 
     // Validity window — refuses plans whose now() is outside
     // [valid_from, valid_until). For freshly-synthesized plans this
@@ -301,6 +313,23 @@ pub fn admit_for_run(
 /// cannot hand admission a wider ceiling than the host configured.
 fn host_grant_ceiling() -> GrantCeiling {
     mvm_core::user_config::load(None).grant_ceiling()
+}
+
+/// Refuse a boot that, on top of every live machine's admitted charge, would
+/// exceed the host's configured headroom.
+///
+/// Skipped entirely when no headroom is configured — not to save the
+/// directory walk, but so an unconfigured host cannot be refused by a probe
+/// whose result it would ignore anyway.
+fn admit_within_host_budget(plan: &ExecutionPlan) -> Result<()> {
+    let budget = mvm_core::user_config::load(None).host_budget();
+    if !budget.is_configured() {
+        return Ok(());
+    }
+    let undeclared = Grants::default();
+    let grants = plan.grants.as_ref().unwrap_or(&undeclared);
+    let request = crate::admission_budget::charge_for(plan.resources.mem_mib, grants);
+    crate::admission_budget::admits(&budget, crate::admission_budget::committed(), request)
 }
 
 /// What admission has to be told, because the plan cannot be trusted to say
@@ -1078,6 +1107,47 @@ fn run_post_admission_gates(
     Ok(config)
 }
 
+/// What rolling a launch back needs to know. A struct rather than seven
+/// positional arguments, so a caller cannot silently swap the stage label for
+/// the reason.
+struct UndoLaunch<'a> {
+    backend: &'a AnyBackend,
+    vm_id: &'a VmId,
+    admitted: &'a AdmittedPlan,
+    emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
+    /// Wire label of the stage that refused, for the terminal audit entry.
+    stage: &'static str,
+    /// Human-readable clause naming what went wrong, for the stop-failure log.
+    reason: &'static str,
+    err: anyhow::Error,
+}
+
+/// Stop a VM that started but must not keep running, emit the terminal
+/// `plan.failed` entry, and hand the original error back.
+///
+/// One helper for both post-start refusals: leaving a VM up whose bounds were
+/// never established would mean the only record of the run claims it was
+/// bounded when it was not.
+fn undo_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
+    if let Err(stop_err) = undo.backend.stop(undo.vm_id) {
+        tracing::warn!(
+            error = %stop_err,
+            "stopping a VM whose {reason} failed; it may still be running",
+            reason = undo.reason,
+        );
+    }
+    if let Some(emitter) = undo.emitter
+        && let Err(e) = emitter.emit_failed(
+            undo.admitted.plan(),
+            undo.stage,
+            &format!("{err:#}", err = undo.err),
+        )
+    {
+        tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
+    }
+    undo.err
+}
+
 #[tracing::instrument(skip_all)]
 pub fn admit_and_start(
     backend: &AnyBackend,
@@ -1119,6 +1189,7 @@ pub fn admit_and_start(
     };
 
     let backend_name = backend.name().to_string();
+    let vm_name = config.name.clone();
     match backend
         .start(&config)
         .context("backend start after signed-plan admission")
@@ -1131,22 +1202,39 @@ pub fn admit_and_start(
                     // running without the bounds it was admitted under, and
                     // leaving it up would mean the only record of the run says
                     // it was bounded.
-                    if let Err(stop_err) = backend.stop(&vm_id) {
-                        tracing::warn!(
-                            error = %stop_err,
-                            "stopping a VM whose grants could not be applied failed; \
-                             it may still be running"
-                        );
-                    }
-                    if let Some(emitter) = params.emitter
-                        && let Err(e) =
-                            emitter.emit_failed(admitted.plan(), "grants", &format!("{err:#}"))
-                    {
-                        tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
-                    }
-                    return Err(err);
+                    return Err(undo_launch(UndoLaunch {
+                        backend,
+                        vm_id: &vm_id,
+                        admitted: &admitted,
+                        emitter: params.emitter,
+                        stage: "grants",
+                        reason: "grants could not be applied",
+                        err,
+                    }));
                 }
             };
+
+            // Record what this boot committed, so every later admission counts
+            // it. A machine running without a record is invisible to the
+            // budget, and an undercounted host is precisely the state the
+            // budget exists to prevent — so this is fatal, and rolls the
+            // launch back the same way an unapplied grant does.
+            let undeclared = Grants::default();
+            let charge = crate::admission_budget::charge_for(
+                admitted.plan().resources.mem_mib,
+                admitted.plan().grants.as_ref().unwrap_or(&undeclared),
+            );
+            if let Err(err) = crate::admission_budget::record_charge(&vm_name, charge) {
+                return Err(undo_launch(UndoLaunch {
+                    backend,
+                    vm_id: &vm_id,
+                    admitted: &admitted,
+                    emitter: params.emitter,
+                    stage: "host-budget",
+                    reason: "its admitted charge could not be recorded",
+                    err,
+                }));
+            }
             if let Some(emitter) = params.emitter {
                 if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
                     tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");

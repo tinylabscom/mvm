@@ -115,7 +115,7 @@ ledger is the checked source of truth for *what proves it*.
 
 ### The claims
 
-Seventeen claims: fifteen numbered guarantees plus two preview claims not
+Eighteen claims: fifteen numbered guarantees plus three preview claims not
 yet promoted to the numbered set. L1 (the host) has no claim of its own
 per the threat model above.
 
@@ -197,6 +197,97 @@ secret value. This claim is registered in the ledger for
 witness-checking but stays a preview — promotion to the numbered set
 above is a separate decision.
 
+**Preview 18 — a workload's resource consumption is bounded at admission,
+and bound at spawn where the host has a mechanism.** Three controls, with
+sharply different strengths, and the row exists to keep them from being read
+as one thing.
+
+*Admission* is the strong half and holds on every host. An operator-configured
+ceiling bounds what one workload may be granted, and an operator-configured
+host-wide budget bounds the sum: a boot whose memory, added to every live
+machine's admitted charge, would exceed the headroom is refused before the
+keystore is touched. Both are read from host config and never from the plan,
+for the reason the ceiling already documents — a plan's author also authors
+its grants. Two properties of the budget are load-bearing and are witnessed
+individually. It counts only machines whose state directory carries a pid
+marker pointing at a live process, using the same probe the fork path trusts,
+so a VM that crashed without cleanup cannot turn the safety check into a
+permanent refusal of every later boot. And it counts each machine's
+*configured maximum*, not its current commitment, because the balloon
+controller moves the latter at runtime and a budget summed from it would
+re-admit memory the host has already promised.
+
+*CPU* is the partial half. A granted share wraps the VMM spawn in a systemd
+transient scope before the payload execs — born-bounded rather than adopted —
+and the achieved tier is read back off the scope's `cpu.max` and written to
+the chain-signed audit log, so the receipt records what was measured rather
+than what was asked for. This works on Linux with a systemd user session and
+nowhere else: macOS has no cgroup equivalent, so a CPU grant there is
+*declared*, and admission refuses it outright under `--prod` rather than
+booting a run whose bound nothing implements.
+
+*Wall clock* is claimed by nothing. It is authored, ceiling-checked, admitted
+and audited as a tier label, and no code in this tree stops a workload at its
+deadline. That is stated as limit 2 below rather than softened, because the
+capability table currently answers `SupervisorTimer` for three backend kinds
+and a reader could take the row as covering it.
+
+This is a preview and not a numbered claim for the ordinary reason plus one
+specific one: the CPU control's only *measured* witness — the live
+1.5-core-against-a-1.5-core-grant run — is an `#[ignore]`d test that needs a
+Linux host with a systemd user session, so PR CI witnesses the spawn wrapping
+and the read-back, not the throttling. The limits below are load-bearing; do
+not paraphrase this row without them.
+
+**Preview 18 limits — what the resource bound does and does not enforce.**
+
+1. **CPU is enforced on Linux and declared-only on macOS. (OPEN,
+   permanent on macOS.)** The mechanism is a cgroup v2 `cpu.max` on a
+   systemd transient scope. macOS has no equivalent — thread QoS is priority,
+   not quota — so `ResourceControls::for_backend` answers `CpuControl::None`
+   there and the enforceability gate refuses a CPU grant under `--prod` and
+   warns under dev. A Linux host without `systemd-run` or without a user
+   session bus gets the same treatment through a second, host-level probe, so
+   a sealed run cannot be admitted on a host that merely looks capable by
+   backend kind. Witnessed by
+   `fn:the_libkrun_tier_cannot_bound_cpu_off_linux`,
+   `fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu`,
+   `fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present` and
+   `fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error`.
+2. **Wall clock has no mechanism at all. (OPEN.)** A `WallClockGrant::Secs`
+   is parsed, ceiling-checked, admitted, projected and audited, and nothing
+   ever kills the workload. There is no supervisor timer in this tree;
+   `WallClockControl::SupervisorTimer` in the capability table is a
+   declaration of what the tier *could* bound, and `negotiate_grants` accepts
+   a wall-clock grant against it, which means such a grant passes the `--prod`
+   enforceability gate today with nothing behind it. The negotiation half is
+   witnessed by `fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload`;
+   the enforcement half has no witness because it has no code. Read every
+   `supervisor:timer` tier label in an audit chain accordingly.
+3. **wasm fuel and epoch are declared, not wired. (OPEN.)** The wasm tier
+   advertises `WasmFuel` and `WasmEpoch` and its backend does not override
+   `apply_grants`, so it honestly reports `Declared`. The capability
+   declaration is checked; the enforcement is absent.
+4. **A restored or warm-claimed child is admission-bounded, not
+   spawn-bounded. (OPEN.)** A restored child boots under its own admitted
+   plan, so its charge is checked against the ceiling and counted against the
+   budget — but the restore spawns a fresh VMM without re-entering the
+   scope-binding path, so no `cpu.max` is re-armed and its CPU bound is a
+   ledger entry rather than an enforcement. A warm-claimed child is worse: the
+   standby parent is deliberately spawned with no CPU grant, and the claim
+   path applies none either, so the child is unbounded by its parent for CPU
+   and, per limit 2, for wall clock.
+5. **The budget is not a precise cliff. (OPEN, by choice.)** Two admissions
+   racing each other can both read the same total and both be admitted,
+   overshooting by one boot; closing that needs a host-wide lock held across
+   measure-and-start. Its CPU arm sums only *granted* shares, so an ungranted
+   workload is uncapped and contributes nothing. And its liveness and record
+   reads fail open in the undercount direction — an unreadable charge record
+   makes one machine invisible rather than refusing every boot on the host
+   (`fn:an_unreadable_charge_record_is_skipped_rather_than_fatal`). Each is a
+   deliberate choice of the undercount failure over the lockout failure, which
+   is the same judgement limit 4's counting rule makes.
+
 ### Explicit out of scope
 
 - **A malicious host.** mvmctl trusts the host with the hypervisor, the
@@ -258,21 +349,30 @@ backend falls below Tier 1.
 | QEMU (Linux KVM/TCG) | ✅ KVM where available | ⚠️ larger device-model TCB | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — a `mvm`-only Linux dev/test substrate, opt-in only, never reachable from the fleet orchestrator. It carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path. This carve-out is type-enforced: a `WorkloadBackend` marker trait gates the admitted workload-launch path, and QEMU does not implement it, so it cannot reach that path regardless of prose. The test-only mock backend does implement the marker — it is a hermetic lifecycle test double that carries no real workload, so permitting it costs nothing. |
 | `wasm-sandbox` (browser / WASI preview) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale.** No KVM, no real kernel, no TAP/virtio/vsock. Asserts none of the numbered claims and declares its own non-virtualization honestly; fails closed on any kernel/TAP/vsock request. Opt-in only; auto-detection never selects it. It is safe *because* it is single-principal — a developer's own code in their own browser sandbox, where the "malicious guest" adversary class does not apply — not because it holds any isolation claim. Promotion to a real, claim-bearing microVM re-materializes the workload from recorded intent through the audited build and admission pipeline; nothing produced in this claims-free tier carries authority into a claim-bearing one. |
 
+**Matrix scope — networking.** Every "no guest network interface" statement in
+the rows above describes the default socket-aware vsock path, which is the
+only path a new workload can now take. It does not describe the frozen
+`l3-vsock` mode, where the guest holds an `mvm0` TUN by design; see
+"The `l3-vsock` second path, and its retirement" below. A run's tier is
+otherwise unaffected by this: `l3-vsock` never changed a backend's isolation
+tier, only which policy implementation decided its egress.
+
 **Tier discipline.** Tier 1 is the production default and the only tier
 that carries every numbered claim. Tier 2 backends hold every claim
 except claim 3, which is scoped to the block+ext4 backends. There is no
 Tier 3: a shared-kernel container runtime holds none of the L1–L3
 isolation claims, so mvm ships no container-based backend at any tier.
 
-**Claim-10 coverage.** Claim 10's default-deny egress is enforced at **one**
-seam for every backend that runs an untrusted workload: the per-VM
-substitution endpoint reached over vsock, whose shared `EgressGate` is the
-sole decision point. There is no host-side network chokepoint to enforce at,
-because a workload guest has no network interface at all — Firecracker omits
-`/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect`, and the
-HVF device model has no net device. Egress leaves a guest only over vsock, to
-a host-side endpoint the host itself originates the outbound connection from,
-which is what makes admission, substitution and the audit record possible.
+**Claim-10 coverage.** On the default socket-aware path, claim 10's
+default-deny egress is enforced at **one** seam for every backend that runs an
+untrusted workload: the per-VM substitution endpoint reached over vsock, whose
+shared `EgressGate` is the sole decision point. There is no host-side network
+chokepoint to enforce at, because such a workload guest has no network
+interface at all — Firecracker omits `/network-interfaces`, libkrun pins
+`NetworkingMode::VsockDirect`, and the HVF device model has no net device.
+Egress leaves the guest only over vsock, to a host-side endpoint the host
+itself originates the outbound connection from, which is what makes admission,
+substitution and the audit record possible.
 
 Two gates keep that true rather than aspirational. `xtask
 check-uniform-vsock-egress` pins Firecracker, libkrun and HVF to a single
@@ -281,6 +381,31 @@ gate or revert to a raw backend. `xtask check-vsock-only-egress` fails closed
 if `virtio_net`, a tap, or a userspace-gateway token appears on a workload
 path. QEMU is intentionally excluded, for the reason given in the tier matrix
 above.
+
+**The `l3-vsock` second path, and its retirement.** ADR-036 added an opt-in
+compatibility mode (`raw_ip_stack=true`, `NetworkMode::L3Vsock`) in which the
+guest *does* get an IP stack, on an `mvm0` TUN, and tunnels raw IP packets to
+a host forwarder; ADR-037 added a second forwarder for it. On that path the
+guest originates connections, so the decision point is the L3 admitter and the
+forwarder's policy — not the `EgressGate` above — and host-side substitution
+and redaction cannot apply at all. Claim 10 held on that path through its own
+admitter, but through a *second* implementation, which is a weaker property
+than the "one decision point" this section asserts for the default path.
+
+ADR-042 retires it. `raw_ip_stack=true` / `NetworkMode::L3Vsock` is now
+refused at synthesis and admission with a migration error; already-running VMs
+drain, and no new production L3 workload boots. `xtask
+check-l3-expansion-freeze` is a temporary shrink-only ratchet holding that
+line until Plan 316 Phase 7 deletes the path and Phase 8 replaces
+`check-uniform-vsock-egress`, `check-vsock-only-egress`, and the ratchet with
+`check-single-network-path` plus a socket-owner gate. Until that lands, read
+claim 10 as: one decision point on the only path a new workload can take, and
+a frozen second implementation with no new entrants.
+
+*Corrected 2026-08-11.* This section, and `specs/refactor/03-networking.md`,
+both asserted that a workload guest has no network interface at all, with no
+qualifier. That was written before `l3-vsock` shipped and was not revisited
+when it did. The paragraphs above restore the qualifier.
 
 *Corrected 2026-08-02.* This section previously described enforcement as
 "Firecracker via nftables default-deny on the TAP, and libkrun via the
@@ -549,6 +674,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY | fn:console_refused_on_sealed_image, ci:guest-agent-runtime-boundary, fn:prod_console_attachment_has_no_input | runtime profile + signed VerbGrant + host accessible-gate + console policy (ADR-001 §W4.3 extension). The host→guest input plane is deliberately *not* claimed here: its properties are policy, not absence, and are witnessed at row 17 | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
 | 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason, fn:the_endpoint_fingerprints_what_it_resolved_and_reports_no_value, fn:the_handshakes_two_halves_go_to_two_different_places, fn:a_secret_split_across_two_frames_does_not_reassemble_in_the_workload, fn:a_fingerprint_refusal_does_not_claim_the_bytes_are_the_secret | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + fingerprint-matching sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
+| 18 | A workload's resource consumption is bounded at admission — per workload and across the host — and CPU-bound at spawn where the host has a mechanism | fn:a_boot_past_the_headroom_is_refused, fn:budget_ignores_dead_machines, fn:budget_counts_the_configured_maximum_not_current_usage, fn:an_empty_host_admits_a_boot_within_headroom, fn:an_unreadable_charge_record_is_skipped_rather_than_fatal, fn:admission_refuses_a_grant_over_the_ceiling, fn:the_ceiling_bounds_memory_even_though_no_one_granted_it, fn:prod_refuses_a_cpu_grant_on_a_backend_that_cannot_bound_cpu, fn:the_libkrun_tier_cannot_bound_cpu_off_linux, fn:a_share_grant_binds_the_spawn_when_the_mechanism_is_present, fn:a_vm_with_no_recorded_scope_reads_back_as_declared_not_as_an_error, fn:an_admitted_boot_writes_the_achieved_tier_to_the_audit_chain, fn:a_wall_clock_bound_needs_a_clock_that_can_stop_the_workload, fn:a_granted_cpu_share_binds_a_real_spawn_to_its_quota | operator-configured per-workload ceiling + host-wide budget summed over live machines only (pid-marker probe, configured maximum not current usage) + cgroup v2 `cpu.max` on a systemd transient scope, read back and written to the chain-signed audit log. CPU is declared-only off Linux, wall clock has no mechanism at all, and a restored or warm-claimed child is not re-bound — read the "Preview 18 limits" note below before treating this as enforced | Preview |
 
 Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
 it is registered here for witness machine-checking and tracked by its own doc

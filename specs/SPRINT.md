@@ -44,6 +44,12 @@
       global test environment races; the affected tests pass in isolation and
       serially.
 
+- [x] HVF directory-share boot regression — **plan 322**. Queue-backed
+      virtio-fs now reports the virtio-MMIO all-one sentinel for an absent DAX
+      shared-memory region instead of exposing a false zero-length window that
+      Linux rejects. The 456-test VMM suite passes, and the original Alpine
+      `machine run --mount .:/work -- ls /work` command succeeds on native HVF;
+      workspace checks, doctests, and host Clippy are green.
 - [x] Merge-group CI scoping — **plan 322**. A fail-closed SHA-range
       classifier keeps the full Rust matrix for behavior-changing diffs and
       manual runs, while prose/site-only pull requests and merge groups avoid
@@ -879,6 +885,49 @@ updates only its own entry below.
       run on a KVM host (6/6, live forwarding witness, clean teardown); 23
       hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
       and refuses; native Windows is not claimed.
+      **Retired by plan 316 (ADR-042).** This shipped, and it is now a second
+      production networking path with its own policy code — which is the
+      problem plan 316 fixes. Frozen as of Phase 0: new
+      `raw_ip_stack=true`/`L3Vsock` launches are refused at synthesis,
+      admission, and CLI preflight; running VMs drain; deletion is Phase 7.
+
+- [~] Single flow-aware vsock networking path (plan 316 / ADR-042, umbrella
+      #2368). One external networking path for every untrusted workload:
+      guest loopback adapter → authenticated FlowMux session on
+      `GuestService::NetworkFlow` (vsock 5253) → one per-VM
+      `mvm-network-endpoint` → canonical policy, DNS, substitution/redaction,
+      rate and audit pipeline → host-originated socket or host-owned ingress
+      listener. Flow-aware at L4 with selective L7: opaque TCP/UDP is relayed
+      unparsed, and transformation runs only for a typed flow whose signed
+      plan requires it — a plan requiring transformation refuses an opaque
+      shape rather than downgrading. Supersedes the production-path decisions
+      in plans 285 and 287.
+  - [x] **Phase 0 — ratify the invariant and freeze expansion** (#2369).
+        ADR-042 accepted, recording the L4-with-selective-L7 decision, why
+        arbitrary guest TLS and host-side replacement are mutually exclusive,
+        and the rejection of a universal MITM CA. ADR-036 and ADR-037 marked
+        superseded for production workload networking with their measurements
+        retained. `specs/refactor/03-networking.md` corrected — it claimed the
+        raw-packet path was deleted, which stopped being true when ADR-036
+        reintroduced it. ADR-001's tier matrix and claim-10 section qualified
+        to name the second path and its retirement. New temporary
+        `xtask check-l3-expansion-freeze` ratchet: no new non-test reference
+        to `L3Vsock`, `raw_ip_stack`, `NetworkControl`, `NetworkData`,
+        `spawn_netd`, or `host_datapath` outside a 29-entry allowlist that
+        fails closed on a stale entry, so it can only shrink. Synthesis
+        (`mvm_core::plan::refuse_retired_l3`), supervisor admission
+        (`admit_for_run`), and CLI preflight
+        (`mvm_cli::commands::machine::preflight_network`) all refuse the
+        retired transport with one shared error naming the loopback adapters
+        and typed connectors; running VMs are unaffected.
+  - [ ] Phase 1 — pin protocol, resource, and performance baselines (#2370)
+  - [ ] Phase 2 — the one authenticated endpoint (#2371)
+  - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
+  - [ ] Phase 4 — stream typed transformations (#2373)
+  - [ ] Phase 5 — declared ingress on FlowMux (#2374)
+  - [ ] Phase 6 — compatibility boundary (#2375)
+  - [ ] Phase 7 — delete L3 completely (#2376)
+  - [ ] Phase 8 — make "one path" mechanically enforceable (#2377)
 
 - [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
       dormant**. Tracked in `specs/plans/295-workload-stream-plane.md` and
