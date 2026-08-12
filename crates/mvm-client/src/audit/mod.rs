@@ -5,7 +5,7 @@
 //! sources. It discovers the per-tenant lifecycle chains
 //! (`<audit_dir>/<tenant>.jsonl`) and the per-VM workload chains
 //! (`<audit_dir>/<tenant>.<vm>.workload.jsonl`), verifies each through the
-//! canonical verifiers (`mvm_hostd::supervisor::verify_audit_chain_entries`
+//! canonical verifiers (`mvm_hostd::supervisor::audit_set::verify_segment_entries`
 //! and `mvm_hostd::audit_signer::verify::verify_workload_chain_entries`),
 //! and returns normalized [`VerifiedAuditEvent`]s only from sources whose
 //! signatures, chain links, and tenant scope all hold. A source that fails
@@ -24,6 +24,13 @@
 //! deliberately not sources: they carry no authenticity and can never be
 //! presented as trusted activity, so they yield neither events nor
 //! refusals.
+//!
+//! A rotated lifecycle chain is several files but **one** source. Retired
+//! segments (`<audit_dir>/<tenant>.seg-NNNNNN.jsonl`) fold to their tenant
+//! rather than reading as tenants of their own, and the whole segment set is
+//! verified together — including the handoffs between segments. Reading only
+//! the live `<tenant>.jsonl` would present the newest slice as the history,
+//! which is the silent narrowing rotation must not introduce.
 
 mod event;
 mod normalize;
@@ -44,7 +51,7 @@ use thiserror::Error;
 
 use event::{OrderKey, parse_ts_millis};
 use normalize::{
-    normalize_lifecycle_entry, normalize_workload_entry, refusal_from_lifecycle,
+    normalize_lifecycle_entry, normalize_workload_entry, refusal_from_segment_set,
     refusal_from_workload, scope_mismatch_refusal,
 };
 
@@ -182,11 +189,17 @@ impl LocalAuditReader {
         let source = &source_file.id;
         let events = match source.kind {
             AuditSourceKind::Lifecycle => {
-                let entries = mvm_hostd::supervisor::verify_audit_chain_entries(
-                    &source_file.path,
+                // Reads the tenant's whole segment set, oldest first, including
+                // the handoffs between segments. Verifying only
+                // `<tenant>.jsonl` would hand back the live segment as though
+                // it were the history, which is exactly the silent narrowing
+                // rotation must not introduce.
+                let entries = mvm_hostd::supervisor::audit_set::verify_segment_entries(
+                    &self.audit_dir,
+                    &source.tenant,
                     &self.verifying_key,
                 )
-                .map_err(|e| Box::new(refusal_from_lifecycle(source, &e)))?;
+                .map_err(|e| Box::new(refusal_from_segment_set(source, &e)))?;
                 for (i, entry) in entries.iter().enumerate() {
                     if entry.tenant.0 != source.tenant {
                         return Err(Box::new(scope_mismatch_refusal(
@@ -304,6 +317,11 @@ fn discover_sources(dir: &Path, tenant: Option<&str>) -> Result<Vec<SourceFile>,
         }
     };
     sources.sort_by(|a, b| a.id.cmp(&b.id));
+    // A rotated chain is several files but one source. Every segment of a
+    // tenant folds to the same id, and the lifecycle verifier reads the whole
+    // set from the tenant name, so keeping duplicates here would verify the set
+    // once per segment and report each entry that many times.
+    sources.dedup_by(|a, b| a.id == b.id);
     Ok(sources)
 }
 
@@ -338,11 +356,11 @@ fn lifecycle_tenant(name: &str) -> Option<String> {
     if name == SECRETS_OPERATOR_LOG || name.ends_with(mvm_core::config::WORKLOAD_AUDIT_SUFFIX) {
         return None;
     }
-    let tenant = name.strip_suffix(".jsonl")?;
-    if tenant.is_empty() {
-        return None;
-    }
-    Some(tenant.to_string())
+    // Folds a retired segment onto the tenant it was split off from. Without
+    // that, `local.seg-000001.jsonl` reads as a tenant literally called
+    // `local.seg-000001`, every entry inside it fails the tenant-scope check,
+    // and rotating a chain turns the whole log into refusals.
+    mvm_core::config::lifecycle_chain_base(name).map(str::to_string)
 }
 
 /// Tenant-anchored classification: is `name` one of `tenant`'s chains?

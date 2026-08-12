@@ -824,6 +824,115 @@ pub fn is_host_lifecycle_chain(path: &std::path::Path) -> bool {
         })
 }
 
+/// Filename infix marking a retired (sealed) segment of a tenant's lifecycle
+/// chain: `<tenant>.seg-<NNNNNN>.jsonl`.
+pub const AUDIT_SEGMENT_INFIX: &str = ".seg-";
+
+/// Environment override for [`audit_segment_max_bytes`]. `0` disables rotation.
+pub const AUDIT_SEGMENT_BYTES_ENV: &str = "MVM_AUDIT_SEGMENT_BYTES";
+
+/// Default size at which the active audit segment is sealed and a fresh one
+/// opened: 4 MiB.
+///
+/// Chosen from measurement rather than roundness. A full chain walk costs about
+/// 29 ns/byte in a release build, so 4 MiB is a ~120 ms verification — the
+/// budget that keeps the check the live chain needs comfortably interactive.
+/// At the ~1 KB/entry this log actually averages that is roughly 4,000 entries
+/// per segment.
+pub const AUDIT_SEGMENT_DEFAULT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Size at which the active audit segment rotates, or `None` when rotation is
+/// disabled.
+///
+/// An unparseable override is ignored in favour of the default rather than
+/// treated as a disable: a typo silently reinstating unbounded growth is the
+/// failure this ordering prevents.
+pub fn audit_segment_max_bytes() -> Option<u64> {
+    let configured = std::env::var(AUDIT_SEGMENT_BYTES_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(AUDIT_SEGMENT_DEFAULT_BYTES);
+    (configured > 0).then_some(configured)
+}
+
+/// Width the segment sequence number is zero-padded to, so that lexical order
+/// over segment filenames equals numeric order over sequence numbers. Six
+/// digits is a million segments; at the 4 MiB default that is 4 TiB of audit
+/// log, which is well past the point where the operator has other problems.
+pub const AUDIT_SEGMENT_SEQ_WIDTH: usize = 6;
+
+/// A retired segment of `tenant`'s lifecycle chain:
+/// `<mvm_home>/audit/<tenant>.seg-<NNNNNN>.jsonl`.
+///
+/// The *active* segment keeps the plain `<tenant>.jsonl` name it has always
+/// had, so every existing reader and the `file:///…` fixed-file destination are
+/// unaffected. Rotation renames the active file to this name and opens a fresh
+/// active file.
+///
+/// Deliberately still matched by [`is_host_lifecycle_chain`]: a retired segment
+/// is intact evidence and has to stay in verification scope. That is the
+/// opposite of the `.forked-` quarantine rename, which drops a *known-broken*
+/// chain out of scope so an operator can clear the finding without deleting it.
+pub fn audit_segment_path(tenant: &str, seq: u64) -> std::path::PathBuf {
+    mvm_audit_dir().join(audit_segment_file_name(tenant, seq))
+}
+
+/// The bare filename [`audit_segment_path`] builds, for callers that already
+/// hold the audit directory (a test dir, or the signer's own `audit_dir`).
+pub fn audit_segment_file_name(tenant: &str, seq: u64) -> String {
+    format!(
+        "{tenant}{AUDIT_SEGMENT_INFIX}{seq:0width$}.jsonl",
+        width = AUDIT_SEGMENT_SEQ_WIDTH
+    )
+}
+
+/// If `file_name` is a retired segment of `tenant`'s lifecycle chain, return
+/// its sequence number.
+///
+/// Rejects a non-canonical spelling of a sequence number rather than accepting
+/// it: `seg-1` and `seg-000001` would otherwise be two names for one segment,
+/// and a set that contains both has an ambiguous ordering. Round-tripping
+/// through [`audit_segment_file_name`] is the check, so there is exactly one
+/// spelling per sequence number by construction.
+pub fn audit_segment_seq(file_name: &str, tenant: &str) -> Option<u64> {
+    let digits = file_name
+        .strip_prefix(tenant)?
+        .strip_prefix(AUDIT_SEGMENT_INFIX)?
+        .strip_suffix(".jsonl")?;
+    let seq: u64 = digits.parse().ok()?;
+    (audit_segment_file_name(tenant, seq) == file_name).then_some(seq)
+}
+
+/// The tenant a lifecycle-chain file belongs to, folding a retired segment
+/// back onto the chain it was split off from.
+///
+/// `local.jsonl` and `local.seg-000001.jsonl` both answer `local`. Without
+/// this, a segment reads as a tenant literally named `local.seg-000001`: every
+/// entry inside it fails the tenant-scope check, and rotating a chain turns the
+/// whole log into refusals. Two sweeps need the same answer, so it is one
+/// function — the drift between copies of the *other* naming rule is why
+/// [`is_host_lifecycle_chain`] exists.
+///
+/// Returns `None` for anything that is not a lifecycle chain.
+pub fn lifecycle_chain_base(file_name: &str) -> Option<&str> {
+    if file_name == SECRETS_OPERATOR_LOG || file_name.ends_with(WORKLOAD_AUDIT_SUFFIX) {
+        return None;
+    }
+    let stem = file_name.strip_suffix(".jsonl")?;
+    if stem.is_empty() {
+        return None;
+    }
+    // Only a canonical segment suffix folds; a tenant whose name genuinely
+    // contains `.seg-` keeps its own name, because `audit_segment_seq` refuses
+    // any spelling it did not produce.
+    Some(
+        stem.rsplit_once(AUDIT_SEGMENT_INFIX)
+            .map(|(base, _)| base)
+            .filter(|base| !base.is_empty() && audit_segment_seq(file_name, base).is_some())
+            .unwrap_or(stem),
+    )
+}
+
 /// If `file_name` is a workload audit chain for `tenant`
 /// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`), return its VM name. Lets
 /// `mvmctl audit verify` enumerate a tenant's per-VM workload chains from a
@@ -926,6 +1035,90 @@ mod tests {
         assert!(!is_host_lifecycle_chain(p("/a/audit/local.jsonl.bak")));
         assert!(!is_host_lifecycle_chain(p("/a/audit/notes.txt")));
         assert!(!is_host_lifecycle_chain(p("/a/audit")));
+    }
+
+    /// A retired segment is intact evidence, so it stays in sweep scope. This
+    /// is the load-bearing difference from the quarantine rename below, which
+    /// looks similar on disk and means the opposite.
+    #[test]
+    fn a_retired_segment_stays_in_sweep_scope() {
+        assert!(is_host_lifecycle_chain(std::path::Path::new(
+            "/a/audit/local.seg-000001.jsonl"
+        )));
+    }
+
+    /// A segment name must not be mistaken for a per-VM workload chain, or a
+    /// tenant's own history would be verified with the wrong envelope parser.
+    #[test]
+    fn a_segment_is_not_read_as_a_workload_chain() {
+        assert_eq!(
+            workload_audit_vm_name("local.seg-000001.jsonl", "local"),
+            None
+        );
+        // And the converse: a workload chain is not read as a segment.
+        assert_eq!(
+            audit_segment_seq("local.vm-1.workload.jsonl", "local"),
+            None
+        );
+    }
+
+    #[test]
+    fn segment_names_round_trip_through_their_sequence_number() {
+        for seq in [1u64, 9, 10, 999_999] {
+            let name = audit_segment_file_name("local", seq);
+            assert_eq!(audit_segment_seq(&name, "local"), Some(seq));
+        }
+        assert_eq!(
+            audit_segment_file_name("local", 3),
+            "local.seg-000003.jsonl"
+        );
+    }
+
+    /// Zero-padding is what makes lexical order equal numeric order, which is
+    /// how a directory listing becomes an ordered segment set. If both
+    /// spellings were accepted, one sequence number would have two filenames
+    /// and the set's ordering would be ambiguous.
+    #[test]
+    fn a_non_canonical_sequence_spelling_is_refused() {
+        assert_eq!(audit_segment_seq("local.seg-1.jsonl", "local"), None);
+        assert_eq!(audit_segment_seq("local.seg-0000001.jsonl", "local"), None);
+        assert_eq!(audit_segment_seq("local.seg-abc.jsonl", "local"), None);
+        // A different tenant's segment is not this tenant's.
+        assert_eq!(audit_segment_seq("other.seg-000001.jsonl", "local"), None);
+        // The active segment is not a retired one.
+        assert_eq!(audit_segment_seq("local.jsonl", "local"), None);
+    }
+
+    /// A rotated chain is several files but one chain. If a segment answered
+    /// its own name here, every entry inside it would fail the tenant-scope
+    /// check and rotating would turn a healthy log into refusals.
+    #[test]
+    fn a_segment_folds_onto_the_chain_it_was_split_from() {
+        assert_eq!(lifecycle_chain_base("local.jsonl"), Some("local"));
+        assert_eq!(
+            lifecycle_chain_base("local.seg-000001.jsonl"),
+            Some("local")
+        );
+        assert_eq!(
+            lifecycle_chain_base("local.seg-999999.jsonl"),
+            Some("local")
+        );
+        // Not lifecycle chains at all.
+        assert_eq!(lifecycle_chain_base("local.vm-1.workload.jsonl"), None);
+        assert_eq!(lifecycle_chain_base(SECRETS_OPERATOR_LOG), None);
+        assert_eq!(lifecycle_chain_base("notes.txt"), None);
+        assert_eq!(lifecycle_chain_base(".jsonl"), None);
+    }
+
+    /// A tenant whose name happens to contain the segment infix keeps its own
+    /// name — only a spelling `audit_segment_file_name` would produce folds.
+    /// Otherwise a tenant called `a.seg-x` would silently merge into `a`.
+    #[test]
+    fn a_tenant_name_containing_the_segment_infix_does_not_fold() {
+        assert_eq!(lifecycle_chain_base("a.seg-x.jsonl"), Some("a.seg-x"));
+        assert_eq!(lifecycle_chain_base("a.seg-1.jsonl"), Some("a.seg-1"));
+        // The canonical width does fold, so the two cases stay distinguishable.
+        assert_eq!(lifecycle_chain_base("a.seg-000001.jsonl"), Some("a"));
     }
 
     /// A quarantined chain must drop out of scope. Renaming the file is the

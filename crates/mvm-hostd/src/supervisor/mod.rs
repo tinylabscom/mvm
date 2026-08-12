@@ -33,6 +33,8 @@ pub mod audit_checkpoint;
 pub mod audit_dedup;
 pub mod audit_file;
 pub mod audit_recorder;
+pub mod audit_segment;
+pub mod audit_set;
 pub mod backend;
 pub mod balloon;
 pub mod balloon_runtime;
@@ -136,12 +138,18 @@ pub use artifact::{
 pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
 pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
 pub use audit_file::{
-    ChainCheckpoint, FileAuditSigner, IncrementalVerification, SignedEnvelope, VerifyError,
-    verify_audit_chain, verify_audit_chain_entries, verify_audit_chain_incremental,
+    ChainCheckpoint, FileAuditSigner, IncrementalVerification, RotationPolicy, SegmentWalk,
+    SignedEnvelope, VerifyError, verify_audit_chain, verify_audit_chain_entries,
+    verify_audit_chain_incremental, verify_chain_bytes,
 };
 pub use audit_recorder::{
     EventCategory, Recorder, RecorderError, UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256,
     UNBOUND_PLAN_ID,
+};
+pub use audit_segment::{CHAIN_CONTINUED, CHAIN_SEALED, Continuation, Sealed};
+pub use audit_set::{
+    SegmentContent, SegmentReport, SegmentSetError, read_verified_set, verify_segment_entries,
+    verify_segment_set, verify_segment_topology,
 };
 pub use backend::{BackendError, BackendLaunchSpec, BackendLauncher, NoopBackendLauncher};
 #[cfg(target_os = "macos")]

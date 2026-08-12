@@ -11,6 +11,14 @@ for detailed scope and acceptance criteria.
       all three SDKs, shared fixtures, BDD scenarios, recovery guidance, and
       website docs agree on that single public command shape. Host and Linux
       gates, including the complete workspace suite and doctests, pass.
+- [x] **Issue #2365 / Plan 319 — audit-log rotation.** The chain-signed audit
+      log now rotates into sequenced segments at 4 MiB instead of growing
+      forever. Rotation is an authenticated handoff, not a truncation: each new
+      segment opens with a signed record naming its predecessor and that
+      predecessor's final chain hash, so a removed segment is reported by
+      number rather than passing silently. Retention is keep-everything;
+      deletion stays an explicit operator action. ADR-001 rows 8 and 14 amended
+      to say what `verify_audit_chain` now attests.
 - [x] **Plan 322 — HVF virtio-fs shared-memory sentinel.** The queue-backed
       virtio-fs transport returns the required all-one absent-region value from
       its shared-memory length and base registers, so Linux no longer rejects

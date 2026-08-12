@@ -97,6 +97,7 @@ pub struct FileAuditSigner {
     signing_key: SigningKey,
     audit_dir: PathBuf,
     fixed_file: Option<PathBuf>,
+    rotation: RotationPolicy,
     cursors: Mutex<HashMap<String, [u8; 32]>>,
     /// Files carrying entries that have been written but not yet fsynced.
     ///
@@ -104,6 +105,52 @@ pub struct FileAuditSigner {
     /// `sync_data` is file-wide and carries every earlier write with it. What
     /// remains at drop is flushed there.
     pending_sync: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+/// When the active segment is sealed and a fresh one opened.
+///
+/// A type rather than a bare `Option<u64>` so the disabled case has to be
+/// spelled out at the call site. A signer constructed with rotation silently
+/// off is how a log goes back to growing forever without anyone noticing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotationPolicy {
+    max_bytes: Option<u64>,
+}
+
+impl RotationPolicy {
+    /// Rotate once the active segment reaches `bytes`.
+    #[must_use]
+    pub fn at_bytes(bytes: u64) -> Self {
+        Self {
+            max_bytes: Some(bytes),
+        }
+    }
+
+    /// Never rotate. The chain stays one file and grows without bound.
+    #[must_use]
+    pub fn never() -> Self {
+        Self { max_bytes: None }
+    }
+
+    /// The configured threshold, honouring `MVM_AUDIT_SEGMENT_BYTES`.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            max_bytes: mvm_core::config::audit_segment_max_bytes(),
+        }
+    }
+
+    /// Whether a segment of `len` bytes has reached the threshold.
+    #[must_use]
+    pub fn should_rotate(&self, len: u64) -> bool {
+        self.max_bytes.is_some_and(|max| len >= max)
+    }
+}
+
+impl Default for RotationPolicy {
+    fn default() -> Self {
+        Self::from_env()
+    }
 }
 
 /// Whether an entry must be on disk before this call returns.
@@ -175,9 +222,19 @@ impl FileAuditSigner {
             signing_key,
             audit_dir,
             fixed_file: None,
+            rotation: RotationPolicy::from_env(),
             cursors: Mutex::new(HashMap::new()),
             pending_sync: Arc::new(Mutex::new(HashSet::new())),
         })
+    }
+
+    /// Replace the rotation policy. Consuming rather than mutating, so a signer
+    /// cannot have its rotation behaviour changed out from under a writer that
+    /// is already appending to it.
+    #[must_use]
+    pub fn with_rotation(mut self, rotation: RotationPolicy) -> Self {
+        self.rotation = rotation;
+        self
     }
 
     /// Create a signer rooted at one exact JSONL file instead of a
@@ -199,6 +256,7 @@ impl FileAuditSigner {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from(".")),
             fixed_file: Some(audit_file),
+            rotation: RotationPolicy::from_env(),
             cursors: Mutex::new(HashMap::new()),
             pending_sync: Arc::new(Mutex::new(HashSet::new())),
         })
@@ -282,45 +340,67 @@ impl Drop for FileAuditSigner {
     }
 }
 
-#[async_trait]
-impl AuditSigner for FileAuditSigner {
-    async fn sign_and_emit(&self, entry: &AuditEntry) -> Result<(), AuditError> {
-        let tenant = entry.tenant.0.clone();
-        let path = self.tenant_path(&tenant);
-        let cursor_key = self
-            .fixed_file
-            .as_ref()
-            .map(|p| format!("file:{}", p.display()))
-            .unwrap_or_else(|| format!("tenant:{tenant}"));
+impl FileAuditSigner {
+    /// The lock guarding one chain's read-cursor / rotate / sign / append
+    /// section.
+    ///
+    /// Deliberately a file *beside* the chain rather than the chain itself.
+    /// The lock used to be taken on the data file, which was correct while
+    /// that file was immortal — but rotation renames it, and a `flock` follows
+    /// the inode. A second process opening `<tenant>.jsonl` immediately after
+    /// the rename would create a brand-new inode, take an uncontended lock on
+    /// it, and append concurrently with the rotation still in progress. The
+    /// lock file is never renamed, so it stays the one thing both writers
+    /// agree to contend on.
+    ///
+    /// Not `.jsonl`-suffixed, so it never enters lifecycle-chain sweep scope.
+    fn lock_path(active: &Path) -> PathBuf {
+        let mut name = active.as_os_str().to_os_string();
+        name.push(".lock");
+        PathBuf::from(name)
+    }
 
-        // Cross-process chain integrity.
-        //
-        // The in-memory `cursors` HashMap only serializes writers
-        // inside *this* process. Two `mvm-libkrun-supervisor`
-        // instances for the same tenant would otherwise both restore
-        // the same on-disk prev_hash, both append, and break the
-        // chain. Take an exclusive flock on the tenant file across
-        // the whole read-cursor / sign / append critical section.
-        //
-        // The in-memory cursor cache stays a fast-path hint;
-        // restoration under the lock is the source of truth.
-        let mut file = OpenOptions::new()
+    fn acquire_lock(active: &Path) -> Result<std::fs::File, AuditError> {
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(Self::lock_path(active))
             .map_err(|e| AuditError::Io(e.to_string()))?;
         flock_exclusive(&file).map_err(|e| AuditError::Io(e.to_string()))?;
-        // Lock is released on `file` drop at end of scope.
+        Ok(file)
+    }
 
-        // Refresh the cursor under the lock — another process may
-        // have appended between our last in-memory snapshot and
-        // this call.
-        let prev_hash = self.restore_cursor(&path)?;
-        {
-            let mut cursors = self.cursors.lock().expect("cursors poisoned");
-            cursors.insert(cursor_key.clone(), prev_hash);
-        }
+    /// The name this chain's segments are filed under: `local` for
+    /// `local.jsonl`. Derived from the file rather than from the tenant so the
+    /// `file:///…` fixed-file destination rotates under its own stem instead
+    /// of scattering segments named after whichever tenant emitted first.
+    fn segment_base(active: &Path) -> String {
+        active
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("audit")
+            .to_string()
+    }
 
+    /// Append one signed entry to `path`, assuming the chain lock is held.
+    /// Returns the new chain tip.
+    fn append_locked(&self, path: &Path, entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
+        // Refresh the cursor under the lock — another process may have appended
+        // between our last in-memory snapshot and this call. The in-memory
+        // cursor cache stays a fast-path hint; restoration here is the source
+        // of truth.
+        let prev_hash = self.restore_cursor(path)?;
+        self.write_signed(path, entry, prev_hash, sync_policy_for(&entry.event))
+    }
+
+    /// Sign `entry` against `prev_hash` and append it to `path`.
+    fn write_signed(
+        &self,
+        path: &Path,
+        entry: &AuditEntry,
+        prev_hash: [u8; 32],
+        sync: SyncPolicy,
+    ) -> Result<[u8; 32], AuditError> {
         let entry_bytes = serde_json::to_vec(entry).map_err(|e| AuditError::Io(e.to_string()))?;
         let mut to_sign = entry_bytes.clone();
         to_sign.extend_from_slice(&prev_hash);
@@ -337,8 +417,13 @@ impl AuditSigner for FileAuditSigner {
         let line = serde_json::to_string(&envelope).map_err(|e| AuditError::Io(e.to_string()))?;
         let new_hash = hash_line(line.as_bytes());
 
-        // One `write_all` of record-plus-terminator, then fsync, both inside
-        // the flock.
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| AuditError::Io(e.to_string()))?;
+
+        // One `write_all` of record-plus-terminator, then fsync.
         //
         // `writeln!` goes through `write_fmt`, which issues a syscall per
         // format fragment — the record, then the newline. A crash between the
@@ -361,29 +446,245 @@ impl AuditSigner for FileAuditSigner {
         // disk, so syncing each one charged the launch for durability it did
         // not need at that instant. `sync_data` is file-wide, so a barrier
         // carries every deferred write on the same file with it.
-        match sync_policy_for(&entry.event) {
+        match sync {
             SyncPolicy::Barrier => {
                 file.sync_data()
                     .map_err(|e| AuditError::Io(e.to_string()))?;
                 self.pending_sync
                     .lock()
                     .expect("pending_sync poisoned")
-                    .remove(&path);
+                    .remove(path);
             }
             SyncPolicy::Deferred => {
                 self.pending_sync
                     .lock()
                     .expect("pending_sync poisoned")
-                    .insert(path.clone());
+                    .insert(path.to_path_buf());
             }
         }
+        Ok(new_hash)
+    }
 
+    /// A handoff record, which belongs to the chain's structure rather than to
+    /// any plan. Uses the same unbound sentinels every other non-plan-bound
+    /// event uses, so `plan_id == UNBOUND_PLAN_ID` keeps meaning exactly one
+    /// thing across the whole stream.
+    fn handoff_entry(
+        &self,
+        tenant: &mvm_core::plan::TenantId,
+        event: &str,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> AuditEntry {
+        AuditEntry {
+            timestamp: chrono::Utc::now(),
+            tenant: tenant.clone(),
+            plan_id: mvm_core::plan::PlanId(
+                crate::supervisor::audit_recorder::UNBOUND_PLAN_ID.to_string(),
+            ),
+            plan_version: 0,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: crate::supervisor::audit_recorder::UNBOUND_IMAGE_NAME.to_string(),
+            image_sha256: crate::supervisor::audit_recorder::UNBOUND_IMAGE_SHA256.to_string(),
+            event: event.to_string(),
+            labels,
+        }
+    }
+
+    /// The sequence number of the segment currently in `active`.
+    ///
+    /// A file whose first line is a continuation says so itself; anything else
+    /// is the genesis segment. Read back off disk rather than cached so a
+    /// second writer's rotation is visible to this one.
+    fn active_segment_seq(active: &Path) -> Result<u64, AuditError> {
+        let content = std::fs::read_to_string(active).map_err(|e| AuditError::Io(e.to_string()))?;
+        let Some(first) = content.lines().find(|l| !l.is_empty()) else {
+            return Ok(1);
+        };
+        Ok(serde_json::from_str::<SignedEnvelope>(first)
+            .ok()
+            .and_then(|e| crate::supervisor::audit_segment::continuation_from_entry(&e.entry))
+            .map_or(1, |c| c.segment))
+    }
+
+    /// Seal the active segment and open its successor. Assumes the chain lock
+    /// is held.
+    ///
+    /// Ordering is seal (fsynced) → rename → continue. A crash anywhere in that
+    /// sequence leaves a state [`Self::recover_active`] can finish, and never
+    /// leaves a sealed segment that nothing points at.
+    fn rotate(&self, active: &Path, tenant: &mvm_core::plan::TenantId) -> Result<(), AuditError> {
+        let seq = Self::active_segment_seq(active)?;
+        let base = Self::segment_base(active);
+        let content = std::fs::read_to_string(active).map_err(|e| AuditError::Io(e.to_string()))?;
+        // Counting this segment's own sealing record, which is about to be
+        // appended, so the number a successor cross-checks needs no adjustment
+        // at the reading end.
+        let entries = content.lines().filter(|l| !l.is_empty()).count() as u64 + 1;
+
+        let sealed = crate::supervisor::audit_segment::Sealed {
+            segment: seq,
+            next_segment: seq + 1,
+            entries,
+        };
+        let seal_entry = self.handoff_entry(
+            tenant,
+            crate::supervisor::audit_segment::CHAIN_SEALED,
+            crate::supervisor::audit_segment::sealed_labels(seq, entries),
+        );
+        let tip = self.append_locked(active, &seal_entry)?;
+
+        let sealed_path =
+            active.with_file_name(mvm_core::config::audit_segment_file_name(&base, seq));
+        std::fs::rename(active, &sealed_path).map_err(|e| AuditError::Io(e.to_string()))?;
+        self.pending_sync
+            .lock()
+            .expect("pending_sync poisoned")
+            .remove(active);
+
+        self.write_continuation(active, tenant, &sealed, tip)
+    }
+
+    /// Open a fresh active segment continuing `sealed`.
+    fn write_continuation(
+        &self,
+        active: &Path,
+        tenant: &mvm_core::plan::TenantId,
+        sealed: &crate::supervisor::audit_segment::Sealed,
+        tip: [u8; 32],
+    ) -> Result<(), AuditError> {
+        let entry = self.handoff_entry(
+            tenant,
+            crate::supervisor::audit_segment::CHAIN_CONTINUED,
+            crate::supervisor::audit_segment::continuation_labels(sealed, tip),
+        );
+        // The one append in this file that signs against a hash it did not read
+        // off the file being written: the seed is the *previous* segment's tip.
+        // Always a barrier, because everything appended after this depends on
+        // it being the file's first line, so it must not be able to arrive
+        // second.
+        self.write_signed(active, &entry, tip, SyncPolicy::Barrier)
+            .map(|_| ())
+    }
+
+    /// Finish an interrupted rotation.
+    ///
+    /// A crash between the rename and the continuation write leaves a sealed
+    /// segment and no active file. Without this, the next append would find an
+    /// absent file, seed from genesis, and start a fresh chain that claims to
+    /// be the beginning of history — silently orphaning every sealed segment
+    /// behind it, each of which still verifies perfectly alone. That is the one
+    /// failure mode of this design that would destroy evidence without anyone
+    /// getting an error, so it is repaired before any append rather than
+    /// detected afterwards.
+    fn recover_active(
+        &self,
+        active: &Path,
+        tenant: &mvm_core::plan::TenantId,
+    ) -> Result<(), AuditError> {
+        let live = std::fs::metadata(active).map(|m| m.len()).unwrap_or(0);
+        if live > 0 {
+            return Ok(());
+        }
+        let base = Self::segment_base(active);
+        let dir = active.parent().unwrap_or(Path::new("."));
+        let Some((seq, sealed_path)) = highest_sealed_segment(dir, &base)? else {
+            // No sealed segments: this really is a fresh genesis chain.
+            return Ok(());
+        };
+        let content =
+            std::fs::read_to_string(&sealed_path).map_err(|e| AuditError::Io(e.to_string()))?;
+        let Some(last) = content.lines().rfind(|l| !l.is_empty()) else {
+            return Ok(());
+        };
+        let envelope: SignedEnvelope =
+            serde_json::from_str(last).map_err(|e| AuditError::Io(e.to_string()))?;
+        let Some(sealed) = crate::supervisor::audit_segment::sealed_from_entry(&envelope.entry)
+        else {
+            // The newest segment on disk does not end with a sealing record, so
+            // it was never retired. Refuse rather than guess: appending a
+            // continuation onto an unsealed predecessor would fabricate a
+            // handoff the writer never made.
+            return Err(AuditError::Io(format!(
+                "audit segment {} is the newest on disk but carries no sealing record; \
+                 refusing to continue a chain that was never sealed",
+                sealed_path.display()
+            )));
+        };
+        if sealed.segment != seq {
+            return Err(AuditError::Io(format!(
+                "audit segment {} seals segment {} but is filed as {seq}",
+                sealed_path.display(),
+                sealed.segment
+            )));
+        }
+        self.write_continuation(active, tenant, &sealed, hash_line(last.as_bytes()))
+    }
+}
+
+/// The highest-numbered sealed segment for `base` in `dir`, if any.
+pub(crate) fn highest_sealed_segment(
+    dir: &Path,
+    base: &str,
+) -> Result<Option<(u64, PathBuf)>, AuditError> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(AuditError::Io(e.to_string())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| AuditError::Io(e.to_string()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(seq) = mvm_core::config::audit_segment_seq(name, base) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(b, _)| seq > *b) {
+            best = Some((seq, entry.path()));
+        }
+    }
+    Ok(best)
+}
+
+#[async_trait]
+impl AuditSigner for FileAuditSigner {
+    async fn sign_and_emit(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+        let tenant = entry.tenant.0.clone();
+        let path = self.tenant_path(&tenant);
+        let cursor_key = self
+            .fixed_file
+            .as_ref()
+            .map(|p| format!("file:{}", p.display()))
+            .unwrap_or_else(|| format!("tenant:{tenant}"));
+
+        // Cross-process chain integrity.
+        //
+        // The in-memory `cursors` HashMap only serializes writers inside *this*
+        // process. Two `mvm-libkrun-supervisor` instances for the same tenant
+        // would otherwise both restore the same on-disk prev_hash, both append,
+        // and break the chain. The lock covers the whole read-cursor / rotate /
+        // sign / append section, so a rotation is atomic against a concurrent
+        // writer too — two processes cannot both seal the same segment.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| AuditError::Io(e.to_string()))?;
+        }
+        let _lock = Self::acquire_lock(&path)?;
+
+        self.recover_active(&path, &entry.tenant)?;
+
+        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if self.rotation.should_rotate(len) {
+            self.rotate(&path, &entry.tenant)?;
+        }
+
+        let new_hash = self.append_locked(&path, entry)?;
         self.cursors
             .lock()
             .expect("cursors poisoned")
             .insert(cursor_key, new_hash);
         Ok(())
-        // `file` drop releases the flock here.
+        // `_lock` drop releases the flock here.
     }
 }
 
@@ -476,6 +777,37 @@ pub fn verify_audit_chain_entries(
     Ok(walk.entries)
 }
 
+/// One verified segment: its entries and the chain hash it ends on.
+///
+/// The segment-set checker needs the tip so it can match the successor's
+/// claimed predecessor hash. Recomputing it by re-reading the file would open
+/// the read/verify/re-read window this module is careful to avoid elsewhere,
+/// so the walk reports it from the same bytes it verified.
+#[derive(Debug, Clone)]
+pub struct SegmentWalk {
+    /// Authenticated entries, in chain order.
+    pub entries: Vec<AuditEntry>,
+    /// SHA-256 of the final line — what a successor segment must claim.
+    pub tip: [u8; 32],
+}
+
+/// Verify an already-read segment, from genesis or from its authenticated
+/// handoff, returning its entries and its tip.
+///
+/// Callers that also need the raw lines — the Merkle leaf builder, the
+/// segment-set walker — read the file once and verify from that buffer, so
+/// what is attested and what is used are provably the same bytes.
+pub fn verify_chain_bytes(
+    content: &str,
+    verifying_key: &VerifyingKey,
+) -> Result<SegmentWalk, VerifyError> {
+    let walk = walk_chain(content, verifying_key, ChainStart::Genesis)?;
+    Ok(SegmentWalk {
+        entries: walk.entries,
+        tip: walk.chain_hash,
+    })
+}
+
 /// Where a chain walk begins.
 enum ChainStart {
     /// Line 0, with the all-zero chain hash. The zero prefix is the anchor
@@ -516,6 +848,7 @@ fn walk_chain(
     let mut entries = Vec::new();
     let total = content.lines().count();
     let last_idx = total.saturating_sub(1);
+    let mut at_genesis_head = matches!(start, ChainStart::Genesis);
     for (idx, line) in content.lines().enumerate() {
         if idx < skip_to || line.is_empty() {
             continue;
@@ -523,6 +856,26 @@ fn walk_chain(
         if truncated_tail && idx == last_idx {
             return Err(VerifyError::TruncatedTail { line: idx });
         }
+        // The opening line of a rotated segment does not claim genesis; it
+        // claims its predecessor's final line hash. Adopt that as the seed, but
+        // only when the entry is a continuation record whose *signed body*
+        // names the identical hash.
+        //
+        // It is still only a claim here: `verify_line` checks the signature
+        // over `signed_bytes || prev_hash`, so an adopted seed that was never
+        // signed fails there. That keeps the cost of forging a handoff equal to
+        // the cost of forging any other line rather than reducing it to editing
+        // one field.
+        //
+        // Only ever the first line of a genesis walk. A continuation record
+        // appearing mid-file would otherwise splice a chain restart into the
+        // middle of a segment and orphan everything before it — and a *resumed*
+        // walk must not do this at all, because its seed came from a checkpoint
+        // rather than from the anchor.
+        if at_genesis_head && let Some(tip) = adopted_continuation_seed(line) {
+            prev_hash = tip;
+        }
+        at_genesis_head = false;
         prev_hash = verify_line(line, idx, &prev_hash, verifying_key, &mut entries)?;
     }
     Ok(ChainWalk {
@@ -530,6 +883,21 @@ fn walk_chain(
         lines: total,
         chain_hash: prev_hash,
     })
+}
+
+/// The chain hash `line` authorizes as a segment's starting point, if it is a
+/// well-formed continuation record whose envelope and signed body agree.
+///
+/// Both copies must match before the seed is adopted. The envelope `prev_hash`
+/// is what the walk consumes; the copy inside the entry is what the signature
+/// covers. Checking only the envelope would let anyone restart a chain
+/// anywhere by editing one field, which is the whole property rotation must
+/// not give away.
+fn adopted_continuation_seed(line: &str) -> Option<[u8; 32]> {
+    let envelope: SignedEnvelope = serde_json::from_str(line).ok()?;
+    let claimed = URL_SAFE_NO_PAD.decode(&envelope.prev_hash).ok()?;
+    let tip = crate::supervisor::audit_segment::continuation_start_hash(&envelope.entry)?;
+    (claimed == tip).then_some(tip)
 }
 
 /// Verify one line against the running chain hash, push its entry, and return
