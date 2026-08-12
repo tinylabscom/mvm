@@ -25,9 +25,12 @@
 //!   egress-spawn tokens; the one legal spawn site
 //!   (`workload_runner/runner.rs`) is out of the guarded set.
 //! - **C — `AppleContainerBackend` still delegates to an `HvfRunner`.** It holds
-//!   a `runner: HvfRunner` field and its `start` body calls
-//!   `self.runner.start(...)`, so its egress reaches the endpoint spawner
-//!   through the runner Assertion A already locks.
+//!   a `runner: HvfRunner` field, and each of its launch paths — `start`,
+//!   `start_with_mode`, `warm_start` — calls the matching `self.runner.*`,
+//!   so its egress reaches the endpoint spawner through the runner Assertion A
+//!   already locks. Those three are the methods that bring a guest up; the rest
+//!   of the surface acts on an already-launched VM or reports metadata, so it
+//!   opens no egress seam.
 //!
 //! Scope — the covered set is what `AnyBackend::as_workload_backend` admits:
 //!
@@ -184,13 +187,41 @@ fn check_converged_runner_shape(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The `VmBackend::start` signature on the Apple Container backend. Assertion C
-/// reads the body that follows it.
-const APPLE_CONTAINER_START_SIG: &str = "fn start(&self, config: &VmStartConfig)";
+/// A launch path on the Apple Container backend: a method that brings a guest
+/// up, and so must reach the runner that owns the egress seam. `signature` is
+/// matched against the method's signature line; `delegation` must appear in the
+/// body that follows.
+struct LaunchPath {
+    signature: &'static str,
+    delegation: &'static str,
+}
+
+/// Every `AppleContainerBackend` method that starts or restores a guest. These
+/// are the ones whose delegation carries egress; the rest of the `VmBackend`
+/// surface (`wait`/`pause`/`resume`/`stop`/`stop_all`/`status`/`list`/`logs`/
+/// `install`/`name`/`kind`/`capabilities`/`security_profile`) acts on an
+/// already-launched VM or reports metadata, so it opens no egress seam and is
+/// deliberately not pinned here.
+const APPLE_CONTAINER_LAUNCH_PATHS: &[LaunchPath] = &[
+    LaunchPath {
+        signature: "fn start(&self, config: &VmStartConfig)",
+        delegation: "self.runner.start(",
+    },
+    LaunchPath {
+        signature: "fn start_with_mode(",
+        delegation: "self.runner.start_with_mode(",
+    },
+    // A warm start restores a guest that then runs a workload, so it reaches
+    // the same endpoint the cold path does.
+    LaunchPath {
+        signature: "fn warm_start(",
+        delegation: "self.runner.warm_start(",
+    },
+];
 
 /// Assertion C — `AppleContainerBackend` still reaches egress through an
 /// `HvfRunner`. Its coverage is transitive, so both halves must hold: it holds
-/// the runner, and `start` goes through it rather than around it.
+/// the runner, and every launch path goes through it rather than around it.
 fn check_apple_container_delegates_to_runner(workspace: &Path) -> Result<()> {
     let path = workspace.join(APPLE_CONTAINER_RS);
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -212,22 +243,34 @@ fn check_apple_container_delegates_to_runner(workspace: &Path) -> Result<()> {
         );
     }
 
-    let body = fn_body(&code, APPLE_CONTAINER_START_SIG).ok_or_else(|| {
-        anyhow::anyhow!(
-            "check-uniform-vsock-egress: {APPLE_CONTAINER_RS}: cannot find \
-             `{APPLE_CONTAINER_START_SIG}` — `AppleContainerBackend::start` must exist for \
-             its delegation to be checkable."
-        )
-    })?;
-    if !body.iter().any(|line| line.contains("self.runner.start(")) {
-        bail!(
-            "check-uniform-vsock-egress: {APPLE_CONTAINER_RS}: \
-             `AppleContainerBackend::start` no longer delegates to `self.runner.start(...)`. \
-             A start that bypasses the HVF runner bypasses the per-VM substitution endpoint \
-             that owns claim-10 for this tier."
-        );
+    for path in APPLE_CONTAINER_LAUNCH_PATHS {
+        let Some(body) = fn_body(&code, path.signature) else {
+            bail!(
+                "check-uniform-vsock-egress: {APPLE_CONTAINER_RS}: cannot find `{sig}` — \
+                 this launch path must exist for its delegation to be checkable. Removing a \
+                 launch path instead of pinning it is not a way past this gate.",
+                sig = path.signature
+            );
+        };
+        if !squeeze(&body.concat()).contains(&squeeze(path.delegation)) {
+            bail!(
+                "check-uniform-vsock-egress: {APPLE_CONTAINER_RS}: the launch path `{sig}` no \
+                 longer delegates to `{delegation}...)`. A launch that bypasses the HVF runner \
+                 bypasses the per-VM substitution endpoint that owns claim-10 for this tier.",
+                sig = path.signature,
+                delegation = path.delegation
+            );
+        }
     }
     Ok(())
+}
+
+/// Drop all whitespace, so a delegation rustfmt wrapped across lines
+/// (`self.runner\n    .start_with_mode(...)`) still matches the token being
+/// looked for. Without this the gate reads as green on a wrapped call it never
+/// actually found.
+fn squeeze(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 /// The code lines of the function whose signature line contains `signature`, up
@@ -429,33 +472,110 @@ mod tests {
         );
     }
 
-    /// Write an apple-container fixture with the given struct field and `start`
-    /// body, and run Assertion C over it.
-    fn apple_container_fixture(field: &str, start_body: &str) -> (tempfile::TempDir, Result<()>) {
+    /// One launch path in a fixture: the signature line, and the single body
+    /// line under it.
+    struct FixtureMethod {
+        signature: &'static str,
+        body: String,
+    }
+
+    /// A faithful fixture's launch paths — each delegating to the runner, as the
+    /// real backend does. Tests mutate or drop one entry to model a regression.
+    fn faithful_launch_paths() -> Vec<FixtureMethod> {
+        [
+            (
+                "fn start(&self, config: &VmStartConfig) -> Result<VmId> {",
+                "self.runner.start(&self.config_with_kernel(config)?)",
+            ),
+            // Wrapped across lines exactly as rustfmt writes it in the real
+            // file — a per-line match would miss this and read as green.
+            (
+                "fn start_with_mode(&self, config: &VmStartConfig, mode: StartMode) -> Result<VmId> {",
+                "self.runner\n            .start_with_mode(&self.config_with_kernel(config)?, mode)",
+            ),
+            (
+                "fn warm_start(&self, config: &VmStartConfig, req: SnapshotCapability) -> Outcome {",
+                "self.runner.warm_start(config, req)",
+            ),
+        ]
+        .into_iter()
+        .map(|(signature, body)| FixtureMethod {
+            signature,
+            body: body.to_string(),
+        })
+        .collect()
+    }
+
+    /// The faithful launch paths with the one whose signature contains
+    /// `signature` rewritten to `body`.
+    fn with_launch_body(signature: &str, body: &str) -> Vec<FixtureMethod> {
+        let mut paths = faithful_launch_paths();
+        let entry = paths
+            .iter_mut()
+            .find(|m| m.signature.contains(signature))
+            .expect("fixture must carry the launch path under test");
+        entry.body = body.to_string();
+        paths
+    }
+
+    /// The faithful launch paths with the one whose signature contains
+    /// `signature` deleted entirely.
+    fn without_launch_path(signature: &str) -> Vec<FixtureMethod> {
+        faithful_launch_paths()
+            .into_iter()
+            .filter(|m| !m.signature.contains(signature))
+            .collect()
+    }
+
+    /// Write an apple-container fixture with the given struct field and launch
+    /// paths, and run Assertion C over it.
+    fn apple_container_fixture(
+        field: &str,
+        paths: &[FixtureMethod],
+    ) -> (tempfile::TempDir, Result<()>) {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join(APPLE_CONTAINER_RS);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
-        std::fs::write(
-            &path,
-            format!(
-                "pub struct AppleContainerBackend {{\n    {field}\n}}\n\
-                 impl VmBackend for AppleContainerBackend {{\n    \
-                 fn start(&self, config: &VmStartConfig) -> Result<VmId> {{\n        \
-                 {start_body}\n    }}\n\n    \
-                 fn stop(&self, id: &VmId) -> Result<()> {{\n        self.runner.stop(id)\n    }}\n}}\n"
-            ),
-        )
-        .expect("write apple-container fixture");
+        let mut source = format!("pub struct AppleContainerBackend {{\n    {field}\n}}\n");
+        source.push_str("impl VmBackend for AppleContainerBackend {\n");
+        for method in paths {
+            source.push_str(&format!(
+                "    {}\n        {}\n    }}\n\n",
+                method.signature, method.body
+            ));
+        }
+        // A lifecycle method that is deliberately NOT a launch path, so the
+        // fixture proves the gate pins the launch set rather than everything.
+        source.push_str("    fn stop(&self, id: &VmId) -> Result<()> {\n        self.runner.stop(id)\n    }\n}\n");
+        std::fs::write(&path, source).expect("write apple-container fixture");
         let outcome = check_apple_container_delegates_to_runner(root.path());
         (root, outcome)
     }
 
+    /// The launch paths under test, with the bypass that models rerouting each
+    /// one past the runner and the delegation the gate must name.
+    const LAUNCH_PATH_CASES: &[(&str, &str, &str)] = &[
+        (
+            "fn start(",
+            "hvf_runner().start(&self.config_with_kernel(config)?)",
+            "self.runner.start(",
+        ),
+        (
+            "fn start_with_mode(",
+            "hvf_runner().start_with_mode(&self.config_with_kernel(config)?, mode)",
+            "self.runner.start_with_mode(",
+        ),
+        (
+            "fn warm_start(",
+            "hvf_runner().warm_start(config, req)",
+            "self.runner.warm_start(",
+        ),
+    ];
+
     #[test]
     fn apple_container_holding_the_hvf_runner_and_delegating_passes() {
-        let (_root, outcome) = apple_container_fixture(
-            "runner: HvfRunner,",
-            "self.runner.start(&self.config_with_kernel(config)?)",
-        );
+        let (_root, outcome) =
+            apple_container_fixture("runner: HvfRunner,", &faithful_launch_paths());
         outcome.expect("the real shape must pass Assertion C");
     }
 
@@ -463,37 +583,40 @@ mod tests {
     fn swapping_the_apple_container_runner_for_a_raw_backend_fails() {
         // The transitive coverage rests on the runner: a raw backend field
         // would need its own egress seam.
-        let (_root, outcome) = apple_container_fixture(
-            "runner: HvfBackend,",
-            "self.runner.start(&self.config_with_kernel(config)?)",
-        );
+        let (_root, outcome) =
+            apple_container_fixture("runner: HvfBackend,", &faithful_launch_paths());
         let err = outcome.expect_err("a raw runner field must fail the gate");
         assert!(err.to_string().contains("runner: HvfRunner"), "got {err}");
     }
 
     #[test]
-    fn an_apple_container_start_that_bypasses_the_runner_fails() {
-        let (_root, outcome) = apple_container_fixture(
-            "runner: HvfRunner,",
-            "hvf_backend().start(&self.config_with_kernel(config)?)",
-        );
-        let err = outcome.expect_err("a start bypassing the runner must fail the gate");
-        assert!(err.to_string().contains("self.runner.start("), "got {err}");
+    fn an_apple_container_launch_path_that_bypasses_the_runner_fails() {
+        // Each launch path is pinned independently: rerouting any one of them
+        // past the runner opens a second egress seam on this tier. The bypass
+        // still reaches an `HvfRunner`, so a check that merely looked for that
+        // token would pass — the delegation through the held field is the point.
+        for (signature, bypass, named) in LAUNCH_PATH_CASES {
+            let (_root, outcome) =
+                apple_container_fixture("runner: HvfRunner,", &with_launch_body(signature, bypass));
+            let err = outcome
+                .expect_err("a launch path bypassing the runner must fail the gate")
+                .to_string();
+            assert!(err.contains(named), "for {signature}: got {err}");
+        }
     }
 
     #[test]
-    fn a_deleted_apple_container_start_fails() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path().join(APPLE_CONTAINER_RS);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
-        std::fs::write(
-            &path,
-            "pub struct AppleContainerBackend {\n    runner: HvfRunner,\n}\n",
-        )
-        .expect("write fixture");
-        let err = check_apple_container_delegates_to_runner(root.path())
-            .expect_err("an absent start must fail rather than pass vacuously");
-        assert!(err.to_string().contains("cannot find"), "got {err}");
+    fn a_deleted_apple_container_launch_path_fails() {
+        // Deleting a launch path must not be a way past the gate: the check
+        // fails rather than passing vacuously on a method it cannot find.
+        for (signature, _, _) in LAUNCH_PATH_CASES {
+            let (_root, outcome) =
+                apple_container_fixture("runner: HvfRunner,", &without_launch_path(signature));
+            let err = outcome
+                .expect_err("an absent launch path must fail rather than pass vacuously")
+                .to_string();
+            assert!(err.contains("cannot find"), "for {signature}: got {err}");
+        }
     }
 
     #[test]
