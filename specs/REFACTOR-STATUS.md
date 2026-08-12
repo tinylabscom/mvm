@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -1151,7 +1151,10 @@ for detailed scope and acceptance criteria.
         `spawn_netd`/`host_datapath` (29 allowlist entries); synthesis,
         admission, and CLI preflight refuse `raw_ip_stack=true`/`L3Vsock` with
         a migration error naming the loopback adapters and typed connectors
-  - [ ] Phase 1 — pin protocol, resource, and performance baselines (#2370)
+  - [~] Phase 1 — pin protocol, resource, and performance baselines (#2370):
+        transport-neutral signed `NetworkLimits` is implemented with
+        default-byte compatibility, validation, and one legacy/FlowMux
+        accessor; protocol, authentication, fuzz, and benchmark work remains
   - [ ] Phase 2 — the one authenticated endpoint (#2371)
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)

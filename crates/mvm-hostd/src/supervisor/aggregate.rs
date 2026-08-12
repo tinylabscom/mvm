@@ -1317,6 +1317,7 @@ mod tests {
             network_mode: Default::default(),
             stream_retention: Default::default(),
             l3_network: None,
+            network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
             // Overwritten below with the content-address, matching what
             // sign_plan stamps — so a test's `plan.plan_id` equals the id that

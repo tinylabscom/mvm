@@ -209,11 +209,16 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
 - [ ] Add a state-machine validator that rejects data-before-open, duplicate
       open/close, credit overflow, stream-ID parity violations, reuse after
       reset, and host-initiated opens not backed by a declared listener.
-- [ ] Move `max_flows` and the other endpoint resource ceilings out of
+- [x] Move `max_flows` and the other endpoint resource ceilings out of
       `L3NetworkSpec` into a transport-neutral, signed `NetworkLimits` plan type
       before any FlowMux runtime consumes them. Defaults preserve the current
       4,096-flow ceiling; serde omits default values so existing signed-plan
       bytes remain stable until the intentional plan-version migration.
+      Landed as an additive, default-omitted `ExecutionPlan.network_limits`
+      contract with a validated builder and `effective_network_limits()`
+      compatibility projection. The frozen L3 gateway now consumes that one
+      accessor; pre-migration L3 fields remain deserialize-only compatibility
+      data so existing signatures and plan bytes continue to verify.
 - [ ] Add `fuzz_network_flow_decode` and `fuzz_network_flow_state`; seed them
       with every valid frame class plus malformed length and transition cases.
 - [ ] Extract the existing authenticated-session handshake and encrypted frame
