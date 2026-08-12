@@ -205,6 +205,7 @@ fn relay_supervisor_config_with_handoff(
             })
             .collect(),
         vsock: true,
+        trusted_builder_egress: spec.trusted_builder,
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),
         workload_exit: paths.workload_exit.clone(),
@@ -1189,6 +1190,28 @@ mod tests {
             cfg.egress_relay_socket,
             Some(PathBuf::from("/run/egress.sock"))
         );
+    }
+
+    #[test]
+    fn only_a_trusted_builder_relays_trusted_builder_egress() {
+        let mut spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                agent_port("/run/agent.sock"),
+                egress_port("/run/egress.sock"),
+            ],
+            vec![],
+        );
+
+        let workload = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(
+            !workload.trusted_builder_egress,
+            "a workload must stay rate-limited"
+        );
+
+        spec.trusted_builder = true;
+        let builder = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert!(builder.trusted_builder_egress);
     }
 
     #[test]

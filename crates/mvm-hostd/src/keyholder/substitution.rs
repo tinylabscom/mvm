@@ -15,52 +15,13 @@
 use std::collections::HashMap;
 
 use mvm_contract::ir::{AuthType, SecretRef, host_is_bound};
+pub use mvm_contract::substitution::{Placeholder, SECRET_PLACEHOLDER_PREFIX, find_placeholder};
 use rand::RngCore;
 use zeroize::Zeroizing;
 
 use super::injector::{InjectError, Injector};
 use super::resolver::SecretResolver;
 use super::signer::{SignError, Signature, Signer, SigningInput};
-
-/// The host-owned namespace every minted [`Placeholder`] carries. This prefix
-/// is reserved: it must never appear in a workload's own egress, so the
-/// leak scan can drop any non-substitution egress that contains it — the
-/// legitimate substitution path routes the placeholder to the host-local
-/// endpoint, never out the raw egress wire.
-pub const PLACEHOLDER_PREFIX: &str = "mvm-secret-";
-
-/// An opaque, per-session placeholder standing in for a secret on the guest
-/// side. **Not** the secret name and **not** the value: a leaked
-/// placeholder reveals nothing and resolves to nothing outside the session
-/// registry that minted it. Destination non-replay comes from the binding
-/// check at substitution time, not the token itself.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Placeholder(String);
-
-impl Placeholder {
-    /// The on-the-wire token form the guest embeds in its request.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Find the first placeholder token embedded in `text` (e.g. a header value
-/// `Bearer mvm-secret-<hex>`). Returns the `mvm-secret-<hex>` slice — the
-/// reserved prefix plus its trailing hex run — or `None` if no token is
-/// present. Used by the substitution endpoint to locate the placeholder a
-/// guest put in a request header without the guest having to name the header.
-pub fn find_placeholder(text: &str) -> Option<&str> {
-    let start = text.find(PLACEHOLDER_PREFIX)?;
-    let after = start + PLACEHOLDER_PREFIX.len();
-    let hex_len = text[after..]
-        .bytes()
-        .take_while(u8::is_ascii_hexdigit)
-        .count();
-    if hex_len == 0 {
-        return None;
-    }
-    Some(&text[start..after + hex_len])
-}
 
 /// Per-session map from a minted [`Placeholder`] to the [`SecretRef`] it
 /// stands for. Session-scoped: dropped when the session ends, so a
@@ -83,7 +44,7 @@ impl SubstitutionRegistry {
     pub fn mint(&mut self, secret: SecretRef) -> Placeholder {
         let mut bytes = [0u8; 24];
         rand::thread_rng().fill_bytes(&mut bytes);
-        let ph = Placeholder(format!("{PLACEHOLDER_PREFIX}{}", hex::encode(bytes)));
+        let ph = Placeholder::new(format!("{SECRET_PLACEHOLDER_PREFIX}{}", hex::encode(bytes)));
         self.map.insert(ph.clone(), secret);
         ph
     }
@@ -91,7 +52,7 @@ impl SubstitutionRegistry {
     /// Resolve a placeholder by its on-the-wire string form. `None` for a
     /// token this session never minted (a smuggled or stale token).
     pub fn resolve(&self, token: &str) -> Option<&SecretRef> {
-        self.map.get(&Placeholder(token.to_string()))
+        self.map.get(&Placeholder::new(token))
     }
 
     /// Whether any secret in this session is bound to `host` (a [`host_matches`]
@@ -406,26 +367,6 @@ mod tests {
             err,
             SignDispatchError::Sign(SignError::WrongAuthType(AuthType::Bearer))
         ));
-    }
-
-    #[test]
-    fn find_placeholder_extracts_token_from_a_header_value() {
-        let mut reg = SubstitutionRegistry::new();
-        let ph = reg.mint(bearer_ref("openai", &["api.openai.com"]));
-        let header = format!("Bearer {}", ph.as_str());
-        assert_eq!(find_placeholder(&header), Some(ph.as_str()));
-    }
-
-    #[test]
-    fn find_placeholder_stops_at_non_hex_and_ignores_clean_text() {
-        // Trailing non-hex (quote, space) bounds the token.
-        assert_eq!(
-            find_placeholder("Bearer mvm-secret-abc123\"; x=1"),
-            Some("mvm-secret-abc123")
-        );
-        // No token, and the bare prefix with no hex run, both yield None.
-        assert_eq!(find_placeholder("Bearer ya29.real-token"), None);
-        assert_eq!(find_placeholder("mvm-secret-"), None);
     }
 
     #[test]

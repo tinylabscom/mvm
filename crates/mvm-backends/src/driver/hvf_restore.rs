@@ -42,6 +42,10 @@ pub struct HvfRestoreRequest<'a> {
     pub vm_name: &'a str,
     /// The child's state directory, already holding the materialized content.
     pub state_dir: &'a Path,
+    /// The CPU share this restore was admitted under, applied to the supervisor
+    /// the restored machine runs inside. `None` means the admitted plan granted
+    /// none, which is unbounded — the same answer a cold boot gives.
+    pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
 }
 
 /// The live supervisor a restore produced.
@@ -145,6 +149,8 @@ pub fn hvf_child_restore_config(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(HvfSupervisorConfig {
+        // Same tier as the parent it forked from.
+        trusted_builder_egress: parent.trusted_builder_egress,
         kernel: parent.kernel.clone(),
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
@@ -180,6 +186,23 @@ pub fn hvf_child_restore_config(
     })
 }
 
+/// The restore's supervisor launch, bounded by the CPU share the restored
+/// child's plan was admitted under.
+///
+/// The same seam a cold HVF boot goes through, for the same reason: the HVF VMM
+/// runs inside this supervisor process, so the supervisor is what has to be born
+/// inside the scope. A restore that spawned unwrapped would come up perfectly
+/// well and simply be unbounded, so nothing but reading the argv back catches a
+/// regression — hence a function to read.
+fn bounded_restore_command(supervisor: &Path, req: &HvfRestoreRequest<'_>) -> Command {
+    mvm_core::cpu_scope::bind_cpu_grant(
+        Command::new(supervisor),
+        req.vm_name,
+        req.state_dir,
+        req.cpu_grant.as_ref(),
+    )
+}
+
 /// Start a supervisor that loads `req`'s materialized saved state instead of
 /// booting a kernel, and wait for it to confirm the VM is live.
 #[tracing::instrument(name = "hvf.restore", skip_all, fields(vm = %req.vm_name))]
@@ -209,7 +232,7 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
 
     let supervisor = resolve_supervisor_path()?;
     let json = serde_json::to_string(&cfg).context("serializing HvfSupervisorConfig")?;
-    let mut child = Command::new(&supervisor)
+    let mut child = bounded_restore_command(&supervisor, req)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -261,6 +284,7 @@ mod tests {
 
     fn parent_config(state: &Path, disks: Vec<HvfDisk>) -> HvfSupervisorConfig {
         HvfSupervisorConfig {
+            trusted_builder_egress: false,
             kernel: state.join("Image"),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
@@ -313,6 +337,7 @@ mod tests {
         HvfRestoreRequest {
             vm_name,
             state_dir: dir,
+            cpu_grant: None,
         }
     }
 
@@ -461,6 +486,123 @@ mod tests {
         assert!(
             error.to_string().contains("kernel"),
             "the refusal must name the kernel, got: {error}"
+        );
+    }
+
+    /// A fake `systemctl --user show <unit> -p ControlGroup --value` plus the
+    /// cgroup it names, so the read-back can be exercised off a Linux session.
+    fn probe_over_a_scope_with_quota(
+        scratch: &Path,
+        quota: &str,
+    ) -> mvm_core::cpu_scope::ScopeProbe {
+        let cgroup_root = scratch.join("cgroup");
+        std::fs::create_dir_all(cgroup_root.join("mvm-restored.scope")).unwrap();
+        std::fs::write(
+            cgroup_root.join("mvm-restored.scope").join("cpu.max"),
+            quota,
+        )
+        .unwrap();
+        let systemctl = scratch.join("systemctl");
+        std::fs::write(&systemctl, "#!/bin/sh\necho /mvm-restored.scope\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        mvm_core::cpu_scope::ScopeProbe::with_root_and_systemctl(cgroup_root, systemctl)
+    }
+
+    /// The whole point of the restore-side grant thread: the supervisor that
+    /// runs the restored machine is born inside the scope. An unwrapped spawn
+    /// restores the child perfectly well and is simply unbounded, so the argv is
+    /// the only thing that distinguishes the two.
+    #[test]
+    fn a_restored_child_is_cpu_bounded_by_its_admitted_grant() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let state = scratch.path().join("child-state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        let cmd = bounded_restore_command(
+            Path::new("/usr/bin/mvm-hvf-supervisor"),
+            &HvfRestoreRequest {
+                vm_name: "restored-child",
+                state_dir: &state,
+                cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            },
+        );
+
+        let argv = mvm_core::cpu_scope::rendered_argv(&cmd);
+        assert_eq!(argv[0], "systemd-run");
+        assert!(argv.contains(&"CPUQuota=150%".to_string()), "{argv:?}");
+        assert_eq!(argv.last().expect("payload"), "/usr/bin/mvm-hvf-supervisor");
+    }
+
+    /// A bound that cannot be read back afterwards is a bound a receipt has to
+    /// call `Declared`. The spawn records the unit it was born into, which is
+    /// what turns the quota into a reportable tier.
+    #[test]
+    fn a_restored_child_reports_its_enforced_tier() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let state = scratch.path().join("child-state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        let _ = bounded_restore_command(
+            Path::new("/usr/bin/mvm-hvf-supervisor"),
+            &HvfRestoreRequest {
+                vm_name: "restored-child",
+                state_dir: &state,
+                cpu_grant: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+            },
+        );
+
+        // Rewrite the recorded name to the one the fake systemctl answers for:
+        // the real name carries a per-boot suffix that cannot be reconstructed.
+        let recorded = mvm_core::cpu_scope::read_scope_unit(&state)
+            .expect("a bound restore records the scope it was born into");
+        assert!(recorded.ends_with(".scope"), "{recorded}");
+        std::fs::write(state.join("cpu-scope"), "mvm-restored.scope").unwrap();
+
+        assert_eq!(
+            probe_over_a_scope_with_quota(scratch.path(), "150000 100000\n").tier_for_vm(&state),
+            mvm_contract::protocol::resource_controls::EnforcedTier::Cgroup2CpuMax
+        );
+    }
+
+    /// The honest other half. A plan granting no share leaves the restore
+    /// unwrapped, and the read-back says `Declared` rather than claiming a bound
+    /// nobody asked for.
+    #[test]
+    fn a_restored_child_without_a_grant_runs_unbounded_and_says_so() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
+        let state = scratch.path().join("child-state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        let cmd = bounded_restore_command(
+            Path::new("/usr/bin/mvm-hvf-supervisor"),
+            &HvfRestoreRequest {
+                vm_name: "restored-child",
+                state_dir: &state,
+                cpu_grant: None,
+            },
+        );
+
+        assert_eq!(
+            mvm_core::cpu_scope::rendered_argv(&cmd),
+            vec!["/usr/bin/mvm-hvf-supervisor".to_string()]
+        );
+        assert!(mvm_core::cpu_scope::read_scope_unit(&state).is_none());
+        assert_eq!(
+            mvm_core::cpu_scope::enforced_grants_for_vm(&state).cpu,
+            mvm_contract::protocol::resource_controls::EnforcedTier::Declared
         );
     }
 

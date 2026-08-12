@@ -70,6 +70,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         virtiofs_root: None,
         virtiofs_shares: Vec::new(),
         vsock: true,
+        trusted_builder_egress: false,
         console_log: PathBuf::from("/parent/state/console.log"),
         pid_file: PathBuf::from("/parent/state/hvf.pid"),
         workload_exit: PathBuf::from("/parent/state/workload.exit"),
@@ -145,6 +146,7 @@ fn rewrite_for_child(world: &mut CliWorld) {
         &HvfRestoreRequest {
             vm_name: "restored-child",
             state_dir: &dir,
+            cpu_grant: None,
         },
     )
     .expect("rewrite the captured config for a restored child");

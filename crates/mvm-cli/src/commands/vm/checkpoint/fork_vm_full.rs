@@ -229,7 +229,13 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             child_plan_json,
             child_tenant_id,
         },
-        &|name, dir| mvm_runtime::firecracker::FcForkRestorer.restore_fork(name, dir),
+        &|child| {
+            mvm_runtime::firecracker::FcForkRestorer.restore_fork(
+                child.vm_name,
+                child.state_dir,
+                child.cpu_grant,
+            )
+        },
         &anchor,
     );
     if let Err(ref e) = fork_result {
@@ -448,7 +454,7 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
             child_plan_json,
             child_tenant_id,
         },
-        &|name, dir| mvm_runtime::hvf_restore::HvfForkRestorer.restore_fork(name, dir),
+        &|child| mvm_runtime::hvf_restore::HvfForkRestorer.restore_fork(child),
         &anchor,
     );
     if let Err(ref e) = fork_result {

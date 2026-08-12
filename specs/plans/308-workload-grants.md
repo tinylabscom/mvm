@@ -351,10 +351,27 @@ cheapest and most rigorous, not the one where it is hardest.
       and before the child has an identity or a byte. An fs_quick fork presents
       no plan and inherits.
 
-      STILL OPEN, two gaps, both real:
-      (a) Restore does not re-apply the grants through `apply_grants` the way a
-      cold boot does — a child cannot be *admitted* wider, but nothing re-arms
-      the host-side control on the restored VM.
+      (a) LANDED: the admitted child grant now reaches the child's spawn, by
+      the same field a cold boot uses rather than through a second re-arm step.
+      The value `ensure_child_grants_within_parent` cleared rides the fork seam
+      on `checkpoint::RestoredChild.cpu_grant`, and each restorer binds it where
+      its cold boot binds `VmmSpec.cpu_grant`: HVF wraps the supervisor spawn in
+      `bind_cpu_grant` (`bounded_restore_command`); Firecracker — which launches
+      through a shell rather than a `Command` — prefixes the launch line from
+      the same token builder, carried on `FirecrackerIO::bounded_by`. The warm
+      claim threads the same admitted value onto `ChildForkRequest.cpu_grant`.
+      Because the bind records the scope unit in the child's own state dir, a
+      restored child's tier reads back as `Cgroup2CpuMax` rather than
+      `Declared`, and a child whose plan grants nothing restores unwrapped and
+      reports `Declared`.
+      Two restores stay deliberately unbounded and say so in code: a
+      same-identity `HvfVmFullRestore` admits no plan of its own, so there is no
+      grant to bind; and a *preloaded* standby child's VMM starts before any
+      claim exists, so `resume_preloaded_child` inherits an unbounded VMM.
+      Closing that one needs the bound applied to a live cgroup rather than at
+      spawn, which is a different mechanism.
+
+      STILL OPEN:
       (b) A warm parent seals no grant, so it bounds a claimed child's egress
       (absent egress is deny-all) but not its CPU or wall clock. Not an
       oversight in the capture: a factory parent holds no plan, tenant or
@@ -365,8 +382,21 @@ cheapest and most rigorous, not the one where it is hardest.
       to bound those dimensions the *pool* needs a grant of its own: a bound on
       `StandbySpec`, plumbed from pool configuration and sealed at capture.
       Until then a warm child's CPU and wall clock are bounded only by the host
-      `GrantCeiling` its own plan was admitted against. Belongs with the rest of
-      the warm-pool arming work.
+      `GrantCeiling` its own plan was admitted against, plus — since (a) —
+      whatever its own admitted plan grants.
+
+      Assessed and deliberately deferred rather than rushed: **there is no pool
+      configuration to plumb from.** A pool has no declared identity at all —
+      `warm_to_target` derives one from the provisioning launch via
+      `compat_for_launch`, and `build_standby_spec` fills every field of
+      `StandbySpec` out of that derived key. A pool grant therefore needs a new
+      surface to *declare* it, plus a decision the surface cannot dodge: if the
+      grant joins the compat key, pools fragment per distinct millicore value
+      and warm capacity multiplies; if it does not, a claim admitted wider than
+      the pool it matched is refused only after matching, which is warm capacity
+      that silently cannot serve legitimate claims. Neither is plumbing. No
+      production code constructs a `StandbyClaim` today, so this is unreachable
+      in production and can wait for the pool surface it belongs to.
 
 - [ ] **WS6 — The four surfaces.**
       Manifest: `[grants]` table extending `ManifestMachineWorkflow`.

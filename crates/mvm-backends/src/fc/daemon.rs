@@ -34,9 +34,11 @@ pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
 /// under.
 ///
 /// Separate from [`start_vm_firecracker`] rather than a wider signature on it:
-/// the snapshot-restore and standby callers resume a VM whose grant is not
-/// theirs to decide, and giving them a parameter to fill would invite one of
-/// them to invent a bound the run was never admitted under.
+/// the unbounded entry point exists for harnesses that admit no plan at all, and
+/// keeping the grant off its signature is what stops one of them from inventing
+/// a bound no run was admitted under. A restore has an admitted grant — the one
+/// its child plan carries — and calls this or
+/// [`start_vm_firecracker_for_snapshot`] with it.
 #[instrument(skip_all)]
 pub fn start_vm_firecracker_bounded(
     abs_dir: &str,
@@ -48,9 +50,21 @@ pub fn start_vm_firecracker_bounded(
     start_vm_firecracker_inner(abs_dir, abs_socket, true, &prefix)
 }
 
-/// Start Firecracker without unlinking a mounted child vsock UDS.
-pub fn start_vm_firecracker_for_snapshot(abs_dir: &str, abs_socket: &str) -> Result<()> {
-    start_vm_firecracker_inner(abs_dir, abs_socket, false, "")
+/// Start Firecracker for a snapshot load, inside a scope prefix the caller has
+/// already built.
+///
+/// The restore paths take the prefix rather than the grant because the value
+/// that ends up on the launch line has to be the one a test can read back: an
+/// unwrapped Firecracker loads the snapshot and runs the restored guest exactly
+/// as well, and is simply unbounded. `clean_vsock` is false for a fork, whose
+/// private mount namespace has already put the child's vsock UDS in place.
+pub(crate) fn start_vm_firecracker_scoped(
+    abs_dir: &str,
+    abs_socket: &str,
+    clean_vsock: bool,
+    cpu_scope: &str,
+) -> Result<()> {
+    start_vm_firecracker_inner(abs_dir, abs_socket, clean_vsock, cpu_scope)
 }
 
 /// The `systemd-run` scope prefix for the launch line, shell-quoted, or empty
@@ -61,7 +75,7 @@ pub fn start_vm_firecracker_for_snapshot(abs_dir: &str, abs_socket: &str) -> Res
 /// `nohup setsid` — so it needs the prefix as text. The tokens come from the
 /// same builder the `Command` path uses, so the two cannot drift into bounding
 /// different things.
-fn cpu_scope_prefix(
+pub(crate) fn cpu_scope_prefix(
     machine_id: &str,
     state_dir: &std::path::Path,
     grant: Option<&mvm_contract::grants::CpuGrant>,

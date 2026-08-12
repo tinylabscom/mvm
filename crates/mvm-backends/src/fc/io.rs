@@ -21,11 +21,49 @@ use mvm_vmm::snapshot::SnapshotIO;
 pub struct FirecrackerIO {
     /// Absolute path to the live Firecracker control socket.
     pub socket_path: PathBuf,
+    /// The bound the *fresh* VMM a snapshot load starts is born inside. `None`
+    /// on a handle that only talks to an already-running Firecracker, and on a
+    /// restore whose admitted plan granted no CPU share.
+    cpu_bound: Option<RestoreCpuBound>,
+}
+
+/// The CPU share a restore-launched Firecracker is born inside, and the machine
+/// id its transient scope is named for.
+///
+/// One value rather than two optional fields: a share with no machine to name
+/// its scope cannot be recorded, and a machine id with no share bounds nothing,
+/// so neither half means anything alone.
+#[derive(Clone, Debug)]
+pub struct RestoreCpuBound {
+    pub machine_id: String,
+    pub grant: mvm_contract::grants::CpuGrant,
 }
 
 impl FirecrackerIO {
     pub fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
+        Self {
+            socket_path,
+            cpu_bound: None,
+        }
+    }
+
+    /// Carry the CPU bound the restored child's plan was admitted under.
+    #[must_use]
+    pub fn bounded_by(mut self, bound: Option<RestoreCpuBound>) -> Self {
+        self.cpu_bound = bound;
+        self
+    }
+
+    /// The scope prefix the fresh VMM's launch line carries, or empty when
+    /// nothing is to be bound. The launch uses this exact value, so reading it
+    /// back is reading what the restored guest actually runs inside.
+    pub(crate) fn restore_scope_prefix(&self, state_dir: &Path) -> String {
+        match &self.cpu_bound {
+            Some(bound) => {
+                super::cpu_scope_prefix(&bound.machine_id, state_dir, Some(&bound.grant))
+            }
+            None => String::new(),
+        }
     }
 
     fn ensure_socket(&self) -> Result<()> {
@@ -63,13 +101,13 @@ impl FirecrackerIO {
             ))
             .with_context(|| "stopping paused Firecracker before snapshot restore")?;
         }
-        let start = if clean_vsock {
-            super::start_vm_firecracker
-        } else {
-            super::start_vm_firecracker_for_snapshot
-        };
-        start(&vm_dir.to_string_lossy(), &socket_str)
-            .with_context(|| "starting fresh Firecracker for snapshot restore")?;
+        super::start_vm_firecracker_scoped(
+            &vm_dir.to_string_lossy(),
+            &socket_str,
+            clean_vsock,
+            &self.restore_scope_prefix(vm_dir),
+        )
+        .with_context(|| "starting fresh Firecracker for snapshot restore")?;
 
         // `resume_vm: false` — vCPUs stay paused so the device-model guard in
         // `verify_and_resume_from_dir` can inspect `GET /vm/config` before
