@@ -2,16 +2,22 @@
   "name": "mvm-docs",
   "type": "module",
   "version": "0.0.1",
+  "packageManager": "pnpm@10.33.2",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "check:tokens": "node scripts/check-no-hardcoded-hex.mjs",
+    "check:samples": "node scripts/check-sample-provenance.mjs",
+    "check": "pnpm check:tokens && pnpm check:samples && pnpm build"
   },
   "dependencies": {
     "@astrojs/react": "^4.4.2",
     "@astrojs/starlight": "^0.37.6",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@tailwindcss/vite": "^4.2.1",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",

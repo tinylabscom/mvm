@@ -6,6 +6,14 @@ All Nix builds/evals, Firecracker operations, `mvmctl` runtime commands (anythin
 
 > **Exception (2026-05-31, owner-approved): Lima is permitted _strictly_ as a test-environment KVM provider** — e.g. a virtual `/dev/kvm` for Firecracker / Linux-KVM E2E tests that cannot run on the builder VM or on GitHub-hosted runners (which have no KVM). It is modeled as a **test/dev-tier `VmBackend`** (admission-visible, **refused by prod admission** — like the Docker fallback tier), so it can never silently run a production workload, and it is never used for builds/evals. Broader Lima use is a separate future decision (ADR-022 / Plan 117 §A28).
 
+> **Exception (2026-08-10, user-authorized for Plan 314):** Native macOS
+> HVF live lifecycle tests and teardown benchmarks may run on the macOS host
+> because the Linux builder VM cannot provide Hypervisor.framework. This is
+> limited to explicit HVF test/benchmark commands in the Plan 314 worktree;
+> Nix builds/evals, Firecracker operations, Linux-specific checks, and all
+> other `mvmctl` runtime commands remain subject to the builder-VM rule. Do
+> not use Lima for this HVF exception.
+
 **Run cargo on the macOS host wherever it compiles cleanly.** `cargo test`, `cargo check`, and `cargo build` should default to the host so worktrees don't deadlock on shared builder state (cargo target-dir contention, registry locks, and `.git/index` cross-mount races are real and have caused us to lose work). Tests that genuinely need Linux — vsock, jailer/seccomp, dm-verity, network namespaces, anything that pokes at `/dev/kvm` or `/proc/net` — should be gated with `#[cfg(target_os = "linux")]` and only those sub-targets are run inside the builder VM. Workspace-wide `cargo clippy --workspace --all-targets -- -D warnings` is still expected to pass in the Linux builder environment before merge, since clippy needs to see the Linux-gated code paths.
 
 **git only runs from the main `mvm/` checkout, never from inside a worktree directory and never from inside the builder VM.** The main checkout is the single git operator for the whole repo. To act on a worktree's branch, use `git -C /path/to/.worktrees/mvm-<slug> <cmd>` from the main checkout — that drives the worktree's index/HEAD/refs while keeping the running git process anchored at the main checkout. Reasons: (1) only one git process at a time touches `.git/objects`, `.git/packed-refs`, and the shared `.git/hooks/` invocation context, eliminating the cross-worktree contention that has caused us to lose work; (2) VM/shared-filesystem lock semantics can deadlock against host-side git. Cargo/nix/firecracker/mvmctl commands still run from each worktree's own directory — only `git` is centralized.
@@ -154,6 +162,35 @@ No task is complete without tests. Every feature, bug fix, or refactor must incl
 - New CLI flags/commands: integration tests in `tests/cli.rs` verifying help text and argument parsing.
 - Security code: positive path (valid data accepted), negative path (tampered/invalid data rejected), and edge cases (replay, wrong key, expired session).
 - If a function can fail, test that it fails correctly (returns `Err`, not panic).
+
+## Waiting Model: Events, Timers, and Reconciliation
+
+Choose a wait primitive from the condition being observed; do not introduce a
+poll loop merely because the surrounding API is synchronous.
+
+- **Owned live resources use events.** When mvm owns a process, child handle,
+  socket, pipe, eventfd, kqueue filter, pidfd, or other stable wait handle, arm
+  that observer before triggering the transition and block on the event. Keep a
+  bounded deadline, a compatibility fallback for unsupported hosts, and a final
+  identity/state verification before cleanup.
+- **Time conditions use timers.** TTL expiry, leases, retry backoff, health
+  cadence, debounce windows, and watchdog deadlines are timer-driven by
+  definition. Use a monotonic clock and make cancellation explicit.
+- **Crash recovery and external state use reconciliation.** State owned by a
+  different process, a remote service, or a previous crashed owner may have no
+  trustworthy live event. Re-read and reconcile it at a bounded cadence; make
+  every pass idempotent and safe under stale or duplicated observations.
+- **Durable markers are evidence, not wakeups.** A file or database record may
+  remain the cross-process source of truth while an owned event accelerates the
+  foreground path. Never delete or trust durable state solely because a
+  best-effort notification fired.
+- **Measure before converting compatibility polls.** Boot/readiness markers and
+  attach/recovery paths may retain bounded polling until profiling shows a user-
+  visible latency or CPU cost and an ownership-safe event exists. Record why a
+  remaining poll is timer-driven, externally owned, or a recovery fallback.
+
+An event-driven change does not imply adopting a repository-wide async runtime.
+Use the smallest event primitive that matches the existing ownership boundary.
 
 ## Privacy & Security
 

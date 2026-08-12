@@ -2797,6 +2797,73 @@ Not done here: the SDK parity fixture (WS6) and everything in WS6b.
 
 ---
 
+### Task 18: Report the tier on the path a user actually boots
+
+**Found by live measurement on real hardware, not by any test or review.**
+The CPU quota genuinely binds — measured 1.5003 cores against a 1.5-core
+grant with 100 of 100 accounting periods throttled — and the read-back
+correctly returns `Cgroup2CpuMax`. **The two are not connected on the shipped
+path.**
+
+`apply_grants` is called only from `admit_and_start`, whose sole caller is
+`mvm_hostd::run::admit_and_boot_local` — reached through the `mvm-client`
+facade, which the CLI does not use for booting. `mvmctl` boots via
+`mvm_client::start_prepared` (`commands/vm/up/oci_persist.rs`). So a
+genuinely bounded CLI boot emits `plan.admitted`, `plan.policy_resolved` and
+`plan.launched` — and **no `plan.grants_enforced`**. The per-VM audit file
+was 0 bytes, and `machine inspect --json` shows only the *requested* grant.
+
+This is the sixth control in this plan to ship correct, tested, and reachable
+by nothing, and it is the most consequential: every claim that a receipt
+records what was actually enforced is false for every CLI user. A tier that
+is only observable from an `#[ignore]`d test is not a report.
+
+**The work:** call `apply_grants` on the path `mvmctl` actually takes, record
+the returned `EnforcedGrants`, and emit `plan.grants_enforced` to the
+chain-signed log. The tier must also be visible to a user — `machine inspect`
+currently shows the request, which is precisely the confusion the read-back
+exists to prevent.
+
+**Second finding, same measurement:** with no user session bus the boot
+degrades to unbounded, as designed — but **emits no operator warning**. That
+path is the common one in CI and automation, so silence there means a user
+asks for a bound, gets none, and is told nothing.
+
+**Witnesses:**
+- `a_bounded_cli_boot_emits_grants_enforced` — assert the audit entry on the
+  path `mvmctl` takes, not on `admit_and_boot_local`
+- `machine_inspect_shows_the_enforced_tier_not_only_the_request`
+- `a_degraded_boot_warns` — the silence case
+- a gate or test that `apply_grants` has a caller on the CLI boot path, so
+  this cannot regress to unreachable a seventh time
+
+**Status: COMPLETE.**
+
+- [x] `mvm_client::enforced_grants_after_start` — the seam that calls
+      `VmBackend::apply_grants` from the CLI's own boot
+      (`crates/mvm-client/src/boot.rs`).
+- [x] `report_enforced_grants` fires from `start_persistent_oci_machine`
+      immediately after `start_prepared` succeeds
+      (`crates/mvm-cli/src/commands/vm/up/grants_report.rs`): reads the tier
+      back, records it per-VM, emits `plan.grants_enforced` on the chain, and
+      warns when a requested bound did not happen.
+- [x] `machine inspect` shows `cpu-limit: … (requested)` alongside
+      `enforced-cpu: <tier> (bounded|not bounded)`, and `--json` carries an
+      `enforced_grants` object. An absent record reads as unknown, not as
+      unenforced.
+- [x] `mvm_core::cpu_scope::cpu_degradation_reason` builds the operator
+      warning from `MechanismGap::describe()`; the boot still succeeds, since
+      `--prod` is where an unenforceable grant is refused.
+- [x] Regression guard: two `xtask/dormant-controls.toml` entries
+      (`report_enforced_grants`, `enforced_grants_after_start`) declared live.
+      Deleting the CLI call site turns `xtask check-dormant-controls` red —
+      verified by removing it.
+- [x] Witnesses: `a_bounded_cli_boot_emits_grants_enforced`,
+      `machine_inspect_shows_the_enforced_tier_not_only_the_request`,
+      `a_degraded_boot_warns`.
+
+---
+
 ### Task 20: Close the two WS5b enforcement gaps
 
 Both were declared honestly rather than hidden, and both mean a bound that

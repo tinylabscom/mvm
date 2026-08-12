@@ -24,7 +24,8 @@ pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};
 pub use console_smoke::{ConsoleProof, console_smoke};
 pub use hv_impl::{HvfHandle, HvfVcpu, HvfVm};
 pub use kernel_boot::{
-    HostChannels, KernelBootResult, KernelBootUntilParams, boot_kernel, boot_kernel_until,
+    HostChannels, KernelBootResult, KernelBootUntilParams, KernelShutdownTiming, boot_kernel,
+    boot_kernel_until,
 };
 
 /// Compatibility alias for examples/tests that still reach `backends::hvf::driver::HvfDriver`.

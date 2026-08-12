@@ -482,14 +482,39 @@ fn remove_pid_marker_if_matches(pid_file: &Path, pid: u32) {
 /// while `pid_file` is still trusted; this function never rereads the marker
 /// for liveness or signal delivery.
 pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -> Result<()> {
-    let outcome = escalate_kill(
-        crate::legacy::libkrun::STOP_TIMEOUT,
-        mvm_core::poll_backoff::poll_delay,
-        || crate::fc::is_firecracker_pid_running(pid),
-        |signal| fc_sudo_signal(pid, signal),
-        Instant::now,
-        std::thread::sleep,
-    )?;
+    let outcome = if let Ok(observer) =
+        mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid as libc::pid_t)
+    {
+        fc_sudo_signal(pid, FcStopSignal::Terminate);
+        let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
+            pid as libc::pid_t,
+            Instant::now() + crate::legacy::libkrun::STOP_TIMEOUT,
+            Some(&observer),
+        );
+        if exited {
+            KillOutcome::Stopped
+        } else {
+            fc_sudo_signal(pid, FcStopSignal::ForceKill);
+            if mvm_vmm::host::process_exit::wait_for_pid_exit(
+                pid as libc::pid_t,
+                Instant::now() + Duration::from_millis(500),
+                Some(&observer),
+            ) {
+                KillOutcome::Stopped
+            } else {
+                KillOutcome::StillRunning
+            }
+        }
+    } else {
+        escalate_kill(
+            crate::legacy::libkrun::STOP_TIMEOUT,
+            mvm_core::poll_backoff::poll_delay,
+            || crate::fc::is_firecracker_pid_running(pid),
+            |signal| fc_sudo_signal(pid, signal),
+            Instant::now,
+            std::thread::sleep,
+        )?
+    };
     finish_firecracker_kill(name, pid, pid_file, outcome)
 }
 
@@ -777,6 +802,11 @@ impl VmmDriver for FcDriver {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "fc.boot",
+        skip_all,
+        fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
+    )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         if !spec.shares.is_empty() {
             bail!(
@@ -1003,12 +1033,31 @@ fn prepare_guest_filesystems_for_stop(vsock_uds: &str) -> Result<()> {
     require_guest_filesystem_flush(response)
 }
 
+/// Two spans, emitted at debug, splitting teardown into the only two things it
+/// does. `stop_transient` is one opaque number to the launch sample, and the
+/// guest flush and the kill-and-wait have unrelated costs and unrelated fixes —
+/// a vsock round-trip the guest controls, versus a signal plus a host-side poll
+/// loop. Without the split, a slow teardown cannot be attributed to either.
 fn stop_after_guest_flush(
     prepare: impl FnOnce() -> Result<()>,
     terminate: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    prepare()?;
-    terminate()
+    let flush_started = Instant::now();
+    let prepared = prepare();
+    tracing::debug!(
+        ms = flush_started.elapsed().as_secs_f64() * 1000.0,
+        ok = prepared.is_ok(),
+        "fc stop: guest filesystem flush"
+    );
+    prepared?;
+
+    let terminate_started = Instant::now();
+    let terminated = terminate();
+    tracing::debug!(
+        ms = terminate_started.elapsed().as_secs_f64() * 1000.0,
+        "fc stop: signal + exit wait"
+    );
+    terminated
 }
 
 impl RunningVm for FcRunningVm {

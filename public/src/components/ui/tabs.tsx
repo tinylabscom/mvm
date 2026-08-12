@@ -50,8 +50,9 @@ export function TabsTrigger({
   const isActive = ctx.value === value;
   return (
     <button
+      type="button"
       className={cn(
-        "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+        "rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-page",
         isActive
           ? "bg-raised text-emphasis"
           : "text-label hover:text-emphasis",
