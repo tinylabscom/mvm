@@ -13,6 +13,7 @@ fn privileged_requeue_workflow_never_executes_pull_request_code() {
 
     assert!(source.contains("pull_request_target:\n    types: [dequeued]"));
     assert!(source.contains("contents: write\n  pull-requests: write"));
+    assert!(!source.contains("actions: write"));
     assert!(!source.contains("actions/checkout"));
     assert!(!source.contains("github.event.pull_request.head"));
     assert!(!source.contains("github.head_ref"));
@@ -27,4 +28,14 @@ fn retries_are_bounded_counted_and_conflict_aware() {
     assert!(source.contains("--remove-label auto-requeued"));
     assert!(source.contains("--add-label auto-requeued"));
     assert!(source.contains("gh pr merge \"${PR}\" --repo \"${REPO}\" --auto"));
+}
+
+#[test]
+fn timed_out_checks_release_the_queue_instead_of_restarting_the_same_work() {
+    let source = workflow();
+
+    assert!(source.contains("REMOVED_FROM_MERGE_QUEUE_EVENT"));
+    assert!(source.contains("checks_timed_out"));
+    assert!(source.contains("not automatically requeuing"));
+    assert!(source.find("checks_timed_out") < source.find("head_sha=$(gh api"));
 }

@@ -6,6 +6,11 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Plan 316 — merge-queue forward progress.** Reduced live speculative
+      build concurrency from four to two, restored immediate single-entry
+      progress, raised the check-response timeout from 90 to 240 minutes, and
+      made timeout ejections terminal for automatic recovery at an unchanged
+      commit. Required checks and exact merge-commit validation are unchanged.
 - [x] **Foreground `machine run` port forwarding.** Repeatable
       `--port HOST:GUEST` promotes a run to a persistent machine, delegates to
       the existing forwarding lifecycle, binds loopback rather than socat's
