@@ -171,7 +171,21 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        self.stop_with_timing(id).map(|_| ())
+        let timing = self.stop_with_timing(id)?;
+        // `stop_transient` reaches teardown through here, and the launch sample
+        // records only the one opaque total for it. The breakdown is computed on
+        // every stop regardless, so dropping it left the majority of a teardown
+        // unattributable while the numbers already existed.
+        tracing::debug!(
+            vm = %id.0,
+            attach_ms = timing.attach.as_secs_f64() * 1000.0,
+            endpoint_reaping_ms = timing.endpoint_reaping.as_secs_f64() * 1000.0,
+            driver_kill_ms = timing.driver_kill.as_secs_f64() * 1000.0,
+            console_cleanup_ms = timing.console_cleanup.as_secs_f64() * 1000.0,
+            total_ms = timing.total.as_secs_f64() * 1000.0,
+            "stop: teardown breakdown"
+        );
+        Ok(())
     }
 
     fn stop_all(&self) -> Result<()> {

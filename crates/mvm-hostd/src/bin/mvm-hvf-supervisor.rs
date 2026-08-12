@@ -214,7 +214,7 @@ fn main() -> anyhow::Result<()> {
     use std::time::Duration;
 
     use anyhow::Context;
-    use mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig;
+    use mvm_vmm::host::hvf_supervisor::{HvfShutdownTimingRecord, HvfSupervisorConfig};
 
     // Sign + re-exec before anything else (preserves the stdin config pipe).
     ensure_self_signed();
@@ -240,6 +240,11 @@ fn main() -> anyhow::Result<()> {
         .context("read HvfSupervisorConfig from stdin")?;
     let cfg: HvfSupervisorConfig =
         serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
+    if let Some(state_dir) = cfg.pid_file.parent() {
+        let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::shutdown_timing_path(
+            state_dir,
+        ));
+    }
 
     // Announce launch: the backend polls for this PID file to confirm boot, then
     // reads it to stop/status the VM.
@@ -335,17 +340,48 @@ fn main() -> anyhow::Result<()> {
     // BEFORE removing the PID file: the backend keys "stopped" on the PID file via
     // status/wait, so dropping it first races a reader to an empty console.
     let r = result.map_err(|e| anyhow::anyhow!("hvf boot failed: {e:?}"))?;
+    let console_write_started = std::time::Instant::now();
     if let Ok(mut f) = std::fs::File::create(&cfg.console_log) {
         let _ = f.write_all(&r.console);
+        let _ = f.flush();
     }
+    let console_write = console_write_started.elapsed();
     // Transient run-to-exit: persist the workload exit code (the backend's `wait`
     // reads this) so it is durable before "stopped" is observable.
+    let workload_exit_write_started = std::time::Instant::now();
     if let Some(code) = r.workload_exit_code {
         let _ = std::fs::write(&cfg.workload_exit, code.to_string());
+    }
+    let workload_exit_write = r
+        .workload_exit_code
+        .map(|_| workload_exit_write_started.elapsed())
+        .unwrap_or_default();
+    if let Some(timing) = r.shutdown_timing
+        && let Some(state_dir) = cfg.pid_file.parent()
+    {
+        let record = HvfShutdownTimingRecord {
+            schema_version: 1,
+            watchdog_to_vcpu_exit_micros: duration_micros(timing.watchdog_to_vcpu_exit),
+            watchdog_join_micros: duration_micros(timing.watchdog_join),
+            io_thread_join_micros: duration_micros(timing.io_thread_join),
+            vcpu_destroy_micros: duration_micros(timing.vcpu_destroy),
+            vm_destroy_micros: duration_micros(timing.vm_destroy),
+            console_write_micros: duration_micros(console_write),
+            workload_exit_write_micros: duration_micros(workload_exit_write),
+        };
+        if let Ok(json) = serde_json::to_vec(&record) {
+            let path = mvm_vmm::host::hvf_supervisor::shutdown_timing_path(state_dir);
+            let _ = std::fs::write(path, json);
+        }
     }
     let _ = std::fs::remove_file(&cfg.pid_file);
     if let Some(code) = r.workload_exit_code {
         std::process::exit(code);
     }
     Ok(())
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn duration_micros(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }

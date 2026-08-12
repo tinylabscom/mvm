@@ -1,15 +1,9 @@
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt;
-use tracing_subscriber::prelude::*;
+//! CLI logging setup.
+//!
+//! The subscriber assembly itself lives in `mvm_core::observability::logging`;
+//! this module only maps the CLI's `-v` count onto a filter.
 
-/// Log output format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogFormat {
-    /// Human-readable colored output (for interactive CLI use).
-    Human,
-    /// Structured JSON output (for daemon/agent mode).
-    Json,
-}
+pub use mvm_core::observability::logging::LogFormat;
 
 /// The default tracing filter for a `-v` count when `RUST_LOG` is unset.
 /// 0 = quiet (errors only); each `-v` widens it.
@@ -24,32 +18,14 @@ pub fn filter_for_verbosity(verbosity: u8) -> &'static str {
 
 /// Initialize the global tracing subscriber.
 ///
-/// Call once at program startup. Without `-v` the filter is `error` (quiet by
-/// default). Each `-v` widens it: `-v` → `mvm=info,warn`, `-vv` → `debug`,
-/// `-vvv` → `trace`. `RUST_LOG=<filter>` overrides verbosity entirely.
+/// Without `-v` the filter is `error` (quiet by default). Each `-v` widens it:
+/// `-v` → `mvm=info,warn`, `-vv` → `debug`, `-vvv` → `trace`.
+/// `RUST_LOG=<filter>` overrides verbosity entirely.
+///
+/// Span profiling is independent of verbosity: when `MVM_SPAN_TIMINGS` is set,
+/// spans are measured even at the default quiet filter.
 pub fn init(format: LogFormat, verbosity: u8) {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(filter_for_verbosity(verbosity)));
-
-    match format {
-        LogFormat::Human => {
-            let subscriber = fmt::layer()
-                .with_target(false)
-                .with_thread_ids(false)
-                .compact();
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(subscriber)
-                .init();
-        }
-        LogFormat::Json => {
-            let subscriber = fmt::layer().json().with_target(true);
-            tracing_subscriber::registry()
-                .with(env_filter)
-                .with(subscriber)
-                .init();
-        }
-    }
+    mvm_core::observability::logging::init_with_filter(format, filter_for_verbosity(verbosity));
 }
 
 #[cfg(test)]
@@ -69,5 +45,14 @@ mod tests {
         assert!(filter_for_verbosity(1).contains("info"));
         assert_eq!(filter_for_verbosity(2), "debug");
         assert_eq!(filter_for_verbosity(5), "trace");
+    }
+
+    #[test]
+    fn verbosity_widens_monotonically() {
+        // Each step must not narrow the previous one; the quiet default is the
+        // reason span timing needs its own filter rather than riding on this.
+        assert_eq!(filter_for_verbosity(0), "error");
+        assert_ne!(filter_for_verbosity(0), filter_for_verbosity(1));
+        assert_ne!(filter_for_verbosity(1), filter_for_verbosity(2));
     }
 }

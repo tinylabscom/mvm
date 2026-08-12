@@ -155,6 +155,28 @@ pub struct KernelBootResult {
     /// Monotonic time spent installing a private restore-RAM mapping, in
     /// microseconds. `None` when the boot did not restore RAM.
     pub restore_mapping_micros: Option<u64>,
+    /// Internal supervisor shutdown spans. Present when the watchdog stopped a
+    /// live run; absent for setup failures and ordinary guest exits.
+    pub shutdown_timing: Option<KernelShutdownTiming>,
+}
+
+/// Internal spans between the watchdog observing stop and Hypervisor.framework
+/// releasing the VM. File persistence happens in the detached supervisor and
+/// is measured there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KernelShutdownTiming {
+    /// From the watchdog observing `stop` and forcing a vCPU exit until the run
+    /// loop returns. The preceding flag-observation delay is bounded by the
+    /// watchdog's 5 ms interval.
+    pub watchdog_to_vcpu_exit: Duration,
+    /// Time spent joining the watchdog after the run loop returned.
+    pub watchdog_join: Duration,
+    /// Time spent waking and joining the event-driven host-I/O thread.
+    pub io_thread_join: Duration,
+    /// Time spent destroying the vCPU.
+    pub vcpu_destroy: Duration,
+    /// Time spent destroying the process-global HVF VM.
+    pub vm_destroy: Duration,
 }
 
 /// Host-supplied boot inputs the supervisor threads into a guest: the vsock
@@ -547,7 +569,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
             return Err(HvfError::VmCreate(rc));
         }
         let mapped_ram_size = guest_ram.len();
-        let r = run(
+        let mut r = run(
             &mut guest_ram,
             ram,
             entry,
@@ -577,7 +599,13 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
             stop,
             paused,
         );
+        let vm_destroy_started = Instant::now();
         hv_vm_destroy();
+        if let Ok(result) = &mut r
+            && let Some(timing) = &mut result.shutdown_timing
+        {
+            timing.vm_destroy = vm_destroy_started.elapsed();
+        }
         r
     };
     // `guest_ram` unmaps here as it drops, after `hv_vm_destroy` above.
@@ -742,21 +770,21 @@ unsafe fn run(
         let watchdog = std::thread::spawn(move || {
             let step = Duration::from_millis(5);
             let mut waited = Duration::ZERO;
-            loop {
+            let stop_observed_at = loop {
                 std::thread::sleep(step);
                 if done_w.load(Ordering::Relaxed) {
                     if let Some(path) = &pause_state_w {
                         let _ = std::fs::remove_file(path);
                     }
-                    return; // run already ended; don't poke a finishing vCPU
+                    return None; // run already ended; don't poke a finishing vCPU
                 }
                 if stop.load(Ordering::Relaxed) {
-                    break; // requested stop / workload-exit → final force-exit below
+                    break Instant::now(); // requested stop / workload-exit
                 }
                 waited += step;
                 if waited >= timeout {
                     stop.store(true, Ordering::Relaxed); // timeout → end the run
-                    break;
+                    break Instant::now();
                 }
                 // Break the guest out of `hv_vcpu_run` when: a pause was requested
                 // (so the run loop reaches its pause hold and parks the vCPU), an
@@ -770,12 +798,13 @@ unsafe fn run(
                 {
                     HvfHandle::force_exit(&[handle]); // wake the run loop
                 }
-            }
+            };
             pause_ack_w.store(false, Ordering::Release);
             if let Some(path) = &pause_state_w {
                 let _ = std::fs::remove_file(path);
             }
             HvfHandle::force_exit(&[handle]); // final wake → loop sees stop, returns
+            Some(stop_observed_at)
         });
 
         let mut uart = Pl011::new(UART_BASE);
@@ -1068,15 +1097,22 @@ unsafe fn run(
             )?
         };
 
+        let vcpu_exited_at = Instant::now();
         done.store(true, Ordering::Relaxed);
-        let _ = watchdog.join();
+        let watchdog_join_started = Instant::now();
+        let stop_observed_at = watchdog.join().ok().flatten();
+        let watchdog_join = watchdog_join_started.elapsed();
         // Join the vsock host-I/O thread before touching device state or freeing
         // the guest RAM it points into — the join is the memory-safety barrier.
+        let io_thread_join_started = Instant::now();
         if let Some(v) = vsock_dev.as_mut() {
             v.shutdown();
         }
+        let io_thread_join = io_thread_join_started.elapsed();
         let final_pc = vcpu.get_core(CoreReg::Pc).unwrap_or(0);
+        let vcpu_destroy_started = Instant::now();
         hv_vcpu_destroy(vcpu_id);
+        let vcpu_destroy = vcpu_destroy_started.elapsed();
 
         let mut r = KernelBootResult {
             console: uart.output,
@@ -1090,6 +1126,13 @@ unsafe fn run(
             psci_fns,
             other_ecs,
             final_pc,
+            shutdown_timing: stop_observed_at.map(|observed_at| KernelShutdownTiming {
+                watchdog_to_vcpu_exit: vcpu_exited_at.saturating_duration_since(observed_at),
+                watchdog_join,
+                io_thread_join,
+                vcpu_destroy,
+                vm_destroy: Duration::ZERO,
+            }),
             ..Default::default()
         };
         if let Some(vs) = &vsock_dev {
@@ -1149,6 +1192,7 @@ mod tests {
         let result = KernelBootResult::default();
         assert_eq!(result.restore_mapping_micros, None);
         assert_eq!(result.resident_ram_bytes, None);
+        assert_eq!(result.shutdown_timing, None);
     }
 
     #[test]

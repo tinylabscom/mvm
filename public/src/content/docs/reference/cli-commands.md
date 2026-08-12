@@ -445,8 +445,8 @@ guest, on any tier.
 | `mvmctl machine restart <name>...` | Restart one or more named machines: stop if running, then start (same stop→start as a config-change recreate). This is also how a running machine picks up a newer version-matched runtime overlay. |
 | `mvmctl machine ls` (alias `ps`) | List persisted named machine specs |
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
-| `mvmctl machine inspect <name>` | Show one persisted named machine spec |
-| `mvmctl machine inspect <name> --json` | Print one persisted named machine spec as JSON |
+| `mvmctl machine inspect <name>` | Show one persisted named machine spec, plus `enforced-cpu:` — the tier that actually bounded its last boot, read back off the live control. A `cpu-limit:` line shows what was *requested*; the two are separate on purpose, since a request and an enforcement are not the same statement. Absent when no boot has recorded a tier. |
+| `mvmctl machine inspect <name> --json` | Print one persisted named machine spec as JSON, with an `enforced_grants` object carrying the achieved per-dimension tiers |
 | `mvmctl machine rm <name>... --yes` | Remove one or more persisted named machine specs (refuses a running machine; pass `--force` to stop then remove) |
 | `mvmctl machine rm --all --yes` | Remove every persisted named machine spec |
 | `mvmctl machine rm <name>... --yes --json` | Print a JSON array deletion summary |

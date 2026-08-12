@@ -88,7 +88,8 @@ mod linux {
     /// Stage 0's dedicated persistent Nix-store block device. The libkrun
     /// launcher attaches this before the virtio-fs shares, so it enumerates as
     /// `/dev/vda`. QEMU uses `/dev/vda` as the rootfs, so this is libkrun-only.
-    const STAGE0_NIX_STORE_DEV: &str = "/dev/vda";
+    const LIBKRUN_STAGE0_NIX_STORE_DEV: &str = "/dev/vda";
+    const QEMU_STAGE0_NIX_STORE_DEV: &str = "/dev/vde";
     /// Mount point for the persistent Stage 0 Nix store before binding it over
     /// `/nix`.
     const STAGE0_NIX_STORE_MOUNT: &str = "/nix-stage0-store";
@@ -400,6 +401,7 @@ mod linux {
     /// writable store.
     fn setup() -> Result<(), String> {
         let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        sync_clock_from_host_epoch(&cmdline)?;
         mount_pseudofs()?;
         // `/dev/null` insurance — some libkrun set_root boots reach
         // userspace without it, which then masks every `2>/dev/null`
@@ -438,13 +440,7 @@ mod linux {
             ])?;
         }
 
-        if qemu {
-            // The QEMU root is a writable ext4 seed, so `/nix` is already a
-            // writable store — no virtiofs-over-FUSE problem, no tmpfs copy
-            // (and no EMFILE). nix writes directly to `/nix/store`.
-        } else {
-            setup_nix_store()?;
-        }
+        setup_nix_store(qemu)?;
         if should_enable_vsock_egress(qemu, &cmdline) {
             best_effort_raise_loopback();
             mvm_agentd::guest_net::seed_loopback_resolver()
@@ -453,6 +449,21 @@ mod linux {
         let mut egress_child = fork_vsock_egress_client_if_requested(&cmdline);
         wait_for_vsock_egress_proxy_if_requested(&cmdline, egress_child.as_mut());
         configure_nix_runtime()?;
+        Ok(())
+    }
+
+    /// Seed the RTC-less Stage 0 guest clock before starting the egress client
+    /// or Nix. Without this, TLS validation observes 1970 and every fresh
+    /// bootstrap download fails with a misleading certificate error.
+    fn sync_clock_from_host_epoch(cmdline: &str) -> Result<(), String> {
+        let Some(epoch_seconds) =
+            mvm_vmm::host::boot_config::builder_hostepoch_from_cmdline(cmdline)
+        else {
+            return Ok(());
+        };
+        mvm_agentd::restore_clock::resync(epoch_seconds)
+            .map_err(|error| format!("set wall clock from host epoch: {error}"))?;
+        eprintln!("stage0-init: wall clock set from host epoch {epoch_seconds}");
         Ok(())
     }
 
@@ -506,8 +517,8 @@ mod linux {
     /// from the verified RootDir store, then bind it over `/nix` on every later
     /// boot. If the current seed lacks `mkfs.ext4` and the disk is still blank,
     /// fall back to the old tmpfs copy so the bootstrap remains functional.
-    fn setup_nix_store() -> Result<(), String> {
-        match setup_persistent_nix_store() {
+    fn setup_nix_store(qemu: bool) -> Result<(), String> {
+        match setup_persistent_nix_store(qemu) {
             Ok(()) => return Ok(()),
             Err(e) => eprintln!(
                 "stage0-init: persistent Stage 0 /nix store unavailable ({e}); falling back to tmpfs seed copy"
@@ -537,37 +548,40 @@ mod linux {
         Ok(())
     }
 
-    fn setup_persistent_nix_store() -> Result<(), String> {
-        if !Path::new(STAGE0_NIX_STORE_DEV).exists() {
-            return Err(format!("{STAGE0_NIX_STORE_DEV} is not present"));
+    fn stage0_nix_store_device(qemu: bool) -> &'static str {
+        if qemu {
+            QEMU_STAGE0_NIX_STORE_DEV
+        } else {
+            LIBKRUN_STAGE0_NIX_STORE_DEV
+        }
+    }
+
+    fn setup_persistent_nix_store(qemu: bool) -> Result<(), String> {
+        let device = stage0_nix_store_device(qemu);
+        if !Path::new(device).exists() {
+            return Err(format!("{device} is not present"));
         }
 
         std::fs::create_dir_all(STAGE0_NIX_STORE_MOUNT)
             .map_err(|e| format!("create {STAGE0_NIX_STORE_MOUNT}: {e}"))?;
-        mount_stage0_nix_store()?;
+        mount_stage0_nix_store(device)?;
 
         let seed_store = Path::new(NIX_TARGET).join("store");
         let expected_marker = stage0_nix_store_marker(&seed_store)?;
         if persistent_nix_store_matches(&expected_marker)? {
-            eprintln!(
-                "stage0-init: reusing persistent Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
-            );
+            eprintln!("stage0-init: reusing persistent Stage 0 Nix store at {device}");
             bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
             return Ok(());
         }
         if persistent_nix_store_matches_seed(&seed_store)? {
             std::fs::write(STAGE0_NIX_STORE_MARKER, expected_marker)
                 .map_err(|e| format!("write {STAGE0_NIX_STORE_MARKER}: {e}"))?;
-            eprintln!(
-                "stage0-init: adopting host-prepopulated Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
-            );
+            eprintln!("stage0-init: adopting host-prepopulated Stage 0 Nix store at {device}");
             bind_mount(STAGE0_NIX_STORE_MOUNT, NIX_TARGET)?;
             return Ok(());
         }
 
-        eprintln!(
-            "stage0-init: initializing persistent Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
-        );
+        eprintln!("stage0-init: initializing persistent Stage 0 Nix store at {device}");
         clear_dir_children(Path::new(STAGE0_NIX_STORE_MOUNT))
             .map_err(|e| format!("clearing {STAGE0_NIX_STORE_MOUNT}: {e}"))?;
         let dst_store = Path::new(STAGE0_NIX_STORE_MOUNT).join("store");
@@ -588,8 +602,8 @@ mod linux {
         Ok(())
     }
 
-    fn mount_stage0_nix_store() -> Result<(), String> {
-        match mount_fs(STAGE0_NIX_STORE_DEV, STAGE0_NIX_STORE_MOUNT, "ext4") {
+    fn mount_stage0_nix_store(device: &str) -> Result<(), String> {
+        match mount_fs(device, STAGE0_NIX_STORE_MOUNT, "ext4") {
             Ok(()) => return Ok(()),
             Err(first_mount_err) => {
                 let Some(mkfs) = find_mkfs_ext4() else {
@@ -598,12 +612,12 @@ mod linux {
                     ));
                 };
                 eprintln!(
-                    "stage0-init: formatting {STAGE0_NIX_STORE_DEV} for persistent Stage 0 store ({first_mount_err})"
+                    "stage0-init: formatting {device} for persistent Stage 0 store ({first_mount_err})"
                 );
-                format_ext4_with(&mkfs, STAGE0_NIX_STORE_DEV)?;
+                format_ext4_with(&mkfs, device)?;
             }
         }
-        mount_fs(STAGE0_NIX_STORE_DEV, STAGE0_NIX_STORE_MOUNT, "ext4")
+        mount_fs(device, STAGE0_NIX_STORE_MOUNT, "ext4")
     }
 
     fn find_mkfs_ext4() -> Option<PathBuf> {
@@ -1293,9 +1307,16 @@ mod linux {
         use super::{
             VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into,
             ext4_volume_label_from_superblock, find_labeled_ext4_disk, run_streaming,
+            stage0_nix_store_device,
         };
         use std::os::unix::fs::symlink;
         use std::process::Command;
+
+        #[test]
+        fn stage0_nix_store_device_matches_backend_disk_order() {
+            assert_eq!(stage0_nix_store_device(false), "/dev/vda");
+            assert_eq!(stage0_nix_store_device(true), "/dev/vde");
+        }
 
         #[test]
         fn ext4_volume_label_from_superblock_rejects_too_short_buffers() {

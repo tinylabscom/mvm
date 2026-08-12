@@ -174,6 +174,7 @@ fn parse_backend_kind(s: &str) -> mvm_core::vm_backend::BackendKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn manager_attach_detach_is_idempotent() {
@@ -187,8 +188,8 @@ mod tests {
     #[test]
     fn attach_reads_observability_target_from_mode_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", tmp.path());
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
 
         let vm_name = "ebpf-attach-test";
         let target = mvm_runtime::base::observability_target::VmObservabilityTarget {

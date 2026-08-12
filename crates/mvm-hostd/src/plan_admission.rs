@@ -205,6 +205,7 @@ pub struct BundleAdmissionContext<'a> {
 /// `posture` is what the plan cannot be trusted to say: whether this is a
 /// sealed production launch or a developer's boot, and which backend will
 /// actually boot it. See [`RunPosture`].
+#[tracing::instrument(skip_all)]
 pub fn admit_for_run(
     input: &SynthesisInput<'_>,
     clock: &dyn Clock,
@@ -1115,6 +1116,7 @@ fn undo_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
     undo.err
 }
 
+#[tracing::instrument(skip_all)]
 pub fn admit_and_start(
     backend: &AnyBackend,
     params: AdmitAndStartParams<'_>,
@@ -1731,6 +1733,38 @@ mod tests {
             cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores }),
             ..mvm_contract::grants::Grants::default()
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_cpu_mechanism_gap_requires_a_share_capable_tier_and_a_reported_gap() {
+        use mvm_core::cpu_scope::MechanismGap;
+
+        let missing_bus = Some(MechanismGap::NoUserSessionBus);
+        assert_eq!(
+            host_cpu_mechanism_gap(
+                &mvm_contract::grants::Grants::default(),
+                BackendKind::Firecracker,
+                missing_bus,
+            ),
+            None,
+            "a plan with no CPU share has no CPU mechanism gap"
+        );
+        assert_eq!(
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Wasm, missing_bus),
+            None,
+            "a tier whose CPU control is not a cgroup share does not use the host mechanism"
+        );
+        assert_eq!(
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Firecracker, None),
+            None,
+            "an available host mechanism leaves no gap"
+        );
+
+        let detail =
+            host_cpu_mechanism_gap(&cpu_share(1000), BackendKind::Firecracker, missing_bus)
+                .expect("a missing mechanism must be reported for a share-capable tier");
+        assert!(detail.contains("no user session bus"), "{detail}");
     }
 
     #[test]

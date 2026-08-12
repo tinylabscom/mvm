@@ -601,10 +601,26 @@ fn seal_capture(vm: &str, stream: VmStream) {
         broker,
         transcript_dir,
     } = stream;
+    // Teardown reports console cleanup as one number, and it is the largest
+    // span of a transient stop. The work behind it is two independent writer
+    // joins and a manifest write, so the total is not actionable until split.
+    let t_console = std::time::Instant::now();
     if let Some(console) = console {
         console.stop();
     }
+    tracing::debug!(
+        vm = %vm,
+        ms = t_console.elapsed().as_secs_f64() * 1000.0,
+        "seal: console writer stop"
+    );
+
+    let t_server = std::time::Instant::now();
     server.stop();
+    tracing::debug!(
+        vm = %vm,
+        ms = t_server.elapsed().as_secs_f64() * 1000.0,
+        "seal: server writer stop"
+    );
 
     let Some(broker) = Arc::into_inner(broker) else {
         // Unreachable while the two joins above are the only other holders,

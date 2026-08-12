@@ -33,6 +33,38 @@ pub fn start_prepared(
     Ok(())
 }
 
+/// Report what actually bounded the VM [`start_prepared`] just started.
+///
+/// This is the seam that puts `VmBackend::apply_grants` on the path `mvmctl`
+/// boots. Without a caller here the read-back is computed correctly and
+/// reported to nobody, which from the outside is indistinguishable from a bound
+/// that was never applied — a bounded CLI boot emitted no `plan.grants_enforced`
+/// and `machine inspect` showed only the request.
+///
+/// Separate from [`start_prepared`] rather than folded into its return, because
+/// the two answer different questions and only one of them can fail: the start
+/// either happened or errored, while the tier is a read-back off the live
+/// control that always has an honest answer (`Declared` for a host whose
+/// mechanism is absent). Folding them would make a degraded — but successful —
+/// boot look like a failure mode of starting.
+///
+/// `grants` is the request the plan was admitted under. It is passed because the
+/// backend seam takes it; a backend derives its tier from the control, never
+/// from what was asked for.
+pub fn enforced_grants_after_start(
+    backend_name: &str,
+    vm_name: &str,
+    grants: &mvm_contract::grants::Grants,
+) -> Result<mvm_contract::protocol::resource_controls::EnforcedGrants> {
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend_name);
+    backend
+        .as_vm_backend()
+        .apply_grants(&VmId(vm_name.to_string()), grants)
+        .map_err(|e| MvmError::Backend {
+            reason: format!("{e:#}"),
+        })
+}
+
 /// The typed tier behind a hypervisor name.
 ///
 /// Admission measures a workload's declared grants against the mechanisms its

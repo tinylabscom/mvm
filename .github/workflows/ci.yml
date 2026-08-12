@@ -113,6 +113,9 @@ jobs:
       - name: Broad-egress constructor stays builder-only
         run: cargo run -p xtask -- check-build-egress-callers
 
+      - name: Workload-kernel reads go through the verified seam
+        run: cargo run -p xtask -- check-verified-kernel-reads
+
       - name: No host-nix invocation (builds route through the builder VM)
         run: cargo run -p xtask -- check-no-host-nix
 

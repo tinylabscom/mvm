@@ -17,9 +17,9 @@
 //!   on stdin, and waits up to `PID_FILE_TIMEOUT` for the supervisor
 //!   to write its PID file. Returns once the supervisor is running or
 //!   exits with an error if the spawn fails or PID file never appears.
-//! - `stop` reads `<vm_state_dir>/libkrun.pid`, sends `SIGTERM`, polls
-//!   for the process to exit, and falls back to `SIGKILL` if it doesn't
-//!   die within `STOP_TIMEOUT`.
+//! - `stop` reads `<vm_state_dir>/libkrun.pid`, arms a host process-exit
+//!   observer before `SIGTERM`, and falls back to bounded polling plus
+//!   `SIGKILL` if the process does not exit within `STOP_TIMEOUT`.
 //! - `status` reads the PID file and probes with `kill(pid, 0)`.
 //! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
 
@@ -134,6 +134,7 @@ pub(crate) const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 /// means `mvmctl stop` returns in 2 s instead of 5 s. Shared with the libkrun
 /// driver's `kill` escalation.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const FORCE_KILL_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Open the per-VM guest-console capture sink. OUTPUT-ONLY by
 /// construction (write-only, create+truncate): the guest console
@@ -1090,6 +1091,7 @@ impl VmBackend for LibkrunBackend {
                     id.0,
                     pid_path.display()
                 ));
+                cleanup_vsock_sockets(&vm_state_dir(&id.0));
                 return Ok(());
             }
         };
@@ -1100,28 +1102,42 @@ impl VmBackend for LibkrunBackend {
                 id.0
             ));
             let _ = std::fs::remove_file(&pid_path);
+            cleanup_vsock_sockets(&vm_state_dir(&id.0));
             return Ok(());
         }
 
-        // SIGTERM first — gives libkrun a chance to clean up
-        // virtio-blk file descriptors. Then SIGKILL if it ignores us.
+        // Arm before SIGTERM so a short-lived supervisor cannot exit between
+        // signal delivery and observer registration.
+        let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
+        // SIGTERM first — gives libkrun a chance to clean up virtio-blk file
+        // descriptors. Then SIGKILL if it ignores us.
         send_signal(pid, libc::SIGTERM);
-        let deadline = Instant::now() + STOP_TIMEOUT;
-        while Instant::now() < deadline {
-            if !pid_alive(pid) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if pid_alive(pid) {
+        let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
+            pid,
+            Instant::now() + STOP_TIMEOUT,
+            observer.as_ref(),
+        );
+        if !exited {
             ui::info(&format!(
                 "libkrun VM '{}' PID {pid} did not exit after SIGTERM within {STOP_TIMEOUT:?}; sending SIGKILL.",
                 id.0
             ));
             send_signal(pid, libc::SIGKILL);
+            if !mvm_vmm::host::process_exit::wait_for_pid_exit(
+                pid,
+                Instant::now() + FORCE_KILL_TIMEOUT,
+                observer.as_ref(),
+            ) {
+                bail!(
+                    "libkrun VM '{}' PID {pid} could not be proven dead after SIGKILL; preserving {}",
+                    id.0,
+                    pid_path.display()
+                );
+            }
         }
 
         let _ = std::fs::remove_file(&pid_path);
+        cleanup_vsock_sockets(&vm_state_dir(&id.0));
         ui::success(&format!("libkrun VM '{}' stopped.", id.0));
         Ok(())
     }
@@ -1435,19 +1451,57 @@ pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
 }
 
 pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
-    // `kill(pid, 0)` returns 0 if the process exists (and the caller
-    // has permission to signal it), -1 with errno=ESRCH if not.
-    unsafe { libc::kill(pid, 0) == 0 }
+    mvm_vmm::host::process_liveness::pid_is_alive(pid)
 }
 
 pub(crate) fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     unsafe { libc::kill(pid, sig) };
 }
 
+pub(crate) fn cleanup_vsock_sockets(state_dir: &Path) {
+    let control_ports = [
+        mvm_agentd::vsock::GUEST_AGENT_PORT,
+        mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+        mvm_agentd::vsock::EGRESS_PORT,
+        mvm_agentd::vsock::BROKER_PORT,
+    ];
+    for port in control_ports
+        .into_iter()
+        .chain(mvm_agentd::vsock::dev_console_data_ports())
+    {
+        let socket = mvm_core::config::vm_vsock_port_socket_at(state_dir, port);
+        let _ = std::fs::remove_file(socket);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn vsock_cleanup_removes_only_known_port_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let agent = mvm_core::config::vm_vsock_port_socket_at(
+            temp.path(),
+            mvm_agentd::vsock::GUEST_AGENT_PORT,
+        );
+        let workload_exit = mvm_core::config::vm_vsock_port_socket_at(
+            temp.path(),
+            mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+        );
+        let unrelated = temp.path().join("unrelated.sock");
+        std::fs::create_dir_all(agent.parent().expect("socket parent")).expect("create socket dir");
+        std::fs::write(&agent, b"agent").expect("write agent path");
+        std::fs::write(&workload_exit, b"exit").expect("write exit path");
+        std::fs::write(&unrelated, b"unrelated").expect("write unrelated path");
+
+        cleanup_vsock_sockets(temp.path());
+
+        assert!(!agent.exists());
+        assert!(!workload_exit.exists());
+        assert!(unrelated.exists());
+    }
 
     fn sample_standby_spec() -> StandbySpec {
         StandbySpec {
@@ -1993,6 +2047,38 @@ mod tests {
             .status(&VmId("never-started-vm".to_string()))
             .expect("status should not error");
         assert_eq!(status, VmStatus::Stopped);
+    }
+
+    #[test]
+    fn stop_reaps_a_supervisor_through_the_shared_exit_wait() {
+        with_env(|| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut env = TestEnv::new();
+            env.set("MVM_HOME", temp.path());
+
+            let vm_name = "libkrun-event-stop";
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn supervisor fixture");
+            let pid_path = vm_libkrun_pid(vm_name);
+            std::fs::create_dir_all(pid_path.parent().expect("pid parent")).expect("state dir");
+            std::fs::write(&pid_path, child.id().to_string()).expect("write pid marker");
+
+            LibkrunBackend
+                .stop(&VmId(vm_name.to_string()))
+                .expect("stop should prove the fixture exited");
+            let _ = child.wait();
+
+            assert!(
+                !pid_path.exists(),
+                "verified exit should remove the pid marker"
+            );
+            assert!(!pid_alive(child.id() as libc::pid_t));
+        });
     }
 
     /// Serialise env-var mutations across tests in this module —

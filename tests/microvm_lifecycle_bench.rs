@@ -8,6 +8,12 @@
 //! MVM_LIFECYCLE_BENCH=1 \
 //! MVM_LIFECYCLE_BENCH_KERNEL=/path/to/vmlinux \
 //! MVM_LIFECYCLE_BENCH_ROOTFS=/path/to/rootfs.ext4 \
+//! MVM_LIFECYCLE_BENCH_INITRD=/path/to/rootfs.initrd \
+//! MVM_LIFECYCLE_BENCH_ROOTFS_VERITY=/path/to/rootfs.verity \
+//! MVM_LIFECYCLE_BENCH_ROOTFS_ROOTHASH=<64-lowercase-hex> \
+//! MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY=/path/to/overlay.ext4 \
+//! MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY_VERITY=/path/to/overlay.verity \
+//! MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY_ROOTHASH=<64-lowercase-hex> \
 //! cargo test --test microvm_lifecycle_bench -- --exact --nocapture
 //! ```
 //!
@@ -22,14 +28,21 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use mvm_core::vm_backend::{VmId, VmStartConfig};
+use mvm_core::vm_backend::{RuntimeSourcePolicy, VmId, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::workload_runner::StopTiming;
+use mvm_vmm::host::hvf_supervisor::HvfShutdownTimingRecord;
 
 const ENABLE_VAR: &str = "MVM_LIFECYCLE_BENCH";
 const BACKENDS_VAR: &str = "MVM_LIFECYCLE_BENCH_BACKENDS";
 const KERNEL_VAR: &str = "MVM_LIFECYCLE_BENCH_KERNEL";
 const ROOTFS_VAR: &str = "MVM_LIFECYCLE_BENCH_ROOTFS";
+const INITRD_VAR: &str = "MVM_LIFECYCLE_BENCH_INITRD";
+const ROOTFS_VERITY_VAR: &str = "MVM_LIFECYCLE_BENCH_ROOTFS_VERITY";
+const ROOTFS_ROOTHASH_VAR: &str = "MVM_LIFECYCLE_BENCH_ROOTFS_ROOTHASH";
+const RUNTIME_OVERLAY_VAR: &str = "MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY";
+const RUNTIME_OVERLAY_VERITY_VAR: &str = "MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY_VERITY";
+const RUNTIME_OVERLAY_ROOTHASH_VAR: &str = "MVM_LIFECYCLE_BENCH_RUNTIME_OVERLAY_ROOTHASH";
 const COUNT_VAR: &str = "MVM_LIFECYCLE_BENCH_COUNT";
 const CONCURRENCY_VAR: &str = "MVM_LIFECYCLE_BENCH_CONCURRENCY";
 const CPUS_VAR: &str = "MVM_LIFECYCLE_BENCH_CPUS";
@@ -50,6 +63,8 @@ fn starts_and_stops_1000_microvms() -> Result<()> {
     }
 
     let spec = BenchSpec::from_env()?;
+    mvm_hostd::audit::host_keypair::load_or_init()
+        .context("initializing the benchmark host signer")?;
     for backend in &spec.backends {
         run_backend(&spec, backend)?;
     }
@@ -61,10 +76,26 @@ struct BenchSpec {
     backends: Vec<String>,
     kernel: PathBuf,
     rootfs: PathBuf,
+    rootfs_integrity: Option<RootfsIntegritySpec>,
+    runtime_overlay: Option<RuntimeOverlaySpec>,
     count: usize,
     concurrency: usize,
     cpus: u32,
     memory_mib: u32,
+}
+
+#[derive(Debug, Clone)]
+struct RootfsIntegritySpec {
+    initrd: PathBuf,
+    verity: PathBuf,
+    roothash: String,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeOverlaySpec {
+    image: PathBuf,
+    verity: PathBuf,
+    roothash: String,
 }
 
 impl BenchSpec {
@@ -88,6 +119,8 @@ impl BenchSpec {
             backends,
             kernel: required_file(KERNEL_VAR)?,
             rootfs: required_file(ROOTFS_VAR)?,
+            rootfs_integrity: rootfs_integrity_from_env()?,
+            runtime_overlay: runtime_overlay_from_env()?,
             count,
             concurrency,
             cpus: env_u32(CPUS_VAR, DEFAULT_CPUS)?,
@@ -96,7 +129,7 @@ impl BenchSpec {
     }
 
     fn config(&self, backend: &str, index: usize) -> VmStartConfig {
-        VmStartConfig {
+        let mut config = VmStartConfig {
             name: unique_vm_name(backend, index),
             rootfs_path: self.rootfs.to_string_lossy().into_owned(),
             kernel_path: Some(self.kernel.to_string_lossy().into_owned()),
@@ -105,8 +138,29 @@ impl BenchSpec {
             revision_hash: "microvm-lifecycle-bench".to_string(),
             flake_ref: "prebuilt-runtime-image".to_string(),
             ..Default::default()
+        };
+        if let Some(rootfs_integrity) = &self.rootfs_integrity {
+            apply_rootfs_integrity(&mut config, rootfs_integrity);
         }
+        if let Some(runtime_overlay) = &self.runtime_overlay {
+            apply_runtime_overlay(&mut config, runtime_overlay);
+        }
+        config
     }
+}
+
+fn apply_rootfs_integrity(config: &mut VmStartConfig, rootfs_integrity: &RootfsIntegritySpec) {
+    config.initrd_path = Some(rootfs_integrity.initrd.to_string_lossy().into_owned());
+    config.verity_path = Some(rootfs_integrity.verity.to_string_lossy().into_owned());
+    config.roothash = Some(rootfs_integrity.roothash.clone());
+}
+
+fn apply_runtime_overlay(config: &mut VmStartConfig, runtime_overlay: &RuntimeOverlaySpec) {
+    config.runtime_overlay_path = Some(runtime_overlay.image.to_string_lossy().into_owned());
+    config.runtime_overlay_verity_path =
+        Some(runtime_overlay.verity.to_string_lossy().into_owned());
+    config.runtime_overlay_roothash = Some(runtime_overlay.roothash.clone());
+    config.runtime_source_policy = RuntimeSourcePolicy::RequiredOverlay;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +181,7 @@ struct StartedVm {
 struct StoppedVm {
     elapsed: Duration,
     timing: Option<StopTiming>,
+    hvf_shutdown_timing: Option<HvfShutdownTimingRecord>,
 }
 
 fn run_backend(spec: &BenchSpec, selector: &str) -> Result<()> {
@@ -134,6 +189,7 @@ fn run_backend(spec: &BenchSpec, selector: &str) -> Result<()> {
     let mut start_samples = Vec::with_capacity(spec.count);
     let mut stop_samples = Vec::with_capacity(spec.count);
     let mut stop_timings = Vec::with_capacity(spec.count);
+    let mut hvf_shutdown_timings = Vec::with_capacity(spec.count);
     let mut start_wall = Duration::ZERO;
     let mut stop_wall = Duration::ZERO;
 
@@ -152,16 +208,20 @@ fn run_backend(spec: &BenchSpec, selector: &str) -> Result<()> {
         stop_wall += stop_started_at.elapsed();
         stop_samples.extend(stopped.iter().map(|vm| vm.elapsed));
         stop_timings.extend(stopped.iter().filter_map(|vm| vm.timing));
+        hvf_shutdown_timings.extend(stopped.iter().filter_map(|vm| vm.hvf_shutdown_timing));
     }
 
     print_report(
-        selector,
-        spec,
-        &start_samples,
-        &stop_samples,
-        &stop_timings,
-        start_wall,
-        stop_wall,
+        LifecycleReport::builder()
+            .backend(selector)
+            .spec(spec)
+            .starts(&start_samples)
+            .stops(&stop_samples)
+            .stop_timings(&stop_timings)
+            .hvf_shutdown_timings(&hvf_shutdown_timings)
+            .start_wall(start_wall)
+            .stop_wall(stop_wall)
+            .build()?,
     );
     Ok(())
 }
@@ -225,7 +285,8 @@ fn stop_batch(backend: Arc<AnyBackend>, started: Vec<StartedVm>) -> Result<Vec<S
             handles.push(scope.spawn(move || {
                 let started_at = Instant::now();
                 let result = backend.stop_with_timing(&vm.id);
-                (vm.id, started_at.elapsed(), result)
+                let hvf_shutdown_timing = read_hvf_shutdown_timing(&vm.id);
+                (vm.id, started_at.elapsed(), result, hvf_shutdown_timing)
             }));
         }
 
@@ -241,9 +302,13 @@ fn stop_batch(backend: Arc<AnyBackend>, started: Vec<StartedVm>) -> Result<Vec<S
 
     let mut samples = Vec::with_capacity(results.len());
     let mut failures = Vec::new();
-    for (id, elapsed, result) in results {
+    for (id, elapsed, result, hvf_shutdown_timing) in results {
         match result {
-            Ok(timing) => samples.push(StoppedVm { elapsed, timing }),
+            Ok(timing) => samples.push(StoppedVm {
+                elapsed,
+                timing,
+                hvf_shutdown_timing,
+            }),
             Err(error) => failures.push((id, error)),
         }
     }
@@ -271,15 +336,121 @@ fn stop_batch(backend: Arc<AnyBackend>, started: Vec<StartedVm>) -> Result<Vec<S
     Err(error).with_context(|| format!("stopping benchmark VM {}", id.0))
 }
 
-fn print_report(
-    backend: &str,
-    spec: &BenchSpec,
-    starts: &[Duration],
-    stops: &[Duration],
-    stop_timings: &[StopTiming],
+fn read_hvf_shutdown_timing(id: &VmId) -> Option<HvfShutdownTimingRecord> {
+    let state_dir = mvm_core::config::vm_state_dir(&id.0);
+    let path = mvm_vmm::host::hvf_supervisor::shutdown_timing_path(&state_dir);
+    let json = std::fs::read(path).ok()?;
+    let record = serde_json::from_slice::<HvfShutdownTimingRecord>(&json).ok()?;
+    (record.schema_version == 1).then_some(record)
+}
+
+struct LifecycleReport<'a> {
+    backend: &'a str,
+    spec: &'a BenchSpec,
+    starts: &'a [Duration],
+    stops: &'a [Duration],
+    stop_timings: &'a [StopTiming],
+    hvf_shutdown_timings: &'a [HvfShutdownTimingRecord],
     start_wall: Duration,
     stop_wall: Duration,
-) {
+}
+
+impl<'a> LifecycleReport<'a> {
+    fn builder() -> LifecycleReportBuilder<'a> {
+        LifecycleReportBuilder::default()
+    }
+}
+
+#[derive(Default)]
+struct LifecycleReportBuilder<'a> {
+    backend: Option<&'a str>,
+    spec: Option<&'a BenchSpec>,
+    starts: Option<&'a [Duration]>,
+    stops: Option<&'a [Duration]>,
+    stop_timings: Option<&'a [StopTiming]>,
+    hvf_shutdown_timings: Option<&'a [HvfShutdownTimingRecord]>,
+    start_wall: Option<Duration>,
+    stop_wall: Option<Duration>,
+}
+
+impl<'a> LifecycleReportBuilder<'a> {
+    fn backend(mut self, backend: &'a str) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    fn spec(mut self, spec: &'a BenchSpec) -> Self {
+        self.spec = Some(spec);
+        self
+    }
+
+    fn starts(mut self, starts: &'a [Duration]) -> Self {
+        self.starts = Some(starts);
+        self
+    }
+
+    fn stops(mut self, stops: &'a [Duration]) -> Self {
+        self.stops = Some(stops);
+        self
+    }
+
+    fn stop_timings(mut self, stop_timings: &'a [StopTiming]) -> Self {
+        self.stop_timings = Some(stop_timings);
+        self
+    }
+
+    fn hvf_shutdown_timings(mut self, hvf_shutdown_timings: &'a [HvfShutdownTimingRecord]) -> Self {
+        self.hvf_shutdown_timings = Some(hvf_shutdown_timings);
+        self
+    }
+
+    fn start_wall(mut self, start_wall: Duration) -> Self {
+        self.start_wall = Some(start_wall);
+        self
+    }
+
+    fn stop_wall(mut self, stop_wall: Duration) -> Self {
+        self.stop_wall = Some(stop_wall);
+        self
+    }
+
+    fn build(self) -> Result<LifecycleReport<'a>> {
+        Ok(LifecycleReport {
+            backend: self
+                .backend
+                .context("lifecycle report backend is required")?,
+            spec: self.spec.context("lifecycle report spec is required")?,
+            starts: self
+                .starts
+                .context("lifecycle report starts are required")?,
+            stops: self.stops.context("lifecycle report stops are required")?,
+            stop_timings: self
+                .stop_timings
+                .context("lifecycle report stop timings are required")?,
+            hvf_shutdown_timings: self
+                .hvf_shutdown_timings
+                .context("lifecycle report HVF shutdown timings are required")?,
+            start_wall: self
+                .start_wall
+                .context("lifecycle report start wall time is required")?,
+            stop_wall: self
+                .stop_wall
+                .context("lifecycle report stop wall time is required")?,
+        })
+    }
+}
+
+fn print_report(report: LifecycleReport<'_>) {
+    let LifecycleReport {
+        backend,
+        spec,
+        starts,
+        stops,
+        stop_timings,
+        hvf_shutdown_timings,
+        start_wall,
+        stop_wall,
+    } = report;
     let start = summarize(starts);
     let stop = summarize(stops);
     eprintln!(
@@ -289,10 +460,56 @@ fn print_report(
     print_phase("start", start, start_wall, starts.len());
     print_phase("stop", stop, stop_wall, stops.len());
     print_stop_breakdown(stop_timings);
+    print_hvf_shutdown_breakdown(hvf_shutdown_timings);
     eprintln!(
         "[microvm_lifecycle_bench] lifecycle wall={}ms throughput={:.2} VMs/s",
         millis(start_wall + stop_wall),
         starts.len() as f64 / (start_wall + stop_wall).as_secs_f64()
+    );
+}
+
+fn print_hvf_shutdown_breakdown(timings: &[HvfShutdownTimingRecord]) {
+    if timings.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[microvm_lifecycle_bench] hvf-supervisor-shutdown n={} watchdog_to_vcpu_exit={} watchdog_join={} io_thread_join={} vcpu_destroy={} vm_destroy={} console_write={} workload_exit_write={}",
+        timings.len(),
+        format_summary(
+            timings
+                .iter()
+                .map(|timing| Duration::from_micros(timing.watchdog_to_vcpu_exit_micros))
+        ),
+        format_summary(
+            timings
+                .iter()
+                .map(|timing| Duration::from_micros(timing.watchdog_join_micros))
+        ),
+        format_summary(
+            timings
+                .iter()
+                .map(|timing| Duration::from_micros(timing.io_thread_join_micros))
+        ),
+        format_summary(
+            timings
+                .iter()
+                .map(|timing| Duration::from_micros(timing.vcpu_destroy_micros))
+        ),
+        format_summary(
+            timings
+                .iter()
+                .map(|timing| Duration::from_micros(timing.vm_destroy_micros))
+        ),
+        format_summary(
+            timings
+                .iter()
+                .map(|timing| Duration::from_micros(timing.console_write_micros))
+        ),
+        format_summary(
+            timings
+                .iter()
+                .map(|timing| Duration::from_micros(timing.workload_exit_write_micros))
+        ),
     );
 }
 
@@ -317,14 +534,24 @@ fn print_stop_breakdown(timings: &[StopTiming]) {
         .collect::<Vec<_>>();
     if details.len() == timings.len() {
         eprintln!(
-            "[microvm_lifecycle_bench] stop-driver-detail n={} supervisor_signal={} pid_disappearance={} force_kill_wait={} state_cleanup={}",
+            "[microvm_lifecycle_bench] stop-driver-detail n={} supervisor_signal={} pid_disappearance={} force_kill_wait={} state_cleanup={} force_kill_escalations={}/{}",
             details.len(),
             format_summary(details.iter().map(|detail| detail.supervisor_signal)),
             format_summary(details.iter().map(|detail| detail.pid_disappearance)),
             format_summary(details.iter().map(|detail| detail.force_kill_wait)),
             format_summary(details.iter().map(|detail| detail.state_cleanup)),
+            force_kill_escalation_count(timings),
+            timings.len(),
         );
     }
+}
+
+fn force_kill_escalation_count(timings: &[StopTiming]) -> usize {
+    timings
+        .iter()
+        .filter_map(|timing| timing.driver_detail)
+        .filter(|detail| detail.force_kill_wait > Duration::ZERO)
+        .count()
 }
 
 fn format_summary(samples: impl Iterator<Item = Duration>) -> String {
@@ -399,10 +626,83 @@ fn required_file(var: &str) -> Result<PathBuf> {
     let path = std::env::var_os(var)
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("{var} is required for the live benchmark"))?;
+    validate_file(var, path)
+}
+
+fn validate_file(var: &str, path: PathBuf) -> Result<PathBuf> {
     if !path.is_file() {
         bail!("{var}={} is not a file", path.display());
     }
     Ok(path)
+}
+
+fn runtime_overlay_from_env() -> Result<Option<RuntimeOverlaySpec>> {
+    runtime_overlay_from_values(
+        std::env::var_os(RUNTIME_OVERLAY_VAR).map(PathBuf::from),
+        std::env::var_os(RUNTIME_OVERLAY_VERITY_VAR).map(PathBuf::from),
+        std::env::var(RUNTIME_OVERLAY_ROOTHASH_VAR).ok(),
+    )
+}
+
+fn rootfs_integrity_from_env() -> Result<Option<RootfsIntegritySpec>> {
+    rootfs_integrity_from_values(
+        std::env::var_os(INITRD_VAR).map(PathBuf::from),
+        std::env::var_os(ROOTFS_VERITY_VAR).map(PathBuf::from),
+        std::env::var(ROOTFS_ROOTHASH_VAR).ok(),
+    )
+}
+
+fn rootfs_integrity_from_values(
+    initrd: Option<PathBuf>,
+    verity: Option<PathBuf>,
+    roothash: Option<String>,
+) -> Result<Option<RootfsIntegritySpec>> {
+    match (initrd, verity, roothash) {
+        (None, None, None) => Ok(None),
+        (Some(initrd), Some(verity), Some(roothash)) => Ok(Some(RootfsIntegritySpec {
+            initrd: validate_file(INITRD_VAR, initrd)?,
+            verity: validate_file(ROOTFS_VERITY_VAR, verity)?,
+            roothash: validate_roothash(ROOTFS_ROOTHASH_VAR, roothash)?,
+        })),
+        _ => bail!(
+            "{INITRD_VAR}, {ROOTFS_VERITY_VAR}, and {ROOTFS_ROOTHASH_VAR} must be set together"
+        ),
+    }
+}
+
+fn runtime_overlay_from_values(
+    image: Option<PathBuf>,
+    verity: Option<PathBuf>,
+    roothash: Option<String>,
+) -> Result<Option<RuntimeOverlaySpec>> {
+    match (image, verity, roothash) {
+        (None, None, None) => Ok(None),
+        (Some(image), Some(verity), Some(roothash)) => {
+            let image = validate_file(RUNTIME_OVERLAY_VAR, image)?;
+            let verity = validate_file(RUNTIME_OVERLAY_VERITY_VAR, verity)?;
+            let roothash = validate_roothash(RUNTIME_OVERLAY_ROOTHASH_VAR, roothash)?;
+            Ok(Some(RuntimeOverlaySpec {
+                image,
+                verity,
+                roothash,
+            }))
+        }
+        _ => bail!(
+            "{RUNTIME_OVERLAY_VAR}, {RUNTIME_OVERLAY_VERITY_VAR}, and \
+             {RUNTIME_OVERLAY_ROOTHASH_VAR} must be set together"
+        ),
+    }
+}
+
+fn validate_roothash(var: &str, roothash: String) -> Result<String> {
+    if roothash.len() != 64
+        || !roothash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{var} must be 64 lowercase hexadecimal bytes");
+    }
+    Ok(roothash)
 }
 
 fn env_usize(var: &str, default: usize) -> Result<usize> {
@@ -427,9 +727,9 @@ fn unique_vm_name(backend: &str, index: usize) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
-    let backend = backend.replace('-', "_");
+    let backend = backend.replace('-', "");
     format!(
-        "mvm-lifecycle-bench-{backend}-{}-{nanos}-{index}",
+        "p314-{backend}-{:x}-{nanos:x}-{index:x}",
         std::process::id()
     )
 }
@@ -454,6 +754,17 @@ fn backend_selector_defaults_to_hvf_and_expands_all() {
 }
 
 #[test]
+fn benchmark_vm_names_leave_room_for_unix_socket_paths() {
+    let name = unique_vm_name("apple-container", usize::MAX);
+    assert!(name.len() <= 64, "benchmark VM name is too long: {name}");
+    assert!(
+        name.chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-'),
+        "benchmark VM name contains a path-hostile character: {name}"
+    );
+}
+
+#[test]
 fn backend_selector_rejects_unknown_and_empty_values() {
     assert!(parse_backend_selectors("").is_err());
     assert!(parse_backend_selectors("hvf,unknown").is_err());
@@ -463,6 +774,92 @@ fn backend_selector_rejects_unknown_and_empty_values() {
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn runtime_overlay_is_optional_but_must_be_complete_and_valid() {
+    assert!(
+        runtime_overlay_from_values(None, None, None)
+            .unwrap()
+            .is_none()
+    );
+
+    let temp = tempfile::tempdir().expect("create runtime-overlay fixture");
+    let image = temp.path().join("overlay.ext4");
+    let verity = temp.path().join("overlay.verity");
+    std::fs::write(&image, b"image").expect("write overlay fixture");
+    std::fs::write(&verity, b"verity").expect("write verity fixture");
+    let roothash = "ab".repeat(32);
+    let parsed = runtime_overlay_from_values(
+        Some(image.clone()),
+        Some(verity.clone()),
+        Some(roothash.clone()),
+    )
+    .expect("parse complete runtime overlay")
+    .expect("complete tuple produces a runtime overlay");
+    assert_eq!(parsed.image, image);
+    assert_eq!(parsed.verity, verity);
+    assert_eq!(parsed.roothash, roothash);
+
+    let mut config = VmStartConfig::default();
+    apply_runtime_overlay(&mut config, &parsed);
+    assert_eq!(
+        config.runtime_source_policy,
+        RuntimeSourcePolicy::RequiredOverlay
+    );
+    assert_eq!(
+        config.runtime_overlay_roothash.as_deref(),
+        Some(roothash.as_str())
+    );
+
+    assert!(runtime_overlay_from_values(Some(parsed.image), None, None).is_err());
+    assert!(
+        runtime_overlay_from_values(
+            Some(parsed.verity.clone()),
+            Some(parsed.verity),
+            Some("AB".repeat(32)),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn rootfs_integrity_is_optional_but_must_be_complete_and_valid() {
+    assert!(
+        rootfs_integrity_from_values(None, None, None)
+            .unwrap()
+            .is_none()
+    );
+
+    let temp = tempfile::tempdir().expect("create rootfs-integrity fixture");
+    let initrd = temp.path().join("rootfs.initrd");
+    let verity = temp.path().join("rootfs.verity");
+    std::fs::write(&initrd, b"initrd").expect("write initrd fixture");
+    std::fs::write(&verity, b"verity").expect("write verity fixture");
+    let roothash = "cd".repeat(32);
+    let parsed = rootfs_integrity_from_values(
+        Some(initrd.clone()),
+        Some(verity.clone()),
+        Some(roothash.clone()),
+    )
+    .expect("parse complete rootfs integrity tuple")
+    .expect("complete tuple produces rootfs integrity inputs");
+    assert_eq!(parsed.initrd, initrd);
+    assert_eq!(parsed.verity, verity);
+    assert_eq!(parsed.roothash, roothash);
+
+    let mut config = VmStartConfig::default();
+    apply_rootfs_integrity(&mut config, &parsed);
+    assert_eq!(config.roothash.as_deref(), Some(roothash.as_str()));
+    assert!(rootfs_integrity_from_values(Some(parsed.initrd), None, None).is_err());
+    assert!(
+        rootfs_integrity_from_values(
+            Some(parsed.verity.clone()),
+            Some(parsed.verity),
+            Some("not-a-hash".to_string()),
+        )
+        .is_err()
     );
 }
 
@@ -478,4 +875,73 @@ fn percentile_summary_reports_tail_values() {
     assert_eq!(summary.p95, Duration::from_millis(4));
     assert_eq!(summary.p99, Duration::from_millis(4));
     assert_eq!(summary.max, Duration::from_millis(4));
+}
+
+#[test]
+fn force_kill_escalation_count_only_counts_nonzero_force_waits() {
+    let timings = [
+        StopTiming {
+            driver_detail: Some(mvm_vmm::driver::RunningVmStopTiming::default()),
+            ..StopTiming::default()
+        },
+        StopTiming {
+            driver_detail: Some(mvm_vmm::driver::RunningVmStopTiming {
+                force_kill_wait: Duration::from_millis(2),
+                ..mvm_vmm::driver::RunningVmStopTiming::default()
+            }),
+            ..StopTiming::default()
+        },
+        StopTiming::default(),
+    ];
+    assert_eq!(force_kill_escalation_count(&timings), 1);
+}
+
+#[test]
+fn lifecycle_report_builder_carries_every_measurement() {
+    let spec = BenchSpec {
+        backends: vec!["hvf".to_string()],
+        kernel: PathBuf::new(),
+        rootfs: PathBuf::new(),
+        rootfs_integrity: None,
+        runtime_overlay: None,
+        count: 1,
+        concurrency: 1,
+        cpus: 1,
+        memory_mib: 256,
+    };
+    let starts = [Duration::from_millis(1)];
+    let stops = [Duration::from_millis(2)];
+    let stop_timings = [StopTiming::default()];
+    let hvf_shutdown_timings = [HvfShutdownTimingRecord {
+        schema_version: 1,
+        watchdog_to_vcpu_exit_micros: 0,
+        watchdog_join_micros: 0,
+        io_thread_join_micros: 0,
+        vcpu_destroy_micros: 0,
+        vm_destroy_micros: 0,
+        console_write_micros: 0,
+        workload_exit_write_micros: 0,
+    }];
+    let report = LifecycleReport::builder()
+        .backend("hvf")
+        .spec(&spec)
+        .starts(&starts)
+        .stops(&stops)
+        .stop_timings(&stop_timings)
+        .hvf_shutdown_timings(&hvf_shutdown_timings)
+        .start_wall(Duration::from_millis(3))
+        .stop_wall(Duration::from_millis(4))
+        .build()
+        .expect("complete lifecycle report");
+
+    assert_eq!(report.backend, "hvf");
+    assert_eq!(report.starts, starts);
+    assert_eq!(report.stops, stops);
+    assert_eq!(report.start_wall, Duration::from_millis(3));
+    assert_eq!(report.stop_wall, Duration::from_millis(4));
+}
+
+#[test]
+fn lifecycle_report_builder_refuses_missing_measurements() {
+    assert!(LifecycleReport::builder().backend("hvf").build().is_err());
 }
