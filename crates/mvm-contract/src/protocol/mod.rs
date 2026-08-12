@@ -15,6 +15,9 @@ pub mod host_audit;
 pub mod host_cost;
 pub mod host_signer;
 pub mod host_time;
+/// Bounded, flow-aware guest/host networking wire contract: framing,
+/// opcodes, and the session/stream state machine shared by guest and host.
+pub mod network_flow;
 pub mod resource_controls;
 pub mod routing;
 pub mod signed_config;
