@@ -6,6 +6,10 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+- [x] **Plan 325 — lowercase OCI image names.** Registry and repository
+      capitalization is normalized before validation across every shared OCI
+      pull and launch path, while case-sensitive tags and strict digest
+      validation remain unchanged.
 - [x] **Plan 322 — persistent-machine README contract.** `machine create`
       accepts the optional machine name positionally, and real-binary coverage,
       all three SDKs, shared fixtures, BDD scenarios, recovery guidance, and

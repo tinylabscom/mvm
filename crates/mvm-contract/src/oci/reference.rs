@@ -154,7 +154,8 @@ impl FromStr for ImageReference {
             format!("{DOCKER_HUB_LIBRARY_NAMESPACE}/{repository}")
         } else {
             repository.to_string()
-        };
+        }
+        .to_ascii_lowercase();
 
         validate_repository(&repository)?;
 
@@ -342,13 +343,19 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_repository_rejected() {
-        // OCI spec requires lowercase repositories.
-        let err = "Foo/Bar:v1".parse::<ImageReference>().unwrap_err();
-        match err {
-            OciError::InvalidReference(_) => {}
-            other => panic!("expected InvalidReference, got {other:?}"),
-        }
+    fn uppercase_repository_normalizes_to_lowercase() {
+        let r = parse("GHCR.IO/Foo/Bar:v1");
+        assert_eq!(r.registry, "ghcr.io");
+        assert_eq!(r.repository, "foo/bar");
+        assert_eq!(r.tag.as_deref(), Some("v1"));
+        assert_eq!(r.canonical(), "ghcr.io/foo/bar:v1");
+    }
+
+    #[test]
+    fn repository_normalization_preserves_case_sensitive_tag() {
+        let r = parse("Alpine:ReleaseCandidate");
+        assert_eq!(r.repository, "library/alpine");
+        assert_eq!(r.tag.as_deref(), Some("ReleaseCandidate"));
     }
 
     #[test]
