@@ -895,6 +895,59 @@ mod tests {
     }
 
     #[test]
+    fn workload_vsock_ports_converged_path_has_exactly_one_network_flow() {
+        let ports = workload_vsock_ports(&sample_sockets());
+
+        let network_flow: Vec<_> = ports
+            .iter()
+            .filter(|p| p.service == GuestService::NetworkFlow)
+            .collect();
+        assert_eq!(
+            network_flow.len(),
+            1,
+            "exactly one NetworkFlow channel on the converged path"
+        );
+        assert_eq!(network_flow[0].direction, VsockDirection::GuestDials);
+
+        assert!(
+            !ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkControl),
+            "converged path must not carry L3 NetworkControl"
+        );
+        assert!(
+            !ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkData { queue: 0 }),
+            "converged path must not carry L3 NetworkData"
+        );
+    }
+
+    #[test]
+    fn workload_vsock_ports_l3_path_exposes_control_and_data_channels() {
+        // The frozen L3 path is still mapped faithfully when its sockets are
+        // supplied. New launches are refused at admission; this test only
+        // witnesses that the mapping does not silently drop declared channels.
+        let mut socks = sample_sockets();
+        socks.network_control = Some(Path::new("/run/network-control.sock"));
+        socks.network_data = Some(Path::new("/run/network-data-0.sock"));
+        let ports = workload_vsock_ports(&socks);
+
+        assert!(
+            ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkControl),
+            "L3 path carries NetworkControl"
+        );
+        assert!(
+            ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkData { queue: 0 }),
+            "L3 path carries NetworkData"
+        );
+    }
+
+    #[test]
     fn workload_vsock_ports_emit_the_broker_channel_only_when_admitted() {
         // Admitted (broker socket present) ⇒ a BROKER_PORT GuestDials channel.
         let admitted = WorkloadSockets {

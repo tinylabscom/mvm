@@ -1221,7 +1221,7 @@ for detailed scope and acceptance criteria.
         extracts the authenticated session so it is shared by control RPC and
         FlowMux, with tests for replay, tampering, wrong identity, and counter
         exhaustion. Remaining: the perf harness + baselines.
-  - [~] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
+  - [x] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
     now names the port-5253 channel; the endpoint binary, proxy, spawner, and
     test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
     `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
@@ -1231,8 +1231,9 @@ for detailed scope and acceptance criteria.
     transitions, and credit accounting. The acceptor is wired into the
     `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
     `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
-    the identity on stdin. Remaining: backend witness tests proving one
-    `NetworkFlow` service per backend.
+    the identity on stdin. Backend witness tests in `mvm-vmm::host::spec_map`
+    and the Firecracker/HVF/libkrun driver modules prove exactly one
+    `NetworkFlow` service and no L3 services per granted workload.
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)

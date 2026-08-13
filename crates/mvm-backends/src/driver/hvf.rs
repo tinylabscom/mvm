@@ -1627,4 +1627,32 @@ mod tests {
         assert!(argv.contains(&"CPUQuota=50%".to_string()), "{argv:?}");
         assert_eq!(argv.last().expect("payload"), "/usr/bin/mvm-hvf-supervisor");
     }
+
+    #[test]
+    fn hvf_spec_carries_exactly_one_network_flow_and_no_l3() {
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+            ],
+            vec![],
+        );
+        let ports = &spec.vsock;
+        let network_flow: Vec<_> = ports
+            .iter()
+            .filter(|p| p.service == GuestService::NetworkFlow)
+            .collect();
+        assert_eq!(network_flow.len(), 1, "exactly one NetworkFlow service");
+        assert!(
+            !ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkControl)
+        );
+        assert!(
+            !ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkData { queue: 0 })
+        );
+    }
 }

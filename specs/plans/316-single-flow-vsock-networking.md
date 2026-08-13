@@ -2,7 +2,7 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 in progress (#2371): the production endpoint role, channel identity, and spawner files have been renamed; a host-side authenticated FlowMux session acceptor has landed and is exercised by unit tests.**
+**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 complete (#2371). Phase 3 in progress (#2372): converge egress TCP, UDP, and DNS over FlowMux `OpenTcp`/`OpenUdp`/`Resolve` frames.**
 
 ADR-042 is accepted and the raw-packet path is frozen: new
 `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
@@ -259,6 +259,11 @@ tunnel's `u16`: 64 KiB is one past what a `u16` expresses, and a cap the field
 cannot represent is not really enforced at the parse boundary.
 
 ### Phase 2 — Introduce the one authenticated endpoint without changing callers
+
+**Status: COMPLETE.** The production endpoint role is renamed, the
+authenticated FlowMux session acceptor and bounded stream registry are wired
+into `mvm-network-endpoint`, and backend witnesses prove exactly one
+`NetworkFlow` service per granted workload with no L3 services.
 
 - [ ] Rename the production role from `mvm-substitution-endpoint` to
       `mvm-network-endpoint`, including Cargo bin declarations, release
