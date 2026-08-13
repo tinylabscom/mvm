@@ -34,6 +34,7 @@ pub enum RegistryError {
 pub enum FlowClass {
     Tcp,
     Udp,
+    Dns,
 }
 
 impl std::fmt::Display for FlowClass {
@@ -41,6 +42,7 @@ impl std::fmt::Display for FlowClass {
         match self {
             FlowClass::Tcp => write!(f, "tcp"),
             FlowClass::Udp => write!(f, "udp"),
+            FlowClass::Dns => write!(f, "dns"),
         }
     }
 }
@@ -73,6 +75,7 @@ pub struct StreamEntry {
 pub struct RegistryLimits {
     pub max_tcp: usize,
     pub max_udp: usize,
+    pub max_dns: usize,
     pub initial_credit: u32,
 }
 
@@ -81,6 +84,7 @@ impl Default for RegistryLimits {
         Self {
             max_tcp: 4096,
             max_udp: 256,
+            max_dns: 256,
             initial_credit: 64 * 1024,
         }
     }
@@ -122,6 +126,15 @@ impl StreamRegistry {
         self.streams
             .values()
             .filter(|e| e.class == FlowClass::Udp && e.state != StreamState::Closed)
+            .count()
+    }
+
+    /// How many live DNS resolution streams exist.
+    #[must_use]
+    pub fn live_dns(&self) -> usize {
+        self.streams
+            .values()
+            .filter(|e| e.class == FlowClass::Dns && e.state != StreamState::Closed)
             .count()
     }
 
@@ -207,6 +220,7 @@ impl StreamRegistry {
         match class {
             FlowClass::Tcp => self.limits.max_tcp,
             FlowClass::Udp => self.limits.max_udp,
+            FlowClass::Dns => self.limits.max_dns,
         }
     }
 
@@ -315,6 +329,7 @@ impl StreamRegistry {
         match class {
             FlowClass::Tcp => self.live_tcp(),
             FlowClass::Udp => self.live_udp(),
+            FlowClass::Dns => self.live_dns(),
         }
     }
 
@@ -340,6 +355,7 @@ pub fn class_for_open(opcode: mvm_contract::protocol::network_flow::Opcode) -> O
     match opcode {
         Opcode::OpenTcp | Opcode::InboundOpen => Some(FlowClass::Tcp),
         Opcode::OpenUdp => Some(FlowClass::Udp),
+        Opcode::Resolve => Some(FlowClass::Dns),
         _ => None,
     }
 }
@@ -378,6 +394,7 @@ mod tests {
         let mut reg = StreamRegistry::new(RegistryLimits {
             max_tcp: 2,
             max_udp: 1,
+            max_dns: 64,
             initial_credit: 1024,
         });
         reg.alloc_guest(FlowClass::Tcp).unwrap();
@@ -418,6 +435,7 @@ mod tests {
         let mut reg = StreamRegistry::new(RegistryLimits {
             max_tcp: 1,
             max_udp: 0,
+            max_dns: 64,
             initial_credit: 100,
         });
         let id = reg.alloc_guest(FlowClass::Tcp).unwrap();

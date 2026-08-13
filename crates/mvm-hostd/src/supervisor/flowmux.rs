@@ -3,15 +3,15 @@
 //! This module owns the host side of one authenticated FlowMux session:
 //! handshake, frame I/O, and dispatch to the per-flow handlers. The current
 //! implementation accepts one session, completes the handshake, and runs a
-//! minimal TCP data relay for guest-initiated `OpenTcp` flows. UDP (`OpenUdp`)
-//! and DNS (`Resolve`) frames are admitted into the registry but not yet
-//! connected; everything else fails closed with `GoAway`.
+//! minimal TCP data relay, one-shot DNS resolution, and a basic UDP association
+//! relay for guest-initiated `OpenTcp`, `Resolve`, and `OpenUdp` flows.
+//! Everything else fails closed with `GoAway`.
 
 pub mod registry;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{IpAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::sync::{
     Arc, Mutex,
@@ -20,14 +20,18 @@ use std::sync::{
 use std::time::Duration;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
 use mvm_contract::protocol::network_flow::{
-    Direction, FrameError, HEADER_LEN, LENGTH_PREFIX_LEN, Opcode, SessionValidator, decode,
+    Direction, FrameError, HEADER_LEN, LENGTH_PREFIX_LEN, MAX_UDP_DATAGRAM_LEN, Opcode,
+    SessionValidator, UDP_ADDR_PREFIX_LEN, decode,
 };
 use mvm_core::net::session::Session;
-use mvm_vmm::vsock_egress_bridge::egress_gate::{EgressGate, EgressVerdict};
+use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
 use tracing::{info, warn};
 
 use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
+
+use crate::supervisor::raw_egress::resolve_hostname_ips_pure;
 
 /// Per-address connect budget when trying an admitted set: small so an
 /// unreachable address (e.g. an AAAA with no host IPv6 egress) fails over to
@@ -62,6 +66,9 @@ pub struct FlowMuxSession {
     /// Active guest-initiated TCP streams and their upstream sockets. The host
     /// half of each stream lives in a dedicated thread.
     streams: BTreeMap<u32, TcpStreamHandle>,
+    /// Active guest-initiated UDP associations. Each association runs in its
+    /// own relay thread.
+    udp_associations: BTreeMap<u32, UdpAssociationHandle>,
     gate: EgressGate,
     read_buf: Vec<u8>,
     connect_timeout: Duration,
@@ -83,6 +90,20 @@ struct TcpStreamHandle {
     upstream: TcpStream,
     /// Set by the relay thread when the upstream socket reaches EOF.
     host_half_closed: Arc<AtomicBool>,
+}
+
+/// A request from the main session thread to a UDP relay thread to send one
+/// datagram to an admitted destination.
+struct UdpSendMsg {
+    destination: SocketAddr,
+    payload: Vec<u8>,
+}
+
+/// The host-side handle for one active UDP association. The relay thread owns
+/// the socket; the main thread forwards guest `UdpSend` frames through a
+/// channel.
+struct UdpAssociationHandle {
+    tx: std::sync::mpsc::Sender<UdpSendMsg>,
 }
 
 impl FlowMuxSession {
@@ -126,6 +147,7 @@ impl FlowMuxSession {
             validator: SessionValidator::default(),
             registry: Arc::new(Mutex::new(StreamRegistry::new(limits))),
             streams: BTreeMap::new(),
+            udp_associations: BTreeMap::new(),
             gate,
             read_buf: Vec::with_capacity(4096),
             connect_timeout: Duration::from_secs(30),
@@ -223,29 +245,31 @@ impl FlowMuxSession {
                     }
                 }
                 Opcode::OpenUdp => {
-                    // Record the guest-initiated stream so the registry tracks
-                    // ceilings and parity; UDP association relay is still TODO.
+                    if let Err(e) = self.handle_open_udp(stream_id) {
+                        warn!(error = %e, stream_id, "FlowMux UDP open failed");
+                        self.send_refused(stream_id, "host error")?;
+                    }
+                }
+                Opcode::UdpSend => {
+                    if let Err(e) = self.handle_udp_send(stream_id, payload_len) {
+                        warn!(error = %e, stream_id, "FlowMux UDP send failed");
+                        self.remove_udp_association(stream_id);
+                    }
+                }
+                Opcode::Resolve => {
                     if let Some(class) = class_for_open(opcode)
                         && let Err(e) = lock_registry(&self.registry).open_guest(stream_id, class)
                     {
-                        warn!(error = %e, stream_id, "FlowMux refusing UDP open");
-                        self.send_refused(stream_id, &e.to_string())?;
-                    } else {
-                        warn!(
-                            stream_id,
-                            "FlowMux UDP open admitted; relay not yet implemented"
-                        );
-                        self.send_goaway("UDP relay not yet implemented")?;
-                        return Ok(());
+                        warn!(error = %e, stream_id, "FlowMux refusing DNS resolve");
+                        self.send_resolve_refused(stream_id, &e.to_string())?;
+                    } else if let Err(e) = self.handle_resolve(stream_id, payload_len) {
+                        warn!(error = %e, stream_id, "FlowMux DNS resolve failed");
+                        self.send_resolve_refused(stream_id, "resolve failed")?;
+                        self.remove_stream(stream_id);
                     }
                 }
                 Opcode::CloseUdp => {
-                    if lock_registry(&self.registry).get(stream_id).is_some() {
-                        let _ = lock_registry(&self.registry).retire(stream_id);
-                    }
-                    warn!(stream_id, "FlowMux skeleton rejects CloseUdp");
-                    self.send_goaway("UDP relay not yet implemented")?;
-                    return Ok(());
+                    self.remove_udp_association(stream_id);
                 }
                 _ => {
                     if lock_registry(&self.registry).get(stream_id).is_some() {
@@ -323,6 +347,133 @@ impl FlowMuxSession {
         self.send_opened(stream_id)?;
         self.spawn_tcp_relay(stream_id, upstream)?;
         Ok(())
+    }
+
+    fn handle_resolve(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
+        if payload_len == 0 || payload_len as usize > MAX_DNS_MESSAGE {
+            self.send_resolve_refused(stream_id, "DNS query missing or oversized")?;
+            return Ok(());
+        }
+
+        let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
+        let payload_end = payload_start + payload_len as usize;
+        let query = &self.read_buf[payload_start..payload_end];
+
+        let question = match decode_query(query) {
+            Ok(q) => q,
+            Err(e) => {
+                self.send_resolve_refused(stream_id, &format!("malformed DNS query: {e:?}"))?;
+                return Ok(());
+            }
+        };
+
+        let timeout = self.connect_timeout;
+        let verdict = self
+            .gate
+            .dns_verdict(&question.name, question.qtype, |name| {
+                resolve_hostname_ips_pure(name, timeout)
+            });
+
+        let response = match verdict {
+            DnsVerdict::Resolved(ips) => encode_response(
+                &question,
+                mvm_contract::protocol::dns::DnsRcode::NoError,
+                &ips,
+            ),
+            DnsVerdict::Refused => {
+                self.send_resolve_refused(stream_id, "policy refused")?;
+                return Ok(());
+            }
+        };
+
+        self.send_resolved(stream_id, &response)?;
+        self.remove_stream(stream_id);
+        Ok(())
+    }
+
+    fn handle_open_udp(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
+        if let Err(e) =
+            lock_registry(&self.registry).open_guest(stream_id, registry::FlowClass::Udp)
+        {
+            self.send_refused(stream_id, &e.to_string())?;
+            return Ok(());
+        }
+
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| {
+            warn!(stream_id, error = %e, "FlowMux UDP bind failed");
+            FlowMuxError::Transport(e)
+        })?;
+        let timeout = self.connect_timeout;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = Arc::clone(&self.writer);
+        std::thread::Builder::new()
+            .name(format!("flowmux-udp-{stream_id}"))
+            .spawn(move || run_udp_relay(stream_id, socket, writer, timeout, rx))
+            .map_err(FlowMuxError::Transport)?;
+
+        self.udp_associations
+            .insert(stream_id, UdpAssociationHandle { tx });
+        self.send_udp_opened(stream_id)?;
+        Ok(())
+    }
+
+    fn handle_udp_send(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
+        let handle = match self.udp_associations.get(&stream_id) {
+            Some(h) => h,
+            None => {
+                warn!(stream_id, "UdpSend on unknown association");
+                self.send_goaway("unknown UDP association")?;
+                return Ok(());
+            }
+        };
+
+        let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
+        let payload_end = payload_start + payload_len as usize;
+        let payload = &self.read_buf[payload_start..payload_end];
+        if payload.len() < UDP_ADDR_PREFIX_LEN {
+            return Err(FlowMuxError::FrameRefused(
+                "UdpSend payload too short".to_string(),
+            ));
+        }
+
+        let (ip, port, datagram) = decode_udp_addr(payload)
+            .map_err(|e| FlowMuxError::FrameRefused(format!("invalid UdpSend address: {e}")))?;
+        let target = format!("{ip}:{port}");
+
+        match self.gate.decide_udp_request(&target) {
+            EgressVerdict::Allow { .. } => {}
+            EgressVerdict::Deny(reason) => {
+                warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
+                return Ok(());
+            }
+            EgressVerdict::Malformed => {
+                return Err(FlowMuxError::FrameRefused(
+                    "malformed UDP destination".to_string(),
+                ));
+            }
+        }
+
+        let msg = UdpSendMsg {
+            destination: SocketAddr::new(ip, port),
+            payload: datagram.to_vec(),
+        };
+        if handle.tx.send(msg).is_err() {
+            return Err(FlowMuxError::FrameRefused(
+                "UDP relay thread has exited".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn remove_udp_association(&mut self, stream_id: u32) {
+        let _ = self.udp_associations.remove(&stream_id);
+        let _ = lock_registry(&self.registry).retire(stream_id);
+    }
+
+    fn send_udp_opened(&self, stream_id: u32) -> Result<(), FlowMuxError> {
+        info!(stream_id, "FlowMux sending UdpOpened");
+        self.write_frame(Opcode::UdpOpened, stream_id, b"")
     }
 
     fn spawn_tcp_relay(&mut self, stream_id: u32, upstream: TcpStream) -> Result<(), FlowMuxError> {
@@ -482,6 +633,16 @@ impl FlowMuxSession {
         self.write_frame(Opcode::Refused, stream_id, reason.as_bytes())
     }
 
+    fn send_resolved(&self, stream_id: u32, response: &[u8]) -> Result<(), FlowMuxError> {
+        info!(stream_id, len = response.len(), "FlowMux sending Resolved");
+        self.write_frame(Opcode::Resolved, stream_id, response)
+    }
+
+    fn send_resolve_refused(&self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
+        warn!(stream_id, %reason, "FlowMux sending ResolveRefused");
+        self.write_frame(Opcode::ResolveRefused, stream_id, reason.as_bytes())
+    }
+
     fn send_reset(&self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
         warn!(stream_id, %reason, "FlowMux sending Reset");
         self.write_frame(Opcode::Reset, stream_id, reason.as_bytes())
@@ -634,6 +795,99 @@ fn run_tcp_relay(
     // half-close/reset and retires it, so we do not race with in-flight guest
     // frames here.
     let _ = registry;
+}
+
+/// Per-association UDP relay thread: read datagrams from the upstream socket
+/// and forward them to the guest as `UdpRecv` frames. Guest `UdpSend`
+/// requests arrive through a channel so the socket stays owned by one thread.
+fn run_udp_relay(
+    stream_id: u32,
+    socket: std::net::UdpSocket,
+    writer: Arc<Mutex<UnixStream>>,
+    timeout: Duration,
+    rx: std::sync::mpsc::Receiver<UdpSendMsg>,
+) {
+    if socket.set_read_timeout(Some(timeout)).is_err() {
+        warn!(stream_id, "FlowMux UDP relay failed to set read timeout");
+        return;
+    }
+
+    let mut buf = vec![0_u8; MAX_UDP_DATAGRAM_LEN];
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((len, source)) => {
+                let mut payload = encode_udp_addr(source.ip(), source.port());
+                payload.extend_from_slice(&buf[..len]);
+                if write_frame_to(&writer, Opcode::UdpRecv, stream_id, &payload).is_err() {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => {
+                warn!(stream_id, error = %e, "FlowMux UDP recv failed");
+                break;
+            }
+        }
+
+        // Drain any guest-send requests without blocking.
+        while let Ok(msg) = rx.try_recv() {
+            if socket.send_to(&msg.payload, msg.destination).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// Encode a UDP address prefix: one family tag, a 16-byte address slot, and a
+/// big-endian port. IPv4 is carried as an IPv4-mapped IPv6 address under tag
+/// `0x01`; IPv6 uses tag `0x04`.
+fn encode_udp_addr(ip: IpAddr, port: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(UDP_ADDR_PREFIX_LEN);
+    match ip {
+        IpAddr::V4(v4) => {
+            out.push(0x01);
+            out.extend_from_slice(&[0; 10]);
+            out.extend_from_slice(&[0xff, 0xff]);
+            out.extend_from_slice(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            out.push(0x04);
+            out.extend_from_slice(&v6.octets());
+        }
+    }
+    out.extend_from_slice(&port.to_be_bytes());
+    out
+}
+
+/// Decode a UDP address prefix. Returns the address, port, and the remaining
+/// payload bytes (the datagram body).
+fn decode_udp_addr(bytes: &[u8]) -> Result<(IpAddr, u16, &[u8]), String> {
+    if bytes.len() < UDP_ADDR_PREFIX_LEN {
+        return Err(format!(
+            "UdpSend prefix too short: {} < {}",
+            bytes.len(),
+            UDP_ADDR_PREFIX_LEN
+        ));
+    }
+    let tag = bytes[0];
+    let addr_bytes: [u8; 16] = bytes[1..17]
+        .try_into()
+        .map_err(|_| "address slot truncated".to_string())?;
+    let port = u16::from_be_bytes([bytes[17], bytes[18]]);
+
+    let ip = match tag {
+        0x01 => match IpAddr::from(addr_bytes) {
+            IpAddr::V6(v6) => IpAddr::from(
+                v6.to_ipv4_mapped()
+                    .ok_or_else(|| "IPv4-mapped address expected".to_string())?,
+            ),
+            IpAddr::V4(_) => return Err("IPv4-mapped address expected".to_string()),
+        },
+        0x04 => IpAddr::from(addr_bytes),
+        _ => return Err(format!("unknown UDP address family tag: {tag}")),
+    };
+
+    Ok((ip, port, &bytes[UDP_ADDR_PREFIX_LEN..]))
 }
 
 fn parse_host_port(target: &str) -> Result<(&str, u16), String> {
@@ -838,5 +1092,140 @@ mod tests {
         assert!(parse_host_port("example.com").is_err());
         assert!(parse_host_port(":443").is_err());
         assert!(parse_host_port("example.com:99999").is_err());
+    }
+
+    fn build_dns_query(name: &str, qtype: u16, id: u16) -> Vec<u8> {
+        let mut query = Vec::from(id.to_be_bytes());
+        query.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+        for label in name.split('.') {
+            query.push(u8::try_from(label.len()).expect("test label length fits in u8"));
+            query.extend_from_slice(label.as_bytes());
+        }
+        query.push(0);
+        query.extend_from_slice(&qtype.to_be_bytes());
+        query.extend_from_slice(&1_u16.to_be_bytes());
+        query
+    }
+
+    #[test]
+    fn open_udp_creates_association_and_replies_udp_opened() {
+        let (host_key, host_verify) = fresh_keys();
+        let (guest_key, guest_verify) = fresh_keys();
+
+        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+
+        let gate = EgressGate::default_deny();
+        let host_handle = thread::spawn(move || {
+            let mut session = FlowMuxSession::accept(
+                host_stream,
+                "test-session",
+                host_key,
+                &guest_verify,
+                RegistryLimits::default(),
+                gate,
+            )
+            .unwrap();
+            session.serve()
+        });
+
+        let (_guest_session, _session_id) =
+            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
+
+        let mut hello = Vec::new();
+        encode_into(&mut hello, Opcode::Hello, 0, b"").unwrap();
+        guest_stream.write_all(&hello).unwrap();
+        guest_stream.flush().unwrap();
+
+        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        assert_eq!(opcode, Opcode::HelloAck);
+
+        let mut open = Vec::new();
+        encode_into(&mut open, Opcode::OpenUdp, 1, b"").unwrap();
+        guest_stream.write_all(&open).unwrap();
+        guest_stream.flush().unwrap();
+
+        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        assert_eq!(opcode, Opcode::UdpOpened);
+
+        // Close the association cleanly.
+        let mut close = Vec::new();
+        encode_into(&mut close, Opcode::CloseUdp, 1, b"").unwrap();
+        guest_stream.write_all(&close).unwrap();
+        guest_stream.flush().unwrap();
+
+        // The session is still alive.
+        let mut data = Vec::new();
+        encode_into(&mut data, Opcode::Data, 3, b"?").unwrap();
+        guest_stream.write_all(&data).unwrap();
+        guest_stream.flush().unwrap();
+
+        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        assert_eq!(opcode, Opcode::GoAway);
+
+        drop(guest_stream);
+        host_handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn udp_addr_roundtrips_ipv4_and_ipv6() {
+        let (ip4, port4) = ("192.0.2.10".parse::<std::net::IpAddr>().unwrap(), 5353);
+        let encoded4 = encode_udp_addr(ip4, port4);
+        let (decoded4_ip, decoded4_port, rest4) = decode_udp_addr(&encoded4).unwrap();
+        assert_eq!(decoded4_ip, ip4);
+        assert_eq!(decoded4_port, port4);
+        assert!(rest4.is_empty());
+
+        let (ip6, port6) = ("2001:db8::1".parse::<std::net::IpAddr>().unwrap(), 443);
+        let encoded6 = encode_udp_addr(ip6, port6);
+        let (decoded6_ip, decoded6_port, rest6) = decode_udp_addr(&encoded6).unwrap();
+        assert_eq!(decoded6_ip, ip6);
+        assert_eq!(decoded6_port, port6);
+        assert!(rest6.is_empty());
+    }
+
+    #[test]
+    fn resolve_to_unknown_host_is_refused_by_default_deny_gate() {
+        let (host_key, host_verify) = fresh_keys();
+        let (guest_key, guest_verify) = fresh_keys();
+
+        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+
+        let gate = EgressGate::default_deny();
+        let host_handle = thread::spawn(move || {
+            let mut session = FlowMuxSession::accept(
+                host_stream,
+                "test-session",
+                host_key,
+                &guest_verify,
+                RegistryLimits::default(),
+                gate,
+            )
+            .unwrap();
+            session.serve()
+        });
+
+        let (_guest_session, _session_id) =
+            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
+
+        let mut hello = Vec::new();
+        encode_into(&mut hello, Opcode::Hello, 0, b"").unwrap();
+        guest_stream.write_all(&hello).unwrap();
+        guest_stream.flush().unwrap();
+
+        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        assert_eq!(opcode, Opcode::HelloAck);
+
+        let query = build_dns_query("example.com", 1, 0x1234);
+        let mut resolve = Vec::new();
+        encode_into(&mut resolve, Opcode::Resolve, 1, &query).unwrap();
+        guest_stream.write_all(&resolve).unwrap();
+        guest_stream.flush().unwrap();
+
+        let (opcode, payload) = read_flowmux_frame(&mut guest_stream);
+        assert_eq!(opcode, Opcode::ResolveRefused);
+        assert!(!payload.is_empty());
+
+        drop(guest_stream);
+        host_handle.join().unwrap().unwrap();
     }
 }
