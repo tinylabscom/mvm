@@ -84,9 +84,14 @@ pub struct StartArgs {
     #[arg(long)]
     pub workspace: Option<PathBuf>,
     /// Guest memory in MiB for the persistent Nix builder.
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = DEFAULT_MEMORY_MIB)]
     pub memory_mib: u32,
 }
+
+/// Guest memory for a persistent builder when nobody names one. Shared by the
+/// `--memory-mib` default and the auto-start path, so a build that starts a
+/// session on contention gets the same builder an explicit `start` would.
+const DEFAULT_MEMORY_MIB: u32 = 4096;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub struct SubmitArgs {
@@ -231,6 +236,49 @@ fn run_start(args: StartArgs) -> Result<()> {
     println!("dispatch_socket: {}", record.dispatch_socket_path.display());
     println!("supervisor_pid: {}", record.supervisor_pid);
     Ok(())
+}
+
+/// Start a session on behalf of a build that found the store image busy.
+///
+/// Registered into `mvm-build`, which decides *when* a session is worth
+/// starting but cannot start one: extracting host binaries, resolving a
+/// builder image and writing the session record all live above it in the
+/// dependency graph.
+///
+/// The workspace is the build's own working directory — the tree it would have
+/// handed a single-shot builder — so the session serves `/work` from where the
+/// build expects it.
+pub(crate) fn start_session_for_contended_build()
+-> Result<mvm_build::persistent_builder::SessionRecord> {
+    // Another process may have published a record between `mvm-build`'s check
+    // and this call.
+    if let Ok(existing) = read_session_record() {
+        return Ok(as_build_record(&existing));
+    }
+
+    let backend = persistent_backend(resolve_env_override())?;
+    let workspace = std::env::current_dir()
+        .context("resolving the working directory for the builder session")?;
+    let record = match backend {
+        PersistentBackend::Libkrun => start_libkrun_persistent(workspace, DEFAULT_MEMORY_MIB)?,
+        PersistentBackend::Hvf => start_hvf_persistent(workspace, DEFAULT_MEMORY_MIB)?,
+    };
+    write_session_record(&record)?;
+    Ok(as_build_record(&record))
+}
+
+/// Project the CLI's session record onto `mvm-build`'s copy of the shape. The
+/// two are deliberately separate types — `mvm-build` sits below this crate —
+/// and `session_record_serde_matches_mvm_cli` pins them together.
+fn as_build_record(record: &SessionRecord) -> mvm_build::persistent_builder::SessionRecord {
+    mvm_build::persistent_builder::SessionRecord {
+        session_id: record.session_id.clone(),
+        dispatch_socket_path: record.dispatch_socket_path.clone(),
+        job_dir: record.job_dir.clone(),
+        workspace_root: record.workspace_root.clone(),
+        supervisor_pid: record.supervisor_pid,
+        last_activity_unix_secs: record.last_activity_unix_secs,
+    }
 }
 
 /// Extract the host-vm binaries a persistent builder serves at `/mvm-bins`,
