@@ -14,7 +14,7 @@
 
 use mvm_contract::ir::{AuthType, SecretRef, host_is_bound};
 pub use mvm_contract::substitution::{
-    Placeholder, PlaceholderMap, SECRET_PLACEHOLDER_PREFIX, find_placeholder,
+    Placeholder, PlaceholderMap, SECRET_PLACEHOLDER_PREFIX, find_placeholder, substitute_into,
 };
 use rand::RngCore;
 use zeroize::Zeroizing;

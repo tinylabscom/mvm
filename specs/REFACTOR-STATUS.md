@@ -745,15 +745,17 @@ for detailed scope and acceptance criteria.
         54 projection tests plus 10 mandatory-deny tests now run under
         `wasm32-wasip1` (651 → 715), closing plan 301 P1's "tests under wasm"
         gap for this module.
-  - [~] E2 substitution core — E2.1–E2.3 shipped; E2.4/E2.5 remain.
+  - [~] E2 substitution core — E2.1–E2.4 shipped; E2.5 remains.
         E2.1 relocated the placeholder leaf as `mvm_contract::substitution`
         with the hard-renamed `SECRET_PLACEHOLDER_PREFIX`. E2.2 de-duplicated
         the claim-12 bind check as `mvm_contract::ir::host_is_bound`. E2.3
         moved the portable half of `SubstitutionRegistry` down as
         `PlaceholderMap` (insert/resolve/host_is_bound), leaving the OS-RNG
         `mint` in the host wrapper so the browser bundle does not pull
-        `getrandom`. E2.4 (`substitute_into`) and E2.5 (the pure header-walk
-        core of `prepare_request`) are next.
+        `getrandom`. E2.4 relocated the pure text replacement as
+        `mvm_contract::substitution::substitute_into`; the host `Injector`
+        wraps the result in `Zeroizing`. E2.5 (the pure header-walk core of
+        `prepare_request`) is next.
   - [~] E3 audit writer core — moves/stays pass **done and re-validated
         against post-319 `main`**, E3.0 decided (**option A**), E3.1 (frozen
         byte fixture) shipped and green after #2379. `SignedEnvelope`'s shape

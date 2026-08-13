@@ -242,7 +242,7 @@ into `mvm-contract` to preserve a signature.
       either type.
 - [x] E2.3 — `SubstitutionRegistry` map/`resolve`/`host_is_bound` →P;
       `mint` splits.
-- [ ] E2.4 — `substitute_into` →P; `Injector` calls it.
+- [x] E2.4 — `substitute_into` →P; `Injector` calls it.
 - [ ] E2.5 — decide `prepare_request`. Own commit, own review.
 
 ### E3 — audit-entry construction and chain signing

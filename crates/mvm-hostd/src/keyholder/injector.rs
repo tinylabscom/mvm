@@ -71,7 +71,7 @@ impl<'a> Injector<'a> {
             std::str::from_utf8(value.expose_secret()).map_err(|_| InjectError::NonUtf8Value)?;
         // The output carries the raw credential — hand it back zeroizing so
         // the caller's copy wipes on drop.
-        Ok(Zeroizing::new(text.replace(placeholder, value)))
+        Ok(Zeroizing::new(mvm_contract::substitution::substitute_into(text, placeholder, value)))
     }
 }
 

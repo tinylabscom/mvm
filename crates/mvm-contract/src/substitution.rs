@@ -181,6 +181,16 @@ mod tests {
         assert!(map.resolve("mvm-secret-1111").is_some());
         assert!(map.resolve("mvm-secret-2222").is_some());
     }
+
+    #[test]
+    fn substitute_into_replaces_the_token_and_leaves_the_rest() {
+        let text = "Bearer mvm-secret-deadbeef, Accept: application/json";
+        let out = substitute_into(text, "mvm-secret-deadbeef", "real-api-key");
+        assert_eq!(out, "Bearer real-api-key, Accept: application/json");
+
+        // A token that does not appear is a no-op, not an error.
+        assert_eq!(substitute_into("clean", "mvm-secret-deadbeef", "x"), "clean");
+    }
 }
 
 /// Per-session map from a minted [`Placeholder`] to the [`SecretRef`] it
@@ -242,4 +252,15 @@ impl PlaceholderMap {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+}
+
+/// Replace every occurrence of `placeholder` in `text` with `value`.
+///
+/// This is the pure half of secret substitution: no binding check, no
+/// decrypt, no secret custody. The host runs those guards first and then
+/// calls this; the browser demo calls it with fixture values after the same
+/// policy decision. Keeping one definition guarantees the two sides produce
+/// identical bytes.
+pub fn substitute_into(text: &str, placeholder: &str, value: &str) -> String {
+    text.replace(placeholder, value)
 }
