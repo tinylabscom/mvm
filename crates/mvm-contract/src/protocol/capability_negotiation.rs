@@ -499,6 +499,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn a_share_grant_on_a_cgroup_backend_produces_no_gap() {
+        // A CpuGrant::Share is the native unit for cgroup-backed microVM
+        // tiers. The negotiation must not invent a gap for a grant the
+        // mechanism can serve.
+        let grants = Grants {
+            cpu: Some(CpuGrant::Share { millicores: 1500 }),
+            ..Grants::default()
+        };
+        assert_eq!(negotiate_grants(&grants, BackendKind::Firecracker), Ok(()));
+    }
+
+    #[test]
     fn an_undeclared_grant_asks_the_backend_for_nothing() {
         // Mock bounds neither dimension, so an empty grant set is the only
         // thing it can serve — and it must serve it, or every unbounded run
