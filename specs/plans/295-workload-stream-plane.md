@@ -394,7 +394,7 @@ gates them:
 - Secret material refused inbound, including split across frames.
 - A stream-plane audit entry carries no payload bytes. This plan writes the
   test; the guard earlier drafts cited does not exist.
-- `prod_console_attachment_has_no_input` still passes — the console capture
+- `following_the_console_never_writes_to_it` still passes — the console capture
   keeps no host input fd.
 - Retention mode recorded in `plan.admitted`, so "was this run recorded?" is
   answerable from the chain alone.
@@ -2237,7 +2237,7 @@ Expected: every named witness resolves.
 
 - [x] **Step 5: Verify the untouched claim-15 witnesses still pass**
 
-Run: `cargo nextest run --workspace -E 'test(console_refused_on_sealed_image) or test(prod_console_attachment_has_no_input)'`
+Run: `cargo nextest run --workspace -E 'test(console_refused_on_sealed_image) or test(following_the_console_never_writes_to_it)'`
 Expected: PASS — the console capture still has no host input fd.
 
 - [x] **Step 6: Commit** — `git commit -am "docs(claims): reword claim 15 and add claim 17 for the input channel"`

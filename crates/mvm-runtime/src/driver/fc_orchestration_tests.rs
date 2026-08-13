@@ -23,14 +23,14 @@ mod tests {
         use crate::driver::hvf::HvfDriver;
         use crate::wasm_backend::WasmBackend;
         use mvm_backends::driver::LibkrunDriver;
-        use mvm_backends::legacy::qemu::QemuBackend;
+        use mvm_backends::driver::QemuDriver;
         use mvm_backends::mock::MockDriver;
 
         assert!(FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
         assert!(HvfDriver::new().capabilities().standby_pool);
         assert!(!MockDriver::default().capabilities().standby_pool);
-        assert!(!QemuBackend.capabilities().standby_pool);
+        assert!(!QemuDriver::new().capabilities().standby_pool);
         assert!(!WasmBackend::new().capabilities().standby_pool);
     }
 

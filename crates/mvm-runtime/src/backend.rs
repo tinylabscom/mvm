@@ -1,11 +1,9 @@
 use crate::catalog;
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, ResourceControls,
-    SnapshotCapability, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
-    WarmStartOutcome,
+    BackendKind, BackendSecurityProfile, SnapshotCapability, VmBackend, VmCapabilities, VmId,
+    VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
 };
-use mvm_vmm::host::shell::run_in_vm_stdout;
 
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
@@ -30,11 +28,8 @@ use mvm_vmm::host::drive_file::DriveFile;
 /// The hvf VMM driven through the unified workload-runner role over the driver
 /// seam — hvf's sole workload launch path (`--hypervisor hvf` and the macOS-26
 /// `auto_select` default). NIC-less: egress routes to the per-VM gating endpoint
-/// over vsock only; the raw [`HvfBackend`](crate::backends::hvf::HvfBackend) shim
-/// stays behind the driver as its identity delegate and for the
-/// `examples/hvf-backend-*.rs` witnesses, unreached via this enum. One alias
-/// keeps the long generic instantiation readable at the enum variant and its
-/// construction site.
+/// over vsock only; the legacy direct `HvfBackend` shim has been deleted, so
+/// this runner is the only hvf workload launch path.
 pub(crate) type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct the hvf VMM's workload runner. Like [`libkrun_runner`] and
@@ -47,10 +42,9 @@ pub(crate) fn hvf_runner() -> HvfRunner {
 
 /// libkrun driven through the same unified workload-runner role — libkrun's
 /// sole production launch path (both `--hypervisor libkrun` and `auto_select`).
-/// Egress routes to the per-VM gating endpoint over vsock only; the raw
-/// [`LibkrunBackend`](crate::libkrun::LibkrunBackend) shim stays behind the
-/// driver as its identity delegate and for the live benchmark, unreached via
-/// this enum.
+/// Egress routes to the per-VM gating endpoint over vsock only; the legacy
+/// direct `LibkrunBackend` shim has been deleted, so this runner is the only
+/// libkrun workload launch path.
 type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct libkrun's workload runner. The runner is not const-constructible,
@@ -69,8 +63,8 @@ pub(crate) fn libkrun_runner() -> LibkrunRunner {
 /// path (`--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
 /// it). NIC-less: the converged boot attaches no slirp user-mode network, so
 /// egress routes to the per-VM gating endpoint over vsock only, through the
-/// per-VM AF_VSOCK↔UNIX bridge. The raw [`QemuBackend`](crate::qemu::QemuBackend)
-/// stays behind the driver as its identity delegate, unreached via this enum.
+/// per-VM AF_VSOCK↔UNIX bridge. The legacy direct `QemuBackend`
+/// has been deleted; this runner is the only QEMU workload launch path.
 type QemuRunner = WorkloadRunner<QemuDriver, RealEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct QEMU's workload runner. Like [`libkrun_runner`] the runner is not
@@ -81,13 +75,10 @@ pub(crate) fn qemu_runner() -> QemuRunner {
     WorkloadRunner::new(QemuDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
 }
 
-/// Firecracker (Linux KVM) driven through the same unified workload-runner role
+/// Firecracker (Linux KVM) driven through the unified workload-runner role
 /// — Firecracker's sole mvmctl-CLI workload launch path (`--hypervisor
 /// firecracker`, `default_backend`, and `auto_select`). NIC-less: egress routes
-/// to the per-VM gating endpoint over vsock only; the raw
-/// [`FirecrackerBackend`] shim stays behind the driver as its identity delegate
-/// and for the out-of-scope hostd-supervisor / warm-start / standby callers,
-/// unreached via this enum.
+/// to the per-VM gating endpoint over vsock only.
 type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct Firecracker's workload runner. Like [`libkrun_runner`] the runner
@@ -96,160 +87,6 @@ type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistra
 /// selector all call.
 pub(crate) fn fc_runner() -> FcRunner {
     WorkloadRunner::new(FcDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
-}
-
-/// Firecracker backend implementation.
-///
-/// Wraps the existing free functions in [`crate::fc`] and [`crate::fc`]
-/// behind the [`VmBackend`] trait. This is a thin adapter — all real
-/// work is delegated to the existing implementation.
-pub struct FirecrackerBackend;
-
-impl VmBackend for FirecrackerBackend {
-    fn name(&self) -> &str {
-        "firecracker"
-    }
-
-    fn kind(&self) -> BackendKind {
-        BackendKind::Firecracker
-    }
-
-    fn capabilities(&self) -> VmCapabilities {
-        // Firecracker ships a virtio-balloon device with PATCH-able
-        // target via `/balloon`; the start path attaches it whenever
-        // `VmStartConfig::mem_initial_mib` is `Some`. Capability is
-        // advertised unconditionally so the host-side controller can
-        // discover support before deciding to plumb a workload.
-        VmCapabilities {
-            pause_resume: true,
-            snapshots: false,
-            snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: false,
-            vsock: true,
-            tap_networking: false,
-            no_routable_guest_nic: true,
-            host_vsock_proxy: true,
-            balloon: true,
-            fs_quick_checkpoint: false,
-            // Named explicitly, not left at the all-`None` struct-update
-            // default: on Linux a cgroup can bound any process, and
-            // Firecracker runs as a direct child of this backend — no
-            // mvm-*-supervisor binary in front of it — so the cgroup goes
-            // on that child process directly.
-            resource_controls: ResourceControls::for_backend(BackendKind::Firecracker),
-            ..VmCapabilities::default()
-        }
-    }
-
-    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        fc_runner().start(config)
-    }
-
-    fn stop(&self, id: &VmId) -> Result<()> {
-        mvm_backends::fc::stop_vm(&id.0)
-    }
-
-    fn stop_all(&self) -> Result<()> {
-        mvm_backends::fc::stop_all_vms()
-    }
-
-    fn pause(&self, id: &VmId) -> Result<()> {
-        mvm_backends::fc::pause_vm(&id.0)
-    }
-
-    fn resume(&self, id: &VmId) -> Result<()> {
-        mvm_backends::fc::resume_vm(&id.0)
-    }
-
-    fn balloon_set_target(&self, id: &VmId, target_inflate_mib: u32) -> Result<()> {
-        mvm_backends::fc::balloon_set_target(&id.0, target_inflate_mib)
-    }
-
-    fn balloon_state(&self, id: &VmId) -> Result<mvm_core::vm_backend::BalloonState> {
-        let inflated = mvm_backends::fc::balloon_state(&id.0)?;
-        // FC reports the inflation amount via /balloon; the cap is
-        // tracked host-side in the VM's runtime metadata (RunInfo).
-        // List the VM to recover its declared cap.
-        let vms = mvm_backends::fc::list_vms()?;
-        let info = vms
-            .into_iter()
-            .find(|i| i.name.as_deref() == Some(&*id.0))
-            .ok_or_else(|| anyhow::anyhow!("balloon_state: VM '{}' not found in list", id.0))?;
-        let max_mib = info.memory;
-        Ok(mvm_core::vm_backend::BalloonState {
-            max_mib,
-            inflated_mib: inflated,
-            host_committed_mib: max_mib.saturating_sub(inflated),
-        })
-    }
-
-    fn status(&self, id: &VmId) -> Result<VmStatus> {
-        let vms = mvm_backends::fc::list_vms()?;
-        match vms.iter().find(|info| info.name.as_deref() == Some(&*id.0)) {
-            Some(_) => Ok(VmStatus::Running),
-            None => Ok(VmStatus::Stopped),
-        }
-    }
-
-    fn list(&self) -> Result<Vec<VmInfo>> {
-        let vms = mvm_backends::fc::list_vms()?;
-        Ok(vms
-            .into_iter()
-            .filter_map(|info| {
-                let name = info.name.clone()?;
-                Some(VmInfo {
-                    id: VmId(name.clone()),
-                    name,
-                    status: VmStatus::Running,
-                    guest_ip: info.guest_ip,
-                    cpus: info.cpus,
-                    memory_mib: info.memory,
-                    profile: info.profile,
-                    revision: info.revision,
-                    flake_ref: info.flake_ref,
-                    ports: Vec::new(),
-                })
-            })
-            .collect())
-    }
-
-    fn logs(&self, id: &VmId, lines: u32, hypervisor: bool) -> Result<String> {
-        let abs_vms = mvm_backends::fc::abs_vms_dir();
-        let abs_vms = abs_vms.trim();
-        let filename = if hypervisor {
-            "firecracker.log"
-        } else {
-            "console.log"
-        };
-        let log_file = format!("{}/{}/{}", abs_vms, id.0, filename);
-        run_in_vm_stdout(&format!(
-            "tail -n {} {} 2>/dev/null || true",
-            lines, log_file
-        ))
-    }
-
-    fn is_available(&self) -> Result<bool> {
-        mvm_backends::fc::host::is_installed()
-    }
-
-    fn install(&self) -> Result<()> {
-        mvm_backends::fc::host::install()
-    }
-
-    fn security_profile(&self) -> BackendSecurityProfile {
-        // Tier 1: full security posture. All seven CI-enforced claims
-        // hold. Hardware isolation via KVM; verified boot via
-        // dm-verity.
-        BackendSecurityProfile {
-            claims: [ClaimStatus::Holds; 7],
-            layer_coverage: LayerCoverage::all_layers(),
-            tier: "Tier 1",
-            notes: &[
-                "Full ADR-002 — all seven CI-enforced claims hold.",
-                "Hardware isolation via KVM. Verified boot via dm-verity (W3).",
-            ],
-        }
-    }
 }
 
 /// Compatibility wrapper for the retired raw Firecracker configuration.
@@ -456,9 +293,7 @@ pub enum AnyBackend {
     /// by `--hypervisor firecracker`, `default_backend`, and `auto_select`.
     /// NIC-less: egress routes to the per-VM gating endpoint over vsock only
     /// (claim-10 + claims 12/13 at the endpoint); no routable guest NIC and no
-    /// transparent `:80/:443` terminator. The raw [`FirecrackerBackend`] stays
-    /// behind the driver as its identity delegate and for the out-of-scope
-    /// hostd-supervisor / warm-start / standby callers, unreached via this enum.
+    /// transparent `:80/:443` terminator.
     Firecracker(FcRunner),
     /// libkrun (Linux KVM / macOS Apple Silicon HVF), driven through the unified
     /// `WorkloadRunner` over the driver seam — libkrun's sole production path,
@@ -473,9 +308,7 @@ pub enum AnyBackend {
     /// it (Firecracker stays the production runtime). The boot attaches the
     /// universal initramfs and receives `ActivateEnvironment` over vsock
     /// (via the AF_VSOCK↔UNIX bridge), exactly like the other runner
-    /// backends. Dev tier only, outside the security claims. The raw
-    /// [`QemuBackend`](crate::qemu::QemuBackend) stays behind the driver as
-    /// its identity delegate, unreached via this enum.
+    /// backends. Dev tier only, outside the security claims.
     Qemu(QemuRunner),
     /// In-memory mock — test-only. Records `start`/`stop`/`pause`/
     /// `resume` calls against a `Mutex<HashMap>` and never touches
@@ -492,10 +325,7 @@ pub enum AnyBackend {
     /// selected by `--hypervisor hvf` / `MVM_BACKEND=hvf` and the macOS-26
     /// auto-detect default. NIC-less: egress routes to the per-VM gating endpoint
     /// over vsock only (claim-10 + claims 12/13 at the endpoint); no routable
-    /// guest NIC. The raw [`HvfBackend`](crate::backends::hvf::HvfBackend) stays
-    /// behind the driver as its identity delegate and for the
-    /// `examples/hvf-backend-*.rs` witnesses, unreached via this enum. The
-    /// destination macOS backend.
+    /// guest NIC. The destination macOS backend.
     Hvf(HvfRunner),
     /// Host-`wasmtime` claim-free portability tier — see
     /// [`crate::wasm_backend`]. Selectable only via explicit
@@ -1184,13 +1014,13 @@ mod tests {
 
     #[test]
     fn test_firecracker_backend_name() {
-        let backend = FirecrackerBackend;
+        let backend = fc_runner();
         assert_eq!(backend.name(), "firecracker");
     }
 
     #[test]
     fn test_firecracker_capabilities() {
-        let backend = FirecrackerBackend;
+        let backend = fc_runner();
         let caps = backend.capabilities();
         assert!(caps.pause_resume);
         assert!(!caps.snapshots);
@@ -1201,9 +1031,9 @@ mod tests {
     }
 
     #[test]
-    fn firecracker_does_not_report_standby_pool_support() {
-        let backend = FirecrackerBackend;
-        assert!(!backend.supports_standby_pool());
+    fn firecracker_reports_standby_pool_support() {
+        let backend = fc_runner();
+        assert!(backend.supports_standby_pool());
     }
 
     #[test]
@@ -1258,7 +1088,7 @@ mod tests {
 
     #[test]
     fn test_firecracker_security_profile_tier_1_holds_all_claims() {
-        let backend = FirecrackerBackend;
+        let backend = fc_runner();
         let profile = backend.security_profile();
         assert_eq!(profile.tier, "Tier 1");
         assert!(profile.layer_coverage.is_microvm());
@@ -2050,7 +1880,7 @@ mod tests {
         use mvm_core::vm_backend::SnapshotCapability;
         // The raw Firecracker live-memory restore path could restore a captured
         // NIC, so the vsock-only backend refuses that legacy tier.
-        let fc = FirecrackerBackend;
+        let fc = fc_runner();
         assert_eq!(fc.snapshot_capability(), SnapshotCapability::Unsupported);
     }
 

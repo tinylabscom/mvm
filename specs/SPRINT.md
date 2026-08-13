@@ -1234,14 +1234,17 @@ updates only its own entry below.
       tracked in
       `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
 
-- [ ] **Backend shim removal — invert the driver/backend relationship.** The
-      `VmmDriver` seam still wraps the older direct `VmBackend` impls rather
-      than owning the VMM mechanics, so `FirecrackerBackend` / `LibkrunBackend`
-      / `HvfBackend` remain live in the production path. Plan drafted at
-      `specs/plans/269-backend-shim-removal.md`; it carries a "Status and known
-      gaps" section covering the blanket-impl seam that does not exist yet, the
-      unaccounted-for `WasmBackend`, and the QEMU contradiction in §2.5 below
-      that Task 5 depends on. Not started.
+- [x] **Backend shim removal — invert the driver/backend relationship.**
+      `FcDriver`, `HvfDriver`, `LibkrunDriver`, and `QemuDriver` now own their
+      VMM mechanics directly; the legacy `FirecrackerBackend`, `HvfBackend`,
+      `LibkrunBackend`, and `QemuBackend` shells are deleted. Every selectable
+      microVM backend reaches production through the blanket
+      `impl VmBackend for WorkloadRunner<D: VmmDriver, ...>`. `WasmBackend`
+      remains a documented direct `VmBackend` exemption (WASI container, not a
+      microVM). QEMU stays an opt-in Tier-2 dev/test backend, never
+      workload-bearing. Verification: workspace `cargo nextest run`, workspace
+      all-target Clippy, and `cargo xtask check-claim-catalog` are green; the
+      migration boundary is recorded in `MIGRATION-269.md`.
 - [x] Lightweight guest WS-3: runtime-overlay guest executables now build
       static-musl without the shared loader bundle; the glibc SDK FFI is
       published as a separate `sdk-sidecar` output with an explicit
@@ -1435,7 +1438,7 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 
 ### 2.5 Backend & egress model
 
-- Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload), and **wasm** (`WasmBackend` — WASI wasm-container; core goal, see §1 + WS11). QEMU **dropped**. `mock` behind `test-support`.
+- Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload), and **wasm** (`WasmBackend` — WASI wasm-container; core goal, see §1 + WS11). **QEMU** stays as an opt-in Tier-2 dev/test backend, never workload-bearing and never auto-selected. `mock` behind `test-support`.
 - Selected via the existing `BackendKind` enum + `backend_catalog!` registry — **never string-matched**. The ~6 remaining `backend.name() == "…"` sites in `mvm-cli` and the dead retired-backend arms are removed.
 - **One host-mediated, default-deny, audited egress boundary on every workload backend**, transport-abstracted via `VmDuplexTransport`: vsock/UDS for the microVM backends, WASI host-calls for the wasm backend. Firecracker, libkrun, and HVF all use the `WorkloadRunner` endpoint seam; any backend that cannot mediate egress through the host fails closed on `--network-allow`.
 - Mount ordering is `rootfs → runtime-overlay → custom`, with an **explicit no-shadow rule**: a later mount may never shadow an earlier target; `/mvm` and `/mvm/runtime` join the deny-prefix set.

@@ -143,7 +143,7 @@ impl Drop for HeldProbeVm {
     fn drop(&mut self) {
         use mvm_core::vm_backend::{VmBackend, VmId};
 
-        let backend = mvm_runtime::LibkrunBackend;
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("libkrun").into_dyn();
         let _ = backend.stop(&VmId(self.vm_name.clone()));
     }
 }
@@ -198,7 +198,7 @@ pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
     };
     populate_audit_substrate(&mut cfg, &admitted, None)?;
 
-    let backend = mvm_runtime::LibkrunBackend;
+    let backend = mvm_runtime::AnyBackend::from_hypervisor("libkrun").into_dyn();
     let start = Instant::now();
     backend.start(&cfg).context("probe backend.start")?;
 

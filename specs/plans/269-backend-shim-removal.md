@@ -1,6 +1,6 @@
 # Backend shim removal — invert the driver/backend relationship
 
-> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make `VmmDriver` the sole owner of per-VMM mechanics, delete the legacy direct `VmBackend` implementations (`FirecrackerBackend`, `HvfBackend`, `LibkrunBackend`, `QemuBackend`), and have every workload backend reach production through `WorkloadRunner<D: VmmDriver, ...>`.
 
@@ -67,19 +67,19 @@ Resolve them first rather than discovering them mid-Task-2.
 - Produces: a written inventory of every method call from the new drivers into the old backends and every external caller of the old backends.
 - Consumes: the current `VmBackend` trait definition and `VmmDriver` trait definition.
 
-- [ ] **Step 1: Map driver → old-backend delegation**
+- [x] **Step 1: Map driver → old-backend delegation**
 
   For each driver, list which `FirecrackerBackend` / `LibkrunBackend` / `HvfBackend` methods it calls (capabilities, security profile, availability, status, stop, etc.).
 
-- [ ] **Step 2: Map external old-backend callers**
+- [x] **Step 2: Map external old-backend callers**
 
   Find every non-driver caller: builder VM, tests, examples, `AnyBackend` dispatch, `selection.rs`, `workload_backend.rs`. Note which methods they use.
 
-- [ ] **Step 3: Classify each method as "move to driver" or "delete"**
+- [x] **Step 3: Classify each method as "move to driver" or "delete"**
 
   Methods used only by the driver → move into the driver. Methods used by tests/examples → rewrite against the driver or `WorkloadRunner`. Methods used by builder → decide if builder can use `LibkrunDriver` + `WorkloadRunner` or needs a narrower builder seam.
 
-- [ ] **Step 4: Commit the inventory**
+- [x] **Step 4: Commit the inventory**
 
   Add a short markdown note in the worktree root (`MIGRATION-268.md`) listing the classification. This is the contract for the rest of the plan.
 
@@ -96,26 +96,26 @@ Resolve them first rather than discovering them mid-Task-2.
 - Produces: `FcDriver` owns all FC mechanics; `FirecrackerBackend` type deleted or reduced to a zero-sized token.
 - Consumes: existing `microvm` primitives (`start_vm_firecracker`, API client, etc.).
 
-- [ ] **Step 1: Inline capability, profile, and availability**
+- [x] **Step 1: Inline capability, profile, and availability**
 
   Replace `self.backend.capabilities()` / `self.backend.security_profile()` / `self.backend.is_available()` with local `FcDriver` implementations. The values must match the current matrix exactly.
 
-- [ ] **Step 2: Inline `boot`, `attach`, `wait`, `kill`, `pause`, `resume`, `guest_channel_info`**
+- [x] **Step 2: Inline `boot`, `attach`, `wait`, `kill`, `pause`, `resume`, `guest_channel_info`**
 
   Move the relevant logic from `FirecrackerBackend` into `FcDriver`. Preserve the existing `RunningVm` handle shape.
 
-- [ ] **Step 3: Update `AnyBackend::Firecracker` to use `FcRunner` only**
+- [x] **Step 3: Update `AnyBackend::Firecracker` to use `FcRunner` only**
 
   Ensure `AnyBackend::Firecracker` holds `FcRunner` and no path constructs a raw `FirecrackerBackend` for workload execution.
 
-- [ ] **Step 4: Run tests and clippy**
+- [x] **Step 4: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-runtime
   cargo clippy -p mvm-runtime -- -D warnings
   ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```bash
   git -C <wt> commit -m "refactor(runtime): move Firecracker mechanics into FcDriver"
@@ -134,28 +134,28 @@ Resolve them first rather than discovering them mid-Task-2.
 - Produces: `LibkrunDriver` owns all libkrun mechanics; builder uses either `LibkrunDriver` or a dedicated `BuilderVm` path.
 - Consumes: `libkrun-sys` FFI surface.
 
-- [ ] **Step 1: Inline libkrun capability/profile/availability into `LibkrunDriver`**
+- [x] **Step 1: Inline libkrun capability/profile/availability into `LibkrunDriver`**
 
-- [ ] **Step 2: Inline `boot`, `attach`, `wait`, `kill`, `pause`, `resume`, `guest_channel_info` into `LibkrunDriver`**
+- [x] **Step 2: Inline `boot`, `attach`, `wait`, `kill`, `pause`, `resume`, `guest_channel_info` into `LibkrunDriver`**
 
-- [ ] **Step 3: Migrate builder VM off `LibkrunBackend::start`**
+- [x] **Step 3: Migrate builder VM off `LibkrunBackend::start`**
 
   Decide: can the builder use `LibkrunDriver` + a minimal `VmmSpec`, or does it need a separate `BuilderVm` trait? Per ADR-007, builder stays a separate role. If the builder currently reaches into `LibkrunBackend` only for spawn/stop/status, create a thin builder-facing wrapper around `LibkrunDriver` or extend the existing `BuilderVm` impl.
 
-- [ ] **Step 4: Rewrite tests and examples**
+- [x] **Step 4: Rewrite tests and examples**
 
   `mvm-runtime/tests/libkrun_lifecycle_e2e.rs` and any examples using `LibkrunBackend` directly should use `LibkrunDriver` through `WorkloadRunner` or a test helper.
 
-- [ ] **Step 5: Delete `crates/mvm-runtime/src/libkrun.rs` if no references remain**
+- [x] **Step 5: Delete `crates/mvm-runtime/src/libkrun.rs` if no references remain**
 
-- [ ] **Step 6: Run tests and clippy**
+- [x] **Step 6: Run tests and clippy**
 
   ```bash
   cargo nextest run -p mvm-runtime -p mvm-build
   cargo clippy -p mvm-runtime -p mvm-build -- -D warnings
   ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ---
 
@@ -170,23 +170,23 @@ Resolve them first rather than discovering them mid-Task-2.
 - Produces: `HvfDriver` owns all HVF mechanics.
 - Consumes: HVF supervisor process model, `HvfSupervisorConfig`.
 
-- [ ] **Step 1: Inline HVF capability/profile/availability into `HvfDriver`**
+- [x] **Step 1: Inline HVF capability/profile/availability into `HvfDriver`**
 
-- [ ] **Step 2: Inline `boot`, `attach`, `wait`, `kill`, `pause`, `resume`, `guest_channel_info` into `HvfDriver`**
+- [x] **Step 2: Inline `boot`, `attach`, `wait`, `kill`, `pause`, `resume`, `guest_channel_info` into `HvfDriver`**
 
-- [ ] **Step 3: Update `WorkloadBackend` impl**
+- [x] **Step 3: Update `WorkloadBackend` impl**
 
   Change `impl WorkloadBackend for HvfBackend` to delegate to `HvfDriver` or `HvfRunner`.
 
-- [ ] **Step 4: Rewrite examples**
+- [x] **Step 4: Rewrite examples**
 
   `hvf-backend-run.rs`, `hvf-agent-ping.rs`, `hvf-backend-transient.rs`, `hvf-workload-runner.rs` — update to use `HvfDriver` / `HvfRunner`.
 
-- [ ] **Step 5: Delete `crates/mvm-runtime/src/hvf_backend.rs` if no references remain**
+- [x] **Step 5: Delete `crates/mvm-runtime/src/hvf_backend.rs` if no references remain**
 
-- [ ] **Step 6: Run tests and clippy**
+- [x] **Step 6: Run tests and clippy**
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ---
 
@@ -200,13 +200,13 @@ Resolve them first rather than discovering them mid-Task-2.
 **Interfaces:**
 - Produces: either a `QemuDriver` that implements `VmmDriver`, or QEMU removed from workload backends.
 
-- [ ] **Step 1: Confirm sprint decision**
+- [x] **Step 1: Confirm sprint decision**
 
   Re-read `specs/SPRINT.md` §2.5. If QEMU is dropped, remove `QemuBackend` and `AnyBackend::Qemu`. If it is kept as a dev substrate, either create `QemuDriver` or leave it as a non-workload path.
 
-- [ ] **Step 2: Execute the confirmed decision**
+- [x] **Step 2: Execute the confirmed decision**
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ---
 
@@ -219,24 +219,24 @@ Resolve them first rather than discovering them mid-Task-2.
 **Interfaces:**
 - Produces: `AnyBackend` holds only runner-backed `VmBackend` impls; no raw backend variants.
 
-- [ ] **Step 1: Remove raw backend variants from `AnyBackend`**
+- [x] **Step 1: Remove raw backend variants from `AnyBackend`**
 
   Keep only `Firecracker(FcRunner)`, `Libkrun(LibkrunRunner)`, `Hvf(HvfRunner)`, `Mock(MockBackend)`, and any decided QEMU path.
 
-- [ ] **Step 2: Update `from_hypervisor`, `auto_select`, `for_started_vm`**
+- [x] **Step 2: Update `from_hypervisor`, `auto_select`, `for_started_vm`**
 
   Ensure all dispatch sites construct the runner-backed variants.
 
-- [ ] **Step 3: Delete dead helper methods on raw backends**
+- [x] **Step 3: Delete dead helper methods on raw backends**
 
-- [ ] **Step 4: Run workspace tests and clippy**
+- [x] **Step 4: Run workspace tests and clippy**
 
   ```bash
   cargo nextest run --workspace
   cargo clippy --workspace --all-targets -- -D warnings
   ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ---
 
@@ -244,7 +244,7 @@ Resolve them first rather than discovering them mid-Task-2.
 
 **Files:** entire workspace.
 
-- [ ] **Step 1: Grep for raw backend names**
+- [x] **Step 1: Grep for raw backend names**
 
   ```bash
   rg "FirecrackerBackend\b|HvfBackend\b|LibkrunBackend\b|QemuBackend\b" crates/ --type rust
@@ -252,7 +252,7 @@ Resolve them first rather than discovering them mid-Task-2.
 
   Only permitted hits: module-level re-exports that still exist for backward compat (if any), or intentional references inside the migration note. Any production-path reference is a bug.
 
-- [ ] **Step 2: Check that `VmBackend` is implemented only by `WorkloadRunner` and `MockBackend`**
+- [x] **Step 2: Check that `VmBackend` is implemented only by `WorkloadRunner` and `MockBackend`**
 
   ```bash
   rg "impl VmBackend for" crates/ --type rust
@@ -260,17 +260,17 @@ Resolve them first rather than discovering them mid-Task-2.
 
   Expected: `WorkloadRunner`, `MockBackend`, and test doubles only.
 
-- [ ] **Step 3: Commit the cleanup**
+- [x] **Step 3: Commit the cleanup**
 
 ---
 
 ## Task 8: Claims-catalog and security witness check
 
-- [ ] **Step 1: Run `cargo xtask check-claim-catalog`** and ensure no witness drifted.
+- [x] **Step 1: Run `cargo xtask check-claim-catalog`** and ensure no witness drifted.
 
-- [ ] **Step 2: Run BDD/conformance tests** if `just bdd` is available.
+- [x] **Step 2: Run BDD/conformance tests** if `just bdd` is available.
 
-- [ ] **Step 3: Open PR** with a concise description of the refactor and the verification performed.
+- [x] **Step 3: Open PR** with a concise description of the refactor and the verification performed.
 
 ---
 

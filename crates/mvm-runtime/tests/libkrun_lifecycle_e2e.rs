@@ -1,10 +1,10 @@
-//! End-to-end LibkrunBackend lifecycle test.
+//! End-to-end libkrun runner lifecycle test.
 //!
-//! Validates that `LibkrunBackend::start → status → stop → status`
+//! Validates that `libkrun runner::start → status → stop → status`
 //! drives a real `mvm-libkrun-supervisor` subprocess against a real
 //! libkrun guest, all the way through SIGTERM-based shutdown. This is
 //! the only test in the workspace that exercises the
-//! `LibkrunBackend → supervisor → libkrun → kernel boot → SIGTERM →
+//! `libkrun runner → supervisor → libkrun → kernel boot → SIGTERM →
 //! supervisor exit` path end-to-end.
 //!
 //! ## Why SIGTERM and not a clean `init=/sbin/poweroff`?
@@ -18,7 +18,7 @@
 //!
 //! What this test *can* validate against today's broken dev init is
 //! the **production stop path** itself: `mvmctl stop <name>` always
-//! goes through `LibkrunBackend::stop`, which reads the supervisor's
+//! goes through `libkrun runner::stop`, which reads the supervisor's
 //! PID file and sends `SIGTERM` (escalating to `SIGKILL` after 5s).
 //! That's the path users actually hit when shutting down a libkrun
 //! VM, and it's the path this test exercises.
@@ -41,20 +41,20 @@
 //!
 //! ## What it asserts
 //!
-//! 1. `LibkrunBackend::start` writes the per-VM directory under
+//! 1. `libkrun runner::start` writes the per-VM directory under
 //!    `~/.mvm/vms/<name>/` and the PID file appears.
-//! 2. `LibkrunBackend::status(name)` reports `Running` within
+//! 2. `libkrun runner::status(name)` reports `Running` within
 //!    [`STATUS_RUNNING_TIMEOUT`].
-//! 3. `LibkrunBackend::list()` includes the VM.
-//! 4. `LibkrunBackend::stop(name)` sends SIGTERM and the supervisor
+//! 3. `libkrun runner::list()` includes the VM.
+//! 4. `libkrun runner::stop(name)` sends SIGTERM and the supervisor
 //!    process actually exits within [`STOP_TIMEOUT`] (i.e. doesn't
 //!    require the SIGKILL escalation; libkrun's signal handling is
 //!    correct under macOS Hypervisor.framework).
 //! 5. After `stop`, `status` reports `Stopped` and the PID file is
 //!    cleaned up.
 
-use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig, VmStatus};
-use mvm_runtime::LibkrunBackend;
+use mvm_core::vm_backend::{VmId, VmStartConfig, VmStatus};
+use mvm_runtime::AnyBackend;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -102,8 +102,8 @@ fn libkrun_lifecycle_start_status_stop() {
         ..Default::default()
     };
 
-    let backend = LibkrunBackend;
-    let id = backend.start(&config).expect("LibkrunBackend::start");
+    let backend = AnyBackend::from_hypervisor("libkrun").into_dyn();
+    let id = backend.start(&config).expect("libkrun runner start");
     assert_eq!(id, VmId(name.clone()));
 
     let pid_file = state_dir.join("libkrun.pid");
@@ -124,7 +124,7 @@ fn libkrun_lifecycle_start_status_stop() {
         matches!(backend.status(&vm_id), Ok(VmStatus::Running))
     });
 
-    let listed = backend.list().expect("LibkrunBackend::list");
+    let listed = backend.list().expect("libkrun runner list");
     let found = listed.iter().find(|v| v.name == name).unwrap_or_else(|| {
         panic!(
             "list() didn't include the VM we just started; got: {:?}",
@@ -139,7 +139,7 @@ fn libkrun_lifecycle_start_status_stop() {
     // SIGTERM the supervisor. `stop` polls for the process to exit
     // for up to STOP_TIMEOUT before escalating to SIGKILL. If the
     // process doesn't go down within that window, this test fails.
-    backend.stop(&vm_id).expect("LibkrunBackend::stop");
+    backend.stop(&vm_id).expect("libkrun runner stop");
 
     poll_until(STOP_TIMEOUT, "status reports Stopped", || {
         matches!(backend.status(&vm_id), Ok(VmStatus::Stopped))
@@ -150,13 +150,13 @@ fn libkrun_lifecycle_start_status_stop() {
         pid_file.display()
     );
 
-    let listed_after = backend.list().expect("LibkrunBackend::list after stop");
+    let listed_after = backend.list().expect("libkrun runner list after stop");
     let still_listed = listed_after.iter().any(|v| v.name == name);
     // After stop the state dir is gone (we removed it above before
     // the run, and `stop` rm'd the PID file; depending on whether
     // anything else writes to the state dir, list() may still see
     // the directory but without a PID file — that's filtered out by
-    // LibkrunBackend::list).
+    // libkrun runner::list).
     assert!(
         !still_listed,
         "list() after stop should not include the stopped VM; got: {:?}",

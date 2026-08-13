@@ -488,7 +488,7 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
         fc_sudo_signal(pid, FcStopSignal::Terminate);
         let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
             pid as libc::pid_t,
-            Instant::now() + crate::legacy::libkrun::STOP_TIMEOUT,
+            Instant::now() + crate::driver::libkrun_legacy::STOP_TIMEOUT,
             Some(&observer),
         );
         if exited {
@@ -507,7 +507,7 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
         }
     } else {
         escalate_kill(
-            crate::legacy::libkrun::STOP_TIMEOUT,
+            crate::driver::libkrun_legacy::STOP_TIMEOUT,
             mvm_core::poll_backoff::poll_delay,
             || crate::fc::is_firecracker_pid_running(pid),
             |signal| fc_sudo_signal(pid, signal),

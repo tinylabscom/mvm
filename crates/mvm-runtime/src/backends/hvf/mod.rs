@@ -1,8 +1,7 @@
 //! HVF (`Hypervisor.framework`) backend for macOS / Apple Silicon.
 //!
-//! The raw substrate modules remain here; the `VmBackend` and `VmmDriver`
-//! implementations have moved to `mvm-backends` and are re-exported below for
-//! backward compatibility.
+//! The raw substrate modules remain here; the `VmmDriver` implementation has
+//! moved to `mvm-backends` and is re-exported below.
 
 mod boot_smoke;
 mod console_smoke;
@@ -14,8 +13,7 @@ mod sys;
 mod vcpu;
 
 pub use mvm_backends::driver::hvf::HvfDriver;
-pub use mvm_backends::legacy::hvf::HvfBackend;
-pub use mvm_backends::legacy::hvf_bootargs::{
+pub use mvm_backends::driver::hvf_bootargs::{
     default_bootargs, default_virtiofs_bootargs, workload_bootargs,
 };
 pub use mvm_vmm::vmm::virtio::DiskImage;
