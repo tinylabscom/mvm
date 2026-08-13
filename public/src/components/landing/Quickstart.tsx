@@ -60,7 +60,6 @@ const STEPS = [
   { tab: "define", trigger: "Define", sampleId: "python-hello" },
   { tab: "build", trigger: "Build", sampleId: "walk-build" },
   { tab: "run", trigger: "Run", sampleId: "walk-run" },
-  { tab: "result", trigger: "Result", sampleId: "walk-result" },
 ] as const;
 
 export function Quickstart() {

@@ -2,6 +2,7 @@ import { Section } from "./primitives/Section";
 import { Eyebrow } from "./primitives/Eyebrow";
 import { Reveal } from "./primitives/Reveal";
 import { Button } from "../ui/button";
+import { GlowCard } from "./primitives/GlowCard";
 
 // Copy below is deliberately narrower than plain-language marketing prose —
 // it tracks the exact wording of the project's gated security-claims table,
@@ -82,7 +83,7 @@ export function Security() {
                   rather than break-words because these are mono identifiers —
                   breaking mid-token is fine and wrapping at all is not
                   otherwise possible. */}
-              <div className="min-w-0 rounded-xl border border-edge/50 p-6 sm:p-7">
+              <GlowCard accent={3} className="min-w-0 p-6 sm:p-7">
                 <h3 className="mb-2 text-base font-semibold leading-snug text-title">
                   {c.title}
                 </h3>
@@ -90,7 +91,7 @@ export function Security() {
                 <p className="min-w-0 font-mono text-[11px] break-all text-label/70">
                   {c.witnesses}
                 </p>
-              </div>
+              </GlowCard>
             </Reveal>
           ))}
         </div>

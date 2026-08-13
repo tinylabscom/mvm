@@ -129,24 +129,15 @@ export function Hero() {
             {/* Platform-specific install — the single install affordance in
                 the hero. */}
             <Reveal delay={240}>
-              <Tabs defaultValue="macos" className="max-w-lg">
+              <Tabs defaultValue="unix" className="max-w-lg">
                 <TabsList>
-                  <TabsTrigger value="macos">macOS</TabsTrigger>
-                  <TabsTrigger value="linux">Linux</TabsTrigger>
+                  <TabsTrigger value="unix">macOS / Linux</TabsTrigger>
                   <TabsTrigger value="windows">Windows (WSL2)</TabsTrigger>
                 </TabsList>
 
-                <TabsContent value="macos">
+                <TabsContent value="unix">
                   <p className="mb-4 text-sm leading-relaxed text-body">
-                    Apple Silicon only. Runs the HVF backend on macOS 26+, libkrun on
-                    macOS 13&ndash;25.
-                  </p>
-                  <InstallRow command={ONE_LINER} />
-                </TabsContent>
-
-                <TabsContent value="linux">
-                  <p className="mb-4 text-sm leading-relaxed text-body">
-                    Tier 1 target. Needs a kernel with KVM enabled at{" "}
+                    macOS 13+ (libkrun on 13&ndash;25, HVF on 26+) or Linux with{" "}
                     <code className="font-mono text-emphasis/90">/dev/kvm</code>.
                   </p>
                   <InstallRow command={ONE_LINER} />
