@@ -37,8 +37,8 @@ pub enum GuestService {
     WorkloadExit,
     /// The host-services broker.
     Broker,
-    /// The one flow-aware networking endpoint.
-    NetworkFlow,
+    /// The egress substitution endpoint.
+    Substitution,
     /// One dev-only interactive console data stream.
     ///
     /// The guest allocates these ports from its console session range. The
@@ -70,7 +70,7 @@ impl GuestService {
         match self {
             Self::WorkloadExit => 5251,
             Self::MachineControl => 5252,
-            Self::NetworkFlow => 5253,
+            Self::Substitution => 5253,
             Self::NetworkControl => mvm_contract::l3::L3_CONTROL_PORT,
             Self::NetworkData { queue } => mvm_contract::l3::data_port(queue),
             Self::Broker => 5300,
@@ -92,7 +92,7 @@ impl GuestService {
             Self::NetworkData { .. } => "network-data",
             Self::WorkloadExit => "workload-exit",
             Self::Broker => "broker",
-            Self::NetworkFlow => "network-flow",
+            Self::Substitution => "substitution",
             Self::ConsoleData { .. } => "console-data",
             Self::IngressTcp { .. } => "ingress-tcp",
             Self::BuilderDispatch => "builder-dispatch",
@@ -317,7 +317,7 @@ mod tests {
     fn services_map_to_the_ports_both_ends_agree_on() {
         assert_eq!(GuestService::MachineControl.port(), 5252);
         assert_eq!(GuestService::WorkloadExit.port(), 5251);
-        assert_eq!(GuestService::NetworkFlow.port(), 5253);
+        assert_eq!(GuestService::Substitution.port(), 5253);
         assert_eq!(GuestService::Broker.port(), 5300);
         // Both ends of the builder control plane pin these literals: the guest
         // side in `mvm_agentd::builder_agent`, which this crate sits below.
@@ -341,7 +341,7 @@ mod tests {
             GuestService::NetworkData { queue: 0 }.port(),
             GuestService::WorkloadExit.port(),
             GuestService::Broker.port(),
-            GuestService::NetworkFlow.port(),
+            GuestService::Substitution.port(),
         ];
         let mut sorted = ports.to_vec();
         sorted.sort_unstable();
@@ -444,7 +444,7 @@ mod tests {
             GuestService::NetworkData { queue: 0 },
             GuestService::WorkloadExit,
             GuestService::Broker,
-            GuestService::NetworkFlow,
+            GuestService::Substitution,
             GuestService::ConsoleData { port: 20001 },
         ] {
             assert!(!service.is_builder_tier(), "{service} is not builder-tier");

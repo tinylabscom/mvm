@@ -1165,7 +1165,7 @@ mod tests {
     fn workload_channels() -> Vec<VsockPort> {
         vec![
             host_dials(GuestService::MachineControl, "/run/agent.sock"),
-            guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
+            guest_dials(GuestService::Substitution, "/run/egress.sock"),
             guest_dials(GuestService::Broker, "/run/broker.sock"),
             guest_dials(GuestService::WorkloadExit, "/state/w/workload.exit"),
         ]
@@ -1403,7 +1403,7 @@ mod tests {
     fn config_threads_cmdline_verbatim_and_configures_no_nic() {
         let mut spec = spec_with(
             KernelImage::Path("/img/vmlinux".into()),
-            vec![guest_dials(GuestService::NetworkFlow, "/run/egress.sock")],
+            vec![guest_dials(GuestService::Substitution, "/run/egress.sock")],
             vec![ro_block("/img/rootfs.ext4", 0)],
         );
         spec.cmdline = "  console=ttyS0 root=/dev/vda mvm.roothash=abc mvm.vsock_egress=1  ".into();

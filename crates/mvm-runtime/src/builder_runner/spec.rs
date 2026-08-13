@@ -90,7 +90,7 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         });
     }
     vsock.push(VsockPort {
-        service: GuestService::NetworkFlow,
+        service: GuestService::Substitution,
         host_uds: inputs.egress_socket.clone(),
         direction: VsockDirection::HostDials,
     });
@@ -241,7 +241,7 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
         direction: VsockDirection::HostDials,
     };
     let vsock = vec![
-        host_dials(GuestService::NetworkFlow, &inputs.egress_socket),
+        host_dials(GuestService::Substitution, &inputs.egress_socket),
         host_dials(GuestService::BuilderDispatch, &inputs.dispatch_socket),
         host_dials(GuestService::BuilderdControl, &inputs.builderd_socket),
     ];
@@ -331,7 +331,7 @@ mod tests {
 
         assert!(services.contains(&GuestService::BuilderDispatch));
         assert!(services.contains(&GuestService::BuilderdControl));
-        assert!(services.contains(&GuestService::NetworkFlow));
+        assert!(services.contains(&GuestService::Substitution));
         // Every one is host-dials: the guest listens, the host connects.
         assert!(
             spec.vsock
@@ -410,7 +410,7 @@ mod tests {
         assert!(
             spec.vsock
                 .iter()
-                .any(|p| p.service == GuestService::NetworkFlow)
+                .any(|p| p.service == GuestService::Substitution)
         );
         // Boots the builder PID 1 over the disk transport, rootfs read-only.
         assert!(spec.cmdline.contains("init=/sbin/mvm-host-vm-init"));
@@ -427,7 +427,7 @@ mod tests {
         i.agent_socket = None;
         let spec = builder_spec(&i);
         assert_eq!(spec.vsock.len(), 1);
-        assert_eq!(spec.vsock[0].service, GuestService::NetworkFlow);
+        assert_eq!(spec.vsock[0].service, GuestService::Substitution);
     }
 
     #[test]

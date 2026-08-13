@@ -926,7 +926,7 @@ mod tests {
         let state_dir = Path::new("/state/w");
         let channels = vec![
             host_dials(GuestService::MachineControl, "/run/agent-hint.sock"),
-            guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
+            guest_dials(GuestService::Substitution, "/run/egress.sock"),
             guest_dials(GuestService::WorkloadExit, "/state/w/workload.exit"),
             guest_dials(GuestService::Broker, "/run/broker.sock"),
             host_dials(

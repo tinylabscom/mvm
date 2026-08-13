@@ -196,7 +196,7 @@ impl GuestChannelProvider for UdsGuestChannelProvider {
             GuestService::NetworkData { queue: 0 },
             GuestService::WorkloadExit,
             GuestService::Broker,
-            GuestService::NetworkFlow,
+            GuestService::Substitution,
         ] {
             let _ = std::fs::remove_file(self.socket_path(instance, service));
         }

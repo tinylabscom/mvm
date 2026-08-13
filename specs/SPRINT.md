@@ -74,10 +74,10 @@
       local x86_64 Linux cross-build passes on current main; the platform
       gates are complete.
 - [x] Issue-closeout batch — **#2165, #2321, #2323**. Closed 2026-08-13.
-      Workload-runner root bootargs agree with read-only block attachments
-      across the selected drivers; the substitution forward leg rejects
-      oversized declared or streamed response bodies before accumulation; and
-      Firecracker teardown uses the shared bounded poll backoff.
+      #2165 closed as
+      completed by PR #2330: workload-runner root bootargs now agree with
+      read-only block attachments across the selected drivers. #2321 and #2323
+      were previously closed; the batch is complete.
 
 - [x] Release-artifact download failures no longer send macOS users into a
       host-Nix setup that writes SSH credentials under `/etc/nix` and forces a
@@ -212,14 +212,15 @@
       `features/suites/s11_snapshot/hvf_save_restore.feature`; workspace
       nextest 10600 passed / 24 skipped.
 
-- [~] Open issue reconciliation — **plan 300**. The 30 issues open at the
-      2026-08-10 snapshot are inventoried against `origin/main` `6a18cb740`
+- [~] Open issue reconciliation — **plan 300**. The 31 issues open at the
+      2026-08-13 snapshot are inventoried against `origin/main` `dd528f981`
       with an explicit disposition, closure gate, and dependency-ordered
-      execution phase. #2293 is closed as completed by merged PRs #2302 and
-      #2317; its remaining receipt-store performance finding stays open as
-      #2318. The other 29 issues retain concrete implementation, security,
-      rollout, live-validation, performance, governance, or cross-repository
-      acceptance work.
+      execution phase. Eight issues were closed on 2026-08-13: #2165, #2289,
+      #2333, and #2423 as completed by merged PRs; #2180, #2181, #2305, and
+      #2413 as not planned / superseded by Plan 316 or Plan 313. The
+      remaining 31 issues retain concrete implementation, security, rollout,
+      live-validation, performance, governance, or cross-repository acceptance
+      work.
 - [~] Runtime hardening for production — **plan 303**. Closes gaps between the
       binary CI witnesses and the binary that ships. Landed: trapping integer
       overflow in `[profile.release]` plus a `release-witness` CI lane over the
@@ -266,12 +267,13 @@
       and a real UDS round trip. The PR carries the remaining host-specific
       BDD execution note.
 
-- [~] Kernel pin freshness — **issue #2289**. This PR synchronizes the libkrunfw
-      bundle and custom guest kernel on the verified Linux 6.12.103 LTS
-      tarball, replacing the stale 6.12.102 pin. Structural parity tests keep
-      both consumers on one version/hash, and the existing freshness check
-      refuses a point release that trails kernel.org. The prior #2128 closeout
-      remains the history for the preceding 6.12.102 bump.
+- [x] Kernel pin freshness — **issue #2289**. Closed as completed by PR
+      #2301. The libkrunfw bundle and custom guest kernel now synchronize on
+      the verified Linux 6.12.103 LTS tarball, replacing the stale 6.12.102
+      pin. Structural parity tests keep both consumers on one version/hash,
+      and the existing freshness check refuses a point release that trails
+      kernel.org. The prior #2128 closeout remains the history for the
+      preceding 6.12.102 bump.
 
 - [x] Runtime SDK parity — **issue #2163**. Added the live process-handle and
       filesystem surface to Python and TypeScript, with a Rust-owned
