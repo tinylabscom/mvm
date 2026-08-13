@@ -259,7 +259,7 @@ suite = "egress_substitution"
 statement = "Egress substitution keeps a raw secret off the guest, bound-only, no value in audit"
 witnesses = [
     "fn:handed_placeholders_never_contain_the_secret_value",
-    "fn:substitution_endpoint_refuses_unbound_destination",
+    "fn:network_endpoint_refuses_unbound_destination",
     "fn:audit_chain_carries_no_secret_value",
 ]
 
