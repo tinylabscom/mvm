@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use mvm_contract::protocol::network_flow::Direction;
+use mvm_contract::protocol::network_flow::{Direction, MAX_STREAM_CREDIT};
 use tracing::warn;
 
 /// Why a stream/association operation was refused.
@@ -314,14 +314,39 @@ impl StreamRegistry {
             .streams
             .get_mut(&stream_id)
             .ok_or(RegistryError::NotLive { stream_id })?;
-        entry.guest_credit =
-            entry
-                .guest_credit
-                .checked_add(delta)
-                .ok_or(RegistryError::IllegalState {
-                    stream_id,
-                    state: entry.state,
-                })?;
+        entry.guest_credit = entry
+            .guest_credit
+            .saturating_add(delta)
+            .min(MAX_STREAM_CREDIT);
+        Ok(())
+    }
+
+    /// Consume `len` bytes of host credit on `stream_id`.
+    pub fn consume_host_credit(&mut self, stream_id: u32, len: u32) -> Result<(), RegistryError> {
+        let entry = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(RegistryError::NotLive { stream_id })?;
+        if len > entry.host_credit {
+            return Err(RegistryError::IllegalState {
+                stream_id,
+                state: entry.state,
+            });
+        }
+        entry.host_credit -= len;
+        Ok(())
+    }
+
+    /// Add `delta` bytes to the host credit on `stream_id`.
+    pub fn grant_host_credit(&mut self, stream_id: u32, delta: u32) -> Result<(), RegistryError> {
+        let entry = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(RegistryError::NotLive { stream_id })?;
+        entry.host_credit = entry
+            .host_credit
+            .saturating_add(delta)
+            .min(MAX_STREAM_CREDIT);
         Ok(())
     }
 
@@ -444,6 +469,37 @@ mod tests {
         reg.grant_guest_credit(id, 10).unwrap();
         assert_eq!(reg.get(id).unwrap().guest_credit, 80);
         assert!(reg.consume_guest_credit(id, 81).is_err());
+    }
+
+    #[test]
+    fn host_credit_is_tracked() {
+        let mut reg = StreamRegistry::new(RegistryLimits {
+            max_tcp: 1,
+            max_udp: 0,
+            max_dns: 64,
+            initial_credit: 100,
+        });
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+        reg.consume_host_credit(id, 30).unwrap();
+        assert_eq!(reg.get(id).unwrap().host_credit, 70);
+        reg.grant_host_credit(id, 10).unwrap();
+        assert_eq!(reg.get(id).unwrap().host_credit, 80);
+        assert!(reg.consume_host_credit(id, 81).is_err());
+    }
+
+    #[test]
+    fn credit_grants_are_capped_at_max_stream_credit() {
+        let mut reg = StreamRegistry::new(RegistryLimits {
+            max_tcp: 1,
+            max_udp: 0,
+            max_dns: 64,
+            initial_credit: 100,
+        });
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+        reg.grant_guest_credit(id, u32::MAX).unwrap();
+        reg.grant_host_credit(id, u32::MAX).unwrap();
+        assert_eq!(reg.get(id).unwrap().guest_credit, MAX_STREAM_CREDIT);
+        assert_eq!(reg.get(id).unwrap().host_credit, MAX_STREAM_CREDIT);
     }
 
     #[test]
