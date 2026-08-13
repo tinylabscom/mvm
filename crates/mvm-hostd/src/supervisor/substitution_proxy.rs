@@ -31,7 +31,6 @@ use crate::keyholder::{
     SigningInput, SubstituteError, SubstitutionEndpoint, SubstitutionRegistry, assemble_registry,
     build_sigv4_input, find_placeholder,
 };
-pub use mvm_contract::substitution::{PreparedRequest, ProxyRequest, PrepareError, SubstitutionDriver, prepare_request as prepare_request_core};
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
 use crate::supervisor::reversible_replacement::{ReplacementEngine, ReplacementFlow};
@@ -40,6 +39,10 @@ use crate::supervisor::secret_audit::{
     emit_secret_substituted,
 };
 use crate::supervisor::tools::http_hardening::hardened_client_builder;
+pub use mvm_contract::substitution::{
+    PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver,
+    prepare_request as prepare_request_core,
+};
 
 /// 16 MiB cap on a single routed request/response frame.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -47,7 +50,6 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FORWARD_RESPONSE_BYTES: usize = MAX_FRAME_BYTES;
 #[cfg(not(target_os = "linux"))]
 const RVPROXY_ORIGINAL_DST_MAGIC: &[u8; 8] = b"RVPXOD01";
-
 
 fn recover_terminator_original_destination(
     stream: &mut std::net::TcpStream,
@@ -131,7 +133,9 @@ impl<'a> SubstitutionDriver for SubstitutionEndpoint<'a> {
         destination: &str,
         text: &str,
     ) -> Result<String, ProxyError> {
-        Ok(self.substitute(placeholder, destination, text).map(|z| z.to_string())?)
+        Ok(self
+            .substitute(placeholder, destination, text)
+            .map(|z| z.to_string())?)
     }
 
     fn sign(

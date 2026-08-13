@@ -22,13 +22,14 @@
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::supervisor::audit_file::{SignedEnvelope, VerifyError, verify_chain_bytes};
+use crate::supervisor::SignedEnvelope;
+use crate::supervisor::audit_file::{VerifyError, verify_chain_bytes};
 use crate::supervisor::audit_segment::{
     Continuation, Sealed, continuation_from_entry, sealed_from_entry,
 };
+use mvm_contract::verify::hash_line;
 
 /// What went wrong across the set, as opposed to within one file.
 #[derive(Debug, Error)]
@@ -210,12 +211,6 @@ fn active_seq(path: &Path) -> Result<u64, SegmentSetError> {
         .ok()
         .and_then(|e| continuation_from_entry(&e.entry))
         .map_or(1, |c| c.segment))
-}
-
-fn hash_line(bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher.finalize().into()
 }
 
 fn hex(bytes: &[u8; 32]) -> String {

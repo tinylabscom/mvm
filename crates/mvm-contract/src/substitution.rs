@@ -190,7 +190,10 @@ mod tests {
         assert_eq!(out, "Bearer real-api-key, Accept: application/json");
 
         // A token that does not appear is a no-op, not an error.
-        assert_eq!(substitute_into("clean", "mvm-secret-deadbeef", "x"), "clean");
+        assert_eq!(
+            substitute_into("clean", "mvm-secret-deadbeef", "x"),
+            "clean"
+        );
     }
 }
 
@@ -457,31 +460,49 @@ mod prepare_tests {
 
     #[test]
     fn passes_through_a_request_with_no_placeholder() {
-        let driver = DummyDriver { allow_substitute: true };
+        let driver = DummyDriver {
+            allow_substitute: true,
+        };
         let req = ProxyRequest {
             headers: vec![("Accept".to_string(), "application/json".to_string())],
             ..req()
         };
         let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
-        assert_eq!(prepared.headers, vec![("Accept".to_string(), "application/json".to_string())]);
+        assert_eq!(
+            prepared.headers,
+            vec![("Accept".to_string(), "application/json".to_string())]
+        );
     }
 
     #[test]
     fn substitutes_an_inject_placeholder() {
-        let driver = DummyDriver { allow_substitute: true };
+        let driver = DummyDriver {
+            allow_substitute: true,
+        };
         let req = ProxyRequest {
-            headers: vec![("Authorization".to_string(), "Bearer mvm-secret-bea70000".to_string())],
+            headers: vec![(
+                "Authorization".to_string(),
+                "Bearer mvm-secret-bea70000".to_string(),
+            )],
             ..req()
         };
         let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
-        assert_eq!(prepared.headers, vec![("Authorization".to_string(), "Bearer REAL".to_string())]);
+        assert_eq!(
+            prepared.headers,
+            vec![("Authorization".to_string(), "Bearer REAL".to_string())]
+        );
     }
 
     #[test]
     fn propagates_a_driver_substitute_error() {
-        let driver = DummyDriver { allow_substitute: false };
+        let driver = DummyDriver {
+            allow_substitute: false,
+        };
         let req = ProxyRequest {
-            headers: vec![("Authorization".to_string(), "Bearer mvm-secret-bea70000".to_string())],
+            headers: vec![(
+                "Authorization".to_string(),
+                "Bearer mvm-secret-bea70000".to_string(),
+            )],
             ..req()
         };
         let err = prepare_request(&driver, "api.example.com", req).unwrap_err();
@@ -490,10 +511,15 @@ mod prepare_tests {
 
     #[test]
     fn refuses_more_than_one_signing_placeholder() {
-        let driver = DummyDriver { allow_substitute: true };
+        let driver = DummyDriver {
+            allow_substitute: true,
+        };
         let req = ProxyRequest {
             headers: vec![
-                ("Authorization".to_string(), "Bearer mvm-secret-cafebabe".to_string()),
+                (
+                    "Authorization".to_string(),
+                    "Bearer mvm-secret-cafebabe".to_string(),
+                ),
                 ("X-Other".to_string(), "mvm-secret-deadbeef".to_string()),
             ],
             ..req()
@@ -504,17 +530,30 @@ mod prepare_tests {
 
     #[test]
     fn signing_placeholder_drops_its_header_then_signs() {
-        let driver = DummyDriver { allow_substitute: true };
+        let driver = DummyDriver {
+            allow_substitute: true,
+        };
         let req = ProxyRequest {
             headers: vec![
-                ("Authorization".to_string(), "Bearer mvm-secret-cafebabe".to_string()),
+                (
+                    "Authorization".to_string(),
+                    "Bearer mvm-secret-cafebabe".to_string(),
+                ),
                 ("Accept".to_string(), "application/json".to_string()),
             ],
             ..req()
         };
         let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
         assert!(!prepared.headers.iter().any(|(k, _)| k == "Authorization"));
-        assert!(prepared.headers.contains(&("Accept".to_string(), "application/json".to_string())));
-        assert!(prepared.headers.contains(&("x-signature".to_string(), "sig".to_string())));
+        assert!(
+            prepared
+                .headers
+                .contains(&("Accept".to_string(), "application/json".to_string()))
+        );
+        assert!(
+            prepared
+                .headers
+                .contains(&("x-signature".to_string(), "sig".to_string()))
+        );
     }
 }

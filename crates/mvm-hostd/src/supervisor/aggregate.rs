@@ -720,7 +720,7 @@ impl Supervisor {
         if !reason.is_empty() {
             merged.push(("reason".to_string(), reason.to_string()));
         }
-        let entry = crate::supervisor::audit::PlanAuditEntry::for_plan(plan, None, event, merged);
+        let entry = crate::supervisor::audit::for_plan(plan, None, event, merged);
         match self.audit.sign_and_emit(&entry).await {
             Ok(()) => Ok(()),
             Err(crate::supervisor::audit::AuditError::NotWired) => {

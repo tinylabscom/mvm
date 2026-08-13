@@ -54,7 +54,7 @@ use mvm_core::observability::metrics::Metrics;
 use mvm_core::plan::{ExecutionPlan, PlanId, TenantId};
 use mvm_core::policy::PolicyBundle;
 
-use crate::supervisor::audit::{PlanAuditEntry, AuditError, AuditSigner};
+use crate::supervisor::audit::{AuditError, AuditSigner, PlanAuditEntry, for_plan};
 
 /// Canonical audit-event categories. The string form (the
 /// `event_name` field's prefix) is the wire-stable identifier
@@ -246,7 +246,7 @@ impl Recorder {
         let event_name = event_name.into();
         validate_event_prefix(category, &event_name)?;
         let merged = merge_extras(category, extras);
-        let entry = PlanAuditEntry::for_plan(plan, bundle, event_name, merged);
+        let entry = for_plan(plan, bundle, event_name, merged);
         self.signer.sign_and_emit(&entry).await?;
         self.bump_metric(category);
         Ok(())

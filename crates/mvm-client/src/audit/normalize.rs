@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use mvm_hostd::audit_signer::canonical::CanonicalEntry;
 use mvm_hostd::audit_signer::verify::WorkloadVerifyError;
 use mvm_hostd::supervisor::{
-    AuditEntry, UNBOUND_IMAGE_NAME, UNBOUND_PLAN_ID, VerifyError as LifecycleVerifyError,
+    PlanAuditEntry, UNBOUND_IMAGE_NAME, UNBOUND_PLAN_ID, VerifyError as LifecycleVerifyError,
 };
 
 use super::event::{
@@ -30,7 +30,7 @@ const MACHINE_LABEL_KEYS: &[&str] = &["vm", "vm_name", "machine", "workload"];
 pub(crate) fn normalize_lifecycle_entry(
     source: &AuditSourceId,
     seq: u64,
-    entry: &AuditEntry,
+    entry: &PlanAuditEntry,
 ) -> VerifiedAuditEvent {
     VerifiedAuditEvent {
         id: AuditEventId {
@@ -78,7 +78,7 @@ pub(crate) fn normalize_workload_entry(
 
 /// Machine name of a lifecycle event: an explicit machine-ish label wins,
 /// then the image name unless it is the unbound placeholder.
-fn lifecycle_machine(entry: &AuditEntry) -> Option<String> {
+fn lifecycle_machine(entry: &PlanAuditEntry) -> Option<String> {
     for key in MACHINE_LABEL_KEYS {
         if let Some(value) = entry.labels.get(*key) {
             return Some(sanitize_free_text(value, MAX_FIELD_LEN));
@@ -92,7 +92,7 @@ fn lifecycle_machine(entry: &AuditEntry) -> Option<String> {
 }
 
 /// Plan id unless the entry is the unbound placeholder.
-fn lifecycle_plan_id(entry: &AuditEntry) -> Option<String> {
+fn lifecycle_plan_id(entry: &PlanAuditEntry) -> Option<String> {
     if entry.plan_id.0 == UNBOUND_PLAN_ID {
         None
     } else {
@@ -261,8 +261,8 @@ mod tests {
         }
     }
 
-    fn entry(event: &str) -> AuditEntry {
-        AuditEntry {
+    fn entry(event: &str) -> PlanAuditEntry {
+        PlanAuditEntry {
             timestamp: Utc::now(),
             tenant: TenantId("local".into()),
             plan_id: PlanId("sha256:abc".into()),

@@ -254,7 +254,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// audit log and render them.
 ///
 /// This is a read-only operation: it verifies the existing chain under
-/// the host signer's public key, converts each mappable `AuditEntry`
+/// the host signer's public key, converts each mappable `PlanAuditEntry`
 /// into a receipt payload, signs it with the same host key, and prints
 /// the result. No new audit entries are written.
 fn audit_receipts_export(tenant: &str, plan_id: Option<&str>, json: bool) -> Result<()> {
@@ -821,7 +821,7 @@ fn print_last_n_chain_lines(path: &std::path::Path, n: usize) -> Result<()> {
 fn print_chain_line(line: &str) {
     match serde_json::from_str::<SignedEnvelope>(line) {
         Ok(env) => {
-            // Render the inner AuditEntry as a single human-readable
+            // Render the inner PlanAuditEntry as a single human-readable
             // line. Operators who want the full envelope still have
             // the raw file at `~/.mvm/audit/<tenant>.jsonl`.
             let labels = if env.entry.labels.is_empty() {
@@ -1029,7 +1029,7 @@ fn print_audit_line(line: &str) {
             println!("{ts}  {kind}{vm}{detail}", ts = event.timestamp);
         }
         Err(_) => {
-            // Non-local-audit line — print as-is (fleet AuditEntry, etc.)
+            // Non-local-audit line — print as-is (fleet PlanAuditEntry, etc.)
             println!("{line}");
         }
     }
@@ -1206,7 +1206,7 @@ mod verify_cert_tests {
     // ──────────────────────────────────────────────────────────────
 
     use mvm_core::plan::{PlanId, TenantId};
-    use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+    use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
     use mvm_runtime::vm::overlay::cert_fingerprint;
     use std::collections::BTreeMap;
 
@@ -1236,7 +1236,7 @@ mod verify_cert_tests {
             labels.insert("tenant".to_string(), tenant_label.to_string());
             labels.insert("workload".to_string(), workload.to_string());
             labels.insert("cert_fingerprint".to_string(), fingerprint.to_string());
-            let entry = AuditEntry {
+            let entry = PlanAuditEntry {
                 timestamp: chrono::Utc::now(),
                 tenant: TenantId(tenant.to_string()),
                 plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
@@ -1364,7 +1364,7 @@ mod verify_cert_tests {
         labels.insert("tenant".to_string(), "acme".to_string());
         labels.insert("workload".to_string(), "build".to_string());
         labels.insert("cert_fingerprint".to_string(), "fp1".to_string());
-        let destroy_entry = AuditEntry {
+        let destroy_entry = PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: TenantId("local".to_string()),
             plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
@@ -1381,7 +1381,7 @@ mod verify_cert_tests {
         // One unrelated event.
         let mut other_labels = BTreeMap::new();
         other_labels.insert("verb".to_string(), "up".to_string());
-        let other_entry = AuditEntry {
+        let other_entry = PlanAuditEntry {
             timestamp: chrono::Utc::now(),
             tenant: TenantId("local".to_string()),
             plan_id: PlanId(mvm_hostd::supervisor::UNBOUND_PLAN_ID.to_string()),
@@ -1589,7 +1589,7 @@ mod merkle_verb_tests {
     /// Seed a real chain of SignedEnvelope lines via `FileAuditSigner`,
     /// returning the verified leaf set. `plan_ids` names each entry's plan_id.
     fn seed_leaves(plan_ids: &[&str]) -> (tempfile::TempDir, Vec<String>) {
-        use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+        use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
         use std::collections::BTreeMap;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1603,7 +1603,7 @@ mod merkle_verb_tests {
             .build()
             .unwrap();
         for (i, plan_id) in plan_ids.iter().enumerate() {
-            let entry = AuditEntry {
+            let entry = PlanAuditEntry {
                 timestamp: chrono::Utc::now(),
                 tenant: mvm_core::plan::TenantId("local".to_string()),
                 plan_id: mvm_core::plan::PlanId(plan_id.to_string()),

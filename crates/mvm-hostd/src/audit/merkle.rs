@@ -112,7 +112,7 @@ pub fn build_inclusion_in(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::{PlanAuditEntry, AuditSigner, FileAuditSigner};
+    use crate::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
     use ed25519_dalek::SigningKey;
     use mvm_contract::merkle::{verify_inclusion, verify_signed_root};
     use mvm_core::plan::{PlanId, TenantId};

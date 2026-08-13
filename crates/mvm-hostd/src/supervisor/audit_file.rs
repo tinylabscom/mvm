@@ -42,53 +42,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::supervisor::audit::{PlanAuditEntry, AuditError, AuditSigner};
-
-/// On-disk representation of one audit line: the entry, the exact bytes that
-/// were signed, the hash of the previous envelope (genesis = 32 zero bytes),
-/// and an Ed25519 signature over `signed_bytes || prev_hash`.
-///
-/// ## Why the signed bytes are stored
-///
-/// A verifier that re-derives the signed bytes by re-serializing `entry` is
-/// committing every future reader to reproducing this crate's serializer
-/// exactly and forever. It also makes the entry schema unchangeable in
-/// practice: add one field that always serializes, and every historical line
-/// re-serializes differently and stops verifying — the log would accuse
-/// itself of tampering because a struct grew.
-///
-/// So the bytes that were signed are written down. Verification reads them
-/// and never re-derives anything, which is what makes the signature a fact
-/// about the past rather than a fact about the current struct definition.
-///
-/// `entry` stays alongside them, decoded, because an audit log nobody can
-/// `grep` is an audit log nobody reads. The verifier checks the two agree, so
-/// the readable copy cannot drift from the signed one.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SignedEnvelope {
-    pub entry: PlanAuditEntry,
-    /// base64 url-safe-no-pad of the exact entry bytes covered by
-    /// `signature`.
-    ///
-    /// `None` on lines written before this field existed. Those verify by the
-    /// original rule — re-serializing `entry` — which is kept indefinitely:
-    /// evidence somebody already holds must not stop verifying because the
-    /// writer improved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical: Option<String>,
-    /// base64 url-safe-no-pad of the 32-byte SHA-256 of the previous
-    /// envelope's full JSON line. Genesis is 32 zero bytes.
-    pub prev_hash: String,
-    /// base64 url-safe-no-pad of the 64-byte Ed25519 signature over
-    /// `signed_entry_bytes || prev_hash_bytes`.
-    pub signature: String,
-}
+use crate::supervisor::audit::{AuditError, AuditSigner, PlanAuditEntry, SignedEnvelope};
+use mvm_contract::verify::{hash_line, seal, signed_bytes_for};
 
 /// Chain-signed file signer. Holds an Ed25519 private key, a base
 /// directory, and an in-memory `tenant -> last_envelope_hash` cursor
@@ -401,19 +360,8 @@ impl FileAuditSigner {
         prev_hash: [u8; 32],
         sync: SyncPolicy,
     ) -> Result<[u8; 32], AuditError> {
-        let entry_bytes = serde_json::to_vec(entry).map_err(|e| AuditError::Io(e.to_string()))?;
-        let mut to_sign = entry_bytes.clone();
-        to_sign.extend_from_slice(&prev_hash);
-        let signature = self.signing_key.sign(&to_sign);
-
-        let envelope = SignedEnvelope {
-            entry: entry.clone(),
-            // Written down rather than left to be re-derived: this is what the
-            // signature covers, and a verifier should never have to guess it.
-            canonical: Some(URL_SAFE_NO_PAD.encode(&entry_bytes)),
-            prev_hash: URL_SAFE_NO_PAD.encode(prev_hash),
-            signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
-        };
+        let envelope = seal(entry.clone(), prev_hash, &self.signing_key)
+            .map_err(|e| AuditError::Io(e.to_string()))?;
         let line = serde_json::to_string(&envelope).map_err(|e| AuditError::Io(e.to_string()))?;
         let new_hash = hash_line(line.as_bytes());
 
@@ -724,38 +672,6 @@ pub enum VerifyError {
     TruncatedTail { line: usize },
 }
 
-/// The bytes a line's signature covers.
-///
-/// Post-`canonical` lines carry them verbatim; the readable `entry` is checked
-/// against them so the copy a human reads cannot say something different from
-/// the copy the signature protects. Pre-`canonical` lines are verified by the
-/// original rule, re-serializing `entry`, which stays supported forever —
-/// there is no cutover and no flag day, because a log written last year is
-/// evidence and must keep verifying.
-fn signed_bytes_for(envelope: &SignedEnvelope, line: usize) -> Result<Vec<u8>, VerifyError> {
-    let Some(encoded) = envelope.canonical.as_deref() else {
-        return serde_json::to_vec(&envelope.entry).map_err(|e| VerifyError::Malformed {
-            line,
-            reason: format!("entry reserialize: {e}"),
-        });
-    };
-    let bytes = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|e| VerifyError::Malformed {
-            line,
-            reason: format!("canonical b64: {e}"),
-        })?;
-    let decoded: PlanAuditEntry =
-        serde_json::from_slice(&bytes).map_err(|e| VerifyError::Malformed {
-            line,
-            reason: format!("canonical entry parse: {e}"),
-        })?;
-    if decoded != envelope.entry {
-        return Err(VerifyError::EntryCanonicalMismatch { line });
-    }
-    Ok(bytes)
-}
-
 /// Walk a chain-signed audit file, verifying each envelope's
 /// `prev_hash` against the running chain hash and each signature
 /// against `verifying_key`. Returns the number of valid entries on
@@ -940,19 +856,30 @@ fn verify_line(
                 reason: "signature must be 64 bytes".to_string(),
             })?;
     let signature = Signature::from_bytes(&sig_arr);
-    let mut to_verify = signed_bytes_for(&envelope, idx)?;
+    let mut to_verify = signed_bytes_for(&envelope, idx).map_err(|e| match e {
+        mvm_contract::verify::AuditVerifyError::Malformed { reason, .. } => {
+            VerifyError::Malformed { line: idx, reason }
+        }
+        mvm_contract::verify::AuditVerifyError::PrevHashMismatch { .. } => {
+            VerifyError::PrevHashMismatch { line: idx }
+        }
+        mvm_contract::verify::AuditVerifyError::SignatureInvalid { .. } => {
+            VerifyError::SignatureInvalid { line: idx }
+        }
+        mvm_contract::verify::AuditVerifyError::EntryCanonicalMismatch { .. } => {
+            VerifyError::EntryCanonicalMismatch { line: idx }
+        }
+        mvm_contract::verify::AuditVerifyError::KeyDecode(reason) => VerifyError::Malformed {
+            line: idx,
+            reason: format!("key: {reason}"),
+        },
+    })?;
     to_verify.extend_from_slice(prev_hash);
     verifying_key
         .verify(&to_verify, &signature)
         .map_err(|_| VerifyError::SignatureInvalid { line: idx })?;
     entries.push(envelope.entry);
     Ok(hash_line(line.as_bytes()))
-}
-
-fn hash_line(bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher.finalize().into()
 }
 
 /// How far a chain has already been verified, so a later run can resume.

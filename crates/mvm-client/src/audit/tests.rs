@@ -11,7 +11,7 @@ use ed25519_dalek::SigningKey;
 use mvm_core::plan::{PlanId, TenantId};
 use mvm_hostd::audit_signer::canonical::CanonicalEntry;
 use mvm_hostd::audit_signer::chain::Chain;
-use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+use mvm_hostd::supervisor::{AuditSigner, FileAuditSigner, PlanAuditEntry};
 
 use super::*;
 
@@ -25,8 +25,8 @@ fn ts(hour: u32, minute: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 8, 1, hour, minute, 0).unwrap()
 }
 
-fn lifecycle_entry(tenant: &str, event: &str, at: DateTime<Utc>) -> AuditEntry {
-    AuditEntry {
+fn lifecycle_entry(tenant: &str, event: &str, at: DateTime<Utc>) -> PlanAuditEntry {
+    PlanAuditEntry {
         timestamp: at,
         tenant: TenantId(tenant.to_string()),
         plan_id: PlanId("sha256:plan".to_string()),
@@ -41,7 +41,7 @@ fn lifecycle_entry(tenant: &str, event: &str, at: DateTime<Utc>) -> AuditEntry {
 }
 
 /// Write a lifecycle chain of `entries` under `key` into `audit_dir`.
-fn write_lifecycle_chain(audit_dir: &Path, key: &SigningKey, entries: &[AuditEntry]) {
+fn write_lifecycle_chain(audit_dir: &Path, key: &SigningKey, entries: &[PlanAuditEntry]) {
     let signer = FileAuditSigner::open(key.clone(), audit_dir).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -445,7 +445,7 @@ fn merged_ordering_is_newest_first_with_stable_tie_breaks() {
 #[test]
 fn pagination_walks_the_stream_without_gaps_or_duplicates() {
     let fx = Fixture::new();
-    let entries: Vec<AuditEntry> = (0..7u32)
+    let entries: Vec<PlanAuditEntry> = (0..7u32)
         .map(|i| lifecycle_entry("local", &format!("e-{i}"), ts(9, i)))
         .collect();
     write_lifecycle_chain(&fx.audit_dir, &fx.key, &entries);

@@ -40,7 +40,9 @@ use std::path::{Path, PathBuf};
 
 use crate::audit::receipt_export::audit_entry_to_receipt;
 use crate::audit::receipt_store::ReceiptStore;
-use crate::supervisor::{PlanAuditEntry, AuditSigner, FileAuditSigner};
+use crate::supervisor::{
+    AuditSigner, FileAuditSigner, PlanAuditEntry, for_plan, transcript_sealed,
+};
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -811,7 +813,7 @@ impl AuditEmitter {
         sealed_root_hex: &str,
         chunk_count: usize,
     ) -> Result<()> {
-        let entry = PlanAuditEntry::transcript_sealed(
+        let entry = transcript_sealed(
             plan,
             None,
             capture_id,
@@ -935,7 +937,7 @@ impl AuditEmitter {
     where
         E: IntoIterator<Item = (String, String)>,
     {
-        let entry = PlanAuditEntry::for_plan(plan, None, event, extras);
+        let entry = for_plan(plan, None, event, extras);
         self.emit_entry(&entry)
     }
 

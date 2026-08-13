@@ -373,12 +373,12 @@ E3.1 was unaffected and is done; the frozen fixture passes on post-319
       function that *is* the chain link, so three definitions are three
       definitions of what the chain is. Independent of every other E3 step
       (no `AuditEntry` dependency), so it lands first and alone.
-- [ ] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
-- [ ] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
+- [x] E3.2 — hard-rename one of the two `AuditEntry`s. No alias.
+- [x] E3.3 — `hash_line` + `signed_bytes_for` de-duplicated to one
       definition each, `mvm-hostd` calling `mvm-contract`.
-- [ ] E3.4 — `AuditEntry` →P; `for_plan` becomes a free fn.
-- [ ] E3.5 — unify `SignedEnvelope`, retire `MirrorEntry`.
-- [ ] E3.6 — `seal()` →P; `FileAuditSigner::sign_and_emit` calls it.
+- [x] E3.4 — `AuditEntry` →P; `for_plan` becomes a free fn.
+- [x] E3.5 — unify `SignedEnvelope`, retire `MirrorEntry`.
+- [x] E3.6 — `seal()` →P; `FileAuditSigner::sign_and_emit` calls it.
 
 ### Why relocate rather than reimplement
 

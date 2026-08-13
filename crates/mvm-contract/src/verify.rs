@@ -20,7 +20,7 @@
 //!
 //! Lines written before `canonical` existed carry no such copy, and are
 //! verified the original way — by re-serializing `entry`, which requires
-//! [`MirrorEntry`] to reproduce `mvm_hostd::supervisor::audit::AuditEntry`'s
+//! [`PlanAuditEntry`] to reproduce `mvm_hostd::supervisor::audit::AuditEntry`'s
 //! serde shape field-for-field (declaration order, `#[serde(transparent)]`
 //! string ids flattened to `String`, `skip_serializing_if` on the bundle
 //! fields, `deny_unknown_fields`). That path is kept indefinitely: a log
@@ -37,38 +37,35 @@ use alloc::vec::Vec;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use core::fmt;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Mirror of `mvm_hostd::supervisor::audit::AuditEntry`.
+/// A chain-signed audit entry.
 ///
-/// For lines that carry `canonical`, this no longer has to re-serialize
-/// byte-for-byte like upstream: the signed bytes are read off the line, and
-/// this type only has to *parse* them to the same value. That is a far weaker
-/// obligation than reproducing another crate's serializer, and it is what lets
-/// the entry schema evolve without invalidating history.
-///
-/// Pre-`canonical` lines still depend on byte-exact agreement — field order
-/// and serde attributes must match upstream exactly, or a genuine untampered
-/// line fails to verify. The `#[serde(transparent)]` newtype ids upstream
-/// serialize as bare strings, so they are `String` here.
+/// Generic over identifier and timestamp types so the host can use its
+/// strongly-typed `TenantId` / `PlanId` / `PolicyId` newtypes and `DateTime<Utc>`
+/// while the browser verifier uses plain strings. The serde shape is the same
+/// in all cases: the ids serialize as bare strings (`#[serde(transparent)]`
+/// upstream), the bundle fields are omitted when absent, and labels are a
+/// canonical-ordered map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MirrorEntry {
-    /// RFC 3339 timestamp, passed through verbatim (no chrono parse).
-    pub timestamp: String,
-    /// Tenant id (`TenantId`, transparent string upstream).
-    pub tenant: String,
-    /// Plan id (`PlanId`, transparent string upstream).
-    pub plan_id: String,
+pub struct PlanAuditEntry<Tenant = String, Plan = String, Bundle = String, Time = String> {
+    /// RFC 3339 timestamp. The host uses `DateTime<Utc>`; the browser verifier
+    /// passes the string through.
+    pub timestamp: Time,
+    /// Tenant id. `TenantId` upstream; serializes as a bare string.
+    pub tenant: Tenant,
+    /// Plan id. `PlanId` upstream; serializes as a bare string.
+    pub plan_id: Plan,
     /// Plan schema/content version.
     pub plan_version: u32,
     /// Bundle id at event time; omitted from the wire when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bundle_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<Bundle>,
     /// Bundle version at event time; omitted from the wire when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle_version: Option<u32>,
     /// Image name the workload ran.
     pub image_name: String,
@@ -81,13 +78,12 @@ pub struct MirrorEntry {
     pub labels: BTreeMap<String, String>,
 }
 
-/// On-disk representation of one audit line. Mirrors
-/// `mvm_hostd::supervisor::audit_file::SignedEnvelope`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// On-disk representation of one audit line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignedEnvelope {
+pub struct SignedEnvelope<T = PlanAuditEntry> {
     /// The audit entry that was signed, decoded for reading.
-    pub entry: MirrorEntry,
+    pub entry: T,
     /// base64 url-safe-no-pad of the exact entry bytes covered by
     /// `signature`. `None` on lines written before this field existed, which
     /// are verified by re-serializing `entry` instead — indefinitely.
@@ -204,7 +200,19 @@ pub fn verifying_key_from_hex(hex: &str) -> Result<VerifyingKey, AuditVerifyErro
 ///
 /// Byte-for-byte counterpart of
 /// `mvm_hostd::supervisor::audit_file::signed_bytes_for`.
-fn signed_bytes_for(envelope: &SignedEnvelope, line: usize) -> Result<Vec<u8>, AuditVerifyError> {
+/// The bytes a line's signature covers.
+///
+/// Post-`canonical` lines carry them verbatim; the readable `entry` is checked
+/// against them so the copy a human reads cannot say something different from
+/// the copy the signature protects. Pre-`canonical` lines fall back to
+/// re-serializing `entry`, which stays supported indefinitely.
+pub fn signed_bytes_for<T>(
+    envelope: &SignedEnvelope<T>,
+    line: usize,
+) -> Result<Vec<u8>, AuditVerifyError>
+where
+    T: Serialize + for<'de> Deserialize<'de> + PartialEq,
+{
     let Some(encoded) = envelope.canonical.as_deref() else {
         return serde_json::to_vec(&envelope.entry).map_err(|e| AuditVerifyError::Malformed {
             line,
@@ -217,11 +225,10 @@ fn signed_bytes_for(envelope: &SignedEnvelope, line: usize) -> Result<Vec<u8>, A
             line,
             reason: format!("canonical b64: {e}"),
         })?;
-    let decoded: MirrorEntry =
-        serde_json::from_slice(&bytes).map_err(|e| AuditVerifyError::Malformed {
-            line,
-            reason: format!("canonical entry parse: {e}"),
-        })?;
+    let decoded: T = serde_json::from_slice(&bytes).map_err(|e| AuditVerifyError::Malformed {
+        line,
+        reason: format!("canonical entry parse: {e}"),
+    })?;
     if decoded != envelope.entry {
         return Err(AuditVerifyError::EntryCanonicalMismatch { line });
     }
@@ -252,7 +259,7 @@ pub const LABEL_PREV_SEGMENT: &str = "chain.prev_segment";
 /// Still only a claim when this returns: it becomes a fact when the signature
 /// over `signed_bytes || tip` verifies. Sequence contiguity is checked here so
 /// a record cannot assert its own gap and be adopted anyway.
-fn continuation_start_hash(entry: &MirrorEntry) -> Option<[u8; 32]> {
+fn continuation_start_hash(entry: &PlanAuditEntry) -> Option<[u8; 32]> {
     if entry.event != CHAIN_CONTINUED {
         return None;
     }
@@ -353,10 +360,33 @@ pub fn verify_audit_chain_bytes(
 /// each audit line advances the running `prev_hash` by. Shared with
 /// `merkle` (the empty-tree Merkle root is the SHA-256 of the empty
 /// input, i.e. `hash_line(&[])`).
-pub(crate) fn hash_line(bytes: &[u8]) -> [u8; 32] {
+pub fn hash_line(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finalize().into()
+}
+
+/// Sign `entry` into a chain link that follows `prev_hash`.
+///
+/// Serializes `entry`, base64-encodes the bytes into `canonical`, signs
+/// `entry_bytes || prev_hash`, and returns the complete envelope. This is the
+/// pure half of the writer that both `mvm-hostd` and the browser demo share.
+pub fn seal<T: Serialize>(
+    entry: T,
+    prev_hash: [u8; 32],
+    signing_key: &SigningKey,
+) -> Result<SignedEnvelope<T>, serde_json::Error> {
+    let entry_bytes = serde_json::to_vec(&entry)?;
+    let canonical = URL_SAFE_NO_PAD.encode(&entry_bytes);
+    let mut to_sign = entry_bytes;
+    to_sign.extend_from_slice(&prev_hash);
+    let signature = signing_key.sign(&to_sign);
+    Ok(SignedEnvelope {
+        entry,
+        canonical: Some(canonical),
+        prev_hash: URL_SAFE_NO_PAD.encode(prev_hash),
+        signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+    })
 }
 
 /// Decode exactly 32 bytes from a hex string. A tiny local decoder so
@@ -427,8 +457,8 @@ mod tests {
         SigningKey::from_bytes(&SEED)
     }
 
-    fn entry(event: &str, bundle: Option<&str>) -> MirrorEntry {
-        MirrorEntry {
+    fn entry(event: &str, bundle: Option<&str>) -> PlanAuditEntry {
+        PlanAuditEntry {
             timestamp: "2026-06-03T12:00:00Z".to_string(),
             tenant: "tenant-a".to_string(),
             plan_id: "plan-1".to_string(),
@@ -455,7 +485,7 @@ mod tests {
     /// Re-implement the supervisor's writer so tests produce genuine chains:
     /// sign `to_vec(entry) || prev_hash`, then emit the envelope and advance
     /// the chain by hashing the written line.
-    fn build_chain_shaped(key: &SigningKey, entries: &[MirrorEntry], shape: Shape) -> String {
+    fn build_chain_shaped(key: &SigningKey, entries: &[PlanAuditEntry], shape: Shape) -> String {
         let mut prev_hash = [0u8; 32];
         let mut out = String::new();
         for e in entries {
@@ -480,7 +510,7 @@ mod tests {
         out
     }
 
-    fn build_chain(key: &SigningKey, entries: &[MirrorEntry]) -> String {
+    fn build_chain(key: &SigningKey, entries: &[PlanAuditEntry]) -> String {
         build_chain_shaped(key, entries, Shape::Stored)
     }
 
