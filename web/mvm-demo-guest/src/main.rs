@@ -209,6 +209,7 @@ fn cmd_help() {
     println("  cat <file>...          print file contents");
     println("  echo [-n] <text>       print text");
     println("  fetch <host> <port>    egress to host:port via mvm:egress");
+    println("  ping <host> <port>     test policy decision for host:port");
     println("  whoami                 print current user");
     println("  hostname               print system hostname");
     println("  date                   print current date and time");
@@ -474,16 +475,29 @@ fn cmd_man(args: &[String]) {
     println(&format!("No manual entry for {topic}"));
 }
 
-fn cmd_fetch(args: &[String]) {
+fn parse_host_port(args: &[String]) -> Option<(String, u16)> {
     if args.len() < 3 {
-        println("fetch: usage: fetch <host> <port> [body]");
-        return;
+        return None;
     }
     let host = args[1].clone();
-    let port: u16 = match args[2].parse() {
-        Ok(p) => p,
+    match args[2].parse::<u16>() {
+        Ok(port) => Some((host, port)),
         Err(_) => {
             println("fetch: invalid port");
+            None
+        }
+    }
+}
+
+fn read_response(out: &[u8], n: usize) -> String {
+    String::from_utf8_lossy(&out[..n]).into_owned()
+}
+
+fn cmd_fetch(args: &[String]) {
+    let (host, port) = match parse_host_port(args) {
+        Some(hp) => hp,
+        None => {
+            println("fetch: usage: fetch <host> <port> [body]");
             return;
         }
     };
@@ -491,14 +505,41 @@ fn cmd_fetch(args: &[String]) {
     let mut out = vec![0u8; 4096];
     match host_egress(&host, port, body, &mut out) {
         Ok(n) => {
-            let response = String::from_utf8_lossy(&out[..n]);
+            let response = read_response(&out, n);
             println(&format!("fetch: allowed ({host}:{port})"));
             if !response.is_empty() {
                 println(&response);
             }
         }
         Err(-13) => println(&format!("fetch: denied by NetworkPolicy ({host}:{port})")),
-        Err(e) => println(&format!("fetch: error {e}")),
+        Err(_) => {
+            // The host wrote an explanatory message into the response buffer
+            // even though it returned a negative status code.
+            let msg = read_response(&out, out.iter().position(|&b| b == 0).unwrap_or(out.len()));
+            println(&format!("fetch: error ({host}:{port}): {msg}"));
+        }
+    }
+}
+
+fn cmd_ping(args: &[String]) {
+    let (host, port) = match parse_host_port(args) {
+        Some(hp) => hp,
+        None => {
+            println("ping: usage: ping <host> <port>");
+            return;
+        }
+    };
+    let mut out = vec![0u8; 4096];
+    match host_egress(&host, port, &[], &mut out) {
+        Ok(_) => println(&format!("ping: {host}:{port}: policy allowed")),
+        Err(-13) => println(&format!("ping: {host}:{port}: denied by NetworkPolicy")),
+        Err(_) => {
+            let msg = read_response(
+                &out,
+                out.iter().position(|&b| b == 0).unwrap_or(out.len()),
+            );
+            println(&format!("ping: {host}:{port}: {msg}"));
+        }
     }
 }
 
@@ -535,6 +576,7 @@ fn run_line(line: &str) -> bool {
         "which" => cmd_which(&args),
         "man" => cmd_man(&args),
         "fetch" => cmd_fetch(&args),
+        "ping" => cmd_ping(&args),
         "exit" => {
             println("mvm: stopping microVM");
             return false;

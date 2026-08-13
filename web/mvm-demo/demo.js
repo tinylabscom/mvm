@@ -21,7 +21,7 @@ let historyIndex = -1;
 let savedInput = "";
 
 const BUILTINS = [
-  "help", "clear", "exit", "pwd", "cd", "ls", "cat", "echo", "fetch",
+  "help", "clear", "exit", "pwd", "cd", "ls", "cat", "echo", "fetch", "ping",
   "whoami", "hostname", "date", "uname", "env", "printenv", "id", "ps",
   "top", "df", "free", "uptime", "history", "which", "man",
 ];
