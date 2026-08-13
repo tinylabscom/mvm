@@ -310,6 +310,8 @@ shell).
 | Command | Description |
 |---------|-------------|
 | `mvmctl run -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
+| `mvmctl run python3 script.py` | Auto-detect the runtime from the command name and project files, then run in a pinned OCI image |
+| `mvmctl run --no-detect -- <cmd>...` | Skip runtime detection and use the bundled default microVM image |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...` | Boot a registered manifest/template instead of the default |
 | `mvmctl run --image <ref> -- <cmd>...` | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit |
 | `mvmctl run --image <ref> --prod -- <cmd>...` | Production OCI-image policy: require `<ref>` to be digest-pinned and cosign-verified by the OCI policy before cache use or boot |

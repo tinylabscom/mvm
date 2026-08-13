@@ -11,6 +11,7 @@ mod grants;
 mod hints;
 mod parse;
 mod resolve;
+mod runtime_detect;
 mod start;
 mod state;
 mod vsock;
@@ -29,6 +30,7 @@ pub(super) use resolve::{
     ManifestArgRef, egress_enforcement_label, resolve_effective_hypervisor, resolve_flake_ref,
     resolve_manifest_arg, resolve_run_network_policy, resolve_running_vm,
 };
+pub(super) use runtime_detect::detect_runtime_image;
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(super) use vsock::{emit_vsock_rpc_audit, wait_for_guest_agent};

@@ -122,6 +122,12 @@ pub(in crate::commands) struct RunArgs {
     /// and host paths are omitted.
     #[arg(long)]
     pub dry_run: bool,
+    /// Do not auto-detect the runtime image from the command or project files.
+    ///
+    /// When set, `mvmctl run` uses only `--image`, `--manifest`, `--launch-plan`,
+    /// or the bundled default image.
+    #[arg(long)]
+    pub no_detect: bool,
     /// Path to an mvmforge launch document. Mutually exclusive with trailing argv.
     #[arg(long, value_name = "PATH", conflicts_with = "argv")]
     pub launch_plan: Option<String>,
@@ -257,10 +263,22 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
 /// mutable template pointer would boot the wrong revision.
 pub(in crate::commands) fn run_secure_with_source(
     cli: &Cli,
-    args: RunArgs,
+    mut args: RunArgs,
     cfg: &MvmConfig,
     source_override: Option<crate::exec::ImageSource>,
 ) -> Result<()> {
+    // Auto-detect the runtime image from the command or project files when
+    // no explicit source was supplied. Explicit `--image` / `--manifest` /
+    // `--launch-plan` always win; `--no-detect` disables this.
+    if args.image.is_none() && args.manifest.is_none() && args.launch_plan.is_none() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Some(detected) =
+            super::shared::detect_runtime_image(&args.argv, &cwd, args.no_detect)
+        {
+            args.image = Some(detected);
+        }
+    }
+
     // When an SDK transport mode is requested, peel off the
     // SDK-shaped surface before the sandbox-runner validation kicks
     // in. `--dev` (alias for live) is refused in v1; `--prod` (alias
@@ -1539,6 +1557,7 @@ mod tests {
             receipt: None,
             json: false,
             dry_run: false,
+            no_detect: false,
             launch_plan: None,
             mode: None,
             dev: false,

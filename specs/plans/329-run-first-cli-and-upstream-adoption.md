@@ -140,16 +140,16 @@ complete; no unresolved capability gap.
 
 ### Phase 2 — Runtime auto-detection
 
-- [ ] Define a small, auditable runtime catalog mapping command names and
+- [x] Define a small, auditable runtime catalog mapping command names and
       project files to OCI image refs (e.g. `python3` / `requirements.txt` →
       `python:3.12-alpine`, `cargo` / `Cargo.toml` → `rust:1.85-alpine`).
-- [ ] Implement detection order: explicit `--image`, then argv[0], then
+- [x] Implement detection order: explicit `--image`, then argv[0], then
       project files in the working directory, then the bundled default image.
-- [ ] Add `--no-detect` to force the default image, and `--image` to override.
+- [x] Add `--no-detect` to force the default image, and `--image` to override.
 - [ ] Add `--template` to pick a built-in template by name.
-- [ ] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
+- [x] Ensure auto-detected runs still produce a signed `ExecutionPlan` with
       default-deny egress.
-- [ ] Add unit tests for each detection rule and BDD scenarios for at least
+- [x] Add unit tests for each detection rule and BDD scenarios for at least
       Python, Node, Rust, and Go.
 
 **Acceptance:** `mvmctl run python3 -c "print('ok')"` boots the right image

@@ -166,11 +166,17 @@ Firecracker microVM as the sandbox. Name a source with `--image`, `--flake`,
 or `--manifest`.
 
 ```bash
+mvmctl run python3 script.py                                     # auto-detected runtime, one-shot
 mvmctl machine run --image alpine -- uname -a                    # OCI image, one-shot
 mvmctl machine run --flake . --mount .:/work -- ls /work         # share host dir, read-only
 mvmctl machine run --image alpine -e DEBUG=1 -- env | grep DEBUG # inject env vars
 mvmctl machine run --manifest my-tpl -- /bin/true                # registered template
 ```
+
+`mvmctl run` is the same transient one-shot path as `mvmctl machine run`, but
+with the runtime image auto-detected from the command name and project files.
+Use `--no-detect` to skip detection, or `--image <ref>` to choose the image
+explicitly.
 
 When you reuse a registered template that has a captured snapshot, exec
 restores the captured state instead of re-provisioning from scratch, so

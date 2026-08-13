@@ -14,9 +14,17 @@ Use one-shot mode for isolated code execution. Use named-VM commands when you ar
 
 ```sh
 mvmctl run -- uname -a
+mvmctl run python3 script.py
 mvmctl run --profile restrictive -- python -c 'print("hello")'
 mvmctl run --timeout 30 --receipt /tmp/run-receipt.json -- python task.py
 ```
+
+When no image, manifest, or launch plan is supplied, `mvmctl run` auto-detects
+a runtime from the trailing command (`python3`, `npm`, `cargo`, `go`, ...) and,
+as a fallback, from project files in the working directory (`requirements.txt`,
+`package.json`, `Cargo.toml`, ...). The detected image is a conservative,
+pinned OCI reference such as `python:3.12-alpine`. Use `--no-detect` to force
+the bundled default microVM, or `--image <ref>` to override.
 
 `mvmctl run` produces a transient sandbox. It can write a signed receipt with invocation hashes, output hashes, and exit status. Raw argv, env values, stdout, stderr, and host paths are not stored in the receipt.
 

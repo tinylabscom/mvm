@@ -578,6 +578,7 @@ mod tests {
             dev: false,
             prod: false,
             dry_run: false,
+            no_detect: false,
             argv: Vec::new(),
             ack_divergence: Vec::new(),
             stdin: Vec::new(),

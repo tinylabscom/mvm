@@ -7,8 +7,8 @@ import { CodeBlock } from "../ui/code-block";
 import { SAMPLES } from "./samples";
 
 const TERMINAL_LINES = [
-  { text: '$ mvmctl machine run --image python:3.12 -- \\', delay: 0 },
-  { text: '  python -c "print(2 + 2)"', delay: 500 },
+  { text: '$ mvmctl run python3 -c "print(2 + 2)"', delay: 0 },
+  { text: "  Detected python runtime...", delay: 500, dim: true },
   { text: "  Pulling image and preparing a private root...", delay: 1200, dim: true },
   { text: "  Booted. Own kernel. Network: deny-all.", delay: 2500, accent: true },
   { text: "  4", delay: 3400 },

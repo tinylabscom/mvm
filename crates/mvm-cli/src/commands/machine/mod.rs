@@ -447,6 +447,7 @@ impl MachineRunArgs {
             receipt: self.receipt,
             json: self.json,
             dry_run: self.dry_run,
+            no_detect: false,
             launch_plan: None,
             prod: false,
             // SDK-transport surface (`--mode`/`--dev`/`--ack-divergence`) stays

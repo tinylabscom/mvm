@@ -119,6 +119,6 @@ let result = MachineRun::builder()
     label: "CLI",
     language: "bash",
     source: "public/src/content/docs/reference/cli-commands.md",
-    code: `mvmctl machine run --net --image <ref> -- <cmd>...`,
+    code: `mvmctl run python3 script.py`,
   },
 ];
