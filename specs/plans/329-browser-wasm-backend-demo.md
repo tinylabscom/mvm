@@ -208,6 +208,11 @@ outside the guest root are rejected.
   Ctrl+L clears screen.
 - [x] **3.4** Render the capability notice and security profile on the page,
     pulled from the wasm core.
+  - **Follow-up UX pass:** terminal-style console now supports click-to-focus,
+    command history (↑/↓), Tab completion, Ctrl+C interrupt, and Ctrl+L
+    clear-screen. The guest shell implements a curated Linux-like command set
+    (`ls`, `cat`, `cd`, `pwd`, `env`, `ps`, `df`, `free`, `uptime`, `history`,
+    etc.) so the demo feels like a real emulated terminal.
 
 ### Slice 4 — Build integration
 

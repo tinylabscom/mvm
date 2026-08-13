@@ -160,6 +160,14 @@ async function launchVm(configJson) {
   // Virtual rootfs.
   const policyBytes = new TextEncoder().encode(policyJson);
   const authorityBytes = new TextEncoder().encode(authority);
+  const hostnameBytes = new TextEncoder().encode("mvm\n");
+  const osReleaseBytes = new TextEncoder().encode(`PRETTY_NAME="mvm browser-tier microVM"
+NAME="mvm"
+VERSION_ID="0.0.0"
+VERSION="0.0.0 (wasm32-wasip1)"
+ID=mvm
+HOME_URL="https://mvm.dev/"
+`);
   const fsRoot = {
     type: "dir",
     entries: {
@@ -168,17 +176,50 @@ async function launchVm(configJson) {
         entries: {
           policy: { type: "file", data: policyBytes },
           authority: { type: "file", data: authorityBytes },
+          hostname: { type: "file", data: hostnameBytes },
+          "os-release": { type: "file", data: osReleaseBytes },
         },
       },
       bin: {
         type: "dir",
         entries: {
           init: { type: "file", data: new Uint8Array() },
+          sh: { type: "file", data: new Uint8Array() },
+          ls: { type: "file", data: new Uint8Array() },
+        },
+      },
+      root: {
+        type: "dir",
+        entries: {},
+      },
+      home: {
+        type: "dir",
+        entries: {
+          root: { type: "dir", entries: {} },
         },
       },
       tmp: {
         type: "dir",
         entries: {},
+      },
+      var: {
+        type: "dir",
+        entries: {
+          log: { type: "dir", entries: {} },
+        },
+      },
+      proc: {
+        type: "dir",
+        entries: {
+          uptime: { type: "file", data: new TextEncoder().encode("0.00 0.00 0.00\n") },
+        },
+      },
+      usr: {
+        type: "dir",
+        entries: {
+          bin: { type: "dir", entries: {} },
+          sbin: { type: "dir", entries: {} },
+        },
       },
     },
   };
