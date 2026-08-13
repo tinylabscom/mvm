@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * Smoke test for the browser-tier microVM demo.
+ * Smoke test for the browser-tier microVM demo and the static site.
  *
  * This script starts a tiny static server from the built `public/dist`
- * directory and uses Playwright to drive the /demo page through launch,
+ * directory and uses Playwright to visit the landing page (to catch any
+ * site-wide console errors) and then drive the /demo page through launch,
  * shell commands, allow/deny policy, and stop.
  *
  * Prerequisites: Playwright must be installed in a discoverable Node scope.
@@ -84,6 +85,10 @@ async function main() {
   });
 
   try {
+    // Smoke-check the landing page first.
+    await page.goto("http://localhost:8788/", { waitUntil: "networkidle" });
+    await page.waitForTimeout(500);
+
     await page.goto("http://localhost:8788/demo/", { waitUntil: "networkidle" });
     await page.waitForTimeout(1500);
 
