@@ -418,6 +418,9 @@ while (hooks.should_throttle)() && !(hooks.should_stop)() && !(hooks.should_paus
 
 ### Task 4: The controller — predict, read once, hold, measure
 
+**Status:** COMPLETE — `VcpuQuota`, `QuotaAchievement`, and per-period `run_period`
+implemented; 8 controller witnesses pass; Linux cross-build clean.
+
 **Files:**
 - Create: `crates/mvm-vmm/src/quota/controller.rs`
 
@@ -477,7 +480,7 @@ impl VcpuQuota {
 - Clearing the hold flag must never require a `force_exit` — the run loop's
   throttle hold polls the flag every millisecond and leaves on its own.
 
-- [ ] **Step 1: Write the failing tests**, driving the controller with a mock
+- [x] **Step 1: Write the failing tests**, driving the controller with a mock
       `VcpuHandle` that records its `force_exit` calls and the scripted clock
       from Task 2. Run them, paste the failure:
 
@@ -492,10 +495,10 @@ impl VcpuQuota {
   | `the_achievement_is_computed_from_measurement_not_from_the_target` | a clock scripted to overshoot yields `achieved_millicores > target_millicores`; the controller reports what happened, not what was asked |
   | `an_achievement_over_a_zero_wall_window_is_not_a_division_by_zero` | `stop()` immediately after `start()` returns a defined value |
 
-- [ ] **Step 2: Implement.** Keep the thread body small enough to read: one
+- [x] **Step 2: Implement.** Keep the thread body small enough to read: one
       `run_period` function that the loop calls, so the per-period logic is
       unit-testable on its own.
-- [ ] **Step 3:** `cargo nextest run -p mvm-vmm --lib quota::`, clippy, fmt,
+- [x] **Step 3:** `cargo nextest run -p mvm-vmm --lib quota::`, clippy, fmt,
       `just check-linux`.
 
 ---

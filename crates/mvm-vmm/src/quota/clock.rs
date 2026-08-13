@@ -1,6 +1,8 @@
 //! A source of one thread's consumed CPU time (user + system).
 
 #[cfg(any(test, feature = "test-support"))]
+use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -103,6 +105,7 @@ impl Drop for ThreadCpuHandle {
 
 /// A fake clock that always returns the same value.
 #[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
 pub struct FixedClock(Duration);
 
 #[cfg(any(test, feature = "test-support"))]
@@ -122,9 +125,10 @@ impl ThreadCpuClock for FixedClock {
 /// A fake clock that returns a caller-supplied sequence of readings and
 /// exposes how many times it was read.
 #[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
 pub struct ScriptedClock {
     readings: Vec<Duration>,
-    index: AtomicUsize,
+    index: Arc<AtomicUsize>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -132,7 +136,7 @@ impl ScriptedClock {
     pub fn new(readings: Vec<Duration>) -> Self {
         Self {
             readings,
-            index: AtomicUsize::new(0),
+            index: Arc::new(AtomicUsize::new(0)),
         }
     }
 
