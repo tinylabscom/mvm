@@ -125,6 +125,7 @@ pub mod plan;
 pub mod platform;
 pub mod policy;
 pub mod protocol;
+pub mod provenance;
 pub mod rate_limit;
 pub mod receipt;
 pub mod residency;

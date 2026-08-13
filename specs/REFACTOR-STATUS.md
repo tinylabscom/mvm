@@ -114,7 +114,7 @@ for detailed scope and acceptance criteria.
 - [~] Plan 330 — Decision provenance layer
   (`specs/plans/330-decision-provenance-layer.md`)
   - [ ] Phase 0 — RFC and ADR approved
-  - [ ] Phase 1 — PROV-O export of existing events
+  - [x] Phase 1 — PROV-O export of existing events
   - [ ] Phase 2 — Enrich existing audit events with authorizer/rationale
   - [ ] Phase 3 — DecisionRecord API and content-addressed store
   - [ ] Phase 4 — Query API and causal chains
