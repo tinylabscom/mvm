@@ -1193,8 +1193,10 @@ for detailed scope and acceptance criteria.
         credit, declared-listener-backed ingress, fail-closed on every
         refusal). 87 unit tests. `crates/mvm-contract/fuzz` adds
         `fuzz_network_flow_decode` and `fuzz_network_flow_state` with 95
-        committed seeds, wired into `security.yml`. Remaining: `NetworkLimits`,
-        the session extraction, and the perf harness + baselines.
+        committed seeds, wired into `security.yml`. Transport-neutral signed
+        `NetworkLimits` is also implemented with default-byte compatibility,
+        validation, and one legacy/FlowMux accessor. Remaining: session
+        extraction and the perf harness + baselines.
   - [ ] Phase 2 — the one authenticated endpoint (#2371)
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)

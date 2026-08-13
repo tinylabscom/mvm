@@ -261,6 +261,9 @@ fn build_netd_config(
         .ok_or_else(|| anyhow!("an l3-vsock launch carries no admitted plan"))?;
     let plan = mvm_core::plan::plan_from_admitted_json(plan_json)
         .map_err(|e| anyhow!("decoding the admitted plan for the l3 gateway: {e}"))?;
+    let network_limits = plan
+        .effective_network_limits()
+        .map_err(|e| anyhow!("invalid admitted network limits: {e}"))?;
     let spec = plan
         .l3_network
         .as_ref()
@@ -341,7 +344,8 @@ fn build_netd_config(
         admitted_private_cidrs: spec.admitted_private_cidrs.clone(),
         icmp: Default::default(),
         policy_epoch: spec.policy_epoch,
-        max_flows: spec.max_flows as usize,
+        max_flows: usize::try_from(network_limits.max_tcp_flows)
+            .map_err(|_| anyhow!("max_tcp_flows does not fit this host"))?,
         queue_depth: DEFAULT_QUEUE_DEPTH,
         dns_qps: DEFAULT_DNS_QPS,
         ingress: Vec::new(),
@@ -473,6 +477,24 @@ mod wiring_tests {
         let hvf_json = build_netd_config(&config, BackendKind::Hvf).expect("an l3 plan lowers");
         let hvf_lowered: serde_json::Value = serde_json::from_str(&hvf_json).expect("valid json");
         assert_eq!(hvf_lowered["uds_layout"], "hvf_vsock_dir");
+    }
+
+    #[test]
+    fn transport_neutral_flow_limit_overrides_the_legacy_default() {
+        let mut config = config_for(NetworkMode::L3Vsock);
+        let mut plan = mvm_core::plan::plan_from_admitted_json(
+            config.plan_json.as_deref().expect("fixture plan"),
+        )
+        .expect("fixture parses");
+        plan.network_limits = mvm_core::plan::NetworkLimits::builder()
+            .max_tcp_flows(37)
+            .build()
+            .expect("valid limits");
+        config.plan_json = Some(serde_json::to_string(&plan).expect("plan serializes"));
+
+        let json = build_netd_config(&config, BackendKind::Firecracker).expect("plan lowers");
+        let lowered: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(lowered["max_flows"], 37);
     }
 
     #[test]

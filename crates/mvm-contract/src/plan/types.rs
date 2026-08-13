@@ -42,6 +42,173 @@ pub enum NetworkMode {
     L3Vsock,
 }
 
+/// Transport-neutral per-workload networking resource ceilings.
+///
+/// These limits are part of the signed execution plan. A runtime may enforce
+/// a lower host ceiling, but it may never raise one of these values after
+/// admission. The default preserves the bounds of plans authored before this
+/// type existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkLimits {
+    /// Aggregate concurrent TCP and typed-HTTP flows.
+    #[serde(
+        default = "NetworkLimits::default_max_tcp_flows",
+        skip_serializing_if = "NetworkLimits::is_default_max_tcp_flows"
+    )]
+    pub max_tcp_flows: u32,
+    /// Concurrent UDP associations.
+    #[serde(
+        default = "NetworkLimits::default_max_udp_associations",
+        skip_serializing_if = "NetworkLimits::is_default_max_udp_associations"
+    )]
+    pub max_udp_associations: u32,
+    /// Live host-owned DNS bindings.
+    #[serde(
+        default = "NetworkLimits::default_max_dns_bindings",
+        skip_serializing_if = "NetworkLimits::is_default_max_dns_bindings"
+    )]
+    pub max_dns_bindings: u32,
+    /// Declared ingress listeners.
+    #[serde(
+        default = "NetworkLimits::default_max_ingress_listeners",
+        skip_serializing_if = "NetworkLimits::is_default_max_ingress_listeners"
+    )]
+    pub max_ingress_listeners: u16,
+}
+
+impl NetworkLimits {
+    /// Start a validated limits builder from the compatibility defaults.
+    #[must_use]
+    pub const fn builder() -> NetworkLimitsBuilder {
+        NetworkLimitsBuilder {
+            limits: Self::defaults(),
+        }
+    }
+
+    /// Whether every field has its compatibility default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    const fn defaults() -> Self {
+        Self {
+            max_tcp_flows: Self::default_max_tcp_flows(),
+            max_udp_associations: Self::default_max_udp_associations(),
+            max_dns_bindings: Self::default_max_dns_bindings(),
+            max_ingress_listeners: Self::default_max_ingress_listeners(),
+        }
+    }
+
+    const fn default_max_tcp_flows() -> u32 {
+        4096
+    }
+
+    const fn default_max_udp_associations() -> u32 {
+        256
+    }
+
+    const fn default_max_dns_bindings() -> u32 {
+        1024
+    }
+
+    const fn default_max_ingress_listeners() -> u16 {
+        16
+    }
+
+    fn is_default_max_tcp_flows(value: &u32) -> bool {
+        *value == Self::default_max_tcp_flows()
+    }
+
+    fn is_default_max_udp_associations(value: &u32) -> bool {
+        *value == Self::default_max_udp_associations()
+    }
+
+    fn is_default_max_dns_bindings(value: &u32) -> bool {
+        *value == Self::default_max_dns_bindings()
+    }
+
+    fn is_default_max_ingress_listeners(value: &u16) -> bool {
+        *value == Self::default_max_ingress_listeners()
+    }
+}
+
+impl Default for NetworkLimits {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+/// Builder for a validated [`NetworkLimits`] value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkLimitsBuilder {
+    limits: NetworkLimits,
+}
+
+impl NetworkLimitsBuilder {
+    /// Set the aggregate TCP/HTTP flow ceiling.
+    #[must_use]
+    pub const fn max_tcp_flows(mut self, value: u32) -> Self {
+        self.limits.max_tcp_flows = value;
+        self
+    }
+
+    /// Set the UDP-association ceiling.
+    #[must_use]
+    pub const fn max_udp_associations(mut self, value: u32) -> Self {
+        self.limits.max_udp_associations = value;
+        self
+    }
+
+    /// Set the DNS-binding ceiling.
+    #[must_use]
+    pub const fn max_dns_bindings(mut self, value: u32) -> Self {
+        self.limits.max_dns_bindings = value;
+        self
+    }
+
+    /// Set the ingress-listener ceiling.
+    #[must_use]
+    pub const fn max_ingress_listeners(mut self, value: u16) -> Self {
+        self.limits.max_ingress_listeners = value;
+        self
+    }
+
+    /// Validate that every resource class retains a non-zero ceiling.
+    pub fn build(self) -> Result<NetworkLimits, NetworkLimitsError> {
+        if self.limits.max_tcp_flows == 0 {
+            return Err(NetworkLimitsError::Zero {
+                field: "max_tcp_flows",
+            });
+        }
+        if self.limits.max_udp_associations == 0 {
+            return Err(NetworkLimitsError::Zero {
+                field: "max_udp_associations",
+            });
+        }
+        if self.limits.max_dns_bindings == 0 {
+            return Err(NetworkLimitsError::Zero {
+                field: "max_dns_bindings",
+            });
+        }
+        if self.limits.max_ingress_listeners == 0 {
+            return Err(NetworkLimitsError::Zero {
+                field: "max_ingress_listeners",
+            });
+        }
+        Ok(self.limits)
+    }
+}
+
+/// Invalid signed networking limit configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NetworkLimitsError {
+    /// A zero ceiling would make a granted networking class unusable.
+    #[error("network limit {field} must be greater than zero")]
+    Zero { field: &'static str },
+}
+
 impl NetworkMode {
     /// Stable wire/CLI spelling. Matches the serde representation, so the
     /// CLI parser and the plan cannot drift apart.
@@ -992,6 +1159,57 @@ mod network_mode_tests {
             serde_json::from_str::<NetworkMode>("\"none\"").unwrap(),
             NetworkMode::None
         );
+    }
+}
+
+#[cfg(test)]
+mod network_limits_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_the_existing_endpoint_ceilings() {
+        let limits = NetworkLimits::default();
+        assert_eq!(limits.max_tcp_flows, 4096);
+        assert_eq!(limits.max_udp_associations, 256);
+        assert_eq!(limits.max_dns_bindings, 1024);
+        assert_eq!(limits.max_ingress_listeners, 16);
+    }
+
+    #[test]
+    fn default_fields_are_omitted_and_roundtrip() {
+        let json = serde_json::to_string(&NetworkLimits::default()).unwrap();
+        assert_eq!(json, "{}");
+        assert_eq!(
+            serde_json::from_str::<NetworkLimits>(&json).unwrap(),
+            NetworkLimits::default()
+        );
+    }
+
+    #[test]
+    fn builder_preserves_custom_values() {
+        let limits = NetworkLimits::builder()
+            .max_tcp_flows(12)
+            .max_udp_associations(13)
+            .max_dns_bindings(14)
+            .max_ingress_listeners(15)
+            .build()
+            .unwrap();
+        assert_eq!(limits.max_tcp_flows, 12);
+        assert_eq!(limits.max_udp_associations, 13);
+        assert_eq!(limits.max_dns_bindings, 14);
+        assert_eq!(limits.max_ingress_listeners, 15);
+    }
+
+    #[test]
+    fn builder_refuses_zero_for_every_resource_class() {
+        for result in [
+            NetworkLimits::builder().max_tcp_flows(0).build(),
+            NetworkLimits::builder().max_udp_associations(0).build(),
+            NetworkLimits::builder().max_dns_bindings(0).build(),
+            NetworkLimits::builder().max_ingress_listeners(0).build(),
+        ] {
+            assert!(matches!(result, Err(NetworkLimitsError::Zero { .. })));
+        }
     }
 }
 

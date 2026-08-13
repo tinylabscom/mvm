@@ -23,6 +23,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         network_mode: Default::default(),
         stream_retention: Default::default(),
         l3_network: None,
+        network_limits: Default::default(),
         schema_version: SCHEMA_VERSION,
         plan_id: PlanId("test-plan-001".to_string()),
         plan_version: 1,
