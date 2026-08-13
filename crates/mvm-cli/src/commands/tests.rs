@@ -403,6 +403,7 @@ fn internal_subprocess_commands_are_hidden_from_help() {
         "persistent-builder",
         "__builder-vm-bootstrap",
         "__builder-egress-supervisor",
+        "__builder-shell-job",
         "__qemu-vsock-bridge",
     ] {
         assert!(
@@ -428,6 +429,14 @@ fn internal_builder_egress_supervisor_command_is_hidden_but_parseable() {
     ])
     .unwrap();
     assert!(matches!(cli.command, Commands::BuilderEgressSupervisor(_)));
+}
+
+#[test]
+#[cfg(feature = "builder-vm")]
+fn internal_builder_shell_job_command_is_hidden_but_parseable() {
+    let cli = Cli::try_parse_from(["mvmctl", "__builder-shell-job", "--script", "/tmp/dummy.sh"])
+        .unwrap();
+    assert!(matches!(cli.command, Commands::BuilderShellJob(_)));
 }
 
 #[test]

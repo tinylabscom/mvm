@@ -474,6 +474,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("run", AuditPosture::InteractiveOrControl),
     ("__sdk-no-vm", AuditPosture::InteractiveOrControl),
     ("__builder-vm-bootstrap", AuditPosture::InteractiveOrControl),
+    ("__builder-shell-job", AuditPosture::InteractiveOrControl),
     (
         "__builder-egress-supervisor",
         AuditPosture::InteractiveOrControl,
