@@ -115,17 +115,20 @@ for detailed scope and acceptance criteria.
         pass
   - [ ] Native libkrun Python host-time acceptance passes
 
-- [~] Plan 323 — Concurrent builds through one builder VM
+- [x] Plan 323 — Concurrent builds through one builder VM
       (`specs/plans/323-concurrent-builds-one-builder-vm.md`)
   - [x] Phase 1 — a contended Nix-store image lock queues (naming the holding
         pid and command) instead of failing the second build outright;
         `MVM_BUILDER_LOCK_WAIT_SECS` bounds the wait and `0` restores
         fail-fast for CI
-  - [ ] Phase 2 — an HVF persistent builder, so the multiplexing path exists
-        on the macOS 26+ default backend
-  - [ ] Phase 3 — adopt (or start) a persistent builder on contention so
-        concurrent builds share one VM instead of queueing
-  - [ ] Phase 4 — troubleshooting + CLI-reference documentation
+  - [x] Phase 2 — `HvfPersistentHostVm` uses the virtio-fs persistent-builder
+        spec (`work`, `mvm-bins`, `job`, `out` shares) so the multiplexing
+        path exists on the macOS 26+ default backend
+  - [x] Phase 3 — a contended store image adopts a live persistent session or
+        auto-starts one (arbitrated by a start marker), so concurrent builds
+        share one VM instead of queueing
+  - [x] Phase 4 — troubleshooting and CLI-reference docs cover the contention
+        message, the wait override, and the persistent-builder path
 
 - [x] Plan 322 — Scope merge-group Rust CI to behavior-changing diffs
       (`specs/plans/322-merge-group-ci-scope.md`)

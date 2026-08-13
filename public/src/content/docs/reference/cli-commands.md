@@ -938,6 +938,9 @@ All commands accept these global options:
 | `MVM_FC_ASSET_ROOTFS` | Override rootfs filename | Auto-detected |
 | `MVM_FC_ASSET_KERNEL` | Override kernel filename | Auto-detected |
 | `MVM_BUILDER_MODE` | Builder execution mode: `host` (default) or `vsock`; `auto` is accepted as a legacy alias for `vsock` | `host` |
+| `MVM_BUILDER_BACKEND` | Builder VMM selection: `libkrun`, `hvf`, or `qemu`. Defaults to the platform's native builder (macOS 26+ → `hvf`, Linux KVM → `qemu`, otherwise `libkrun`) | Platform default |
+| `MVM_BUILDER_LOCK_WAIT_SECS` | Seconds to wait for the shared Nix store image lock when another build holds it; set to `0` to fail fast instead of queueing | `3600` (1 hour) |
+| `MVM_NO_PERSISTENT_BUILDER` | Set to `1` to disable automatic routing through a persistent-builder session | Unset |
 | `MVM_TEMPLATE_REGISTRY_ENDPOINT` | S3-compatible endpoint URL for template push/pull | None |
 | `MVM_TEMPLATE_REGISTRY_BUCKET` | S3 bucket name for templates | None |
 | `MVM_TEMPLATE_REGISTRY_ACCESS_KEY_ID` | S3 access key ID | None |
