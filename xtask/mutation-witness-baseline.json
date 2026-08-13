@@ -155,6 +155,13 @@
       ]
     },
     {
+      "path": "crates/mvm-contract/src/substitution.rs",
+      "package": "mvm-contract",
+      "claims": [
+        13
+      ]
+    },
+    {
       "path": "crates/mvm-core/src/cpu_scope.rs",
       "package": "mvm-core",
       "claims": [
@@ -245,6 +252,13 @@
       "package": "mvm-hostd",
       "claims": [
         17
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/supervisor/substitution_proxy.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        13
       ]
     },
     {
