@@ -19,6 +19,8 @@ pub enum CpuControl {
     CgroupShare,
     /// A deterministic wasmtime instruction budget.
     WasmFuel,
+    /// The HVF scheduler's own per-thread quota controller.
+    HvfVcpuQuota,
 }
 
 impl CpuControl {
@@ -27,7 +29,7 @@ impl CpuControl {
     /// with no conversion between them.
     #[must_use]
     pub const fn serves_share(self) -> bool {
-        matches!(self, Self::CgroupShare)
+        matches!(self, Self::CgroupShare | Self::HvfVcpuQuota)
     }
 
     /// Whether this control can serve a `CpuGrant::Fuel`.
@@ -108,7 +110,11 @@ impl ResourceControls {
             // but it is not handed the admitted plan, so it has no bound to
             // enforce and this stays honest until it is.
             BackendKind::Hvf | BackendKind::AppleContainer => Self {
-                cpu: CpuControl::None,
+                cpu: if cfg!(target_os = "macos") {
+                    CpuControl::HvfVcpuQuota
+                } else {
+                    CpuControl::None
+                },
                 wall_clock: WallClockControl::None,
             },
             // Fuel bounds instructions; epoch preempts a module parked in a
@@ -158,6 +164,7 @@ pub enum EnforcedTier {
     WasmFuel,
     WasmEpoch,
     SupervisorTimer,
+    HvfVcpuQuota,
 }
 
 impl EnforcedTier {
@@ -176,6 +183,7 @@ impl EnforcedTier {
             Self::WasmFuel => "wasmtime:fuel",
             Self::WasmEpoch => "wasmtime:epoch",
             Self::SupervisorTimer => "supervisor:timer",
+            Self::HvfVcpuQuota => "hvf:vcpu-quota",
         }
     }
 }
@@ -229,12 +237,23 @@ mod tests {
         assert_eq!(c.wall_clock, WallClockControl::WasmEpoch);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn the_hvf_tier_cannot_bound_cpu() {
-        // macOS has no cgroup equivalent. Thread QoS is a scheduling priority,
-        // not a quota, so claiming it would overstate the enforcement.
+    fn the_hvf_tier_bounds_cpu_with_its_own_scheduler_on_macos() {
+        let c = ResourceControls::for_backend(BackendKind::Hvf);
+        assert_eq!(c.cpu, CpuControl::HvfVcpuQuota);
+        assert!(c.cpu.serves_share());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_hvf_tier_cannot_bound_cpu_off_macos() {
+        // No Mach host thread accounting exists on this host, so a share grant
+        // must be refused at negotiation time rather than accepted and left to
+        // fail at apply.
         let c = ResourceControls::for_backend(BackendKind::Hvf);
         assert_eq!(c.cpu, CpuControl::None);
+        assert!(!c.cpu.serves_share());
     }
 
     /// Only a tier with a per-VM supervisor process of ours may claim a
@@ -306,5 +325,25 @@ mod tests {
         assert_eq!(EnforcedTier::WasmFuel.label(), "wasmtime:fuel");
         assert_eq!(EnforcedTier::WasmEpoch.label(), "wasmtime:epoch");
         assert_eq!(EnforcedTier::SupervisorTimer.label(), "supervisor:timer");
+        assert_eq!(EnforcedTier::HvfVcpuQuota.label(), "hvf:vcpu-quota");
+    }
+
+    #[test]
+    fn every_enforced_tier_has_a_distinct_label() {
+        let labels = [
+            EnforcedTier::Declared.label(),
+            EnforcedTier::Cgroup2CpuMax.label(),
+            EnforcedTier::WasmFuel.label(),
+            EnforcedTier::WasmEpoch.label(),
+            EnforcedTier::SupervisorTimer.label(),
+            EnforcedTier::HvfVcpuQuota.label(),
+        ];
+        for (i, a) in labels.iter().enumerate() {
+            for (j, b) in labels.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "enforced tier labels must be unique");
+                }
+            }
+        }
     }
 }

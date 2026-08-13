@@ -98,6 +98,8 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         handoff_socket: None,
         handoff_root: None,
         handoff_verify_key: None,
+        cpu_millicores: None,
+        quota_record: None,
     };
     let json = serde_json::to_string(&cfg).context("serialize inject supervisor config")?;
 

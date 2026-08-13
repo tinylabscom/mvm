@@ -127,6 +127,49 @@ where
 ///   out of guest execution — polling once first, then sleeping — so guest RAM and
 ///   device state freeze in place until the pause clears (resume) or a stop
 ///   arrives. Backends with no pause primitive pass `|| false`.
+///
+/// The hooks the run loop consults. A struct rather than more positional
+/// arguments: the loop already takes seven, and an eighth would trip the
+/// argument-count lint this repo bans exceptions to.
+pub struct RunHooks<C, X, Q, P, H, T>
+where
+    C: HypervisorVcpu,
+    X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
+    Q: Fn() -> bool,
+    P: Fn() -> bool,
+    H: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
+    T: Fn() -> bool,
+{
+    pub on_exception: X,
+    pub should_stop: Q,
+    pub should_pause: P,
+    pub on_pause: H,
+    /// True while the vCPU must be held out of guest execution to stay inside
+    /// its CPU quota. Polled like `should_pause`, but parks the vCPU without
+    /// touching any snapshot machinery.
+    pub should_throttle: T,
+    pub _marker: std::marker::PhantomData<fn() -> C>,
+}
+
+/// Run `vcpu` until it halts/cancels or `on_exception` says stop.
+///
+/// - `set_irq(intid, level)` raises/lowers a device interrupt line (the backend's
+///   `HypervisorVm::set_irq`).
+/// - `devices` are matched by guest address (MMIO) / port (PIO).
+/// - `on_exception(vcpu, syndrome, phys_addr)` handles a non-MMIO exception
+///   (arm64 PSCI/HVC); return [`RunControl::Stop`] to end the run. x86 KVM never
+///   reaches it (every exit is decoded).
+/// - `should_stop()` disambiguates a forced exit ([`VcpuExit::Canceled`]): a real
+///   stop (watchdog timeout / graceful stop) returns `true` and ends the run; a
+///   `false` means the cancel was a *heartbeat wake* to let host-side async work
+///   run (e.g. draining an egress socket into the guest's rx queue while the guest
+///   is idle in WFI), so the loop polls devices and keeps going. Backends with no
+///   async host I/O pass `|| true` (a cancel always stops).
+/// - `should_pause()` parks the vCPU without ending the run: when it returns
+///   `true` (and no stop is pending) after a forced exit, the loop holds the vCPU
+///   out of guest execution — polling once first, then sleeping — so guest RAM and
+///   device state freeze in place until the pause clears (resume) or a stop
+///   arrives. Backends with no pause primitive pass `|| false`.
 pub fn run<C, S, X, Q, P>(
     vcpu: &C,
     set_irq: S,
@@ -161,10 +204,10 @@ pub fn run_with_pause_hook<C, S, X, Q, P, H>(
     vcpu: &C,
     set_irq: S,
     devices: &mut [&mut dyn RunDevice],
-    mut on_exception: X,
+    on_exception: X,
     should_stop: Q,
     should_pause: P,
-    mut on_pause: H,
+    on_pause: H,
 ) -> Result<RunOutcome, C::Error>
 where
     C: HypervisorVcpu,
@@ -173,6 +216,39 @@ where
     Q: Fn() -> bool,
     P: Fn() -> bool,
     H: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
+{
+    run_with_hooks(
+        vcpu,
+        set_irq,
+        devices,
+        RunHooks {
+            on_exception,
+            should_stop,
+            should_pause,
+            on_pause,
+            should_throttle: || false,
+            _marker: std::marker::PhantomData,
+        },
+    )
+}
+
+/// Run a vCPU with the full hook set. This is the single implementation shared
+/// by [`run`] and [`run_with_pause_hook`]; callers that need a throttle hold
+/// supply a `should_throttle` predicate.
+pub fn run_with_hooks<C, S, X, Q, P, H, T>(
+    vcpu: &C,
+    set_irq: S,
+    devices: &mut [&mut dyn RunDevice],
+    mut hooks: RunHooks<C, X, Q, P, H, T>,
+) -> Result<RunOutcome, C::Error>
+where
+    C: HypervisorVcpu,
+    S: Fn(u32, bool) -> Result<(), C::Error>,
+    X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
+    Q: Fn() -> bool,
+    P: Fn() -> bool,
+    H: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
+    T: Fn() -> bool,
 {
     let mut pause_prepared = false;
     loop {
@@ -197,14 +273,14 @@ where
                         set_irq(irq, true)?;
                     }
                 }
-                if should_stop() {
+                if (hooks.should_stop)() {
                     return Ok(RunOutcome::Canceled);
                 }
                 // Pause hold: a pause request parks the vCPU here, out of guest
                 // execution, so RAM and device state stay frozen until resume
                 // clears the pause (or a stop arrives). The device poll above
                 // already drained any in-flight host reply before we park.
-                if should_pause() {
+                if (hooks.should_pause)() {
                     if !pause_prepared {
                         for device in devices.iter_mut() {
                             device.prepare_snapshot();
@@ -215,11 +291,11 @@ where
                         .iter()
                         .filter_map(|device| device.snapshot_device())
                         .collect::<Vec<_>>();
-                    on_pause(vcpu, &snapshot_devices)?;
+                    (hooks.on_pause)(vcpu, &snapshot_devices)?;
                 } else {
                     pause_prepared = false;
                 }
-                while should_pause() && !should_stop() {
+                while (hooks.should_pause)() && !(hooks.should_stop)() {
                     for d in devices.iter_mut() {
                         if let Some(irq) = d.poll() {
                             set_irq(irq, true)?;
@@ -229,8 +305,28 @@ where
                         .iter()
                         .filter_map(|device| device.snapshot_device())
                         .collect::<Vec<_>>();
-                    on_pause(vcpu, &snapshot_devices)?;
+                    (hooks.on_pause)(vcpu, &snapshot_devices)?;
                     std::thread::sleep(Duration::from_millis(1));
+                }
+                // Throttle hold: a throttle is not a pause. The vCPU is parked
+                // to stay inside its CPU quota, and the guest's device state
+                // must survive it untouched. Devices are still polled every
+                // millisecond so host→guest I/O keeps flowing while the vCPU is
+                // out of guest execution; nothing else from the pause path runs.
+                while (hooks.should_throttle)() && !(hooks.should_stop)() && !(hooks.should_pause)()
+                {
+                    for d in devices.iter_mut() {
+                        if let Some(irq) = d.poll() {
+                            set_irq(irq, true)?;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // A stop that arrived while we were throttled must still end the
+                // run as Canceled, even if the next vCPU step would otherwise
+                // return Halt.
+                if (hooks.should_stop)() {
+                    return Ok(RunOutcome::Canceled);
                 }
             }
             VcpuExit::Halt => return Ok(RunOutcome::Halt),
@@ -262,7 +358,7 @@ where
                 syndrome,
                 phys_addr,
             } => {
-                if on_exception(vcpu, syndrome, phys_addr)? == RunControl::Stop {
+                if (hooks.on_exception)(vcpu, syndrome, phys_addr)? == RunControl::Stop {
                     return Ok(RunOutcome::Stopped);
                 }
             }
@@ -397,7 +493,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Clone, Copy)]
     struct NopHandle;
@@ -888,6 +984,380 @@ mod tests {
         assert!(
             serviced,
             "the I/O thread must accept the host connection under pure-MMIO activity"
+        );
+    }
+
+    /// A device that counts how many times the snapshot machinery touches it.
+    struct SnapshotCountDev {
+        prepare_count: RefCell<usize>,
+    }
+
+    impl SnapshotCountDev {
+        fn new() -> Self {
+            Self {
+                prepare_count: RefCell::new(0),
+            }
+        }
+        fn prepare_count(&self) -> usize {
+            *self.prepare_count.borrow()
+        }
+    }
+
+    impl RunDevice for SnapshotCountDev {
+        fn contains(&self, _addr: u64) -> bool {
+            false
+        }
+        fn base(&self) -> u64 {
+            0
+        }
+        fn read(&mut self, _: u64, _: u8) -> u64 {
+            0
+        }
+        fn write(&mut self, _: u64, _: u64, _: u8) -> Option<u32> {
+            None
+        }
+        fn prepare_snapshot(&mut self) {
+            *self.prepare_count.borrow_mut() += 1;
+        }
+        fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
+            Some(self)
+        }
+    }
+
+    impl SnapshotDeviceState for SnapshotCountDev {
+        fn device_kind(&self) -> super::super::device_state::DeviceKind {
+            super::super::device_state::DeviceKind::Unknown(99)
+        }
+        fn snapshot_state(&self) -> Result<Vec<u8>, super::super::device_state::DeviceStateError> {
+            Ok(vec![0])
+        }
+        fn restore_state(
+            &mut self,
+            _bytes: &[u8],
+        ) -> Result<(), super::super::device_state::DeviceStateError> {
+            Ok(())
+        }
+    }
+
+    /// A device that counts how many times `poll()` is called.
+    struct PollCountDev {
+        polls: RefCell<usize>,
+    }
+
+    impl PollCountDev {
+        fn new() -> Self {
+            Self {
+                polls: RefCell::new(0),
+            }
+        }
+        fn polls(&self) -> usize {
+            *self.polls.borrow()
+        }
+    }
+
+    impl RunDevice for PollCountDev {
+        fn contains(&self, _addr: u64) -> bool {
+            false
+        }
+        fn base(&self) -> u64 {
+            0
+        }
+        fn read(&mut self, _: u64, _: u8) -> u64 {
+            0
+        }
+        fn write(&mut self, _: u64, _: u64, _: u8) -> Option<u32> {
+            None
+        }
+        fn poll(&mut self) -> Option<u32> {
+            *self.polls.borrow_mut() += 1;
+            None
+        }
+    }
+
+    #[test]
+    fn a_throttle_hold_parks_the_vcpu_until_it_clears() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut devs: Vec<&mut dyn RunDevice> = vec![];
+        let throttle = Arc::new(AtomicBool::new(true));
+        let throttle_for_clear = Arc::clone(&throttle);
+        let clear = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            throttle_for_clear.store(false, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let out = run_with_hooks(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            RunHooks {
+                _marker: std::marker::PhantomData,
+                on_exception: no_exceptions,
+                should_stop: || false,
+                should_pause: || false,
+                on_pause: |_, _| Ok(()),
+                should_throttle: || throttle.load(Ordering::SeqCst),
+            },
+        )
+        .unwrap();
+        clear.join().unwrap();
+
+        assert_eq!(out, RunOutcome::Halt);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "throttle hold should keep the vCPU out of guest execution until it clears"
+        );
+    }
+
+    #[test]
+    fn a_throttle_hold_never_prepares_a_snapshot() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut dev = SnapshotCountDev::new();
+        let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
+        let throttle = Arc::new(AtomicBool::new(true));
+        let throttle_for_clear = Arc::clone(&throttle);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            throttle_for_clear.store(false, Ordering::SeqCst);
+        });
+
+        run_with_hooks(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            RunHooks {
+                _marker: std::marker::PhantomData,
+                on_exception: no_exceptions,
+                should_stop: || false,
+                should_pause: || false,
+                on_pause: |_, _| Ok(()),
+                should_throttle: || throttle.load(Ordering::SeqCst),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            dev.prepare_count(),
+            0,
+            "throttle hold must not prepare a snapshot"
+        );
+
+        // And a pause hold on the same device does prepare one.
+        let vcpu2 = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut dev2 = SnapshotCountDev::new();
+        let mut devs2: Vec<&mut dyn RunDevice> = vec![&mut dev2];
+        let paused = Arc::new(AtomicBool::new(true));
+        let paused_for_resume = Arc::clone(&paused);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            paused_for_resume.store(false, Ordering::SeqCst);
+        });
+        run(
+            &vcpu2,
+            |_, _| Ok(()),
+            &mut devs2,
+            no_exceptions,
+            || false,
+            || paused.load(Ordering::SeqCst),
+        )
+        .unwrap();
+        assert!(
+            dev2.prepare_count() > 0,
+            "pause hold must prepare a snapshot"
+        );
+    }
+
+    #[test]
+    fn a_throttle_hold_never_calls_the_pause_hook() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut devs: Vec<&mut dyn RunDevice> = vec![];
+        let throttle = Arc::new(AtomicBool::new(true));
+        let throttle_for_clear = Arc::clone(&throttle);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            throttle_for_clear.store(false, Ordering::SeqCst);
+        });
+        let pause_calls = Arc::new(AtomicUsize::new(0));
+        let pause_calls_for_hook = Arc::clone(&pause_calls);
+
+        run_with_hooks(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            RunHooks {
+                _marker: std::marker::PhantomData,
+                on_exception: no_exceptions,
+                should_stop: || false,
+                should_pause: || false,
+                on_pause: move |_, _| {
+                    pause_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                should_throttle: || throttle.load(Ordering::SeqCst),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            pause_calls.load(Ordering::SeqCst),
+            0,
+            "throttle hold must not call the pause hook"
+        );
+    }
+
+    #[test]
+    fn a_throttle_hold_keeps_polling_devices() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut dev = PollCountDev::new();
+        let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
+        let throttle = Arc::new(AtomicBool::new(true));
+        let throttle_for_clear = Arc::clone(&throttle);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            throttle_for_clear.store(false, Ordering::SeqCst);
+        });
+
+        run_with_hooks(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            RunHooks {
+                _marker: std::marker::PhantomData,
+                on_exception: no_exceptions,
+                should_stop: || false,
+                should_pause: || false,
+                on_pause: |_, _| Ok(()),
+                should_throttle: || throttle.load(Ordering::SeqCst),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            dev.polls() >= 10,
+            "device poll count {} should rise during a throttle hold",
+            dev.polls()
+        );
+    }
+
+    #[test]
+    fn a_stop_breaks_a_throttle_hold() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut devs: Vec<&mut dyn RunDevice> = vec![];
+        let throttle = Arc::new(AtomicBool::new(true));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_set = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            stop_for_set.store(true, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let out = run_with_hooks(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            RunHooks {
+                _marker: std::marker::PhantomData,
+                on_exception: no_exceptions,
+                should_stop: || stop.load(Ordering::SeqCst),
+                should_pause: || false,
+                on_pause: |_, _| Ok(()),
+                should_throttle: || throttle.load(Ordering::SeqCst),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out, RunOutcome::Canceled);
+        assert!(
+            started.elapsed() >= Duration::from_millis(30),
+            "stop should have held the throttle at least 30 ms"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "stop should break the throttle hold promptly"
+        );
+    }
+
+    #[test]
+    fn a_pause_during_a_throttle_takes_precedence() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut dev = SnapshotCountDev::new();
+        let mut devs: Vec<&mut dyn RunDevice> = vec![&mut dev];
+        let throttle = Arc::new(AtomicBool::new(true));
+        let pause = Arc::new(AtomicBool::new(false));
+        let throttle_for_thread = Arc::clone(&throttle);
+        let pause_for_thread = Arc::clone(&pause);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            throttle_for_thread.store(false, Ordering::SeqCst);
+            pause_for_thread.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(30));
+            pause_for_thread.store(false, Ordering::SeqCst);
+        });
+        let pause_calls = Arc::new(AtomicUsize::new(0));
+        let pause_calls_for_hook = Arc::clone(&pause_calls);
+
+        let started = std::time::Instant::now();
+        let out = run_with_hooks(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            RunHooks {
+                _marker: std::marker::PhantomData,
+                on_exception: no_exceptions,
+                should_stop: || false,
+                should_pause: || pause.load(Ordering::SeqCst),
+                on_pause: move |_, _| {
+                    pause_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                should_throttle: || throttle.load(Ordering::SeqCst),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out, RunOutcome::Halt);
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "pause hold should extend the park"
+        );
+        assert!(
+            dev.prepare_count() > 0,
+            "pause machinery must run when pause takes over"
+        );
+        assert!(
+            pause_calls.load(Ordering::SeqCst) > 0,
+            "pause hook must run when pause takes over"
+        );
+    }
+
+    #[test]
+    fn the_existing_entry_points_throttle_never() {
+        let vcpu = ScriptVcpu::new(vec![VcpuExit::Canceled, VcpuExit::Halt]);
+        let mut devs: Vec<&mut dyn RunDevice> = vec![];
+        let paused = Arc::new(AtomicBool::new(true));
+        let paused_for_resume = Arc::clone(&paused);
+        let resume = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            paused_for_resume.store(false, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let out = run(
+            &vcpu,
+            |_, _| Ok(()),
+            &mut devs,
+            no_exceptions,
+            || false,
+            || paused.load(Ordering::SeqCst),
+        )
+        .unwrap();
+        resume.join().unwrap();
+
+        assert_eq!(out, RunOutcome::Halt);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "run() must still honor pause"
         );
     }
 }

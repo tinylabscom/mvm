@@ -485,15 +485,17 @@ exceed the headroom (`crates/mvm-hostd/src/admission_budget.rs`). The
 budget counts only machines carrying a live pid marker — the same probe
 the fork path trusts, so a crashed VM cannot lock the host out — and
 counts each machine's configured maximum rather than the balloon's
-current commitment. CPU is the partial half: a granted share wraps the
-VMM spawn in a systemd transient scope and the achieved tier is read back
-off `cpu.max` and audited, on Linux with a systemd user session and
-nowhere else — macOS has no cgroup equivalent, so a CPU grant there is
-`declared` and `--prod` refuses it. Wall clock is claimed by nothing: it
-is authored, ceiling-checked, admitted and audited as a tier label, and
-no code in this tree stops a workload at its deadline. wasm fuel/epoch is
-likewise declared and unwired, and a restored or warm-claimed child is
-admission-bounded without its host-side CPU control being re-armed.
+current commitment. CPU is the partial half: a granted share wraps the VMM spawn in a
+systemd transient scope on Linux and the achieved tier is read back off
+`cpu.max`. On the in-house HVF VMM on macOS there is no host-level quota
+primitive, so the run loop enforces the share in-process using the vCPU
+thread's Mach CPU time; the achieved tier is read back from the scheduler's
+measured record and audited. libkrun has no in-process vCPU control, so a CPU
+grant there stays `declared` and `--prod` refuses it. Wall clock is claimed by
+nothing: it is authored, ceiling-checked, admitted and audited as a tier
+label, and no code in this tree stops a workload at its deadline. wasm
+fuel/epoch is likewise declared and unwired, and a restored or warm-claimed
+child is admission-bounded without its host-side CPU control being re-armed.
 ADR-001's ledger carries the "Preview 18 limits" note; do not paraphrase
 this row as enforced without it.
 

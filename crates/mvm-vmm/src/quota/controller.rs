@@ -1,0 +1,436 @@
+//! Predictive vCPU quota controller.
+//!
+//! Spawns a thread that sleeps to the predicted exhaustion instant, reads the
+//! thread CPU clock once per period, and parks the vCPU through a throttle flag
+//! when the allowance is spent.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use crate::quota::clock::ThreadCpuClock;
+use crate::quota::{PeriodVerdict, QuotaPolicy};
+use crate::vmm::hv::VcpuHandle;
+
+/// What the scheduler actually delivered. The only honest source for the
+/// enforced tier on this tier, since macOS exposes no quota file to read back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotaAchievement {
+    pub target_millicores: u32,
+    pub achieved_millicores: u32,
+    pub period: Duration,
+    pub measured_wall: Duration,
+    pub measured_cpu: Duration,
+    pub periods: u32,
+}
+
+/// A running controller scheduling one vCPU against a quota.
+pub struct VcpuQuota<H: VcpuHandle> {
+    hold: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    handle: H,
+    join: Option<JoinHandle<QuotaAchievement>>,
+}
+
+impl<H: VcpuHandle> VcpuQuota<H> {
+    /// Start scheduling `handle` against `policy`, charging `clock`.
+    pub fn start<C: ThreadCpuClock>(handle: H, clock: C, policy: QuotaPolicy) -> Self {
+        Self::start_with_flag(handle, clock, policy, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn start_with_flag<C: ThreadCpuClock>(
+        handle: H,
+        clock: C,
+        policy: QuotaPolicy,
+        hold: Arc<AtomicBool>,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let hold_thread = Arc::clone(&hold);
+        let stop_thread = Arc::clone(&stop);
+        let handle_for_thread = handle;
+        let join = thread::spawn(move || {
+            run_controller(handle_for_thread, clock, policy, hold_thread, stop_thread)
+        });
+        Self {
+            hold,
+            stop,
+            handle,
+            join: Some(join),
+        }
+    }
+
+    /// A predicate for `RunHooks::should_throttle`.
+    pub fn throttle_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.hold)
+    }
+
+    /// Stop the controller and take its measurement.
+    pub fn stop(mut self) -> QuotaAchievement {
+        self.stop.store(true, Ordering::SeqCst);
+        self.hold.store(false, Ordering::SeqCst);
+        H::force_exit(&[self.handle]);
+        self.join
+            .take()
+            .expect("controller join handle is present")
+            .join()
+            .expect("controller thread panicked")
+    }
+}
+
+fn run_controller<H: VcpuHandle, C: ThreadCpuClock>(
+    handle: H,
+    clock: C,
+    mut policy: QuotaPolicy,
+    hold: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) -> QuotaAchievement {
+    let start = Instant::now();
+    let mut periods: u32 = 0;
+    let mut measured_cpu = Duration::ZERO;
+
+    while let Some((_, consumed)) = run_period(
+        handle,
+        &clock,
+        &mut policy,
+        &hold,
+        &stop,
+        start,
+        &mut periods,
+    ) {
+        measured_cpu = consumed;
+    }
+
+    hold.store(false, Ordering::SeqCst);
+    let measured_wall = start.elapsed();
+    let target_millicores = policy.config().millicores();
+    let achieved_millicores = if measured_wall.as_micros() == 0 {
+        0
+    } else {
+        let cpu_us = measured_cpu.as_micros();
+        let wall_us = measured_wall.as_micros();
+        u32::try_from((cpu_us * 1000).saturating_div(wall_us)).unwrap_or(u32::MAX)
+    };
+
+    QuotaAchievement {
+        target_millicores,
+        achieved_millicores,
+        period: policy.config().period(),
+        measured_wall,
+        measured_cpu,
+        periods,
+    }
+}
+
+/// Run one period: clear the hold, sleep to predicted exhaustion, read the
+/// clock once, settle the policy, and hold to the period boundary if needed.
+/// Returns `None` when a stop was requested before the period completed.
+fn run_period<H: VcpuHandle, C: ThreadCpuClock>(
+    handle: H,
+    clock: &C,
+    policy: &mut QuotaPolicy,
+    hold: &AtomicBool,
+    stop: &AtomicBool,
+    start: Instant,
+    periods: &mut u32,
+) -> Option<(PeriodVerdict, Duration)> {
+    if stop.load(Ordering::SeqCst) {
+        return None;
+    }
+    hold.store(false, Ordering::SeqCst);
+    let allowance = policy.allowance();
+    thread::sleep(allowance);
+    if stop.load(Ordering::SeqCst) {
+        return None;
+    }
+
+    let consumed_total = clock.consumed();
+    *periods += 1;
+    let verdict = policy.settle(consumed_total, *periods);
+    if verdict.hold {
+        hold.store(true, Ordering::SeqCst);
+        H::force_exit(&[handle]);
+    }
+
+    let elapsed = start.elapsed();
+    let boundary = policy.config().period() * *periods;
+    if boundary > elapsed {
+        thread::sleep(boundary - elapsed);
+    }
+
+    Some((verdict, consumed_total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quota::clock::ScriptedClock;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+
+    #[derive(Clone, Copy)]
+    struct MockHandle(u64);
+
+    struct MockState {
+        flag: Option<Arc<AtomicBool>>,
+        force_exit_count: usize,
+        flag_at_last_exit: Option<bool>,
+        saw_flag_true: bool,
+    }
+
+    static MOCK_STATE: std::sync::LazyLock<Mutex<HashMap<u64, MockState>>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    impl MockHandle {
+        fn new() -> Self {
+            let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+            MOCK_STATE.lock().unwrap().insert(
+                id,
+                MockState {
+                    flag: None,
+                    force_exit_count: 0,
+                    flag_at_last_exit: None,
+                    saw_flag_true: false,
+                },
+            );
+            Self(id)
+        }
+
+        fn bind_flag(&self, flag: Arc<AtomicBool>) {
+            MOCK_STATE.lock().unwrap().get_mut(&self.0).unwrap().flag = Some(flag);
+        }
+
+        fn force_exit_count(&self) -> usize {
+            MOCK_STATE
+                .lock()
+                .unwrap()
+                .get(&self.0)
+                .unwrap()
+                .force_exit_count
+        }
+
+        fn flag_at_last_exit(&self) -> Option<bool> {
+            MOCK_STATE
+                .lock()
+                .unwrap()
+                .get(&self.0)
+                .unwrap()
+                .flag_at_last_exit
+        }
+
+        fn saw_hold_flag_true(&self) -> bool {
+            MOCK_STATE
+                .lock()
+                .unwrap()
+                .get(&self.0)
+                .unwrap()
+                .saw_flag_true
+        }
+    }
+
+    impl VcpuHandle for MockHandle {
+        fn force_exit(handles: &[Self]) {
+            let id = handles[0].0;
+            let mut map = MOCK_STATE.lock().unwrap();
+            let state = map.get_mut(&id).expect("mock handle registered");
+            state.force_exit_count += 1;
+            let flag_now = state.flag.as_ref().map(|f| f.load(Ordering::SeqCst));
+            state.flag_at_last_exit = flag_now;
+            if flag_now == Some(true) {
+                state.saw_flag_true = true;
+            }
+        }
+    }
+
+    fn share_policy(millicores: u32) -> QuotaPolicy {
+        QuotaPolicy::new(crate::quota::QuotaConfig::for_share(millicores).unwrap())
+    }
+
+    #[test]
+    fn the_controller_reads_the_clock_once_per_period() {
+        let period = Duration::from_millis(10);
+        let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        let clock = ScriptedClock::new(vec![Duration::from_millis(1); 100]);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(handle, clock.clone(), policy, Arc::clone(&flag));
+
+        std::thread::sleep(Duration::from_millis(55));
+        let achievement = quota.stop();
+
+        assert_eq!(
+            clock.read_count(),
+            achievement.periods as usize,
+            "the controller must read the clock exactly once per completed period"
+        );
+        assert!(achievement.periods >= 4, "should complete several periods");
+    }
+
+    #[test]
+    fn a_vcpu_that_spent_its_slice_is_forced_out_and_held() {
+        let period = Duration::from_millis(10);
+        let slice = Duration::from_millis(5);
+        let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        // The vCPU burns exactly one slice each period, so it must be held.
+        let readings: Vec<Duration> = (1..=20).map(|i| slice * i).collect();
+        let clock = ScriptedClock::new(readings);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(handle, clock, policy, Arc::clone(&flag));
+
+        std::thread::sleep(Duration::from_millis(55));
+        let _ = quota.stop();
+
+        assert!(
+            handle.force_exit_count() > 0,
+            "a vCPU that spent its slice must be forced out"
+        );
+        assert!(
+            handle.saw_hold_flag_true(),
+            "the hold flag must be set before at least one force_exit"
+        );
+    }
+
+    #[test]
+    fn an_idle_vcpu_is_never_forced_out() {
+        let period = Duration::from_millis(10);
+        let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        let clock = ScriptedClock::new(vec![Duration::ZERO; 100]);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(handle, clock, policy, Arc::clone(&flag));
+
+        std::thread::sleep(Duration::from_millis(55));
+        let _ = quota.stop();
+
+        assert_eq!(
+            handle.force_exit_count(),
+            1,
+            "only the final stop force_exit is expected for an idle vCPU"
+        );
+        assert_ne!(
+            handle.flag_at_last_exit(),
+            Some(true),
+            "no force_exit should happen while the hold flag is set"
+        );
+    }
+
+    #[test]
+    fn the_hold_flag_is_set_before_the_vcpu_is_forced_out() {
+        // Covered by a_vcpu_that_spent_its_slice_is_forced_out_and_held; keep a
+        // dedicated witness so the ordering is explicit in the test names.
+        let period = Duration::from_millis(10);
+        let slice = Duration::from_millis(5);
+        let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        let readings: Vec<Duration> = (1..=20).map(|i| slice * i).collect();
+        let clock = ScriptedClock::new(readings);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(handle, clock, policy, Arc::clone(&flag));
+
+        std::thread::sleep(Duration::from_millis(55));
+        let _ = quota.stop();
+
+        assert!(
+            handle.saw_hold_flag_true(),
+            "force_exit must see the hold flag already true"
+        );
+    }
+
+    #[test]
+    fn an_overshooting_period_shrinks_the_next_allowance() {
+        let period = Duration::from_millis(10);
+        let slice = Duration::from_millis(5);
+        let mut policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        let clock = ScriptedClock::new(vec![Duration::from_millis(10)]);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+
+        let verdict = run_period(
+            handle,
+            &clock,
+            &mut policy,
+            &flag,
+            &Arc::new(AtomicBool::new(false)),
+            Instant::now(),
+            &mut 0,
+        );
+        assert!(verdict.unwrap().0.hold, "overshooting must trigger a hold");
+        assert!(
+            policy.allowance() < slice,
+            "the next allowance must shrink because debt is carried forward"
+        );
+    }
+
+    #[test]
+    fn stopping_releases_a_parked_vcpu() {
+        let period = Duration::from_millis(10);
+        let slice = Duration::from_millis(5);
+        let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        let readings: Vec<Duration> = (1..=20).map(|i| slice * i).collect();
+        let clock = ScriptedClock::new(readings);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(handle, clock, policy, Arc::clone(&flag));
+
+        std::thread::sleep(Duration::from_millis(55));
+        let _ = quota.stop();
+
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "stop must clear the throttle flag so the vCPU can run again"
+        );
+        assert!(
+            handle.force_exit_count() > 0,
+            "stop must issue a final force_exit to release a parked vCPU"
+        );
+    }
+
+    #[test]
+    fn the_achievement_is_computed_from_measurement_not_from_the_target() {
+        let period = Duration::from_millis(10);
+        let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        // The vCPU burns 8 ms per 10 ms period: 800 millicores measured.
+        let readings: Vec<Duration> = (1..=20)
+            .map(|i| Duration::from_millis(8 * i as u64))
+            .collect();
+        let clock = ScriptedClock::new(readings);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(handle, clock, policy, Arc::clone(&flag));
+
+        std::thread::sleep(Duration::from_millis(85));
+        let achievement = quota.stop();
+
+        assert!(
+            achievement.achieved_millicores > achievement.target_millicores,
+            "measured achievement {}/{} must reflect overshoot, not the target",
+            achievement.achieved_millicores,
+            achievement.target_millicores
+        );
+    }
+
+    #[test]
+    fn an_achievement_over_a_zero_wall_window_is_not_a_division_by_zero() {
+        let policy = share_policy(500);
+        let clock = ScriptedClock::new(vec![Duration::ZERO; 100]);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(handle, clock, policy, Arc::clone(&flag));
+
+        let achievement = quota.stop();
+
+        assert_eq!(achievement.periods, 0);
+        assert_eq!(achievement.achieved_millicores, 0);
+    }
+}

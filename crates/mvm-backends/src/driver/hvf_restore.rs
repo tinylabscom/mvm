@@ -189,6 +189,8 @@ pub fn hvf_child_restore_config(
         handoff_socket: None,
         handoff_root: None,
         handoff_verify_key: None,
+        cpu_millicores: parent.cpu_millicores,
+        quota_record: parent.quota_record.clone(),
     })
 }
 
@@ -322,6 +324,8 @@ mod tests {
             handoff_socket: Some(PathBuf::from("/parent/hvf-handoff.sock")),
             handoff_root: Some(PathBuf::from("/parent/vms")),
             handoff_verify_key: Some("aa".repeat(32)),
+            cpu_millicores: None,
+            quota_record: None,
         }
     }
 

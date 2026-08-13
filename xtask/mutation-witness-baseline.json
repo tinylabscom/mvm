@@ -29,6 +29,13 @@
       ]
     },
     {
+      "path": "crates/mvm-backends/src/driver/hvf.rs",
+      "package": "mvm-backends",
+      "claims": [
+        18
+      ]
+    },
+    {
       "path": "crates/mvm-backends/src/driver/hvf_restore.rs",
       "package": "mvm-backends",
       "claims": [
@@ -189,6 +196,13 @@
       ]
     },
     {
+      "path": "crates/mvm-core/src/vcpu_quota.rs",
+      "package": "mvm-core",
+      "claims": [
+        18
+      ]
+    },
+    {
       "path": "crates/mvm-hostd/src/admission_budget.rs",
       "package": "mvm-hostd",
       "claims": [
@@ -300,11 +314,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,

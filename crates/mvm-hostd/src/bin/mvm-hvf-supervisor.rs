@@ -324,6 +324,8 @@ fn main() -> anyhow::Result<()> {
             .vsock(cfg.vsock)
             .stop(&STOP)
             .paused(&PAUSED)
+            .cpu_millicores(cfg.cpu_millicores)
+            .quota_record(cfg.quota_record.clone())
             .channels(mvm_runtime::backends::hvf::HostChannels {
                 agent_socket: cfg.agent_socket.clone(),
                 substitution_socket: cfg.substitution_socket.clone(),
