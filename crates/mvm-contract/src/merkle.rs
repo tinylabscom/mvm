@@ -56,6 +56,43 @@
 //! is the leaf's immediate sibling, the last is the top-level sibling. At
 //! each level the `leaf_index` bit selects placement — an even index sits
 //! left of its sibling, an odd index sits right.
+//!
+//! # Consistency proofs, and what they do not buy
+//!
+//! [`build_consistency_proof`] / [`verify_consistency`] implement the RFC
+//! 6962 consistency proof: an `O(log n)` witness that the tree of `m`
+//! leaves is a **prefix** of the tree of `n` leaves — that the log was only
+//! appended to, never rewritten, between the two.
+//!
+//! Read the following three limits before treating this as a defence
+//! against a log being shortened.
+//!
+//! **1. A consistency proof on its own detects nothing.** It relates two
+//! roots the caller already holds. If the only place either root has ever
+//! been stored is the host that produced the log, a host that rewrites the
+//! log re-signs a matching root and every proof it emits is internally
+//! perfect. This code is what makes an *off-host* witness meaningful; it is
+//! not itself a witness. Without somewhere the host cannot rewrite a root,
+//! and something that compares successive roots, this adds capability, not
+//! a guarantee.
+//!
+//! **2. A host-signed root stored on the host is zero tamper-evidence
+//! against that host.** [`SignedAuditRoot`] is signed by the host signer at
+//! `~/.mvm/keys/host-signer.ed25519` and published beside the log it
+//! attests — same directory, same machine. Against a malicious host —
+//! explicitly out of project scope — that signature proves nothing the
+//! host did not already control. Against accident, and against a *later*
+//! compromise that did not also capture the earlier root, it is worth
+//! having, and that is the whole of its value.
+//!
+//! **3. Even with an off-host witness the property is DETECTION, never
+//! prevention, and only back to the last witnessed root.** Entries appended
+//! and then deleted *between* two witness points leave no trace in either
+//! root, so no consistency proof can speak about them. The detection window
+//! is exactly the witnessing interval.
+//!
+//! Tail truncation of the audit log is undetectable today, and nothing in
+//! this module changes that.
 
 use crate::verify::{decode_hex32, encode_hex32, hash_line};
 use alloc::string::String;
@@ -185,6 +222,44 @@ pub enum MerkleError {
     /// The canonical signing payload could not be serialized (unreachable
     /// for the scalar fields, but fail closed rather than panic).
     PayloadSerialize(String),
+    /// A consistency proof was asked for from an empty tree. RFC 6962
+    /// defines the proof only for `0 < m`, and the empty tree's root
+    /// (`SHA-256("")`) is not a node of any larger tree, so there is
+    /// nothing to relate.
+    ConsistencyOldSizeZero,
+    /// The tree claimed to be the prefix is **larger** than the tree it is
+    /// claimed to be a prefix of. A log cannot shrink by appending, so this
+    /// is the shape a shortened log takes when checked against a root that
+    /// was witnessed when it was longer.
+    ConsistencyShrunk {
+        /// Leaf count of the earlier (claimed-prefix) tree.
+        old_size: u64,
+        /// Leaf count of the later tree, which is smaller.
+        new_size: u64,
+    },
+    /// `new_size` exceeds the number of leaves supplied to the builder.
+    NewSizeExceedsLeaves {
+        /// The requested tree size.
+        new_size: u64,
+        /// How many leaves were actually supplied.
+        leaves: u64,
+    },
+    /// The consistency path had fewer nodes than the two tree shapes
+    /// require.
+    ConsistencyPathTooShort,
+    /// The consistency path had more nodes than the two tree shapes
+    /// require.
+    ConsistencyPathTooLong,
+    /// The path folded to something other than the claimed **earlier**
+    /// root: the later tree does not contain the earlier tree as a prefix.
+    /// At equal sizes this means the two roots disagree over the same leaf
+    /// count — the log's existing entries changed.
+    OldRootMismatch,
+    /// The path folded to something other than the claimed **later** root.
+    NewRootMismatch,
+    /// A consistency proof did not bind to the pair of [`SignedAuditRoot`]s
+    /// it was checked against. The payload names the field that differed.
+    RootBindingMismatch(&'static str),
 }
 
 impl fmt::Display for MerkleError {
@@ -210,6 +285,37 @@ impl fmt::Display for MerkleError {
             Self::SignatureInvalid => write!(f, "signature did not verify"),
             Self::PayloadSerialize(reason) => {
                 write!(f, "signing payload serialize failed: {reason}")
+            }
+            Self::ConsistencyOldSizeZero => {
+                write!(f, "consistency proof is undefined from an empty tree")
+            }
+            Self::ConsistencyShrunk { old_size, new_size } => write!(
+                f,
+                "tree shrank from {old_size} to {new_size} leaves; an appended log cannot shrink"
+            ),
+            Self::NewSizeExceedsLeaves { new_size, leaves } => write!(
+                f,
+                "requested tree size {new_size} exceeds the {leaves} leaves supplied"
+            ),
+            Self::ConsistencyPathTooShort => {
+                write!(f, "consistency path shorter than the trees require")
+            }
+            Self::ConsistencyPathTooLong => {
+                write!(f, "consistency path longer than the trees require")
+            }
+            Self::OldRootMismatch => write!(
+                f,
+                "recomputed earlier root does not match the claimed earlier root"
+            ),
+            Self::NewRootMismatch => write!(
+                f,
+                "recomputed later root does not match the claimed later root"
+            ),
+            Self::RootBindingMismatch(field) => {
+                write!(
+                    f,
+                    "consistency proof does not bind to the signed roots: {field}"
+                )
             }
         }
     }
@@ -293,28 +399,39 @@ pub fn build_inclusion_proof(
     }
     let leaf_line = String::from_utf8(leaf_lines[index].as_ref().to_vec())
         .map_err(|_| MerkleError::LeafNotUtf8)?;
-    let mut level: Vec<[u8; 32]> = leaf_lines.iter().map(|l| leaf_hash(l.as_ref())).collect();
-    let mut idx = index;
-    let mut audit_path: Vec<String> = Vec::new();
-    while level.len() > 1 {
-        let count = level.len();
-        // A node has a sibling unless it is the lone trailing node of an
-        // odd-length level.
-        let is_lone = idx == count - 1 && count % 2 == 1;
-        if !is_lone {
-            let sib = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
-            audit_path.push(encode_hex32(&level[sib]));
-        }
-        level = reduce_level(&level);
-        idx /= 2;
-    }
+    let level: Vec<[u8; 32]> = leaf_lines.iter().map(|l| leaf_hash(l.as_ref())).collect();
     Ok(InclusionProof {
         leaf_index: index as u64,
         tree_size: n as u64,
         leaf_line,
-        audit_path,
-        root: encode_hex32(&level[0]),
+        audit_path: sibling_path(level, index),
+        root: encode_hex32(&merkle_root(leaf_lines)),
     })
+}
+
+/// Sibling hashes on the path from `index` at `level` up to the tree root,
+/// bottom→top, skipping the levels where the node is the lone trailing node
+/// and so has no sibling.
+///
+/// `level` may be any level of the tree, not just the leaves — the
+/// consistency builder enters part-way up. Folding to the root is the same
+/// [`reduce_level`] both proof kinds share, so an inclusion path and a
+/// consistency path can never disagree about the tree's shape.
+fn sibling_path(mut level: Vec<[u8; 32]>, mut index: usize) -> Vec<String> {
+    let mut path = Vec::new();
+    while level.len() > 1 {
+        let count = level.len();
+        // A node has a sibling unless it is the lone trailing node of an
+        // odd-length level.
+        let is_lone = index == count - 1 && count % 2 == 1;
+        if !is_lone {
+            let sibling = if index % 2 == 0 { index + 1 } else { index - 1 };
+            path.push(encode_hex32(&level[sibling]));
+        }
+        level = reduce_level(&level);
+        index /= 2;
+    }
+    path
 }
 
 /// Verify an [`InclusionProof`], returning the recomputed root on success.
@@ -365,6 +482,247 @@ pub fn verify_inclusion(proof: &InclusionProof) -> Result<[u8; 32], MerkleError>
         return Err(MerkleError::RootMismatch);
     }
     Ok(hash)
+}
+
+/// An `O(log n)` proof that the tree of `old_size` leaves is a **prefix**
+/// of the tree of `new_size` leaves — i.e. that the log was only appended
+/// to between the two.
+///
+/// `path` holds the nodes bottom→top as lowercase hex, per RFC 6962
+/// §2.1.2. The proof is self-describing: [`verify_consistency`]
+/// reconstructs both roots from `path` and checks them against `old_root`
+/// and `new_root`.
+///
+/// # Security: an unbound consistency proof is worth nothing
+///
+/// Exactly as for [`InclusionProof`], a successful [`verify_consistency`]
+/// attests only that the proof is internally consistent with its **own
+/// embedded roots**. Anyone can invent two trees, compute both roots, and
+/// emit a self-verifying proof. The proof means something only when
+/// `old_root` is a root some party recorded *earlier and elsewhere* — see
+/// [`verify_consistency_against_roots`], and the module-level note on why
+/// "elsewhere" cannot be the host that wrote the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsistencyProof {
+    /// Leaf count of the earlier tree, claimed to be a prefix.
+    pub old_size: u64,
+    /// Leaf count of the later tree.
+    pub new_size: u64,
+    /// The earlier tree's Merkle root, 64 lowercase hex chars.
+    pub old_root: String,
+    /// The later tree's Merkle root, 64 lowercase hex chars.
+    pub new_root: String,
+    /// RFC 6962 consistency-proof nodes, bottom→top, each 64 lowercase hex
+    /// chars. Empty when `old_size == new_size`.
+    pub path: Vec<String>,
+}
+
+/// The level and index of the largest perfect subtree ending exactly at
+/// leaf `size - 1` — the node a consistency proof for `size` is anchored
+/// at.
+///
+/// The subtree spans `[size - 2^level, size)`. `index == 0` exactly when
+/// `size` is a power of two, in which case that node **is** the tree's own
+/// root and a prover therefore never has to send it.
+fn consistency_anchor(size: u64) -> (u32, u64) {
+    let level = size.trailing_zeros();
+    (level, (size - 1) >> level)
+}
+
+/// Node count at `level` in a tree of `leaves` leaves — the same div-ceil
+/// ladder [`reduce_level`] walks, so builder and verifier agree on where a
+/// level ends and therefore on which nodes are lone.
+fn level_width(leaves: u64, level: u32) -> u64 {
+    (0..level).fold(leaves, |width, _| width.div_ceil(2))
+}
+
+/// Build the RFC 6962 consistency proof from the tree of `old_size` leaves
+/// to the tree of `new_size` leaves, both taken from the front of
+/// `leaf_lines`.
+///
+/// Requires `0 < old_size <= new_size <= leaf_lines.len()`. `old_size ==
+/// new_size` yields an empty path and two equal roots.
+///
+/// Fails closed with [`MerkleError::ConsistencyOldSizeZero`] (RFC 6962
+/// defines the proof only for a non-empty prefix),
+/// [`MerkleError::ConsistencyShrunk`] (the prefix is bigger than the tree
+/// it is claimed to be a prefix of — what a shortened log looks like), or
+/// [`MerkleError::NewSizeExceedsLeaves`].
+///
+/// Unlike [`build_inclusion_proof`] this carries no leaf bytes, so leaves
+/// need not be valid UTF-8.
+pub fn build_consistency_proof(
+    leaf_lines: &[impl AsRef<[u8]>],
+    old_size: usize,
+    new_size: usize,
+) -> Result<ConsistencyProof, MerkleError> {
+    if new_size > leaf_lines.len() {
+        return Err(MerkleError::NewSizeExceedsLeaves {
+            new_size: new_size as u64,
+            leaves: leaf_lines.len() as u64,
+        });
+    }
+    if old_size == 0 {
+        return Err(MerkleError::ConsistencyOldSizeZero);
+    }
+    if old_size > new_size {
+        return Err(MerkleError::ConsistencyShrunk {
+            old_size: old_size as u64,
+            new_size: new_size as u64,
+        });
+    }
+    let mut path = Vec::new();
+    if old_size < new_size {
+        let (level, index) = consistency_anchor(old_size as u64);
+        // Climb to the anchor's level, then walk to the root exactly as an
+        // inclusion path does.
+        let mut nodes: Vec<[u8; 32]> = leaf_lines[..new_size]
+            .iter()
+            .map(|l| leaf_hash(l.as_ref()))
+            .collect();
+        for _ in 0..level {
+            nodes = reduce_level(&nodes);
+        }
+        let index = index as usize;
+        if index != 0 {
+            // `old_size` is not a power of two, so the anchor is not the
+            // earlier root; the verifier cannot derive it and needs it sent.
+            path.push(encode_hex32(&nodes[index]));
+        }
+        path.extend(sibling_path(nodes, index));
+    }
+    Ok(ConsistencyProof {
+        old_size: old_size as u64,
+        new_size: new_size as u64,
+        old_root: encode_hex32(&merkle_root(&leaf_lines[..old_size])),
+        new_root: encode_hex32(&merkle_root(&leaf_lines[..new_size])),
+        path,
+    })
+}
+
+/// Verify a [`ConsistencyProof`], reconstructing both roots from `path`.
+///
+/// Both accumulators start at the anchor node ([`consistency_anchor`]) —
+/// the first path element, or `old_root` itself when `old_size` is a power
+/// of two and the anchor therefore *is* that root. Walking up, a sibling on
+/// the **left** lies inside the earlier tree and folds into both
+/// accumulators; a sibling on the **right** covers leaves the earlier tree
+/// did not have and folds into the later accumulator only. What survives is
+/// the earlier root reconstructed out of nodes of the later tree, which is
+/// precisely the prefix claim.
+///
+/// Fails closed on `old_size == 0`, `old_size > new_size` (a log that
+/// shrank), a path length inconsistent with the two tree shapes, any hex
+/// decode error, and either root mismatching.
+///
+/// An `Ok` result attests **only** that the proof folds to its own embedded
+/// roots. It is not evidence about a real log until `old_root` is bound to
+/// a root recorded earlier and off-host — see
+/// [`verify_consistency_against_roots`] and the module-level note.
+pub fn verify_consistency(proof: &ConsistencyProof) -> Result<(), MerkleError> {
+    if proof.old_size == 0 {
+        return Err(MerkleError::ConsistencyOldSizeZero);
+    }
+    if proof.old_size > proof.new_size {
+        return Err(MerkleError::ConsistencyShrunk {
+            old_size: proof.old_size,
+            new_size: proof.new_size,
+        });
+    }
+    let old_root = decode_hex32(&proof.old_root).map_err(MerkleError::HexDecode)?;
+    let new_root = decode_hex32(&proof.new_root).map_err(MerkleError::HexDecode)?;
+    let mut path = proof.path.iter();
+
+    if proof.old_size == proof.new_size {
+        // Same tree: nothing to fold, and nothing legitimate to send.
+        if path.next().is_some() {
+            return Err(MerkleError::ConsistencyPathTooLong);
+        }
+        if old_root != new_root {
+            return Err(MerkleError::OldRootMismatch);
+        }
+        return Ok(());
+    }
+
+    let (level, mut index) = consistency_anchor(proof.old_size);
+    let anchor = if index == 0 {
+        old_root
+    } else {
+        let hex = path.next().ok_or(MerkleError::ConsistencyPathTooShort)?;
+        decode_hex32(hex).map_err(MerkleError::HexDecode)?
+    };
+    let mut old_hash = anchor;
+    let mut new_hash = anchor;
+    let mut width = level_width(proof.new_size, level);
+    while width > 1 {
+        let is_lone = index == width - 1 && width % 2 == 1;
+        if !is_lone {
+            let hex = path.next().ok_or(MerkleError::ConsistencyPathTooShort)?;
+            let sibling = decode_hex32(hex).map_err(MerkleError::HexDecode)?;
+            if index % 2 == 1 {
+                old_hash = interior_hash(&sibling, &old_hash);
+                new_hash = interior_hash(&sibling, &new_hash);
+            } else {
+                new_hash = interior_hash(&new_hash, &sibling);
+            }
+        }
+        index /= 2;
+        width = width.div_ceil(2);
+    }
+    if path.next().is_some() {
+        return Err(MerkleError::ConsistencyPathTooLong);
+    }
+    if old_hash != old_root {
+        return Err(MerkleError::OldRootMismatch);
+    }
+    if new_hash != new_root {
+        return Err(MerkleError::NewRootMismatch);
+    }
+    Ok(())
+}
+
+/// Verify a [`ConsistencyProof`] **bound to two [`SignedAuditRoot`]s** —
+/// the composition that actually says something about a log.
+///
+/// Checks both roots describe the same tenant, that the proof's sizes and
+/// root hashes are exactly the signed ones, and only then folds the path.
+/// The caller MUST have already run [`verify_signed_root`] on both roots
+/// under the trusted key; this function deliberately does not, so that key
+/// handling stays in one place.
+///
+/// This is still detection, not prevention, and it detects only back to
+/// whenever `old` was recorded. If `old` was read from the same host that
+/// produced `new`, it detects nothing at all — that host can reissue both.
+/// The module-level note spells out why.
+pub fn verify_consistency_against_roots(
+    proof: &ConsistencyProof,
+    old: &SignedAuditRoot,
+    new: &SignedAuditRoot,
+) -> Result<(), MerkleError> {
+    if old.tenant != new.tenant {
+        return Err(MerkleError::RootBindingMismatch("tenant"));
+    }
+    if proof.old_size != old.tree_size {
+        return Err(MerkleError::RootBindingMismatch("old_size"));
+    }
+    if proof.new_size != new.tree_size {
+        return Err(MerkleError::RootBindingMismatch("new_size"));
+    }
+    // Compare decoded bytes, not the hex strings, so a case or formatting
+    // difference is not mistaken for a tampered root.
+    let bind = |proof_hex: &str, root_hex: &str, field| -> Result<(), MerkleError> {
+        let a = decode_hex32(proof_hex).map_err(MerkleError::HexDecode)?;
+        let b = decode_hex32(root_hex).map_err(MerkleError::HexDecode)?;
+        if a == b {
+            Ok(())
+        } else {
+            Err(MerkleError::RootBindingMismatch(field))
+        }
+    };
+    bind(&proof.old_root, &old.root_hash, "old_root")?;
+    bind(&proof.new_root, &new.root_hash, "new_root")?;
+    verify_consistency(proof)
 }
 
 /// The exact bytes an Ed25519 signature over a [`SignedAuditRoot`] covers.
@@ -732,6 +1090,479 @@ mod tests {
                 leaf_index: 0,
                 tree_size: 0,
             })
+        );
+    }
+
+    // --- consistency proofs ---------------------------------------------
+
+    /// Independent RFC 6962 §2.1.2 `SUBPROOF` oracle, transcribed from the
+    /// recursive definition. Structurally unrelated to the level-by-level
+    /// builder — it recurses on a split at the largest power of two, where
+    /// the builder folds levels and promotes lone nodes — so agreement
+    /// between them is evidence, not a tautology. Same discipline as
+    /// [`rfc6962_mth`], which pins the tree shape the whole algorithm
+    /// assumes (see `merkle_root_matches_rfc6962_oracle_for_many_sizes`).
+    fn rfc6962_subproof(m: usize, leaves: &[[u8; 32]], b: bool) -> Vec<[u8; 32]> {
+        let n = leaves.len();
+        if m == n {
+            return if b {
+                Vec::new()
+            } else {
+                vec![rfc6962_mth(leaves)]
+            };
+        }
+        let mut k = 1usize;
+        while k * 2 < n {
+            k *= 2;
+        }
+        if m <= k {
+            let mut out = rfc6962_subproof(m, &leaves[..k], b);
+            out.push(rfc6962_mth(&leaves[k..]));
+            out
+        } else {
+            let mut out = rfc6962_subproof(m - k, &leaves[k..], false);
+            out.push(rfc6962_mth(&leaves[..k]));
+            out
+        }
+    }
+
+    /// `PROOF(m, D[n]) = SUBPROOF(m, D[n], true)`, as hex.
+    fn rfc6962_consistency(leaf_lines: &[String], m: usize, n: usize) -> Vec<String> {
+        let leaves: Vec<[u8; 32]> = leaf_lines[..n]
+            .iter()
+            .map(|l| leaf_hash(l.as_bytes()))
+            .collect();
+        rfc6962_subproof(m, &leaves, true)
+            .iter()
+            .map(encode_hex32)
+            .collect()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn consistency_path_matches_rfc6962_oracle_for_every_pair() {
+        // Every (m, n) with 1 <= m <= n <= 33 — past the 32 boundary so a
+        // power-of-two special case cannot hide at the edge of the range.
+        for n in 1..=33usize {
+            let l = lines(n);
+            for m in 1..=n {
+                let proof = build_consistency_proof(&l, m, n).unwrap();
+                assert_eq!(
+                    proof.path,
+                    rfc6962_consistency(&l, m, n),
+                    "consistency path diverged from the RFC 6962 oracle at m={m}, n={n}"
+                );
+                assert_eq!(proof.old_root, encode_hex32(&rfc6962_root(&l[..m])));
+                assert_eq!(proof.new_root, encode_hex32(&rfc6962_root(&l[..n])));
+            }
+        }
+    }
+
+    #[test]
+    fn every_consistency_proof_round_trips() {
+        for n in 1..=33usize {
+            let l = lines(n);
+            for m in 1..=n {
+                let proof = build_consistency_proof(&l, m, n).unwrap();
+                assert_eq!(
+                    verify_consistency(&proof),
+                    Ok(()),
+                    "m={m}, n={n} failed to verify"
+                );
+            }
+        }
+    }
+
+    /// The eight leaves of the Certificate Transparency reference tree, as
+    /// published in `transparency-dev/merkle`'s `testdata`. Hex-encoded
+    /// byte strings, not text — leaf 0 is the empty string.
+    fn ct_reference_leaves() -> Vec<Vec<u8>> {
+        [
+            "",
+            "00",
+            "10",
+            "2021",
+            "3031",
+            "40414243",
+            "5051525354555657",
+            "606162636465666768696a6b6c6d6e6f",
+        ]
+        .iter()
+        .map(|h| unhex(h))
+        .collect()
+    }
+
+    #[test]
+    fn known_answer_consistency_vectors_from_the_ct_reference_tree() {
+        // Known answers from an INDEPENDENT implementation — the CT
+        // reference tree's published consistency vectors
+        // (transparency-dev/merkle, testdata/consistency/*), converted from
+        // base64 to hex. These are not this implementation's own output
+        // pasted back: agreement means our tree, our hashing scheme, and our
+        // proof shape all match the reference log, and any drift in any of
+        // the three turns this red.
+        let leaves = ct_reference_leaves();
+        let cases: &[(usize, usize, &str, &str, &[&str])] = &[
+            (
+                1,
+                1,
+                "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+                "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+                &[],
+            ),
+            (
+                1,
+                8,
+                "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+                "5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328",
+                &[
+                    "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7",
+                    "5f083f0a1a33ca076a95279832580db3e0ef4584bdff1f54c8a360f50de3031e",
+                    "6b47aaf29ee3c2af9af889bc1fb9254dabd31177f16232dd6aab035ca39bf6e4",
+                ],
+            ),
+            (
+                6,
+                8,
+                "76e67dadbcdf1e10e1b74ddc608abd2f98dfb16fbce75277b5232a127f2087ef",
+                "5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328",
+                &[
+                    "0ebc5d3437fbe2db158b9f126a1d118e308181031d0a949f8dededebc558ef6a",
+                    "ca854ea128ed050b41b35ffc1b87b8eb2bde461e9e3b5596ece6b9d5975a0ae0",
+                    "d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7",
+                ],
+            ),
+            (
+                2,
+                5,
+                "fac54203e7cc696cf0dfcb42c92a1d9dbaf70ad9e621f4bd8d98662f00e3c125",
+                "4e3bbb1f7b478dcfe71fb631631519a3bca12c9aefca1612bfce4c13a86264d4",
+                &[
+                    "5f083f0a1a33ca076a95279832580db3e0ef4584bdff1f54c8a360f50de3031e",
+                    "bc1a0643b12e4d2d7c77918f44e0f4f79a838b6cf9ec5b5c283e1f4d88599e6b",
+                ],
+            ),
+            (
+                6,
+                7,
+                "76e67dadbcdf1e10e1b74ddc608abd2f98dfb16fbce75277b5232a127f2087ef",
+                "ddb89be403809e325750d3d263cd78929c2942b7942a34b77e122c9594a74c8c",
+                &[
+                    "0ebc5d3437fbe2db158b9f126a1d118e308181031d0a949f8dededebc558ef6a",
+                    "b08693ec2e721597130641e8211e7eedccb4c26413963eee6c1e2ed16ffb1a5f",
+                    "d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7",
+                ],
+            ),
+        ];
+        for &(m, n, root1, root2, path) in cases {
+            let proof = build_consistency_proof(&leaves, m, n).unwrap();
+            // Our roots equal the reference log's published roots...
+            assert_eq!(proof.old_root, root1, "root1 drifted at m={m}, n={n}");
+            assert_eq!(proof.new_root, root2, "root2 drifted at m={m}, n={n}");
+            // ...and so does every node of the proof, in order.
+            assert_eq!(proof.path, path, "proof drifted at m={m}, n={n}");
+            assert_eq!(verify_consistency(&proof), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_truncated_log_fails_consistency_against_its_own_earlier_root() {
+        // The failure mode, executable rather than described.
+        //
+        // Scope note, because this test is the one most likely to be
+        // misread: it demonstrates that the MATH refuses a truncated log
+        // checked against a root witnessed when the log was longer. It does
+        // NOT demonstrate host-level detection. Nothing here keeps the
+        // witnessed root out of reach of the host that wrote the log, so on
+        // a real host today the attacker holding `witnessed` simply reissues
+        // it. That gap is the off-host witness, and it is not this module.
+        let full = lines(12);
+        let witnessed = encode_hex32(&merkle_root(&full)); // recorded at size 12
+
+        // The host deletes the three newest lines.
+        let truncated = &full[..9];
+
+        // There is no proof to offer at all: the log is now shorter than the
+        // root a witness already holds, and appending cannot shrink a tree.
+        assert_eq!(
+            build_consistency_proof(truncated, 12, truncated.len()),
+            Err(MerkleError::ConsistencyShrunk {
+                old_size: 12,
+                new_size: 9,
+            })
+        );
+
+        // So the host rewrites instead: keep the first nine, substitute the
+        // three it deleted, and keep appending past the witnessed size. The
+        // log is now LONGER than when it was witnessed, so no size check can
+        // catch it.
+        let mut rewritten: Vec<String> = full[..9].to_vec();
+        for i in 9..15 {
+            rewritten.push(format!("rewritten-line-{i}"));
+        }
+        let mut forged = build_consistency_proof(&rewritten, 12, 15).unwrap();
+        assert_ne!(
+            forged.old_root, witnessed,
+            "the rewritten prefix must not reproduce the witnessed root"
+        );
+        // The host claims the witnessed root as its size-12 prefix.
+        forged.old_root = witnessed.clone();
+        assert_eq!(
+            verify_consistency(&forged),
+            Err(MerkleError::OldRootMismatch),
+            "a rewritten prefix must not verify against the witnessed root"
+        );
+
+        // Control: had the host only appended, the same 12 -> 15 proof
+        // verifies against the same witnessed root. The test above fails for
+        // the truncation, not because 12 -> 15 proofs never verify.
+        let mut appended: Vec<String> = full.clone();
+        for i in 12..15 {
+            appended.push(format!("audit-line-{i}"));
+        }
+        let honest = build_consistency_proof(&appended, 12, 15).unwrap();
+        assert_eq!(honest.old_root, witnessed);
+        assert_eq!(verify_consistency(&honest), Ok(()));
+    }
+
+    #[test]
+    fn a_log_that_shrank_is_refused_by_both_builder_and_verifier() {
+        let l = lines(4);
+        assert_eq!(
+            build_consistency_proof(&l, 4, 3),
+            Err(MerkleError::ConsistencyShrunk {
+                old_size: 4,
+                new_size: 3,
+            })
+        );
+        let mut proof = build_consistency_proof(&l, 2, 4).unwrap();
+        proof.old_size = 5;
+        assert_eq!(
+            verify_consistency(&proof),
+            Err(MerkleError::ConsistencyShrunk {
+                old_size: 5,
+                new_size: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn equal_sizes_yield_an_empty_proof_and_reject_a_changed_root() {
+        let l = lines(6);
+        let proof = build_consistency_proof(&l, 6, 6).unwrap();
+        assert!(proof.path.is_empty());
+        assert_eq!(proof.old_root, proof.new_root);
+        assert_eq!(verify_consistency(&proof), Ok(()));
+
+        // Same leaf count, different root: existing entries were edited.
+        let mut edited = proof.clone();
+        edited.new_root = encode_hex32(&merkle_root(&lines(5)));
+        assert_eq!(
+            verify_consistency(&edited),
+            Err(MerkleError::OldRootMismatch)
+        );
+
+        // And nothing legitimate can be sent for an equal-size claim.
+        let mut padded = proof.clone();
+        padded.path.push(encode_hex32(&[0xabu8; 32]));
+        assert_eq!(
+            verify_consistency(&padded),
+            Err(MerkleError::ConsistencyPathTooLong)
+        );
+    }
+
+    #[test]
+    fn empty_prefix_is_refused_by_both_builder_and_verifier() {
+        let l = lines(4);
+        assert_eq!(
+            build_consistency_proof(&l, 0, 4),
+            Err(MerkleError::ConsistencyOldSizeZero)
+        );
+        let mut proof = build_consistency_proof(&l, 1, 4).unwrap();
+        proof.old_size = 0;
+        assert_eq!(
+            verify_consistency(&proof),
+            Err(MerkleError::ConsistencyOldSizeZero)
+        );
+    }
+
+    #[test]
+    fn new_size_past_the_supplied_leaves_is_refused() {
+        let l = lines(3);
+        assert_eq!(
+            build_consistency_proof(&l, 2, 4),
+            Err(MerkleError::NewSizeExceedsLeaves {
+                new_size: 4,
+                leaves: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn consistency_proof_carries_no_leaf_bytes_so_non_utf8_leaves_are_fine() {
+        // Unlike an inclusion proof, nothing here embeds a leaf, so a leaf
+        // that is not valid UTF-8 must not block a proof.
+        let leaves: [&[u8]; 4] = [b"ok", &[0xffu8, 0xfe], b"also-ok", &[0x80u8]];
+        let proof = build_consistency_proof(&leaves, 2, 4).unwrap();
+        assert_eq!(verify_consistency(&proof), Ok(()));
+        assert_eq!(proof.new_root, encode_hex32(&merkle_root(&leaves)));
+    }
+
+    #[test]
+    fn flipped_consistency_node_fails_closed() {
+        let l = lines(9);
+        let mut proof = build_consistency_proof(&l, 6, 9).unwrap();
+        let mut node = proof.path[0].clone().into_bytes();
+        node[0] = if node[0] == b'0' { b'1' } else { b'0' };
+        proof.path[0] = String::from_utf8(node).unwrap();
+        // The anchor is shared by both folds, so corrupting it breaks the
+        // earlier root first.
+        assert_eq!(
+            verify_consistency(&proof),
+            Err(MerkleError::OldRootMismatch)
+        );
+    }
+
+    #[test]
+    fn tampered_new_root_fails_closed_on_the_later_root() {
+        let l = lines(7);
+        let mut proof = build_consistency_proof(&l, 3, 7).unwrap();
+        proof.new_root = encode_hex32(&[0xffu8; 32]);
+        assert_eq!(
+            verify_consistency(&proof),
+            Err(MerkleError::NewRootMismatch)
+        );
+    }
+
+    #[test]
+    fn truncated_and_extended_consistency_paths_fail_closed() {
+        let l = lines(7);
+        let mut short = build_consistency_proof(&l, 3, 7).unwrap();
+        short.path.pop();
+        assert_eq!(
+            verify_consistency(&short),
+            Err(MerkleError::ConsistencyPathTooShort)
+        );
+
+        let mut long = build_consistency_proof(&l, 3, 7).unwrap();
+        long.path.push(encode_hex32(&[0xabu8; 32]));
+        assert_eq!(
+            verify_consistency(&long),
+            Err(MerkleError::ConsistencyPathTooLong)
+        );
+    }
+
+    #[test]
+    fn power_of_two_prefix_does_not_send_its_own_root() {
+        // When `old_size` is a power of two the anchor IS the earlier root,
+        // so the prover omits it and the verifier seeds from `old_root`.
+        // A proof for a non-power-of-two prefix at the same tree size
+        // carries exactly one more node.
+        let l = lines(7);
+        let pow2 = build_consistency_proof(&l, 4, 7).unwrap();
+        assert_eq!(pow2.path, rfc6962_consistency(&l, 4, 7));
+        assert_eq!(verify_consistency(&pow2), Ok(()));
+
+        // Seeding from `old_root` means a wrong `old_root` must surface on
+        // the LATER root, since the earlier fold is then trivially self-
+        // consistent. Fail closed either way.
+        let mut swapped = pow2.clone();
+        swapped.old_root = encode_hex32(&merkle_root(&l[..2]));
+        assert_eq!(
+            verify_consistency(&swapped),
+            Err(MerkleError::NewRootMismatch)
+        );
+    }
+
+    #[test]
+    fn non_hex_consistency_node_fails_closed() {
+        let l = lines(5);
+        let mut proof = build_consistency_proof(&l, 3, 5).unwrap();
+        proof.path[0] = "zz".repeat(32);
+        assert!(matches!(
+            verify_consistency(&proof),
+            Err(MerkleError::HexDecode(_))
+        ));
+    }
+
+    #[test]
+    fn consistency_proof_serde_round_trip_and_unknown_field() {
+        let proof = build_consistency_proof(&lines(9), 5, 9).unwrap();
+        let json = serde_json::to_string(&proof).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ConsistencyProof>(&json).unwrap(),
+            proof
+        );
+
+        let mut value: serde_json::Value = serde_json::to_value(&proof).unwrap();
+        value["surprise"] = serde_json::Value::Bool(true);
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(serde_json::from_str::<ConsistencyProof>(&json).is_err());
+    }
+
+    #[test]
+    fn binding_to_signed_roots_rejects_every_mismatch() {
+        let key = signing_key();
+        let l = lines(9);
+        let proof = build_consistency_proof(&l, 5, 9).unwrap();
+        let old = signed_root(&key, "tenant-a", 5, &proof.old_root);
+        let new = signed_root(&key, "tenant-a", 9, &proof.new_root);
+        assert_eq!(verify_consistency_against_roots(&proof, &old, &new), Ok(()));
+
+        // A root signed for a different tenant is not this log's root.
+        let other_tenant = signed_root(&key, "tenant-b", 9, &proof.new_root);
+        assert_eq!(
+            verify_consistency_against_roots(&proof, &old, &other_tenant),
+            Err(MerkleError::RootBindingMismatch("tenant"))
+        );
+
+        // Sizes must be exactly the signed ones...
+        let wrong_size = signed_root(&key, "tenant-a", 4, &proof.old_root);
+        assert_eq!(
+            verify_consistency_against_roots(&proof, &wrong_size, &new),
+            Err(MerkleError::RootBindingMismatch("old_size"))
+        );
+        let wrong_new_size = signed_root(&key, "tenant-a", 10, &proof.new_root);
+        assert_eq!(
+            verify_consistency_against_roots(&proof, &old, &wrong_new_size),
+            Err(MerkleError::RootBindingMismatch("new_size"))
+        );
+
+        // ...and so must the hashes. A self-consistent proof over roots
+        // nobody signed is exactly the forgery the binding exists to stop.
+        let unrelated = signed_root(&key, "tenant-a", 5, &encode_hex32(&[0x11u8; 32]));
+        assert_eq!(
+            verify_consistency_against_roots(&proof, &unrelated, &new),
+            Err(MerkleError::RootBindingMismatch("old_root"))
+        );
+        let unrelated_new = signed_root(&key, "tenant-a", 9, &encode_hex32(&[0x22u8; 32]));
+        assert_eq!(
+            verify_consistency_against_roots(&proof, &old, &unrelated_new),
+            Err(MerkleError::RootBindingMismatch("new_root"))
+        );
+    }
+
+    #[test]
+    fn binding_does_not_verify_signatures_itself() {
+        // The binding helper is deliberately signature-blind: a root whose
+        // signature is garbage still binds, because checking it is
+        // `verify_signed_root`'s job and the caller's responsibility. This
+        // pins that split so nobody later assumes binding implies signed.
+        let key = signing_key();
+        let l = lines(4);
+        let proof = build_consistency_proof(&l, 2, 4).unwrap();
+        let old = signed_root(&key, "t", 2, &proof.old_root);
+        let mut new = signed_root(&key, "t", 4, &proof.new_root);
+        new.signature = B64.encode([0u8; 64]);
+        assert_eq!(verify_consistency_against_roots(&proof, &old, &new), Ok(()));
+        assert_eq!(
+            verify_signed_root(&new, &key.verifying_key()),
+            Err(MerkleError::SignatureInvalid)
         );
     }
 
