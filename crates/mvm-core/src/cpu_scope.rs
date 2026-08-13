@@ -936,6 +936,41 @@ mod tests {
         assert_eq!(probe.tier_for_vm(state.path()), EnforcedTier::Declared);
     }
 
+    #[test]
+    fn a_scope_with_a_resolvable_cgroup_reads_back_its_enforcement() {
+        // The overstating direction. A recorded unit whose ControlGroup
+        // resolves and whose cpu.max file exists must report the enforced tier,
+        // not silently down-grade to "declared".
+        let state = tempfile::tempdir().expect("state dir");
+        std::fs::write(state.path().join(SCOPE_UNIT_FILE), "mvm-resolved.scope")
+            .expect("record a unit");
+
+        let cgroup_root = state.path().join("cgroup");
+        let control_group = "/user.slice/user-1000.slice/mvm-resolved.scope";
+        let cgroup_dir = cgroup_root.join(control_group.trim_start_matches('/'));
+        std::fs::create_dir_all(&cgroup_dir).expect("create cgroup dir");
+        std::fs::write(
+            cgroup_dir.join("cpu.max"),
+            "150000 100000
+",
+        )
+        .expect("write cpu.max");
+
+        let systemctl = state.path().join("systemctl");
+        std::fs::write(&systemctl, format!("#!/bin/sh\necho '{}'\n", control_group))
+            .expect("write fake systemctl");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&systemctl).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&systemctl, perms).unwrap();
+        }
+
+        let probe = ScopeProbe::with_root_and_systemctl(cgroup_root, systemctl);
+        assert_eq!(probe.tier_for_vm(state.path()), EnforcedTier::Cgroup2CpuMax);
+    }
+
     /// The silence case, and the whole reason the reason-builder exists: a
     /// share was asked for, nothing bounded it, and the operator is told which
     /// half of the mechanism was missing.

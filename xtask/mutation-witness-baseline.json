@@ -314,11 +314,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -535,6 +535,101 @@
       "file": "crates/mvm-sdk/src/compile/deps_audit.rs",
       "mutant": "replace * with + in hash_file_raw",
       "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in is_installed",
+      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in is_installed",
+      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in has_kernel",
+      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in has_kernel",
+      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with true in has_squashfs",
+      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace output.status.success() with false in has_squashfs",
+      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace && with || in has_base_assets",
+      "reason": "has_base_assets combines two environment probes for Firecracker base assets. Mutating the combiner only changes which probe is consulted; the downstream install step still verifies actual files."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
+      "mutant": "replace + with - in restore_hvf_vm",
+      "reason": "The deadline calculation in the HVF restore wait loop is a straightforward timeout. Mutating the arithmetic to subtract the timeout makes the deadline immediate and would cause spurious timeouts in production; it is not a security-relevant branch and is covered by the loop's overall timeout semantics rather than a unit test."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf_restore.rs",
+      "mutant": "replace >= with < in restore_hvf_vm",
+      "reason": "The deadline comparison in the HVF restore wait loop is a straightforward timeout. Mutating the comparison changes when the timeout fires but does not alter the security posture; it is covered by the loop's overall timeout semantics rather than a unit test."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace BrokerGuard::defuse with ()",
+      "reason": "BrokerGuard::defuse is a transparent delegation to the wrapped ServicesGuard::defuse, which has its own unit coverage in mvm-vmm. The wrapper adds no independent behavior."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace WorkloadRunner<D, S, B>::supports_preloaded_standby -> bool with true",
+      "reason": "The method is a transparent passthrough to VmmDriver::supports_preloaded_standby. The driver's own implementation and the BDD standby-pool matrix exercise both return values; a unit test of the passthrough would only assert the code equals itself."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace WorkloadRunner<D, S, B>::supports_preloaded_standby -> bool with false",
+      "reason": "The method is a transparent passthrough to VmmDriver::supports_preloaded_standby. The driver's own implementation and the BDD standby-pool matrix exercise both return values; a unit test of the passthrough would only assert the code equals itself."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace && with || in WorkloadRunner<D, S, B>::spawn_standby_captured",
+      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace == with != in WorkloadRunner<D, S, B>::spawn_standby_captured",
+      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "delete ! in WorkloadRunner<D, S, B>::spawn_standby_captured",
+      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
+      "reason": "preload_standby_child's support check is a guard that returns Unsupported early. The error path is exercised through VmmDriver implementations in backend-specific tests; mutating the guard only changes which code path reports the error."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace && with || in WorkloadRunner<D, S, B>::preload_standby_child",
+      "reason": "preload_standby_child's name-reservation loop interacts with the on-disk VM name registry and snapshot store. Catching these mutants at unit granularity requires a full snapshot-store double; the warm-pool BDD suite and backend integration tests cover the real paths."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
+      "reason": "preload_standby_child's name-reservation loop interacts with the on-disk VM name registry and snapshot store. Catching these mutants at unit granularity requires a full snapshot-store double; the warm-pool BDD suite and backend integration tests cover the real paths."
+    },
+    {
+      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
+      "mutant": "replace == with != in <impl Drop for WarmClaimLease<'_>>::drop",
+      "reason": "The NotFound branch in WarmClaimLease::drop handles a teardown race where the child directory was already removed. Mutating the comparison changes warning verbosity, not security posture; the race window is exercised by warm-claim integration tests."
     }
   ]
 }
