@@ -88,6 +88,13 @@ pub(in crate::commands) enum CacheAction {
         /// (e.g. left by a crashed run).
         #[arg(long)]
         force: bool,
+        /// Remove only the persistent Nix store image, keeping the builder
+        /// kernel/rootfs and the Stage 0 seed. Use this when the store itself
+        /// is the damaged piece — the guest refuses to build and names ext4
+        /// errors on it — so recovery costs one image instead of the whole
+        /// cache.
+        #[arg(long)]
+        store_only: bool,
     },
 }
 
@@ -293,6 +300,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             dry_run,
             json,
             force,
+            store_only,
         } => {
             use super::super::env::builder_vm;
 
@@ -309,8 +317,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 );
             }
 
-            let repair = mvm_build::builder_vm::clear_builder_store(dry_run)
-                .map_err(|e| anyhow::anyhow!("clearing builder store: {e}"))?;
+            let repair = if store_only {
+                mvm_build::builder_vm::clear_builder_store_image(dry_run)
+                    .map_err(|e| anyhow::anyhow!("clearing builder store image: {e}"))?
+            } else {
+                mvm_build::builder_vm::clear_builder_store(dry_run)
+                    .map_err(|e| anyhow::anyhow!("clearing builder store: {e}"))?
+            };
             if json {
                 crate::json_out::emit_json(&repair)?;
                 return Ok(());
