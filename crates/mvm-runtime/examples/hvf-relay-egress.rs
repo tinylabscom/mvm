@@ -174,7 +174,7 @@ fn main() {
             // The one channel off the box: the guest dials EGRESS_PORT, the host
             // relays it to the gating endpoint's UDS.
             vsock: vec![VsockPort {
-                service: GuestService::Substitution,
+                service: GuestService::NetworkFlow,
                 host_uds: uds.clone(),
                 direction: VsockDirection::GuestDials,
             }],

@@ -15,17 +15,17 @@ line. No FlowMux runtime exists yet.
 
 Umbrella: [#2368](https://github.com/tinylabscom/mvm/issues/2368).
 
-| Phase | Issue | Blocked by |
-| ----- | ----- | ---------- |
-| 0 — Ratify the invariant and freeze expansion | [#2369](https://github.com/tinylabscom/mvm/issues/2369) | — (actionable) |
-| 1 — Pin protocol, resource, and performance baselines | [#2370](https://github.com/tinylabscom/mvm/issues/2370) | #2369 |
-| 2 — Introduce the one authenticated endpoint without changing callers | [#2371](https://github.com/tinylabscom/mvm/issues/2371) | #2370 |
-| 3 — Converge egress TCP, UDP, and DNS | [#2372](https://github.com/tinylabscom/mvm/issues/2372) | #2371 |
-| 4 — Stream typed transformations over the same path | [#2373](https://github.com/tinylabscom/mvm/issues/2373) | #2372 |
-| 5 — Implement declared ingress on FlowMux | [#2374](https://github.com/tinylabscom/mvm/issues/2374) | #2373 |
-| 6 — Set the compatibility boundary without weakening isolation | [#2375](https://github.com/tinylabscom/mvm/issues/2375) | #2374 |
-| 7 — Delete L3 completely | [#2376](https://github.com/tinylabscom/mvm/issues/2376) | #2375 |
-| 8 — Make “one path” mechanically enforceable | [#2377](https://github.com/tinylabscom/mvm/issues/2377) | #2376 |
+| Phase                                                                 | Issue                                                   | Blocked by     |
+| --------------------------------------------------------------------- | ------------------------------------------------------- | -------------- |
+| 0 — Ratify the invariant and freeze expansion                         | [#2369](https://github.com/tinylabscom/mvm/issues/2369) | — (actionable) |
+| 1 — Pin protocol, resource, and performance baselines                 | [#2370](https://github.com/tinylabscom/mvm/issues/2370) | #2369          |
+| 2 — Introduce the one authenticated endpoint without changing callers | [#2371](https://github.com/tinylabscom/mvm/issues/2371) | #2370          |
+| 3 — Converge egress TCP, UDP, and DNS                                 | [#2372](https://github.com/tinylabscom/mvm/issues/2372) | #2371          |
+| 4 — Stream typed transformations over the same path                   | [#2373](https://github.com/tinylabscom/mvm/issues/2373) | #2372          |
+| 5 — Implement declared ingress on FlowMux                             | [#2374](https://github.com/tinylabscom/mvm/issues/2374) | #2373          |
+| 6 — Set the compatibility boundary without weakening isolation        | [#2375](https://github.com/tinylabscom/mvm/issues/2375) | #2374          |
+| 7 — Delete L3 completely                                              | [#2376](https://github.com/tinylabscom/mvm/issues/2376) | #2375          |
+| 8 — Make “one path” mechanically enforceable                          | [#2377](https://github.com/tinylabscom/mvm/issues/2377) | #2376          |
 
 Phases run strictly in order; only Phase 0 is actionable until it merges.
 
@@ -223,7 +223,7 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
       data so existing signatures and plan bytes continue to verify.
 - [x] Add `fuzz_network_flow_decode` and `fuzz_network_flow_state`; seed them
       with every valid frame class plus malformed length and transition cases.
-- [ ] Extract the existing authenticated-session handshake and encrypted frame
+- [x] Extract the existing authenticated-session handshake and encrypted frame
       machinery into a transport-independent unit shared by control RPC and
       FlowMux. Prove wrong boot ID, wrong plan digest, wrong key, replayed
       sequence, tampered ciphertext, expired session, and counter exhaustion
@@ -239,7 +239,16 @@ and one shared refusal, `mvm_core::plan::l3_retirement`, called from
       the JSON. The harness refuses to compare different hosts, architectures,
       profiles, or payload/concurrency matrices.
 
-**Landed so far (Phase 1).** `mvm-contract::protocol::network_flow` —
+**Landed so far (Phase 1).** `mvm-core::net::session` — a transport-independent
+authenticated session (`Session::host`, `Session::guest`, `seal`, `open`) shared
+by the control-RPC path and the future FlowMux data path. It reuses the existing
+Ed25519/X25519/AES-256-GCM handshake and per-direction sequence numbers, and
+adds dedicated tests for replay, out-of-order frames, tampered ciphertext,
+tampered signatures, wrong session ID, wrong signer, and sequence-counter
+exhaustion. The control-RPC `AuthenticatedSession` in `mvm-agentd` is now a thin
+JSON-envelope wrapper around this shared module.
+
+`mvm-contract::protocol::network_flow` —
 `limits` (the ceilings, including `MAX_FLOW_CREDIT_BYTES` derived from them so
 the endpoint memory bound cannot drift), `opcode` (all 27 v1 opcodes, their
 classes, their permitted sender, and the confirmation relation), `frame` (the
@@ -257,7 +266,7 @@ cannot represent is not really enforced at the parse boundary.
       `mvm-network-endpoint`, including Cargo bin declarations, release
       packaging, updater manifests, helper resolution, confinement profiles,
       scripts, process reaping, metrics labels, and operator diagnostics.
-- [ ] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
+- [x] Rename `GuestService::Substitution` to `GuestService::NetworkFlow`, retain
       port 5253, and delete the hand-maintained duplicate
       `EGRESS_VSOCK_PORT` constant in favor of the typed service mapping.
 - [ ] Rename `EndpointSpawner`/`RealEndpointSpawner` to
@@ -428,7 +437,7 @@ cannot represent is not really enforced at the parse boundary.
       and absence of L3 services.
 - [ ] Run `cargo test --workspace`, `cargo check --workspace`, host Clippy, and
       formatting on macOS. Run `cargo clippy --workspace --all-targets
-      --all-features -- -D warnings`, Linux-gated tests, and the live KVM lane in
+    --all-features -- -D warnings`, Linux-gated tests, and the live KVM lane in
       the project builder VM.
 - [ ] Update ADR-001's claim witnesses, `specs/SPRINT.md`,
       `specs/REFACTOR-STATUS.md`, public networking documentation, CLI help,

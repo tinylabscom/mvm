@@ -157,7 +157,7 @@ fn relay_supervisor_config_with_handoff(
     // vsock relay so every backend uses one egress path. A channel-less factory
     // parent is the one intentional exception: it has no guest-facing host
     // channel at all, so there is no egress path to wire or authorize.
-    let egress_relay_socket = match spec.host_socket_for_service(GuestService::Substitution) {
+    let egress_relay_socket = match spec.host_socket_for_service(GuestService::NetworkFlow) {
         Some(socket) => Some(socket),
         None if spec.vsock.is_empty() => None,
         // A sealed workload with no EGRESS_PORT has an explicit deny-all,
@@ -167,7 +167,7 @@ fn relay_supervisor_config_with_handoff(
         None if !spec
             .vsock
             .iter()
-            .any(|port| port.service == GuestService::Substitution) =>
+            .any(|port| port.service == GuestService::NetworkFlow) =>
         {
             None
         }
@@ -571,7 +571,7 @@ impl VmmDriver for HvfDriver {
         let channel_mask = req.channels.iter().fold(0_u8, |mask, channel| {
             if channel.service == GuestService::MachineControl {
                 mask | 1
-            } else if channel.service == GuestService::Substitution {
+            } else if channel.service == GuestService::NetworkFlow {
                 mask | 2
             } else if channel.service == GuestService::Broker {
                 mask | 4
@@ -1034,7 +1034,7 @@ mod tests {
 
     fn egress_port(uds: &str) -> VsockPort {
         VsockPort {
-            service: GuestService::Substitution,
+            service: GuestService::NetworkFlow,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }

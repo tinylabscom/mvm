@@ -5,19 +5,16 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
 use super::*;
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use mvm_core::net::session::{SealedFrame, Session};
 use mvm_core::security::{
     AuthenticatedFrame, PROTOCOL_VERSION_AUTHENTICATED, SIG_ALG_ED25519, SessionHello,
-    SessionHelloAck, SessionHelloConfirm,
+    SessionHelloAck,
 };
 use mvm_core::signing::SignedPayload;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::Zeroizing;
 
 /// Read a single length-prefixed JSON frame from a stream.
 /// Returns the deserialized value.
@@ -318,204 +315,14 @@ pub fn handshake_as_guest(
     Ok((host_verifying_key, hello.session_id))
 }
 
-#[derive(Clone, Copy)]
-enum SessionRole {
-    Host,
-    Guest,
-}
-
-impl SessionRole {
-    fn signer_id(self) -> &'static str {
-        match self {
-            Self::Host => "host",
-            Self::Guest => "guest",
-        }
-    }
-
-    fn peer_signer_id(self) -> &'static str {
-        match self {
-            Self::Host => "guest",
-            Self::Guest => "host",
-        }
-    }
-
-    fn opposite(self) -> Self {
-        match self {
-            Self::Host => Self::Guest,
-            Self::Guest => Self::Host,
-        }
-    }
-}
-
-struct HandshakeMaterial {
-    peer_verifying_key: VerifyingKey,
-    session_id: String,
-    shared_secret: [u8; 32],
-}
-
-fn random_bytes() -> Vec<u8> {
-    (0..32).map(|_| rand::random::<u8>()).collect()
-}
-
-fn session_transcript(hello: &SessionHello, ack: &SessionHelloAck) -> Result<Vec<u8>> {
-    serde_json::to_vec(&(hello, ack)).with_context(|| "serialize vsock handshake transcript")
-}
-
-fn guest_challenge_message(hello: &SessionHello, ack: &SessionHelloAck) -> Result<Vec<u8>> {
-    serde_json::to_vec(&(
-        "mvm-vsock-guest-auth-v1",
-        &hello.version,
-        &hello.session_id,
-        &hello.challenge,
-        &hello.host_pubkey,
-        &hello.host_ephemeral_pubkey,
-        &ack.guest_pubkey,
-        &ack.guest_ephemeral_pubkey,
-        &ack.guest_challenge,
-    ))
-    .with_context(|| "serialize guest handshake proof")
-}
-
-fn parse_verifying_key(bytes: &[u8], label: &str) -> Result<VerifyingKey> {
-    let key_bytes: [u8; 32] = bytes
-        .try_into()
-        .with_context(|| format!("{label} Ed25519 public key must be 32 bytes"))?;
-    VerifyingKey::from_bytes(&key_bytes)
-        .with_context(|| format!("invalid {label} Ed25519 public key"))
-}
-
-fn parse_public_key(bytes: &[u8], label: &str) -> Result<PublicKey> {
-    let key_bytes: [u8; 32] = bytes
-        .try_into()
-        .with_context(|| format!("{label} X25519 public key must be 32 bytes"))?;
-    Ok(PublicKey::from(key_bytes))
-}
-
-fn verify_signature(bytes: &[u8], message: &[u8], key: &VerifyingKey, label: &str) -> Result<()> {
-    let signature_bytes: [u8; 64] = bytes
-        .try_into()
-        .with_context(|| format!("{label} signature must be 64 bytes"))?;
-    key.verify(message, &Signature::from_bytes(&signature_bytes))
-        .map_err(|error| anyhow::anyhow!("{label} signature verification failed: {error}"))
-}
-
-fn derive_session_key(shared_secret: [u8; 32], session_id: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"mvm-vsock-control-key-v1");
-    hasher.update(shared_secret);
-    hasher.update(session_id.as_bytes());
-    hasher.finalize().into()
-}
-
-fn secure_host_handshake<S: Read + Write>(
-    stream: &mut S,
-    session_id: &str,
-    host_signing_key: &SigningKey,
-) -> Result<HandshakeMaterial> {
-    let started = std::time::Instant::now();
-    let host_secret = StaticSecret::from(rand::random::<[u8; 32]>());
-    let hello = SessionHello {
-        version: PROTOCOL_VERSION_AUTHENTICATED,
-        session_id: session_id.to_string(),
-        challenge: random_bytes(),
-        host_pubkey: host_signing_key.verifying_key().to_bytes().to_vec(),
-        host_ephemeral_pubkey: PublicKey::from(&host_secret).as_bytes().to_vec(),
-    };
-    write_frame(stream, &hello)?;
-    let ack: SessionHelloAck = read_frame(stream)?;
-    if ack.version != hello.version || ack.session_id != hello.session_id {
-        bail!("invalid or mismatched vsock HelloAck session");
-    }
-    if ack.guest_challenge.len() != 32 {
-        bail!("guest handshake challenge must be 32 bytes");
-    }
-    let guest_key = parse_verifying_key(&ack.guest_pubkey, "guest")?;
-    let proof = guest_challenge_message(&hello, &ack)?;
-    verify_signature(
-        &ack.challenge_response,
-        &proof,
-        &guest_key,
-        "guest handshake",
-    )?;
-    let transcript = session_transcript(&hello, &ack)?;
-    write_frame(
-        stream,
-        &SessionHelloConfirm {
-            version: hello.version,
-            session_id: hello.session_id.clone(),
-            transcript_signature: host_signing_key.sign(&transcript).to_bytes().to_vec(),
-        },
-    )?;
-    let guest_public = parse_public_key(&ack.guest_ephemeral_pubkey, "guest")?;
-    mvm_core::observability::metrics::global()
-        .vsock_handshake_rtt_ms
-        .store(
-            started.elapsed().as_millis() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    Ok(HandshakeMaterial {
-        peer_verifying_key: guest_key,
-        session_id: hello.session_id,
-        shared_secret: host_secret.diffie_hellman(&guest_public).to_bytes(),
-    })
-}
-
-fn secure_guest_handshake<S: Read + Write>(
-    stream: &mut S,
-    guest_signing_key: &SigningKey,
-    expected_host_key: &VerifyingKey,
-) -> Result<HandshakeMaterial> {
-    let hello: SessionHello = read_frame(stream)?;
-    if hello.version != PROTOCOL_VERSION_AUTHENTICATED
-        || hello.challenge.len() != 32
-        || hello.session_id.is_empty()
-    {
-        bail!("invalid vsock SessionHello");
-    }
-    let host_key = parse_verifying_key(&hello.host_pubkey, "host")?;
-    if &host_key != expected_host_key {
-        bail!("vsock host key does not match the pinned guest trust anchor");
-    }
-    let guest_secret = StaticSecret::from(rand::random::<[u8; 32]>());
-    let mut ack = SessionHelloAck {
-        version: hello.version,
-        session_id: hello.session_id.clone(),
-        challenge_response: Vec::new(),
-        guest_pubkey: guest_signing_key.verifying_key().to_bytes().to_vec(),
-        guest_ephemeral_pubkey: PublicKey::from(&guest_secret).as_bytes().to_vec(),
-        guest_challenge: random_bytes(),
-    };
-    let proof = guest_challenge_message(&hello, &ack)?;
-    ack.challenge_response = guest_signing_key.sign(&proof).to_bytes().to_vec();
-    write_frame(stream, &ack)?;
-    let confirm: SessionHelloConfirm = read_frame(stream)?;
-    if confirm.version != hello.version || confirm.session_id != hello.session_id {
-        bail!("invalid or mismatched vsock HelloConfirm");
-    }
-    let transcript = session_transcript(&hello, &ack)?;
-    verify_signature(
-        &confirm.transcript_signature,
-        &transcript,
-        &host_key,
-        "host handshake",
-    )?;
-    let host_public = parse_public_key(&hello.host_ephemeral_pubkey, "host")?;
-    Ok(HandshakeMaterial {
-        peer_verifying_key: host_key,
-        session_id: hello.session_id,
-        shared_secret: guest_secret.diffie_hellman(&host_public).to_bytes(),
-    })
-}
-
 /// A per-connection authenticated and confidential control session.
+///
+/// This is the control-RPC wrapper around [`mvm_core::net::session::Session`].
+/// It keeps the existing JSON `AuthenticatedFrame` envelope so all current
+/// callers continue to interoperate, while the cryptographic session machinery
+/// is shared with the FlowMux networking path.
 pub struct AuthenticatedSession {
-    signing_key: SigningKey,
-    peer_verifying_key: VerifyingKey,
-    session_id: String,
-    key: Zeroizing<[u8; 32]>,
-    role: SessionRole,
-    next_send_sequence: u64,
-    next_receive_sequence: u64,
+    inner: Session,
 }
 
 impl AuthenticatedSession {
@@ -525,19 +332,9 @@ impl AuthenticatedSession {
         session_id: &str,
         signing_key: SigningKey,
     ) -> Result<Self> {
-        let material = secure_host_handshake(stream, session_id, &signing_key)?;
-        Ok(Self {
-            signing_key,
-            peer_verifying_key: material.peer_verifying_key,
-            session_id: material.session_id.clone(),
-            key: Zeroizing::new(derive_session_key(
-                material.shared_secret,
-                &material.session_id,
-            )),
-            role: SessionRole::Host,
-            next_send_sequence: 1,
-            next_receive_sequence: 1,
-        })
+        let (inner, _peer_key) = Session::host(stream, session_id, signing_key)
+            .map_err(|error| anyhow::anyhow!("host session handshake failed: {error}"))?;
+        Ok(Self { inner })
     }
 
     /// Establish a guest session and require the host identity to match `anchor`.
@@ -546,130 +343,65 @@ impl AuthenticatedSession {
         signing_key: SigningKey,
         anchor: &VerifyingKey,
     ) -> Result<Self> {
-        let material = secure_guest_handshake(stream, &signing_key, anchor)?;
-        Ok(Self {
-            signing_key,
-            peer_verifying_key: material.peer_verifying_key,
-            session_id: material.session_id.clone(),
-            key: Zeroizing::new(derive_session_key(
-                material.shared_secret,
-                &material.session_id,
-            )),
-            role: SessionRole::Guest,
-            next_send_sequence: 1,
-            next_receive_sequence: 1,
-        })
+        let (inner, _session_id) = Session::guest(stream, signing_key, anchor)
+            .map_err(|error| anyhow::anyhow!("guest session handshake failed: {error}"))?;
+        Ok(Self { inner })
     }
 
     /// Write one encrypted, signed control frame.
     pub fn write<T: Serialize>(&mut self, stream: &mut impl Write, value: &T) -> Result<()> {
-        let sequence = self.next_send_sequence;
         let plaintext = serde_json::to_vec(value).with_context(|| "serialize control payload")?;
-        let timestamp = chrono::Utc::now().to_rfc3339();
-        let context = frame_context(
-            &self.session_id,
-            sequence,
-            &timestamp,
-            self.role.signer_id(),
-        )?;
-        let nonce = session_nonce(&self.session_id, self.role, sequence);
-        let cipher = Aes256Gcm::new_from_slice(self.key.as_ref())
-            .map_err(|_| anyhow::anyhow!("invalid vsock session key"))?;
-        let ciphertext = cipher
-            .encrypt(&Nonce::from(nonce), plaintext.as_ref())
-            .map_err(|_| anyhow::anyhow!("control payload encryption failed"))?;
-        let mut signed_bytes = context;
-        signed_bytes.extend_from_slice(&ciphertext);
+        let sealed = self
+            .inner
+            .seal(&plaintext)
+            .map_err(|error| anyhow::anyhow!("control frame seal failed: {error}"))?;
         let frame = AuthenticatedFrame {
-            version: PROTOCOL_VERSION_AUTHENTICATED,
-            sig_alg: SIG_ALG_ED25519,
-            session_id: self.session_id.clone(),
-            sequence,
-            timestamp,
+            version: sealed.version,
+            sig_alg: sealed.sig_alg,
+            session_id: sealed.session_id,
+            sequence: sealed.sequence,
+            timestamp: sealed.timestamp,
             signed: SignedPayload {
-                payload: ciphertext,
-                signature: self.signing_key.sign(&signed_bytes).to_bytes().to_vec(),
-                signer_id: self.role.signer_id().to_string(),
+                payload: sealed.ciphertext,
+                signature: sealed.signature,
+                signer_id: sealed.signer_id,
             },
         };
         write_frame(stream, &frame)?;
-        self.next_send_sequence = sequence
-            .checked_add(1)
-            .context("vsock send sequence exhausted")?;
         Ok(())
     }
 
     /// Read, authenticate, decrypt, and deserialize one control frame.
     pub fn read<T: serde::de::DeserializeOwned>(&mut self, stream: &mut impl Read) -> Result<T> {
         let frame: AuthenticatedFrame = read_frame(stream)?;
-        if frame.version != PROTOCOL_VERSION_AUTHENTICATED || frame.sig_alg != SIG_ALG_ED25519 {
-            bail!("unsupported authenticated vsock frame version or signature algorithm");
-        }
-        if frame.session_id != self.session_id {
-            bail!("authenticated vsock session ID mismatch");
-        }
-        if frame.sequence != self.next_receive_sequence {
-            bail!("authenticated vsock sequence mismatch");
-        }
-        if frame.signed.signer_id != self.role.peer_signer_id() {
-            bail!("authenticated vsock signer identity mismatch");
-        }
-        let context = frame_context(
-            &frame.session_id,
-            frame.sequence,
-            &frame.timestamp,
-            &frame.signed.signer_id,
-        )?;
-        let mut signed_bytes = context;
-        signed_bytes.extend_from_slice(&frame.signed.payload);
-        verify_signature(
-            &frame.signed.signature,
-            &signed_bytes,
-            &self.peer_verifying_key,
-            "authenticated vsock frame",
-        )?;
-        let nonce = session_nonce(&self.session_id, self.role.opposite(), frame.sequence);
-        let cipher = Aes256Gcm::new_from_slice(self.key.as_ref())
-            .map_err(|_| anyhow::anyhow!("invalid vsock session key"))?;
-        let plaintext = cipher
-            .decrypt(&Nonce::from(nonce), frame.signed.payload.as_ref())
-            .map_err(|_| anyhow::anyhow!("control payload decryption failed"))?;
-        let value = serde_json::from_slice(&plaintext)
-            .with_context(|| "deserialize decrypted control payload")?;
-        self.next_receive_sequence = frame
-            .sequence
-            .checked_add(1)
-            .context("vsock receive sequence exhausted")?;
-        Ok(value)
+        let sealed = SealedFrame {
+            version: frame.version,
+            sig_alg: frame.sig_alg,
+            session_id: frame.session_id,
+            sequence: frame.sequence,
+            timestamp: frame.timestamp,
+            signature: frame.signed.signature,
+            signer_id: frame.signed.signer_id,
+            ciphertext: frame.signed.payload,
+        };
+        let plaintext = self
+            .inner
+            .open(&sealed)
+            .map_err(|error| anyhow::anyhow!("control frame open failed: {error}"))?;
+        serde_json::from_slice(&plaintext).with_context(|| "deserialize decrypted control payload")
     }
 }
 
-fn frame_context(
-    session_id: &str,
-    sequence: u64,
-    timestamp: &str,
-    signer_id: &str,
-) -> Result<Vec<u8>> {
-    serde_json::to_vec(&(
-        "mvm-vsock-control-frame-v1",
-        session_id,
-        sequence,
-        timestamp,
-        signer_id,
-    ))
-    .with_context(|| "serialize authenticated vsock frame context")
+impl From<Session> for AuthenticatedSession {
+    fn from(inner: Session) -> Self {
+        Self { inner }
+    }
 }
 
-fn session_nonce(session_id: &str, role: SessionRole, sequence: u64) -> [u8; 12] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"mvm-vsock-control-nonce-v1");
-    hasher.update(session_id.as_bytes());
-    hasher.update(role.signer_id().as_bytes());
-    hasher.update(sequence.to_be_bytes());
-    let digest = hasher.finalize();
-    digest[..12]
-        .try_into()
-        .expect("SHA-256 digest has at least 12 bytes")
+impl From<AuthenticatedSession> for Session {
+    fn from(session: AuthenticatedSession) -> Self {
+        session.inner
+    }
 }
 
 #[cfg(test)]

@@ -154,7 +154,7 @@ impl HvfPersistentHostVm {
             host_bin_dir: &self.host_bin_dir,
             runtime_overlay: self.runtime_overlay.as_deref(),
             console_log: state_dir.join("console.log"),
-            egress_socket: socket_for(&state_dir, GuestService::Substitution),
+            egress_socket: socket_for(&state_dir, GuestService::NetworkFlow),
             dispatch_socket: socket_for(&state_dir, GuestService::BuilderDispatch),
             builderd_socket: socket_for(&state_dir, GuestService::BuilderdControl),
             vcpus: self.vcpus,

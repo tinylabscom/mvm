@@ -234,7 +234,7 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
     ];
     if let Some(egress_gateway) = socks.egress_gateway {
         ports.push(VsockPort {
-            service: GuestService::Substitution,
+            service: GuestService::NetworkFlow,
             host_uds: egress_gateway.into(),
             direction: VsockDirection::GuestDials,
         });
@@ -867,7 +867,7 @@ mod tests {
         assert!(
             ports
                 .iter()
-                .all(|port| port.service != GuestService::Substitution)
+                .all(|port| port.service != GuestService::NetworkFlow)
         );
         assert!(
             ports
