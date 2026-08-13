@@ -564,6 +564,22 @@ HOME_URL="https://mvm.dev/"
     }
     signAuditEntry("egress.allow", vm.imageName, { host, port: port.toString() });
 
+    // The demo host is simulated locally so the allow path is deterministic
+    // and never depends on external CORS or live network state.
+    if (host === "echo.mvm.local") {
+      const bodyText = bodyLen > 0 ? new TextDecoder().decode(body) : "";
+      const response = JSON.stringify({
+        status: "ok",
+        host,
+        port,
+        method: bodyLen > 0 ? "POST" : "GET",
+        body: bodyText,
+        note: "response from simulated demo destination",
+      }, null, 2);
+      const n = writeString(outPtr, outCap, response);
+      return n < 0 ? -5 : n;
+    }
+
     // The policy allowed the egress. Attempt a real synchronous fetch so the
     // guest sees an actual network result, but fall back to a mock response
     // when CORS or the browser sandbox blocks it.

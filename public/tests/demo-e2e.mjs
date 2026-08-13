@@ -107,10 +107,13 @@ async function main() {
       throw new Error("policy file not displayed");
     }
 
-    await runCommand(page, "fetch api.openai.com 443");
+    await runCommand(page, "fetch echo.mvm.local 443");
     const allowText = await page.$eval("#console", (el) => el.textContent);
     if (!allowText.includes("fetch: allowed")) {
-      throw new Error("expected allow decision for api.openai.com");
+      throw new Error("expected allow decision for echo.mvm.local");
+    }
+    if (!allowText.includes("response from simulated demo destination")) {
+      throw new Error("expected simulated destination response for echo.mvm.local");
     }
 
     // Stop and verify the first VM's audit chain.
@@ -126,7 +129,7 @@ async function main() {
     await page.fill("#policy", '{"type":"allowlist","rules":[]}');
     await page.click("#launch");
     await page.waitForTimeout(1500);
-    await runCommand(page, "fetch api.openai.com 443");
+    await runCommand(page, "fetch echo.mvm.local 443");
     const denyText = await page.$eval("#console", (el) => el.textContent);
     if (!denyText.includes("fetch: denied")) {
       throw new Error("expected deny decision for empty allowlist");

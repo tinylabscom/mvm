@@ -40,6 +40,17 @@ fn demo_pins() -> DnsPinRegistry {
         DEMO_NOW,
         "2099-01-01T00:00:00Z",
     ));
+    // Deterministic demo-only host. The browser Worker intercepts this host
+    // and returns a mock response, so the allow path always succeeds without
+    // depending on external CORS behavior or live DNS.
+    pins.add(DnsPin::at(
+        "echo.mvm.local",
+        vec![core::net::IpAddr::V4(core::net::Ipv4Addr::new(
+            192, 0, 2, 1,
+        ))],
+        DEMO_NOW,
+        "2099-01-01T00:00:00Z",
+    ));
     pins
 }
 const DEMO_URL: &str = "https://api.openai.com/v1/chat/completions";
@@ -47,7 +58,7 @@ const DEMO_PLACEHOLDER_TOKEN: &str = "mvm-secret-deadbeef";
 const DEMO_SECRET_VALUE: &str = "sk-real-openai-key";
 const DEMO_SIGNING_KEY_HEX: &str =
     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-const DEMO_ALLOWED_HOSTS: &[&str] = &["api.openai.com"];
+const DEMO_ALLOWED_HOSTS: &[&str] = &["api.openai.com", "echo.mvm.local"];
 
 #[wasm_bindgen]
 pub fn demo_capability_notice() -> String {
@@ -354,6 +365,9 @@ fn lookup_host(host: &str) -> Option<core::net::IpAddr> {
         ))),
         "api.github.com" => Some(core::net::IpAddr::V4(core::net::Ipv4Addr::new(
             140, 82, 121, 6,
+        ))),
+        "echo.mvm.local" => Some(core::net::IpAddr::V4(core::net::Ipv4Addr::new(
+            192, 0, 2, 1,
         ))),
         _ => None,
     }
