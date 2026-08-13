@@ -110,6 +110,11 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         &[Rule::AnyBackend],
         "shared backend-selection helpers (from_hypervisor / auto_select) the CLI dispatches through",
     ),
+    (
+        "bench/probe.rs",
+        &[Rule::AnyBackend],
+        "live benchmark probe: directly boots and stops a libkrun probe VM to sample boot marks and process footprint",
+    ),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

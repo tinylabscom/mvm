@@ -36,18 +36,17 @@
       ]
     },
     {
+      "path": "crates/mvm-backends/src/driver/libkrun.rs",
+      "package": "mvm-backends",
+      "claims": [
+        1
+      ]
+    },
+    {
       "path": "crates/mvm-backends/src/fc/host.rs",
       "package": "mvm-backends",
       "claims": [
         18
-      ]
-    },
-    {
-      "path": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "package": "mvm-backends",
-      "claims": [
-        1,
-        15
       ]
     },
     {
@@ -287,11 +286,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -433,136 +432,6 @@
       "file": "crates/mvm-hostd/src/supervisor/network/stages.rs",
       "mutant": "replace < with <= in dns_query_qname",
       "reason": "equivalent: the guard rejects a payload shorter than the 12-byte DNS header, and the label walk that follows indexes through payload.get(i)?, which returns None rather than panicking. A 12-byte payload therefore yields None down both the mutated and unmutated paths."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete ! in <impl VmBackend for LibkrunBackend>::list",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete ! in <impl VmBackend for LibkrunBackend>::start",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete ! in <impl VmBackend for LibkrunBackend>::stop",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete ! in <impl VmBackend for LibkrunBackend>::warm_start",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete field balloon from struct VmCapabilities expression in <impl VmBackend for LibkrunBackend>::capabilities",
-      "reason": "equivalent: VmCapabilities derives Default, and each of these fields is declared with the value Default already yields (false), so deleting it from the literal is a semantic no-op that no test can distinguish. The two fields whose declared value differs from Default -- standby_pool: true and snapshot_capability: DiskOnly -- are caught by libkrun_capabilities_declare_the_vsock_only_shape."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete field fs_quick_checkpoint from struct VmCapabilities expression in <impl VmBackend for LibkrunBackend>::capabilities",
-      "reason": "equivalent: VmCapabilities derives Default, and each of these fields is declared with the value Default already yields (false), so deleting it from the literal is a semantic no-op that no test can distinguish. The two fields whose declared value differs from Default -- standby_pool: true and snapshot_capability: DiskOnly -- are caught by libkrun_capabilities_declare_the_vsock_only_shape."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete field l3_vsock from struct VmCapabilities expression in <impl VmBackend for LibkrunBackend>::capabilities",
-      "reason": "equivalent: VmCapabilities derives Default, and each of these fields is declared with the value Default already yields (false), so deleting it from the literal is a semantic no-op that no test can distinguish. The two fields whose declared value differs from Default -- standby_pool: true and snapshot_capability: DiskOnly -- are caught by libkrun_capabilities_declare_the_vsock_only_shape."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete field pause_resume from struct VmCapabilities expression in <impl VmBackend for LibkrunBackend>::capabilities",
-      "reason": "equivalent: VmCapabilities derives Default, and each of these fields is declared with the value Default already yields (false), so deleting it from the literal is a semantic no-op that no test can distinguish. The two fields whose declared value differs from Default -- standby_pool: true and snapshot_capability: DiskOnly -- are caught by libkrun_capabilities_declare_the_vsock_only_shape."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete field snapshots from struct VmCapabilities expression in <impl VmBackend for LibkrunBackend>::capabilities",
-      "reason": "equivalent: VmCapabilities derives Default, and each of these fields is declared with the value Default already yields (false), so deleting it from the literal is a semantic no-op that no test can distinguish. The two fields whose declared value differs from Default -- standby_pool: true and snapshot_capability: DiskOnly -- are caught by libkrun_capabilities_declare_the_vsock_only_shape."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "delete field tap_networking from struct VmCapabilities expression in <impl VmBackend for LibkrunBackend>::capabilities",
-      "reason": "equivalent: VmCapabilities derives Default, and each of these fields is declared with the value Default already yields (false), so deleting it from the literal is a semantic no-op that no test can distinguish. The two fields whose declared value differs from Default -- standby_pool: true and snapshot_capability: DiskOnly -- are caught by libkrun_capabilities_declare_the_vsock_only_shape."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace && with || in diagnose_vsock_sockets",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace && with || in spawn_libkrun_egress_endpoint_if_needed",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace + with - in <impl VmBackend for LibkrunBackend>::start",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace + with - in <impl VmBackend for LibkrunBackend>::stop",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace < with <= in <impl VmBackend for LibkrunBackend>::stop",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace < with == in <impl VmBackend for LibkrunBackend>::stop",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace < with > in <impl VmBackend for LibkrunBackend>::stop",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace <impl VmBackend for LibkrunBackend>::install -> Result<()> with Ok(())",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace <impl VmBackend for LibkrunBackend>::is_available -> Result<bool> with Ok(false)",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace <impl VmBackend for LibkrunBackend>::is_available -> Result<bool> with Ok(true)",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace <impl VmBackend for LibkrunBackend>::pause -> Result<()> with Ok(())",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace <impl VmBackend for LibkrunBackend>::resume -> Result<()> with Ok(())",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace <impl VmBackend for LibkrunBackend>::stop_all -> Result<()> with Ok(())",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace <impl VmBackend for LibkrunBackend>::supports_standby_pool -> bool with false",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace >= with < in <impl VmBackend for LibkrunBackend>::start",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-backends/src/legacy/libkrun.rs",
-      "mutant": "replace || with && in ensure_libkrun_runtime_source_supported",
-      "reason": "libkrun VM lifecycle over a live supervisor: these paths spawn, signal, poll and reap an mvm-libkrun-supervisor process against its per-VM state dir. The claim-1 and claim-15 witnesses in this file (the read-only virtiofs refusal and the input-less prod console attachment) are caught; these are the surrounding VMM plumbing, which needs a libkrun host the lane's runner is not. Coverage debt tracked in #2033."
     },
     {
       "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
