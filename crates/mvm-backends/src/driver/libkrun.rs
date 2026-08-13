@@ -1,6 +1,5 @@
 //! `LibkrunDriver` — the `VmmDriver` for the libkrun VMM (Linux KVM, macOS
-//! Apple Silicon). Identity and capabilities delegate to the proven
-//! `LibkrunBackend`. `boot` maps a policy-free `VmmSpec` to a relay
+//! Apple Silicon). `boot` maps a policy-free `VmmSpec` to a relay
 //! `SupervisorConfig`, spawns `mvm-libkrun-supervisor`, and returns a live
 //! handle. Egress policy, the claim-10 gate, and secret substitution live in
 //! the host-side endpoint the role runner binds to the spec's `EGRESS_PORT`
@@ -17,15 +16,13 @@ use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorConfig};
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_libkrun_pid, vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
+    ResourceControls, SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
 use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec, VsockDirection};
 use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
-
-use crate::legacy::libkrun::LibkrunBackend;
 
 /// DAX window size exported to libkrun for any virtio-fs share that
 /// requests DAX. 256 MiB matches the HVF DAX window and is large enough
@@ -36,15 +33,11 @@ const VIRTIO_FS_DAX_SHM_SIZE: u64 = 256 * 1024 * 1024;
 /// boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge,
 /// not here.
-pub struct LibkrunDriver {
-    backend: LibkrunBackend,
-}
+pub struct LibkrunDriver;
 
 impl LibkrunDriver {
     pub fn new() -> Self {
-        Self {
-            backend: LibkrunBackend,
-        }
+        Self
     }
 }
 
@@ -67,7 +60,7 @@ fn libkrun_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
         // so only the console base is emitted here.
-        crate::legacy::libkrun::VERITY_CMDLINE.to_string()
+        crate::driver::libkrun_legacy::VERITY_CMDLINE.to_string()
     }
 }
 
@@ -99,7 +92,8 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // shared helper rather than forking it: on x86_64 this converts the workload
     // kernel to a libkrun-loadable ELF and reports the format; on aarch64 it is a
     // passthrough at Raw. The driver must not diverge from the host kernel-prep.
-    let (kernel, kernel_format) = crate::legacy::libkrun::libkrun_kernel_for_host(&kernel_path)?;
+    let (kernel, kernel_format) =
+        crate::driver::libkrun_legacy::libkrun_kernel_for_host(&kernel_path)?;
 
     let vcpus = u8::try_from(spec.vcpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
     let state_dir_str = state_dir.to_string_lossy().into_owned();
@@ -256,30 +250,99 @@ fn bounded_supervisor_command(supervisor: &Path, spec: &VmmSpec, state_dir: &Pat
 
 impl VmmDriver for LibkrunDriver {
     fn name(&self) -> &str {
-        self.backend.name()
+        "libkrun"
     }
 
     fn kind(&self) -> BackendKind {
-        self.backend.kind()
+        BackendKind::Libkrun
     }
 
     fn is_available(&self) -> Result<bool> {
-        self.backend.is_available()
+        Ok(libkrun_sys::is_available())
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        // The raw libkrun shim has standalone disk-warm and supervisor-pool
-        // operations, but the selectable workload runner does not route those
-        // operations through its admission and endpoint guards. Do not expose
-        // an operation as selectable until the runner owns that path too.
-        let mut capabilities = self.backend.capabilities();
+        // libkrun does not support memory snapshots (same trade as
+        // Apple Container). The mvm libkrun launch path is intentionally
+        // vsock-only: the supervisor accepts only `NetworkingMode::VsockDirect`,
+        // which configures a virtio-vsock device and no net device at all, and
+        // serves egress through the host-bound vsock proxy.
+        // Pause/resume is theoretically possible but not exposed by libkrun's
+        // public C API today. The selectable workload runner does not route
+        // standalone disk-warm or supervisor-pool operations through its
+        // admission and endpoint guards, so the runner-facing capability set
+        // reports both snapshot and standby pool as unsupported.
+        let mut capabilities = VmCapabilities {
+            pause_resume: false,
+            snapshots: false,
+            snapshot_capability: SnapshotCapability::DiskOnly,
+            standby_pool: true,
+            vsock: true,
+            tap_networking: false,
+            // Stronger than the field name asks for: the guest has no NIC at
+            // all, not a NIC without a route. `VsockDirect` configures a
+            // virtio-vsock device and never calls libkrun's net attach, so
+            // there is no net device in the guest's device tree to route.
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
+            // libkrun attaches a virtio-net device and drains it, which
+            // satisfies `no_routable_guest_nic` (no upstream route) but
+            // not the L3 tunnel's stricter precondition: that mode
+            // requires the guest to have no network device at all, so
+            // `mvm0` is the only interface its stack can route to.
+            l3_vsock: false,
+            // libkrun's C API doesn't expose virtio-balloon control
+            // today; the upstream crate carries no `.balloon(...)`
+            // builder. Declared `false` until wiring lands.
+            balloon: false,
+            // libkrun's krun_add_virtiofs2/3 APIs can export a host directory
+            // as a virtio-fs share, including DAX and host-enforced read-only.
+            virtiofs_root: true,
+            // libkrun runs on macOS but the rootfs lives in a regular
+            // file, not an APFS clone-eligible volume mount; no
+            // clonefile shortcut here.
+            fs_quick_checkpoint: false,
+            // Named explicitly, not left at the all-`None` struct-update
+            // default: on Linux a cgroup can bound whatever process this
+            // backend runs — libkrun does go through the dedicated
+            // mvm-libkrun-supervisor binary, but the cgroup claim doesn't
+            // depend on that; it holds for any Linux process. libkrun's
+            // macOS 13-25 default host has no cgroup at all, so
+            // `for_backend` answers host-conditionally rather than by kind.
+            resource_controls: ResourceControls::for_backend(BackendKind::Libkrun),
+            ..VmCapabilities::default()
+        };
         capabilities.snapshot_capability = SnapshotCapability::Unsupported;
         capabilities.standby_pool = false;
         capabilities
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        self.backend.security_profile()
+        // Tier 2: hardware isolation via KVM (Linux) or Hypervisor.framework
+        // (macOS). Comparable VMM TCB to Firecracker — libkrun is rust-vmm
+        // based, ~80K LOC, no Firecracker-excluded features (so it passes
+        // the "fork test"). Claim 3 (verified boot) is partial
+        // because the dm-verity pipeline currently targets Firecracker;
+        // libkrun support is a follow-up.
+        BackendSecurityProfile {
+            claims: [
+                ClaimStatus::Holds,       // 1 — host-fs isolation via KVM/HVF
+                ClaimStatus::Holds,       // 2 — uid-0 protections same as FC
+                ClaimStatus::DoesNotHold, // 3 — verified boot for libkrun rootfs not yet wired
+                ClaimStatus::Holds,       // 4 — guest agent has no do_exec in prod
+                ClaimStatus::Holds,       // 5 — vsock framing is fuzzed
+                ClaimStatus::Holds,       // 6 — image hash verification
+                ClaimStatus::Holds,       // 7 — cargo deps audited
+            ],
+            layer_coverage: LayerCoverage::all_layers(),
+            tier: "Tier 2",
+            notes: &[
+                "Hardware isolation via KVM (Linux) or Hypervisor.framework (macOS).",
+                "Comparable VMM TCB to Firecracker; passes plan 53 \"fork test\".",
+                "Claim 3 (verified boot) is partial — dm-verity pipeline targets Firecracker today.",
+                "Supported on Linux KVM and macOS Apple Silicon; macOS Intel is not a supported local host.",
+            ],
+        }
     }
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
@@ -311,7 +374,7 @@ impl VmmDriver for LibkrunDriver {
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;
 
-        let supervisor = crate::legacy::libkrun::resolve_supervisor_path()?;
+        let supervisor = crate::driver::libkrun_legacy::resolve_supervisor_path()?;
         let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
@@ -335,7 +398,7 @@ impl VmmDriver for LibkrunDriver {
 
         // Poll for the PID file (boot confirmed). If the supervisor exits first,
         // surface that — its console capture carries the actionable detail.
-        let deadline = Instant::now() + crate::legacy::libkrun::PID_FILE_TIMEOUT;
+        let deadline = Instant::now() + crate::driver::libkrun_legacy::PID_FILE_TIMEOUT;
         loop {
             if pid_file.exists() {
                 break;
@@ -353,7 +416,7 @@ impl VmmDriver for LibkrunDriver {
                 let _ = child.kill();
                 bail!(
                     "libkrun supervisor did not confirm boot within {:?}; see {}",
-                    crate::legacy::libkrun::PID_FILE_TIMEOUT,
+                    crate::driver::libkrun_legacy::PID_FILE_TIMEOUT,
                     console_log.display()
                 );
             }
@@ -365,7 +428,7 @@ impl VmmDriver for LibkrunDriver {
         // attach / shell_exec that immediately follows doesn't race a
         // not-yet-bound socket and report the VM "not running".
         let agent_socket = vm_vsock_port_socket_at(&state_dir, GUEST_AGENT_PORT);
-        let sock_deadline = Instant::now() + crate::legacy::libkrun::VSOCK_SOCKET_TIMEOUT;
+        let sock_deadline = Instant::now() + crate::driver::libkrun_legacy::VSOCK_SOCKET_TIMEOUT;
         while !agent_socket.exists() {
             if let Some(status) = child
                 .try_wait()
@@ -382,7 +445,7 @@ impl VmmDriver for LibkrunDriver {
                 bail!(
                     "libkrun supervisor did not bind vsock socket {} within {:?}; killed; see {}",
                     agent_socket.display(),
-                    crate::legacy::libkrun::VSOCK_SOCKET_TIMEOUT,
+                    crate::driver::libkrun_legacy::VSOCK_SOCKET_TIMEOUT,
                     console_log.display()
                 );
             }
@@ -412,8 +475,15 @@ impl VmmDriver for LibkrunDriver {
         }))
     }
 
-    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
-        self.backend.guest_channel_info(id)
+    fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
+        // libkrun exposes vsock as a host-side abstract socket; the
+        // guest agent listens on the shared `GUEST_AGENT_PORT` port,
+        // identical to Firecracker and Apple Container, so callers can
+        // share the same vsock client implementation across backends.
+        Ok(GuestChannelInfo::Vsock {
+            cid: 3, // standard guest CID
+            port: mvm_agentd::vsock::GUEST_AGENT_PORT,
+        })
     }
 }
 
@@ -431,7 +501,8 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn host_process_id(&self) -> Option<u32> {
-        crate::legacy::libkrun::read_pid(&self.pid_file).and_then(|pid| u32::try_from(pid).ok())
+        crate::driver::libkrun_legacy::read_pid(&self.pid_file)
+            .and_then(|pid| u32::try_from(pid).ok())
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
@@ -443,21 +514,21 @@ impl RunningVm for LibkrunRunningVm {
     fn kill(&self) -> Result<()> {
         // Arm before SIGTERM so a short-lived supervisor cannot exit between
         // signal delivery and observer registration.
-        if let Some(pid) = crate::legacy::libkrun::read_pid(&self.pid_file)
-            && crate::legacy::libkrun::pid_alive(pid)
+        if let Some(pid) = crate::driver::libkrun_legacy::read_pid(&self.pid_file)
+            && crate::driver::libkrun_legacy::pid_alive(pid)
         {
             let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
             // SIGTERM gives libkrun a chance to close its virtio-blk file
             // descriptors, then SIGKILL if it ignores us within the grace
             // window.
-            crate::legacy::libkrun::send_signal(pid, libc::SIGTERM);
+            crate::driver::libkrun_legacy::send_signal(pid, libc::SIGTERM);
             let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
                 pid,
-                Instant::now() + crate::legacy::libkrun::STOP_TIMEOUT,
+                Instant::now() + crate::driver::libkrun_legacy::STOP_TIMEOUT,
                 observer.as_ref(),
             );
             if !exited {
-                crate::legacy::libkrun::send_signal(pid, libc::SIGKILL);
+                crate::driver::libkrun_legacy::send_signal(pid, libc::SIGKILL);
                 if !mvm_vmm::host::process_exit::wait_for_pid_exit(
                     pid,
                     Instant::now() + Duration::from_millis(500),
@@ -471,7 +542,7 @@ impl RunningVm for LibkrunRunningVm {
             }
         }
         let _ = std::fs::remove_file(&self.pid_file);
-        crate::legacy::libkrun::cleanup_vsock_sockets(&self.state_dir);
+        crate::driver::libkrun_legacy::cleanup_vsock_sockets(&self.state_dir);
         Ok(())
     }
 
@@ -488,10 +559,12 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        Ok(match crate::legacy::libkrun::read_pid(&self.pid_file) {
-            Some(pid) if crate::legacy::libkrun::pid_alive(pid) => VmStatus::Running,
-            _ => VmStatus::Stopped,
-        })
+        Ok(
+            match crate::driver::libkrun_legacy::read_pid(&self.pid_file) {
+                Some(pid) if crate::driver::libkrun_legacy::pid_alive(pid) => VmStatus::Running,
+                _ => VmStatus::Stopped,
+            },
+        )
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -581,10 +654,7 @@ mod tests {
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
-        assert_eq!(
-            d.security_profile().tier,
-            LibkrunBackend.security_profile().tier
-        );
+        assert_eq!(d.security_profile().tier, "Tier 2");
     }
 
     #[test]
@@ -607,16 +677,20 @@ mod tests {
     }
 
     #[test]
-    fn guest_channel_info_delegates_to_the_libkrun_backend() {
-        // LibkrunBackend reports a fixed vsock agent channel; the driver must
-        // relay that same answer rather than inventing one.
+    fn guest_channel_info_reports_the_standard_vsock_agent_channel() {
+        // The driver reports the same fixed vsock agent channel the legacy
+        // libkrun shell reported; nothing is invented here.
         let d = LibkrunDriver::new();
         let id = VmId("libkrun-guest-channel-info-test-vm".into());
-        // GuestChannelInfo has no PartialEq; compare the Debug rendering to
-        // assert the driver relays the backend's channel verbatim.
         assert_eq!(
             format!("{:?}", d.guest_channel_info(&id).unwrap()),
-            format!("{:?}", LibkrunBackend.guest_channel_info(&id).unwrap())
+            format!(
+                "{:?}",
+                GuestChannelInfo::Vsock {
+                    cid: 3,
+                    port: mvm_agentd::vsock::GUEST_AGENT_PORT,
+                }
+            )
         );
     }
 
@@ -906,7 +980,7 @@ mod tests {
         let cfg = relay(&spec);
         assert_eq!(
             cfg.krun.kernel_cmdline.as_deref(),
-            Some(crate::legacy::libkrun::VERITY_CMDLINE)
+            Some(crate::driver::libkrun_legacy::VERITY_CMDLINE)
         );
     }
 

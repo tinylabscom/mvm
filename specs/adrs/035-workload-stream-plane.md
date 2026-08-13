@@ -464,7 +464,7 @@ green.
 
 **Weakened, deliberately.** Claim 15. The console capture is still opened
 read-only and the trait still cannot hand out a writable handle, so
-`prod_console_attachment_has_no_input` continues to hold; the *output* half
+`following_the_console_never_writes_to_it` continues to hold; the *output* half
 adds a reader and never an input fd. The *input* half adds a host→guest byte
 path that did not exist, which moves the claim from enforced-by-absence to
 enforced-by-policy. §"Claim 15 becomes a policy, and what that bought" records

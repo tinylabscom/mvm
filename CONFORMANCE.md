@@ -77,7 +77,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:dir_share_two_part_defaults_ro`, `fn:libkrun_refuses_read_only_virtiofs_share`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
+| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:dir_share_two_part_defaults_ro`, `fn:relay_config_maps_dir_shares_with_dax_and_read_only`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
 
 ## oci_provenance
 
@@ -89,7 +89,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-15` | `build` | A sealed production microVM has no shell, no do_exec, and no PTY | `fn:console_refused_on_sealed_image`, `fn:prod_console_attachment_has_no_input`, `fn:prod_safe_grant_refuses_all_dev_only_requests`, `ci:guest-agent-runtime-boundary` |
+| `MVM-SEC-15` | `build` | A sealed production microVM has no shell, no do_exec, and no PTY | `fn:console_refused_on_sealed_image`, `fn:following_the_console_never_writes_to_it`, `fn:prod_safe_grant_refuses_all_dev_only_requests`, `ci:guest-agent-runtime-boundary` |
 
 ## runtime_overlay
 

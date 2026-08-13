@@ -30,7 +30,9 @@ use mvm_core::checkpoint::{
 };
 use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
-use crate::legacy::hvf::{PID_FILE_NAME, PID_FILE_TIMEOUT, read_pid, resolve_supervisor_path};
+use crate::driver::hvf_legacy::{
+    PID_FILE_NAME, PID_FILE_TIMEOUT, read_pid, resolve_supervisor_path,
+};
 
 /// A materialized HVF checkpoint about to be booted under a fresh identity.
 ///

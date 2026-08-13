@@ -6,7 +6,6 @@ use crate::backend::AnyBackend;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use anyhow::{Result, anyhow};
-use mvm_backends::legacy::hvf::HvfBackend;
 use mvm_core::vm_backend::VmBackend;
 
 /// Declares how a workload backend carries the egress secret-substitution
@@ -45,18 +44,9 @@ pub trait WorkloadBackend: VmBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport;
 }
 
-impl WorkloadBackend for HvfBackend {
-    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        // Proxy-aware substitution over the vsock gateway: the guest dials the
-        // egress port, and the VMM relays bytes to the per-VM endpoint that owns
-        // claim-10 enforcement and claims 12/13. No transparent :80/:443
-        // terminator.
-        EgressSubstitutionTransport::VsockUdsChannel
-    }
-}
 // `MockBackend` is the hermetic lifecycle test double — it carries no real
 // workload, so it stands in for a workload backend on the admitted path in
-// tests. `QemuBackend` (a real dev/test VMM) is deliberately NOT a
+// tests. `QemuDriver` (a real dev/test VMM) is deliberately NOT a
 // `WorkloadBackend`: it is the meaningful Tier-2 carve-out.
 #[cfg(feature = "test-support")]
 impl WorkloadBackend for MockBackend {
@@ -89,7 +79,8 @@ mod tests {
 
     #[test]
     fn workload_backends_implement_marker() {
-        assert_is_workload_backend::<HvfBackend>();
+        let hvf = crate::backend::hvf_runner();
+        let _: &dyn WorkloadBackend = &hvf;
         let firecracker = crate::backend::fc_runner();
         let _: &dyn WorkloadBackend = &firecracker;
         #[cfg(feature = "test-support")]
@@ -101,7 +92,7 @@ mod tests {
 
     #[test]
     fn hvf_declares_vsock_uds_channel() {
-        let transport = HvfBackend.egress_substitution_transport();
+        let transport = crate::backend::hvf_runner().egress_substitution_transport();
         assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
         assert!(transport.supports_proxy_aware_substitution());
         assert!(!transport.supports_transparent_terminator());

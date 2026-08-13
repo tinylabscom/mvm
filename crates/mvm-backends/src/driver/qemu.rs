@@ -1,6 +1,6 @@
 //! `QemuDriver` — the `VmmDriver` for the QEMU dev/test VMM (Linux; KVM
 //! where present, TCG software-emulation fallback otherwise). Identity and
-//! capabilities delegate to the proven [`QemuBackend`]. `boot` maps a
+//! boots what a `VmmSpec` describes, reusing the QEMU machinery moved into
 //! policy-free `VmmSpec` to `qemu-system` argv reusing the raw backend's
 //! machinery (guest-CID allocation, argv assembly, pid-file lifecycle),
 //! spawns the detached AF_VSOCK↔UNIX bridge set so the host reaches the
@@ -23,14 +23,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
+    ResourceControls, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 
-use crate::legacy::qemu::{
-    self, QEMU_LOG_FILE, QEMU_PID_FILE, QemuBackend, QemuBridgeGuestDial, QemuBridgeHostDial,
-    QemuBridgeSpec,
+use crate::driver::qemu_legacy::{
+    self, QEMU_LOG_FILE, QEMU_PID_FILE, QemuBridgeGuestDial, QemuBridgeHostDial, QemuBridgeSpec,
 };
 use mvm_vmm::driver::spec::{KernelImage, VmmSpec, VsockDirection, VsockPort};
 use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
@@ -41,15 +40,11 @@ use mvm_vmm::host::virtiofsd::{SpawnParams, VirtiofsdGuard, locate_virtiofsd};
 /// boots what a `VmmSpec` describes and relays the guest's channels through
 /// the vsock bridge; the claim-10 gate and substitution live in the
 /// endpoint behind those channels, not here.
-pub struct QemuDriver {
-    backend: QemuBackend,
-}
+pub struct QemuDriver;
 
 impl QemuDriver {
     pub fn new() -> Self {
-        Self {
-            backend: QemuBackend,
-        }
+        Self
     }
 }
 
@@ -267,15 +262,15 @@ fn bridge_spec_for_vsock(cid: u32, state_dir: &Path, channels: &[VsockPort]) -> 
 
 impl VmmDriver for QemuDriver {
     fn name(&self) -> &str {
-        self.backend.name()
+        "qemu"
     }
 
     fn kind(&self) -> BackendKind {
-        self.backend.kind()
+        BackendKind::Qemu
     }
 
     fn is_available(&self) -> Result<bool> {
-        self.backend.is_available()
+        Ok(qemu_legacy::locate_qemu().is_ok())
     }
 
     fn capabilities(&self) -> VmCapabilities {
@@ -285,10 +280,23 @@ impl VmmDriver for QemuDriver {
         // and egress rides the vsock endpoint exactly like the other runner
         // backends. Pause/resume stays false (no QMP monitor wired);
         // snapshots and the standby pool stay unsupported.
-        let mut capabilities = self.backend.capabilities();
-        capabilities.no_routable_guest_nic = true;
-        capabilities.host_vsock_proxy = true;
-        capabilities
+        VmCapabilities {
+            pause_resume: false,
+            snapshots: false,
+            snapshot_capability: mvm_core::vm_backend::SnapshotCapability::Unsupported,
+            standby_pool: false,
+            vsock: true,
+            // User-mode (slirp) networking — no host TAP device.
+            tap_networking: false,
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
+            balloon: false,
+            fs_quick_checkpoint: false,
+            // Named explicitly: this backend's per-VM process is cgroup-able,
+            // unlike the all-`None` struct-update default.
+            resource_controls: ResourceControls::for_backend(BackendKind::Qemu),
+            ..VmCapabilities::default()
+        }
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
@@ -339,9 +347,9 @@ impl VmmDriver for QemuDriver {
         // workload rootfs.
         let kernel = match &spec.kernel {
             KernelImage::Path(p) => p.clone(),
-            KernelImage::Bundled => qemu::resolve_workload_kernel_path(&spec.name, None)?,
+            KernelImage::Bundled => qemu_legacy::resolve_workload_kernel_path(&spec.name, None)?,
         };
-        let qemu_bin = qemu::locate_qemu()?;
+        let qemu_bin = qemu_legacy::locate_qemu()?;
 
         let state_dir = vm_state_dir(&spec.name);
         std::fs::create_dir_all(&state_dir)
@@ -356,7 +364,7 @@ impl VmmDriver for QemuDriver {
             )?,
         );
 
-        let kvm = qemu::kvm_available();
+        let kvm = qemu_legacy::kvm_available();
         if !kvm {
             // Loud Tier-3 banner for the unaccelerated TCG fallback — the
             // same runtime-tier signal the raw path emits.
@@ -369,7 +377,7 @@ impl VmmDriver for QemuDriver {
             ));
         }
 
-        let cid = qemu::allocate_cid(&spec.name)?;
+        let cid = qemu_legacy::allocate_cid(&spec.name)?;
         let pid_file = state_dir.join(QEMU_PID_FILE);
         let _ = std::fs::remove_file(&pid_file);
 
@@ -413,13 +421,13 @@ impl VmmDriver for QemuDriver {
 
         // `-daemonize` returns only after the pidfile is written, but poll
         // defensively so a slow fork doesn't race the bridge spawn below.
-        let deadline = Instant::now() + qemu::PID_FILE_TIMEOUT;
+        let deadline = Instant::now() + qemu_legacy::PID_FILE_TIMEOUT;
         while !pid_file.exists() {
             if Instant::now() >= deadline {
                 bail!(
                     "qemu did not write pidfile {} within {:?}",
                     pid_file.display(),
-                    qemu::PID_FILE_TIMEOUT
+                    qemu_legacy::PID_FILE_TIMEOUT
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -431,12 +439,12 @@ impl VmmDriver for QemuDriver {
         // the pid/cid sidecars so a retry re-allocates a CID instead of
         // pinning the (possibly conflicting) one this attempt wrote.
         let bridge_spec = bridge_spec_for_vsock(cid, &state_dir, &spec.vsock);
-        if let Err(e) = qemu::spawn_vsock_bridges(&spec.name, &state_dir, &bridge_spec) {
-            if let Some(pid) = qemu::read_pid(&pid_file) {
-                qemu::send_signal(pid, libc::SIGTERM);
+        if let Err(e) = qemu_legacy::spawn_vsock_bridges(&spec.name, &state_dir, &bridge_spec) {
+            if let Some(pid) = qemu_legacy::read_pid(&pid_file) {
+                qemu_legacy::send_signal(pid, libc::SIGTERM);
             }
             let _ = std::fs::remove_file(&pid_file);
-            let _ = std::fs::remove_file(state_dir.join(qemu::QEMU_CID_FILE));
+            let _ = std::fs::remove_file(state_dir.join(qemu_legacy::QEMU_CID_FILE));
             return Err(e);
         }
 
@@ -463,7 +471,14 @@ impl VmmDriver for QemuDriver {
     }
 
     fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
-        self.backend.guest_channel_info(id)
+        // The shared agent client connects to the UNIX socket the bridge
+        // binds (`vm_vsock_port_socket`); the `cid` here is the guest CID
+        // the bridge dials over AF_VSOCK, surfaced for diagnostics.
+        let cid = qemu_legacy::read_cid(&id.0).unwrap_or(3);
+        Ok(GuestChannelInfo::Vsock {
+            cid,
+            port: mvm_agentd::vsock::GUEST_AGENT_PORT,
+        })
     }
 }
 
@@ -492,31 +507,32 @@ impl RunningVm for QemuRunningVm {
         // Reap the bridge first so it can't keep serving a half-dead VM.
         // Guard on liveness so a stale pidfile (crash without cleanup) whose
         // PID the OS has since recycled isn't signalled by mistake.
-        if let Some(bridge_pid) = qemu::read_pid(&self.state_dir.join(qemu::BRIDGE_PID_FILE))
-            && qemu::pid_alive(bridge_pid)
+        if let Some(bridge_pid) =
+            qemu_legacy::read_pid(&self.state_dir.join(qemu_legacy::BRIDGE_PID_FILE))
+            && qemu_legacy::pid_alive(bridge_pid)
         {
-            qemu::send_signal(bridge_pid, libc::SIGTERM);
+            qemu_legacy::send_signal(bridge_pid, libc::SIGTERM);
         }
-        let _ = std::fs::remove_file(self.state_dir.join(qemu::BRIDGE_PID_FILE));
-        qemu::cleanup_vsock_bridge_sockets(&self.state_dir);
+        let _ = std::fs::remove_file(self.state_dir.join(qemu_legacy::BRIDGE_PID_FILE));
+        qemu_legacy::cleanup_vsock_bridge_sockets(&self.state_dir);
 
         // Arm before SIGTERM so a short-lived QEMU process cannot exit between
         // signal delivery and observer registration.
-        if let Some(pid) = qemu::read_pid(&self.pid_file)
-            && qemu::pid_alive(pid)
+        if let Some(pid) = qemu_legacy::read_pid(&self.pid_file)
+            && qemu_legacy::pid_alive(pid)
         {
             let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
             // SIGTERM gives QEMU a chance to close its virtio-blk file
             // descriptors, then SIGKILL if it ignores us within the grace
             // window.
-            qemu::send_signal(pid, libc::SIGTERM);
+            qemu_legacy::send_signal(pid, libc::SIGTERM);
             let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
                 pid,
-                Instant::now() + qemu::STOP_TIMEOUT,
+                Instant::now() + qemu_legacy::STOP_TIMEOUT,
                 observer.as_ref(),
             );
             if !exited {
-                qemu::send_signal(pid, libc::SIGKILL);
+                qemu_legacy::send_signal(pid, libc::SIGKILL);
                 if !mvm_vmm::host::process_exit::wait_for_pid_exit(
                     pid,
                     Instant::now() + Duration::from_millis(500),
@@ -548,8 +564,8 @@ impl RunningVm for QemuRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        Ok(match qemu::read_pid(&self.pid_file) {
-            Some(pid) if qemu::pid_alive(pid) => VmStatus::Running,
+        Ok(match qemu_legacy::read_pid(&self.pid_file) {
+            Some(pid) if qemu_legacy::pid_alive(pid) => VmStatus::Running,
             _ => VmStatus::Stopped,
         })
     }
@@ -750,8 +766,16 @@ mod tests {
         // raw backend reports.
         assert_eq!(profile.dropped_claims(), vec![3]);
         assert_eq!(
-            format!("{:?}", profile.claims),
-            format!("{:?}", QemuBackend.security_profile().claims)
+            profile.claims,
+            [
+                ClaimStatus::Holds,
+                ClaimStatus::Holds,
+                ClaimStatus::DoesNotHold,
+                ClaimStatus::Holds,
+                ClaimStatus::Holds,
+                ClaimStatus::Holds,
+                ClaimStatus::Holds,
+            ]
         );
         assert!(
             profile
@@ -970,7 +994,7 @@ mod tests {
         env.set("MVM_HOME", dir.path());
 
         // Missing cache entry ⇒ a clear, named failure.
-        let err = qemu::resolve_workload_kernel_path("w", None).unwrap_err();
+        let err = qemu_legacy::resolve_workload_kernel_path("w", None).unwrap_err();
         assert!(
             err.to_string().contains("no bootable kernel"),
             "unexpected error: {err}"
@@ -990,7 +1014,7 @@ mod tests {
         std::fs::create_dir_all(cached.parent().expect("cache parent")).unwrap();
         std::fs::write(&cached, b"kernel").unwrap();
         assert_eq!(
-            qemu::resolve_workload_kernel_path("w", None).unwrap(),
+            qemu_legacy::resolve_workload_kernel_path("w", None).unwrap(),
             cached
         );
     }
@@ -1007,15 +1031,14 @@ mod tests {
     }
 
     #[test]
-    fn guest_channel_info_delegates_to_the_qemu_backend() {
+    fn guest_channel_info_reports_the_vsock_agent_channel() {
         let d = QemuDriver::new();
         let id = VmId("qemu-guest-channel-info-test-vm".into());
-        // GuestChannelInfo has no PartialEq; compare the Debug rendering to
-        // assert the driver relays the backend's channel verbatim.
-        assert_eq!(
-            format!("{:?}", d.guest_channel_info(&id).unwrap()),
-            format!("{:?}", QemuBackend.guest_channel_info(&id).unwrap())
-        );
+        let info = d.guest_channel_info(&id).unwrap();
+        let rendered = format!("{:?}", info);
+        assert!(rendered.contains("Vsock"));
+        assert!(rendered.contains("cid: 3"));
+        assert!(rendered.contains(&format!("port: {}", mvm_agentd::vsock::GUEST_AGENT_PORT)));
     }
 
     #[test]

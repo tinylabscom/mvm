@@ -14,13 +14,13 @@
 fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        use mvm_core::vm_backend::{VmBackend, VmStartConfig};
-        use mvm_runtime::backends::hvf::HvfBackend;
+        use mvm_core::vm_backend::VmStartConfig;
+        use mvm_runtime::AnyBackend;
 
         // SAFETY: single-threaded; no bounded timeout — the workload ends the VM.
         unsafe { std::env::remove_var("MVM_HVF_TIMEOUT") };
 
-        let backend = HvfBackend;
+        let backend = AnyBackend::from_hypervisor("hvf").into_dyn();
         let cfg = VmStartConfig {
             name: "hvf-transient-demo".to_string(),
             kernel_path: Some(
@@ -47,7 +47,7 @@ fn main() {
         let logs = backend.logs(&id, 0, false).unwrap_or_default();
         println!("console bytes: {}", logs.len());
         println!(
-            "PROOF: HvfBackend ran a transient workload to completion; the guest reported \
+            "PROOF: hvf runner ran a transient workload to completion; the guest reported \
              exit code 42 over the workload-exit vsock port and wait() returned it \
              (VM life = workload life)."
         );

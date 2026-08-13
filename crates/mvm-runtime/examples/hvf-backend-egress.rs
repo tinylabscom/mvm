@@ -52,8 +52,8 @@ fn main() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
-        use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
-        use mvm_runtime::backends::hvf::HvfBackend;
+        use mvm_core::vm_backend::{VmStartConfig, VmStatus};
+        use mvm_runtime::AnyBackend;
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::time::Duration;
@@ -94,7 +94,7 @@ fn main() {
             )
         };
 
-        let backend = HvfBackend;
+        let backend = AnyBackend::from_hypervisor("hvf").into_dyn();
         let cfg = VmStartConfig {
             name: "hvf-egress-policy-demo".to_string(),
             kernel_path: Some(
