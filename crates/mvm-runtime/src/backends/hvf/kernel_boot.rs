@@ -1080,9 +1080,7 @@ unsafe fn run(
                 v.set_host_dial_activity(egress_active.clone());
                 let bindings = crate::vmm::vsock::VsockHostBindings {
                     agent_socket: agent_socket.clone(),
-                    network_endpoint: egress_relay
-                        .clone()
-                        .or_else(|| substitution_socket.clone()),
+                    network_endpoint: egress_relay.clone().or_else(|| substitution_socket.clone()),
                     broker_endpoint: broker_socket.clone(),
                     console_sockets: console_data_sockets.clone(),
                 };

@@ -284,7 +284,9 @@ fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net
 /// (placeholder-bearing requests) AND the redirected terminator path.
 async fn serve(
     cfg: &EndpointConfig,
-    service: Option<std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>>,
+    service: Option<
+        std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>,
+    >,
     bound: Bound,
     terminator: Option<std::net::TcpListener>,
     forward_timeout: std::time::Duration,

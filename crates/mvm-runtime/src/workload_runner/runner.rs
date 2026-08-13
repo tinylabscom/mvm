@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
-use mvm_core::config::{vm_state_dir, vm_network_endpoint_socket, vms_dir};
+use mvm_core::config::{vm_network_endpoint_socket, vm_state_dir, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
@@ -54,10 +54,6 @@ use mvm_vmm::host::network_endpoint_spawn::{
 };
 use mvm_vmm::host::spec_map::{
     WorkloadSpecInputs, ensure_dir_share_support, workload_spec, workload_vsock_ports,
-};
-use mvm_vmm::host::network_endpoint_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, reap_network_endpoint,
-    spawn_network_endpoint,
 };
 use mvm_vmm::post_restore::PostRestoreOutcome;
 

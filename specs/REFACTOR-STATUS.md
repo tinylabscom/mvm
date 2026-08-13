@@ -1227,8 +1227,14 @@ for detailed scope and acceptance criteria.
         FlowMux, with tests for replay, tampering, wrong identity, and counter
         exhaustion. Remaining: the perf harness + baselines.
   - [~] Phase 2 — the one authenticated endpoint (#2371). `GuestService::NetworkFlow`
-    now names the port-5253 channel; remaining: endpoint binary/spawner rename,
-    FlowMux session acceptance, per-stream registries, and backend witness tests.
+    now names the port-5253 channel; the endpoint binary, proxy, spawner, and
+    test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
+    `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
+    acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
+    for unimplemented flows) with unit tests covering wrong anchors, handshake
+    completion, and clean close. Remaining: wire the acceptor into the actual
+    endpoint process, add bounded per-stream registries, and backend witness
+    tests proving one `NetworkFlow` service per backend.
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)

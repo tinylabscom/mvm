@@ -2,7 +2,7 @@
 
 ## Status
 
-**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 complete (#2371). Phase 3 in progress (#2372): converge egress TCP, UDP, and DNS over FlowMux `OpenTcp`/`OpenUdp`/`Resolve` frames.**
+**Phase 0 complete (#2369). Phase 1 complete (#2370). Phase 2 in progress (#2371): the production endpoint role, channel identity, and spawner files have been renamed; a host-side authenticated FlowMux session acceptor has landed and is exercised by unit tests.**
 
 ADR-042 is accepted and the raw-packet path is frozen: new
 `raw_ip_stack=true` / `NetworkMode::L3Vsock` launches are refused at synthesis,
@@ -307,19 +307,6 @@ flow frame receives `GoAway` before the session closes cleanly.
 `mvm-contract::protocol::network_flow::SessionValidator` gained
 `mark_hello_ack_sent` so a host-side driver can advance its own state machine
 after sending the ack; the validator still only observes inbound frames.
-
-`mvm-hostd::supervisor::flowmux::registry` provides the per-session stream
-registry: odd IDs for guest-initiated flows, even IDs for host-initiated
-ingress, independent TCP/UDP ceilings, `Opening`/`Open`/`HalfClosed`/`Closed`
-state transitions, and per-direction credit windows. It performs no I/O so it
-is trivially unit-testable.
-
-The `mvm-network-endpoint` binary now understands `EgressMode::FlowMux` and
-`EndpointConfig::flowmux_identity`. The spawner
-(`mvm-vmm::host::network_endpoint_spawn`) emits the identity JSON on stdin and
-selects `flow_mux` mode when identity is present. The bin's `serve_flowmux`
-accepts one UDS or vsock connection and runs the authenticated FlowMux session
-in `spawn_blocking`.
 
 ### Phase 3 — Converge egress TCP, UDP, and DNS
 
