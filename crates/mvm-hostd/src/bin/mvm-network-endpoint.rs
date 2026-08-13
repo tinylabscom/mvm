@@ -409,10 +409,18 @@ async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
         .map(mvm_hostd::supervisor::network_endpoint::build_egress_gate)
         .unwrap_or_else(mvm_runtime::vmm::egress_gate::EgressGate::default_deny);
     let session_id = identity.session_id.clone();
+    let recorder = build_audit_recorder(&cfg.tenant_id).map(std::sync::Arc::new);
     tokio::task::spawn_blocking(move || {
-        let mut session =
-            FlowMuxSession::accept(stream, &session_id, host_key, &guest_anchor, limits, gate)
-                .context("accept FlowMux session")?;
+        let mut session = FlowMuxSession::accept_with_recorder(
+            stream,
+            &session_id,
+            host_key,
+            &guest_anchor,
+            limits,
+            gate,
+            recorder,
+        )
+        .context("accept FlowMux session")?;
         session.serve().context("serve FlowMux session")
     })
     .await

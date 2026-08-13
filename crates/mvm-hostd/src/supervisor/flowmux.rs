@@ -31,12 +31,53 @@ use tracing::{info, warn};
 
 use self::registry::{RegistryLimits, StreamRegistry, class_for_open};
 
+use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::raw_egress::resolve_hostname_ips_pure;
+use mvm_core::rate_limit::TokenBucket;
 
 /// Per-address connect budget when trying an admitted set: small so an
 /// unreachable address (e.g. an AAAA with no host IPv6 egress) fails over to
 /// the next candidate quickly.
 const PER_IP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Per-session rate limiter for new connection/association/resolve attempts.
+///
+/// A guest can otherwise force the host to open an unbounded number of TCP
+/// connections, UDP associations, or DNS queries per second. Each class gets
+/// its own one-second-burst token bucket; zero capacity disables limiting.
+#[derive(Debug)]
+pub struct ConnectionRateLimiter {
+    tcp: Mutex<TokenBucket>,
+    udp: Mutex<TokenBucket>,
+    dns: Mutex<TokenBucket>,
+}
+
+impl ConnectionRateLimiter {
+    /// Build a limiter from the per-class rates in [`RegistryLimits`].
+    pub fn from_limits(limits: &RegistryLimits) -> Self {
+        Self {
+            tcp: Mutex::new(TokenBucket::new(limits.tcp_connect_rate)),
+            udp: Mutex::new(TokenBucket::new(limits.udp_open_rate)),
+            dns: Mutex::new(TokenBucket::new(limits.dns_resolve_rate)),
+        }
+    }
+
+    /// Try to admit one new flow of `class`. Returns `true` when admitted or
+    /// when the limiter for this class is disabled.
+    pub fn try_open(&self, class: registry::FlowClass) -> bool {
+        let bucket = match class {
+            registry::FlowClass::Tcp => &self.tcp,
+            registry::FlowClass::Udp => &self.udp,
+            registry::FlowClass::Dns => &self.dns,
+        };
+        let mut guard = bucket.lock().expect("rate limiter bucket poisoned");
+        // A zero-capacity bucket means "unlimited" for this class.
+        if guard.capacity() == 0.0 {
+            return true;
+        }
+        guard.try_take()
+    }
+}
 
 /// Why the FlowMux session ended.
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +114,15 @@ pub struct FlowMuxSession {
     read_buf: Vec<u8>,
     limits: RegistryLimits,
     connect_timeout: Duration,
+    /// Optional chain-signed audit recorder. The endpoint process builds this
+    /// from the tenant's host signer key; tests run without one.
+    recorder: Option<Arc<Recorder>>,
+    /// Captured Tokio runtime handle so synchronous session code can drive
+    /// the async audit signer without spawning a background task.
+    runtime_handle: Option<tokio::runtime::Handle>,
+    /// Per-class rate limiter for new TCP connects, UDP associations, and
+    /// DNS resolves.
+    rate_limiter: Arc<ConnectionRateLimiter>,
 }
 
 impl std::fmt::Debug for FlowMuxSession {
@@ -91,6 +141,10 @@ struct TcpStreamHandle {
     upstream: TcpStream,
     /// Set by the relay thread when the upstream socket reaches EOF.
     host_half_closed: Arc<AtomicBool>,
+    /// Set by the main thread when the stream is being torn down so the relay
+    /// thread does not emit a stale `HalfClose` or `Reset` after an explicit
+    /// reset or full close.
+    retired: Arc<AtomicBool>,
 }
 
 /// A request from the main session thread to a UDP relay thread to send one
@@ -119,12 +173,38 @@ impl FlowMuxSession {
     /// handshake; `guest_anchor` is the only guest identity this endpoint
     /// will accept. A mismatch fails closed.
     pub fn accept(
+        stream: UnixStream,
+        session_id: &str,
+        host_key: SigningKey,
+        guest_anchor: &VerifyingKey,
+        limits: RegistryLimits,
+        gate: EgressGate,
+    ) -> Result<Self, FlowMuxError> {
+        Self::accept_with_recorder(
+            stream,
+            session_id,
+            host_key,
+            guest_anchor,
+            limits,
+            gate,
+            None,
+        )
+    }
+
+    /// Accept one authenticated FlowMux session with an optional audit
+    /// recorder attached.
+    ///
+    /// `session_id` must be unique per VM boot. `host_key` signs the
+    /// handshake; `guest_anchor` is the only guest identity this endpoint
+    /// will accept. A mismatch fails closed.
+    pub fn accept_with_recorder(
         mut stream: UnixStream,
         session_id: &str,
         host_key: SigningKey,
         guest_anchor: &VerifyingKey,
         limits: RegistryLimits,
         gate: EgressGate,
+        recorder: Option<Arc<Recorder>>,
     ) -> Result<Self, FlowMuxError> {
         // Split the socket into independent read/write descriptors so the
         // main thread can block on guest frames while relay threads emit
@@ -153,7 +233,52 @@ impl FlowMuxSession {
             read_buf: Vec::with_capacity(4096),
             limits,
             connect_timeout: Duration::from_secs(30),
+            recorder,
+            runtime_handle: tokio::runtime::Handle::try_current().ok(),
+            rate_limiter: Arc::new(ConnectionRateLimiter::from_limits(&limits)),
         })
+    }
+
+    /// Emit a payload-free audit entry. The labels carry only metadata
+    /// (stream id, class, target, verdict) — never payload bytes.
+    ///
+    /// Best effort: a missing recorder or absent Tokio runtime is ignored so
+    /// audit plumbing never blocks the networking path.
+    fn emit_audit(
+        &self,
+        category: EventCategory,
+        event_name: &str,
+        labels: BTreeMap<String, String>,
+    ) {
+        let (Some(recorder), Some(handle)) = (&self.recorder, &self.runtime_handle) else {
+            return;
+        };
+        let recorder = Arc::clone(recorder);
+        let event_name = event_name.to_string();
+        let fut = async move {
+            let _ = recorder.record_unbound(category, event_name, labels).await;
+        };
+        // The session runs in `spawn_blocking`; block_on is acceptable
+        // because the audit signer writes to a local file and returns quickly.
+        handle.block_on(fut);
+    }
+
+    /// Check the per-class connection-rate limiter. Returns `true` when the
+    /// attempt is admitted (or when limiting is disabled for this class).
+    fn check_connection_rate(&self, class: registry::FlowClass) -> bool {
+        self.rate_limiter.try_open(class)
+    }
+
+    /// Render a list of IP addresses as a compact, stable label value.
+    fn format_ips(ips: &[IpAddr]) -> String {
+        let mut out = String::with_capacity(ips.len() * 16);
+        for (i, ip) in ips.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&ip.to_string());
+        }
+        out
     }
 
     /// Serve the session until it closes or errors.
@@ -313,15 +438,51 @@ impl FlowMuxSession {
                 return Ok(());
             }
         };
+        let target = target.to_string();
+
+        if !self.check_connection_rate(registry::FlowClass::Tcp) {
+            self.send_refused(stream_id, "rate limited")?;
+            self.emit_audit(
+                EventCategory::Host,
+                "host.flow.denied",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("class".to_string(), "tcp".to_string()),
+                    ("target".to_string(), target.to_string()),
+                    ("reason".to_string(), "rate_limited".to_string()),
+                ]),
+            );
+            return Ok(());
+        }
 
         let (ips, port) = match self.gate.decide_request(&format!("{host}:{port}")) {
             EgressVerdict::Allow { ips, port } => (ips, port),
             EgressVerdict::Deny(reason) => {
                 self.send_refused(stream_id, &reason.to_string())?;
+                self.emit_audit(
+                    EventCategory::Host,
+                    "host.flow.denied",
+                    BTreeMap::from([
+                        ("stream_id".to_string(), stream_id.to_string()),
+                        ("class".to_string(), "tcp".to_string()),
+                        ("target".to_string(), target.to_string()),
+                        ("reason".to_string(), "policy_denied".to_string()),
+                    ]),
+                );
                 return Ok(());
             }
             EgressVerdict::Malformed => {
                 self.send_refused(stream_id, "malformed destination")?;
+                self.emit_audit(
+                    EventCategory::Host,
+                    "host.flow.denied",
+                    BTreeMap::from([
+                        ("stream_id".to_string(), stream_id.to_string()),
+                        ("class".to_string(), "tcp".to_string()),
+                        ("target".to_string(), target.to_string()),
+                        ("reason".to_string(), "malformed".to_string()),
+                    ]),
+                );
                 return Ok(());
             }
         };
@@ -331,6 +492,16 @@ impl FlowMuxSession {
             .err();
         if let Some(e) = open_err {
             self.send_refused(stream_id, &e.to_string())?;
+            self.emit_audit(
+                EventCategory::Host,
+                "host.flow.denied",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("class".to_string(), "tcp".to_string()),
+                    ("target".to_string(), target.to_string()),
+                    ("reason".to_string(), "resource_exhausted".to_string()),
+                ]),
+            );
             return Ok(());
         }
 
@@ -340,6 +511,16 @@ impl FlowMuxSession {
                 warn!(stream_id, %target, "FlowMux TCP connect failed");
                 let _ = lock_registry(&self.registry).retire(stream_id);
                 self.send_refused(stream_id, "connection failed")?;
+                self.emit_audit(
+                    EventCategory::Host,
+                    "host.flow.denied",
+                    BTreeMap::from([
+                        ("stream_id".to_string(), stream_id.to_string()),
+                        ("class".to_string(), "tcp".to_string()),
+                        ("target".to_string(), target.to_string()),
+                        ("reason".to_string(), "connect_failed".to_string()),
+                    ]),
+                );
                 return Ok(());
             }
         };
@@ -353,12 +534,23 @@ impl FlowMuxSession {
 
         self.send_opened(stream_id)?;
         self.spawn_tcp_relay(stream_id, upstream)?;
+        self.emit_audit(
+            EventCategory::Host,
+            "host.flow.allowed",
+            BTreeMap::from([
+                ("stream_id".to_string(), stream_id.to_string()),
+                ("class".to_string(), "tcp".to_string()),
+                ("target".to_string(), target.to_string()),
+                ("resolved_ips".to_string(), Self::format_ips(&ips)),
+            ]),
+        );
         Ok(())
     }
 
     fn handle_resolve(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
         if payload_len == 0 || payload_len as usize > MAX_DNS_MESSAGE {
             self.send_resolve_refused(stream_id, "DNS query missing or oversized")?;
+            self.remove_stream(stream_id);
             return Ok(());
         }
 
@@ -370,9 +562,26 @@ impl FlowMuxSession {
             Ok(q) => q,
             Err(e) => {
                 self.send_resolve_refused(stream_id, &format!("malformed DNS query: {e:?}"))?;
+                self.remove_stream(stream_id);
                 return Ok(());
             }
         };
+
+        if !self.check_connection_rate(registry::FlowClass::Dns) {
+            self.send_resolve_refused(stream_id, "rate limited")?;
+            self.emit_audit(
+                EventCategory::Dns,
+                "dns.refused",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("qname".to_string(), question.name.clone()),
+                    ("qtype".to_string(), question.qtype.to_string()),
+                    ("reason".to_string(), "rate_limited".to_string()),
+                ]),
+            );
+            self.remove_stream(stream_id);
+            return Ok(());
+        }
 
         let timeout = self.connect_timeout;
         let verdict = self
@@ -382,13 +591,36 @@ impl FlowMuxSession {
             });
 
         let response = match verdict {
-            DnsVerdict::Resolved(ips) => encode_response(
-                &question,
-                mvm_contract::protocol::dns::DnsRcode::NoError,
-                &ips,
-            ),
+            DnsVerdict::Resolved(ips) => {
+                self.emit_audit(
+                    EventCategory::Dns,
+                    "dns.resolved",
+                    BTreeMap::from([
+                        ("stream_id".to_string(), stream_id.to_string()),
+                        ("qname".to_string(), question.name.clone()),
+                        ("qtype".to_string(), question.qtype.to_string()),
+                        ("resolved_ips".to_string(), Self::format_ips(&ips)),
+                    ]),
+                );
+                encode_response(
+                    &question,
+                    mvm_contract::protocol::dns::DnsRcode::NoError,
+                    &ips,
+                )
+            }
             DnsVerdict::Refused => {
+                self.emit_audit(
+                    EventCategory::Dns,
+                    "dns.refused",
+                    BTreeMap::from([
+                        ("stream_id".to_string(), stream_id.to_string()),
+                        ("qname".to_string(), question.name.clone()),
+                        ("qtype".to_string(), question.qtype.to_string()),
+                        ("reason".to_string(), "policy_denied".to_string()),
+                    ]),
+                );
                 self.send_resolve_refused(stream_id, "policy refused")?;
+                self.remove_stream(stream_id);
                 return Ok(());
             }
         };
@@ -399,11 +631,34 @@ impl FlowMuxSession {
     }
 
     fn handle_open_udp(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
+        if !self.check_connection_rate(registry::FlowClass::Udp) {
+            self.send_refused(stream_id, "rate limited")?;
+            self.emit_audit(
+                EventCategory::Host,
+                "host.flow.denied",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("class".to_string(), "udp".to_string()),
+                    ("reason".to_string(), "rate_limited".to_string()),
+                ]),
+            );
+            return Ok(());
+        }
+
         let open_err = lock_registry(&self.registry)
             .open_guest(stream_id, registry::FlowClass::Udp)
             .err();
         if let Some(e) = open_err {
             self.send_refused(stream_id, &e.to_string())?;
+            self.emit_audit(
+                EventCategory::Host,
+                "host.flow.denied",
+                BTreeMap::from([
+                    ("stream_id".to_string(), stream_id.to_string()),
+                    ("class".to_string(), "udp".to_string()),
+                    ("reason".to_string(), "resource_exhausted".to_string()),
+                ]),
+            );
             return Ok(());
         }
 
@@ -435,6 +690,14 @@ impl FlowMuxSession {
         self.udp_associations
             .insert(stream_id, UdpAssociationHandle { tx });
         self.send_udp_opened(stream_id)?;
+        self.emit_audit(
+            EventCategory::Host,
+            "host.flow.allowed",
+            BTreeMap::from([
+                ("stream_id".to_string(), stream_id.to_string()),
+                ("class".to_string(), "udp".to_string()),
+            ]),
+        );
         Ok(())
     }
 
@@ -502,12 +765,23 @@ impl FlowMuxSession {
         let upstream_read = upstream.try_clone()?;
         let host_half_closed = Arc::new(AtomicBool::new(false));
         let relay_flag = Arc::clone(&host_half_closed);
+        let retired = Arc::new(AtomicBool::new(false));
+        let retired_flag = Arc::clone(&retired);
         let writer = Arc::clone(&self.writer);
         let registry = Arc::clone(&self.registry);
 
         std::thread::Builder::new()
             .name(format!("flowmux-tcp-{stream_id}"))
-            .spawn(move || run_tcp_relay(stream_id, upstream_read, writer, registry, relay_flag))
+            .spawn(move || {
+                run_tcp_relay(
+                    stream_id,
+                    upstream_read,
+                    writer,
+                    registry,
+                    relay_flag,
+                    retired_flag,
+                )
+            })
             .map_err(FlowMuxError::Transport)?;
 
         self.streams.insert(
@@ -515,6 +789,7 @@ impl FlowMuxSession {
             TcpStreamHandle {
                 upstream,
                 host_half_closed,
+                retired,
             },
         );
         Ok(())
@@ -585,6 +860,7 @@ impl FlowMuxSession {
 
         if handle.host_half_closed.load(Ordering::Relaxed) {
             // Both directions are now done.
+            handle.retired.store(true, Ordering::Relaxed);
             self.send_reset(stream_id, "stream complete")?;
             self.remove_stream(stream_id);
         } else {
@@ -614,6 +890,7 @@ impl FlowMuxSession {
 
     fn reset_stream(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
         if let Some(handle) = self.streams.remove(&stream_id) {
+            handle.retired.store(true, Ordering::Relaxed);
             let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
         }
         let _ = lock_registry(&self.registry).retire(stream_id);
@@ -623,6 +900,7 @@ impl FlowMuxSession {
 
     fn remove_stream(&mut self, stream_id: u32) {
         if let Some(handle) = self.streams.remove(&stream_id) {
+            handle.retired.store(true, Ordering::Relaxed);
             let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
         }
         let _ = lock_registry(&self.registry).retire(stream_id);
@@ -800,13 +1078,16 @@ fn run_tcp_relay(
     writer: Arc<Mutex<UnixStream>>,
     registry: Arc<Mutex<StreamRegistry>>,
     host_half_closed: Arc<AtomicBool>,
+    retired: Arc<AtomicBool>,
 ) {
     let mut buf = [0u8; 16 * 1024];
     loop {
         match upstream.read(&mut buf) {
             Ok(0) => {
                 host_half_closed.store(true, Ordering::Relaxed);
-                if write_frame_to(&writer, Opcode::HalfClose, stream_id, &[]).is_err() {
+                if !retired.load(Ordering::Relaxed)
+                    && write_frame_to(&writer, Opcode::HalfClose, stream_id, &[]).is_err()
+                {
                     warn!(stream_id, "FlowMux relay failed to send HalfClose");
                 }
                 break;
@@ -826,8 +1107,10 @@ fn run_tcp_relay(
             }
             Err(e) => {
                 warn!(stream_id, error = %e, "FlowMux upstream read failed");
-                let reason = format!("upstream error: {e}");
-                let _ = write_frame_to(&writer, Opcode::Reset, stream_id, reason.as_bytes());
+                if !retired.load(Ordering::Relaxed) {
+                    let reason = format!("upstream error: {e}");
+                    let _ = write_frame_to(&writer, Opcode::Reset, stream_id, reason.as_bytes());
+                }
                 host_half_closed.store(true, Ordering::Relaxed);
                 break;
             }
@@ -1060,7 +1343,7 @@ mod tests {
         );
     }
 
-    fn read_flowmux_frame(stream: &mut UnixStream) -> (Opcode, Vec<u8>) {
+    fn read_flowmux_frame(stream: &mut UnixStream) -> (Opcode, u32, Vec<u8>) {
         let mut len_buf = [0u8; 4];
         match stream.read_exact(&mut len_buf) {
             Ok(()) => {}
@@ -1072,7 +1355,11 @@ mod tests {
         buf.resize(4 + len, 0);
         stream.read_exact(&mut buf[4..]).unwrap();
         let parsed = mvm_contract::protocol::network_flow::decode(&buf).unwrap();
-        (parsed.header.opcode, parsed.payload.to_vec())
+        (
+            parsed.header.opcode,
+            parsed.header.stream_id,
+            parsed.payload.to_vec(),
+        )
     }
 
     #[test]
@@ -1106,7 +1393,7 @@ mod tests {
         guest_stream.flush().unwrap();
 
         // Read the HelloAck from the host.
-        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::HelloAck);
 
         // Send a flow frame on an unknown stream and expect a GoAway.
@@ -1115,7 +1402,7 @@ mod tests {
         guest_stream.write_all(&payload).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, goaway_payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, goaway_payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::GoAway);
         assert!(!goaway_payload.is_empty());
 
@@ -1153,7 +1440,7 @@ mod tests {
         guest_stream.write_all(&hello).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::HelloAck);
 
         let mut open = Vec::new();
@@ -1161,7 +1448,7 @@ mod tests {
         guest_stream.write_all(&open).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::Refused);
         assert!(!payload.is_empty());
 
@@ -1172,7 +1459,7 @@ mod tests {
         guest_stream.write_all(&data).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::GoAway);
 
         drop(guest_stream);
@@ -1240,7 +1527,7 @@ mod tests {
         guest_stream.write_all(&hello).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::HelloAck);
 
         let mut open = Vec::new();
@@ -1248,7 +1535,7 @@ mod tests {
         guest_stream.write_all(&open).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::UdpOpened);
 
         // Close the association cleanly.
@@ -1263,7 +1550,7 @@ mod tests {
         guest_stream.write_all(&data).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::GoAway);
 
         drop(guest_stream);
@@ -1316,7 +1603,7 @@ mod tests {
         guest_stream.write_all(&hello).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::HelloAck);
 
         let query = build_dns_query("example.com", 1, 0x1234);
@@ -1325,7 +1612,7 @@ mod tests {
         guest_stream.write_all(&resolve).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::ResolveRefused);
         assert!(!payload.is_empty());
 
@@ -1344,6 +1631,34 @@ mod tests {
             "test IP {ip} is in a mandatory-deny range"
         );
         ip
+    }
+
+    fn gate_allowing_ports(ip: IpAddr, tcp_ports: &[u16], udp_ports: &[u16]) -> EgressGate {
+        use mvm_contract::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
+        let cidr = if ip.is_ipv4() {
+            format!("{ip}/32")
+        } else {
+            format!("{ip}/128")
+        };
+        let net: ipnet::IpNet = cidr.parse().unwrap();
+        let mut rules = Vec::new();
+        for &port in tcp_ports {
+            rules.push(CanonicalRule {
+                proto: Proto::Tcp,
+                net,
+                port_lo: port,
+                port_hi: port,
+            });
+        }
+        for &port in udp_ports {
+            rules.push(CanonicalRule {
+                proto: Proto::Udp,
+                net: cidr.parse().unwrap(),
+                port_lo: port,
+                port_hi: port,
+            });
+        }
+        EgressGate::new(CanonicalEgress::Rules(rules))
     }
 
     fn gate_allowing_addr(ip: IpAddr, tcp_port: u16, udp_port: Option<u16>) -> EgressGate {
@@ -1420,7 +1735,7 @@ mod tests {
         guest_stream.write_all(&hello).unwrap();
         guest_stream.flush().unwrap();
 
-        let (opcode, _payload) = read_flowmux_frame(&mut guest_stream);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest_stream);
         assert_eq!(opcode, Opcode::HelloAck);
         (guest_stream, host_handle)
     }
@@ -1460,6 +1775,18 @@ mod tests {
         udp_echo_server_on(local_test_ip())
     }
 
+    fn tcp_banner_server() -> SocketAddr {
+        let listener =
+            std::net::TcpListener::bind(std::net::SocketAddr::new(local_test_ip(), 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.write_all(b"banner");
+            }
+        });
+        addr
+    }
+
     fn udp_echo_server_on(ip: IpAddr) -> SocketAddr {
         let socket = std::net::UdpSocket::bind(std::net::SocketAddr::new(ip, 0)).unwrap();
         let addr = socket.local_addr().unwrap();
@@ -1482,13 +1809,13 @@ mod tests {
             1,
             format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
         );
-        let (opcode, _payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
         assert_eq!(opcode, Opcode::Opened);
 
         let payload = b"ping";
         write_frame(&mut guest, Opcode::Data, 1, payload);
         let data = loop {
-            let (opcode, frame) = read_flowmux_frame(&mut guest);
+            let (opcode, _stream_id, frame) = read_flowmux_frame(&mut guest);
             if opcode == Opcode::Data {
                 break frame;
             }
@@ -1498,7 +1825,14 @@ mod tests {
         assert_eq!(&data[..], payload);
 
         write_frame(&mut guest, Opcode::HalfClose, 1, b"");
-        let (opcode, _payload) = read_flowmux_frame(&mut guest);
+        let opcode = loop {
+            let (op, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+            if op == Opcode::HalfClose {
+                break op;
+            }
+            // WindowUpdate may be in flight before the relay observes EOF.
+            assert_eq!(op, Opcode::WindowUpdate);
+        };
         assert_eq!(opcode, Opcode::HalfClose);
 
         drop(guest);
@@ -1516,7 +1850,33 @@ mod tests {
             1,
             format!("{}:{}", addr.ip(), denied_port).as_bytes(),
         );
-        let (opcode, payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Refused);
+        assert!(!payload.is_empty());
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn open_tcp_to_allowed_but_unbound_addr_is_refused_truthfully() {
+        let ip = local_test_ip();
+        // Bind briefly to let the OS assign a free port, then drop the
+        // listener so the attempted connect fails with ECONNREFUSED.
+        let free_port = std::net::TcpListener::bind(std::net::SocketAddr::new(ip, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+
+        let (mut guest, host) = run_session(gate_allowing_addr(ip, free_port, None));
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", ip, free_port).as_bytes(),
+        );
+        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest);
         assert_eq!(opcode, Opcode::Refused);
         assert!(!payload.is_empty());
 
@@ -1532,14 +1892,14 @@ mod tests {
             RegistryLimits::default(),
         );
         write_frame(&mut guest, Opcode::OpenUdp, 1, b"");
-        let (opcode, _payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
         assert_eq!(opcode, Opcode::UdpOpened);
 
         let mut payload = encode_udp_addr(addr.ip(), addr.port());
         payload.extend_from_slice(b"hello");
         write_frame(&mut guest, Opcode::UdpSend, 1, &payload);
 
-        let (opcode, recv) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, recv) = read_flowmux_frame(&mut guest);
         assert_eq!(opcode, Opcode::UdpRecv);
         let (source_ip, source_port, body) = decode_udp_addr(&recv).unwrap();
         assert_eq!(SocketAddr::new(source_ip, source_port), addr);
@@ -1560,11 +1920,11 @@ mod tests {
         let (mut guest, host) =
             run_session_with(gate_allowing_addr(addr.ip(), 0, Some(addr.port())), limits);
         write_frame(&mut guest, Opcode::OpenUdp, 1, b"");
-        let (opcode, _payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
         assert_eq!(opcode, Opcode::UdpOpened);
 
         thread::sleep(Duration::from_millis(250));
-        let (opcode, _payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
         assert_eq!(opcode, Opcode::CloseUdp);
 
         drop(guest);
@@ -1582,7 +1942,7 @@ mod tests {
             limits,
         );
         write_frame(&mut guest, Opcode::OpenUdp, 1, b"");
-        let (opcode, _payload) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest);
         assert_eq!(opcode, Opcode::UdpOpened);
 
         let ip = local_test_ip();
@@ -1625,10 +1985,257 @@ mod tests {
         let query = build_dns_query("localhost", 1, 0x1234);
         write_frame(&mut guest, Opcode::Resolve, 1, &query);
 
-        let (opcode, response) = read_flowmux_frame(&mut guest);
+        let (opcode, _stream_id, response) = read_flowmux_frame(&mut guest);
         assert_eq!(opcode, Opcode::Resolved);
         assert!(!response.is_empty());
         assert_eq!(&response[..2], &[0x12, 0x34]);
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn concurrent_tcp_flows_are_independent() {
+        let addr1 = tcp_echo_server();
+        let addr2 = tcp_echo_server();
+        let (mut guest, host) = run_session(gate_allowing_ports(
+            addr1.ip(),
+            &[addr1.port(), addr2.port()],
+            &[],
+        ));
+
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr1.ip(), addr1.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Opened);
+
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            3,
+            format!("{}:{}", addr2.ip(), addr2.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Opened);
+
+        write_frame(&mut guest, Opcode::Data, 1, b"alpha");
+        write_frame(&mut guest, Opcode::Data, 3, b"beta");
+
+        let mut got1: Option<Vec<u8>> = None;
+        let mut got3: Option<Vec<u8>> = None;
+        while got1.is_none() || got3.is_none() {
+            let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest);
+            match opcode {
+                Opcode::Data if stream_id == 1 => got1 = Some(payload),
+                Opcode::Data if stream_id == 3 => got3 = Some(payload),
+                Opcode::WindowUpdate => {}
+                other => panic!("unexpected opcode {other:?} on stream {stream_id}"),
+            }
+        }
+        assert_eq!(got1.unwrap().as_slice(), b"alpha");
+        assert_eq!(got3.unwrap().as_slice(), b"beta");
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn tcp_and_udp_flows_are_concurrent() {
+        let tcp_addr = tcp_echo_server();
+        let udp_addr = udp_echo_server();
+        let (mut guest, host) = run_session(gate_allowing_ports(
+            tcp_addr.ip(),
+            &[tcp_addr.port()],
+            &[udp_addr.port()],
+        ));
+
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", tcp_addr.ip(), tcp_addr.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Opened);
+
+        write_frame(&mut guest, Opcode::OpenUdp, 3, b"");
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::UdpOpened);
+
+        write_frame(&mut guest, Opcode::Data, 1, b"tcp-ping");
+        let mut udp_payload = encode_udp_addr(udp_addr.ip(), udp_addr.port());
+        udp_payload.extend_from_slice(b"udp-ping");
+        write_frame(&mut guest, Opcode::UdpSend, 3, &udp_payload);
+
+        let mut tcp_reply: Option<Vec<u8>> = None;
+        let mut udp_reply: Option<Vec<u8>> = None;
+        while tcp_reply.is_none() || udp_reply.is_none() {
+            let (opcode, stream_id, payload) = read_flowmux_frame(&mut guest);
+            match opcode {
+                Opcode::Data if stream_id == 1 => tcp_reply = Some(payload),
+                Opcode::UdpRecv if stream_id == 3 => udp_reply = Some(payload),
+                Opcode::WindowUpdate => {}
+                other => panic!("unexpected opcode {other:?} on stream {stream_id}"),
+            }
+        }
+        assert_eq!(tcp_reply.unwrap().as_slice(), b"tcp-ping");
+        let udp_payload = udp_reply.unwrap();
+        let (source_ip, source_port, body) = decode_udp_addr(&udp_payload).unwrap();
+        assert_eq!(SocketAddr::new(source_ip, source_port), udp_addr);
+        assert_eq!(body, b"udp-ping");
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn guest_half_close_is_replied_with_host_half_close() {
+        let addr = tcp_echo_server();
+        let (mut guest, host) = run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
+
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Opened);
+
+        write_frame(&mut guest, Opcode::Data, 1, b"hello");
+        let (opcode, _, payload) = loop {
+            let (op, sid, frame) = read_flowmux_frame(&mut guest);
+            if op == Opcode::Data {
+                break (op, sid, frame);
+            }
+            assert_eq!(op, Opcode::WindowUpdate);
+        };
+        assert_eq!(opcode, Opcode::Data);
+        assert_eq!(payload.as_slice(), b"hello");
+
+        write_frame(&mut guest, Opcode::HalfClose, 1, b"");
+        let opcode = loop {
+            let (op, _stream_id, _payload) = read_flowmux_frame(&mut guest);
+            if op == Opcode::HalfClose {
+                break op;
+            }
+            assert_eq!(op, Opcode::WindowUpdate);
+        };
+        assert_eq!(opcode, Opcode::HalfClose);
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn guest_reset_retires_stream() {
+        let addr = tcp_echo_server();
+        let (mut guest, host) = run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
+
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Opened);
+
+        write_frame(&mut guest, Opcode::Reset, 1, b"bye");
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Reset);
+
+        write_frame(&mut guest, Opcode::Data, 1, b"?");
+        let (opcode, _, payload) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::GoAway);
+        assert!(!payload.is_empty());
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn tcp_connection_rate_limit_refuses_overflow() {
+        let addr = tcp_echo_server();
+        let limits = RegistryLimits {
+            tcp_connect_rate: 1,
+            ..Default::default()
+        };
+        let (mut guest, host) =
+            run_session_with(gate_allowing_addr(addr.ip(), addr.port(), None), limits);
+
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Opened);
+
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            3,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _, payload) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Refused);
+        assert!(std::str::from_utf8(&payload).unwrap().contains("rate"));
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn dns_resolve_rate_limit_refuses_overflow() {
+        let limits = RegistryLimits {
+            dns_resolve_rate: 1,
+            ..Default::default()
+        };
+        let (mut guest, host) = run_session_with(gate_with_pinned_localhost(), limits);
+
+        let query1 = build_dns_query("localhost", 1, 0x1234);
+        write_frame(&mut guest, Opcode::Resolve, 1, &query1);
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Resolved);
+
+        let query3 = build_dns_query("localhost", 1, 0x1235);
+        write_frame(&mut guest, Opcode::Resolve, 3, &query3);
+        let (opcode, _, payload) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::ResolveRefused);
+        assert!(std::str::from_utf8(&payload).unwrap().contains("rate"));
+
+        drop(guest);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn host_credit_exhaustion_sends_reset() {
+        let addr = tcp_banner_server();
+        let limits = RegistryLimits {
+            initial_credit: 0,
+            ..Default::default()
+        };
+        let (mut guest, host) =
+            run_session_with(gate_allowing_addr(addr.ip(), addr.port(), None), limits);
+
+        write_frame(
+            &mut guest,
+            Opcode::OpenTcp,
+            1,
+            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
+        );
+        let (opcode, _, _) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Opened);
+
+        let (opcode, _, payload) = read_flowmux_frame(&mut guest);
+        assert_eq!(opcode, Opcode::Reset);
+        assert!(!payload.is_empty());
 
         drop(guest);
         host.join().unwrap().unwrap();

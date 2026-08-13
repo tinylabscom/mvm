@@ -32,6 +32,15 @@ impl DnsRecordType {
     }
 }
 
+impl core::fmt::Display for DnsRecordType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::A => f.write_str("A"),
+            Self::Aaaa => f.write_str("AAAA"),
+        }
+    }
+}
+
 /// A validated, single-question DNS query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsQuestion {

@@ -326,7 +326,7 @@ in `spawn_blocking`.
 - [x] Replace the raw `"host:port\n"` prelude with `OpenTcp`; return `Opened`
       only after a host connection succeeds, and return a typed refusal for
       policy, DNS, timeout, resource, and connection failures.
-- [ ] Move canonical host/port parsing, DNS resolution and pinning, mandatory
+- [x] Move canonical host/port parsing, DNS resolution and pinning, mandatory
       range denial, redirect revalidation, `EgressGate`, byte accounting,
       connection rate limiting, and payload-free audit emission into one
       endpoint pipeline used by every outbound flow type.
