@@ -783,7 +783,11 @@ for detailed scope and acceptance criteria.
         proxy; three curated fixtures (allowed / denied / unbound); tamper
         button; `wasm-opt -Oz` + gzipped-size budget in the existing wasm lane.
         Crate skeleton created with `decide_egress`,
-        `substitute_placeholder`, and `verify` shims over `mvm-contract`.
+        `substitute_placeholder`, `verify`, and `run_scenario` shims over
+        `mvm-contract`. A standalone `index.html` demo page (same deployment
+        pattern as `web/audit-verify/`) lets the visitor run the three
+        scenarios, see module/destination views, and verify/tamper a fixture
+        audit chain. Full Worker ownership + real curated WASI modules remain.
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
 - [ ] Plan 321 — wasm as a workload format inside a real microVM

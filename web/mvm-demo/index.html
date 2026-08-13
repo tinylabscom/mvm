@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mvm wasm sandbox demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.5rem; }
+  p.lede { opacity: 0.85; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  .card { border: 1px solid #8884; border-radius: 8px; padding: 1rem; }
+  .card h2 { font-size: 1.1rem; margin-top: 0; }
+  label { display: block; font-weight: 600; margin: 0.75rem 0 0.25rem; }
+  textarea, input, select { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: 13px; }
+  textarea { height: 6rem; }
+  button { margin-top: 0.75rem; padding: 0.5rem 1rem; font-size: 15px; cursor: pointer; }
+  #result { margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
+  #result.ok { background: #e6f4ea; color: #14532d; }
+  #result.bad { background: #fde8e8; color: #7f1d1d; }
+  .pane { background: #8881; padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem; font-family: ui-monospace, monospace; font-size: 12px; }
+  footer { margin-top: 2rem; font-size: 12px; opacity: 0.7; }
+</style>
+</head>
+<body>
+<h1>mvm wasm sandbox demo</h1>
+<p class="lede">
+  A live in-browser governance sandbox. The wasm bundle is built from the
+  same <code>mvm-contract</code> code the host uses for egress decisions and
+  placeholder substitution. This page demonstrates policy, substitution, and
+  audit-chain verification — not an isolation boundary.
+</p>
+
+<div class="grid">
+  <div class="card">
+    <h2>1. Module + policy</h2>
+    <label for="scenario">Scenario</label>
+    <select id="scenario">
+      <option value="allowed">allowed — secret bound to destination</option>
+      <option value="denied">denied — default-deny policy</option>
+      <option value="unbound">unbound — host admitted, secret not bound</option>
+    </select>
+    <label for="policy">Network policy (JSON)</label>
+    <textarea id="policy">{"mode":"closed","rules":[{"host":"api.openai.com","port":443}]}</textarea>
+    <button id="run">Run sandbox</button>
+  </div>
+
+  <div class="card">
+    <h2>2. Module view</h2>
+    <div id="module-view" class="pane">—</div>
+    <h2>3. Destination view</h2>
+    <div id="destination-view" class="pane">—</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top: 1rem;">
+  <h2>4. Audit chain</h2>
+  <label for="chain">Pre-signed fixture chain (JSONL)</label>
+  <textarea id="chain"></textarea>
+  <label for="pubkey">Verifying key (hex)</label>
+  <input id="pubkey" placeholder="64 hex characters" />
+  <button id="verify">Verify chain</button>
+  <button id="tamper">Tamper + re-verify</button>
+  <div id="result" hidden></div>
+</div>
+
+<footer>
+  Built from <code>web/mvm-demo/</code> over <code>mvm-contract</code>.
+  The browser is the wasm engine; the host <code>WasmBackend</code> is not
+  exercised. Egress decision + placeholder substitution are the same code
+  the host runs; audit signing moves to <code>mvm-contract</code> under
+  plan 320 E3.
+</footer>
+
+<script type="module" src="demo.js"></script>
+</body>
+</html>
