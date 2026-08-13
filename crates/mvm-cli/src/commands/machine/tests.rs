@@ -182,7 +182,7 @@ fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecurityS
     assert_eq!(summary.preflight_mounts, summary.receipt_mounts);
     assert_eq!(summary.preflight_mounts.len(), 1);
     let mount = &summary.preflight_mounts[0];
-    assert_eq!(mount.guest_path, "/workspace");
+    assert_eq!(mount.guest_path, "/work");
     assert!(mount.read_only);
     assert!(!mount.host_path_sha256.contains("/tmp/mvm-sdk-src"));
     assert_eq!(summary.preflight_timeout_secs, 30);
@@ -1117,7 +1117,7 @@ fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
         .cpus(4)
         .memory("1G")
         .profile("dev")
-        .volume("/tmp/mvm-sdk-src:/workspace:ro")
+        .volume("/tmp/mvm-sdk-src:/work:ro")
         .env("TOKEN=secret")
         .env("MODE=test")
         .timeout(30)

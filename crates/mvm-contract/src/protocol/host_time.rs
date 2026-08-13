@@ -9,9 +9,7 @@
 //!
 //! This module is the shared wire contract for the service: the in-guest
 //! typed client (`mvm_agentd::host_time`) and the host-side broker handler
-//! both deserialize against these types. The handler scaffold is not yet
-//! built, so these types are the sole definition today; when the handler
-//! lands it reuses them unchanged.
+//! both deserialize against these types.
 
 use serde::{Deserialize, Serialize};
 

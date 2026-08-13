@@ -98,6 +98,23 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+- [~] Plan 325 — SDK sidecar reserved mount
+      (`specs/plans/325-sdk-sidecar-reserved-mount.md`)
+  - [x] Reserved SDK disk is excluded from generic user-volume activation
+  - [x] Legacy and universal guest boot paths mount `mvm.sdk_dev` read-only at
+        `/mvm/sdk`
+  - [x] Explicit worktree binaries source guest artifacts from the same worktree
+  - [x] Guest Cargo target graphs and artifact caches are source-isolated
+  - [x] Sealed OCI roots carry the reserved `/mvm/sdk` mountpoint
+  - [x] Agent timeouts preserve a redacted console diagnostic before cleanup
+  - [x] The hermetic `/mnt/wheels` plus SDK-sidecar BDD regression passes, and
+        host preflight refuses invalid `/wheels` mounts before VM boot
+  - [x] Source builds include the host-agent helpers and exact admitted service
+        bindings reach a real `host.time.v1` handler
+  - [x] The framed broker/SDK BDD regression and native HVF Python-wheel command
+        pass
+  - [ ] Native libkrun Python host-time acceptance passes
+
 - [~] Plan 323 — Concurrent builds through one builder VM
       (`specs/plans/323-concurrent-builds-one-builder-vm.md`)
   - [x] Phase 1 — a contended Nix-store image lock queues (naming the holding

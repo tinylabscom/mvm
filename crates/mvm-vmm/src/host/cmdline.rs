@@ -209,7 +209,13 @@ pub fn runner_cmdline(
         // PyPI), using the same host epoch captured at boot time as the builder.
         tokens.push(crate::host::boot_config::builder_hostepoch_cmdline_token());
     }
-    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
+    let user_volumes = config
+        .volumes
+        .iter()
+        .filter(|volume| !super::spec_map::is_sdk_sidecar_volume(volume))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&user_volumes) {
         tokens.push(uvols);
     }
     // Tell the guest which device the SDK sidecar landed on. The guest can't
@@ -595,8 +601,17 @@ mod tests {
             cmdline.contains("mvm.sdk_dev=/dev/vdc"),
             "cmdline missing the sidecar device token: {cmdline}"
         );
-        // Both tokens ride together, and the cmdline stays single-token-safe.
-        assert!(cmdline.contains("mvm.uvols=uvol0:"), "cmdline: {cmdline}");
+        // The reserved sidecar is named only by mvm.sdk_dev. It must not also
+        // enter the generic user-volume manifest, whose mountpoint policy
+        // deliberately excludes /mvm/sdk.
+        assert!(
+            cmdline.contains("mvm.uvols=uvol0:2f64617461:ro:blk"),
+            "cmdline missing the ordinary user volume: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("2f6d766d2f73646b"),
+            "cmdline encoded the SDK sidecar as a user volume: {cmdline}"
+        );
         assert_eq!(cmdline_overflow(&cmdline), None);
     }
 

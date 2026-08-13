@@ -67,7 +67,7 @@ fn run_admission_matches_shared_fixture() {
         .cpus(4)
         .memory("1G")
         .profile("dev")
-        .volume("/tmp/mvm-sdk-src:/workspace:ro")
+        .volume("/tmp/mvm-sdk-src:/work:ro")
         .env("TOKEN=secret")
         .env("MODE=test")
         .timeout(30)

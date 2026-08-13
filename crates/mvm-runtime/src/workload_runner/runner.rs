@@ -17,6 +17,7 @@ use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
+use mvm_core::protocol::broker::ServiceId;
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyClaim, StandbyError,
@@ -121,13 +122,15 @@ pub struct BrokerRegisterRequest<'a> {
     /// The `BROKER_PORT` socket the broker/daemon binds — the same path the spec
     /// wires the guest's `BROKER_PORT` relay to. `None` on the unadmitted path.
     pub broker_listen_socket: Option<&'a Path>,
+    /// Host services from the admitted plan. Empty means no broker process is
+    /// needed and every broker call remains fail-closed.
+    pub services: &'a [ServiceId],
 }
 
 /// Register/spawn the per-VM host-services broker for an admitted workload,
 /// returning a guard whose Drop reaps until defused. The claims-12/13 seam:
-/// `host.audit.v1` / `host.secrets.v1` reach the guest over `BROKER_PORT`, and
-/// no raw secret ever crosses that channel. Behind a trait so the runner is
-/// unit-testable with no real broker subprocess.
+/// Admitted host services reach the guest over `BROKER_PORT`. Behind a trait so
+/// the runner is unit-testable with no real broker subprocess.
 pub trait BrokerRegistrar: Send + Sync {
     fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard>;
 }
@@ -158,48 +161,40 @@ pub struct RealBrokerRegistrar;
 
 impl BrokerRegistrar for RealBrokerRegistrar {
     fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard> {
-        // Unadmitted (no tenant, hence no broker socket): register nothing. The
-        // spec carries no BROKER_PORT either, so a stray guest dial fails closed.
+        // Unadmitted or carrying no service bindings: register nothing. The
+        // spec carries no usable broker channel, so a stray guest dial fails closed.
+        if req.services.is_empty() {
+            return Ok(BrokerGuard::defused());
+        }
         let (Some(tenant), Some(broker_listen_socket)) = (req.tenant, req.broker_listen_socket)
         else {
             return Ok(BrokerGuard::defused());
         };
 
-        // Best-effort, matching the raw backends: an absent broker only disables
-        // host.audit.v1 for this VM — the workload still runs and the host-side
-        // audit chain is intact — so a spawn failure is logged, never a rollback.
         let guard = if mvm_vmm::host::host_agent_spawn::host_agent_daemon_enabled() {
-            match mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
+            mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
                 mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
                     workload_id: req.vm_name,
                     tenant_id: Some(tenant),
                     vm_name: req.vm_name,
                     state_dir: req.state_dir,
                     broker_listen_socket,
+                    services: req.services,
                 },
-            ) {
-                Ok(g) => mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent(g),
-                Err(e) => {
-                    tracing::warn!(vm = %req.vm_name, error = %e, "host-agent registration failed; host.audit.v1 unavailable for this VM");
-                    mvm_vmm::host::host_agent_spawn::ServicesGuard::None
-                }
-            }
+            )
+            .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent)?
         } else {
-            match mvm_vmm::host::broker_services_spawn::spawn_broker_services_if_admitted(
+            mvm_vmm::host::broker_services_spawn::spawn_broker_services_if_admitted(
                 mvm_vmm::host::broker_services_spawn::BrokerServicesSpawnParams {
                     workload_id: req.vm_name,
                     tenant_id: Some(tenant),
                     vm_name: req.vm_name,
                     state_dir: req.state_dir,
                     broker_listen_socket,
+                    services: req.services,
                 },
-            ) {
-                Ok(g) => mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork(g),
-                Err(e) => {
-                    tracing::warn!(vm = %req.vm_name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
-                    mvm_vmm::host::host_agent_spawn::ServicesGuard::None
-                }
-            }
+            )
+            .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork)?
         };
         Ok(BrokerGuard(guard))
     }
@@ -482,17 +477,16 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         }
         trace.mark("activate_workload");
 
-        // Register the per-VM host-services broker (host.audit.v1 /
-        // host.secrets.v1) for an admitted workload — the same registration the
-        // raw backends run, lifted here so a workload on this runner keeps those
-        // services. The guard's Drop reaps on any early return until it's defused;
-        // registration is best-effort (a failure is logged inside `register`,
-        // never a launch rollback).
+        // Register the per-VM broker for the exact admitted host-service set.
+        // The guard's Drop reaps on any early return until it is defused. A
+        // requested service whose broker cannot start fails the launch closed.
+        let services = admitted_services(inputs.config.plan_json.as_deref())?;
         let mut broker_guard = self.broker.register(&BrokerRegisterRequest {
             vm_name: &inputs.config.name,
             state_dir: &state_dir,
             tenant: inputs.config.tenant_id.as_deref(),
             broker_listen_socket: socks.broker.as_deref(),
+            services: &services,
         })?;
         endpoint.defuse();
         broker_guard.defuse();
@@ -698,14 +692,9 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         let socks = standing_sockets(&child_dir, &child_cfg);
         let channels = workload_vsock_ports(&socks.with_egress(endpoint.egress_uds()));
 
-        // Register the child's host-services broker (host.audit.v1 /
-        // host.secrets.v1) — the same registration a cold boot performs, and for
-        // the same reason: without it the child would run silently short of the
-        // services an admitted workload is entitled to. Registered before the
-        // fork rather than after it, because the restore resumes a guest that
-        // can dial `BROKER_PORT` immediately. Best-effort inside `register` (a
-        // failure is logged, never a rollback); the guard reaps until the claim
-        // commits.
+        // Register the child's exact admitted host-service set before the fork,
+        // because the restored guest can dial `BROKER_PORT` immediately. Any
+        // registration failure refuses the claim; the guard reaps until commit.
         let mut broker_guard = self
             .broker
             .register(&BrokerRegisterRequest {
@@ -713,6 +702,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 state_dir: &child_dir,
                 tenant: child_cfg.tenant_id.as_deref(),
                 broker_listen_socket: socks.broker.as_deref(),
+                services: &plan.services,
             })
             .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e}")))?;
         claim_phase!("broker_registered");
@@ -1383,6 +1373,14 @@ fn claim_plan(claim: &StandbyClaim) -> std::result::Result<ExecutionPlan, Standb
         .map_err(|_| refuse(ClaimRefusal::PlanMissing))
 }
 
+fn admitted_services(plan_json: Option<&str>) -> Result<Vec<ServiceId>> {
+    plan_json
+        .map(mvm_core::plan::plan_from_admitted_json)
+        .transpose()
+        .context("parse admitted plan host services")
+        .map(|plan| plan.map_or_else(Vec::new, |plan| plan.services))
+}
+
 /// How many times to redraw a fresh child name before giving up. A collision is
 /// astronomically unlikely (random suffix), so a small bound is a fail-closed
 /// backstop, never a hot loop.
@@ -1543,6 +1541,7 @@ mod tests {
         vm_name: String,
         tenant: Option<String>,
         broker_listen_socket: Option<PathBuf>,
+        services: Vec<ServiceId>,
     }
 
     impl RecordingBrokerRegistrar {
@@ -1559,6 +1558,7 @@ mod tests {
                 vm_name: req.vm_name.to_string(),
                 tenant: req.tenant.map(str::to_string),
                 broker_listen_socket: req.broker_listen_socket.map(Path::to_path_buf),
+                services: req.services.to_vec(),
             });
             Ok(BrokerGuard::defused())
         }
@@ -4028,6 +4028,7 @@ mod tests {
             "the broker is registered for the child's own id, never the parent's"
         );
         assert_eq!(broker.tenant.as_deref(), Some("tenant-x"));
+        assert!(broker.services.is_empty());
 
         let wired = run.driver.forked_children()[0]
             .channels

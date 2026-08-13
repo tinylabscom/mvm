@@ -245,6 +245,32 @@ pub fn mount_runtime_overlay(runtime: Option<&RuntimeOverlayConfig>, root: &Path
     Ok(())
 }
 
+/// Mount the reserved SDK sidecar at its fixed guest path.
+///
+/// This disk is host-produced and is never part of the generic user-volume
+/// namespace. It remains read-only, nosuid, and nodev, while executable
+/// mappings stay enabled for the host-services shared library it contains.
+pub fn mount_sdk_sidecar(device: &str, root: &Path) -> Result<()> {
+    validate_virtio_block_device(device, "SDK sidecar")?;
+    let target = root.join(
+        mvm_core::plan::SDK_SIDECAR_GUEST_PATH
+            .strip_prefix('/')
+            .expect("SDK sidecar guest path is absolute"),
+    );
+    ensure_dir(&target.to_string_lossy())?;
+
+    #[cfg(target_os = "linux")]
+    mount(
+        device,
+        &target.to_string_lossy(),
+        "ext4",
+        libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )?;
+
+    Ok(())
+}
+
 /// Reserved mountpoints that volumes are not allowed to shadow.
 #[cfg(test)]
 pub(crate) const RESERVED_MOUNTS: &[&str] =
@@ -351,19 +377,24 @@ fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static 
                     volume.tag
                 ))
             })?;
-            let suffix = device.strip_prefix("/dev/vd").ok_or_else(|| {
-                MountError::PathPolicyDenied(format!(
-                    "block volume device {device:?} is outside /dev/vd[a-z]"
-                ))
-            })?;
-            if suffix.len() != 1 || !suffix.bytes().all(|byte| byte.is_ascii_lowercase()) {
-                return Err(MountError::PathPolicyDenied(format!(
-                    "block volume device {device:?} is outside /dev/vd[a-z]"
-                )));
-            }
+            validate_virtio_block_device(device, "block volume")?;
             Ok((device, "ext4"))
         }
     }
+}
+
+fn validate_virtio_block_device(device: &str, purpose: &str) -> Result<()> {
+    let suffix = device.strip_prefix("/dev/vd").ok_or_else(|| {
+        MountError::PathPolicyDenied(format!(
+            "{purpose} device {device:?} is outside /dev/vd[a-z]"
+        ))
+    })?;
+    if suffix.len() != 1 || !suffix.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return Err(MountError::PathPolicyDenied(format!(
+            "{purpose} device {device:?} is outside /dev/vd[a-z]"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1421,6 +1452,14 @@ mod tests {
             device: Some("/dev/sda".to_string()),
         };
         assert!(resolve_volume_mount_source(&invalid_block).is_err());
+    }
+
+    #[test]
+    fn sdk_sidecar_device_is_confined_to_virtio_block_nodes() {
+        assert!(validate_virtio_block_device("/dev/vde", "SDK sidecar").is_ok());
+        assert!(validate_virtio_block_device("/dev/sda", "SDK sidecar").is_err());
+        assert!(validate_virtio_block_device("/dev/vdaa", "SDK sidecar").is_err());
+        assert!(validate_virtio_block_device("../../dev/vde", "SDK sidecar").is_err());
     }
 
     #[test]

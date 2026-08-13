@@ -75,7 +75,7 @@ fn machine_run_builder_emits_machine_cli_argv() {
         .cpus(2)
         .memory("1G")
         .profile("dev")
-        .volume("/src:/workspace:ro")
+        .volume("/src:/work:ro")
         .env("RUST_LOG=info")
         .timeout(30)
         .receipt("/tmp/receipt.json")
@@ -101,7 +101,7 @@ fn machine_run_builder_emits_machine_cli_argv() {
             "--profile",
             "dev",
             "--mount",
-            "/src:/workspace:ro",
+            "/src:/work:ro",
             "--env",
             "RUST_LOG=info",
             "--timeout",
