@@ -400,8 +400,8 @@ async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
         .context("FlowMux accept task")?
         .context("accept FlowMux connection")?;
 
-    // TODO: derive RegistryLimits from cfg.network_policy / NetworkLimits once
-    // the spawner threads the admitted plan's limits through.
+    // RegistryLimits uses defaults here because the spawner does not yet
+    // thread the admitted plan's limits through cfg.network_policy / NetworkLimits.
     let limits = RegistryLimits::default();
     let session_id = identity.session_id.clone();
     tokio::task::spawn_blocking(move || {
