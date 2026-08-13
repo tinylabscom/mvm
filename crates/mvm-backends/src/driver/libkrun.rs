@@ -1160,4 +1160,32 @@ mod tests {
             vec!["/usr/bin/mvm-libkrun-supervisor"]
         );
     }
+
+    #[test]
+    fn libkrun_spec_carries_exactly_one_network_flow_and_no_l3() {
+        let spec = spec_with(
+            KernelImage::Bundled,
+            vec![
+                guest_dials(GuestService::NetworkFlow, "/run/egress.sock"),
+                host_dials(GuestService::MachineControl, "/run/agent.sock"),
+            ],
+            vec![],
+        );
+        let ports = &spec.vsock;
+        let network_flow: Vec<_> = ports
+            .iter()
+            .filter(|p| p.service == GuestService::NetworkFlow)
+            .collect();
+        assert_eq!(network_flow.len(), 1, "exactly one NetworkFlow service");
+        assert!(
+            !ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkControl)
+        );
+        assert!(
+            !ports
+                .iter()
+                .any(|p| p.service == GuestService::NetworkData { queue: 0 })
+        );
+    }
 }
