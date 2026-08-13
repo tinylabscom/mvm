@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -745,18 +745,15 @@ for detailed scope and acceptance criteria.
         54 projection tests plus 10 mandatory-deny tests now run under
         `wasm32-wasip1` (651 → 715), closing plan 301 P1's "tests under wasm"
         gap for this module.
-  - [~] E2 substitution core — moves/stays pass **done**, code not started
-        (E2.1–E2.5 in the plan). The pass corrected the design on three
-        points: the runtime placeholder is `mvm-secret-<hex>`, not `${NAME}`
-        (which also constrains what demo pane 2 may render); the core spans
-        `keyholder/{admission,substitution,injector}.rs` +
-        `supervisor/substitution_proxy.rs`, not one 509-line file; and
-        `mint`'s `rand::thread_rng` draw has to split out. The claim-12 bind
-        check is written **three** times today (the third is
-        `mvm-client/src/secret.rs`, over `SecretBindingMeta`) and is being
-        de-duplicated ahead of E2 as `mvm_contract::ir::host_is_bound` — a
-        standing drift hazard on a security predicate does not belong behind
-        this plan.
+  - [~] E2 substitution core — E2.1–E2.3 shipped; E2.4/E2.5 remain.
+        E2.1 relocated the placeholder leaf as `mvm_contract::substitution`
+        with the hard-renamed `SECRET_PLACEHOLDER_PREFIX`. E2.2 de-duplicated
+        the claim-12 bind check as `mvm_contract::ir::host_is_bound`. E2.3
+        moved the portable half of `SubstitutionRegistry` down as
+        `PlaceholderMap` (insert/resolve/host_is_bound), leaving the OS-RNG
+        `mint` in the host wrapper so the browser bundle does not pull
+        `getrandom`. E2.4 (`substitute_into`) and E2.5 (the pure header-walk
+        core of `prepare_request`) are next.
   - [~] E3 audit writer core — moves/stays pass **done and re-validated
         against post-319 `main`**, E3.0 decided (**option A**), E3.1 (frozen
         byte fixture) shipped and green after #2379. `SignedEnvelope`'s shape

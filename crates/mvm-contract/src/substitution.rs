@@ -27,7 +27,10 @@
 //! `PLACEHOLDER_PREFIX` precisely so the first two cannot be confused at a
 //! glance in this crate.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
+
+use crate::ir::{SecretRef, host_is_bound};
 
 /// The host-owned namespace every minted [`Placeholder`] carries. This prefix
 /// is reserved: it must never appear in a workload's own egress, so the
@@ -41,7 +44,7 @@ pub const SECRET_PLACEHOLDER_PREFIX: &str = "mvm-secret-";
 /// placeholder reveals nothing and resolves to nothing outside the session
 /// registry that minted it. Destination non-replay comes from the binding
 /// check at substitution time, not the token itself.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Placeholder(String);
 
 impl Placeholder {
@@ -112,5 +115,131 @@ mod tests {
         let managed = crate::policy::secret_binding::PLACEHOLDER_PREFIX;
         assert_ne!(managed, SECRET_PLACEHOLDER_PREFIX);
         assert_eq!(find_placeholder("mvm-managed:OPENAI_API_KEY"), None);
+    }
+
+    fn secret_ref(name: &str, hosts: &[&str]) -> SecretRef {
+        use crate::ir::{AuthType, SecretMount};
+        use alloc::string::ToString;
+        use alloc::vec::Vec;
+        SecretRef {
+            name: name.to_string(),
+            mount: SecretMount::Env {
+                var: "API_KEY".to_string(),
+            },
+            auth_type: AuthType::Bearer,
+            allowed_hosts: hosts.iter().map(|h| h.to_string()).collect::<Vec<_>>(),
+            sigv4: None,
+        }
+    }
+
+    #[test]
+    fn a_token_the_session_never_minted_does_not_resolve() {
+        // The smuggled/stale-token case. Nothing is decrypted downstream
+        // because nothing resolves here.
+        let mut map = PlaceholderMap::new();
+        map.insert(
+            Placeholder::new("mvm-secret-aaaa"),
+            secret_ref("openai", &["api.openai.com"]),
+        );
+
+        assert!(map.resolve("mvm-secret-aaaa").is_some());
+        assert!(map.resolve("mvm-secret-bbbb").is_none());
+        assert!(map.resolve("").is_none());
+    }
+
+    #[test]
+    fn host_is_bound_answers_over_every_recorded_secret() {
+        let mut map = PlaceholderMap::new();
+        assert!(!map.host_is_bound("api.openai.com"), "empty binds nothing");
+
+        map.insert(
+            Placeholder::new("mvm-secret-1111"),
+            secret_ref("openai", &["api.openai.com"]),
+        );
+        map.insert(
+            Placeholder::new("mvm-secret-2222"),
+            secret_ref("gh", &["*.github.com"]),
+        );
+
+        assert!(map.host_is_bound("api.openai.com"));
+        assert!(map.host_is_bound("api.github.com"), "wildcard applies");
+        assert!(!map.host_is_bound("evil.example.com"));
+        // The wildcard's apex is not covered -- same rule as `host_matches`.
+        assert!(!map.host_is_bound("github.com"));
+    }
+
+    #[test]
+    fn two_placeholders_for_the_same_secret_both_resolve() {
+        // Minting twice for one secret is deliberate -- it stops two requests
+        // being linked by their token -- so the map must not collapse them.
+        let mut map = PlaceholderMap::new();
+        let s = secret_ref("openai", &["api.openai.com"]);
+        map.insert(Placeholder::new("mvm-secret-1111"), s.clone());
+        map.insert(Placeholder::new("mvm-secret-2222"), s);
+
+        assert_eq!(map.len(), 2);
+        assert!(map.resolve("mvm-secret-1111").is_some());
+        assert!(map.resolve("mvm-secret-2222").is_some());
+    }
+}
+
+/// Per-session map from a minted [`Placeholder`] to the [`SecretRef`] it
+/// stands for. Session-scoped: dropped when the session ends, so a
+/// placeholder can never be replayed in a different session.
+///
+/// A `BTreeMap` rather than a `HashMap` because `HashMap` is a `std` type and
+/// this crate is `no_std`. Nothing here depends on iteration order —
+/// [`Self::host_is_bound`] is an `any()` — so the change is confined to the
+/// container.
+///
+/// Minting is not here: drawing a fresh token needs an RNG, so it lives with
+/// the host that has one. This type is what remains once that is taken out —
+/// insert, look up, and answer whether any binding covers a host — and it is
+/// the whole of what a browser needs to replay a substitution decision.
+// `SecretRef` holds only binding metadata (name + auth-type + hosts), no
+// value, so `Debug` here cannot leak a secret.
+#[derive(Debug, Default, Clone)]
+pub struct PlaceholderMap {
+    map: BTreeMap<Placeholder, SecretRef>,
+}
+
+impl PlaceholderMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `placeholder` stands for `secret`. The caller owns where
+    /// the token came from; see [`Placeholder::new`].
+    pub fn insert(&mut self, placeholder: Placeholder, secret: SecretRef) {
+        self.map.insert(placeholder, secret);
+    }
+
+    /// Resolve a placeholder by its on-the-wire string form. `None` for a
+    /// token this session never minted (a smuggled or stale token).
+    pub fn resolve(&self, token: &str) -> Option<&SecretRef> {
+        self.map.get(&Placeholder::new(token))
+    }
+
+    /// Whether any secret in this session is bound to `host` — a
+    /// [`host_is_bound`](crate::ir::host_is_bound) hit against some
+    /// `SecretRef.allowed_hosts`.
+    ///
+    /// This is a coarse gate, not the claim-12 enforcement point: it answers
+    /// "could any secret reach this host", which the transparent `https`
+    /// terminator uses to decide whether to MITM-terminate a connection at
+    /// all. The per-request bind check still runs at substitution time.
+    pub fn host_is_bound(&self, host: &str) -> bool {
+        self.map
+            .values()
+            .any(|r| host_is_bound(&r.allowed_hosts, host))
+    }
+
+    /// Number of recorded placeholders. Session bookkeeping only.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }

@@ -12,10 +12,10 @@
 //! the real-TLS forward, the signer-path endpoint shape, and the SDK
 //! client routing are not yet wired here.
 
-use std::collections::HashMap;
-
 use mvm_contract::ir::{AuthType, SecretRef, host_is_bound};
-pub use mvm_contract::substitution::{Placeholder, SECRET_PLACEHOLDER_PREFIX, find_placeholder};
+pub use mvm_contract::substitution::{
+    Placeholder, PlaceholderMap, SECRET_PLACEHOLDER_PREFIX, find_placeholder,
+};
 use rand::RngCore;
 use zeroize::Zeroizing;
 
@@ -23,14 +23,19 @@ use super::injector::{InjectError, Injector};
 use super::resolver::SecretResolver;
 use super::signer::{SignError, Signature, Signer, SigningInput};
 
-/// Per-session map from a minted [`Placeholder`] to the [`SecretRef`] it
-/// stands for. Session-scoped: dropped when the session ends, so a
-/// placeholder can never be replayed in a different session.
-// SecretRef holds only binding metadata (name + auth-type + hosts), no value,
-// so Debug here can't leak a secret.
+/// Per-session placeholder registry: a [`PlaceholderMap`] plus the one
+/// operation that cannot live beside it.
+///
+/// The map — insert, resolve, and the coarse host-binding query — is in
+/// `mvm-contract`, so the same code answers a substitution decision here and
+/// in a browser. Minting stays here because it draws from the OS RNG, and a
+/// wasm bundle that pulled in `getrandom` to mint tokens it will never mint
+/// would be paying for the host's capability. Modelling it this way says
+/// that out loud: the portable half is a value anyone can hold, and the host
+/// wrapper is the half that can create tokens.
 #[derive(Debug, Default)]
 pub struct SubstitutionRegistry {
-    map: HashMap<Placeholder, SecretRef>,
+    map: PlaceholderMap,
 }
 
 impl SubstitutionRegistry {
@@ -41,6 +46,9 @@ impl SubstitutionRegistry {
     /// Mint a fresh opaque placeholder for `secret` and record the mapping.
     /// Each call returns a distinct high-entropy token, so two requests for
     /// the same secret are not linkable by their placeholders.
+    ///
+    /// The 24 bytes come from the OS RNG. This is the reason the registry is
+    /// split rather than moved whole.
     pub fn mint(&mut self, secret: SecretRef) -> Placeholder {
         let mut bytes = [0u8; 24];
         rand::thread_rng().fill_bytes(&mut bytes);
@@ -52,19 +60,22 @@ impl SubstitutionRegistry {
     /// Resolve a placeholder by its on-the-wire string form. `None` for a
     /// token this session never minted (a smuggled or stale token).
     pub fn resolve(&self, token: &str) -> Option<&SecretRef> {
-        self.map.get(&Placeholder::new(token))
+        self.map.resolve(token)
     }
 
-    /// Whether any secret in this session is bound to `host` (a [`host_matches`]
-    /// hit against some `SecretRef.allowed_hosts`). The transparent `https`
-    /// terminator uses this for its terminate-vs-splice decision: it MITM-
-    /// terminates only hosts a workload secret may reach, and splices everything
-    /// else untouched. (claim 12 is still enforced per-request at substitution
-    /// time — this is the coarse gate that avoids decrypting unbound traffic.)
+    /// Whether any secret in this session is bound to `host`. The transparent
+    /// `https` terminator uses this for its terminate-vs-splice decision: it
+    /// MITM-terminates only hosts a workload secret may reach, and splices
+    /// everything else untouched. (claim 12 is still enforced per-request at
+    /// substitution time — this is the coarse gate that avoids decrypting
+    /// unbound traffic.)
     pub fn host_is_bound(&self, host: &str) -> bool {
-        self.map
-            .values()
-            .any(|r| host_is_bound(&r.allowed_hosts, host))
+        self.map.host_is_bound(host)
+    }
+
+    /// The portable half, for a caller that only needs to resolve.
+    pub fn as_map(&self) -> &PlaceholderMap {
+        &self.map
     }
 }
 
