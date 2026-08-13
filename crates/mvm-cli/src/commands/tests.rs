@@ -1048,13 +1048,13 @@ fn up_removed() {
 }
 
 #[test]
-fn run_kept_hidden_as_sdk_transport() {
-    // The user-facing transient-run role folded into `machine run`, but `run`
-    // survives hidden as the SDK Sandbox launcher (`run --mode live/plan`) the
-    // Python/TS SDKs shell to — so it must still parse.
+fn run_is_visible_top_level_command() {
+    // `mvmctl run` is a first-class one-shot sandbox command alongside
+    // `mvmctl machine run`. It still supports the SDK transport modes
+    // (`--mode live/plan`) the Python/TS SDKs shell to.
     let cli = Cli::try_parse_from(["mvmctl", "run", "--mode", "live", "script.py"]).unwrap();
     assert!(matches!(cli.command, Commands::Run(_)));
-    // …but it is hidden from top-level help.
+    // It is visible in top-level help.
     let help = {
         use clap::CommandFactory;
         let mut cmd = Cli::command();
@@ -1063,8 +1063,8 @@ fn run_kept_hidden_as_sdk_transport() {
         String::from_utf8(buf).unwrap()
     };
     assert!(
-        !help.contains("\n  run "),
-        "`run` must be hidden from top-level help"
+        help.contains("\n  run "),
+        "`run` must be visible in top-level help"
     );
 }
 

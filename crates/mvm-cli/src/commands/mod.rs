@@ -108,8 +108,8 @@ pub(in crate::commands) struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // Up variant has many CLI fields; boxing breaks Clap derive
 pub(in crate::commands) enum Commands {
-    /// Beginner microVM workflows (run an OCI image and more)
-    #[command(display_order = 1)]
+    /// Persistent and advanced microVM lifecycle operations.
+    #[command(display_order = 2)]
     Machine(machine::Args),
     /// Build-time commands (image, compile, validate, kernel)
     #[command(display_order = 3)]
@@ -144,11 +144,12 @@ pub(in crate::commands) enum Commands {
     /// Manage versioned packs (list/rollback/prune/download/update)
     #[command(display_order = 9)]
     Pack(pack::Args),
-    /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing
-    /// transient-run role folded into `machine run`; `run` survives only as the
-    /// SDK Sandbox launcher the Python/TS SDKs shell to, so it stays hidden
-    /// rather than break that transport.
-    #[command(hide = true)]
+    /// Run a command in a fresh transient microVM.
+    ///
+    /// This is the one-shot sandbox UX: boot, run `<cmd>`, tear down. It shares
+    /// the same admitted execution path as `mvmctl machine run` and is kept
+    /// alongside it for users who prefer a flat `run <command>` shape.
+    #[command(display_order = 1)]
     Run(vm::exec::RunArgs),
     /// Internal SDK host-dispatch transport for `MVM_NO_VM=1`.
     #[command(name = "__sdk-no-vm", hide = true)]

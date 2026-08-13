@@ -1,9 +1,10 @@
 //! `mvmctl run` — boot a transient microVM, run a single command, tear down.
 //!
 //! The former bare `mvmctl exec` was folded into `run`: `run` was already a
-//! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
-//! `run --profile dev -- <argv>` covers its interactive case. The `Args`
-//! struct + internal request machinery stay — `run_secure` reuses them.
+//! strict superset, so `exec` is gone and `run --profile dev -- <argv>`
+//! covers its interactive case. `RunArgs` is the canonical transient-run
+//! argument shape; `mvmctl machine run` converts into it so both surfaces
+//! share one execution path.
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -22,74 +23,6 @@ use super::super::env::builder_vm::{
 use super::Cli;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
 use crate::ui;
-
-#[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct Args {
-    /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
-    /// legacy slot name). If omitted, the bundled
-    /// `nix/images/default-tenant/` image is used (built via Nix on first use,
-    /// cached at `~/.mvm/cache/default-microvm/`). Each invocation boots a
-    /// fresh transient microVM — never the long-running builder VM.
-    #[arg(short = 'm', long)]
-    pub manifest: Option<String>,
-    /// Internal (not a CLI flag): warm-pool size for this run, carried
-    /// from `machine run` dispatch. `> 0` ⇒ eligible to claim a warm standby.
-    #[arg(skip)]
-    pub warm_pool_size: u32,
-    /// Internal (not a CLI flag): attach the command to a PTY.
-    #[arg(skip)]
-    pub pty: bool,
-    /// Internal (not a CLI flag): optional foreground transient VM identity.
-    #[arg(skip)]
-    pub vm_name: Option<String>,
-    /// vCPU cores (default: 2)
-    #[arg(long, default_value = "2")]
-    pub cpus: u32,
-    /// Memory (supports human-readable: 512M, 1G, …)
-    #[arg(long, default_value = "512M")]
-    pub memory: String,
-    /// Internal (not a CLI flag): live directory shares forwarded from
-    /// `machine run --mount` or the public `run --mount` surface.
-    #[arg(skip)]
-    pub mounts: Vec<String>,
-    /// Environment variable to inject (KEY=VALUE). Repeatable. Overrides any env vars
-    /// carried by `--launch-plan`.
-    #[arg(short, long)]
-    pub env: Vec<String>,
-    /// Per-command timeout in seconds. Unset ⇒ no per-command kill.
-    #[arg(long)]
-    pub timeout: Option<u64>,
-    /// Path to an mvmforge document — either the `launch.json` artifact
-    /// from `mvmforge compile` (top-level `entrypoint`) or the Workload IR
-    /// manifest from `mvmforge emit` (top-level `apps[]`). The resolved
-    /// entrypoint (command, working_dir, env) is invoked instead of a
-    /// trailing argv. Mutually exclusive with the trailing `<ARGV>...`.
-    #[arg(long, value_name = "PATH", conflicts_with = "argv")]
-    pub launch_plan: Option<String>,
-    /// Argv to run inside the guest (use `--` to separate). Required unless
-    /// `--launch-plan` is supplied.
-    // No `allow_hyphen_values`: it turns an unrecognized flag into a silent
-    // argv element, so a typo fails inside the guest shell instead of here.
-    #[arg(trailing_var_arg = true, required_unless_present = "launch_plan")]
-    pub argv: Vec<String>,
-    /// Internal (not a CLI flag): stdin bytes to forward into the guest `Exec`
-    /// frame. Empty ⇒ no stdin (`Exec.stdin = None`). Populated at the
-    /// dispatch site when the host stdin pipe is non-empty.
-    #[arg(skip)]
-    pub stdin: Vec<u8>,
-    /// Internal (not a CLI flag): the resolved healthcheck declaration,
-    /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
-    #[arg(skip)]
-    pub healthcheck: Option<mvm_contract::ir::HealthCheck>,
-    /// Internal (not a CLI flag): requested workload hypervisor, forwarded from
-    /// `RunArgs::hypervisor` via `into_exec_args`.
-    #[arg(skip)]
-    pub hypervisor: Option<String>,
-    /// Internal (not a CLI flag): raw `--host-service` values forwarded from
-    /// `RunArgs::host_service` via `into_exec_args`.
-    #[arg(skip)]
-    pub host_service: Vec<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(in crate::commands) enum RunProfile {
@@ -295,28 +228,6 @@ pub(in crate::commands) enum ReceiptAction {
     },
 }
 
-impl RunArgs {
-    fn into_exec_args(self) -> Args {
-        Args {
-            manifest: self.manifest,
-            warm_pool_size: self.warm_pool_size,
-            pty: self.pty,
-            vm_name: self.vm_name,
-            cpus: self.cpus,
-            memory: self.memory,
-            mounts: self.mounts,
-            env: self.env,
-            timeout: self.timeout,
-            launch_plan: self.launch_plan,
-            argv: self.argv,
-            stdin: self.stdin,
-            healthcheck: self.healthcheck,
-            hypervisor: self.hypervisor,
-            host_service: self.host_service,
-        }
-    }
-}
-
 pub(in crate::commands) fn run_receipt(
     _cli: &Cli,
     args: ReceiptArgs,
@@ -396,7 +307,7 @@ pub(in crate::commands) fn run_secure_with_source(
     // policy is enforced and the run is chain-audited) instead of the legacy
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
-    // consumed by `into_exec_args()` below.
+    // consumed by `build_exec_request` below.
     let selected_backend = crate::exec::select_exec_backend(
         args.image.is_some(),
         &network_policy,
@@ -529,7 +440,7 @@ pub(in crate::commands) fn run_secure_with_source(
             runtime_pack: args.runtime_pack,
         };
         let req = build_exec_request(
-            args.into_exec_args(),
+            args,
             "`mvmctl run`",
             selection,
             network_policy,
@@ -586,7 +497,7 @@ pub(in crate::commands) fn run_secure_with_source(
     };
     run_run_args(
         cli,
-        args.into_exec_args(),
+        args,
         cfg,
         selection,
         network_policy,
@@ -714,7 +625,7 @@ struct ImageSelection {
 
 fn run_run_args(
     _cli: &Cli,
-    args: Args,
+    args: RunArgs,
     _cfg: &MvmConfig,
     selection: ImageSelection,
     network_policy: mvm_core::network_policy::NetworkPolicy,
@@ -888,7 +799,7 @@ fn resolve_default_image_source(prod: bool) -> Result<crate::exec::ImageSource> 
 }
 
 fn build_exec_request(
-    args: Args,
+    args: RunArgs,
     command_name: &str,
     selection: ImageSelection,
     network_policy: mvm_core::network_policy::NetworkPolicy,
@@ -1429,7 +1340,7 @@ mod host_service_flag_tests {
             panic!("expected machine run");
         };
         assert_eq!(run.host_service, ["host.audit.v1", "host.time.v1"]);
-        let forwarded = run.into_run_args_for_test().into_exec_args();
+        let forwarded = run.into_run_args_for_test();
         assert_eq!(forwarded.host_service, ["host.audit.v1", "host.time.v1"]);
     }
 }
