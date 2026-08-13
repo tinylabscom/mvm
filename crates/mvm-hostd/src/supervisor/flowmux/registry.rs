@@ -8,6 +8,7 @@
 //! another?", and "how much credit remains?".
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use mvm_contract::protocol::network_flow::{Direction, MAX_STREAM_CREDIT};
 use tracing::warn;
@@ -70,13 +71,17 @@ pub struct StreamEntry {
     pub host_credit: u32,
 }
 
-/// Resource ceilings for one registry.
+/// Resource ceilings and runtime bounds for one registry.
 #[derive(Debug, Clone, Copy)]
 pub struct RegistryLimits {
     pub max_tcp: usize,
     pub max_udp: usize,
     pub max_dns: usize,
     pub initial_credit: u32,
+    /// How long a UDP association may sit idle before the host closes it.
+    pub udp_idle_timeout: Duration,
+    /// Maximum distinct peers a single UDP association may communicate with.
+    pub max_udp_peers: usize,
 }
 
 impl Default for RegistryLimits {
@@ -86,6 +91,8 @@ impl Default for RegistryLimits {
             max_udp: 256,
             max_dns: 256,
             initial_credit: 64 * 1024,
+            udp_idle_timeout: Duration::from_secs(60),
+            max_udp_peers: 16,
         }
     }
 }
@@ -421,6 +428,7 @@ mod tests {
             max_udp: 1,
             max_dns: 64,
             initial_credit: 1024,
+            ..Default::default()
         });
         reg.alloc_guest(FlowClass::Tcp).unwrap();
         reg.alloc_guest(FlowClass::Tcp).unwrap();
@@ -462,6 +470,7 @@ mod tests {
             max_udp: 0,
             max_dns: 64,
             initial_credit: 100,
+            ..Default::default()
         });
         let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
         reg.consume_guest_credit(id, 30).unwrap();
@@ -478,6 +487,7 @@ mod tests {
             max_udp: 0,
             max_dns: 64,
             initial_credit: 100,
+            ..Default::default()
         });
         let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
         reg.consume_host_credit(id, 30).unwrap();
@@ -494,6 +504,7 @@ mod tests {
             max_udp: 0,
             max_dns: 64,
             initial_credit: 100,
+            ..Default::default()
         });
         let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
         reg.grant_guest_credit(id, u32::MAX).unwrap();
