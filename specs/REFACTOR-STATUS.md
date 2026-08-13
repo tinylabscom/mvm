@@ -774,11 +774,13 @@ for detailed scope and acceptance criteria.
         `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
         `mvmctl audit pubkey`
 - [x] Plan 320 — A live wasm sandbox demo on the website
-      (`specs/plans/320-wasm-browser-demo.md`) — PR #2429 merged to `main`.
-      E1, E2, and E3 shipped; the browser-engine sandbox at `/demo` + landing
-      teaser shipped against the redesigned landing page. Relocates the egress
-      decision (`projection.rs`), placeholder substitution, and audit-entry
-      construction/chain-signing into `mvm-contract` so host and browser run
+      (`specs/plans/320-wasm-browser-demo.md`) — PR #2429 merged to `main`;
+      hardening items closed in #2441. Browser-engine sandbox at `/demo`,
+      landing teaser, Web Worker ownership, curated `wasm32-wasip1` fixtures,
+      Rust fixture-parity tests, and `wasm-opt -Oz` + gzipped size budget in
+      the Linux wasm lane. Egress decision, placeholder substitution, and
+      audit-entry construction/chain signing are relocated into `mvm-contract`
+      so host and browser run
       identical code. Claim-free by ADR-024 §3; adds no claim-catalog witness.
   - [x] E2.1 — the placeholder leaf relocated as
         `mvm_contract::substitution`; the constant hard-renamed to

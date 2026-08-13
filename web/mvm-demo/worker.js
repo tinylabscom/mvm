@@ -1,8 +1,10 @@
 import init, {
+  run_scenario,
   decide_egress,
-  substitute_placeholder,
   host_is_bound,
-  seal,
+  substitute_placeholder,
+  demo_capability_notice,
+  demo_verifying_key_hex,
   verify,
 } from "./pkg/mvm_demo_web.js";
 
@@ -13,14 +15,12 @@ const FIXTURE_SECRET = {
   allowed_hosts: ["api.openai.com"],
 };
 
-// Deterministic demo signing key (32 bytes).  In a real deployment the
-// host key never leaves the server; here it lives in the page so the
-// visitor can sign and verify the chain locally.
-const DEMO_SIGNING_KEY_HEX =
-  "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-
 await init();
-self.postMessage({ type: "ready" });
+self.postMessage({
+  type: "ready",
+  capabilityNotice: demo_capability_notice(),
+  verifyingKeyHex: demo_verifying_key_hex(),
+});
 
 self.onmessage = async (event) => {
   const { id, type } = event.data;
@@ -28,13 +28,15 @@ self.onmessage = async (event) => {
     let payload;
     switch (type) {
       case "runScenario":
-        payload = await runScenario(event.data.scenario, event.data.policyJson);
+        payload = JSON.parse(
+          run_scenario(event.data.scenario, event.data.policyJson, event.data.timestamp)
+        );
         break;
       case "runWasi":
         payload = await runWasi(event.data.fixture, event.data.policyJson);
         break;
       case "verify":
-        payload = verify(event.data.chain, event.data.pubkeyHex);
+        payload = JSON.parse(verify(event.data.chain, event.data.pubkeyHex));
         break;
       default:
         throw new Error(`unknown worker message type: ${type}`);
@@ -44,73 +46,6 @@ self.onmessage = async (event) => {
     self.postMessage({ id, ok: false, error: err.message });
   }
 };
-
-async function runScenario(scenario, policyJson) {
-  const url = "https://api.openai.com/v1/chat/completions";
-  const moduleView = `Authorization: Bearer ${FIXTURE_SECRET.placeholder}`;
-
-  const decision = JSON.parse(decide_egress(policyJson, url));
-  if (!decision.ok) {
-    throw new Error(decision.error);
-  }
-
-  if (!decision.allowed) {
-    return {
-      scenario,
-      allowed: false,
-      module_view: moduleView,
-      destination_view: null,
-      audit_event: "egress.refused",
-      chain_line: null,
-    };
-  }
-
-  const bound = scenario === "allowed";
-  if (!bound) {
-    return {
-      scenario,
-      allowed: true,
-      module_view: moduleView,
-      destination_view: "Authorization: Bearer <placeholder-dropped>",
-      audit_event: "secret.placeholder_dropped",
-      chain_line: null,
-    };
-  }
-
-  const substituted = JSON.parse(
-    substitute_placeholder(moduleView, FIXTURE_SECRET.value)
-  );
-  if (!substituted.ok) {
-    throw new Error(substituted.error);
-  }
-
-  const entry = {
-    timestamp: new Date().toISOString(),
-    tenant: "demo",
-    plan_id: "plan-browser-demo",
-    plan_version: 1,
-    bundle_id: null,
-    bundle_version: null,
-    image_name: "mvm-demo-module",
-    image_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-    event: "secret.substituted",
-    labels: { destination: "api.openai.com", scenario },
-  };
-  const prevHash = "0000000000000000000000000000000000000000000000000000000000000000";
-  const sealed = JSON.parse(seal(JSON.stringify(entry), prevHash, DEMO_SIGNING_KEY_HEX));
-  if (!sealed.ok) {
-    throw new Error(sealed.error);
-  }
-
-  return {
-    scenario,
-    allowed: true,
-    module_view: moduleView,
-    destination_view: substituted.text,
-    audit_event: "secret.substituted",
-    chain_line: JSON.parse(sealed.envelope),
-  };
-}
 
 async function runWasi(fixture, policyJson) {
   const response = await fetch(`./fixtures/${fixture}.opt.wasm`);
