@@ -1,318 +1,231 @@
-// The hero diagram — a vertical cross-section of the real execution stack,
-// read bottom to top: your hardware -> host kernel -> hypervisor -> [the
-// seam] -> guest kernel -> guest userspace -> your workload. This is the
-// product's core claim shown positionally instead of asserted in prose: the
-// workload sits above its OWN kernel, not the host's, and there is exactly
-// one crossing point in the whole stack.
+// Clean 3-Step Execution Pipeline Hero Diagram for mvm.
 //
-// Three-color discipline: the seam owns `--color-accent-3` (its own
-// identity, distinct from the hero CTA's `--color-accent`), vsock owns
-// `--color-accent-2`. Everything else is `--color-raised-2` at a
-// fill-opacity that climbs from top (workload, lightest) to bottom
-// (hardware, densest) — an "elevation" cue done with one fill and one
-// opacity ramp rather than a second palette. Hardware additionally gets a
-// diagonal hatch overlay: the only band dense enough to earn actual
-// texture, not just weight.
+// Visually conveys mvm's core job:
+// 1. Input: Untrusted Code (mvm.invoke / Sandbox API)
+// 2. MicroVM Sandbox: Own Linux Kernel, Nix RootFS, Hardware Isolated, NO NIC
+// 3. Safe Output: Returned over VSOCK (the only crossing)
 //
-// Two <svg> trees (desktop / mobile), sharing one JS layout table so the
-// two can't drift out of sync with each other the way two hand-duplicated
-// coordinate sets would.
+// Scheme-invariant CSS variables only; zero hardcoded hex.
 
-const HAIRLINE = 1.5;
-const FEATURE = 3;
-const RADIUS = 10;
-
-type Band = {
-  key: string;
-  label: string;
-  sub: string;
-  fillOpacity: number;
-  strokeOpacity: number;
-  strokeWidth: number;
-};
-
-// Bottom to top in the real stack; drawn top to bottom in SVG y, so this
-// array is reversed at render time. fillOpacity/strokeOpacity/strokeWidth
-// all climb together toward the bottom — three cues for one idea (density),
-// not three unrelated ones, so the eye reads "heavier" without needing a
-// legend.
-const BANDS: Band[] = [
-  { key: "hardware", label: "your hardware", sub: "CPU · memory · disk", fillOpacity: 1, strokeOpacity: 1, strokeWidth: FEATURE },
-  { key: "host-kernel", label: "host kernel", sub: "KVM / HVF — never shared with a guest", fillOpacity: 0.8, strokeOpacity: 0.9, strokeWidth: 2.5 },
-  { key: "hypervisor", label: "hypervisor", sub: "HVF · libkrun · Firecracker", fillOpacity: 0.62, strokeOpacity: 0.78, strokeWidth: 2 },
-  { key: "guest-kernel", label: "guest kernel", sub: "own kernel · own rootfs · no NIC", fillOpacity: 0.4, strokeOpacity: 0.62, strokeWidth: HAIRLINE },
-  { key: "guest-userspace", label: "guest userspace", sub: "your process, fully isolated", fillOpacity: 0.24, strokeOpacity: 0.48, strokeWidth: HAIRLINE },
-  { key: "workload", label: "your workload", sub: "untrusted code", fillOpacity: 0.1, strokeOpacity: 0.36, strokeWidth: HAIRLINE },
-];
+const RADIUS = 12;
 
 const DESCRIPTION =
-  "Cross-section of the mvm execution stack, read bottom to top: your " +
-  "hardware, host kernel, and hypervisor sit below a single boundary; the " +
-  "guest kernel, guest userspace, and your workload sit above it, on a " +
-  "kernel of their own rather than the host's. The one gap in the boundary " +
-  "is a vsock channel into a deny-all-by-default substitution endpoint; " +
-  "the guest has no network interface.";
+  "Flow diagram of mvm execution: Untrusted code enters a hardware-isolated microVM running its own Linux kernel with no raw network interface, returning safe results back over a single vsock channel.";
 
-/** Diagonal hatch texture — reserved for the densest (hardware) band. */
-function Hatch({ id }: { id: string }) {
+function LockIcon({ x, y }: { x: number; y: number }) {
   return (
-    <pattern id={id} width="9" height="9" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
-      <line x1="0" y1="0" x2="0" y2="9" stroke="currentColor" strokeWidth={HAIRLINE} />
-    </pattern>
-  );
-}
-
-/** No-NIC glyph — marks the guest-kernel band as having no network device. */
-function NoNicGlyph({ x, y, size = 15 }: { x: number; y: number; size?: number }) {
-  const s = size / 14;
-  return (
-    <g transform={`translate(${x} ${y}) scale(${s})`} aria-hidden="true">
-      <circle cx={7} cy={7} r={6} fill="none" stroke="currentColor" strokeWidth={HAIRLINE} />
-      <path d="M4 9.5 7 5l3 4.5" fill="none" stroke="currentColor" strokeWidth={HAIRLINE} strokeLinecap="round" strokeLinejoin="round" />
-      <line x1={1.5} y1={1.5} x2={12.5} y2={12.5} stroke="currentColor" strokeWidth={HAIRLINE} strokeLinecap="round" />
+    <g transform={`translate(${x} ${y})`} className="text-accent-2" aria-hidden="true">
+      <path d="M-3 -1 v-2.2 a3 3 0 0 1 6 0 v2.2" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
+      <rect x={-5} y={-1} width={10} height={8} rx={1.5} fill="none" stroke="currentColor" strokeWidth={2} />
     </g>
   );
 }
 
-function LockGlyph({ x, y }: { x: number; y: number }) {
+function ArrowDown({ x, y, label }: { x: number; y: number; label?: string }) {
   return (
-    <g transform={`translate(${x} ${y})`} className="text-accent-3" aria-hidden="true">
-      <path d="M-3.6 -1 v-2.4 a3.6 3.6 0 0 1 7.2 0 v2.4" fill="none" stroke="currentColor" strokeWidth={FEATURE} strokeLinecap="round" />
-      <rect x={-5.5} y={-1} width={11} height={8.5} rx={1.8} fill="none" stroke="currentColor" strokeWidth={FEATURE} />
-    </g>
-  );
-}
-
-/** Shared layout — one table, two renderers. `bandH`/`gap`/`seamH` are in
- *  local SVG units; each renderer supplies its own so desktop can run
- *  wider/roomier and mobile narrower without touching the band content. */
-function layout(bandH: number, gap: number, seamH: number, seamGap: number, topMargin: number) {
-  const order = [...BANDS].reverse(); // workload first (top) -> hardware last (bottom)
-  const rows: { band: Band; y: number; h: number }[] = [];
-  let y = topMargin;
-  for (let i = 0; i < order.length; i++) {
-    const band = order[i];
-    const isHardware = band.key === "hardware";
-    const h = isHardware ? bandH + 12 : bandH;
-    rows.push({ band, y, h });
-    y += h + gap;
-    if (i === 2) {
-      // The seam gets its own reserved slot between guest-kernel (i===2)
-      // and hypervisor (i===3), with extra breathing room on both sides.
-      y += seamGap;
-    }
-  }
-  const seamY = rows[2].y + rows[2].h + gap + seamGap / 2 - seamH / 2;
-  return { rows, seamY };
-}
-
-function StackBand({
-  x,
-  width,
-  row,
-  labelSize,
-  subSize,
-  hatchId,
-}: {
-  x: number;
-  width: number;
-  row: { band: Band; y: number; h: number };
-  labelSize: number;
-  subSize: number;
-  hatchId: string;
-}) {
-  const { band, y, h } = row;
-  const cy = y + h / 2;
-  return (
-    <g>
-      <rect
-        x={x}
-        y={y}
-        width={width}
-        height={h}
-        rx={RADIUS}
-        fill="var(--color-raised-2)"
-        fillOpacity={band.fillOpacity}
-        stroke="currentColor"
-        className="text-edge"
-        strokeWidth={row.band.strokeWidth}
-        strokeOpacity={band.strokeOpacity}
-      />
-      {band.key === "hardware" && (
-        <rect x={x} y={y} width={width} height={h} rx={RADIUS} fill={`url(#${hatchId})`} opacity={0.5} className="text-edge" />
-      )}
-      <text
-        fill="currentColor"
-        x={x + width / 2}
-        y={cy - (band.sub ? 4 : -5)}
-        textAnchor="middle"
-        fontSize={labelSize}
-        letterSpacing="0.01em"
-        className="font-mono text-emphasis"
-        fontWeight="600"
-      >
-        {band.label}
-      </text>
-      {band.sub && (
-        <text
-          fill="currentColor"
-          x={x + width / 2}
-          y={cy + subSize + 3}
-          textAnchor="middle"
-          fontSize={subSize}
-          className="font-mono text-label"
-        >
-          {band.sub}
+    <g transform={`translate(${x} ${y})`} aria-hidden="true">
+      <line x1={0} y1={0} x2={0} y2={24} stroke="var(--color-accent-2)" strokeWidth={2} strokeDasharray="4 4" className="site-boundary-pulse" />
+      <polygon points="-4,20 0,27 4,20" fill="var(--color-accent-2)" />
+      {label && (
+        <text x={12} y={15} fill="var(--color-label)" fontSize={11} className="font-mono">
+          {label}
         </text>
       )}
     </g>
   );
 }
 
-function Seam({
-  x,
-  width,
-  y,
-  h,
-  gateWidth,
-  glowId,
-  desktop,
-}: {
-  x: number;
-  width: number;
-  y: number;
-  h: number;
-  gateWidth: number;
-  glowId: string;
-  desktop: boolean;
-}) {
-  const midX = x + width / 2;
-  const gateX = midX - gateWidth / 2;
-  // vsock line runs a bit past the seam into the bands on either side.
-  const vTop = y - 10;
-  const vBottom = y + h + 10;
-
-  return (
-    <g>
-      {/* Glow — the seam is the diagram's focal point, so it gets a
-          soft light-spill treatment. */}
-      <rect x={x - 10} y={y - 14} width={width + 20} height={h + 28} className="text-accent-3" fill="currentColor" opacity="0.2" filter={`url(#${glowId})`} />
-
-      {/* vsock — full length, drawn behind the gate so the gate visually
-          interrupts it (enters from the hypervisor side, exits into the
-          guest-kernel side). */}
-      <line
-        x1={midX}
-        y1={vTop}
-        x2={midX}
-        y2={vBottom}
-        stroke="var(--color-accent-2)"
-        strokeWidth={FEATURE + 1}
-        strokeDasharray="8 6"
-        strokeLinecap="round"
-        className="site-boundary-pulse"
-      />
-
-      {/* Two solid seam segments, gap for the gate. */}
-      <rect x={x} y={y} width={gateX - x} height={h} rx={RADIUS} className="text-accent-3" fill="currentColor" />
-      <rect x={gateX + gateWidth} y={y} width={x + width - (gateX + gateWidth)} height={h} rx={RADIUS} className="text-accent-3" fill="currentColor" />
-
-      {/* Gate — canvas background so text stays legible over the seam's
-          solid fill. */}
-      <rect x={gateX} y={y} width={gateWidth} height={h} rx={RADIUS} fill="var(--color-canvas)" stroke="var(--color-accent-3)" strokeWidth={FEATURE} />
-      <text
-        fill="currentColor"
-        x={midX}
-        y={y + h / 2 - (desktop ? 10 : 8)}
-        textAnchor="middle"
-        fontSize={desktop ? 14 : 12.5}
-        letterSpacing="0.05em"
-        className="font-mono text-accent-2"
-        fontWeight="700"
-      >
-        VSOCK
-      </text>
-      <text
-        fill="currentColor"
-        x={midX}
-        y={y + h / 2 + (desktop ? 8 : 7)}
-        textAnchor="middle"
-        fontSize={12}
-        className="font-mono text-label"
-      >
-        the only crossing
-      </text>
-      <LockGlyph x={midX} y={y + h / 2 + (desktop ? 24 : 21)} />
-    </g>
-  );
-}
-
-function DesktopStack() {
-  const bandH = 58;
-  const gap = 10;
-  const seamH = 78;
-  const seamGap = 84;
-  const topMargin = 20;
+function DesktopFlow() {
+  const width = 480;
   const x = 20;
-  const width = 520;
-  const { rows, seamY } = layout(bandH, gap, seamH, seamGap, topMargin);
-  const bottom = rows[rows.length - 1].y + rows[rows.length - 1].h;
-  const viewH = bottom + 20;
 
   return (
-    <svg viewBox={`0 0 560 ${viewH}`} className="hidden w-full lg:block" role="presentation" aria-hidden="true">
-      <defs>
-        <filter id="stack-wall-glow" x="-60%" y="-40%" width="220%" height="180%">
-          <feGaussianBlur stdDeviation="14" />
-        </filter>
-        <Hatch id="stack-hatch" />
-      </defs>
-      {rows.map((row, i) =>
-        i === 3 ? (
-          <g key={row.band.key}>
-            <Seam x={x} width={width} y={seamY} h={seamH} gateWidth={148} glowId="stack-wall-glow" desktop />
-            <StackBand x={x} width={width} row={row} labelSize={16} subSize={12.5} hatchId="stack-hatch" />
-          </g>
-        ) : (
-          <StackBand key={row.band.key} x={x} width={width} row={row} labelSize={16} subSize={12.5} hatchId="stack-hatch" />
-        ),
-      )}
-      <NoNicGlyph x={x + width - 26} y={rows[2].y + 12} />
+    <svg viewBox="0 0 520 400" className="hidden w-full lg:block" role="presentation" aria-hidden="true">
+      {/* ── STEP 1: UNTRUSTED CODE INPUT ── */}
+      <g>
+        <rect
+          x={x}
+          y={16}
+          width={width}
+          height={64}
+          rx={RADIUS}
+          fill="var(--color-raised)"
+          stroke="var(--color-edge)"
+          strokeWidth={1.5}
+        />
+        {/* Terminal window dots */}
+        <circle cx={x + 20} cy={34} r={4} fill="var(--color-dot-close)" />
+        <circle cx={x + 32} cy={34} r={4} fill="var(--color-dot-minimize)" />
+        <circle cx={x + 44} cy={34} r={4} fill="var(--color-dot-expand)" />
+        <text x={x + 60} y={38} fill="var(--color-label)" fontSize={11} className="font-mono">
+          untrusted-code.py
+        </text>
+
+        {/* Code invocation */}
+        <text x={x + 20} y={60} fill="var(--color-title)" fontSize={13} className="font-mono font-medium">
+          mvm.invoke(<tspan fill="var(--color-accent)">"run_agent"</tspan>, input=...)
+        </text>
+        <rect x={x + width - 90} y={28} width={70} height={20} rx={4} fill="var(--color-accent-low)" />
+        <text x={x + width - 55} y={42} fill="var(--color-accent)" fontSize={10} textAnchor="middle" className="font-mono font-semibold">
+          UNTRUSTED
+        </text>
+      </g>
+
+      {/* Connection arrow */}
+      <ArrowDown x={x + width / 2} y={80} />
+
+      {/* ── STEP 2: ISOLATED MICROVM SANDBOX ── */}
+      <g>
+        {/* Container box */}
+        <rect
+          x={x}
+          y={114}
+          width={width}
+          height={164}
+          rx={RADIUS}
+          fill="var(--color-raised-2)"
+          stroke="var(--color-accent-2)"
+          strokeWidth={2}
+        />
+
+        {/* Container header */}
+        <rect x={x} y={114} width={width} height={36} rx={RADIUS} fill="var(--color-canvas)" opacity={0.6} />
+        <line x1={x} y1={150} x2={x + width} y2={150} stroke="var(--color-edge)" strokeWidth={1} />
+
+        <LockIcon x={x + 22} y={132} />
+        <text x={x + 36} y={136} fill="var(--color-title)" fontSize={14} className="font-mono font-bold">
+          mvm MicroVM Sandbox
+        </text>
+
+        <rect x={x + width - 110} y={122} width={90} height={20} rx={4} fill="var(--color-canvas)" stroke="var(--color-accent-2)" strokeWidth={1} />
+        <text x={x + width - 65} y={136} fill="var(--color-accent-2)" fontSize={10} textAnchor="middle" className="font-mono font-bold">
+          OWN KERNEL
+        </text>
+
+        {/* Execution environment inner panel */}
+        <rect
+          x={x + 20}
+          y={166}
+          width={width - 40}
+          height={92}
+          rx={8}
+          fill="var(--color-canvas)"
+          stroke="var(--color-glass-border)"
+          strokeWidth={1}
+        />
+
+        <text x={x + 36} y={190} fill="var(--color-title)" fontSize={13} className="font-mono font-semibold">
+          Guest Kernel &amp; DM-Verity RootFS
+        </text>
+        <text x={x + 36} y={210} fill="var(--color-body)" fontSize={11} className="font-mono">
+          Hardware isolated · Zero shared memory with host
+        </text>
+
+        {/* Feature Pills */}
+        <g transform={`translate(${x + 36}, 224)`}>
+          <rect x={0} y={0} width={72} height={20} rx={4} fill="var(--color-raised-2)" stroke="var(--color-edge)" strokeWidth={1} />
+          <text x={36} y={14} fill="var(--color-accent-3)" fontSize={10} textAnchor="middle" className="font-mono font-semibold">
+            NO NIC
+          </text>
+
+          <rect x={80} y={0} width={130} height={20} rx={4} fill="var(--color-raised-2)" stroke="var(--color-edge)" strokeWidth={1} />
+          <text x={145} y={14} fill="var(--color-label)" fontSize={10} textAnchor="middle" className="font-mono">
+            Secret Substitution
+          </text>
+
+          <rect x={218} y={0} width={110} height={20} rx={4} fill="var(--color-raised-2)" stroke="var(--color-edge)" strokeWidth={1} />
+          <text x={273} y={14} fill="var(--color-label)" fontSize={10} textAnchor="middle" className="font-mono">
+            Signed Audit Log
+          </text>
+        </g>
+      </g>
+
+      {/* VSOCK Connection arrow */}
+      <ArrowDown x={x + width / 2} y={278} label="VSOCK (only crossing)" />
+
+      {/* ── STEP 3: SAFE TYPED RESULT ── */}
+      <g>
+        <rect
+          x={x}
+          y={312}
+          width={width}
+          height={60}
+          rx={RADIUS}
+          fill="var(--color-raised)"
+          stroke="var(--color-green)"
+          strokeWidth={1.5}
+        />
+        <circle cx={x + 28} cy={342} r={10} fill="var(--color-green)" opacity={0.2} />
+        <path d={`M${x + 23} 342 l3.5 3.5 l7 -7`} stroke="var(--color-green)" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+
+        <text x={x + 48} y={338} fill="var(--color-title)" fontSize={13} className="font-mono font-semibold">
+          Safe Typed Output Returned
+        </text>
+        <text x={x + 48} y={354} fill="var(--color-body)" fontSize={11} className="font-mono">
+          {"{ status: 200, result: { ... } }"}
+        </text>
+      </g>
     </svg>
   );
 }
 
-function MobileStack() {
-  const bandH = 56;
-  const gap = 10;
-  const seamH = 74;
-  const seamGap = 80;
-  const topMargin = 18;
-  const x = 18;
-  const width = 304;
-  const { rows, seamY } = layout(bandH, gap, seamH, seamGap, topMargin);
-  const bottom = rows[rows.length - 1].y + rows[rows.length - 1].h;
-  const viewH = bottom + 18;
+function MobileFlow() {
+  const width = 310;
+  const x = 15;
 
   return (
-    <svg viewBox={`0 0 340 ${viewH}`} className="block w-full lg:hidden" role="presentation" aria-hidden="true">
-      <defs>
-        <filter id="stack-wall-glow-m" x="-40%" y="-40%" width="180%" height="180%">
-          <feGaussianBlur stdDeviation="12" />
-        </filter>
-        <Hatch id="stack-hatch-m" />
-      </defs>
-      {rows.map((row, i) =>
-        i === 3 ? (
-          <g key={row.band.key}>
-            <Seam x={x} width={width} y={seamY} h={seamH} gateWidth={128} glowId="stack-wall-glow-m" desktop={false} />
-            <StackBand x={x} width={width} row={row} labelSize={14} subSize={12} hatchId="stack-hatch-m" />
-          </g>
-        ) : (
-          <StackBand key={row.band.key} x={x} width={width} row={row} labelSize={14} subSize={12} hatchId="stack-hatch-m" />
-        ),
-      )}
-      <NoNicGlyph x={x + width - 24} y={rows[2].y + 12} size={13} />
+    <svg viewBox="0 0 340 410" className="block w-full lg:hidden" role="presentation" aria-hidden="true">
+      {/* Step 1 */}
+      <g>
+        <rect x={x} y={15} width={width} height={60} rx={RADIUS} fill="var(--color-raised)" stroke="var(--color-edge)" strokeWidth={1.5} />
+        <circle cx={x + 16} cy={30} r={3} fill="var(--color-dot-close)" />
+        <circle cx={x + 25} cy={30} r={3} fill="var(--color-dot-minimize)" />
+        <circle cx={x + 34} cy={30} r={3} fill="var(--color-dot-expand)" />
+        <text x={x + 16} y={54} fill="var(--color-title)" fontSize={11} className="font-mono font-medium">
+          mvm.invoke("run_code")
+        </text>
+      </g>
+
+      <ArrowDown x={x + width / 2} y={75} />
+
+      {/* Step 2 */}
+      <g>
+        <rect x={x} y={105} width={width} height={170} rx={RADIUS} fill="var(--color-raised-2)" stroke="var(--color-accent-2)" strokeWidth={2} />
+        <LockIcon x={x + 18} y={125} />
+        <text x={x + 30} y={130} fill="var(--color-title)" fontSize={13} className="font-mono font-bold">
+          mvm MicroVM Sandbox
+        </text>
+
+        <rect x={x + 14} y={145} width={width - 28} height={114} rx={8} fill="var(--color-canvas)" stroke="var(--color-glass-border)" strokeWidth={1} />
+        <text x={x + 26} y={170} fill="var(--color-title)" fontSize={12} className="font-mono font-semibold">
+          Own Guest Kernel
+        </text>
+        <text x={x + 26} y={188} fill="var(--color-body)" fontSize={10} className="font-mono">
+          Nix rootfs · Hardware isolated
+        </text>
+
+        <rect x={x + 26} y={205} width={64} height={18} rx={4} fill="var(--color-raised-2)" stroke="var(--color-edge)" strokeWidth={1} />
+        <text x={x + 58} y={218} fill="var(--color-accent-3)" fontSize={9} textAnchor="middle" className="font-mono font-semibold">
+          NO NIC
+        </text>
+
+        <rect x={x + 98} y={205} width={100} height={18} rx={4} fill="var(--color-raised-2)" stroke="var(--color-edge)" strokeWidth={1} />
+        <text x={x + 148} y={218} fill="var(--color-label)" fontSize={9} textAnchor="middle" className="font-mono">
+          Secret Substituted
+        </text>
+      </g>
+
+      <ArrowDown x={x + width / 2} y={275} label="VSOCK" />
+
+      {/* Step 3 */}
+      <g>
+        <rect x={x} y={305} width={width} height={56} rx={RADIUS} fill="var(--color-raised)" stroke="var(--color-green)" strokeWidth={1.5} />
+        <circle cx={x + 24} cy={333} r={8} fill="var(--color-green)" opacity={0.2} />
+        <path d={`M${x + 20} 333 l2.5 2.5 l5 -5`} stroke="var(--color-green)" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        <text x={x + 40} y={337} fill="var(--color-title)" fontSize={12} className="font-mono font-semibold">
+          Typed Safe Result
+        </text>
+      </g>
     </svg>
   );
 }
@@ -320,8 +233,8 @@ function MobileStack() {
 export function HeroStackDiagram() {
   return (
     <figure className="w-full" role="img" aria-label={DESCRIPTION}>
-      <DesktopStack />
-      <MobileStack />
+      <DesktopFlow />
+      <MobileFlow />
     </figure>
   );
 }
