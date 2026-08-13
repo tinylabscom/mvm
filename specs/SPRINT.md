@@ -55,7 +55,7 @@
       bootstrap and kernel publication, then ran Alpine twice from a fully warm
       cache without launching Stage 0.
 
-- [~] HVF large-response integrity — **plan 315**. Restored bounded
+- [x] HVF large-response integrity — **plan 315**. Restored bounded
       virtio-vsock host-to-guest credit accounting that had been removed while
       its relay-side readers remained. Every guest header refreshes the actual
       `buf_alloc`/`fwd_cnt` window before dispatch; unknown credit fails closed,
@@ -70,8 +70,9 @@
       `python:3.12` pandas
       install through PyPI. All 446 `mvm-vmm` tests, workspace check, macOS
       workspace all-target Clippy, the serial aggregate workspace suite, and
-      the focused x86_64 Linux cross-build are green. Linux-native builder-VM
-      tests and all-target Clippy remain the final platform gates.
+      the focused x86_64 Linux cross-build are green. The CI test-linux and lint-core lanes passed on PR #2324, and a
+      local x86_64 Linux cross-build passes on current main; the platform
+      gates are complete.
 - [~] Issue-closeout batch — **#2165, #2321, #2323**. Workload-runner root
       bootargs now agree with read-only block attachments across the selected
       drivers; the substitution forward leg rejects oversized declared or

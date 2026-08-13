@@ -2,7 +2,7 @@
 
 ## Status
 
-**Implementation complete; platform gates pending.** Opened 2026-08-10 after
+**COMPLETE.** Opened 2026-08-10 after
 the documented README `pandas` example reproduced a PyPI wheel hash mismatch
 on the HVF backend. The package index and TLS endpoint are not the source of
 the mismatch: the current `mvm-vmm` transport retained transmit-credit readers
@@ -36,8 +36,11 @@ host response can overrun the guest receive window.
 - [x] Run focused `mvm-vmm` tests on the macOS host.
 - [x] Run `cargo test --workspace` and `cargo check --workspace` on the macOS
       host.
-- [ ] Run workspace all-target Clippy and the Linux-gated `mvm-vmm` tests in
-      the project builder VM.
+- [x] Run workspace all-target Clippy and the Linux-gated `mvm-vmm` tests —
+      the CI `test-linux` and `lint-core` lanes passed on PR #2324; a local
+      x86_64 Linux cross-build (`cargo zigbuild --target
+      x86_64-unknown-linux-gnu -p mvm-vmm --lib --all-features`) passes on
+      current `main`.
 - [x] Record the repair in `specs/SPRINT.md` and
       `specs/REFACTOR-STATUS.md`.
 
