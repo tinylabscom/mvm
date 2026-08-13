@@ -83,6 +83,7 @@ pub fn spawn_libkrun_egress_endpoint_if_needed(
         raw_egress: secrets.is_empty(),
         resolver_remote: None,
         binding_store_dir: None,
+        flowmux_identity: None,
     })?;
     Ok(EndpointGuard::new(vm_name))
 }

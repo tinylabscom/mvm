@@ -1228,9 +1228,11 @@ for detailed scope and acceptance criteria.
     acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
     for unimplemented flows) and bounded per-stream registries
     (`flowmux::registry`) with unit tests for parity, ceilings, state
-    transitions, and credit accounting. Remaining: wire the acceptor into the
-    actual endpoint process and backend witness tests proving one `NetworkFlow`
-    service per backend.
+    transitions, and credit accounting. The acceptor is wired into the
+    `mvm-network-endpoint` binary (`EgressMode::FlowMux`,
+    `EndpointConfig::flowmux_identity`, `serve_flowmux`) and the spawner emits
+    the identity on stdin. Remaining: backend witness tests proving one
+    `NetworkFlow` service per backend.
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)

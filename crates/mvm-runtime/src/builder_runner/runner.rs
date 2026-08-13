@@ -155,6 +155,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             raw_egress: true,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         })?;
         let mut endpoint_guard = EndpointGuard::new(b.name);
 

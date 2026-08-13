@@ -93,6 +93,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         network_policy: None,
         egress_mode: EgressMode::Wire,
         resolver: ResolverBackend::default(),
+        flowmux_identity: None,
     };
 
     let mut child = Command::new(BIN)
@@ -196,6 +197,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all()),
         egress_mode: mvm_hostd::supervisor::network_endpoint::EgressMode::Wire,
         resolver: ResolverBackend::default(),
+        flowmux_identity: None,
     };
 
     let mut child = Command::new(BIN)
@@ -266,6 +268,7 @@ fn endpoint_bin_raw_no_secret_mode_handshakes_without_placeholders() {
         )),
         egress_mode: EgressMode::Raw,
         resolver: ResolverBackend::default(),
+        flowmux_identity: None,
     };
 
     let mut child = Command::new(BIN)

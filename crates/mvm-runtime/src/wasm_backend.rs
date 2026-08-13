@@ -449,6 +449,7 @@ fn wasm_network_endpoint_spawn_params<'a>(
         raw_egress: false,
         resolver_remote: None,
         binding_store_dir: None,
+        flowmux_identity: None,
     }
 }
 

@@ -208,6 +208,21 @@ pub struct RemoteResolverSpawnConfig<'a> {
     pub timeout_secs: u64,
 }
 
+/// Identity material for an authenticated FlowMux session.
+///
+/// Mirrors `mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity` field-for-
+/// field so the JSON on stdin is identical, without creating a dependency cycle
+/// (mvm-hostd depends on mvm-vmm, never the reverse).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowMuxIdentitySpawnConfig {
+    /// Unique session identifier, distinct per VM boot.
+    pub session_id: String,
+    /// Base64-encoded 32-byte Ed25519 host signing key.
+    pub host_signing_key_base64: String,
+    /// Base64-encoded 32-byte Ed25519 guest verifying key.
+    pub guest_verifying_key_base64: String,
+}
+
 /// Inputs to [`spawn_network_endpoint`]. Grouped into a struct (rather
 /// than threading bare positional args) so the backend-shaped fields —
 /// `transport` (vsock vs UDS), `terminator_listen`, `tls_intermediate` — read
@@ -248,6 +263,9 @@ pub struct SubstitutionSpawnParams<'a> {
     /// `auth_type` per secret name are read from at `assemble()` time).
     /// `None` preserves today's host-default dir.
     pub binding_store_dir: Option<&'a Path>,
+    /// Identity material for the authenticated FlowMux session. `Some` selects
+    /// the converged FlowMux path; `None` keeps the legacy Wire/Raw path.
+    pub flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
 }
 
 /// Build the EndpointConfig JSON the endpoint reads on stdin. Pure (no spawn)
@@ -267,7 +285,13 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         // Which egress protocol the relayed stream carries. Always emit: an
         // explicit "wire" is identical to the endpoint's default, so legacy
         // callers stay backward compatible.
-        "egress_mode": if params.raw_egress { "raw" } else { "wire" },
+        "egress_mode": if params.flowmux_identity.is_some() {
+            "flow_mux"
+        } else if params.raw_egress {
+            "raw"
+        } else {
+            "wire"
+        },
     });
     if let Some(addr) = params.terminator_listen {
         // `EndpointConfig.terminator_listen: Option<SocketAddr>`:
@@ -313,6 +337,13 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     }
     if let Some(dir) = params.binding_store_dir {
         cfg["binding_store_dir"] = serde_json::json!(dir);
+    }
+    if let Some(id) = &params.flowmux_identity {
+        cfg["flowmux_identity"] = serde_json::json!({
+            "session_id": id.session_id,
+            "host_signing_key_base64": id.host_signing_key_base64,
+            "guest_verifying_key_base64": id.guest_verifying_key_base64,
+        });
     }
     cfg
 }
@@ -758,6 +789,7 @@ mod tests {
             raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         });
 
         res.expect("spawn with stub endpoint should succeed");
@@ -817,6 +849,7 @@ mod tests {
             raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         })
         .expect("spawn with stub endpoint should succeed");
 
@@ -881,6 +914,7 @@ mod tests {
             raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         })
         .expect_err("an unparseable handshake is not a ready endpoint");
         assert!(
@@ -946,6 +980,7 @@ mod tests {
             raw_egress: false,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         });
 
         assert!(result.is_err(), "invalid MVM_HOME must fail sidecar setup");
@@ -1005,6 +1040,7 @@ mod tests {
             raw_egress,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         }
     }
 
@@ -1082,6 +1118,30 @@ mod tests {
         let round: NetworkPolicy = serde_json::from_value(cfg["network_policy"].clone())
             .expect("network_policy deserializes back");
         assert_eq!(round, policy);
+    }
+
+    // The converged FlowMux path: identity material must land in the stdin
+    // config so the endpoint can authenticate the guest and bind the session to
+    // the plan's verifying key.
+    #[test]
+    fn endpoint_config_json_emits_flowmux_identity() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let mut params = minimal_params(&redaction, sock, None, false);
+        params.flowmux_identity = Some(FlowMuxIdentitySpawnConfig {
+            session_id: "vm-123-boot-456".to_string(),
+            host_signing_key_base64: "aG9zdC1rZXktYnl0ZXM".to_string(),
+            guest_verifying_key_base64: "Z3Vlc3Qta2V5LWJ5dGVz".to_string(),
+        });
+        let cfg = build_endpoint_config_json(&params);
+
+        assert_eq!(cfg["egress_mode"], "flow_mux");
+        let id = cfg["flowmux_identity"]
+            .as_object()
+            .expect("flowmux_identity object");
+        assert_eq!(id["session_id"], "vm-123-boot-456");
+        assert_eq!(id["host_signing_key_base64"], "aG9zdC1rZXktYnl0ZXM");
+        assert_eq!(id["guest_verifying_key_base64"], "Z3Vlc3Qta2V5LWJ5dGVz");
     }
 
     // ── the cert-to-guest / key-to-endpoint split ──

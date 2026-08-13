@@ -112,6 +112,10 @@ pub enum EgressMode {
     Wire,
     /// Raw TCP: first line `host:port`, then a byte splice. No secrets.
     Raw,
+    /// Authenticated FlowMux session on `GuestService::NetworkFlow`. This is
+    /// the converged single networking path; it replaces `Wire` and `Raw` for
+    /// admitted workloads.
+    FlowMux,
 }
 
 /// The per-VM name-constrained intermediate the terminator
@@ -135,6 +139,23 @@ impl std::fmt::Debug for TlsIntermediate {
             .field("key_pem", &"<redacted>")
             .finish()
     }
+}
+
+/// Identity material for one authenticated FlowMux session.
+///
+/// The host signing key authenticates the endpoint to the guest; the guest
+/// verifying key is the pinned anchor the endpoint accepts. Both are carried
+/// as base64 on the stdin wire so no raw bytes escape the spawn boundary in
+/// shell-unsafe form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowMuxIdentity {
+    /// Unique session identifier, distinct per VM boot.
+    pub session_id: String,
+    /// Base64-encoded 32-byte Ed25519 host signing key.
+    pub host_signing_key_base64: String,
+    /// Base64-encoded 32-byte Ed25519 guest verifying key.
+    pub guest_verifying_key_base64: String,
 }
 
 /// Config the backend hands the `mvm-network-endpoint` subprocess on
@@ -202,6 +223,10 @@ pub struct EndpointConfig {
     /// [`ResolverBackend`].
     #[serde(default)]
     pub resolver: ResolverBackend,
+    /// Identity material for the authenticated FlowMux session. Required when
+    /// `egress_mode` is `FlowMux`; ignored for `Wire` and `Raw`.
+    #[serde(default)]
+    pub flowmux_identity: Option<FlowMuxIdentity>,
 }
 
 /// Parse an [`EndpointConfig`] from the JSON the backend writes on stdin.
@@ -446,6 +471,7 @@ mod tests {
             network_policy: None,
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
+            flowmux_identity: None,
         }
     }
 

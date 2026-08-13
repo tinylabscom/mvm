@@ -307,7 +307,14 @@ after sending the ack; the validator still only observes inbound frames.
 registry: odd IDs for guest-initiated flows, even IDs for host-initiated
 ingress, independent TCP/UDP ceilings, `Opening`/`Open`/`HalfClosed`/`Closed`
 state transitions, and per-direction credit windows. It performs no I/O so it
-is trivially unit-testable; the session will drive it in Phase 3.
+is trivially unit-testable.
+
+The `mvm-network-endpoint` binary now understands `EgressMode::FlowMux` and
+`EndpointConfig::flowmux_identity`. The spawner
+(`mvm-vmm::host::network_endpoint_spawn`) emits the identity JSON on stdin and
+selects `flow_mux` mode when identity is present. The bin's `serve_flowmux`
+accepts one UDS or vsock connection and runs the authenticated FlowMux session
+in `spawn_blocking`.
 
 ### Phase 3 — Converge egress TCP, UDP, and DNS
 

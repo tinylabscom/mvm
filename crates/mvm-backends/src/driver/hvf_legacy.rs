@@ -243,6 +243,7 @@ pub fn spawn_hvf_gating_endpoint_if_needed(
         raw_egress: secrets.is_empty(),
         resolver_remote: None,
         binding_store_dir: None,
+        flowmux_identity: None,
     })?;
     Ok((EndpointGuard::new(vm_name), Some(socket)))
 }

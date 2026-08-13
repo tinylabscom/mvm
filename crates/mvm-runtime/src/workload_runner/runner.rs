@@ -104,6 +104,7 @@ impl EndpointSpawner for RealEndpointSpawner {
             raw_egress: req.raw_egress,
             resolver_remote: None,
             binding_store_dir: None,
+            flowmux_identity: None,
         })?;
         Ok(uds)
     }
