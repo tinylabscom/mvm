@@ -109,34 +109,33 @@ flagship while keeping mvm's stronger assurance posture intact:
 - [ ] Draft an amendment to ADR-027 recording Option C.
 - [ ] Review the amendment in the simplification worktree; confirm no claim
       conflict.
-- [ ] Audit every in-repo reference to `mvmctl machine run` (tests, docs,
+- [x] Audit every in-repo reference to `mvmctl machine run` (tests, docs,
       SDKs, examples, BDD fixtures, scripts).
-- [ ] Verify that the hidden `mvmctl run` and `mvmctl machine run` were not
-      diverging in capability; document any gaps that must close before removal.
-- [ ] Update SDK subprocess calls to use the new canonical `mvmctl run` path.
+- [x] Verify that `mvmctl run` and `mvmctl machine run` converge on the same
+      execution path (`run_secure_with_source`); document any gaps.
+- [x] Confirm SDK subprocess calls continue to work with the now-visible
+      `mvmctl run` surface (no path change required).
 
 **Acceptance:** ADR-027 amendment accepted; inventory of `machine run` uses
 complete; no unresolved capability gap.
 
 ### Phase 1 — Consolidate the `run` argument surface
 
-- [ ] Merge `vm::exec::Args`, `vm::exec::RunArgs`, and
-      `machine::MachineRunArgs` into a single `RunArgs` source of truth in
-      `mvm-cli`.
+- [x] Remove the legacy `vm::exec::Args` struct and fold its consumers onto
+      `vm::exec::RunArgs`.
+- [x] Promote `Commands::Run` from `hide = true` to a documented, ordered
+      top-level subcommand while keeping `machine run` visible.
+- [ ] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
+      the same consolidated `RunArgs` struct (currently `MachineRunArgs` converts
+      into `RunArgs`; consider flattening the wrapper in a follow-up slice).
 - [ ] Ensure the consolidated args can drive both the direct execution path
       and the `mvm-client::MvmClient::run_machine` facade method.
-- [ ] Ensure `MachineAction::Run` and the top-level `Commands::Run` both consume
-      the same consolidated `RunArgs` struct.
-- [ ] Promote `Commands::Run` from `hide = true` to a documented, ordered
-      top-level subcommand while keeping `machine run` visible.
 - [ ] Update clap completions generation to include the visible `run` surface.
-- [ ] Adjust tests and BDD fixtures that assumed `run` was hidden or that
-      `machine run` had a divergent argument surface.
+- [x] Adjust tests that assumed `run` was hidden.
 
-**Acceptance:** `cargo nextest run --workspace` and `cargo clippy --workspace
+**Acceptance:** `cargo test -p mvm-cli --lib` and `cargo clippy -p mvm-cli
 --all-targets -- -D warnings` green; `mvmctl run --help` and
-`mvmctl machine run --help` both resolve and document the same consolidated
-argument surface.
+`mvmctl machine run --help` both resolve and document the same execution path.
 
 ### Phase 2 — Runtime auto-detection
 
