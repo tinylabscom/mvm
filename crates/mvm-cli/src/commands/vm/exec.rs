@@ -68,11 +68,9 @@ pub(in crate::commands) struct Args {
     pub launch_plan: Option<String>,
     /// Argv to run inside the guest (use `--` to separate). Required unless
     /// `--launch-plan` is supplied.
-    #[arg(
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        required_unless_present = "launch_plan"
-    )]
+    // No `allow_hyphen_values`: it turns an unrecognized flag into a silent
+    // argv element, so a typo fails inside the guest shell instead of here.
+    #[arg(trailing_var_arg = true, required_unless_present = "launch_plan")]
     pub argv: Vec<String>,
     /// Internal (not a CLI flag): stdin bytes to forward into the guest `Exec`
     /// frame. Empty ⇒ no stdin (`Exec.stdin = None`). Populated at the
@@ -221,9 +219,9 @@ pub(in crate::commands) struct RunArgs {
     /// Argv to run inside the guest (use `--` to separate). Required unless
     /// `--launch-plan` is supplied. Under `--mode plan`, the first
     /// argv element is a `.py`/`.ts`/`.js` script path.
+    // No `allow_hyphen_values` — see `Args::argv` above.
     #[arg(
         trailing_var_arg = true,
-        allow_hyphen_values = true,
         required_unless_present_any = ["launch_plan", "mode", "dev", "prod"]
     )]
     pub argv: Vec<String>,

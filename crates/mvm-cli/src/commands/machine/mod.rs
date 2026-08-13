@@ -400,7 +400,10 @@ pub(in crate::commands) struct MachineRunArgs {
     )]
     pub attach: bool,
     /// Command and arguments to run in the guest.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    // No `allow_hyphen_values`: it makes an unrecognized flag a silent argv
+    // element, so a typo boots a VM and fails inside the guest shell instead of
+    // being named here. Hyphenated guest argv still works after `--`.
+    #[arg(trailing_var_arg = true)]
     pub argv: Vec<String>,
 }
 
@@ -980,7 +983,7 @@ pub(in crate::commands) struct MachineExecArgs {
     pub interactive: bool,
     /// Argv to run inside the guest (use `--` to separate). Omit to drop into
     /// an interactive shell, like `machine shell`.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(trailing_var_arg = true)]
     pub argv: Vec<String>,
 }
 
