@@ -303,6 +303,12 @@ flow frame receives `GoAway` before the session closes cleanly.
 `mark_hello_ack_sent` so a host-side driver can advance its own state machine
 after sending the ack; the validator still only observes inbound frames.
 
+`mvm-hostd::supervisor::flowmux::registry` provides the per-session stream
+registry: odd IDs for guest-initiated flows, even IDs for host-initiated
+ingress, independent TCP/UDP ceilings, `Opening`/`Open`/`HalfClosed`/`Closed`
+state transitions, and per-direction credit windows. It performs no I/O so it
+is trivially unit-testable; the session will drive it in Phase 3.
+
 ### Phase 3 — Converge egress TCP, UDP, and DNS
 
 - [ ] Replace the raw `"host:port\n"` prelude with `OpenTcp`; return `Opened`

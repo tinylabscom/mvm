@@ -1224,10 +1224,11 @@ for detailed scope and acceptance criteria.
     test files are renamed to `mvm-network-endpoint`/`network_endpoint_*`;
     `mvm-hostd::supervisor::flowmux` landed the authenticated FlowMux session
     acceptor (`FlowMuxSession::accept`, `serve`, `Hello`/`HelloAck`, `GoAway`
-    for unimplemented flows) with unit tests covering wrong anchors, handshake
-    completion, and clean close. Remaining: wire the acceptor into the actual
-    endpoint process, add bounded per-stream registries, and backend witness
-    tests proving one `NetworkFlow` service per backend.
+    for unimplemented flows) and bounded per-stream registries
+    (`flowmux::registry`) with unit tests for parity, ceilings, state
+    transitions, and credit accounting. Remaining: wire the acceptor into the
+    actual endpoint process and backend witness tests proving one `NetworkFlow`
+    service per backend.
   - [ ] Phase 3 — converge egress TCP, UDP, and DNS (#2372)
   - [ ] Phase 4 — stream typed transformations (#2373)
   - [ ] Phase 5 — declared ingress on FlowMux (#2374)
