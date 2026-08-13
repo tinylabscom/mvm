@@ -723,8 +723,8 @@ impl FlowMuxSession {
         self.read_buf[..4].copy_from_slice(&len_buf);
         self.reader.read_exact(&mut self.read_buf[4..])?;
 
-        // TODO: decrypt `self.read_buf` with `self.session.open(...)` once
-        // the encrypted wire format for `SealedFrame` is defined.
+        // The payload is currently passed through unencrypted because the
+        // encrypted wire format for `SealedFrame` is not yet defined.
 
         let frame = match decode(&self.read_buf) {
             Ok(frame) => frame,

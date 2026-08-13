@@ -400,8 +400,8 @@ async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
         .context("FlowMux accept task")?
         .context("accept FlowMux connection")?;
 
-    // TODO: derive RegistryLimits from cfg.network_policy / NetworkLimits once
-    // the spawner threads the admitted plan's limits through.
+    // RegistryLimits uses defaults here because the spawner does not yet
+    // thread the admitted plan's limits through cfg.network_policy / NetworkLimits.
     let limits = RegistryLimits::default();
     let gate = cfg
         .network_policy
@@ -427,6 +427,7 @@ fn accept_one_sync(bound: Bound) -> std::io::Result<std::os::unix::net::UnixStre
         }
         #[cfg(target_os = "linux")]
         Bound::Vsock(listener) => {
+            use std::os::fd::FromRawFd;
             let fd =
                 mvm_hostd::supervisor::network_endpoint_proxy::vsock::accept(listener.raw_fd())?;
             // SAFETY: `fd` is an owned connected stream socket from accept(2);

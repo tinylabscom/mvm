@@ -261,14 +261,14 @@
       ]
     },
     {
-      "path": "crates/mvm-hostd/src/supervisor/substitution_endpoint.rs",
+      "path": "crates/mvm-hostd/src/supervisor/network_endpoint.rs",
       "package": "mvm-hostd",
       "claims": [
         17
       ]
     },
     {
-      "path": "crates/mvm-hostd/src/supervisor/substitution_proxy.rs",
+      "path": "crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs",
       "package": "mvm-hostd",
       "claims": [
         13
@@ -297,7 +297,7 @@
       ]
     },
     {
-      "path": "crates/mvm-vmm/src/host/substitution_spawn.rs",
+      "path": "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
       "package": "mvm-vmm",
       "claims": [
         17
