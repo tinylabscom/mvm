@@ -2,11 +2,11 @@
 
 ## Status
 
-COMPLETE — WS-A, WS-B, and the WS-D reproduction merged in PR #2419. The
+COMPLETE — WS-A, WS-B, and the WS-D reproduction merged in PR #2419, and the
 mechanism behind the observed corruption is identified and fixed by Plan 324 /
-PR #2416. WS-C is re-scoped / not built. One follow-up item remains: an
+PR #2416. WS-C is re-scoped / not built. The follow-up regression test is in
 end-to-end regression test proving the store image stays locked across the
-persistent-builder start/exit boundary.
+PR #2432.
 
 ## The problem
 
