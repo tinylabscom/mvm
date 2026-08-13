@@ -216,13 +216,22 @@ for detailed scope and acceptance criteria.
         prove no lifetime quota over a simulated 4 GiB transfer; prove active
         download credit prevents request-side idle eviction after 60 seconds;
         add the live documented pandas-install scenario
-  - [x] Pass all 446 `mvm-vmm` tests, the serial aggregate workspace suite,
+  - [x] Pass all 503 `mvm-vmm` tests, the serial aggregate workspace suite,
         workspace check, macOS workspace all-target Clippy, and the focused
-        x86_64 Linux cross-build
+        x86_64 and aarch64 Linux cross-builds
   - [x] Run Linux-native workspace Clippy/tests — CI test-linux and
-        lint-core passed on PR #2324; local x86_64 Linux cross-build
-        (`cargo zigbuild --target x86_64-unknown-linux-gnu -p mvm-vmm
---lib --all-features`) passes on current `main`
+        lint-core passed on PR #2324; local x86_64 and aarch64 Linux
+        cross-builds (`cargo zigbuild --target x86_64-unknown-linux-gnu`
+        and `--target aarch64-unknown-linux-gnu -p mvm-vmm --lib
+        --all-features`) pass on current `main`. Local Linux-native
+        builder-VM gates are tracked in Plan 316.
+
+- [ ] Plan 316 — Local Linux builder-VM gates via `mvmctl __builder-shell-job`
+      (`specs/plans/316-builder-vm-shell-job-runner.md`)
+  - [ ] Add hidden `mvmctl __builder-shell-job` command and example scripts
+  - [ ] Run `mvm-vmm` tests and crate-level Clippy inside the HVF/libkrun
+        builder VM
+  - [ ] Update Plan 315 and `specs/SPRINT.md` to reference this plan
 
 - [x] Plan 318 — span-timing profiling
       (`specs/plans/318-span-timing-profiling.md`)

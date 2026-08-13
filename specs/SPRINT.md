@@ -68,11 +68,11 @@
       reply; a simulated continuous 4 GiB transfer proves the refillable rate
       budget is not a lifetime quota. A live BDD scenario pins the documented
       `python:3.12` pandas
-      install through PyPI. All 446 `mvm-vmm` tests, workspace check, macOS
-      workspace all-target Clippy, the serial aggregate workspace suite, and
-      the focused x86_64 Linux cross-build are green. The CI test-linux and lint-core lanes passed on PR #2324, and a
-      local x86_64 Linux cross-build passes on current main; the platform
-      gates are complete.
+      install through PyPI. All 503 `mvm-vmm` tests on the macOS host,
+      workspace check, macOS workspace all-target Clippy, the serial aggregate
+      workspace suite, and the focused x86_64 and aarch64 Linux cross-builds
+      are green. The CI test-linux and lint-core lanes passed on PR #2324;
+      local Linux-native builder-VM gates are tracked in Plan 316.
 - [x] Issue-closeout batch — **#2165, #2321, #2323**. Closed 2026-08-13.
       #2165 closed as
       completed by PR #2330: workload-runner root bootargs now agree with
