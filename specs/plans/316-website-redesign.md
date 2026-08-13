@@ -1,7 +1,7 @@
 # Plan 316 — Website and docs redesign
 
-**Status: COMPLETE — merged behaviour verified by measurement; agent design review completed (see `specs/notes/316-design-review.md`); maintainer sign-off pending**
-**Last updated: 2026-08-11**
+**Status: COMPLETE — merged behaviour verified by measurement; agent design review completed (see `specs/notes/316-design-review.md`); maintainer sign-off received and final polish merged via #2438**
+**Last updated: 2026-08-13**
 **Branch:** `feat/website-redesign`
 **Scope:** `public/` only. No Rust crate, CLI, or doc *content* changes.
 
