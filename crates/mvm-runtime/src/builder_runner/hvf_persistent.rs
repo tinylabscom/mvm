@@ -9,26 +9,21 @@
 //! derivations on its own, so one session serves several builds at once off a
 //! single warm store.
 //!
-//! # The store lock does not outlive the starting process
+//! # The supervisor owns the store lock, not this process
 //!
-//! [`PersistentHvfSession`] holds the store lock for as long as the *object*
-//! lives, which covers a caller that starts a session and stays up. It does
-//! **not** cover `mvmctl persistent-builder start`, which leaks its handle and
-//! exits so the VM outlives it: an `flock` belongs to the open file
-//! description, that description belongs to the exiting `mvmctl` process, and
-//! the kernel drops the lock at exit. The VM then keeps writing an unlocked
-//! store image.
+//! This type materializes the store image and names its sidecar, but never
+//! locks it. The supervisor does, at startup, and holds it until it exits —
+//! which is exactly when the VM stops.
 //!
-//! This is the same gap the libkrun persistent builder documents on
-//! `leak_handle`, and the same mitigation applies — the session record acts as
-//! a soft mutex, since `start` refuses when one already exists. It is a soft
-//! mutex and not a lock: nothing stops a one-shot builder from taking the image
-//! while a session owns it.
+//! The ownership matters because an `flock` belongs to the open file
+//! description, and that description dies with the process holding it.
+//! `mvmctl persistent-builder start` leaks its handle and exits so the VM
+//! outlives the command, so a lock taken here would be released at that exit,
+//! leaving a running VM writing an image any other builder was free to attach.
 //!
-//! The fix is to move ownership to the process that owns the VM — pass the
-//! locked descriptor to the supervisor, since an `flock` survives as long as
-//! any descriptor for that open file description does — rather than to widen
-//! the guard here, which cannot help once its process is gone.
+//! Locking here and handing the lock over would need a release before the
+//! supervisor could take an exclusive lock, and another builder can win that
+//! gap. Never taking it removes the handoff, and with it the gap.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -36,14 +31,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use mvm_build::builder_vm::{BuilderVmError, builder_vm_cache_dir};
 use mvm_build::builder_vm_runtime::{
-    DISPATCH_READY_MARKER, NixStoreImageLock, PERSISTENT_BUILDER_READY_TIMEOUT,
-    acquire_nix_store_image_lock, stage_persistent_job_dir,
+    DISPATCH_READY_MARKER, PERSISTENT_BUILDER_READY_TIMEOUT, ensure_nix_store_image_unlocked,
+    stage_persistent_job_dir,
 };
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_net::channel::GuestService;
 
 use super::spec::{PersistentBuilderSpecInputs, persistent_builder_spec};
-use crate::driver::traits::{RunningVm, VmmDriver};
+use crate::driver::traits::RunningVm;
 use mvm_backends::driver::hvf::HvfDriver;
 
 /// Default persistent nix-store disk size (MiB), matching the one-shot builder.
@@ -126,17 +121,18 @@ impl HvfPersistentHostVm {
             );
         }
 
-        // Take the store lock before booting: while this process lives, this VM
-        // is the one writer, which is what lets other builds dispatch into it
-        // rather than fight it for the image. A caller that exits and leaves
-        // the VM running loses the lock with its process — see the module docs.
-        let nix_store_lock = acquire_nix_store_image_lock(
+        // Materialize the store image but take no lock here. The supervisor
+        // takes it and holds it for its whole life, which is the VM's life.
+        // Locking here would tie the flock to this process, and a caller that
+        // starts a session exits immediately after — releasing the lock out
+        // from under a VM that is still writing the image.
+        let nix_store = ensure_nix_store_image_unlocked(
             &builder_vm_cache_dir(),
             std::env::consts::ARCH,
             u64::from(self.nix_store_mib),
         )
         .map_err(|e: BuilderVmError| anyhow::anyhow!(e))
-        .context("acquiring the nix-store image lock for the persistent builder")?;
+        .context("materializing the nix-store image for the persistent builder")?;
 
         let vm_name = format!("mvm-persistent-builder-hvf-{session_id}");
         let state_dir = vm_state_dir(&vm_name);
@@ -152,7 +148,7 @@ impl HvfPersistentHostVm {
             name: &vm_name,
             kernel: &self.kernel,
             rootfs: &self.rootfs,
-            nix_store: nix_store_lock.path(),
+            nix_store: nix_store.path(),
             job_dir: &job_dir,
             workspace_root: &self.workspace_root,
             host_bin_dir: &self.host_bin_dir,
@@ -165,8 +161,9 @@ impl HvfPersistentHostVm {
             memory_mib: self.memory_mib,
         });
 
+        // The supervisor holds the store lock, not this process.
         let vm = HvfDriver::new()
-            .boot(&spec)
+            .boot_holding_image_lock(&spec, nix_store.lock_path())
             .context("booting the persistent HVF builder VM")?;
 
         let session = PersistentHvfSession {
@@ -174,7 +171,6 @@ impl HvfPersistentHostVm {
             state_dir,
             job_dir,
             vm,
-            _nix_store_lock: nix_store_lock,
         };
         session.wait_until_dispatch_ready(PERSISTENT_BUILDER_READY_TIMEOUT)?;
         Ok(session)
@@ -188,18 +184,14 @@ fn socket_for(state_dir: &Path, service: GuestService) -> PathBuf {
 
 /// A live persistent builder session.
 ///
-/// Holds the Nix store lock for as long as **this object** exists: dropping,
-/// killing, or waiting on the session releases it. That is not the same as the
-/// VM's lifetime — see the module docs on why a leaked handle in an exiting
-/// process leaves the VM running against an unlocked store image.
+/// Holds no store lock: the supervisor took it and holds it until the VM
+/// stops, so this handle can be leaked by a command that exits without the
+/// image losing its writer. See the module docs.
 pub struct PersistentHvfSession {
     session_id: String,
     state_dir: PathBuf,
     job_dir: PathBuf,
     vm: Box<dyn RunningVm>,
-    /// Load-bearing despite the underscore: the guard's `Drop` releases the
-    /// cross-process flock on the shared store image.
-    _nix_store_lock: NixStoreImageLock,
 }
 
 impl PersistentHvfSession {
@@ -288,6 +280,32 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
 
     #[test]
+    fn the_starter_materializes_the_image_without_locking_it() {
+        // The property this whole design turns on: after the starter has done
+        // its part, the sidecar is free for the supervisor to take. If the
+        // starter locked it, the supervisor could not, and the lock would die
+        // with the command that exits moments later.
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(scratch.path());
+
+        let image = mvm_build::builder_vm_runtime::ensure_nix_store_image_unlocked(
+            &mvm_build::builder_vm::builder_vm_cache_dir(),
+            std::env::consts::ARCH,
+            64,
+        )
+        .expect("materialize the store image");
+
+        assert!(image.path().is_file(), "the image must exist");
+        let taken = mvm_build::builder_vm_runtime::hold_image_lock(
+            image.lock_path(),
+            mvm_build::builder_vm_runtime::LockWait::none(),
+        )
+        .expect("a supervisor must be able to take the lock the starter left free");
+        drop(taken);
+    }
+
+    #[test]
     fn control_sockets_follow_the_hvf_per_port_convention() {
         let state = Path::new("/state/mvm-persistent-builder-hvf-abc");
         assert_eq!(
@@ -327,9 +345,10 @@ mod tests {
     }
 
     #[test]
-    fn start_refuses_a_missing_host_binary_dir_before_taking_the_store_lock() {
-        // Ordering matters: a validation failure must not leave the shared
-        // store image locked by a process that then gives up.
+    fn start_refuses_a_missing_host_binary_dir_without_leaving_artifacts() {
+        // Ordering matters: validation runs before anything is materialized,
+        // so a refusal leaves no store image and no sidecar behind for a
+        // later run — or a later supervisor — to trip over.
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = TestEnv::new();
         env.isolate_mvm_home(scratch.path());
@@ -348,9 +367,8 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        // The claim in this test's name: no store image, and so no lock, was
-        // created on the way to that refusal. A validation failure that left
-        // the shared image locked would block every other builder on the host.
+        // The claim in this test's name: nothing was materialized on the way
+        // to that refusal.
         let cache = builder_vm_cache_dir();
         assert!(
             cache.starts_with(scratch.path()),
@@ -369,7 +387,7 @@ mod tests {
             .unwrap_or_default();
         assert!(
             locks.is_empty(),
-            "refusal left lock files behind in {}: {locks:?}",
+            "refusal left sidecar files behind in {}: {locks:?}",
             cache.display()
         );
     }

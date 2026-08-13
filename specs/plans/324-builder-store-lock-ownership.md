@@ -29,25 +29,43 @@ store. That is a path to two writers on one filesystem.
 
 ## Approach
 
-Move ownership to the process that owns the VM. An `flock` survives as long as
-*any* descriptor for its open file description is open, so a descriptor
-inherited across `exec` keeps the lock alive after the parent exits — with no
-window where neither process holds it.
+Move ownership to the process that owns the VM: **the supervisor acquires the
+lock itself**, and the starting process never holds it on the persistent path.
 
-- [ ] Pass the locked descriptor from the starting process to the supervisor it
-      spawns (clear `FD_CLOEXEC` on the lock fd, tell the supervisor its number
-      via config). The alternative — supervisor opens and locks the path itself
-      — has a race: the parent must release before the child can take an
-      exclusive lock, and another builder can win that gap.
-- [ ] Apply it to both persistent paths, `mvm-libkrun-supervisor` and
-      `mvm-hvf-supervisor`. The gap is not HVF-specific and fixing one backend
-      would leave the documented libkrun hole open.
-- [ ] Once the supervisor owns the lock, `leak_handle`'s comment and the
-      module docs on `PersistentHvfSession` both stop being caveats and become
+The original sketch here was to pass the parent's locked descriptor across
+`exec` (an `flock` survives as long as any descriptor for its open file
+description does). That works, but it is the wrong shape once you notice why
+the handoff seemed necessary. The race it was avoiding — parent releases, child
+acquires, a third process wins the gap — only exists **because** the parent
+takes the lock first. If the parent never takes it, there is no handoff and no
+gap, and no `FD_CLOEXEC` manipulation or fd-number plumbing either.
+
+What the parent loses is the ability to report contention itself. That is
+acceptable here and only here: on the persistent path the parent's job is to
+start a session and exit, so it waits for the supervisor's pid file anyway. A
+supervisor that cannot take the lock exits, and the parent surfaces that.
+
+The **one-shot** path keeps the parent holding the lock. There the CLI outlives
+the VM, so the ownership is already correct, and it is where Plan 323's
+queueing and its "waiting for `<holder>`" reporting live. Nothing about that
+changes.
+
+- [ ] `SupervisorConfig` (libkrun) carries the sidecar lock path; the
+      supervisor acquires it in `dispatch_config`, the shared tail both
+      entrypoints route through, and holds it for the process's lifetime.
+- [ ] `HvfSupervisorConfig` carries the same, set through an inherent
+      `HvfDriver` entry point for the persistent builder rather than a new
+      `VmmSpec` field — 30 spec literals across the workspace would otherwise
+      change for a property only one path sets.
+- [ ] `LibkrunPersistentHostVm` / `HvfPersistentHostVm` stop acquiring the lock
+      and instead ensure the image exists (a non-locking sparse create), then
+      name the sidecar for the supervisor.
+- [ ] Once the supervisor owns the lock, `leak_handle`'s comment and the module
+      docs on `PersistentHvfSession` stop being caveats and become
       descriptions.
 - [ ] Test: start a session, drop the starting handle, and assert from a
       separate process that the image is still locked. That is the assertion
-      that would fail today and is the point of the change.
+      that fails today and is the point of the change.
 
 ## Why not just document it
 

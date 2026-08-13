@@ -218,6 +218,7 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         // paths) leaves this unset and the derived socket unchanged.
         transparent_terminator_port: None,
         egress_relay_socket: spec.host_socket_for_service(GuestService::Substitution),
+        exclusive_image_lock: None,
     })
 }
 
