@@ -1181,20 +1181,17 @@ mod tests {
     #[test]
     fn workload_channels_carry_exactly_one_network_flow_and_no_l3() {
         let ports = workload_channels();
-        let network_flow: Vec<_> = ports
-            .iter()
-            .filter(|p| p.service == GuestService::NetworkFlow)
-            .collect();
-        assert_eq!(network_flow.len(), 1);
-        assert!(
-            !ports
-                .iter()
-                .any(|p| p.service == GuestService::NetworkControl)
-        );
-        assert!(
-            !ports
-                .iter()
-                .any(|p| p.service == GuestService::NetworkData { queue: 0 })
+        let services: std::collections::BTreeSet<_> = ports.iter().map(|p| p.service).collect();
+        assert_eq!(
+            services,
+            [
+                GuestService::MachineControl,
+                GuestService::NetworkFlow,
+                GuestService::Broker,
+                GuestService::WorkloadExit,
+            ]
+            .into_iter()
+            .collect()
         );
     }
 

@@ -403,10 +403,15 @@ async fn serve_flowmux(cfg: &EndpointConfig, bound: Bound) -> Result<()> {
     // TODO: derive RegistryLimits from cfg.network_policy / NetworkLimits once
     // the spawner threads the admitted plan's limits through.
     let limits = RegistryLimits::default();
+    let gate = cfg
+        .network_policy
+        .as_ref()
+        .map(mvm_hostd::supervisor::network_endpoint::build_egress_gate)
+        .unwrap_or_else(mvm_runtime::vmm::egress_gate::EgressGate::default_deny);
     let session_id = identity.session_id.clone();
     tokio::task::spawn_blocking(move || {
         let mut session =
-            FlowMuxSession::accept(stream, &session_id, host_key, &guest_anchor, limits)
+            FlowMuxSession::accept(stream, &session_id, host_key, &guest_anchor, limits, gate)
                 .context("accept FlowMux session")?;
         session.serve().context("serve FlowMux session")
     })
