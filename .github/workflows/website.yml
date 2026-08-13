@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - "public/**"
+      - "web/mvm-demo/**"
       - ".github/workflows/website.yml"
   merge_group:
     types: [checks_requested]
@@ -39,6 +40,18 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: public/pnpm-lock.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build wasm demo
+        working-directory: web/mvm-demo
+        run: ./build.sh
 
       - name: Install dependencies
         working-directory: public

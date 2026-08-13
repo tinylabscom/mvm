@@ -5,10 +5,14 @@
 //! uses. This file stays a dumb adapter; the logic and tests live in
 //! `mvm-contract`.
 
+use mvm_contract::ir::host_is_bound as host_is_bound_core;
 use mvm_contract::policy::dns_pin::DnsPinRegistry;
 use mvm_contract::policy::projection::{Proto, canonicalize_network_policy};
 use mvm_contract::substitution::{find_placeholder, substitute_into};
-use mvm_contract::verify::{verify_audit_chain_bytes, verifying_key_from_hex};
+use mvm_contract::verify::{
+    PlanAuditEntry, SignedEnvelope, hash_line as hash_line_core, seal as seal_core,
+    verify_audit_chain_bytes, verifying_key_from_hex,
+};
 use wasm_bindgen::prelude::*;
 
 /// Parse a `NetworkPolicy` JSON string and return whether the policy would
@@ -65,6 +69,87 @@ pub fn verify(chain_bytes: &str, pubkey_hex: &str) -> String {
         })
         .to_string(),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+    }
+}
+
+/// Check whether `destination` is in the secret's `allowed_hosts` list.
+///
+/// `allowed_hosts_json` is a JSON array of host patterns; `destination` is
+/// the host:port string from the egress request. Returns
+/// `{"ok":true,"bound":true}` or `{"ok":false,"error":"…"}`.
+#[wasm_bindgen]
+pub fn host_is_bound(allowed_hosts_json: &str, destination: &str) -> String {
+    let outcome = (|| -> Result<bool, String> {
+        let allowed: Vec<String> =
+            serde_json::from_str(allowed_hosts_json).map_err(|e| format!("parse hosts: {e}"))?;
+        Ok(host_is_bound_core(&allowed, destination))
+    })();
+    match outcome {
+        Ok(bound) => serde_json::json!({ "ok": true, "bound": bound }).to_string(),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }).to_string(),
+    }
+}
+
+/// Sign an audit entry into a chain link that follows `prev_hash`.
+///
+/// `entry_json` is a `PlanAuditEntry`; `prev_hash_hex` is the 64-char hex of
+/// the previous line's SHA-256 (genesis is 64 zeroes); `signing_key_hex` is
+/// the 64-char hex Ed25519 private key. Returns the JSON `SignedEnvelope` or
+/// an error object.
+#[wasm_bindgen]
+pub fn seal(entry_json: &str, prev_hash_hex: &str, signing_key_hex: &str) -> String {
+    let outcome = (|| -> Result<String, String> {
+        let entry: PlanAuditEntry =
+            serde_json::from_str(entry_json).map_err(|e| format!("parse entry: {e}"))?;
+        let prev_hash = decode_hex32(prev_hash_hex).map_err(|e| format!("prev_hash: {e}"))?;
+        let signing_key = ed25519_signing_key_from_hex(signing_key_hex)?;
+        let envelope: SignedEnvelope<PlanAuditEntry> =
+            seal_core(entry, prev_hash, &signing_key).map_err(|e| format!("seal: {e}"))?;
+        serde_json::to_string(&envelope).map_err(|e| format!("serialize envelope: {e}"))
+    })();
+    match outcome {
+        Ok(json) => serde_json::json!({ "ok": true, "envelope": json }).to_string(),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }).to_string(),
+    }
+}
+
+/// SHA-256 of `bytes` exposed for the demo so the Worker can advance the
+/// chain hash without re-implementing the hashing rule.
+#[wasm_bindgen]
+pub fn hash_line(bytes: &[u8]) -> Vec<u8> {
+    hash_line_core(bytes).to_vec()
+}
+
+fn ed25519_signing_key_from_hex(hex: &str) -> Result<ed25519_dalek::SigningKey, String> {
+    let bytes = decode_hex32(hex)?;
+    Ok(ed25519_dalek::SigningKey::from_bytes(&bytes))
+}
+
+fn decode_hex32(input: &str) -> Result<[u8; 32], String> {
+    let s = input.trim();
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if s.len() != 64 {
+        return Err(format!("expected 64 hex chars, got {}", s.len()));
+    }
+    let mut out = [0u8; 32];
+    let bytes = s.as_bytes();
+    for (i, slot) in out.iter_mut().enumerate() {
+        let hi = hex_nibble(bytes[i * 2])?;
+        let lo = hex_nibble(bytes[i * 2 + 1])?;
+        *slot = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(c: u8) -> Result<u8, String> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(format!("non-hex character {:?}", c as char)),
     }
 }
 
