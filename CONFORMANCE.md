@@ -47,7 +47,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-16` | `build` | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | `fn:handed_placeholders_never_contain_the_secret_value`, `fn:substitution_endpoint_refuses_unbound_destination`, `fn:audit_chain_carries_no_secret_value` |
+| `MVM-SEC-16` | `build` | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | `fn:handed_placeholders_never_contain_the_secret_value`, `fn:network_endpoint_refuses_unbound_destination`, `fn:audit_chain_carries_no_secret_value` |
 
 ## egress_vsock
 
